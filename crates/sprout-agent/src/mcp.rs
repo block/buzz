@@ -239,6 +239,9 @@ impl McpRegistry {
 
     /// Kill the server's process group and mark it dead. Idempotent:
     /// if the server is already Dead (or unknown), this is a no-op.
+    /// Counts as one attempt toward the restart budget so that a
+    /// pathological server (starts fine, deadlocks on every call)
+    /// eventually exhausts.
     pub fn kill_server(&self, name: &str, reason: &str) {
         let server = match self.servers.iter().find(|s| s.name == name) {
             Some(s) => s,
@@ -250,7 +253,7 @@ impl McpRegistry {
             ClientState::Healthy { pgid, tools, .. } => (*pgid, tools.clone()),
         };
         let dead = Arc::new(ClientState::Dead {
-            attempts: 0,
+            attempts: 1,
             next_retry: Instant::now() + backoff(1, self.backoff_base, self.backoff_max),
             reason: reason.to_owned(),
             tools,
@@ -265,7 +268,7 @@ impl McpRegistry {
                 killpg(p, &server.name, "kill_server");
             }
             log_error!(
-                "MCP server '{}' marked dead (attempts=0, reason={reason})",
+                "MCP server '{}' killed and marked dead (reason={reason})",
                 server.name
             );
         }
@@ -288,14 +291,14 @@ impl McpRegistry {
                     killpg(p, &server.name, "call_failed");
                 }
                 let dead = Arc::new(ClientState::Dead {
-                    attempts: 0,
+                    attempts: 1,
                     next_retry: Instant::now() + backoff(1, self.backoff_base, self.backoff_max),
                     reason: reason.to_owned(),
                     tools: tools.clone(),
                 });
                 let _ = server.client.compare_and_swap(&current, dead);
                 log_error!(
-                    "MCP server '{}' marked dead (attempts=0, reason={reason})",
+                    "MCP server '{}' killed and marked dead (reason={reason})",
                     server.name
                 );
             }
