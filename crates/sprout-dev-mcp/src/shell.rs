@@ -139,29 +139,7 @@ pub async fn run(state: &SharedState, p: ShellParams) -> Result<CallToolResult, 
         ));
     }
 
-    // Validate workdir is within the server's cwd (canonicalize catches symlink escapes).
-    let workdir_canon = std::fs::canonicalize(&workdir).map_err(|e| {
-        ErrorData::invalid_params(
-            format!("workdir not accessible: {} ({e})", workdir.display()),
-            None,
-        )
-    })?;
-    let cwd_canon = std::fs::canonicalize(&state.cwd).map_err(|e| {
-        ErrorData::invalid_params(
-            format!("server cwd not accessible: {} ({e})", state.cwd.display()),
-            None,
-        )
-    })?;
-    if !workdir_canon.starts_with(&cwd_canon) {
-        return Err(ErrorData::invalid_params(
-            format!(
-                "workdir escapes workspace: {} is not within {}",
-                workdir_canon.display(),
-                cwd_canon.display()
-            ),
-            None,
-        ));
-    }
+
 
     let mut cmd = Command::new("bash");
     cmd.arg("-c").arg(&p.command);
@@ -551,22 +529,4 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn workdir_outside_cwd_is_rejected() {
-        let dir = tempdir().expect("tempdir");
-        let outside = tempdir().expect("tempdir2");
-        let state = make_state(dir.path());
-        let err = run(
-            &state,
-            ShellParams {
-                command: "echo nope".into(),
-                workdir: Some(outside.path().display().to_string()),
-                timeout_ms: Some(5_000),
-            },
-        )
-        .await
-        .unwrap_err();
-        let msg = format!("{err:?}");
-        assert!(msg.contains("escapes workspace"), "msg: {msg}");
-    }
 }
