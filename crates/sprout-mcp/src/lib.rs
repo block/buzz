@@ -81,10 +81,11 @@
 //! - **`join_channel`** / **`leave_channel`** — Membership management.
 //! - **`update_channel`** / **`set_channel_topic`** / **`set_channel_purpose`** — Metadata.
 //! - **`open_dm`** — Open a direct-message channel.
+//! - **`list_channel_members`** — List members of a channel.
 //!
 //! ### Channel Admin (`channel_admin` toolset)
 //! - **`create_channel`** / **`archive_channel`** / **`unarchive_channel`**
-//! - **`add_channel_member`** / **`remove_channel_member`** / **`list_channel_members`**
+//! - **`add_channel_member`** / **`remove_channel_member`**
 //!
 //! ### Canvas (`canvas` toolset)
 //! - **`get_canvas`** — Retrieve the shared canvas document for a channel.
