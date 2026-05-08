@@ -3959,14 +3959,11 @@ dependencies = [
 name = "sprout-sdk"
 version = "0.1.0"
 dependencies = [
- "futures-util",
  "nostr",
  "serde",
  "serde_json",
  "sprout-core",
  "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite",
  "uuid",
 ]
 
