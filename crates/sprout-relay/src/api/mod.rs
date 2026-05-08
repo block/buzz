@@ -53,6 +53,26 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
     ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
         if !state.config.require_relay_membership {
+            // On open relays, still extract NIP-OA owner so the auth handler can
+            // write the agent→owner mapping (required for observer frame auth).
+            if state.config.allow_nip_oa_auth {
+                if let Some(tag_json) = auth_tag_header {
+                    let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes).map_err(|e| {
+                        super::internal_error(&format!(
+                            "invalid agent pubkey for NIP-OA check: {e}"
+                        ))
+                    })?;
+                    match sprout_sdk::nip_oa::verify_auth_tag(tag_json, &agent_pubkey) {
+                        Ok(owner_pubkey) => return Ok(Some(owner_pubkey)),
+                        Err(e) => {
+                            tracing::debug!(
+                                agent = %hex::encode(pubkey_bytes),
+                                "NIP-OA auth tag invalid on open relay: {e}"
+                            );
+                        }
+                    }
+                }
+            }
             return Ok(None);
         }
 
