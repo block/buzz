@@ -370,12 +370,7 @@ function getMarkdownFromEditor(editor: Editor): string {
     | { getMarkdown?: () => string }
     | undefined;
   if (storage?.getMarkdown) {
-    let md = storage.getMarkdown();
-    // tiptap-markdown serializes hard breaks as "\" + newline (CommonMark hard
-    // line break syntax). Chat messages are plain text, not rendered markdown,
-    // so strip the backslashes to keep clean newlines.
-    md = md.replace(/\\\n/g, "\n");
-    return md;
+    return storage.getMarkdown();
   }
   // Fallback: plain text
   return editor.state.doc.textContent;

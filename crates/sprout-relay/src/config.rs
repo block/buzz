@@ -80,9 +80,10 @@ pub struct Config {
     /// bearing a valid NIP-OA `auth` tag can authenticate by proving their
     /// owner is a relay member. The agent gets session-scoped access.
     ///
-    /// On open relays (`require_relay_membership = false`), this flag also
-    /// enables owner extraction from NIP-OA auth tags during WebSocket auth,
-    /// allowing agent→owner backfill for observer frame authorization.
+    /// On open relays (`require_relay_membership = false`), NIP-OA owner
+    /// extraction for agent→owner backfill happens unconditionally (the
+    /// signature is cryptographically self-proving). This flag only controls
+    /// whether NIP-OA can grant membership access on closed relays.
     ///
     /// Default: `false`. Set via `SPROUT_ALLOW_NIP_OA_AUTH=true`.
     pub allow_nip_oa_auth: bool,

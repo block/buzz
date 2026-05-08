@@ -113,16 +113,14 @@ pub mod relay_members {
     /// Extract NIP-OA owner from an auth tag without membership enforcement.
     ///
     /// Used on open relays (`require_relay_membership = false`) to opportunistically
-    /// extract the owner pubkey for agent→owner backfill. Returns `None` if the tag
-    /// is absent, invalid, or NIP-OA is disabled.
+    /// extract the owner pubkey for agent→owner backfill. The NIP-OA signature is
+    /// cryptographically self-proving, so no feature flag is needed — if the tag
+    /// verifies, the owner relationship is authentic. Returns `None` if the tag
+    /// is absent or invalid.
     pub fn extract_nip_oa_owner(
-        allow_nip_oa_auth: bool,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
     ) -> Option<nostr::PublicKey> {
-        if !allow_nip_oa_auth {
-            return None;
-        }
         let tag_json = auth_tag_header?;
         let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes).ok()?;
         match sprout_sdk::nip_oa::verify_auth_tag(tag_json, &agent_pubkey) {
@@ -140,9 +138,9 @@ pub mod relay_members {
         use nostr::Keys;
         use sprout_sdk::nip_oa::compute_auth_tag;
 
-        /// Open relay + valid NIP-OA auth tag → returns Some(owner_pubkey).
+        /// Valid NIP-OA auth tag → returns Some(owner_pubkey).
         #[test]
-        fn open_relay_with_valid_nip_oa_returns_owner() {
+        fn valid_nip_oa_returns_owner() {
             let owner_keys = Keys::generate();
             let agent_keys = Keys::generate();
             let agent_pubkey = agent_keys.public_key();
@@ -150,45 +148,29 @@ pub mod relay_members {
             let tag_json = compute_auth_tag(&owner_keys, &agent_pubkey, "")
                 .expect("compute_auth_tag must succeed");
 
-            let result = extract_nip_oa_owner(
-                true, // allow_nip_oa_auth
-                &agent_pubkey.to_bytes(),
-                Some(&tag_json),
-            );
+            let result = extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some(&tag_json));
 
             assert_eq!(result, Some(owner_keys.public_key()));
         }
 
-        /// Open relay + no auth tag → returns None (unchanged behavior).
+        /// No auth tag → returns None.
         #[test]
-        fn open_relay_without_auth_tag_returns_none() {
+        fn no_auth_tag_returns_none() {
             let agent_keys = Keys::generate();
             let agent_pubkey = agent_keys.public_key();
 
-            let result = extract_nip_oa_owner(
-                true, // allow_nip_oa_auth
-                &agent_pubkey.to_bytes(),
-                None,
-            );
+            let result = extract_nip_oa_owner(&agent_pubkey.to_bytes(), None);
 
             assert_eq!(result, None);
         }
 
-        /// NIP-OA disabled → always returns None regardless of auth tag.
+        /// Invalid auth tag → returns None.
         #[test]
-        fn nip_oa_disabled_returns_none() {
-            let owner_keys = Keys::generate();
+        fn invalid_auth_tag_returns_none() {
             let agent_keys = Keys::generate();
             let agent_pubkey = agent_keys.public_key();
 
-            let tag_json = compute_auth_tag(&owner_keys, &agent_pubkey, "")
-                .expect("compute_auth_tag must succeed");
-
-            let result = extract_nip_oa_owner(
-                false, // allow_nip_oa_auth disabled
-                &agent_pubkey.to_bytes(),
-                Some(&tag_json),
-            );
+            let result = extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some("not valid json"));
 
             assert_eq!(result, None);
         }
