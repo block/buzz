@@ -416,8 +416,9 @@ export function TeamDialog({
                         >
                           <Checkbox
                             checked={isSelected}
+                            className="pointer-events-none"
                             disabled={isPending}
-                            onCheckedChange={() => togglePersona(persona.id)}
+                            tabIndex={-1}
                           />
                           <ProfileAvatar
                             avatarUrl={persona.avatarUrl}
