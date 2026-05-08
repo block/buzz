@@ -357,14 +357,6 @@ export const ChannelPane = React.memo(function ChannelPane({
         ) : (
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
             <div className="pointer-events-auto">
-              {hasTypingActivity ? (
-                <TypingIndicatorRow
-                  channel={activeChannel}
-                  currentPubkey={currentPubkey}
-                  profiles={profiles}
-                  typingPubkeys={typingPubkeys}
-                />
-              ) : null}
               <MessageComposer
                 channelId={activeChannel?.id ?? null}
                 channelName={activeChannel?.name ?? "channel"}
@@ -395,6 +387,17 @@ export const ChannelPane = React.memo(function ChannelPane({
                 }
                 showTopBorder={false}
               />
+              <div className="h-6 bg-background">
+                {hasTypingActivity ? (
+                  <TypingIndicatorRow
+                    channel={activeChannel}
+                    className="px-4 pb-1 pt-0 sm:px-6"
+                    currentPubkey={currentPubkey}
+                    profiles={profiles}
+                    typingPubkeys={typingPubkeys}
+                  />
+                ) : null}
+              </div>
             </div>
           </div>
         )}

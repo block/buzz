@@ -196,7 +196,7 @@ export function MessageThreadPanel({
           onScroll={syncScrollState}
           ref={threadBodyRef}
         >
-          <div className="pb-8" ref={contentRef}>
+          <div className="pb-10" ref={contentRef}>
             <div className="px-3 pb-1 pt-0" data-testid="message-thread-head">
               <div className="rounded-2xl">
                 <MessageRow
@@ -277,7 +277,7 @@ export function MessageThreadPanel({
         </div>
 
         {!isAtBottom ? (
-          <div className="pointer-events-none absolute inset-x-0 bottom-32 z-20 flex justify-center px-4">
+          <div className="pointer-events-none absolute inset-x-0 bottom-36 z-20 flex justify-center px-4">
             <Button
               className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-[11px] font-medium text-muted-foreground shadow-sm backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-3.5"
               data-testid="thread-scroll-to-latest"
@@ -296,12 +296,6 @@ export function MessageThreadPanel({
 
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
           <div className="pointer-events-auto">
-            <TypingIndicatorRow
-              channel={channel}
-              currentPubkey={currentPubkey}
-              profiles={profiles}
-              typingPubkeys={threadTypingPubkeys}
-            />
             <MessageComposer
               channelId={channelId}
               channelName={channelName}
@@ -319,6 +313,17 @@ export function MessageThreadPanel({
               typingParentEventId={threadHead.id}
               typingRootEventId={threadHead.rootId}
             />
+            <div className="h-6 bg-background">
+              {threadTypingPubkeys.length > 0 ? (
+                <TypingIndicatorRow
+                  channel={channel}
+                  className="px-4 pb-1 pt-0 sm:px-6"
+                  currentPubkey={currentPubkey}
+                  profiles={profiles}
+                  typingPubkeys={threadTypingPubkeys}
+                />
+              ) : null}
+            </div>
           </div>
         </div>
       </aside>

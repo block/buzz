@@ -6,9 +6,11 @@ import {
 } from "@/features/profile/lib/identity";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { Channel } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 
 type TypingIndicatorRowProps = {
   channel: Channel | null;
+  className?: string;
   currentPubkey?: string;
   profiles?: UserProfileLookup;
   typingPubkeys: string[];
@@ -48,6 +50,7 @@ function formatTypingLabel(names: string[]) {
 
 export function TypingIndicatorRow({
   channel,
+  className,
   currentPubkey,
   profiles,
   typingPubkeys,
@@ -69,7 +72,7 @@ export function TypingIndicatorRow({
   return (
     <div
       aria-live="polite"
-      className="shrink-0 bg-transparent px-4 py-2 sm:px-6"
+      className={cn("shrink-0 bg-transparent px-4 py-2 sm:px-6", className)}
       {...(labels.length > 0
         ? { "data-testid": "message-typing-indicator" }
         : {})}

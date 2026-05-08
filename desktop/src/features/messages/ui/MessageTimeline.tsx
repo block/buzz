@@ -133,7 +133,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
           ref={scrollContainerRef}
         >
           <div
-            className="mx-auto flex w-full max-w-4xl flex-col gap-2 pb-8 pt-16"
+            className="mx-auto flex w-full max-w-4xl flex-col gap-2 pb-10 pt-16"
             ref={contentRef}
           >
             <div ref={topSentinelRef} aria-hidden className="h-px" />
@@ -197,7 +197,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
         </div>
 
         {!isAtBottom ? (
-          <div className="pointer-events-none absolute inset-x-0 bottom-32 z-20 flex justify-center px-4">
+          <div className="pointer-events-none absolute inset-x-0 bottom-36 z-20 flex justify-center px-4">
             <Button
               className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-[11px] font-medium text-muted-foreground shadow-sm backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-3.5"
               data-testid="message-scroll-to-latest"
