@@ -292,12 +292,6 @@ export function MessageThreadPanel({
 
         <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
           <div className="pointer-events-auto">
-            <TypingIndicatorRow
-              channel={channel}
-              currentPubkey={currentPubkey}
-              profiles={profiles}
-              typingPubkeys={threadTypingPubkeys}
-            />
             <MessageComposer
               channelId={channelId}
               channelName={channelName}
@@ -315,6 +309,15 @@ export function MessageThreadPanel({
               typingParentEventId={threadHead.id}
               typingRootEventId={threadHead.rootId}
             />
+            {threadTypingPubkeys.length > 0 ? (
+              <TypingIndicatorRow
+                channel={channel}
+                className="px-4 pb-1 pt-0 sm:px-6"
+                currentPubkey={currentPubkey}
+                profiles={profiles}
+                typingPubkeys={threadTypingPubkeys}
+              />
+            ) : null}
           </div>
         </div>
       </aside>
