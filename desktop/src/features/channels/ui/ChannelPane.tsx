@@ -387,15 +387,17 @@ export const ChannelPane = React.memo(function ChannelPane({
                 }
                 showTopBorder={false}
               />
-              {hasTypingActivity ? (
-                <TypingIndicatorRow
-                  channel={activeChannel}
-                  className="px-4 pb-1 pt-0 sm:px-6"
-                  currentPubkey={currentPubkey}
-                  profiles={profiles}
-                  typingPubkeys={typingPubkeys}
-                />
-              ) : null}
+              <div className="h-6 bg-background">
+                {hasTypingActivity ? (
+                  <TypingIndicatorRow
+                    channel={activeChannel}
+                    className="px-4 pb-1 pt-0 sm:px-6"
+                    currentPubkey={currentPubkey}
+                    profiles={profiles}
+                    typingPubkeys={typingPubkeys}
+                  />
+                ) : null}
+              </div>
             </div>
           </div>
         )}

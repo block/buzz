@@ -133,7 +133,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
           ref={scrollContainerRef}
         >
           <div
-            className="mx-auto flex w-full max-w-4xl flex-col gap-2 pb-8 pt-14"
+            className="mx-auto flex w-full max-w-4xl flex-col gap-2 pb-10 pt-14"
             ref={contentRef}
           >
             <div ref={topSentinelRef} aria-hidden className="h-px" />

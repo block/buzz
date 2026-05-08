@@ -192,7 +192,7 @@ export function MessageThreadPanel({
           onScroll={syncScrollState}
           ref={threadBodyRef}
         >
-          <div className="pb-8" ref={contentRef}>
+          <div className="pb-10" ref={contentRef}>
             <div className="px-3 pb-1 pt-0" data-testid="message-thread-head">
               <div className="rounded-2xl">
                 <MessageRow
@@ -309,15 +309,17 @@ export function MessageThreadPanel({
               typingParentEventId={threadHead.id}
               typingRootEventId={threadHead.rootId}
             />
-            {threadTypingPubkeys.length > 0 ? (
-              <TypingIndicatorRow
-                channel={channel}
-                className="px-4 pb-1 pt-0 sm:px-6"
-                currentPubkey={currentPubkey}
-                profiles={profiles}
-                typingPubkeys={threadTypingPubkeys}
-              />
-            ) : null}
+            <div className="h-6 bg-background">
+              {threadTypingPubkeys.length > 0 ? (
+                <TypingIndicatorRow
+                  channel={channel}
+                  className="px-4 pb-1 pt-0 sm:px-6"
+                  currentPubkey={currentPubkey}
+                  profiles={profiles}
+                  typingPubkeys={threadTypingPubkeys}
+                />
+              ) : null}
+            </div>
           </div>
         </div>
       </aside>
