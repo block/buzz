@@ -19,8 +19,8 @@
 //!
 //! | Name            | Tools |
 //! |-----------------|-------|
-//! | `default`       | 25    |
-//! | `channel_admin` | 6     |
+//! | `default`       | 26    |
+//! | `channel_admin` | 5     |
 //! | `dms`           | 3     |
 //! | `canvas`        | 2     |
 //! | `workflow_admin`| 5     |
@@ -69,13 +69,13 @@ pub const ALL_TOOLS: &[(&str, &str, bool)] = &[
     ("set_presence", "default", false),
     ("trigger_workflow", "default", false),
     ("approve_step", "default", false),
+    ("list_channel_members", "default", true),
     // ── channel_admin ────────────────────────────────────────────────────────
     ("create_channel", "channel_admin", false),
     ("archive_channel", "channel_admin", false),
     ("unarchive_channel", "channel_admin", false),
     ("add_channel_member", "channel_admin", false),
     ("remove_channel_member", "channel_admin", false),
-    ("list_channel_members", "channel_admin", true),
     // ── dms ──────────────────────────────────────────────────────────────────
     ("add_dm_member", "dms", false),
     ("hide_dm", "dms", false),
@@ -317,9 +317,9 @@ mod tests {
     }
 
     #[test]
-    fn default_includes_25_tools() {
+    fn default_includes_26_tools() {
         let tools = enabled_tools("default");
-        assert_eq!(tools.len(), 25);
+        assert_eq!(tools.len(), 26);
         assert!(tools.contains("send_message"));
         assert!(tools.contains("approve_step"));
         assert!(!tools.contains("create_channel"));
@@ -356,7 +356,7 @@ mod tests {
         assert!(!remove.contains("send_message"));
         // create_channel is channel_admin+write → should be removed (ro)
         assert!(remove.contains("create_channel"));
-        // list_channel_members is channel_admin+read → should be kept (ro allows reads)
+        // list_channel_members is default+read → should be kept (rw)
         assert!(!remove.contains("list_channel_members"));
     }
 
@@ -364,7 +364,7 @@ mod tests {
     fn unknown_toolset_is_skipped_gracefully() {
         // Should not panic; unknown toolset is silently ignored
         let tools = enabled_tools("default,nonexistent_toolset");
-        assert_eq!(tools.len(), 25); // only default
+        assert_eq!(tools.len(), 26); // only default
     }
 
     #[test]

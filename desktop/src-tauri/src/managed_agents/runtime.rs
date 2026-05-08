@@ -550,7 +550,7 @@ pub fn spawn_agent_child(
     if let Some(toolsets) = &record.mcp_toolsets {
         command.env("SPROUT_TOOLSETS", toolsets);
     } else {
-        command.env("SPROUT_TOOLSETS", "default,media");
+        command.env("SPROUT_TOOLSETS", "default,canvas,forums,dms,media");
     }
     command.env_remove("SPROUT_ACP_PRIVATE_KEY");
     command.env_remove("SPROUT_ACP_API_TOKEN");
