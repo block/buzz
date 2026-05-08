@@ -192,7 +192,7 @@ export function MessageThreadPanel({
           onScroll={syncScrollState}
           ref={threadBodyRef}
         >
-          <div ref={contentRef}>
+          <div className="pb-8" ref={contentRef}>
             <div className="px-3 pb-1 pt-0" data-testid="message-thread-head">
               <div className="rounded-2xl">
                 <MessageRow
@@ -273,15 +273,16 @@ export function MessageThreadPanel({
         </div>
 
         {!isAtBottom ? (
-          <div className="pointer-events-none absolute inset-x-0 bottom-24 flex justify-center px-4">
+          <div className="pointer-events-none absolute inset-x-0 bottom-32 z-20 flex justify-center px-4">
             <Button
-              className="pointer-events-auto rounded-full shadow-lg"
+              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-[11px] font-medium text-muted-foreground shadow-sm backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-3.5"
               data-testid="thread-scroll-to-latest"
               onClick={() => scrollToBottom("smooth")}
               size="sm"
               type="button"
+              variant="outline"
             >
-              <ArrowDown className="h-4 w-4" />
+              <ArrowDown aria-hidden />
               {newMessageCount > 0
                 ? `${newMessageCount} new message${newMessageCount === 1 ? "" : "s"}`
                 : "Jump to latest"}
