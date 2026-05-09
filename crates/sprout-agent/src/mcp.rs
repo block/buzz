@@ -317,19 +317,26 @@ impl McpRegistry {
                 Ok((_idx, server_name, Err(_elapsed))) => {
                     // Kill only on second consecutive timeout.
                     let count = {
-                        let mut counts = self.hook_timeouts.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut counts =
+                            self.hook_timeouts.lock().unwrap_or_else(|e| e.into_inner());
                         let c = counts.entry(server_name.clone()).or_insert(0);
                         *c += 1;
                         *c
                     };
                     if count >= 2 {
-                        eprintln!("sprout-agent: hook: killing server '{}' after {} consecutive timeouts", server_name, count);
+                        eprintln!(
+                            "sprout-agent: hook: killing server '{}' after {} consecutive timeouts",
+                            server_name, count
+                        );
                         self.kill_server(&server_name, "hook timeout (consecutive)");
                         if let Ok(mut counts) = self.hook_timeouts.lock() {
                             counts.remove(&server_name);
                         }
                     } else {
-                        eprintln!("sprout-agent: hook: server '{}' timed out ({}/2)", server_name, count);
+                        eprintln!(
+                            "sprout-agent: hook: server '{}' timed out ({}/2)",
+                            server_name, count
+                        );
                     }
                 }
                 _ => {}

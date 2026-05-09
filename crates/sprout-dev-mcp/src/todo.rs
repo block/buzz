@@ -209,9 +209,7 @@ mod tests {
                 done: false,
             })
             .collect();
-        let err = s
-            .handle_todo(TodoParams { todos: Some(many) })
-            .unwrap_err();
+        let err = s.handle_todo(TodoParams { todos: Some(many) }).unwrap_err();
         assert!(err.contains("too many items"));
     }
 

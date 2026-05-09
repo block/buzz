@@ -108,7 +108,10 @@ impl Config {
             max_history_bytes: parse_env("SPROUT_AGENT_MAX_HISTORY_BYTES", 1024 * 1024)?,
             max_handoffs: parse_env("SPROUT_AGENT_MAX_HANDOFFS", 5)?,
             max_parallel_tools: parse_env("SPROUT_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
-            hook_timeout: Duration::from_millis(parse_env("SPROUT_AGENT_HOOK_TIMEOUT_MS", 2500u64)?),
+            hook_timeout: Duration::from_millis(parse_env(
+                "SPROUT_AGENT_HOOK_TIMEOUT_MS",
+                2500u64,
+            )?),
             stop_max_rejections: parse_env("SPROUT_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
         };

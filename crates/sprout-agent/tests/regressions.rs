@@ -700,16 +700,11 @@ async fn description_clamping_enforced() {
     h.shutdown().await;
 }
 
-
-
 // ─── Hook system regression tests ──────────────────────────────────────────
 
 /// Helper: spawn a session with a fake MCP server exposing one regular tool
 /// plus an optional `_Stop` hook controlled by env vars.
-async fn init_session_with_fake_mcp(
-    h: &mut Harness,
-    extra_mcp_env: &[(&str, &str)],
-) -> String {
+async fn init_session_with_fake_mcp(h: &mut Harness, extra_mcp_env: &[(&str, &str)]) -> String {
     let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
     let env: Vec<Value> = extra_mcp_env
         .iter()
@@ -893,11 +888,7 @@ async fn hook_stop_consecutive_end_turn() {
     // LLM sequence:
     //   1. text → _Stop objects (rejections: 0→1, last_was_end_turn=true)
     //   2. text again, no tool calls → consecutive rule fires, return end_turn
-    let llm = spawn_capturing_llm(vec![
-        openai_text("done-1"),
-        openai_text("done-2"),
-    ])
-    .await;
+    let llm = spawn_capturing_llm(vec![openai_text("done-1"), openai_text("done-2")]).await;
     let mut h = Harness::spawn_with_env(
         &llm.url,
         &[
@@ -980,7 +971,12 @@ async fn hook_tools_hidden_from_llm() {
     // The tool result fed back to the LLM (round 2) must be the
     // synthetic "unknown tool" error, not the hook's actual output.
     let captured = llm.captured.lock().await;
-    assert_eq!(captured.len(), 2, "expected 2 LLM calls, got {}", captured.len());
+    assert_eq!(
+        captured.len(),
+        2,
+        "expected 2 LLM calls, got {}",
+        captured.len()
+    );
     let msgs = captured[1]["messages"].as_array().unwrap();
     let tool_msg = msgs
         .iter()
@@ -1173,6 +1169,11 @@ async fn hook_stop_timeout_failopen() {
 
     // Only the initial LLM call — agent did NOT loop after the timeout.
     let captured = llm.captured.lock().await;
-    assert_eq!(captured.len(), 1, "expected 1 LLM call, got {}", captured.len());
+    assert_eq!(
+        captured.len(),
+        1,
+        "expected 1 LLM call, got {}",
+        captured.len()
+    );
     h.shutdown().await;
 }

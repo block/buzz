@@ -265,19 +265,26 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         Ok(p) => p,
         Err(m) => return reject(&wire_tx, id, INVALID_PARAMS, &m).await,
     };
-    let (sid, mcp, mut history, mut original_task, mut handoff_count, mut stop_rejections, mut cancel_rx) =
-        match acquire_session(&app, &p.session_id).await {
-            Ok(v) => v,
-            Err(reason) => {
-                return reject(
-                    &wire_tx,
-                    id,
-                    INVALID_PARAMS,
-                    &format!("session/prompt: {reason}"),
-                )
-                .await
-            }
-        };
+    let (
+        sid,
+        mcp,
+        mut history,
+        mut original_task,
+        mut handoff_count,
+        mut stop_rejections,
+        mut cancel_rx,
+    ) = match acquire_session(&app, &p.session_id).await {
+        Ok(v) => v,
+        Err(reason) => {
+            return reject(
+                &wire_tx,
+                id,
+                INVALID_PARAMS,
+                &format!("session/prompt: {reason}"),
+            )
+            .await
+        }
+    };
     let mut ctx = RunCtx {
         cfg: &app.cfg,
         session_id: &sid,

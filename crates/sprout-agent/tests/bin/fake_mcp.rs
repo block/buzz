@@ -124,17 +124,14 @@ fn main() {
     };
     let tool_delay_secs = env_u64("FAKE_MCP_TOOL_DELAY", 0);
     let stop_hook = env_flag("FAKE_MCP_STOP_HOOK");
-    let stop_text =
-        std::env::var("FAKE_MCP_STOP_TEXT").unwrap_or_else(|_| "keep going".to_owned());
+    let stop_text = std::env::var("FAKE_MCP_STOP_TEXT").unwrap_or_else(|_| "keep going".to_owned());
     let stop_delay_secs = env_u64("FAKE_MCP_STOP_DELAY", 0);
     // 0 means "unset" → unlimited; any positive value caps the number of
     // calls that return STOP_TEXT before flipping to empty string.
-    let stop_count_limit: usize =
-        env_usize("FAKE_MCP_STOP_COUNT", usize::MAX);
+    let stop_count_limit: usize = env_usize("FAKE_MCP_STOP_COUNT", usize::MAX);
     let mut stop_calls_seen: usize = 0;
     let post_compact_hook = env_flag("FAKE_MCP_POSTCOMPACT_HOOK");
-    let post_compact_text =
-        std::env::var("FAKE_MCP_POSTCOMPACT_TEXT").unwrap_or_default();
+    let post_compact_text = std::env::var("FAKE_MCP_POSTCOMPACT_TEXT").unwrap_or_default();
 
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
