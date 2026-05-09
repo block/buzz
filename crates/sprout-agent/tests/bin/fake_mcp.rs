@@ -20,6 +20,17 @@
 //!                              tree dies on timeout.
 //!   FAKE_MCP_GRANDCHILD_PID_FILE=path
 //!                            — path to write the grandchild PID to.
+//!   FAKE_MCP_STOP_HOOK=1     — expose a `_Stop` hook tool
+//!   FAKE_MCP_STOP_TEXT=text  — `_Stop` returns this text (default: "keep going")
+//!   FAKE_MCP_STOP_DELAY=N    — `_Stop` sleeps N seconds before replying
+//!                              (use a large value to simulate hang/timeout)
+//!   FAKE_MCP_STOP_COUNT=N    — `_Stop` returns STOP_TEXT for the first N
+//!                              invocations; empty string thereafter. If
+//!                              unset, every call returns STOP_TEXT.
+//!   FAKE_MCP_POSTCOMPACT_HOOK=1
+//!                            — expose a `_PostCompact` hook tool
+//!   FAKE_MCP_POSTCOMPACT_TEXT=text
+//!                            — `_PostCompact` returns this (default: "")
 
 use std::io::{BufRead, Write};
 
@@ -58,8 +69,13 @@ fn hang_forever() -> ! {
     }
 }
 
-fn make_tools(count: usize, desc: &str) -> Vec<Value> {
-    (0..count)
+fn make_tools(
+    count: usize,
+    desc: &str,
+    include_stop_hook: bool,
+    include_post_compact_hook: bool,
+) -> Vec<Value> {
+    let mut tools: Vec<Value> = (0..count)
         .map(|i| {
             json!({
                 "name": format!("tool_{i}"),
@@ -67,7 +83,22 @@ fn make_tools(count: usize, desc: &str) -> Vec<Value> {
                 "inputSchema": { "type": "object", "properties": {} },
             })
         })
-        .collect()
+        .collect();
+    if include_stop_hook {
+        tools.push(json!({
+            "name": "_Stop",
+            "description": "stop hook",
+            "inputSchema": { "type": "object", "properties": {} },
+        }));
+    }
+    if include_post_compact_hook {
+        tools.push(json!({
+            "name": "_PostCompact",
+            "description": "post compact hook",
+            "inputSchema": { "type": "object", "properties": {} },
+        }));
+    }
+    tools
 }
 
 fn main() {
@@ -92,6 +123,18 @@ fn main() {
         "fake tool".to_owned()
     };
     let tool_delay_secs = env_u64("FAKE_MCP_TOOL_DELAY", 0);
+    let stop_hook = env_flag("FAKE_MCP_STOP_HOOK");
+    let stop_text =
+        std::env::var("FAKE_MCP_STOP_TEXT").unwrap_or_else(|_| "keep going".to_owned());
+    let stop_delay_secs = env_u64("FAKE_MCP_STOP_DELAY", 0);
+    // 0 means "unset" → unlimited; any positive value caps the number of
+    // calls that return STOP_TEXT before flipping to empty string.
+    let stop_count_limit: usize =
+        env_usize("FAKE_MCP_STOP_COUNT", usize::MAX);
+    let mut stop_calls_seen: usize = 0;
+    let post_compact_hook = env_flag("FAKE_MCP_POSTCOMPACT_HOOK");
+    let post_compact_text =
+        std::env::var("FAKE_MCP_POSTCOMPACT_TEXT").unwrap_or_default();
 
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
@@ -130,9 +173,19 @@ fn main() {
                 if hang_tools {
                     hang_forever();
                 }
-                write_response(id, json!({ "tools": make_tools(tool_count, &desc) }));
+                write_response(
+                    id,
+                    json!({
+                        "tools": make_tools(tool_count, &desc, stop_hook, post_compact_hook)
+                    }),
+                );
             }
             "tools/call" => {
+                let called_name = msg
+                    .get("params")
+                    .and_then(|p| p.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 // Optionally spawn a long-sleeping grandchild so the test
                 // can verify process-group killing reaches the whole tree.
                 if env_flag("FAKE_MCP_SPAWN_GRANDCHILD") {
@@ -143,8 +196,40 @@ fn main() {
                     if let Ok(path) = std::env::var("FAKE_MCP_GRANDCHILD_PID_FILE") {
                         let _ = std::fs::write(&path, child.id().to_string());
                     }
-                    // Don't reap; let it run until the parent group is killed.
                     std::mem::forget(child);
+                }
+                if called_name == "_Stop" {
+                    if stop_delay_secs > 0 {
+                        std::thread::sleep(std::time::Duration::from_secs(stop_delay_secs));
+                    }
+                    // Once we exceed the configured count, return empty
+                    // text so the agent treats it as no objection. This
+                    // lets a test exercise the "objected then cleared"
+                    // path without relying on the rejection budget.
+                    let payload = if stop_calls_seen < stop_count_limit {
+                        stop_text.clone()
+                    } else {
+                        String::new()
+                    };
+                    stop_calls_seen = stop_calls_seen.saturating_add(1);
+                    write_response(
+                        id,
+                        json!({
+                            "content": [{ "type": "text", "text": payload }],
+                            "isError": false,
+                        }),
+                    );
+                    continue;
+                }
+                if called_name == "_PostCompact" {
+                    write_response(
+                        id,
+                        json!({
+                            "content": [{ "type": "text", "text": post_compact_text }],
+                            "isError": false,
+                        }),
+                    );
+                    continue;
                 }
                 if tool_delay_secs > 0 {
                     std::thread::sleep(std::time::Duration::from_secs(tool_delay_secs));

@@ -27,7 +27,11 @@ pub struct RunCtx<'a> {
     pub history: &'a mut Vec<HistoryItem>,
     pub original_task: &'a mut Option<String>,
     pub handoff_count: &'a mut usize,
-    pub todos: &'a mut crate::todo::Todos,
+    /// Cumulative `_Stop` objection count for this session (persists
+    /// across `session/prompt` calls). Once it hits
+    /// `cfg.stop_max_rejections` we stop calling `_Stop` for that
+    /// session — a runaway hook can't burn rejections on every prompt.
+    pub stop_rejections: &'a mut u32,
 }
 
 impl RunCtx<'_> {
@@ -44,6 +48,10 @@ impl RunCtx<'_> {
         self.history.push(HistoryItem::User(user_text));
 
         let mut round = 0u32;
+        // Per-prompt latch: only used to detect "LLM said end_turn twice
+        // in a row with no tool calls between" within this single prompt.
+        // The cumulative rejection budget lives on the session.
+        let mut last_was_end_turn = false;
         loop {
             if self.cfg.max_rounds > 0 && round >= self.cfg.max_rounds {
                 return Ok(StopReason::MaxTurnRequests);
@@ -59,10 +67,7 @@ impl RunCtx<'_> {
                 }
             }
 
-            let mut tools = self.mcp.tools();
-            if let Some(td) = self.todos.tool_def() {
-                tools.push(td);
-            }
+            let tools = self.mcp.tools();
             round = round.saturating_add(1);
             let response = tokio::select! {
                 biased;
@@ -97,8 +102,28 @@ impl RunCtx<'_> {
                 let stop = map_stop(response.stop);
                 // Only gate genuine end_turn — don't override max_tokens/refusal.
                 if stop == StopReason::EndTurn {
-                    if let Some(msg) = self.todos.check_end_turn() {
-                        self.history.push(HistoryItem::User(msg));
+                    // Consecutive-rejection rule: LLM responded to our last
+                    // objection with no tool calls — accept the end and
+                    // move on rather than loop forever.
+                    if last_was_end_turn {
+                        return Ok(stop);
+                    }
+                    if *self.stop_rejections >= self.cfg.stop_max_rejections {
+                        return Ok(stop);
+                    }
+                    let objections = self
+                        .mcp
+                        .call_hooks(
+                            "_Stop",
+                            &json!({}),
+                            self.cfg.hook_timeout,
+                            &self.cfg.hook_servers,
+                        )
+                        .await;
+                    if !objections.is_empty() {
+                        *self.stop_rejections = self.stop_rejections.saturating_add(1);
+                        last_was_end_turn = true;
+                        push_hook_outputs_as_tool_results(self.history, "_Stop", &objections);
                         continue;
                     }
                 }
@@ -117,6 +142,9 @@ impl RunCtx<'_> {
                 text: response.text,
                 tool_calls: calls.clone(),
             });
+
+            // Tool calls executed → reset the consecutive-rejection latch.
+            last_was_end_turn = false;
 
             if let Some(stop) = self.execute_calls(&calls).await {
                 return Ok(stop);
@@ -158,38 +186,10 @@ impl RunCtx<'_> {
                 return Some(StopReason::Cancelled);
             }
             emit_pending(self.wire, self.session_id, call).await;
-            // Intercept the agent-side todo tool before MCP. Synchronous
-            // and cheap; we emit in_progress + completed/failed ourselves
-            // so the wire shape matches an MCP tool exactly.
-            if call.name == crate::todo::TOOL_NAME && self.todos.is_enabled() {
-                emit_in_progress(self.wire, self.session_id, call).await;
-                let (result, ok) = match self.todos.handle_call(&call.arguments) {
-                    Ok(text) => (
-                        ToolResult {
-                            provider_id: call.provider_id.clone(),
-                            text,
-                            is_error: false,
-                        },
-                        true,
-                    ),
-                    Err(e) => (
-                        ToolResult {
-                            provider_id: call.provider_id.clone(),
-                            text: format!("Error: {e}"),
-                            is_error: true,
-                        },
-                        false,
-                    ),
-                };
-                if ok {
-                    emit_completed(self.wire, self.session_id, call, &result).await;
-                } else {
-                    emit_failed(self.wire, self.session_id, call, &result.text).await;
-                }
-                results[idx] = Some(result);
-                continue;
-            }
-            if !self.mcp.has(&call.name) {
+            // Hook tools (bare name starts with `_`) are invisible to the
+            // LLM and only callable via `call_hooks`. Treat any direct
+            // invocation as if the tool didn't exist.
+            if !self.mcp.has(&call.name) || self.mcp.is_hook(&call.name) {
                 let err = format!("unknown tool: {}", call.name);
                 emit_failed(self.wire, self.session_id, call, &err).await;
                 results[idx] = Some(synthetic_tool_result(call, err));
@@ -462,6 +462,73 @@ fn prompt_to_text(prompt: Vec<ContentBlock>) -> Result<String, AgentError> {
         }
     }
     Ok(parts.join("\n"))
+}
+
+/// Format a single hook output as a structured tool-result body.
+///
+/// We emit a JSON object rather than XML-style tags. JSON is unambiguous:
+/// the inner `text` field is escaped, so a malicious hook cannot break
+/// out by including a literal `</hook_output>` (or any other delimiter)
+/// in its output. The LLM still sees the source attribution via the
+/// `hook` and `server` fields.
+fn format_hook_output_body(hook: &str, server: &str, text: &str) -> String {
+    // serde_json::to_string never fails on owned strings.
+    serde_json::to_string(&json!({
+        "hook": hook,
+        "server": server,
+        "text": text,
+    }))
+    .unwrap_or_else(|_| String::from("{\"hook\":\"\",\"server\":\"\",\"text\":\"\"}"))
+}
+
+/// Synthetic provider id for an injected hook tool-call/result pair. Must
+/// be unique per pair so the LLM wire format (which keys tool results by
+/// id) stays valid across multiple objections in one session.
+fn synthetic_hook_id(hook: &str, server: &str, ordinal: u64) -> String {
+    format!("sprout_hook_{hook}_{server}_{ordinal}")
+}
+
+/// Append a synthetic Assistant tool-call + ToolResult pair for each hook
+/// output. Modeling hook output as a tool result (rather than as a User
+/// message) means a malicious hook can't impersonate the user or system
+/// — the LLM treats tool results as lower-trust, structured data.
+///
+/// Each pair uses the hook's qualified tool name (e.g. `fake___Stop`) so
+/// attribution is preserved in the wire format. Empty arguments are sent
+/// as `{}`. The `Assistant` turn carries no text (tool_calls only).
+pub(crate) fn push_hook_outputs_as_tool_results(
+    history: &mut Vec<HistoryItem>,
+    hook: &str,
+    outputs: &[(String, String)],
+) {
+    for (server, text) in outputs.iter() {
+        let provider_id = synthetic_hook_id(hook, server, unique_nonce());
+        // Tool name is `<server>__<hook>` — same shape as a real qname
+        // for that hook, so the LLM never sees an unknown synthetic name.
+        let tool_name = format!("{server}__{hook}");
+        history.push(HistoryItem::Assistant {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                provider_id: provider_id.clone(),
+                name: tool_name,
+                arguments: serde_json::json!({}),
+            }],
+        });
+        history.push(HistoryItem::ToolResult(ToolResult {
+            provider_id,
+            text: format_hook_output_body(hook, server, text),
+            is_error: false,
+        }));
+    }
+}
+
+/// Monotonic counter for synthetic hook ids within a single process. The
+/// uniqueness target is "no collision within the lifetime of one history
+/// vec", which a process-wide counter satisfies trivially.
+fn unique_nonce() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 fn synthetic_tool_result(call: &ToolCall, msg: String) -> ToolResult {

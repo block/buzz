@@ -5,7 +5,6 @@ mod handoff;
 mod llm;
 mod log;
 mod mcp;
-mod todo;
 mod types;
 mod wire;
 
@@ -41,7 +40,7 @@ struct Session {
     busy: bool,
     original_task: Option<String>,
     handoff_count: usize,
-    todos: crate::todo::Todos,
+    stop_rejections: u32,
 }
 
 fn die(msg: String) -> ! {
@@ -234,7 +233,7 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             busy: false,
             original_task: None,
             handoff_count: 0,
-            todos: crate::todo::Todos::new(app.cfg.todo_enabled),
+            stop_rejections: 0,
         },
     );
     drop(sessions);
@@ -266,7 +265,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         Ok(p) => p,
         Err(m) => return reject(&wire_tx, id, INVALID_PARAMS, &m).await,
     };
-    let (sid, mcp, mut history, mut original_task, mut handoff_count, mut todos, mut cancel_rx) =
+    let (sid, mcp, mut history, mut original_task, mut handoff_count, mut stop_rejections, mut cancel_rx) =
         match acquire_session(&app, &p.session_id).await {
             Ok(v) => v,
             Err(reason) => {
@@ -289,7 +288,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         history: &mut history,
         original_task: &mut original_task,
         handoff_count: &mut handoff_count,
-        todos: &mut todos,
+        stop_rejections: &mut stop_rejections,
     };
     let result = ctx.run(p.prompt).await;
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
@@ -297,7 +296,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         s.history = history;
         s.original_task = original_task;
         s.handoff_count = handoff_count;
-        s.todos = todos;
+        s.stop_rejections = stop_rejections;
     }
     match result {
         Ok(stop) => {
@@ -321,7 +320,7 @@ async fn acquire_session(
         Vec<HistoryItem>,
         Option<String>,
         usize,
-        crate::todo::Todos,
+        u32,
         watch::Receiver<bool>,
     ),
     &'static str,
@@ -334,17 +333,13 @@ async fn acquire_session(
     s.busy = true;
     let (tx, rx) = watch::channel(false);
     s.cancel_tx = tx;
-    // Move agent-side helpers out for the duration of the prompt; restored
-    // on exit. Disabled placeholders are safe because the Session is
-    // locked-busy until we put them back.
-    let todos = std::mem::replace(&mut s.todos, crate::todo::Todos::new(false));
     Ok((
         s.id.clone(),
         s.mcp.clone(),
         std::mem::take(&mut s.history),
         s.original_task.take(),
         s.handoff_count,
-        todos,
+        s.stop_rejections,
         rx,
     ))
 }

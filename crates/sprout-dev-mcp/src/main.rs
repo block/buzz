@@ -14,11 +14,13 @@ mod rg;
 mod shell;
 mod shim;
 mod str_replace;
+mod todo;
 mod tree;
 
 #[derive(Clone)]
 struct DevMcp {
     state: Arc<shell::SharedState>,
+    todos: Arc<todo::TodoState>,
     tool_router: ToolRouter<DevMcp>,
 }
 
@@ -27,6 +29,7 @@ impl DevMcp {
     fn new(state: Arc<shell::SharedState>) -> Self {
         Self {
             state,
+            todos: Arc::new(todo::TodoState::new()),
             tool_router: Self::tool_router(),
         }
     }
@@ -51,6 +54,46 @@ impl DevMcp {
         Parameters(p): Parameters<str_replace::StrReplaceParams>,
     ) -> Result<String, ErrorData> {
         str_replace::run(&self.state, p)
+    }
+
+    #[tool(
+        name = "todo",
+        description = "Session task list. Omit `todos` to read. Provide a full replacement array to update. If the operator enables hooks for this server, the agent's _Stop hook will advise against ending the turn while items are open."
+    )]
+    async fn todo(
+        &self,
+        Parameters(p): Parameters<todo::TodoParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match self.todos.handle_todo(p) {
+            Ok(text) => todo::text_result(text),
+            Err(e) => todo::error_result(format!("Error: {e}")),
+        }
+    }
+
+    /// Hook: called by the agent before honoring end_turn. Returns
+    /// non-empty objection text iff items remain open.
+    #[tool(
+        name = "_Stop",
+        description = "Returns open todo items if any exist. Used by the agent's _Stop lifecycle hook to advise against ending with incomplete work."
+    )]
+    async fn stop_hook(
+        &self,
+        Parameters(_): Parameters<todo::HookParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        todo::text_result(self.todos.stop_objection())
+    }
+
+    /// Hook: called by the agent after context compaction/handoff so the
+    /// todo list survives history truncation.
+    #[tool(
+        name = "_PostCompact",
+        description = "Internal hook. Agent invokes after handoff; returns todo state for re-injection."
+    )]
+    async fn post_compact_hook(
+        &self,
+        Parameters(_): Parameters<todo::HookParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        todo::text_result(self.todos.post_compact())
     }
 }
 

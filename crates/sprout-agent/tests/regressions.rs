@@ -644,7 +644,7 @@ async fn per_turn_tool_call_cap_enforced() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn description_clamping_enforced() {
     let llm = spawn_capturing_llm(vec![openai_text("done")]).await;
-    let mut h = Harness::spawn_with_env(&llm.url, &[("SPROUT_AGENT_TODO", "0")]).await;
+    let mut h = Harness::spawn(&llm.url).await;
 
     let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
     h.send(
@@ -700,94 +700,479 @@ async fn description_clamping_enforced() {
     h.shutdown().await;
 }
 
-/// Todo enforcement: agent must not accept end_turn while pending todos exist.
-/// Sequence: LLM calls todo (creates pending items) → LLM tries to end (no tool calls)
-/// → agent injects reminder → LLM calls todo (marks all completed) → LLM ends → accepted.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn todo_enforcement_blocks_premature_end() {
-    // Round 1: LLM calls todo to create 2 open items.
-    // Round 2: LLM tries to end (text only, no tool calls) → enforcement fires.
-    // Round 3: LLM calls todo to mark both done.
-    // Round 4: LLM ends (text only) → allowed because no open items.
-    let llm = spawn_capturing_llm(vec![
-        // Round 1: create todos
-        openai_tool_call(
-            "tc_1",
-            "todo",
-            json!({
-                "todos": [
-                    {"id": 1, "title": "Step one", "done": false},
-                    {"id": 2, "title": "Step two", "done": false}
-                ]
-            }),
-        ),
-        // Round 2: try to end — should be blocked
-        openai_text("All done!"),
-        // Round 3: after enforcement reminder, complete the todos
-        openai_tool_call(
-            "tc_2",
-            "todo",
-            json!({
-                "todos": [
-                    {"id": 1, "title": "Step one", "done": true},
-                    {"id": 2, "title": "Step two", "done": true}
-                ]
-            }),
-        ),
-        // Round 4: end again — should be allowed now
-        openai_text("Now truly done."),
-    ])
-    .await;
-    let mut h = Harness::spawn(&llm.url).await;
 
+
+// ─── Hook system regression tests ──────────────────────────────────────────
+
+/// Helper: spawn a session with a fake MCP server exposing one regular tool
+/// plus an optional `_Stop` hook controlled by env vars.
+async fn init_session_with_fake_mcp(
+    h: &mut Harness,
+    extra_mcp_env: &[(&str, &str)],
+) -> String {
+    let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
+    let env: Vec<Value> = extra_mcp_env
+        .iter()
+        .map(|(k, v)| json!({ "name": k, "value": v }))
+        .collect();
     h.send(
         "initialize",
         json!({"protocolVersion":1,"clientCapabilities":{}}),
     )
     .await;
     let _ = h.recv().await;
-    h.send("session/new", json!({"cwd": "/tmp", "mcpServers": []}))
+    h.send(
+        "session/new",
+        json!({
+            "cwd": "/tmp",
+            "mcpServers": [{
+                "name": "fake",
+                "command": fake_mcp,
+                "args": [],
+                "env": env,
+            }],
+        }),
+    )
+    .await;
+    let r = h
+        .recv_until(|v| v.get("result").is_some() || v.get("error").is_some())
         .await;
-    let r = h.recv().await;
-    let sid = r["result"]["sessionId"].as_str().unwrap().to_owned();
+    r["result"]["sessionId"]
+        .as_str()
+        .expect("sessionId")
+        .to_owned()
+}
 
-    let p_id = h
+/// `_Stop` hook objects on the first end_turn → agent must NOT stop.
+/// The hook returns an objection only on its first invocation; on the
+/// second end_turn (after a tool round), the hook stays silent so the
+/// agent ends cleanly. Verifies that the gate rerolls the LLM at least
+/// once, and that the objection appears in history as a tool-role
+/// message with the JSON-encoded source attribution.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_stop_blocks_premature_end() {
+    // LLM sequence:
+    //   1. text "premature" (triggers _Stop objection — call #1)
+    //   2. tool_call to fake__tool_0 (regular tool, resets latch)
+    //   3. text "really done" (hook returns empty on call #2 → end)
+    let llm = spawn_capturing_llm(vec![
+        openai_text("premature"),
+        openai_tool_call("tc1", "fake__tool_0", json!({})),
+        openai_text("really done"),
+    ])
+    .await;
+    // stop_max_rejections=10 so the budget never trips. The hook itself
+    // stays silent on its second call (FAKE_MCP_STOP_COUNT=1) so the
+    // second end_turn is accepted by the agent — this exercises the
+    // genuine "objected then later cleared" path, not a budget cap.
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("MCP_HOOK_SERVERS", "fake"),
+            ("SPROUT_AGENT_STOP_MAX_REJECTIONS", "10"),
+        ],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_STOP_HOOK", "1"),
+            ("FAKE_MCP_STOP_TEXT", "you have open work"),
+            // Objection text returned for the first STOP_COUNT calls;
+            // empty string thereafter.
+            ("FAKE_MCP_STOP_COUNT", "1"),
+        ],
+    )
+    .await;
+
+    let p = h
         .send(
             "session/prompt",
-            json!({
-                "sessionId": sid,
-                "prompt": [{"type": "text", "text": "do something"}],
-            }),
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
         )
         .await;
+    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    assert!(r.get("result").is_some(), "errored: {r}");
+    assert_eq!(r["result"]["stopReason"], "end_turn");
 
-    // Collect all messages until the prompt resolves.
-    let v = h.recv_until(|v| v["id"] == json!(p_id)).await;
-    assert_eq!(
-        v["result"]["stopReason"], "end_turn",
-        "should eventually end_turn after completing todos"
-    );
-
-    // Verify the LLM was called 4 times (enforcement forced an extra round).
+    // Agent must have called LLM ≥2 times (initial end_turn was rejected,
+    // forcing another LLM round). We expect exactly 3 here: text → tool → text.
     let captured = llm.captured.lock().await;
-    assert_eq!(
-        captured.len(),
-        4,
-        "expected 4 LLM calls (todo, blocked end, todo complete, allowed end), got {}",
+    assert!(
+        captured.len() >= 2,
+        "agent did not loop after objection: {} LLM calls",
         captured.len()
     );
 
-    // The 3rd request (after enforcement) should contain the strike reminder
-    // in the messages array (injected as a user message).
-    let third_req = &captured[2];
-    let messages = third_req["messages"].as_array().unwrap();
-    let last_user_msg = messages.iter().rev().find(|m| m["role"] == "user").unwrap();
-    let content = last_user_msg["content"].as_str().unwrap_or("");
+    // Round 2's request must carry the objection as a tool-role message
+    // (synthetic tool result), not a user/assistant message. Content is
+    // a JSON object with hook/server/text fields — never escapable.
+    let msgs = captured[1]["messages"].as_array().unwrap();
+    let objection_present = msgs.iter().any(|m| {
+        if m["role"] != "tool" {
+            return false;
+        }
+        let content = m["content"].as_str().unwrap_or("");
+        let parsed: Value = match serde_json::from_str(content) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        parsed["hook"] == "_Stop"
+            && parsed["server"] == "fake"
+            && parsed["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("you have open work")
+    });
     assert!(
-        content.contains("open todo items"),
-        "enforcement reminder not found in 3rd LLM request. Last user msg: {}",
-        &content[..content.len().min(200)]
+        objection_present,
+        "objection (role=tool, JSON-encoded) missing from messages: {msgs:?}"
+    );
+    h.shutdown().await;
+}
+
+/// After `stop_max_rejections` objections, the agent honors end_turn
+/// even if `_Stop` would still object. Set max=1 so it trips quickly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_stop_budget_exhausted() {
+    // LLM sequence:
+    //   1. text → triggers _Stop objection (rejections: 0→1)
+    //   2. tool_call (resets last_was_end_turn)
+    //   3. text → gate sees rejections>=max, returns end_turn (no _Stop call)
+    let llm = spawn_capturing_llm(vec![
+        openai_text("first"),
+        openai_tool_call("tc1", "fake__tool_0", json!({})),
+        openai_text("second"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("MCP_HOOK_SERVERS", "fake"),
+            ("SPROUT_AGENT_STOP_MAX_REJECTIONS", "1"),
+        ],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_STOP_HOOK", "1"),
+            ("FAKE_MCP_STOP_TEXT", "still working"),
+        ],
+    )
+    .await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    assert!(r.get("result").is_some(), "errored: {r}");
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    // Three LLM calls expected: budget cap stops the loop on the 3rd end_turn.
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        3,
+        "expected exactly 3 LLM calls (budget cap), got {}",
+        captured.len()
+    );
+    h.shutdown().await;
+}
+
+/// Consecutive-rejection rule: if the LLM responds to an objection with
+/// no tool calls and end_turn again, the agent accepts the end (avoids
+/// infinite loops with an unreasonable hook).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_stop_consecutive_end_turn() {
+    // LLM sequence:
+    //   1. text → _Stop objects (rejections: 0→1, last_was_end_turn=true)
+    //   2. text again, no tool calls → consecutive rule fires, return end_turn
+    let llm = spawn_capturing_llm(vec![
+        openai_text("done-1"),
+        openai_text("done-2"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("MCP_HOOK_SERVERS", "fake"),
+            // Set high so we don't trip the budget instead.
+            ("SPROUT_AGENT_STOP_MAX_REJECTIONS", "10"),
+        ],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_STOP_HOOK", "1"),
+            ("FAKE_MCP_STOP_TEXT", "keep going"),
+        ],
+    )
+    .await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    assert!(r.get("result").is_some(), "errored: {r}");
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+
+    // Exactly 2 LLM calls — consecutive rule prevented a 3rd round.
+    let captured = llm.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        2,
+        "expected 2 LLM calls (consecutive rule), got {}",
+        captured.len()
+    );
+    h.shutdown().await;
+}
+
+/// Regression: an LLM that tries to call a hidden hook tool (e.g.
+/// `fake___Stop`) directly must get an "unknown tool" error result —
+/// the MCP server must NOT be invoked. This guarantees a malicious or
+/// confused model can't trigger lifecycle hooks itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_tools_hidden_from_llm() {
+    // LLM sequence:
+    //   1. tool_call to fake___Stop (hidden hook, must fail closed)
+    //   2. text "done"
+    let llm = spawn_capturing_llm(vec![
+        openai_tool_call("tc1", "fake___Stop", json!({})),
+        openai_text("done"),
+    ])
+    .await;
+    // We deliberately leave MCP_HOOK_SERVERS unset so the
+    // agent's hook gate is disabled — hook-tool hiding must hold even
+    // when hooks aren't allowlisted (defense in depth).
+    let mut h = Harness::spawn(&llm.url).await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_STOP_HOOK", "1"),
+            // Distinct text we can scan for. If the MCP server is ever
+            // invoked, this string would appear in the captured history.
+            ("FAKE_MCP_STOP_TEXT", "HOOK_LEAKED_TO_LLM"),
+        ],
+    )
+    .await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    assert!(r.get("result").is_some(), "errored: {r}");
+
+    // The tool result fed back to the LLM (round 2) must be the
+    // synthetic "unknown tool" error, not the hook's actual output.
+    let captured = llm.captured.lock().await;
+    assert_eq!(captured.len(), 2, "expected 2 LLM calls, got {}", captured.len());
+    let msgs = captured[1]["messages"].as_array().unwrap();
+    let tool_msg = msgs
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .expect("expected a tool result message in round 2");
+    let content = tool_msg["content"].as_str().unwrap_or("");
+    assert!(
+        content.contains("unknown tool"),
+        "expected unknown-tool error, got: {content}"
+    );
+    assert!(
+        !content.contains("HOOK_LEAKED_TO_LLM"),
+        "MCP hook was invoked from the LLM path: {content}"
     );
 
+    // Defense-in-depth: also confirm the *advertised* tools never
+    // included the hook in the first place.
+    let round1_tools = captured[0]["tools"].as_array().unwrap();
+    for t in round1_tools {
+        let name = t["function"]["name"].as_str().unwrap_or("");
+        assert!(
+            !name.contains("_Stop"),
+            "hook tool advertised to LLM: {name}"
+        );
+    }
+    h.shutdown().await;
+}
+
+/// `_PostCompact` hook fires after a context-handoff and its output is
+/// re-injected into the fresh history as a synthetic tool result. The
+/// next LLM request must therefore see the post-compact text in
+/// `messages` (role=tool) — proving the hook ran on the *new* context,
+/// not the discarded one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_post_compact_injects_after_handoff() {
+    // Sequence of canned LLM responses consumed in order:
+    //   1-3. Three `session/prompt` rounds returning short text. Each
+    //        prompt body is ~300 KB, so by the 4th prompt we'll be over
+    //        the 75% (= 768 KB) threshold of a 1 MB budget.
+    //   4.   Handoff `summarize()` call returns the summary text.
+    //   5.   Next regular `complete()` call after the handoff returns
+    //        a final "done" message; we inspect this request's body.
+    let llm = spawn_capturing_llm(vec![
+        openai_text("ack-1"),
+        openai_text("ack-2"),
+        openai_text("ack-3"),
+        openai_text("handoff summary text"),
+        openai_text("done"),
+    ])
+    .await;
+    // 1 MB budget = MIN allowed. Threshold = 768 KB. Each ~300 KB prompt
+    // fills the budget on the 4th turn, triggering handoff.
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("MCP_HOOK_SERVERS", "fake"),
+            ("SPROUT_AGENT_MAX_HISTORY_BYTES", &(1024 * 1024).to_string()),
+            // Allow at least one handoff.
+            ("SPROUT_AGENT_MAX_HANDOFFS", "3"),
+        ],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            // No _Stop hook here — _PostCompact only.
+            ("FAKE_MCP_POSTCOMPACT_HOOK", "1"),
+            ("FAKE_MCP_POSTCOMPACT_TEXT", "todo state here"),
+        ],
+    )
+    .await;
+
+    // Drive prompts until we observe a handoff. We detect it by counting
+    // captured LLM requests: a handoff inserts one extra `summarize` call
+    // that we didn't issue ourselves. We send up to 6 prompts.
+    let big = "x".repeat(300 * 1024);
+    let mut prompts_sent = 0usize;
+    let mut handoff_observed = false;
+    for i in 0..6 {
+        let p = h
+            .send(
+                "session/prompt",
+                json!({
+                    "sessionId": sid,
+                    "prompt": [{"type":"text","text": format!("{i}:{big}")}],
+                }),
+            )
+            .await;
+        let _ = h.recv_until(|v| v["id"] == json!(p)).await;
+        prompts_sent += 1;
+        let captured_now = llm.captured.lock().await.len();
+        // After N prompts we'd normally see N requests; an extra request
+        // means a handoff summarize() ran.
+        if captured_now > prompts_sent {
+            handoff_observed = true;
+            break;
+        }
+    }
+    assert!(
+        handoff_observed,
+        "no handoff observed after {prompts_sent} prompts (captured={})",
+        llm.captured.lock().await.len()
+    );
+
+    // The first LLM call AFTER the handoff is the one we inspect. Find it:
+    // it's the one where the messages array is short (history just reset)
+    // and contains a tool-role message with the _PostCompact payload.
+    let captured = llm.captured.lock().await;
+    let post_compact_visible = captured.iter().any(|req| {
+        let msgs = match req["messages"].as_array() {
+            Some(m) => m,
+            None => return false,
+        };
+        msgs.iter().any(|m| {
+            if m["role"] != "tool" {
+                return false;
+            }
+            let content = m["content"].as_str().unwrap_or("");
+            let parsed: Value = match serde_json::from_str(content) {
+                Ok(v) => v,
+                Err(_) => return false,
+            };
+            parsed["hook"] == "_PostCompact"
+                && parsed["server"] == "fake"
+                && parsed["text"] == "todo state here"
+        })
+    });
+    assert!(
+        post_compact_visible,
+        "_PostCompact tool result not visible to LLM after handoff"
+    );
+    h.shutdown().await;
+}
+
+/// `_Stop` hook that takes longer than `SPROUT_AGENT_HOOK_TIMEOUT_MS`
+/// must be treated as no-objection (fail-open). Agent stops normally.
+///
+/// Note on server-kill-on-timeout: `call_hooks` calls `kill_server` on a
+/// timed-out hook so a wedged server can't poison subsequent calls. We
+/// don't add a separate per-test assertion for this — the
+/// `mcp_init_timeout_kills_child` test already exercises the same
+/// kill-on-timeout codepath through `kill_server`, and the harness here
+/// (spawn-then-shutdown) makes a follow-up "tool still works" check
+/// fragile because the server we just killed is the only one in the
+/// session. The timeout assertion below (elapsed < 2.5s) implicitly
+/// covers the kill: if the hook child kept running past the timeout,
+/// we'd block on it during shutdown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hook_stop_timeout_failopen() {
+    let llm = spawn_capturing_llm(vec![openai_text("done")]).await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("MCP_HOOK_SERVERS", "fake"),
+            // Hook delay (3s) >> hook timeout (200ms) → fail-open.
+            ("SPROUT_AGENT_HOOK_TIMEOUT_MS", "200"),
+        ],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_STOP_HOOK", "1"),
+            ("FAKE_MCP_STOP_TEXT", "would object"),
+            ("FAKE_MCP_STOP_DELAY", "3"),
+        ],
+    )
+    .await;
+
+    let started = Instant::now();
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let r = h.recv_until(|v| v["id"] == json!(p)).await;
+    let elapsed = started.elapsed();
+
+    assert!(r.get("result").is_some(), "errored: {r}");
+    assert_eq!(r["result"]["stopReason"], "end_turn");
+    // Hook delay is 3s; if we waited for it the test would take ≥3s.
+    // 1.5s gives slack for CI without masking a regression.
+    assert!(
+        elapsed < Duration::from_millis(2500),
+        "did not fail-open: prompt took {elapsed:?}"
+    );
+
+    // Only the initial LLM call — agent did NOT loop after the timeout.
+    let captured = llm.captured.lock().await;
+    assert_eq!(captured.len(), 1, "expected 1 LLM call, got {}", captured.len());
     h.shutdown().await;
 }

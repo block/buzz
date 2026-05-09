@@ -45,7 +45,14 @@ pub struct Config {
     pub max_history_bytes: usize,
     pub max_handoffs: usize,
     pub max_parallel_tools: usize,
-    pub todo_enabled: bool,
+    pub hook_timeout: Duration,
+    /// Maximum `_Stop` rejections per session. Default 3. Set to 0 to
+    /// disable `_Stop` hooks entirely (agent always honors end_turn).
+    pub stop_max_rejections: u32,
+    /// Hook server allowlist. See [`HookServers`] for variant semantics.
+    /// Default (env unset/empty) is `None` — hooks are off unless the
+    /// operator explicitly opts in.
+    pub hook_servers: HookServers,
     pub api_key: String,
     pub model: String,
     pub base_url: String,
@@ -101,7 +108,9 @@ impl Config {
             max_history_bytes: parse_env("SPROUT_AGENT_MAX_HISTORY_BYTES", 1024 * 1024)?,
             max_handoffs: parse_env("SPROUT_AGENT_MAX_HANDOFFS", 5)?,
             max_parallel_tools: parse_env("SPROUT_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
-            todo_enabled: parse_bool_env("SPROUT_AGENT_TODO", true),
+            hook_timeout: Duration::from_millis(parse_env("SPROUT_AGENT_HOOK_TIMEOUT_MS", 2500u64)?),
+            stop_max_rejections: parse_env("SPROUT_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
+            hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
         };
         cfg.validate()?;
         Ok(cfg)
@@ -179,15 +188,150 @@ where
         .unwrap_or(Ok(default))
 }
 
-/// Lenient boolean env parsing. Unset → default. "0"/"false"/"no"/"off"
-/// (case-insensitive) → false. Anything else → true. Picked over strict
-/// parsing because operators reach for `=0` or `=no` more than `=false`.
-fn parse_bool_env(key: &str, default: bool) -> bool {
-    match env(key) {
-        None => default,
-        Some(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off" | ""
-        ),
+/// Hook-server allowlist parsed from a comma-separated env var.
+///   - unset / empty / whitespace-only → `None` (no hooks enabled)
+///   - `*`                              → `All` (every server eligible)
+///   - `a,b,c`                          → `Only(["a","b","c"])`
+#[derive(Debug, Clone)]
+pub enum HookServers {
+    None,
+    All,
+    Only(Vec<String>),
+}
+
+impl HookServers {
+    /// Returns true iff `name` may receive hook calls.
+    pub fn allows(&self, name: &str) -> bool {
+        match self {
+            HookServers::None => false,
+            HookServers::All => true,
+            HookServers::Only(v) => v.iter().any(|s| s == name),
+        }
+    }
+
+    /// True if no hooks should ever fire — used to short-circuit dispatch.
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, HookServers::None)
+    }
+}
+
+fn parse_hook_servers_env(key: &str) -> HookServers {
+    parse_hook_servers(env(key).as_deref())
+}
+
+/// Pure parser exposed for unit tests. `None` (env unset) and `Some("")`
+/// (env set but empty) both yield `HookServers::None`.
+fn parse_hook_servers(raw: Option<&str>) -> HookServers {
+    let raw = match raw {
+        Some(v) => v,
+        None => return HookServers::None,
+    };
+    let names: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if names.is_empty() {
+        return HookServers::None;
+    }
+    // `*` is the wildcard — only honored when it's the sole entry. A mixed
+    // value like "*,foo" falls through to `Only(["*","foo"])`; "*" is not a
+    // legal MCP server name (it can't pass `valid_name`), so it never matches
+    // an actual server. This avoids silently widening scope on typos.
+    if names.len() == 1 && names[0] == "*" {
+        return HookServers::All;
+    }
+    HookServers::Only(names)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_servers_unset_is_none() {
+        assert!(matches!(parse_hook_servers(None), HookServers::None));
+    }
+
+    #[test]
+    fn hook_servers_empty_string_is_none() {
+        assert!(matches!(parse_hook_servers(Some("")), HookServers::None));
+    }
+
+    #[test]
+    fn hook_servers_whitespace_only_is_none() {
+        assert!(matches!(
+            parse_hook_servers(Some("   ,, ,")),
+            HookServers::None
+        ));
+    }
+
+    #[test]
+    fn hook_servers_star_is_all() {
+        assert!(matches!(parse_hook_servers(Some("*")), HookServers::All));
+    }
+
+    #[test]
+    fn hook_servers_star_with_whitespace_is_all() {
+        assert!(matches!(
+            parse_hook_servers(Some("  *  ")),
+            HookServers::All
+        ));
+    }
+
+    #[test]
+    fn hook_servers_named_list() {
+        match parse_hook_servers(Some("foo,bar")) {
+            HookServers::Only(v) => assert_eq!(v, vec!["foo".to_owned(), "bar".to_owned()]),
+            other => panic!("expected Only, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_servers_trims_entries() {
+        match parse_hook_servers(Some(" foo , bar , ")) {
+            HookServers::Only(v) => assert_eq!(v, vec!["foo".to_owned(), "bar".to_owned()]),
+            other => panic!("expected Only, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_servers_star_mixed_is_literal() {
+        // `*,foo` is NOT a wildcard — it's a literal Only(["*","foo"]).
+        // No real server can be named `*`, so this never matches anything.
+        match parse_hook_servers(Some("*,foo")) {
+            HookServers::Only(v) => assert_eq!(v, vec!["*".to_owned(), "foo".to_owned()]),
+            other => panic!("expected Only, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_servers_allows_matches_named_only() {
+        let hs = parse_hook_servers(Some("foo,bar"));
+        assert!(hs.allows("foo"));
+        assert!(hs.allows("bar"));
+        assert!(!hs.allows("baz"));
+    }
+
+    #[test]
+    fn hook_servers_allows_matches_all() {
+        assert!(parse_hook_servers(Some("*")).allows("anything"));
+    }
+
+    #[test]
+    fn hook_servers_allows_blocks_when_none() {
+        assert!(!parse_hook_servers(None).allows("foo"));
+    }
+
+    #[test]
+    fn hook_servers_star_mixed_does_not_match_real_server() {
+        let hs = parse_hook_servers(Some("*,foo"));
+        // The literal "*" entry exists in Only, but no real server can
+        // be named "*" (rejected by the MCP server name validator).
+        assert!(hs.allows("foo"));
+        assert!(!hs.allows("bar"));
+        // Allowed strictly only as a literal match — defense-in-depth
+        // expectation for callers.
+        assert!(hs.allows("*"));
     }
 }

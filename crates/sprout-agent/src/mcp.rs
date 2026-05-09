@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::config::Config;
+use crate::config::{Config, HookServers};
 use crate::log::{log_error, log_info, log_warn};
 use crate::types::{clamp, AgentError, McpServerStdio, ToolDef, ToolResult};
 
@@ -24,6 +24,7 @@ const MAX_DESCRIPTION_BYTES: usize = 1024;
 const MAX_SCHEMA_BYTES: usize = 4096;
 const MARKER_FIELD_MAX: usize = 256;
 pub const MAX_MCP_SERVERS: usize = 16;
+const MAX_HOOK_RESULT_BYTES: usize = 16 * 1024;
 
 const PASSTHROUGH_ENV: &[&str] = &["PATH", "HOME", "TERM", "LANG", "LC_ALL", "TMPDIR"];
 
@@ -111,6 +112,8 @@ pub struct McpRegistry {
     backoff_base: Duration,
     backoff_max: Duration,
     init_timeout: Duration,
+    /// Consecutive hook timeout count per server. Kill on second consecutive.
+    hook_timeouts: std::sync::Mutex<HashMap<String, u32>>,
 }
 
 impl McpRegistry {
@@ -134,6 +137,7 @@ impl McpRegistry {
             backoff_base: Duration::from_millis(cfg.mcp_restart_base_ms.max(1)),
             backoff_max: Duration::from_millis(cfg.mcp_restart_max_ms.max(1)),
             init_timeout: cfg.mcp_init_timeout,
+            hook_timeouts: std::sync::Mutex::new(HashMap::new()),
         };
 
         let mut seen_names = HashSet::new();
@@ -217,6 +221,16 @@ impl McpRegistry {
         self.by_qname.contains_key(qname)
     }
 
+    /// True if `qname` resolves to a hidden hook tool (bare name starts
+    /// with `_`). Used to reject hook calls coming from the LLM path —
+    /// hooks are only callable via `call_hooks`.
+    pub fn is_hook(&self, qname: &str) -> bool {
+        self.by_qname
+            .get(qname)
+            .map(|e| e.bare.starts_with('_'))
+            .unwrap_or(false)
+    }
+
     pub fn tools(&self) -> Vec<ToolDef> {
         self.defs
             .iter()
@@ -225,6 +239,10 @@ impl McpRegistry {
                     Some(e) => e,
                     None => return false,
                 };
+                // Bare names starting with `_` are hooks — invisible to the LLM.
+                if entry.bare.starts_with('_') {
+                    return false;
+                }
                 let server = &self.servers[entry.server_idx];
                 match &**server.client.load() {
                     ClientState::Healthy { tools, .. } => tools.iter().any(|t| t == &entry.bare),
@@ -234,6 +252,93 @@ impl McpRegistry {
                 }
             })
             .cloned()
+            .collect()
+    }
+
+    /// Call every tool whose bare name equals `hook_name` across all
+    /// allowlisted servers in parallel, bounded by `timeout`. Returns
+    /// `(server_name, text)` pairs in **config order** (deterministic),
+    /// dropping empty/whitespace-only responses, errors and timeouts.
+    /// Hooks are fail-open and must never block the agent.
+    pub async fn call_hooks(
+        self: &Arc<Self>,
+        hook_name: &str,
+        input: &Value,
+        timeout: Duration,
+        allowed: &HookServers,
+    ) -> Vec<(String, String)> {
+        if allowed.is_disabled() {
+            return Vec::new();
+        }
+        // Walk servers in registration order so the result is deterministic
+        // regardless of HashMap iteration order or task completion order.
+        let mut targets: Vec<(usize, String, String)> = Vec::new();
+        for (idx, server) in self.servers.iter().enumerate() {
+            if !allowed.allows(&server.name) {
+                continue;
+            }
+            let qname = format!("{}{SEP}{}", server.name, hook_name);
+            if self.by_qname.contains_key(&qname) {
+                targets.push((idx, server.name.clone(), qname));
+            }
+        }
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let mut set = tokio::task::JoinSet::new();
+        for (idx, server_name, qname) in targets {
+            let reg = Arc::clone(self);
+            let args = input.clone();
+            set.spawn(async move {
+                let res = tokio::time::timeout(
+                    timeout,
+                    reg.call(&qname, "hook", &args, MAX_HOOK_RESULT_BYTES),
+                )
+                .await;
+                (idx, server_name, res)
+            });
+        }
+        let mut indexed: Vec<(usize, String, String)> = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            // fail-open: drop join errors, timeouts, call errors,
+            // empty/whitespace-only text. On timeout, also kill the server
+            // process group so a wedged hook can't poison the next regular
+            // tool call. The registry's lazy restart handles the rest.
+            match joined {
+                Ok((idx, server_name, Ok(Ok(r)))) => {
+                    // Success — reset consecutive timeout counter.
+                    if let Ok(mut counts) = self.hook_timeouts.lock() {
+                        counts.remove(&server_name);
+                    }
+                    if !r.is_error && !r.text.trim().is_empty() {
+                        indexed.push((idx, server_name, r.text));
+                    }
+                }
+                Ok((_idx, server_name, Err(_elapsed))) => {
+                    // Kill only on second consecutive timeout.
+                    let count = {
+                        let mut counts = self.hook_timeouts.lock().unwrap_or_else(|e| e.into_inner());
+                        let c = counts.entry(server_name.clone()).or_insert(0);
+                        *c += 1;
+                        *c
+                    };
+                    if count >= 2 {
+                        eprintln!("sprout-agent: hook: killing server '{}' after {} consecutive timeouts", server_name, count);
+                        self.kill_server(&server_name, "hook timeout (consecutive)");
+                        if let Ok(mut counts) = self.hook_timeouts.lock() {
+                            counts.remove(&server_name);
+                        }
+                    } else {
+                        eprintln!("sprout-agent: hook: server '{}' timed out ({}/2)", server_name, count);
+                    }
+                }
+                _ => {}
+            }
+        }
+        indexed.sort_by_key(|(idx, _, _)| *idx);
+        indexed
+            .into_iter()
+            .map(|(_, name, text)| (name, text))
             .collect()
     }
 

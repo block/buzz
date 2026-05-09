@@ -1,4 +1,4 @@
-use crate::agent::RunCtx;
+use crate::agent::{push_hook_outputs_as_tool_results, RunCtx};
 use crate::config::{
     HANDOFF_MAX_OUTPUT_TOKENS, HANDOFF_MAX_TOOL_NAMES, HANDOFF_ORIGINAL_TASK_MAX_BYTES,
     HANDOFF_PROMPT_MAX_BYTES, HANDOFF_TAIL_ITEMS, HANDOFF_THRESHOLD,
@@ -56,15 +56,27 @@ impl RunCtx<'_> {
             _ => None,
         });
         let prior = self.history.len();
+        // Reset history first; the _PostCompact hook is meant to inject
+        // state into the FRESH context, not the old one we're discarding.
         self.history.clear();
-        // Replay the todo state into the post-handoff context. Without
-        // this the next turn forgets the plan.
-        let mut handoff_text = format!("[Context Handoff]\n{summary}");
-        if let Some(block) = self.todos.handoff_block() {
-            handoff_text.push_str("\n\n");
-            handoff_text.push_str(&block);
-        }
+        let post_compact = self
+            .mcp
+            .call_hooks(
+                "_PostCompact",
+                &serde_json::json!({}),
+                self.cfg.hook_timeout,
+                &self.cfg.hook_servers,
+            )
+            .await;
+        // Handoff summary is trusted (we generated it). Push as User so
+        // it anchors the new context.
+        let handoff_text = format!("[Context Handoff]\n{summary}");
         self.history.push(HistoryItem::User(handoff_text));
+        // Hook output is untrusted — inject as synthetic tool results so a
+        // malicious _PostCompact can't impersonate the user/system.
+        if !post_compact.is_empty() {
+            push_hook_outputs_as_tool_results(self.history, "_PostCompact", &post_compact);
+        }
         if let Some(prompt) = current_prompt {
             self.history.push(HistoryItem::User(prompt));
         }
@@ -92,10 +104,7 @@ impl RunCtx<'_> {
         let task = self.original_task.as_deref().unwrap_or("(unknown)");
         head.push_str(&clamp_bytes(task, HANDOFF_ORIGINAL_TASK_MAX_BYTES));
         head.push_str("\n\n# Available Tools\n");
-        let mut all_tools = self.mcp.tools();
-        if let Some(td) = self.todos.tool_def() {
-            all_tools.push(td);
-        }
+        let all_tools = self.mcp.tools();
         let total = all_tools.len();
         if total == 0 {
             head.push_str("(none)\n");
@@ -108,12 +117,6 @@ impl RunCtx<'_> {
             }
             head.push('\n');
         }
-        if let Some(block) = self.todos.handoff_block() {
-            head.push('\n');
-            head.push_str(&block);
-            head.push('\n');
-        }
-
         let tail = "\n# Instructions\n\
              Produce a context handoff summary covering: (1) original task, \
              (2) what was accomplished, (3) key decisions, (4) what remains, \
