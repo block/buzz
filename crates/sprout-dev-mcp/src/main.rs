@@ -58,7 +58,7 @@ impl DevMcp {
 
     #[tool(
         name = "todo",
-        description = "Session task list. Omit `todos` to read. Provide a full replacement array to update. If the operator enables hooks for this server, the agent's _Stop hook will advise against ending the turn while items are open."
+        description = "Session task list. Omit `todos` to read current state. Provide a full replacement array to update. Items are {text, done}. Open items removed without being marked done will trigger a warning. If the operator enables hooks for this server, the agent's _Stop hook will advise against ending the turn while items are open."
     )]
     async fn todo(
         &self,
