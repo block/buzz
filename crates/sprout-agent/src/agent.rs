@@ -158,8 +158,9 @@ impl RunCtx<'_> {
     ///      slot as cancelled.
     ///   2. Execute: spawn runnable calls into a `JoinSet` bounded by a
     ///      `Semaphore(max_parallel_tools)`. `select!` between cancel and
-    ///      `join_next`. On cancel: `abort_all`, drain joined results,
-    ///      synthesize cancelled for unfilled slots and emit `failed`.
+    ///      `join_next`. On cancel: close semaphore, drain in-flight tasks
+    ///      (each sends `notifications/cancelled` internally), synthesize
+    ///      cancelled for unfilled slots and emit `failed`.
     ///   3. Append: push results into history in original call order.
     ///
     /// `max_parallel_tools = 1` makes phase 2 effectively sequential
@@ -268,16 +269,22 @@ impl RunCtx<'_> {
         }
 
         let mut cancel_rx = self.cancel.clone();
-        let mut cancelled = false;
-        loop {
+        let mut cancelled = if *cancel_rx.borrow() {
+            sem.close();
+            true
+        } else {
+            false
+        };
+        while !cancelled {
             tokio::select! {
                 biased;
                 _ = cancel_rx.changed() => {
-                    // Cancel: stop accepting new permits, abort tasks.
-                    // We do NOT use `set.shutdown().await` — that drops
-                    // already-completed results we still need.
+                    // Cancel: stop accepting new permits. Do NOT abort
+                    // tasks — each in-flight `mcp.call` observes the same
+                    // cancel receiver via its internal `select!` and
+                    // returns promptly with an "cancelled" error after
+                    // sending `notifications/cancelled` to the server.
                     sem.close();
-                    set.abort_all();
                     cancelled = true;
                     break;
                 }
@@ -295,31 +302,36 @@ impl RunCtx<'_> {
             }
         }
 
-        // After cancel + abort_all, drain remaining tasks. abort_all only
-        // *requests* cancellation; already-completed tasks are still
-        // joinable and we must record their results (otherwise the wire
-        // already said "completed" but history would say "cancelled" —
-        // status divergence). join_next also collects newly-aborted tasks
-        // as JoinErrors.
+        // After cancel, drain in-flight tasks. Each task's internal
+        // `do_call` observes the cancel receiver and returns promptly
+        // after sending `notifications/cancelled`. We bound the drain
+        // to avoid hanging if a task is stuck in restart/reconnect.
         if cancelled {
-            while let Some(joined) = set.join_next().await {
-                match joined {
-                    Ok((i, outcome)) => {
+            let drain_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match tokio::time::timeout_at(drain_deadline, set.join_next()).await {
+                    Ok(Some(Ok((i, outcome)))) => {
                         if results[i].is_none() {
                             results[i] = Some(outcome_to_result(&calls[i], outcome));
                         }
                     }
-                    Err(e) => {
+                    Ok(Some(Err(e))) => {
                         tracing::warn!("tool task join error (drain): {e}");
+                    }
+                    Ok(None) => break, // all tasks drained
+                    Err(_) => {
+                        // Drain timed out — abort remaining tasks.
+                        set.abort_all();
+                        tracing::warn!("cancel drain timed out; aborting remaining tasks");
+                        break;
                     }
                 }
             }
         }
 
-        // Fill any remaining unfilled runnable slots as cancelled. These
-        // tasks were aborted before reaching their own emit_failed path,
-        // so emit the terminal "failed" wire update here — otherwise the
-        // client sees "pending" forever.
+        // Fill any remaining unfilled runnable slots as cancelled. Tasks
+        // that didn't complete (timed out in drain or never started) need
+        // a terminal wire update so the client doesn't see "pending" forever.
         for &i in runnable {
             if results[i].is_none() {
                 results[i] = Some(synthetic_tool_result(&calls[i], "cancelled".into()));
@@ -347,31 +359,40 @@ async fn invoke_tool_inner(
     tool_timeout: std::time::Duration,
     mut cancel: watch::Receiver<bool>,
 ) -> InvokeOutcome {
-    // Check if already cancelled before waiting for changes (a cloned
-    // receiver that starts at the current version won't fire changed()).
     if *cancel.borrow() {
         return InvokeOutcome::Failed("cancelled".into());
     }
-    tokio::select! {
-        biased;
-        _ = cancel.changed() => InvokeOutcome::Failed("cancelled".into()),
-        r = tokio::time::timeout(
-            tool_timeout,
-            mcp.call(&call.name, &call.provider_id, &call.arguments, MAX_TOOL_RESULT_BYTES),
-        ) => match r {
-            Ok(Ok(result)) => InvokeOutcome::Done(result),
-            Ok(Err(e)) => InvokeOutcome::Failed(e.to_string()),
-            Err(_) => {
-                if let Some(server) = mcp.server_of(&call.name) {
-                    mcp.kill_server(server, "tool timeout");
-                }
-                let msg = format!(
-                    "tool: timeout after {}s. The command took too long. Try a faster approach.",
-                    tool_timeout.as_secs()
-                );
-                InvokeOutcome::Failed(msg)
+    match tokio::time::timeout(
+        tool_timeout,
+        mcp.call(
+            &call.name,
+            &call.provider_id,
+            &call.arguments,
+            MAX_TOOL_RESULT_BYTES,
+            &mut cancel,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(result)) => InvokeOutcome::Done(result),
+        Ok(Err(AgentError::Cancelled)) => InvokeOutcome::Failed("cancelled".into()),
+        Ok(Err(e)) => InvokeOutcome::Failed(e.to_string()),
+        Err(_) => {
+            // If the session was cancelled, the timeout fired because
+            // do_call returned quickly with "cancelled" and the outer
+            // timeout raced. Don't kill a healthy server for that.
+            if *cancel.borrow() {
+                return InvokeOutcome::Failed("cancelled".into());
             }
-        },
+            if let Some(server) = mcp.server_of(&call.name) {
+                mcp.kill_server(server, "tool timeout");
+            }
+            let msg = format!(
+                "tool: timeout after {}s. The command took too long. Try a faster approach.",
+                tool_timeout.as_secs()
+            );
+            InvokeOutcome::Failed(msg)
+        }
     }
 }
 

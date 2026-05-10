@@ -1177,3 +1177,244 @@ async fn hook_stop_timeout_failopen() {
     );
     h.shutdown().await;
 }
+
+/// When a session is cancelled while a tool call is in-flight, the agent
+/// sends `notifications/cancelled` to the MCP server. With sprout-dev-mcp,
+/// this cancels the CancellationToken and kills the running shell process
+/// group. We verify:
+///   1. The prompt completes in under 5s (not 60s).
+///   2. The `sleep 60` process is actually dead after cancel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_kills_inflight_tool_via_mcp_notification() {
+    // sprout-dev-mcp is a separate crate; locate its binary relative to
+    // the sprout-agent test binary (they share the same target dir).
+    let self_bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_sprout-agent"));
+    let dev_mcp_bin = self_bin.parent().unwrap().join("sprout-dev-mcp");
+    if !dev_mcp_bin.exists() {
+        eprintln!(
+            "SKIP: sprout-dev-mcp not built at {}; run `cargo build -p sprout-dev-mcp` first",
+            dev_mcp_bin.display()
+        );
+        return;
+    }
+    let dev_mcp_bin = dev_mcp_bin.to_string_lossy().to_string();
+
+    // Use a unique marker (PID + timestamp) to avoid stale-file collisions.
+    let marker = format!(
+        "sprout_cancel_test_{}_{:x}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let pid_file = format!("/tmp/{marker}.pid");
+    let _ = std::fs::remove_file(&pid_file); // clean any stale file
+    let cmd = format!("echo $$ > /tmp/{marker}.pid && exec sleep 60");
+
+    // LLM returns a shell tool call, then text after cancel.
+    let llm = spawn_capturing_llm(vec![
+        openai_tool_call("tc1", "dev__shell", json!({"command": cmd})),
+        openai_text("done"),
+    ])
+    .await;
+
+    let mut h = Harness::spawn(&llm.url).await;
+    let sid = init_session(
+        &mut h,
+        json!([{
+            "name": "dev",
+            "command": &dev_mcp_bin,
+            "args": [],
+            "env": []
+        }]),
+    )
+    .await;
+
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"run"}]}),
+        )
+        .await;
+
+    // Wait for the tool call to be in-progress.
+    h.recv_until(|v| {
+        v.get("params")
+            .and_then(|p| p.get("update"))
+            .and_then(|u| u.get("status"))
+            .and_then(Value::as_str)
+            == Some("in_progress")
+    })
+    .await;
+
+    // Wait for the shell to spawn and write its PID (bounded).
+    let pid_deadline = Instant::now() + Duration::from_secs(3);
+    let shell_pid: u32 = loop {
+        if let Ok(content) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = content.trim().parse::<u32>() {
+                break pid;
+            }
+        }
+        assert!(
+            Instant::now() < pid_deadline,
+            "shell did not write PID file within 3s"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    // Cancel the session — measure latency from here.
+    let cancel_start = Instant::now();
+    h.notify("session/cancel", json!({"sessionId": sid})).await;
+
+    // Wait for prompt to complete.
+    let _ = h.recv_until(|v| v["id"] == json!(p1)).await;
+
+    let cancel_latency = cancel_start.elapsed();
+    // Cancellation itself should complete in well under 3s. The 60s sleep
+    // must NOT run to completion. We allow generous CI slack.
+    assert!(
+        cancel_latency < Duration::from_secs(3),
+        "cancel latency too high: {cancel_latency:?} (expected < 3s)"
+    );
+
+    // Verify the shell process is actually dead (bounded poll).
+    let kill_deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &shell_pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !alive {
+            break;
+        }
+        assert!(
+            Instant::now() < kill_deadline,
+            "shell process {shell_pid} still alive 2s after cancel"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&pid_file);
+    h.shutdown().await;
+}
+
+/// Protocol-level test: verify that `notifications/cancelled` is sent to
+/// any MCP server (not just sprout-dev-mcp) when a session is cancelled
+/// during an in-flight tool call. Uses fake_mcp with FAKE_MCP_CANCEL_LOG
+/// to capture the raw notification on stdin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_sends_notifications_cancelled_to_any_mcp_server() {
+    let cancel_log = std::env::temp_dir()
+        .join(format!(
+            "sprout_cancel_proto_{}_{:x}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+        .to_string_lossy()
+        .to_string();
+    let _ = std::fs::remove_file(&cancel_log);
+    let call_received_marker = format!("{cancel_log}.call_received");
+    let _ = std::fs::remove_file(&call_received_marker);
+
+    let fake_mcp = env!("CARGO_BIN_EXE_fake-mcp");
+
+    // LLM returns a tool call; fake_mcp will delay 999s (never responds).
+    let llm = spawn_capturing_llm(vec![
+        openai_tool_call("tc1", "fake__tool_0", json!({})),
+        openai_text("done"),
+    ])
+    .await;
+
+    let mut h = Harness::spawn(&llm.url).await;
+    let sid = init_session(
+        &mut h,
+        json!([{
+            "name": "fake",
+            "command": fake_mcp,
+            "args": [],
+            "env": [
+                {"name": "FAKE_MCP_TOOL_DELAY", "value": "999"},
+                {"name": "FAKE_MCP_CANCEL_LOG", "value": &cancel_log},
+                {"name": "FAKE_MCP_CALL_RECEIVED", "value": &call_received_marker},
+            ]
+        }]),
+    )
+    .await;
+
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+
+    // Wait for tool call to be in-progress.
+    h.recv_until(|v| {
+        v.get("params")
+            .and_then(|p| p.get("update"))
+            .and_then(|u| u.get("status"))
+            .and_then(Value::as_str)
+            == Some("in_progress")
+    })
+    .await;
+
+    // Wait until fake_mcp has received the tools/call request (bounded).
+    // The marker file contains the JSON-RPC request id.
+    let call_deadline = Instant::now() + Duration::from_secs(3);
+    let call_request_id: Value = loop {
+        if let Ok(content) = std::fs::read_to_string(&call_received_marker) {
+            if let Ok(id) = serde_json::from_str::<Value>(content.trim()) {
+                break id;
+            }
+        }
+        assert!(
+            Instant::now() < call_deadline,
+            "fake_mcp did not receive tools/call within 3s"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    // Cancel the session.
+    h.notify("session/cancel", json!({"sessionId": sid})).await;
+
+    // Wait for prompt to complete.
+    let _ = h.recv_until(|v| v["id"] == json!(p1)).await;
+
+    // Poll the cancel log with bounded timeout (replaces fixed sleep).
+    let poll_deadline = Instant::now() + Duration::from_secs(2);
+    let log_content = loop {
+        let content = std::fs::read_to_string(&cancel_log).unwrap_or_default();
+        if content.contains("notifications/cancelled") {
+            break content;
+        }
+        assert!(
+            Instant::now() < poll_deadline,
+            "cancel notification not received within 2s; log: {content:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    // Parse the logged notification and verify requestId matches the
+    // actual tools/call request id that fake_mcp received.
+    let cancel_msg: Value = serde_json::from_str(log_content.trim()).unwrap_or(json!(null));
+    let cancelled_id = &cancel_msg["params"]["requestId"];
+    assert!(
+        cancelled_id.is_number(),
+        "expected numeric requestId in cancel notification, got: {cancel_msg}"
+    );
+    assert_eq!(
+        cancelled_id, &call_request_id,
+        "cancelled requestId ({cancelled_id}) != tools/call id ({call_request_id})"
+    );
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&cancel_log);
+    let _ = std::fs::remove_file(&call_received_marker);
+    h.shutdown().await;
+}

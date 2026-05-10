@@ -10,6 +10,7 @@ use rmcp::ServiceError;
 use rmcp::ServiceExt;
 use serde_json::{Map, Value};
 use tokio::process::Command;
+use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::config::{Config, HookServers};
@@ -289,11 +290,22 @@ impl McpRegistry {
             let reg = Arc::clone(self);
             let args = input.clone();
             set.spawn(async move {
+                // Hooks are intentionally non-cancellable: they are
+                // already bounded by their own timeout and are fail-open.
+                // Session cancel should not interrupt hook evaluation.
+                let (_dummy_tx, mut dummy_cancel) = watch::channel(false);
                 let res = tokio::time::timeout(
                     timeout,
-                    reg.call(&qname, "hook", &args, MAX_HOOK_RESULT_BYTES),
+                    reg.call(
+                        &qname,
+                        "hook",
+                        &args,
+                        MAX_HOOK_RESULT_BYTES,
+                        &mut dummy_cancel,
+                    ),
                 )
                 .await;
+                drop(_dummy_tx);
                 (idx, server_name, res)
             });
         }
@@ -421,6 +433,7 @@ impl McpRegistry {
         provider_id: &str,
         arguments: &Value,
         max_bytes: usize,
+        cancel: &mut watch::Receiver<bool>,
     ) -> Result<ToolResult, AgentError> {
         let entry = self
             .by_qname
@@ -446,6 +459,7 @@ impl McpRegistry {
                     provider_id,
                     arguments,
                     max_bytes,
+                    cancel,
                 )
                 .await;
         }
@@ -478,6 +492,7 @@ impl McpRegistry {
             provider_id,
             arguments,
             max_bytes,
+            cancel,
         )
         .await
     }
@@ -492,6 +507,7 @@ impl McpRegistry {
         provider_id: &str,
         arguments: &Value,
         max_bytes: usize,
+        cancel: &mut watch::Receiver<bool>,
     ) -> Result<ToolResult, AgentError> {
         let arg_obj = match arguments {
             Value::Object(m) => Some(m.clone()),
@@ -505,8 +521,44 @@ impl McpRegistry {
         let mut params = CallToolRequestParams::default();
         params.name = bare.to_owned().into();
         params.arguments = arg_obj;
-        let res = match client.peer().call_tool(params).await {
-            Ok(r) => r,
+
+        use rmcp::model::{CallToolRequest, ClientRequest, ServerResult};
+        use rmcp::service::PeerRequestOptions;
+
+        let req = ClientRequest::CallToolRequest(CallToolRequest::new(params));
+        let mut handle = client
+            .peer()
+            .send_cancellable_request(req, PeerRequestOptions::no_options())
+            .await
+            .map_err(|e| AgentError::Mcp(format!("call {qname}: {e}")))?;
+
+        // Early cancel check — watch::changed() only fires on NEW writes.
+        if *cancel.borrow() {
+            fire_and_forget_cancel(handle, qname);
+            return Err(AgentError::Cancelled);
+        }
+
+        // Poll the inner oneshot directly so we can still own `handle` in
+        // the cancel branch (await_response would move it).
+        let raw: Result<ServerResult, ServiceError> = tokio::select! {
+            biased;
+            _ = cancel.changed() => {
+                fire_and_forget_cancel(handle, qname);
+                return Err(AgentError::Cancelled);
+            }
+            r = &mut handle.rx => match r {
+                Ok(inner) => inner,
+                Err(_) => Err(ServiceError::TransportClosed),
+            },
+        };
+
+        let res = match raw {
+            Ok(ServerResult::CallToolResult(r)) => r,
+            Ok(_) => {
+                return Err(AgentError::Mcp(format!(
+                    "call {qname}: unexpected response type"
+                )))
+            }
             Err(e) => {
                 if is_transport_error(&e) {
                     self.kill_and_mark_dead_if_current(
@@ -662,6 +714,21 @@ async fn spawn_one(
     let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
     guard.pgid = None;
     Ok((client, pgid, names, tools))
+}
+
+/// Send `notifications/cancelled` to the MCP server, fire-and-forget.
+/// Per MCP spec, cancellation notifications are best-effort; we never
+/// block the agent on slow server stdio.
+fn fire_and_forget_cancel(
+    handle: rmcp::service::RequestHandle<rmcp::service::RoleClient>,
+    qname: &str,
+) {
+    let qname_owned = qname.to_owned();
+    tokio::spawn(async move {
+        if let Err(e) = handle.cancel(Some("session cancelled".into())).await {
+            tracing::debug!("cancel notification failed for {qname_owned}: {e}");
+        }
+    });
 }
 
 /// Returns `true` for errors indicating the MCP server process is dead or

@@ -40,8 +40,9 @@ impl DevMcp {
     async fn shell(
         &self,
         Parameters(p): Parameters<shell::ShellParams>,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        shell::run(&self.state, p).await
+        shell::run(&self.state, p, context.ct).await
     }
 
     #[tool(

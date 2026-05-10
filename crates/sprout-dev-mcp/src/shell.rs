@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
@@ -102,7 +103,11 @@ pub struct ShellParams {
     pub timeout_ms: Option<u64>,
 }
 
-pub async fn run(state: &SharedState, p: ShellParams) -> Result<CallToolResult, ErrorData> {
+pub async fn run(
+    state: &SharedState,
+    p: ShellParams,
+    ct: CancellationToken,
+) -> Result<CallToolResult, ErrorData> {
     if p.command.len() > MAX_COMMAND_BYTES {
         return Err(ErrorData::invalid_params(
             format!("command exceeds {MAX_COMMAND_BYTES} byte limit"),
@@ -179,7 +184,30 @@ pub async fn run(state: &SharedState, p: ShellParams) -> Result<CallToolResult, 
 
     let timeout_dur = Duration::from_millis(timeout_ms);
     let mut notes: Vec<String> = Vec::new();
-    let (status, timed_out) = match tokio::time::timeout(timeout_dur, child.wait()).await {
+    let (status, timed_out) = tokio::select! {
+        biased;
+        _ = ct.cancelled() => {
+            // Kill process group, reap child, abort reader tasks.
+            if let Some(pid) = pid {
+                kill_process_group_immediate(pid as i32);
+            }
+            // Bounded reap so we don't leak zombies. If reap times out,
+            // PgidGuard drop will SIGKILL again as a last resort.
+            match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
+                Ok(Ok(_)) => { pgid_guard.0 = None; } // reaped; disarm guard
+                Ok(Err(e)) => {
+                    tracing::debug!("cancel: child wait error: {e}");
+                    // Leave pgid_guard armed for drop-kill.
+                }
+                Err(_) => {
+                    tracing::debug!("cancel: child reap timed out; guard will SIGKILL on drop");
+                }
+            }
+            stdout_handle.abort();
+            stderr_handle.abort();
+            return Ok(CallToolResult::error(vec![Content::text("cancelled")]));
+        }
+        r = tokio::time::timeout(timeout_dur, child.wait()) => match r {
         Ok(Ok(s)) => (Some(s), false),
         Ok(Err(err)) => {
             notes.push(format!("child wait failed: {err}"));
@@ -214,6 +242,7 @@ pub async fn run(state: &SharedState, p: ShellParams) -> Result<CallToolResult, 
                 }
             }
             (None, true)
+        }
         }
     };
 
@@ -460,6 +489,7 @@ mod tests {
                 workdir: None,
                 timeout_ms: Some(5_000),
             },
+            CancellationToken::new(),
         )
         .await
         .expect("ok");
@@ -480,6 +510,7 @@ mod tests {
                 workdir: None,
                 timeout_ms: Some(150),
             },
+            CancellationToken::new(),
         )
         .await
         .expect("ok");
@@ -501,6 +532,7 @@ mod tests {
                 workdir: Some(sub.display().to_string()),
                 timeout_ms: Some(5_000),
             },
+            CancellationToken::new(),
         )
         .await
         .expect("ok");

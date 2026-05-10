@@ -126,6 +126,7 @@ pub enum AgentError {
     Llm(String),
     LlmAuth(String),
     Mcp(String),
+    Cancelled,
 }
 
 impl std::fmt::Display for AgentError {
@@ -135,6 +136,7 @@ impl std::fmt::Display for AgentError {
             Self::Llm(s) => write!(f, "llm: {s}"),
             Self::LlmAuth(s) => write!(f, "llm auth: {s}"),
             Self::Mcp(s) => write!(f, "mcp: {s}"),
+            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }

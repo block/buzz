@@ -133,24 +133,52 @@ fn main() {
     let post_compact_hook = env_flag("FAKE_MCP_POSTCOMPACT_HOOK");
     let post_compact_text = std::env::var("FAKE_MCP_POSTCOMPACT_TEXT").unwrap_or_default();
 
-    let stdin = std::io::stdin();
-    let mut lines = stdin.lock().lines();
-
-    while let Some(Ok(line)) = lines.next() {
-        if line.trim().is_empty() {
-            continue;
+    // Use a channel-based stdin reader so notifications (which carry no id)
+    // are captured even while the main thread is sleeping during a tool call.
+    let cancel_log_path = std::env::var("FAKE_MCP_CANCEL_LOG").ok();
+    let (tx, rx) = std::sync::mpsc::channel::<(Value, Option<Value>)>();
+    let cancel_log_for_thread = cancel_log_path.clone();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let lines = stdin.lock().lines();
+        for line in lines {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => return,
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let msg: Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+            let id = msg.get("id").cloned();
+            // Notifications carry no id. Log cancellations if configured.
+            if id.is_none() || id == Some(Value::Null) {
+                if method == "notifications/cancelled" {
+                    if let Some(ref path) = cancel_log_for_thread {
+                        use std::io::Write as _;
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                        {
+                            let _ = writeln!(f, "{}", line.trim());
+                        }
+                    }
+                }
+                continue;
+            }
+            // Send requests (with id) to the main processing loop.
+            let _ = tx.send((msg, id));
         }
-        let msg: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+    });
+
+    while let Ok((msg, id_opt)) = rx.recv() {
         let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
-        let id = msg.get("id").cloned().unwrap_or(Value::Null);
-
-        // Notifications carry no id; ignore.
-        if msg.get("id").is_none() {
-            continue;
-        }
+        let id = id_opt.unwrap_or(Value::Null);
 
         match method {
             "initialize" => {
@@ -178,6 +206,13 @@ fn main() {
                 );
             }
             "tools/call" => {
+                // Signal that the request was received (for tests that
+                // need to wait until the call is in-flight before cancelling).
+                // Write the request id so tests can correlate with cancel.
+                if let Ok(path) = std::env::var("FAKE_MCP_CALL_RECEIVED") {
+                    let id_str = serde_json::to_string(&id).unwrap_or_else(|_| "?".into());
+                    let _ = std::fs::write(&path, id_str);
+                }
                 let called_name = msg
                     .get("params")
                     .and_then(|p| p.get("name"))
