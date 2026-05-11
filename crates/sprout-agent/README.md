@@ -133,7 +133,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, OpenRouter, Ollama, etc. |
 | `SPROUT_AGENT_SYSTEM_PROMPT` | built-in | Inline system prompt. |
 | `SPROUT_AGENT_SYSTEM_PROMPT_FILE` | — | File path. Mutually exclusive with the above. |
-| `SPROUT_AGENT_MAX_ROUNDS` | `16` | Tool-loop iteration cap. |
+| `SPROUT_AGENT_MAX_ROUNDS` | `0` | Tool-loop iteration cap. 0 = unlimited. |
 | `SPROUT_AGENT_MAX_OUTPUT_TOKENS` | `4096` | Per LLM call. |
 | `SPROUT_AGENT_LLM_TIMEOUT_SECS` | `120` | |
 | `SPROUT_AGENT_TOOL_TIMEOUT_SECS` | `660` | Per-tool call timeout in seconds |
@@ -223,7 +223,7 @@ The trust boundary is **the operator who launched the agent**. The harness, MCP 
 | Tool description bytes | 1 KiB | `MAX_DESCRIPTION_BYTES` |
 | Tool schema bytes | 4 KiB | `MAX_SCHEMA_BYTES` (oversize → replaced with `{}`) |
 | Tool calls per turn | 64 | `MAX_TOOL_CALLS_PER_TURN` |
-| Loop rounds | 16 | `SPROUT_AGENT_MAX_ROUNDS` |
+| Loop rounds | 0 (unlimited) | `SPROUT_AGENT_MAX_ROUNDS` |
 | LLM call timeout | 120 s | `SPROUT_AGENT_LLM_TIMEOUT_SECS` |
 | Tool call timeout | 660 s | `SPROUT_AGENT_TOOL_TIMEOUT_SECS` |
 
