@@ -97,7 +97,7 @@ async fn assert_closed(ws: &mut WS) {
 /// Generate a random keypair; returns `(SecretKey, pubkey_hex)`.
 fn gen_keypair() -> (SecretKey, String) {
     let secp = Secp256k1::new();
-    let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rngs::OsRng);
+    let (sk, pk) = secp.generate_keypair(&mut secp256k1::rand::rng());
     let xonly = pk.x_only_public_key().0;
     let pubkey_hex = xonly
         .serialize()
@@ -171,10 +171,13 @@ fn make_signed_event(sk: &SecretKey, pubkey_hex: &str, p_hex: &str, nonce: u64) 
     let hash: [u8; 32] = Sha256::digest(commitment_str.as_bytes()).into();
     let id_hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
 
-    let msg = secp256k1::Message::from_digest(hash);
     let keypair = Keypair::from_secret_key(&secp, sk);
-    let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
-    let sig_hex: String = sig.serialize().iter().map(|b| format!("{b:02x}")).collect();
+    let sig = secp.sign_schnorr_no_aux_rand(&hash, &keypair);
+    let sig_hex: String = sig
+        .to_byte_array()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
 
     json!({
         "id":         id_hex,

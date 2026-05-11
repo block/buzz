@@ -44,7 +44,7 @@ use hyper::{Method, Request, Response, StatusCode, Version};
 use hyper_util::rt::TokioIo;
 use parking_lot::Mutex;
 use secp256k1::schnorr::Signature as SchnorrSig;
-use secp256k1::{Message as SecpMsg, XOnlyPublicKey};
+use secp256k1::XOnlyPublicKey;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
@@ -577,17 +577,16 @@ fn verify_event_sig(ev: &Value) -> Result<(), &'static str> {
 
     // Step 3: parse pubkey as x-only.
     let pubkey_bytes = decode_hex32(pubkey_str).ok_or("pubkey must be 64 lowercase hex chars")?;
-    let xonly_pk = XOnlyPublicKey::from_slice(&pubkey_bytes).map_err(|_| "invalid: bad pubkey")?;
+    let xonly_pk =
+        XOnlyPublicKey::from_byte_array(pubkey_bytes).map_err(|_| "invalid: bad pubkey")?;
 
     // Step 4: parse sig.
     let sig_bytes = decode_hex64(sig_str).ok_or("sig must be 128 lowercase hex chars")?;
-    let schnorr_sig =
-        SchnorrSig::from_slice(&sig_bytes).map_err(|_| "invalid: bad signature encoding")?;
+    let schnorr_sig = SchnorrSig::from_byte_array(sig_bytes);
 
     // Step 5: verify.
     let secp = secp256k1::Secp256k1::verification_only();
-    let msg = SecpMsg::from_digest(hash);
-    secp.verify_schnorr(&schnorr_sig, &msg, &xonly_pk)
+    secp.verify_schnorr(&schnorr_sig, &hash, &xonly_pk)
         .map_err(|_| "invalid: signature verification failed")
 }
 
@@ -913,6 +912,8 @@ async fn handle_conn(relay: Arc<Relay>, conn_id: u64, stream: WebSocketStream<To
     // Remove the subscription first so its cloned writer_tx is dropped.
     // This allows the channel to close when we drop our local tx.
     relay.remove_sub(conn_id);
+
+    let _ = tx.try_send(OutMsg::Close);
 
     // Drop the sender so the writer can drain any queued messages (including
     // Close frames), then cancel after a brief grace period.

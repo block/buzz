@@ -25,12 +25,11 @@ parking_lot      = "0.12"
 hyper            = { version = "1", features = ["server", "http1"] }
 hyper-util       = { version = "0.1", features = ["tokio"] }
 http-body-util   = "0.1"
-secp256k1        = { version = "0.29", features = ["global-context"] }
+secp256k1        = { version = "0.31", features = ["global-context"] }
 sha2             = "0.10"
 
 [dev-dependencies]
 tokio            = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = { workspace = true }
-secp256k1        = { version = "0.29", features = ["global-context", "rand-std"] }
+secp256k1        = { version = "0.31", features = ["global-context", "rand", "std"] }
 sha2             = "0.10"
-rand             = "0.8"
