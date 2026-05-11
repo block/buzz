@@ -406,6 +406,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
           onSubmit={(content, mentionPubkeys, mediaTags) =>
             publishMutation.mutateAsync({ content, mentionPubkeys, mediaTags })
           }
+          profiles={mentionProfiles}
         />
       </div>
     </div>

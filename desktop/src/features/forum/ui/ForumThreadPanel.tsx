@@ -284,6 +284,7 @@ export function ForumThreadPanel({
           isSending={isSendingReply}
           onSubmit={onReply}
           placeholder="Reply to this post..."
+          profiles={profiles}
         />
       </div>
     </div>

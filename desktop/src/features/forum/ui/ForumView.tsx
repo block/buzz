@@ -161,6 +161,7 @@ export function ForumView({
               setIsComposerOpen(false);
             }}
             placeholder="Write your post..."
+            profiles={profiles}
           />
         ) : (
           <button

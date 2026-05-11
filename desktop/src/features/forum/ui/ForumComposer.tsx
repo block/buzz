@@ -21,6 +21,7 @@ import {
 } from "@/features/messages/ui/MentionAutocomplete";
 import { MessageComposerToolbar } from "@/features/messages/ui/MessageComposerToolbar";
 import type { ChannelMember } from "@/shared/api/types";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { Button } from "@/shared/ui/button";
 
 type ForumComposerProps = {
@@ -38,6 +39,7 @@ type ForumComposerProps = {
   ) => undefined | Promise<unknown>;
   /** When true, autocomplete renders below the input (for top-of-view composers). */
   autocompleteBelow?: boolean;
+  profiles?: UserProfileLookup;
 };
 
 export function ForumComposer({
@@ -49,6 +51,7 @@ export function ForumComposer({
   onCancel,
   onSubmit,
   autocompleteBelow = false,
+  profiles,
 }: ForumComposerProps) {
   const [content, setContent] = React.useState("");
   const contentRef = React.useRef(content);
@@ -62,7 +65,7 @@ export function ForumComposer({
     setIsFormattingOpen(pressed);
   }, []);
 
-  const mentions = useMentions(channelId, members);
+  const mentions = useMentions(channelId, members, profiles);
   const channelLinks = useChannelLinks();
   const media = useMediaUpload();
 

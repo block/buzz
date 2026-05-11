@@ -308,6 +308,7 @@ export function MessageThreadPanel({
               onEditSave={onEditSave}
               onSend={onSend}
               placeholder={`Reply in thread to ${threadHead.author}`}
+              profiles={profiles}
               replyTarget={composerReplyTarget}
               toolbarExtraActions={toolbarExtraActions}
               typingParentEventId={threadHead.id}
