@@ -10,17 +10,13 @@ pub async fn cmd_add_reaction(
     emoji: &str,
 ) -> Result<(), CliError> {
     validate_hex64(event_id)?;
-    let keys = client.keys();
-
     let target_eid =
         EventId::parse(event_id).map_err(|e| CliError::Usage(format!("invalid event ID: {e}")))?;
 
     let builder = sprout_sdk::build_reaction(target_eid, emoji)
         .map_err(|e| CliError::Other(format!("build_reaction failed: {e}")))?;
 
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -66,9 +62,7 @@ pub async fn cmd_remove_reaction(
     let builder = sprout_sdk::build_remove_reaction(reaction_eid)
         .map_err(|e| CliError::Other(format!("build_remove_reaction failed: {e}")))?;
 
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");

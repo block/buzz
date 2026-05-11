@@ -60,10 +60,18 @@ impl SharedState {
 
 fn build_bootstrap(cwd: &Path) -> String {
     let stack = detect_stack(cwd);
+    let sprout_hint = if std::env::var("SPROUT_RELAY_URL").is_ok()
+        && std::env::var("SPROUT_PRIVATE_KEY").is_ok()
+    {
+        "\nSprout relay configured. Run `sprout --help` to see available commands.\n"
+    } else {
+        ""
+    };
     format!(
         "Working directory: {}\n\
          Detected stack: {}\n\
-         Pass `workdir` per call rather than `cd`.\n",
+         Pass `workdir` per call rather than `cd`.\n\
+         {sprout_hint}",
         cwd.display(),
         stack,
     )

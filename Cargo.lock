@@ -3872,6 +3872,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "sprout-cli",
  "tempfile",
  "tokio",
  "tokio-util",

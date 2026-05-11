@@ -63,7 +63,6 @@ pub async fn cmd_create_workflow(
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
     let yaml_definition = read_or_stdin(yaml)?;
-    let keys = client.keys();
 
     // Generate a unique d-tag for this workflow
     let workflow_id = uuid::Uuid::new_v4().to_string();
@@ -73,9 +72,7 @@ pub async fn cmd_create_workflow(
     ];
 
     let builder = EventBuilder::new(Kind::Custom(30620), &yaml_definition, tags);
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -90,16 +87,13 @@ pub async fn cmd_update_workflow(
 ) -> Result<(), CliError> {
     validate_uuid(workflow_id)?;
     let yaml_definition = read_or_stdin(yaml)?;
-    let keys = client.keys();
 
     let tags =
         vec![Tag::parse(&["d", workflow_id])
             .map_err(|e| CliError::Other(format!("tag error: {e}")))?];
 
     let builder = EventBuilder::new(Kind::Custom(30620), &yaml_definition, tags);
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -119,9 +113,7 @@ pub async fn cmd_delete_workflow(client: &SproutClient, workflow_id: &str) -> Re
     .map_err(|e| CliError::Other(format!("tag error: {e}")))?];
 
     let builder = EventBuilder::new(Kind::Custom(5), "", tags);
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -134,16 +126,13 @@ pub async fn cmd_trigger_workflow(
     workflow_id: &str,
 ) -> Result<(), CliError> {
     validate_uuid(workflow_id)?;
-    let keys = client.keys();
 
     let tags =
         vec![Tag::parse(&["d", workflow_id])
             .map_err(|e| CliError::Other(format!("tag error: {e}")))?];
 
     let builder = EventBuilder::new(Kind::Custom(46020), "", tags);
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -158,7 +147,6 @@ pub async fn cmd_approve_step(
     note: Option<&str>,
 ) -> Result<(), CliError> {
     validate_uuid(approval_token)?;
-    let keys = client.keys();
 
     let kind = if approved { 46030 } else { 46031 };
     let content = note.unwrap_or("");
@@ -170,9 +158,7 @@ pub async fn cmd_approve_step(
             .map_err(|e| CliError::Other(format!("tag error: {e}")))?];
 
     let builder = EventBuilder::new(Kind::Custom(kind), content, tags);
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");

@@ -29,15 +29,12 @@ pub async fn cmd_publish_note(
         validate_hex64(r)?;
     }
 
-    let keys = client.keys();
     let reply_id = reply_to.map(parse_event_id).transpose()?;
 
     let builder = sprout_sdk::build_note(content, reply_id)
         .map_err(|e| CliError::Other(format!("build error: {e}")))?;
 
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -48,7 +45,6 @@ pub async fn cmd_set_contact_list(
     client: &SproutClient,
     contacts_json: &str,
 ) -> Result<(), CliError> {
-    let keys = client.keys();
     let entries: Vec<ContactEntry> = serde_json::from_str(contacts_json)
         .map_err(|e| CliError::Usage(format!("invalid contacts JSON: {e}")))?;
 
@@ -66,9 +62,7 @@ pub async fn cmd_set_contact_list(
     let builder = sprout_sdk::build_contact_list(&contacts)
         .map_err(|e| CliError::Other(format!("build error: {e}")))?;
 
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");

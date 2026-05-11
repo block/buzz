@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Agent-first CLI for Sprout relay"
 
+[lib]
+name = "sprout_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sprout"
 path = "src/main.rs"

@@ -27,16 +27,13 @@ pub async fn cmd_open_dm(client: &SproutClient, pubkeys: &[String]) -> Result<()
         validate_hex64(pk)?;
     }
 
-    let keys = client.keys();
     let mut tags: Vec<Tag> = Vec::new();
     for pk in pubkeys {
         tags.push(Tag::parse(&["p", pk]).map_err(|e| CliError::Other(format!("tag error: {e}")))?);
     }
 
     let builder = EventBuilder::new(Kind::Custom(41010), "", tags);
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -52,16 +49,13 @@ pub async fn cmd_add_dm_member(
     validate_uuid(channel_id)?;
     validate_hex64(pubkey)?;
 
-    let keys = client.keys();
     let tags = vec![
         Tag::parse(&["h", channel_id]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
         Tag::parse(&["p", pubkey]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
     ];
 
     let builder = EventBuilder::new(Kind::Custom(41011), "", tags);
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");

@@ -123,10 +123,19 @@ pub struct SproutClient {
     http: reqwest::Client,
     relay_url: String, // base URL, no trailing slash, e.g. "https://relay.sprout.place"
     keys: Keys,
+    /// Optional NIP-OA auth tag injected into every signed event.
+    auth_tag: Option<Tag>,
+    /// Raw JSON of the auth tag for the `x-auth-tag` HTTP header.
+    auth_tag_json: Option<String>,
 }
 
 impl SproutClient {
-    pub fn new(relay_url: String, keys: Keys) -> Result<Self, CliError> {
+    pub fn new(
+        relay_url: String,
+        keys: Keys,
+        auth_tag: Option<Tag>,
+        auth_tag_json: Option<String>,
+    ) -> Result<Self, CliError> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))
@@ -136,6 +145,8 @@ impl SproutClient {
             http,
             relay_url,
             keys,
+            auth_tag,
+            auth_tag_json,
         })
     }
 
@@ -148,6 +159,46 @@ impl SproutClient {
     #[allow(dead_code)]
     pub fn relay_url(&self) -> &str {
         &self.relay_url
+    }
+
+    /// Sign an event builder, injecting the NIP-OA auth tag if configured.
+    ///
+    /// All event creation should go through this method to ensure consistent
+    /// auth tag injection. Callers MUST NOT add `auth` tags to the builder
+    /// before calling this method.
+    pub fn sign_event(&self, builder: EventBuilder) -> Result<nostr::Event, CliError> {
+        let builder = if let Some(ref tag) = self.auth_tag {
+            builder.add_tags([tag.clone()])
+        } else {
+            builder
+        };
+        let event = builder
+            .sign_with_keys(&self.keys)
+            .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+
+        // Enforce: auth tags may only come from self.auth_tag injection.
+        let auth_count = event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("auth"))
+            .count();
+        let expected = if self.auth_tag.is_some() { 1 } else { 0 };
+        if auth_count != expected {
+            return Err(CliError::Other(format!(
+                "event has {auth_count} auth tags — expected {expected}; \
+                 callers must not add auth tags manually"
+            )));
+        }
+
+        Ok(event)
+    }
+
+    /// Attach the `x-auth-tag` header if configured (NIP-OA relay membership delegation).
+    fn with_auth_tag(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.auth_tag_json {
+            Some(ref json) => req.header("x-auth-tag", json),
+            None => req,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -163,14 +214,13 @@ impl SproutClient {
             .map_err(|e| CliError::Other(format!("filter serialization failed: {e}")))?;
         let auth = sign_nip98(&self.keys, "POST", &url, Some(&body_bytes))?;
 
-        let resp = self
+        let req = self
             .http
             .post(&url)
             .header("Authorization", &auth)
             .header("Content-Type", "application/json")
-            .body(body_bytes)
-            .send()
-            .await?;
+            .body(body_bytes);
+        let resp = self.with_auth_tag(req).send().await?;
 
         self.handle_response(resp).await
     }
@@ -184,14 +234,13 @@ impl SproutClient {
             .map_err(|e| CliError::Other(format!("filter serialization failed: {e}")))?;
         let auth = sign_nip98(&self.keys, "POST", &url, Some(&body_bytes))?;
 
-        let resp = self
+        let req = self
             .http
             .post(&url)
             .header("Authorization", &auth)
             .header("Content-Type", "application/json")
-            .body(body_bytes)
-            .send()
-            .await?;
+            .body(body_bytes);
+        let resp = self.with_auth_tag(req).send().await?;
 
         self.handle_response(resp).await
     }
@@ -207,14 +256,13 @@ impl SproutClient {
             .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?;
         let auth = sign_nip98(&self.keys, "POST", &url, Some(&body_bytes))?;
 
-        let resp = self
+        let req = self
             .http
             .post(&url)
             .header("Authorization", &auth)
             .header("Content-Type", "application/json")
-            .body(body_bytes)
-            .send()
-            .await?;
+            .body(body_bytes);
+        let resp = self.with_auth_tag(req).send().await?;
 
         self.handle_response(resp).await
     }
@@ -316,7 +364,7 @@ impl SproutClient {
             .header("Content-Type", &mime)
             .header("X-SHA-256", &sha256);
 
-        let resp = req.body(bytes).send().await?;
+        let resp = self.with_auth_tag(req).body(bytes).send().await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();

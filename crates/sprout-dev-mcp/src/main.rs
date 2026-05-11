@@ -35,7 +35,7 @@ impl DevMcp {
 
     #[tool(
         name = "shell",
-        description = "Run a bash command. Ephemeral process per call. Output tail-truncated to ~8KB for the LLM; full output (first 10MB) saved to artifact file. timeout_ms capped at 600000. On PATH: rg (prefer over grep; flags: -n -i -l -g <glob> -C <n> --files) and tree (flags: -d <depth>; shows line counts)."
+        description = "Run a bash command. Ephemeral process per call. Output tail-truncated to ~8KB for the LLM; full output (first 10MB) saved to artifact file. timeout_ms capped at 600000. On PATH: rg (prefer over grep; flags: -n -i -l -g <glob> -C <n> --files), tree (flags: -d <depth>; shows line counts), and sprout (Sprout relay CLI — run sprout --help for commands)."
     )]
     async fn shell(
         &self,
@@ -130,6 +130,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cmd == "tree" {
         let args: Vec<String> = std::env::args().skip(1).collect();
         std::process::exit(tree::run(args));
+    }
+
+    if cmd == "sprout" {
+        std::process::exit(sprout_cli::run_from_args(std::env::args()).await);
     }
 
     let cwd = std::env::current_dir()?;

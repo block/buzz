@@ -10,6 +10,7 @@ name = "sprout-dev-mcp"
 path = "src/main.rs"
 
 [dependencies]
+sprout-cli = { path = "../sprout-cli" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
