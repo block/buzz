@@ -33,12 +33,23 @@ type UploadState = {
   message?: string;
 };
 
+/** True when the drag payload contains files (not plain text or URLs). */
+function isFileDrag(event: React.DragEvent): boolean {
+  return event.dataTransfer?.types.includes("Files") ?? false;
+}
+
 export function useMediaUpload() {
   const [uploadState, setUploadState] = React.useState<UploadState>({
     status: "idle",
   });
   /** Number of files currently in-flight. */
   const [uploadingCount, setUploadingCount] = React.useState(0);
+
+  // ── Drag-over visual indicator state ───────────────────────────────
+  const [isDragOver, setIsDragOver] = React.useState(false);
+  /** Tracks nested dragenter/dragleave pairs so we only flip `isDragOver`
+   *  when the pointer truly enters or leaves the drop target. */
+  const dragDepthRef = React.useRef(0);
   /**
    * Internal slots array — may contain `null` for reserved-but-pending uploads.
    * Consumers see the filtered `pendingImeta` (nulls stripped) so the public
@@ -117,6 +128,8 @@ export function useMediaUpload() {
   const handleDrop = React.useCallback(
     async (event: React.DragEvent<HTMLFormElement>) => {
       event.preventDefault();
+      dragDepthRef.current = 0;
+      setIsDragOver(false);
       const files = Array.from(event.dataTransfer.files);
       if (files.length === 0) return;
 
@@ -156,12 +169,54 @@ export function useMediaUpload() {
     [reserveSlots, fillSlot, onUploadError],
   );
 
+  const handleDragEnter = React.useCallback(
+    (event: React.DragEvent<HTMLFormElement>) => {
+      if (!isFileDrag(event)) return;
+      event.preventDefault();
+      dragDepthRef.current += 1;
+      if (dragDepthRef.current === 1) {
+        setIsDragOver(true);
+      }
+    },
+    [],
+  );
+
+  const handleDragLeave = React.useCallback(
+    (event: React.DragEvent<HTMLFormElement>) => {
+      if (!isFileDrag(event)) return;
+      event.preventDefault();
+      dragDepthRef.current -= 1;
+      if (dragDepthRef.current <= 0) {
+        dragDepthRef.current = 0;
+        setIsDragOver(false);
+      }
+    },
+    [],
+  );
+
   const handleDragOver = React.useCallback(
     (event: React.DragEvent<HTMLFormElement>) => {
       event.preventDefault();
     },
     [],
   );
+
+  // Reset drag state when the drag operation ends outside the form (e.g. user
+  // drops on another part of the window, presses Escape, or drags out of the
+  // browser). Without this, `isDragOver` can stick if the browser doesn't fire
+  // a balanced set of dragenter/dragleave events.
+  React.useEffect(() => {
+    function resetDragState() {
+      dragDepthRef.current = 0;
+      setIsDragOver(false);
+    }
+    window.addEventListener("drop", resetDragState);
+    window.addEventListener("dragend", resetDragState);
+    return () => {
+      window.removeEventListener("drop", resetDragState);
+      window.removeEventListener("dragend", resetDragState);
+    };
+  }, []);
 
   const handlePaste = React.useCallback(
     async (event: {
@@ -235,10 +290,13 @@ export function useMediaUpload() {
   const isUploading = uploadingCount > 0;
 
   return {
+    handleDragEnter,
+    handleDragLeave,
     handleDragOver,
     handleDrop,
     handlePaperclip,
     handlePaste,
+    isDragOver,
     isUploading,
     pendingImeta,
     pendingImetaRef,

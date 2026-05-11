@@ -23,7 +23,7 @@ import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
-import { ComposerAttachments } from "./ComposerAttachments";
+import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
 import { EmojiAutocomplete } from "./EmojiAutocomplete";
 import {
   MentionAutocomplete,
@@ -556,6 +556,8 @@ export function MessageComposer({
         <form
           className="relative isolate rounded-2xl border border-border/50 bg-background/70 px-3 pb-2 pt-3 shadow-[0_4px_24px_rgba(0,0,0,0.08)] backdrop-blur-xl supports-[backdrop-filter]:bg-background/55 dark:shadow-[0_4px_24px_rgba(0,0,0,0.35)] sm:px-4"
           data-testid="message-composer"
+          onDragEnter={media.handleDragEnter}
+          onDragLeave={media.handleDragLeave}
           onDragOver={media.handleDragOver}
           onDrop={(e) => {
             void media.handleDrop(e);
@@ -564,6 +566,7 @@ export function MessageComposer({
             handleSubmit(event);
           }}
         >
+          {media.isDragOver && <DropZoneOverlay />}
           <EmojiAutocomplete
             onSelect={applyEmojiInsert}
             selectedIndex={emojiAutocomplete.emojiSelectedIndex}

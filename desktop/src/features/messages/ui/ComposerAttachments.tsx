@@ -8,6 +8,17 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { shortHash } from "@/features/messages/lib/useMediaUpload";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
+/** Dashed-border overlay shown when a file is dragged over the composer form. */
+export function DropZoneOverlay() {
+  return (
+    <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-primary/10">
+      <span className="text-sm font-medium text-primary">
+        Drop files to upload
+      </span>
+    </div>
+  );
+}
+
 type ComposerAttachmentsProps = {
   attachments: BlobDescriptor[];
   isUploading?: boolean;

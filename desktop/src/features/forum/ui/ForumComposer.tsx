@@ -14,7 +14,10 @@ import {
 } from "@/features/messages/lib/normalizeMentionClipboard";
 import { useRichTextEditor } from "@/features/messages/lib/useRichTextEditor";
 import { ChannelAutocomplete } from "@/features/messages/ui/ChannelAutocomplete";
-import { ComposerAttachments } from "@/features/messages/ui/ComposerAttachments";
+import {
+  ComposerAttachments,
+  DropZoneOverlay,
+} from "@/features/messages/ui/ComposerAttachments";
 import {
   MentionAutocomplete,
   type MentionSuggestion,
@@ -334,12 +337,15 @@ export function ForumComposer({
   return (
     <form
       className="relative rounded-2xl border border-input bg-card px-3 py-2 sm:px-4"
+      onDragEnter={media.handleDragEnter}
+      onDragLeave={media.handleDragLeave}
       onDragOver={media.handleDragOver}
       onDrop={(e) => {
         void media.handleDrop(e);
       }}
       onSubmit={handleSubmit}
     >
+      {media.isDragOver && <DropZoneOverlay />}
       <ChannelAutocomplete
         onSelect={applyChannelInsert}
         position={autocompletePosition}
