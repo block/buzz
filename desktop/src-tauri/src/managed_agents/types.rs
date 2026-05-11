@@ -237,6 +237,8 @@ pub struct AcpProviderInfo {
     pub command: String,
     pub binary_path: String,
     pub default_args: Vec<String>,
+    /// MCP server binary override. `None` means use the default (`sprout-mcp-server`).
+    pub mcp_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

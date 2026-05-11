@@ -435,6 +435,7 @@ export function useEnsureGooseInChannelMutation(channelId: string | null) {
           label: "Goose",
           command: "goose",
           defaultArgs: ["acp"],
+          mcpCommand: null,
         },
         role: "bot",
       });

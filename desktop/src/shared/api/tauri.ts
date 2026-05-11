@@ -246,6 +246,7 @@ type RawAcpProvider = {
   command: string;
   binary_path: string;
   default_args: string[];
+  mcp_command: string | null;
 };
 
 type RawCommandAvailability = {
@@ -842,6 +843,7 @@ function fromRawAcpProvider(provider: RawAcpProvider): AcpProvider {
     command: provider.command,
     binaryPath: provider.binary_path,
     defaultArgs: provider.default_args,
+    mcpCommand: provider.mcp_command,
   };
 }
 

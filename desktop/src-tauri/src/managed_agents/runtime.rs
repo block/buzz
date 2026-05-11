@@ -4,9 +4,9 @@ use tauri::AppHandle;
 
 use crate::{
     managed_agents::{
-        append_log_marker, login_shell_path, managed_agent_log_path, missing_command_message,
-        normalize_agent_args, open_log_file, resolve_command, ManagedAgentProcess,
-        ManagedAgentRecord, ManagedAgentSummary,
+        append_log_marker, known_acp_provider, login_shell_path, managed_agent_log_path,
+        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
+        ManagedAgentProcess, ManagedAgentRecord, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -19,6 +19,8 @@ use crate::{
 pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "sprout-acp",
     "sprout_acp",
+    "sprout-agent",
+    "sprout_agent",
     "claude-agent-acp",
     "claude_agent_acp",
     "claude-code-acp",
@@ -28,6 +30,11 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "goose",
     "sprout-mcp",
     "sprout_mcp",
+    // sprout-dev-mcp's multicall personalities (rg, tree, sprout,
+    // git-credential-nostr, git-sign-nostr) are short-lived per-tool-call
+    // invocations — not listed here.
+    "sprout-dev-mcp",
+    "sprout_dev_mcp",
 ];
 
 /// Check if a process name matches any of our known agent binaries.
@@ -484,6 +491,11 @@ pub fn spawn_agent_child(
     command.env("SPROUT_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("SPROUT_ACP_AGENT_ARGS", agent_args.join(","));
     command.env("SPROUT_ACP_MCP_COMMAND", &resolved_mcp_command);
+    // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
+    // Uses "*" because build_mcp_servers() hard-codes the server name to "sprout-mcp".
+    if known_acp_provider(&record.agent_command).is_some_and(|p| p.mcp_hooks) {
+        command.env("MCP_HOOK_SERVERS", "*");
+    }
     if let Some(idle) = record.idle_timeout_seconds {
         command.env("SPROUT_ACP_IDLE_TIMEOUT", idle.to_string());
         command.env("SPROUT_ACP_TURN_TIMEOUT", idle.to_string());
@@ -728,4 +740,33 @@ pub fn stop_managed_agent_process(
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::managed_agents::known_acp_provider;
+
+    #[test]
+    fn sprout_agent_has_mcp_hooks() {
+        let p = known_acp_provider("sprout-agent").expect("should resolve");
+        assert!(p.mcp_hooks);
+        assert_eq!(p.mcp_command, Some("sprout-dev-mcp"));
+    }
+
+    #[test]
+    fn sprout_agent_resolved_via_path() {
+        assert!(known_acp_provider("/usr/local/bin/sprout-agent").is_some_and(|p| p.mcp_hooks));
+    }
+
+    #[test]
+    fn goose_has_no_mcp_hooks() {
+        let p = known_acp_provider("goose").expect("should resolve");
+        assert!(!p.mcp_hooks);
+        assert_eq!(p.mcp_command, None);
+    }
+
+    #[test]
+    fn unknown_command_returns_none() {
+        assert!(known_acp_provider("custom-agent").is_none());
+    }
 }

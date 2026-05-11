@@ -132,6 +132,7 @@ export function AddTeamToChannelDialog({
             label: providerToUse.label,
             command: providerToUse.command,
             defaultArgs: providerToUse.defaultArgs,
+            mcpCommand: providerToUse.mcpCommand,
           },
           name: persona.displayName,
           systemPrompt: persona.systemPrompt,

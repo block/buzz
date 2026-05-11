@@ -17,6 +17,7 @@ type MockAcpProvider = {
   command: string;
   binaryPath: string;
   defaultArgs: string[];
+  mcpCommand?: string | null;
 };
 
 type MockCommandAvailability = {
@@ -319,6 +320,7 @@ type RawAcpProvider = {
   command: string;
   binary_path: string;
   default_args: string[];
+  mcp_command: string | null;
 };
 
 type RawCommandAvailability = {
@@ -3445,6 +3447,7 @@ async function handleDiscoverAcpProviders(
       command: provider.command,
       binary_path: provider.binaryPath,
       default_args: [...provider.defaultArgs],
+      mcp_command: provider.mcpCommand ?? null,
     }));
   }
 
@@ -3455,6 +3458,7 @@ async function handleDiscoverAcpProviders(
       command: "goose",
       binary_path: "/usr/local/bin/goose",
       default_args: ["acp"],
+      mcp_command: null,
     },
     {
       id: "codex",
@@ -3462,6 +3466,7 @@ async function handleDiscoverAcpProviders(
       command: "codex-acp",
       binary_path: "/usr/local/bin/codex-acp",
       default_args: [],
+      mcp_command: null,
     },
   ];
 }

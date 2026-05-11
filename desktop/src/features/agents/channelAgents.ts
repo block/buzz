@@ -17,7 +17,7 @@ import type {
 
 type ChannelAgentProvider = Pick<
   AcpProvider,
-  "id" | "label" | "command" | "defaultArgs"
+  "id" | "label" | "command" | "defaultArgs" | "mcpCommand"
 >;
 
 export type AttachManagedAgentToChannelInput = {
@@ -248,7 +248,7 @@ export async function ensureChannelAgentPresetInChannel(
     acpCommand: "sprout-acp",
     agentCommand: input.provider.command,
     agentArgs: input.provider.defaultArgs,
-    mcpCommand: "sprout-mcp-server",
+    mcpCommand: input.provider.mcpCommand ?? "sprout-mcp-server",
     spawnAfterCreate: false,
   });
   const attached = await attachManagedAgentToChannel(channelId, {
@@ -299,7 +299,7 @@ export async function createChannelManagedAgent(
     acpCommand: "sprout-acp",
     agentCommand: input.provider.command,
     agentArgs: input.provider.defaultArgs,
-    mcpCommand: "sprout-mcp-server",
+    mcpCommand: input.provider.mcpCommand ?? "sprout-mcp-server",
     personaId: input.personaId ?? undefined,
     systemPrompt: input.systemPrompt?.trim() || undefined,
     avatarUrl: resolvedAvatarUrl,

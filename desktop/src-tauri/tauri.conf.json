@@ -49,6 +49,8 @@
     "externalBin": [
       "binaries/sprout-acp",
       "binaries/sprout-mcp-server",
+      "binaries/sprout-agent",
+      "binaries/sprout-dev-mcp",
       "binaries/git-credential-nostr"
     ],
     "icon": [

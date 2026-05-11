@@ -50,7 +50,7 @@ const overrides = new Map([
   ["src-tauri/src/commands/agents.rs", 881], // remote agent lifecycle routing (local + provider branches) + scope enforcement + persona pack metadata wiring + mcp_toolsets field + NIP-OA auth_tag in deploy payload
   ["src-tauri/src/commands/messages.rs", 510], // feed multi-query + NIP-50 search + forum thread resolution + thread ref + reactions via REQ
   ["src-tauri/src/nostr_convert.rs", 870], // 12 Nostr event→model converters (channels, profiles, members, notes, search, agents, relay members) + 20 unit tests
-  ["src-tauri/src/managed_agents/runtime.rs", 740], // KNOWN_AGENT_BINARIES const + process_belongs_to_us FFI (macOS proc_name + Linux /proc/comm) + terminate_process + start/stop/sync lifecycle + pack persona live-read + login shell PATH augmentation + observer endpoint wiring + git credential helper env injection
+  ["src-tauri/src/managed_agents/runtime.rs", 780], // KNOWN_AGENT_BINARIES const + process_belongs_to_us FFI (macOS proc_name + Linux /proc/comm) + terminate_process + start/stop/sync lifecycle + pack persona live-read + login shell PATH augmentation + observer endpoint wiring + git credential helper env injection + sprout-agent mcp_hooks wiring + tests
   ["src-tauri/src/managed_agents/backend.rs", 530], // provider IPC, validation, discovery, binary resolution + tests
   ["src/features/huddle/HuddleContext.tsx", 650], // huddle lifecycle context + joinHuddle + connectAndSetupMedia shared helper + activeSpeakers/isReconnecting state + PTT (reusable AudioContext) + TTS subscription + mic level analyser (10fps throttle) + agent pubkey refresh
   ["src/features/agents/hooks.ts", 540], // agent query/mutation surface now includes built-in persona library activation + useUpdateManagedAgentMutation

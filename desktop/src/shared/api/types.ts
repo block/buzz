@@ -348,6 +348,8 @@ export type AcpProvider = {
   command: string;
   binaryPath: string;
   defaultArgs: string[];
+  /** MCP server binary override, or `null` for the default (`sprout-mcp-server`). */
+  mcpCommand: string | null;
 };
 
 export type CommandAvailability = {

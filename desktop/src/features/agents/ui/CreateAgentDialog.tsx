@@ -109,6 +109,7 @@ export function CreateAgentDialog({
       setSelectedProviderId(remembered.id);
       setAgentCommand(remembered.command);
       setAgentArgs(remembered.defaultArgs.join(","));
+      setMcpCommand(remembered.mcpCommand ?? "sprout-mcp-server");
     } else {
       const matchingProvider =
         providers.find((provider) => provider.command === agentCommand) ?? null;
@@ -241,6 +242,7 @@ export function CreateAgentDialog({
     setLastProvider(nextProviderId);
     setAgentCommand(provider.command);
     setAgentArgs(provider.defaultArgs.join(","));
+    setMcpCommand(provider.mcpCommand ?? "sprout-mcp-server");
   }
 
   function handleRunOnChange(value: string) {
