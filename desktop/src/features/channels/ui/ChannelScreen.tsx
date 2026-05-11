@@ -493,9 +493,13 @@ export function ChannelScreen({
                   onCancelThreadReply={handleCancelThreadReply}
                   onCloseAgentSession={handleCloseAgentSession}
                   onCloseThread={handleCloseThread}
-                  onDelete={handleDelete}
-                  onEdit={handleEdit}
-                  onEditSave={handleEditSave}
+                  onDelete={
+                    activeChannel?.archivedAt ? undefined : handleDelete
+                  }
+                  onEdit={activeChannel?.archivedAt ? undefined : handleEdit}
+                  onEditSave={
+                    activeChannel?.archivedAt ? undefined : handleEditSave
+                  }
                   onExpandThreadReplies={handleExpandThreadReplies}
                   onOpenAgentSession={handleOpenAgentSession}
                   onOpenDm={handleOpenDm}
