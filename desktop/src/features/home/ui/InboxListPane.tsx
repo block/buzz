@@ -1,4 +1,4 @@
-import { Inbox, Search } from "lucide-react";
+import { Search } from "lucide-react";
 
 import type { InboxFilter, InboxItem } from "@/features/home/lib/inbox";
 import { cn } from "@/shared/lib/cn";
@@ -38,21 +38,9 @@ export function InboxListPane({
   return (
     <section className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r border-border/70 bg-background">
       <div
-        className="border-b border-border/70 px-4 pb-4 pt-8"
+        className="border-b border-border/70 px-4 pb-4 pt-3"
         data-tauri-drag-region
       >
-        <div
-          className="mb-4 flex min-w-0 items-center gap-2"
-          data-tauri-drag-region
-        >
-          <Inbox className="h-5 w-5 shrink-0 text-primary" />
-          <h1
-            className="min-w-0 truncate text-lg font-semibold tracking-tight"
-            data-testid="chat-title"
-          >
-            Inbox
-          </h1>
-        </div>
         <div className="relative">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -97,7 +85,7 @@ export function InboxListPane({
             </div>
           </div>
         ) : (
-          <div className="divide-y divide-border/60">
+          <div>
             {items.map((item) => {
               const isSelected = item.id === selectedId;
               const isDone = doneSet.has(item.id);

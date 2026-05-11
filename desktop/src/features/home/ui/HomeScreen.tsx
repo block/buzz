@@ -21,7 +21,7 @@ export function HomeScreen({
         description="Personalized activity feed for mentions, reminders, channel activity, and agent work."
         mode="home"
         overlaysContent
-        title="Home"
+        title="Inbox"
       />
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">

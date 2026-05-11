@@ -4,7 +4,7 @@ import {
   CircleDot,
   FileText,
   Hash,
-  Home,
+  Inbox,
   Lock,
   Zap,
 } from "lucide-react";
@@ -37,7 +37,7 @@ function ChannelIcon({
   mode?: "home" | "channel" | "agents" | "workflows" | "pulse";
 }) {
   if (mode === "home") {
-    return <Home className={HEADER_ICON_CLASS} />;
+    return <Inbox className={HEADER_ICON_CLASS} />;
   }
 
   if (mode === "agents") {
@@ -111,14 +111,6 @@ export function ChatHeader({
             </div>
           ) : null}
         </div>
-        {trimmedDescription ? (
-          <p
-            className="truncate text-sm text-muted-foreground"
-            data-testid="chat-description"
-          >
-            {trimmedDescription}
-          </p>
-        ) : null}
       </div>
 
       {actions ? <div className="shrink-0">{actions}</div> : null}
