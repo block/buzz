@@ -1,3 +1,5 @@
+import { isMacPlatform } from "@/shared/lib/platform";
+
 export type ShortcutCategory =
   | "Navigation"
   | "Messages"
@@ -220,10 +222,6 @@ export function getShortcutsByCategory(): Map<
   return map;
 }
 
-function isMac(): boolean {
-  return /mac|iphone|ipad|ipod/i.test(navigator.platform);
-}
-
 export function getPlatformKeys(shortcut: KeyboardShortcut): string {
-  return isMac() ? shortcut.keys : shortcut.keysWindows;
+  return isMacPlatform() ? shortcut.keys : shortcut.keysWindows;
 }

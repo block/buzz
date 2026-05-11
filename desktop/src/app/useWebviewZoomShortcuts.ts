@@ -1,6 +1,8 @@
 import * as React from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 
+import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
+
 const DEFAULT_ZOOM_FACTOR = 1;
 const MIN_ZOOM_FACTOR = 0.2;
 const MAX_ZOOM_FACTOR = 10;
@@ -9,7 +11,7 @@ const ZOOM_STEP = 0.2;
 type ZoomAction = "increase" | "decrease" | "reset";
 
 function getZoomAction(event: KeyboardEvent): ZoomAction | null {
-  if (!(event.metaKey || event.ctrlKey) || event.altKey) {
+  if (!hasPrimaryShortcutModifier(event) || event.altKey) {
     return null;
   }
 

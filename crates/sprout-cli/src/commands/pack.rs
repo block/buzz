@@ -3,7 +3,6 @@
 //! These commands operate on local pack directories. No relay connection needed.
 
 use std::path::Path;
-use std::process;
 
 use crate::error::CliError;
 
@@ -16,12 +15,10 @@ use crate::error::CliError;
 pub fn cmd_validate(path: &str) -> Result<(), CliError> {
     let pack_dir = Path::new(path);
     if !pack_dir.exists() {
-        eprintln!("error: path does not exist: {path}");
-        process::exit(1);
+        return Err(CliError::Usage(format!("path does not exist: {path}")));
     }
     if !pack_dir.is_dir() {
-        eprintln!("error: not a directory: {path}");
-        process::exit(1);
+        return Err(CliError::Usage(format!("not a directory: {path}")));
     }
 
     let report = sprout_persona::validate::validate_pack(pack_dir);
@@ -38,8 +35,7 @@ pub fn cmd_validate(path: &str) -> Result<(), CliError> {
     }
 
     if report.has_errors() {
-        eprintln!("\nValidation failed.");
-        process::exit(1);
+        return Err(CliError::Usage("Validation failed.".into()));
     } else if report.has_warnings() {
         println!("Valid (with warnings).");
     } else {
@@ -56,12 +52,10 @@ pub fn cmd_validate(path: &str) -> Result<(), CliError> {
 pub fn cmd_inspect(path: &str) -> Result<(), CliError> {
     let pack_dir = Path::new(path);
     if !pack_dir.exists() {
-        eprintln!("error: path does not exist: {path}");
-        process::exit(1);
+        return Err(CliError::Usage(format!("path does not exist: {path}")));
     }
     if !pack_dir.is_dir() {
-        eprintln!("error: not a directory: {path}");
-        process::exit(1);
+        return Err(CliError::Usage(format!("not a directory: {path}")));
     }
 
     // Resolve the pack — shows fully effective config (post-merge, post-split).

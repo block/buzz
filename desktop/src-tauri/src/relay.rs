@@ -259,11 +259,15 @@ pub async fn sync_managed_agent_profile(
     let url = format!("{}/events", relay_http_base_url(relay_url));
     let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, &url, &body_bytes)?;
 
-    let response = state
+    let mut request = state
         .http_client
         .post(&url)
         .header("Authorization", auth)
-        .header("Content-Type", "application/json")
+        .header("Content-Type", "application/json");
+    if let Some(tag) = auth_tag {
+        request = request.header("x-auth-tag", tag);
+    }
+    let response = request
         .body(body_bytes)
         .send()
         .await

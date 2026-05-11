@@ -24,13 +24,13 @@ function resetWorkspaceState(): void {
 }
 
 type WorkspaceInitResult =
-  | { isReady: true; needsSetup: false }
+  | { isReady: true; needsSetup: false; appliedKey: string }
   | {
       isReady: false;
       needsSetup: true;
       defaultRelayUrl: string;
     }
-  | { isReady: false; needsSetup: false };
+  | { isReady: false; needsSetup: false; appliedKey: string | null };
 
 /**
  * Applies the active workspace config to the Tauri backend and resets
@@ -42,10 +42,12 @@ type WorkspaceInitResult =
  */
 export function useWorkspaceInit(
   activeWorkspace: Workspace | null,
+  workspaceKey: string,
 ): WorkspaceInitResult {
   const [result, setResult] = useState<WorkspaceInitResult>({
     isReady: false,
     needsSetup: false,
+    appliedKey: null,
   });
 
   // Track whether this is the initial mount or a workspace switch.
@@ -80,15 +82,22 @@ export function useWorkspaceInit(
         return;
       }
 
+      // Mark this workspace config as pending while it is applied to the
+      // backend. App.tsx also checks appliedKey against the active workspaceKey,
+      // which prevents rendering workspace-scoped UI for a new workspace until
+      // that exact config has finished applying.
+      setResult({
+        isReady: false,
+        needsSetup: false,
+        appliedKey: workspaceKey,
+      });
+
       // On workspace switch (not initial mount), reset module singletons
       // so the new tree starts with a clean slate.
       if (hasInitializedRef.current) {
         resetWorkspaceState();
       }
       hasInitializedRef.current = true;
-
-      // Show loading gate while we apply the new workspace config
-      setResult({ isReady: false, needsSetup: false });
 
       // Apply workspace config to the Tauri backend.
       //
@@ -110,7 +119,11 @@ export function useWorkspaceInit(
       }
 
       if (!cancelled) {
-        setResult({ isReady: true, needsSetup: false });
+        setResult({
+          isReady: true,
+          needsSetup: false,
+          appliedKey: workspaceKey,
+        });
       }
     }
 
@@ -119,7 +132,12 @@ export function useWorkspaceInit(
     return () => {
       cancelled = true;
     };
-  }, [activeWorkspace?.id, activeWorkspace?.relayUrl, activeWorkspace?.token]);
+  }, [
+    activeWorkspace?.id,
+    activeWorkspace?.relayUrl,
+    activeWorkspace?.token,
+    workspaceKey,
+  ]);
 
   return result;
 }

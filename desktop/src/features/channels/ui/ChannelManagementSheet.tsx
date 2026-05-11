@@ -1,6 +1,7 @@
 import {
   Archive,
   ArchiveRestore,
+  Copy,
   DoorClosed,
   DoorOpen,
   FileText,
@@ -11,6 +12,7 @@ import {
   Zap,
 } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
 import {
   useArchiveChannelMutation,
@@ -70,6 +72,35 @@ function MetadataPill({
       <Icon className="h-3.5 w-3.5" />
       <span>{label}</span>
     </div>
+  );
+}
+
+function ChannelIdRow({ channelId }: { channelId: string }) {
+  async function handleCopyChannelId() {
+    await navigator.clipboard.writeText(channelId);
+    toast.success("Copied channel ID to clipboard");
+  }
+
+  return (
+    <button
+      className="group flex w-full items-center gap-3 rounded-xl border border-border/70 bg-muted/20 px-3 py-2.5 text-left transition-colors hover:border-border hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      data-testid="channel-management-channel-id"
+      onClick={() => {
+        void handleCopyChannelId();
+      }}
+      title="Copy channel ID"
+      type="button"
+    >
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground/70">
+          Channel ID
+        </div>
+        <div className="truncate font-mono text-xs text-muted-foreground">
+          {channelId}
+        </div>
+      </div>
+      <Copy className="h-4 w-4 shrink-0 text-muted-foreground/45 transition-colors group-hover:text-muted-foreground" />
+    </button>
   );
 }
 
@@ -221,6 +252,7 @@ export function ChannelManagementSheet({
         </SheetHeader>
 
         <div className="flex-1 space-y-6 overflow-y-auto px-6 py-6">
+          <ChannelIdRow channelId={resolvedChannel.id} />
           {detailsQuery.error instanceof Error ? (
             <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
               {detailsQuery.error.message}

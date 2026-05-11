@@ -196,7 +196,6 @@ pub async fn cmd_send_message(client: &SproutClient, p: SendMessageParams) -> Re
         validate_hex64(m)?;
     }
 
-    let keys = client.keys();
     let channel_uuid = parse_uuid(&p.channel_id)?;
 
     // Upload files and build imeta tags
@@ -249,9 +248,7 @@ pub async fn cmd_send_message(client: &SproutClient, p: SendMessageParams) -> Re
     )
     .map_err(|e| CliError::Other(format!("build_message failed: {e}")))?;
 
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -292,7 +289,6 @@ pub async fn cmd_send_diff_message(
         _ => {}
     }
 
-    let keys = client.keys();
     let channel_uuid = parse_uuid(&p.channel_id)?;
 
     // Read diff from stdin if "--diff -"
@@ -346,9 +342,7 @@ pub async fn cmd_send_diff_message(
         sprout_sdk::build_diff_message(channel_uuid, &diff, &diff_meta, thread_ref.as_ref())
             .map_err(|e| CliError::Other(format!("build_diff_message failed: {e}")))?;
 
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -357,7 +351,6 @@ pub async fn cmd_send_diff_message(
 
 pub async fn cmd_delete_message(client: &SproutClient, event_id: &str) -> Result<(), CliError> {
     validate_hex64(event_id)?;
-    let keys = client.keys();
 
     // Resolve channel_id from the event's h-tag
     let channel_uuid = resolve_channel_id(client, event_id).await?;
@@ -366,9 +359,7 @@ pub async fn cmd_delete_message(client: &SproutClient, event_id: &str) -> Result
     let builder = sprout_sdk::build_delete_message(channel_uuid, target_eid)
         .map_err(|e| CliError::Other(format!("build_delete_message failed: {e}")))?;
 
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -383,7 +374,6 @@ pub async fn cmd_edit_message(
 ) -> Result<(), CliError> {
     validate_hex64(event_id)?;
     validate_content_size(content)?;
-    let keys = client.keys();
 
     // Resolve channel_id from the event's h-tag
     let channel_uuid = resolve_channel_id(client, event_id).await?;
@@ -392,9 +382,7 @@ pub async fn cmd_edit_message(
     let builder = sprout_sdk::build_edit(channel_uuid, target_eid, content)
         .map_err(|e| CliError::Other(format!("build_edit failed: {e}")))?;
 
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -418,8 +406,6 @@ pub async fn cmd_vote_on_post(
         }
     };
 
-    let keys = client.keys();
-
     // Resolve channel_id from the event's h-tag
     let channel_uuid = resolve_channel_id(client, event_id).await?;
     let target_eid = parse_event_id(event_id)?;
@@ -427,9 +413,7 @@ pub async fn cmd_vote_on_post(
     let builder = sprout_sdk::build_vote(channel_uuid, target_eid, vote_dir)
         .map_err(|e| CliError::Other(format!("build_vote failed: {e}")))?;
 
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");

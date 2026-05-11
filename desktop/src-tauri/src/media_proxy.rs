@@ -7,7 +7,7 @@ use axum::{
     Router,
 };
 use futures_util::TryStreamExt;
-use tauri::http;
+use tauri::{http, Manager};
 use tokio::net::TcpListener;
 
 use crate::app_state::AppState;
@@ -22,7 +22,7 @@ const MAX_PROXY_RESPONSE: u64 = 20 * 1024 * 1024;
 #[derive(Clone)]
 struct ProxyState {
     client: reqwest::Client,
-    base_url: String,
+    app_handle: tauri::AppHandle,
 }
 
 async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) -> Response {
@@ -44,8 +44,10 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
         .map(|pq| pq.as_str())
         .unwrap_or("/");
 
-    // Strip the /media/ prefix check — we only mount on /media/
-    let upstream_url = format!("{}{path_and_query}", state.base_url);
+    // Resolve relay URL dynamically so workspace switches take effect immediately.
+    let app_state = state.app_handle.state::<AppState>();
+    let base_url = relay::relay_api_base_url_with_override(&app_state);
+    let upstream_url = format!("{base_url}{path_and_query}");
 
     let has_range = req.headers().contains_key("range");
 
@@ -111,10 +113,10 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
 /// Spawn a localhost HTTP proxy that streams media via reqwest, avoiding the
 /// Tauri protocol handler's requirement to buffer the entire response into
 /// `Vec<u8>`. Returns the OS-assigned port.
-pub async fn spawn_media_proxy(http_client: reqwest::Client, base_url: String) -> u16 {
+pub async fn spawn_media_proxy(http_client: reqwest::Client, app_handle: tauri::AppHandle) -> u16 {
     let proxy_state = ProxyState {
         client: http_client,
-        base_url,
+        app_handle,
     };
 
     let app = Router::new()

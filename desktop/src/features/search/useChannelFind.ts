@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { useSearchMessagesQuery } from "@/features/search/hooks";
 import type { TimelineMessage } from "@/features/messages/types";
+import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 
 const MIN_QUERY_LENGTH = 2;
 const DEBOUNCE_MS = 300;
@@ -119,11 +120,11 @@ export function useChannelFind({ channelId, messages }: UseChannelFindOptions) {
     );
   }, [matchedIds.length]);
 
-  // Register CMD+F keyboard shortcut.
+  // Register platform-standard find shortcut (⌘F on macOS, Ctrl+F elsewhere).
   React.useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (
-        (event.metaKey || event.ctrlKey) &&
+        hasPrimaryShortcutModifier(event) &&
         !event.altKey &&
         !event.shiftKey &&
         event.key.toLowerCase() === "f"

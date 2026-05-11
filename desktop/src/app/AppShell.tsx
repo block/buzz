@@ -53,6 +53,7 @@ import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
 import { joinChannel } from "@/shared/api/tauri";
 import type { Channel, RelayEvent, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
+import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { Button } from "@/shared/ui/button";
 import {
   SidebarInset,
@@ -415,7 +416,7 @@ export function AppShell() {
     }
 
     function handleKeyDown(event: KeyboardEvent) {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey) {
+      if (!hasPrimaryShortcutModifier(event) || event.altKey) {
         return;
       }
 
@@ -461,7 +462,7 @@ export function AppShell() {
     function handleKeyDown(event: KeyboardEvent) {
       const isSettingsShortcut =
         (event.key === "," || event.code === "Comma") &&
-        (event.metaKey || event.ctrlKey) &&
+        hasPrimaryShortcutModifier(event) &&
         !event.altKey &&
         !event.shiftKey;
 

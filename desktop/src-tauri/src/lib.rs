@@ -376,10 +376,9 @@ pub fn run() {
             // client so WARP tunnelling applies. The port is stored in AppState
             // and exposed to the frontend via the `get_media_proxy_port` command.
             let proxy_client = state.http_client.clone();
-            let proxy_base_url = relay::relay_api_base_url_with_override(&state);
             let proxy_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                let port = media_proxy::spawn_media_proxy(proxy_client, proxy_base_url).await;
+                let port = media_proxy::spawn_media_proxy(proxy_client, proxy_handle.clone()).await;
                 let state = proxy_handle.state::<AppState>();
                 state
                     .media_proxy_port

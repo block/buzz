@@ -46,8 +46,6 @@ pub async fn cmd_set_profile(
         ));
     }
 
-    let keys = client.keys();
-
     // Read-merge-write: fetch current profile, merge in the new fields, then sign.
     let current = fetch_current_profile(client).await?;
 
@@ -94,9 +92,7 @@ pub async fn cmd_set_profile(
     )
     .map_err(|e| CliError::Other(format!("build_profile failed: {e}")))?;
 
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
@@ -170,7 +166,6 @@ pub async fn cmd_set_presence(client: &SproutClient, status: &str) -> Result<(),
         }
     }
 
-    let keys = client.keys();
     let tags =
         vec![Tag::parse(&["status", status])
             .map_err(|e| CliError::Other(format!("tag error: {e}")))?];
@@ -178,9 +173,7 @@ pub async fn cmd_set_presence(client: &SproutClient, status: &str) -> Result<(),
     // KIND_PRESENCE_UPDATE (20001) — ephemeral, WS-only. HTTP bridge will reject this
     // until the CLI gains a WebSocket publish path.
     let builder = EventBuilder::new(Kind::Custom(20001), "", tags);
-    let event = builder
-        .sign_with_keys(keys)
-        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");

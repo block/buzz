@@ -1,8 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "@/app/App";
 import "@/shared/styles/globals.css";
+import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { WorkspacesProvider } from "@/features/workspaces/useWorkspaces";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { Toaster } from "@/shared/ui/sonner";
@@ -12,33 +12,19 @@ type E2eWindow = Window & {
   __SPROUT_E2E__?: unknown;
 };
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: 1,
-      refetchOnWindowFocus: false,
-      networkMode: "always",
-      gcTime: 5 * 60 * 1_000,
-    },
-    mutations: {
-      networkMode: "always",
-    },
-  },
-});
-
 function renderApp() {
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <WorkspacesProvider>
-          <ThemeProvider defaultTheme="houston">
-            <TooltipProvider delayDuration={300}>
+      <WorkspacesProvider>
+        <ThemeProvider defaultTheme="houston">
+          <TooltipProvider delayDuration={300}>
+            <UpdaterProvider>
               <App />
-              <Toaster />
-            </TooltipProvider>
-          </ThemeProvider>
-        </WorkspacesProvider>
-      </QueryClientProvider>
+            </UpdaterProvider>
+            <Toaster />
+          </TooltipProvider>
+        </ThemeProvider>
+      </WorkspacesProvider>
     </React.StrictMode>,
   );
 }

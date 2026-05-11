@@ -9,6 +9,7 @@ members = [
     "crates/sprout-audit",
     "crates/sprout-mcp",
     "crates/sprout-acp",
+    "crates/sprout-agent",
     "crates/sprout-proxy",
     "crates/sprout-test-client",
     "crates/sprout-admin",
@@ -21,6 +22,8 @@ members = [
     "crates/git-credential-nostr",
     "crates/git-sign-nostr",
     "crates/sprout-pair-relay",
+    "crates/sprout-dev-mcp",
+    "examples/countdown-bot",
 ]
 exclude = ["desktop/src-tauri"]
 resolver = "2"

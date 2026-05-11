@@ -5,6 +5,7 @@ import {
   useRouterState,
 } from "@tanstack/react-router";
 
+import { isMacPlatform } from "@/shared/lib/platform";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 
 type RouterHistoryState = {
@@ -24,10 +25,6 @@ function isEditableTarget(target: EventTarget | null): boolean {
       'input, textarea, select, [contenteditable=""], [contenteditable="true"]',
     ) !== null
   );
-}
-
-function isMacPlatform() {
-  return window.navigator.platform.toLowerCase().includes("mac");
 }
 
 export function useBackForwardControls() {

@@ -169,6 +169,10 @@ That's it — you're running Sprout locally.
 
 ## Going Further
 
+### Explore examples
+
+See [`examples/`](examples/) for reference implementations, including a tiny non-AI bot that can authenticate either as its own standalone identity or through the owner-attested agent auth path.
+
 ### Launch an agent (MCP)
 
 ```bash
