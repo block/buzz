@@ -9,6 +9,10 @@ description = "NIP-GS git commit/tag signing program using Nostr secp256k1 keys"
 readme = "README.md"
 publish = false  # internal workspace tool, not published to crates.io
 
+[lib]
+name = "git_sign_nostr"
+path = "src/lib.rs"
+
 [[bin]]
 name = "git-sign-nostr"
 path = "src/main.rs"

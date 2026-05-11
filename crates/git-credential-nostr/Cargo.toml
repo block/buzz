@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 description = "Git credential helper that produces NIP-98 auth headers for Sprout's git server"
 
+[lib]
+name = "git_credential_nostr"
+path = "src/lib.rs"
+
 [[bin]]
 name = "git-credential-nostr"
 path = "src/main.rs"
@@ -13,6 +17,5 @@ path = "src/main.rs"
 [dependencies]
 nostr      = { workspace = true }
 serde_json = { workspace = true }
-anyhow     = { workspace = true }
 zeroize    = { workspace = true }
 base64     = "0.22"

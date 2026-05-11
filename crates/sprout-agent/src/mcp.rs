@@ -26,7 +26,29 @@ const MARKER_FIELD_MAX: usize = 256;
 pub const MAX_MCP_SERVERS: usize = 16;
 const MAX_HOOK_RESULT_BYTES: usize = 16 * 1024;
 
-const PASSTHROUGH_ENV: &[&str] = &["PATH", "HOME", "TERM", "LANG", "LC_ALL", "TMPDIR"];
+const PASSTHROUGH_ENV: &[&str] = &[
+    // Core
+    "PATH",
+    "HOME",
+    "TERM",
+    "LANG",
+    "LC_ALL",
+    "TMPDIR",
+    "XDG_CONFIG_HOME",
+    // SSH — required for git clone/push over SSH (git@github.com:...)
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    // Git — operator-configured helpers and transport overrides
+    "GIT_ASKPASS",
+    "GIT_SSH_COMMAND",
+    "GIT_CONFIG_GLOBAL",
+    // Sprout identity — dev-mcp writes NOSTR_PRIVATE_KEY to a keyfile then
+    // removes it from its own env (children never see it). SPROUT_PRIVATE_KEY
+    // and SPROUT_RELAY_URL are kept for the sprout CLI.
+    "NOSTR_PRIVATE_KEY",
+    "SPROUT_PRIVATE_KEY",
+    "SPROUT_RELAY_URL",
+];
 
 type Client = RunningService<RoleClient, ()>;
 

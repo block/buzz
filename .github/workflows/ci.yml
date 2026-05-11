@@ -324,7 +324,10 @@ jobs:
             -p sprout-relay \
             -p sprout-acp \
             -p sprout-mcp \
-            -p git-credential-nostr
+            -p sprout-agent \
+            -p sprout-dev-mcp \
+            -p git-credential-nostr \
+            -p git-sign-nostr
 
   desktop-build-macos:
     name: Desktop Build (macOS)

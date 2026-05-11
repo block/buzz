@@ -146,6 +146,11 @@ pub async fn run(
     cmd.arg("-c").arg(&p.command);
     cmd.current_dir(&workdir);
     cmd.env("PATH", &state.shim.path_env);
+    // NOSTR_PRIVATE_KEY is already removed from this process's env (shim.rs).
+    // SPROUT_PRIVATE_KEY is intentionally inherited — the sprout CLI needs it.
+    for (k, v) in &state.shim.git_env {
+        cmd.env(k, v);
+    }
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

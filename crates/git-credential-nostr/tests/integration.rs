@@ -170,7 +170,9 @@ fn missing_key() {
     );
 }
 
-/// `wwwauth[]` present but missing `method="..."` → exit 1, stderr mentions "method hint".
+/// `wwwauth[]` present but missing `method="..."` → exit 0, no credential emitted.
+/// The helper gracefully declines rather than erroring, so git can fall through
+/// to the next credential helper (safe for global credential.helper config).
 #[test]
 fn missing_method_hint() {
     let input = "capability[]=authtype\n\
@@ -184,20 +186,22 @@ fn missing_method_hint() {
     let nsec = fresh_nsec();
     let out = run_helper(input, &[("NOSTR_PRIVATE_KEY", &nsec)]);
 
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "expected exit 1 for missing method hint"
+    assert!(
+        out.status.success(),
+        "expected exit 0 for missing method hint (graceful decline), got {:?}",
+        out.status.code()
     );
 
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stderr.contains("method hint"),
-        "expected 'method hint' in stderr, got:\n{stderr}"
+        !stdout.contains("credential="),
+        "should not emit credential= when method hint is missing"
     );
 }
 
 /// Input without `path=` line (useHttpPath not set) → exit 1, stderr mentions "useHttpPath".
+/// The relay requires the full repo-root URL for NIP-98 verification, so the
+/// credential helper cannot function without the path component.
 #[test]
 fn missing_path() {
     let input = "capability[]=authtype\n\

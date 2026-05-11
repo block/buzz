@@ -109,12 +109,7 @@ impl ServerHandler for DevMcp {
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .init();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let argv0 = std::env::args().next().unwrap_or_default();
     let cmd = Path::new(&argv0)
         .file_name()
@@ -122,19 +117,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    if cmd == "rg" {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        std::process::exit(rg::run(args));
+    // Multicall dispatch — sync personalities exit before any runtime is built.
+    // No tracing, no tokio, no allocations beyond argv parsing.
+    match cmd.as_str() {
+        "rg" => std::process::exit(rg::run(std::env::args().skip(1).collect())),
+        "tree" => std::process::exit(tree::run(std::env::args().skip(1).collect())),
+        "git-credential-nostr" => std::process::exit(git_credential_nostr::run()),
+        "git-sign-nostr" => std::process::exit(git_sign_nostr::run()),
+        _ => {}
     }
 
-    if cmd == "tree" {
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        std::process::exit(tree::run(args));
-    }
+    // Async personalities and MCP server mode — build the runtime.
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main(cmd))
+}
 
+async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
+    // sprout CLI needs tokio (async HTTP client).
     if cmd == "sprout" {
         std::process::exit(sprout_cli::run_from_args(std::env::args()).await);
     }
+
+    // MCP server mode — safe to init tracing now.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .init();
 
     let cwd = std::env::current_dir()?;
     let shim = shim::Shim::install()?;
