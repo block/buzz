@@ -1,6 +1,6 @@
 # ── Build stage (Rust) ──────────────────────────────────────
 # Hard-code --platform to prevent exec format error on ARM Macs.
-FROM --platform=linux/amd64 rust:1.93-bookworm AS builder
+FROM --platform=linux/amd64 rust:1.95-bookworm AS builder
 WORKDIR /build
 COPY . .
 RUN cargo build --release -p sprout-relay \
