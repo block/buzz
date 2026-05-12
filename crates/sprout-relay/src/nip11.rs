@@ -48,7 +48,8 @@ pub struct RelayLimitation {
     pub max_subid_length: Option<u32>,
     /// Minimum proof-of-work difficulty required for events.
     pub min_pow_difficulty: Option<u32>,
-    /// Whether NIP-42 authentication is required before sending events.
+    /// Whether NIP-42 authentication is required before subscribing or
+    /// publishing events.
     pub auth_required: bool,
     /// Whether payment is required to use the relay.
     pub payment_required: bool,
@@ -56,12 +57,32 @@ pub struct RelayLimitation {
     pub restricted_writes: bool,
 }
 
+/// Canonical `RelayLimitation` advertised by this relay.
+///
+/// `auth_required` is always `true`: the REQ, EVENT, and COUNT handlers
+/// unconditionally reject connections that are not in
+/// `AuthState::Authenticated`. This is independent of the REST API token
+/// toggle (`config.require_auth_token`).
+fn relay_limitation() -> RelayLimitation {
+    RelayLimitation {
+        max_message_length: Some(MAX_FRAME_BYTES as u64),
+        max_subscriptions: Some(1024),
+        max_filters: Some(10),
+        max_limit: Some(10_000),
+        max_subid_length: Some(256),
+        min_pow_difficulty: None,
+        auth_required: true,
+        payment_required: false,
+        restricted_writes: true,
+    }
+}
+
 impl RelayInfo {
-    /// Builds a `RelayInfo` document from the relay's runtime config.
+    /// Builds the relay's NIP-11 information document.
     ///
     /// `relay_pubkey` is the relay's own signing pubkey (hex), advertised as the
     /// NIP-11 `self` field for NIP-43 membership verification.
-    pub fn from_config(config: &crate::config::Config, relay_pubkey: Option<&str>) -> Self {
+    pub fn build(relay_pubkey: Option<&str>) -> Self {
         Self {
             name: "Sprout Relay".to_string(),
             description: "Sprout — private team communication relay".to_string(),
@@ -70,17 +91,7 @@ impl RelayInfo {
             supported_nips: SUPPORTED_NIPS.to_vec(),
             software: "https://github.com/sprout-rs/sprout".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            limitation: Some(RelayLimitation {
-                max_message_length: Some(MAX_FRAME_BYTES as u64),
-                max_subscriptions: Some(1024),
-                max_filters: Some(10),
-                max_limit: Some(10_000),
-                max_subid_length: Some(256),
-                min_pow_difficulty: None,
-                auth_required: config.require_auth_token,
-                payment_required: false,
-                restricted_writes: true,
-            }),
+            limitation: Some(relay_limitation()),
             relay_self: relay_pubkey.map(|s| s.to_string()),
         }
     }
@@ -97,10 +108,7 @@ pub async fn relay_info_handler(
     } else {
         None
     };
-    axum::response::Json(RelayInfo::from_config(
-        &state.config,
-        relay_pubkey.as_deref(),
-    ))
+    axum::response::Json(RelayInfo::build(relay_pubkey.as_deref()))
 }
 
 #[cfg(test)]
@@ -127,6 +135,15 @@ mod tests {
             SUPPORTED_NIPS.contains(&38),
             "NIP-38 (user statuses) must be advertised"
         );
+    }
+
+    #[test]
+    fn auth_required_is_advertised_true() {
+        // REQ, EVENT, and COUNT all unconditionally require
+        // `AuthState::Authenticated` (see `crates/sprout-relay/src/handlers/`).
+        // The NIP-11 doc must reflect that or clients (e.g. the desktop pair
+        // flow) misroute unauthenticated peers.
+        assert!(relay_limitation().auth_required);
     }
 
     #[test]

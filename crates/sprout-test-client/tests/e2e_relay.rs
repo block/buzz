@@ -605,12 +605,12 @@ async fn test_nip11_relay_info() {
         Some(1024),
         "limitation.max_subscriptions must be 1024"
     );
-    assert!(
-        limitation
-            .get("auth_required")
-            .and_then(|v| v.as_bool())
-            .is_some(),
-        "limitation.auth_required must be a boolean"
+    // The REQ, EVENT, and COUNT handlers unconditionally require an
+    // authenticated connection, so the NIP-11 doc must advertise that.
+    assert_eq!(
+        limitation.get("auth_required").and_then(|v| v.as_bool()),
+        Some(true),
+        "limitation.auth_required must be true — REQ/EVENT/COUNT require NIP-42 auth"
     );
 }
 

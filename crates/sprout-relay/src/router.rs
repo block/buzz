@@ -160,7 +160,7 @@ async fn nip11_or_ws_handler(
     };
 
     if accept.contains("application/nostr+json") {
-        let info = RelayInfo::from_config(&state.config, relay_pubkey.as_deref());
+        let info = RelayInfo::build(relay_pubkey.as_deref());
         return Json(info).into_response();
     }
 
@@ -179,7 +179,7 @@ async fn nip11_or_ws_handler(
                 }
             }
             // Not a WS request and not asking for nostr+json — serve NIP-11 as fallback.
-            let info = RelayInfo::from_config(&state.config, relay_pubkey.as_deref());
+            let info = RelayInfo::build(relay_pubkey.as_deref());
             Json(info).into_response()
         }
     }

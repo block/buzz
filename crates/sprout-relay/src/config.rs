@@ -39,7 +39,8 @@ pub struct Config {
     pub send_buffer_size: usize,
     /// Authentication provider configuration.
     pub auth: sprout_auth::AuthConfig,
-    /// Whether clients must authenticate via NIP-42 before sending events.
+    /// Whether REST API requests must present a valid token. Independent of
+    /// WebSocket protocol auth, which is *always* required by REQ/EVENT/COUNT.
     pub require_auth_token: bool,
     /// Comma-separated list of allowed CORS origins.
     /// If empty, permissive CORS is used (dev mode).
@@ -197,8 +198,8 @@ impl Config {
 
         if !require_auth_token {
             warn!(
-                "SPROUT_REQUIRE_AUTH_TOKEN is false — relay accepts unauthenticated connections. \
-                 Set to true for production."
+                "SPROUT_REQUIRE_AUTH_TOKEN is false — REST API requests bypass token auth. \
+                 WebSocket protocol auth is unaffected. Set to true for production."
             );
         }
 
