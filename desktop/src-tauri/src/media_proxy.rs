@@ -78,6 +78,15 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
         "content-range",
         "accept-ranges",
         "content-length",
+        // Cache-related headers — let WKWebView's HTTP cache do its job so
+        // images don't re-fetch on every channel switch. Media URLs are
+        // content-addressed (sha256 in path), so the relay sends
+        // `Cache-Control: public, max-age=31536000, immutable` and we
+        // forward it verbatim. `etag`/`last-modified` are forwarded for
+        // future-proofing if upstream ever adds them.
+        "cache-control",
+        "etag",
+        "last-modified",
     ] {
         if let Some(val) = resp.headers().get(*key) {
             if let Ok(v) = HeaderValue::from_bytes(val.as_bytes()) {
@@ -205,6 +214,27 @@ pub async fn handle_sprout_media(
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
 
+            // Propagate cache-related headers so WKWebView's HTTP cache
+            // can avoid re-fetching content-addressed media on every
+            // channel switch. The relay sends
+            // `Cache-Control: public, max-age=31536000, immutable`;
+            // `etag`/`last-modified` are forwarded if upstream supplies them.
+            let cache_control = resp
+                .headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let etag = resp
+                .headers()
+                .get("etag")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let last_modified = resp
+                .headers()
+                .get("last-modified")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
             // OOM guard: if this is a non-range GET and the upstream body is
             // larger than our cap, bail with 413 instead of buffering into RAM.
             // Tauri's protocol handler requires Vec<u8> so we can't truly stream.
@@ -234,6 +264,15 @@ pub async fn handle_sprout_media(
                     }
                     if let Some(ref cl) = content_length {
                         builder = builder.header("content-length", cl);
+                    }
+                    if let Some(ref cc) = cache_control {
+                        builder = builder.header("cache-control", cc);
+                    }
+                    if let Some(ref e) = etag {
+                        builder = builder.header("etag", e);
+                    }
+                    if let Some(ref lm) = last_modified {
+                        builder = builder.header("last-modified", lm);
                     }
                     builder
                         .body(bytes.to_vec())
