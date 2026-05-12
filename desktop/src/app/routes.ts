@@ -6,6 +6,8 @@ export const routes = rootRoute("root.tsx", [
   route("/pulse", "pulse.tsx"),
   route("/workflows", "workflows.tsx"),
   route("/workflows/$workflowId", "workflows.$workflowId.tsx"),
+  route("/projects", "projects.tsx"),
+  route("/projects/$projectId", "projects.$projectId.tsx"),
   route("/channels/$channelId", "channels.$channelId.tsx"),
   route(
     "/channels/$channelId/posts/$postId",

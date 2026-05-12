@@ -33,7 +33,7 @@ const overrides = new Map([
   ["src-tauri/src/managed_agents/personas.rs", 900], // built-in persona system prompts (Solo + Kit + Scout) + persona pack import/uninstall/list + uninstall safety check
   ["src-tauri/src/managed_agents/teams.rs", 580], // built-in team registry (Kit & Scout) + merge_teams + validate_team_deletion + JSON export/import + tests
   ["src-tauri/src/managed_agents/persona_card.rs", 970], // PNG/ZIP/MD persona card codec + pack-zip detection + nested root finder + provider/model/namePool fields + 27 unit tests
-  ["src/app/AppShell.tsx", 770], // message edit state + handlers + ChannelPane edit prop threading + scrollback pagination + workflows view + memory-leak safeguards
+  ["src/app/AppShell.tsx", 800], // message edit state + handlers + ChannelPane edit prop threading + scrollback pagination + workflows view + projects view + memory-leak safeguards
   ["src/features/channels/hooks.ts", 550], // canvas query + mutation hooks + DM hide mutation
   ["src/features/channels/ui/ChannelManagementSheet.tsx", 800],
   ["src/features/channels/ui/ChannelPane.tsx", 520], // composer/timeline/sidebar orchestration + anchored agent activity footers

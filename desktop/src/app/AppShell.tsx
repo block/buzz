@@ -63,7 +63,13 @@ import {
 } from "@/shared/ui/sidebar";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 
-type AppView = "home" | "channel" | "agents" | "workflows" | "pulse";
+type AppView =
+  | "home"
+  | "channel"
+  | "agents"
+  | "workflows"
+  | "pulse"
+  | "projects";
 
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
@@ -129,6 +135,13 @@ function deriveShellRoute(pathname: string): {
     };
   }
 
+  if (pathname === "/projects" || pathname.startsWith("/projects/")) {
+    return {
+      selectedChannelId: null,
+      selectedView: "projects",
+    };
+  }
+
   if (pathname === "/pulse") {
     return {
       selectedChannelId: null,
@@ -161,8 +174,15 @@ export function AppShell() {
   const [isNewDmOpen, setIsNewDmOpen] = React.useState(false);
   const location = useLocation();
   const queryClient = useQueryClient();
-  const { goAgents, goChannel, goHome, goPulse, goWorkflows, openSearchHit } =
-    useAppNavigation();
+  const {
+    goAgents,
+    goChannel,
+    goHome,
+    goProjects,
+    goPulse,
+    goWorkflows,
+    openSearchHit,
+  } = useAppNavigation();
   const { canGoBack, canGoForward, goBack, goForward } =
     useBackForwardControls();
   const { selectedChannelId, selectedView } = React.useMemo(
@@ -671,6 +691,9 @@ export function AppShell() {
                   }}
                   onSelectHome={() => {
                     void goHome();
+                  }}
+                  onSelectProjects={() => {
+                    void goProjects();
                   }}
                   onSelectPulse={() => {
                     void goPulse();

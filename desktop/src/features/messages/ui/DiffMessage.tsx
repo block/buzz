@@ -1,5 +1,6 @@
 import { FileDiff, Maximize2 } from "lucide-react";
 
+import { isSafeUrl } from "@/shared/lib/url";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { DiffViewer } from "./DiffViewer";
@@ -13,16 +14,6 @@ type DiffMessageProps = {
   truncated?: boolean;
   onExpand?: () => void;
 };
-
-function isSafeUrl(url: string | undefined): url is string {
-  if (!url) return false;
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
 
 function getHostname(url: string): string {
   try {

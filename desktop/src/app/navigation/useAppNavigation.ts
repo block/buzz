@@ -79,6 +79,31 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goProjects = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/projects",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
+  const goProject = React.useCallback(
+    (projectId: string, behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/projects/$projectId",
+          params: {
+            projectId,
+          },
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goWorkflows = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -204,6 +229,8 @@ export function useAppNavigation() {
     goChannel,
     goForumPost,
     goHome,
+    goProject,
+    goProjects,
     goPulse,
     goWorkflow,
     goWorkflows,

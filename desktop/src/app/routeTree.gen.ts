@@ -7,9 +7,11 @@
 import { Route as rootRouteImport } from "./routes/root";
 import { Route as workflowsRouteImport } from "./routes/workflows";
 import { Route as pulseRouteImport } from "./routes/pulse";
+import { Route as projectsRouteImport } from "./routes/projects";
 import { Route as agentsRouteImport } from "./routes/agents";
 import { Route as indexRouteImport } from "./routes/index";
 import { Route as workflowsDotworkflowIdRouteImport } from "./routes/workflows.$workflowId";
+import { Route as projectsDotprojectIdRouteImport } from "./routes/projects.$projectId";
 import { Route as channelsDotchannelIdRouteImport } from "./routes/channels.$channelId";
 import { Route as channelsDotchannelIdDotpostsDotpostIdRouteImport } from "./routes/channels.$channelId.posts.$postId";
 
@@ -21,6 +23,11 @@ const workflowsRoute = workflowsRouteImport.update({
 const pulseRoute = pulseRouteImport.update({
   id: "/pulse",
   path: "/pulse",
+  getParentRoute: () => rootRouteImport,
+} as any);
+const projectsRoute = projectsRouteImport.update({
+  id: "/projects",
+  path: "/projects",
   getParentRoute: () => rootRouteImport,
 } as any);
 const agentsRoute = agentsRouteImport.update({
@@ -38,6 +45,11 @@ const workflowsDotworkflowIdRoute = workflowsDotworkflowIdRouteImport.update({
   path: "/workflows/$workflowId",
   getParentRoute: () => rootRouteImport,
 } as any);
+const projectsDotprojectIdRoute = projectsDotprojectIdRouteImport.update({
+  id: "/projects/$projectId",
+  path: "/projects/$projectId",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const channelsDotchannelIdRoute = channelsDotchannelIdRouteImport.update({
   id: "/channels/$channelId",
   path: "/channels/$channelId",
@@ -53,18 +65,22 @@ const channelsDotchannelIdDotpostsDotpostIdRoute =
 export interface FileRoutesByFullPath {
   "/": typeof indexRoute;
   "/agents": typeof agentsRoute;
+  "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
   "/workflows": typeof workflowsRoute;
   "/channels/$channelId": typeof channelsDotchannelIdRoute;
+  "/projects/$projectId": typeof projectsDotprojectIdRoute;
   "/workflows/$workflowId": typeof workflowsDotworkflowIdRoute;
   "/channels/$channelId/posts/$postId": typeof channelsDotchannelIdDotpostsDotpostIdRoute;
 }
 export interface FileRoutesByTo {
   "/": typeof indexRoute;
   "/agents": typeof agentsRoute;
+  "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
   "/workflows": typeof workflowsRoute;
   "/channels/$channelId": typeof channelsDotchannelIdRoute;
+  "/projects/$projectId": typeof projectsDotprojectIdRoute;
   "/workflows/$workflowId": typeof workflowsDotworkflowIdRoute;
   "/channels/$channelId/posts/$postId": typeof channelsDotchannelIdDotpostsDotpostIdRoute;
 }
@@ -72,9 +88,11 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof indexRoute;
   "/agents": typeof agentsRoute;
+  "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
   "/workflows": typeof workflowsRoute;
   "/channels/$channelId": typeof channelsDotchannelIdRoute;
+  "/projects/$projectId": typeof projectsDotprojectIdRoute;
   "/workflows/$workflowId": typeof workflowsDotworkflowIdRoute;
   "/channels/$channelId/posts/$postId": typeof channelsDotchannelIdDotpostsDotpostIdRoute;
 }
@@ -83,27 +101,33 @@ export interface FileRouteTypes {
   fullPaths:
     | "/"
     | "/agents"
+    | "/projects"
     | "/pulse"
     | "/workflows"
     | "/channels/$channelId"
+    | "/projects/$projectId"
     | "/workflows/$workflowId"
     | "/channels/$channelId/posts/$postId";
   fileRoutesByTo: FileRoutesByTo;
   to:
     | "/"
     | "/agents"
+    | "/projects"
     | "/pulse"
     | "/workflows"
     | "/channels/$channelId"
+    | "/projects/$projectId"
     | "/workflows/$workflowId"
     | "/channels/$channelId/posts/$postId";
   id:
     | "__root__"
     | "/"
     | "/agents"
+    | "/projects"
     | "/pulse"
     | "/workflows"
     | "/channels/$channelId"
+    | "/projects/$projectId"
     | "/workflows/$workflowId"
     | "/channels/$channelId/posts/$postId";
   fileRoutesById: FileRoutesById;
@@ -111,9 +135,11 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   indexRoute: typeof indexRoute;
   agentsRoute: typeof agentsRoute;
+  projectsRoute: typeof projectsRoute;
   pulseRoute: typeof pulseRoute;
   workflowsRoute: typeof workflowsRoute;
   channelsDotchannelIdRoute: typeof channelsDotchannelIdRoute;
+  projectsDotprojectIdRoute: typeof projectsDotprojectIdRoute;
   workflowsDotworkflowIdRoute: typeof workflowsDotworkflowIdRoute;
   channelsDotchannelIdDotpostsDotpostIdRoute: typeof channelsDotchannelIdDotpostsDotpostIdRoute;
 }
@@ -132,6 +158,13 @@ declare module "@tanstack/react-router" {
       path: "/pulse";
       fullPath: "/pulse";
       preLoaderRoute: typeof pulseRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
+    "/projects": {
+      id: "/projects";
+      path: "/projects";
+      fullPath: "/projects";
+      preLoaderRoute: typeof projectsRouteImport;
       parentRoute: typeof rootRouteImport;
     };
     "/agents": {
@@ -155,6 +188,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof workflowsDotworkflowIdRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/projects/$projectId": {
+      id: "/projects/$projectId";
+      path: "/projects/$projectId";
+      fullPath: "/projects/$projectId";
+      preLoaderRoute: typeof projectsDotprojectIdRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/channels/$channelId": {
       id: "/channels/$channelId";
       path: "/channels/$channelId";
@@ -175,9 +215,11 @@ declare module "@tanstack/react-router" {
 const rootRouteChildren: RootRouteChildren = {
   indexRoute: indexRoute,
   agentsRoute: agentsRoute,
+  projectsRoute: projectsRoute,
   pulseRoute: pulseRoute,
   workflowsRoute: workflowsRoute,
   channelsDotchannelIdRoute: channelsDotchannelIdRoute,
+  projectsDotprojectIdRoute: projectsDotprojectIdRoute,
   workflowsDotworkflowIdRoute: workflowsDotworkflowIdRoute,
   channelsDotchannelIdDotpostsDotpostIdRoute:
     channelsDotchannelIdDotpostsDotpostIdRoute,

@@ -7,6 +7,7 @@ type ViewLoadingFallbackKind =
   | "agents"
   | "channel"
   | "forum"
+  | "projects"
   | "pulse"
   | "workflows";
 
@@ -133,7 +134,7 @@ function AgentsLoadingBody() {
   );
 }
 
-function WorkflowsLoadingBody() {
+function CardListLoadingBody() {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4">
       <div className="mb-4 flex items-center justify-between gap-3">
@@ -235,7 +236,8 @@ export function ViewLoadingFallback({
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       {includeHeader ? <LoadingHeaderSkeleton /> : null}
       {kind === "agents" ? <AgentsLoadingBody /> : null}
-      {kind === "workflows" ? <WorkflowsLoadingBody /> : null}
+      {kind === "workflows" ? <CardListLoadingBody /> : null}
+      {kind === "projects" ? <CardListLoadingBody /> : null}
       {kind === "channel" ? <ChannelLoadingBody /> : null}
       {kind === "forum" ? <ForumLoadingBody /> : null}
       {kind === "pulse" ? <ChannelLoadingBody /> : null}

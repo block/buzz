@@ -3,6 +3,7 @@ import {
   Activity,
   Bot,
   ChevronDown,
+  FolderGit2,
   Home,
   PenSquare,
   Plus,
@@ -88,7 +89,13 @@ type AppSidebarProps = {
   selfPresenceStatus: PresenceStatus;
   errorMessage?: string;
   selectedChannelId: string | null;
-  selectedView: "home" | "channel" | "agents" | "workflows" | "pulse";
+  selectedView:
+    | "home"
+    | "channel"
+    | "agents"
+    | "workflows"
+    | "pulse"
+    | "projects";
   unreadChannelIds: Set<string>;
   workspaces: Workspace[];
   onAddWorkspace: (workspace: Workspace) => void;
@@ -119,6 +126,7 @@ type AppSidebarProps = {
   ) => void;
   onRemoveWorkspace: (id: string) => void;
   onSelectAgents: () => void;
+  onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
   onSelectHome: () => void;
@@ -309,6 +317,7 @@ export function AppSidebar({
   onUpdateWorkspace,
   onRemoveWorkspace,
   onSelectAgents,
+  onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
   onSelectHome,
@@ -479,6 +488,18 @@ export function AppSidebar({
             >
               <Activity className="h-4 w-4" />
               <span>Pulse</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              data-testid="open-projects-view"
+              isActive={selectedView === "projects"}
+              onClick={onSelectProjects}
+              tooltip="Projects"
+              type="button"
+            >
+              <FolderGit2 className="h-4 w-4" />
+              <span>Projects</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>

@@ -3,6 +3,7 @@ import {
   Bot,
   CircleDot,
   FileText,
+  FolderGit2,
   Hash,
   Home,
   Lock,
@@ -20,7 +21,7 @@ type ChatHeaderProps = {
   description: string;
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
-  mode?: "home" | "channel" | "agents" | "workflows" | "pulse";
+  mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
   overlaysContent?: boolean;
   statusBadge?: React.ReactNode;
 };
@@ -34,7 +35,7 @@ function ChannelIcon({
 }: {
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
-  mode?: "home" | "channel" | "agents" | "workflows" | "pulse";
+  mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
 }) {
   if (mode === "home") {
     return <Home className={HEADER_ICON_CLASS} />;
@@ -50,6 +51,10 @@ function ChannelIcon({
 
   if (mode === "pulse") {
     return <Activity className={HEADER_ICON_CLASS} />;
+  }
+
+  if (mode === "projects") {
+    return <FolderGit2 className={HEADER_ICON_CLASS} />;
   }
 
   if (channelType === "dm") {
