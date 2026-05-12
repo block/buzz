@@ -120,6 +120,14 @@ pub struct ManagedAgentRecord {
     pub last_stopped_at: Option<String>,
     pub last_exit_code: Option<i32>,
     pub last_error: Option<String>,
+    /// Inbound author gate mode. Translates to `SPROUT_ACP_RESPOND_TO`.
+    #[serde(default)]
+    pub respond_to: RespondTo,
+    /// Allowlist used when `respond_to == Allowlist`. Stored normalized
+    /// (64-char lowercase hex, deduped). Empty when mode is not Allowlist.
+    /// Preserved across mode toggles so users don't lose state.
+    #[serde(default)]
+    pub respond_to_allowlist: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -157,6 +165,8 @@ pub struct ManagedAgentSummary {
     pub last_error: Option<String>,
     pub start_on_app_launch: bool,
     pub log_path: String,
+    pub respond_to: RespondTo,
+    pub respond_to_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,6 +195,12 @@ pub struct CreateManagedAgentRequest {
     pub start_on_app_launch: bool,
     #[serde(default)]
     pub backend: BackendKind,
+    #[serde(default)]
+    pub respond_to: RespondTo,
+    /// Raw allowlist as received from the frontend. Validated and normalized
+    /// before being written to the record.
+    #[serde(default)]
+    pub respond_to_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -295,6 +311,13 @@ pub struct UpdateManagedAgentRequest {
     pub agent_args: Option<Vec<String>>,
     #[serde(default)]
     pub mcp_command: Option<String>,
+    /// Absent = don't touch. Present = set mode.
+    #[serde(default)]
+    pub respond_to: Option<RespondTo>,
+    /// Absent = don't touch. Present = replace the allowlist (validated &
+    /// normalized server-side).
+    #[serde(default)]
+    pub respond_to_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -379,6 +402,68 @@ fn default_start_on_app_launch() -> bool {
 
 fn default_record_active() -> bool {
     true
+}
+
+// ── Inbound author gate ──────────────────────────────────────────────────────
+//
+// Mirrors `sprout-acp`'s `--respond-to` CLI flag and the related
+// `--respond-to-allowlist` option. Persisted per agent so the desktop can
+// translate the user's choice into `SPROUT_ACP_RESPOND_TO` /
+// `SPROUT_ACP_RESPOND_TO_ALLOWLIST` env vars at spawn time.
+//
+// Wire format is kebab-case (`owner-only`, `allowlist`, `anyone`) to match
+// the harness CLI vocabulary and the strings the GUI emits.
+//
+// `nobody` is intentionally NOT exposed here. The harness supports it, but
+// it's a heartbeat-only mode and the desktop has no surface for it.
+
+/// Who the agent should respond to. Defaults to `OwnerOnly`, which matches
+/// the harness default → existing agents behave identically.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RespondTo {
+    #[default]
+    OwnerOnly,
+    Allowlist,
+    Anyone,
+}
+
+impl RespondTo {
+    /// CLI/env wire string (matches `sprout-acp`'s `--respond-to`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OwnerOnly => "owner-only",
+            Self::Allowlist => "allowlist",
+            Self::Anyone => "anyone",
+        }
+    }
+}
+
+/// Validate and normalize a respond-to allowlist.
+///
+/// Rules mirror `sprout-acp/src/config.rs::validate_allowlist`:
+/// - Each entry is exactly 64 hex chars (any case in, lowercase out).
+/// - Duplicates removed, insertion order preserved.
+///
+/// Empty input is allowed here — the boundary check (allowlist mode requires
+/// at least one entry) is the caller's job, because an `UpdateManagedAgentRequest`
+/// may want to validate a list without yet knowing the final mode.
+pub fn validate_respond_to_allowlist(input: &[String]) -> Result<Vec<String>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(input.len());
+    for entry in input {
+        let trimmed = entry.trim();
+        if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!(
+                "invalid pubkey in respond-to allowlist: '{trimmed}' (must be 64 hex chars)"
+            ));
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if seen.insert(lower.clone()) {
+            out.push(lower);
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -472,5 +557,123 @@ mod tests {
         let record2: ManagedAgentRecord =
             serde_json::from_str(&serialized).expect("round-trip should deserialize");
         assert_eq!(record.auth_tag, record2.auth_tag);
+    }
+
+    // ── Inbound author gate tests ────────────────────────────────────────
+
+    use super::{validate_respond_to_allowlist, RespondTo};
+
+    #[test]
+    fn respond_to_default_is_owner_only() {
+        assert_eq!(RespondTo::default(), RespondTo::OwnerOnly);
+    }
+
+    #[test]
+    fn respond_to_serde_is_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&RespondTo::OwnerOnly).unwrap(),
+            "\"owner-only\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RespondTo::Allowlist).unwrap(),
+            "\"allowlist\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RespondTo::Anyone).unwrap(),
+            "\"anyone\""
+        );
+        let parsed: RespondTo = serde_json::from_str("\"owner-only\"").unwrap();
+        assert_eq!(parsed, RespondTo::OwnerOnly);
+        let parsed: RespondTo = serde_json::from_str("\"allowlist\"").unwrap();
+        assert_eq!(parsed, RespondTo::Allowlist);
+        let parsed: RespondTo = serde_json::from_str("\"anyone\"").unwrap();
+        assert_eq!(parsed, RespondTo::Anyone);
+    }
+
+    #[test]
+    fn respond_to_rejects_unknown_modes() {
+        // `nobody` is a valid harness mode but intentionally not exposed
+        // through the desktop request types.
+        assert!(serde_json::from_str::<RespondTo>("\"nobody\"").is_err());
+        assert!(serde_json::from_str::<RespondTo>("\"OwnerOnly\"").is_err());
+    }
+
+    /// Records persisted before this feature must continue to load,
+    /// defaulting to OwnerOnly (the safe, matches-harness-default value).
+    #[test]
+    fn managed_agent_record_without_respond_to_fields_defaults_to_owner_only() {
+        let record: ManagedAgentRecord = serde_json::from_str(
+            r#"{
+                "pubkey": "abcd1234",
+                "name": "legacy-agent",
+                "private_key_nsec": "nsec1fake",
+                "relay_url": "wss://localhost:3000",
+                "acp_command": "sprout-acp",
+                "agent_command": "goose",
+                "agent_args": [],
+                "mcp_command": "sprout-mcp-server",
+                "turn_timeout_seconds": 320,
+                "system_prompt": null,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "last_started_at": null,
+                "last_stopped_at": null,
+                "last_exit_code": null,
+                "last_error": null
+            }"#,
+        )
+        .expect("legacy record without respond_to fields should deserialize");
+        assert_eq!(record.respond_to, RespondTo::OwnerOnly);
+        assert!(record.respond_to_allowlist.is_empty());
+    }
+
+    #[test]
+    fn validate_respond_to_allowlist_accepts_valid_hex_and_lowercases() {
+        let upper = "A".repeat(64);
+        let lower = "a".repeat(64);
+        let result = validate_respond_to_allowlist(&[upper.clone()]).unwrap();
+        assert_eq!(result, vec![lower.clone()]);
+    }
+
+    #[test]
+    fn validate_respond_to_allowlist_dedups_preserving_order() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let a_upper = "A".repeat(64);
+        let input = vec![a.clone(), b.clone(), a_upper];
+        let result = validate_respond_to_allowlist(&input).unwrap();
+        assert_eq!(result, vec![a, b]);
+    }
+
+    #[test]
+    fn validate_respond_to_allowlist_rejects_wrong_length() {
+        let too_short = "a".repeat(63);
+        assert!(validate_respond_to_allowlist(&[too_short]).is_err());
+        let too_long = "a".repeat(65);
+        assert!(validate_respond_to_allowlist(&[too_long]).is_err());
+    }
+
+    #[test]
+    fn validate_respond_to_allowlist_rejects_non_hex() {
+        let bad = "z".repeat(64);
+        assert!(validate_respond_to_allowlist(&[bad]).is_err());
+        // npub-style strings should not slip through.
+        let npub = format!("npub1{}", "a".repeat(59));
+        assert!(validate_respond_to_allowlist(&[npub]).is_err());
+    }
+
+    #[test]
+    fn validate_respond_to_allowlist_trims_whitespace() {
+        let padded = format!("  {}  ", "a".repeat(64));
+        let result = validate_respond_to_allowlist(&[padded]).unwrap();
+        assert_eq!(result, vec!["a".repeat(64)]);
+    }
+
+    #[test]
+    fn validate_respond_to_allowlist_accepts_empty() {
+        // Empty is allowed at this layer; the boundary check
+        // (Allowlist mode requires ≥1 entry) is the caller's job.
+        let result = validate_respond_to_allowlist(&[]).unwrap();
+        assert!(result.is_empty());
     }
 }

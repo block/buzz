@@ -19,6 +19,14 @@ use crate::{
     util::now_iso,
 };
 
+/// Read the workspace owner's pubkey hex from app state without holding the
+/// lock for longer than necessary. Used to populate `SPROUT_ACP_AGENT_OWNER`
+/// as a fallback for legacy agent records that have no NIP-OA `auth_tag`.
+fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
+    let keys = state.keys.lock().map_err(|e| e.to_string())?;
+    Ok(keys.public_key().to_hex())
+}
+
 /// Build the standard agent JSON payload for provider deploy calls.
 fn build_deploy_payload(record: &ManagedAgentRecord) -> serde_json::Value {
     serde_json::json!({
@@ -34,6 +42,10 @@ fn build_deploy_payload(record: &ManagedAgentRecord) -> serde_json::Value {
         "idle_timeout_seconds": record.idle_timeout_seconds,
         "max_turn_duration_seconds": record.max_turn_duration_seconds,
         "parallelism": record.parallelism,
+        // Inbound author gate. Providers that don't yet read these fall back
+        // to the harness default (`owner-only`) — no protocol break.
+        "respond_to": record.respond_to,
+        "respond_to_allowlist": &record.respond_to_allowlist,
     })
 }
 
@@ -150,6 +162,24 @@ pub async fn create_managed_agent(
             return Err("parallelism must be between 1 and 32".to_string());
         }
     }
+
+    // Validate & normalize the respond-to allowlist BEFORE any side effects.
+    // The harness has its own validator (sprout-acp/src/config.rs) but we want
+    // to catch malformed input at the boundary so the agent never tries to
+    // start with a list that will crash it on launch.
+    let respond_to_allowlist =
+        crate::managed_agents::validate_respond_to_allowlist(&input.respond_to_allowlist)?;
+    if input.respond_to == crate::managed_agents::RespondTo::Allowlist
+        && respond_to_allowlist.is_empty()
+    {
+        return Err(
+            "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
+        );
+    }
+
+    // Snapshot the workspace owner pubkey for the legacy-record auth_tag
+    // fallback. Computed outside the records lock to keep lock ordering simple.
+    let owner_hex = workspace_owner_hex(&state)?;
 
     // ── Phase 1: generate keys (sync lock) ────────────────────────────────────
     let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input) = {
@@ -350,6 +380,8 @@ pub async fn create_managed_agent(
             last_stopped_at: None,
             last_exit_code: None,
             last_error: None,
+            respond_to: input.respond_to,
+            respond_to_allowlist: respond_to_allowlist.clone(),
         };
 
         records.push(record);
@@ -357,7 +389,9 @@ pub async fn create_managed_agent(
         let mut spawn_error = None;
         if input.spawn_after_create && input.backend == BackendKind::Local {
             let record = find_managed_agent_mut(&mut records, &pubkey)?;
-            if let Err(error) = start_managed_agent_process(&app, record, &mut runtimes) {
+            if let Err(error) =
+                start_managed_agent_process(&app, record, &mut runtimes, Some(&owner_hex))
+            {
                 record.updated_at = now_iso();
                 record.last_error = Some(error.clone());
                 spawn_error = Some(error);
@@ -455,6 +489,9 @@ pub async fn start_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
+    // Snapshot the workspace owner pubkey for the legacy auth_tag fallback.
+    // Read outside the records lock to keep lock ordering simple.
+    let owner_hex = workspace_owner_hex(&state)?;
     // Collect backend info and handle local vs provider under lock.
     let (backend, cached_binary_path, agent_json) = {
         let _store_guard = state
@@ -475,7 +512,7 @@ pub async fn start_managed_agent(
 
         if record.backend == BackendKind::Local {
             // Local: spawn in-process and return immediately.
-            start_managed_agent_process(&app, record, &mut runtimes)?;
+            start_managed_agent_process(&app, record, &mut runtimes, Some(&owner_hex))?;
             save_managed_agents(&app, &records)?;
             let record = records
                 .iter()

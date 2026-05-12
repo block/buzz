@@ -226,6 +226,10 @@ export type RawManagedAgent = {
   start_on_app_launch: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
+  // Optional: pre-feature mock fixtures may omit these. Mapped to
+  // `"owner-only"` / `[]` in `fromRawManagedAgent`.
+  respond_to?: ManagedAgent["respondTo"];
+  respond_to_allowlist?: string[];
 };
 
 type RawCreateManagedAgentResponse = {
@@ -833,6 +837,10 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     startOnAppLaunch: agent.start_on_app_launch,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
+    // Fallbacks for pre-feature mocks/fixtures that don't carry these fields.
+    // Real agent records always include them (defaulted server-side).
+    respondTo: agent.respond_to ?? "owner-only",
+    respondToAllowlist: agent.respond_to_allowlist ?? [],
   };
 }
 
@@ -945,6 +953,8 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         spawnAfterCreate: input.spawnAfterCreate,
         startOnAppLaunch: input.startOnAppLaunch,
         backend: input.backend,
+        respondTo: input.respondTo,
+        respondToAllowlist: input.respondToAllowlist,
       },
     },
   );

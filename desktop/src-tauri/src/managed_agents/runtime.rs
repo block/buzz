@@ -427,6 +427,8 @@ pub fn build_managed_agent_summary(
         last_error: record.last_error.clone(),
         start_on_app_launch: record.start_on_app_launch,
         log_path,
+        respond_to: record.respond_to,
+        respond_to_allowlist: record.respond_to_allowlist.clone(),
     })
 }
 
@@ -440,12 +442,73 @@ pub fn find_managed_agent_mut<'a>(
         .ok_or_else(|| format!("agent {pubkey} not found"))
 }
 
+/// Pure decision function for the inbound author gate env vars.
+///
+/// Returns the env vars to **set** and the env vars to **remove**. Removal is
+/// belt-and-suspenders: an inherited parent env var must not leak into a
+/// child agent and silently change its security posture.
+///
+/// The `owner_hex` argument is the current workspace owner pubkey. It's used
+/// as a fallback for legacy records (`auth_tag.is_none()`) — without it, the
+/// harness's owner cache stays empty and `owner-only` / `allowlist` modes
+/// drop everything.
+///
+/// Returns `Err(...)` if the record's allowlist fails validation. The harness
+/// validates too, but doing it here means we never spawn a doomed process.
+pub(crate) fn build_respond_to_env(
+    record: &ManagedAgentRecord,
+    owner_hex: Option<&str>,
+) -> Result<(Vec<(&'static str, String)>, Vec<&'static str>), String> {
+    // Defensive re-validation: an on-disk record could have been hand-edited.
+    let normalized = super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)?;
+    if record.respond_to == super::types::RespondTo::Allowlist && normalized.is_empty() {
+        return Err(
+            "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
+        );
+    }
+
+    let mut set: Vec<(&'static str, String)> = Vec::new();
+    let mut remove: Vec<&'static str> = Vec::new();
+
+    set.push((
+        "SPROUT_ACP_RESPOND_TO",
+        record.respond_to.as_str().to_string(),
+    ));
+
+    if record.respond_to == super::types::RespondTo::Allowlist {
+        set.push(("SPROUT_ACP_RESPOND_TO_ALLOWLIST", normalized.join(",")));
+    } else {
+        remove.push("SPROUT_ACP_RESPOND_TO_ALLOWLIST");
+    }
+
+    // Legacy fallback: agents created before NIP-OA lack `auth_tag`. Without
+    // it the harness can't resolve the owner, and owner-dependent gate modes
+    // would drop every event. Forwarding the workspace owner pubkey via
+    // SPROUT_ACP_AGENT_OWNER keeps those records functional. Modern records
+    // (`auth_tag = Some(...)`) use `SPROUT_AUTH_TAG` as before.
+    if record.auth_tag.is_none() {
+        if let Some(owner) = owner_hex {
+            set.push(("SPROUT_ACP_AGENT_OWNER", owner.to_string()));
+        } else {
+            remove.push("SPROUT_ACP_AGENT_OWNER");
+        }
+    } else {
+        remove.push("SPROUT_ACP_AGENT_OWNER");
+    }
+
+    Ok((set, remove))
+}
+
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible
 /// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
+///
+/// `owner_hex`: the workspace owner's pubkey, used as a fallback for legacy
+/// records that have no NIP-OA `auth_tag`. See `build_respond_to_env`.
 pub fn spawn_agent_child(
     app: &AppHandle,
     record: &ManagedAgentRecord,
+    owner_hex: Option<&str>,
 ) -> Result<(std::process::Child, std::path::PathBuf), String> {
     let log_path = managed_agent_log_path(app, &record.pubkey)?;
     append_log_marker(
@@ -574,6 +637,18 @@ pub fn spawn_agent_child(
         command.env_remove("SPROUT_AUTH_TAG");
     }
 
+    // Inbound author gate: who is this agent allowed to respond to?
+    // Validation is strict here — a malformed allowlist on disk fails before
+    // we spawn anything (the harness would also reject it, but we'd rather
+    // fail with a clear error than crash-loop the child).
+    let (gate_set, gate_remove) = build_respond_to_env(record, owner_hex)?;
+    for (key, value) in &gate_set {
+        command.env(key, value);
+    }
+    for key in &gate_remove {
+        command.env_remove(key);
+    }
+
     command.env("SPROUT_ACP_RELAY_OBSERVER", "true");
 
     // ── Git credential helper for Sprout relay ──────────────────────────
@@ -643,6 +718,7 @@ pub fn start_managed_agent_process(
     app: &AppHandle,
     record: &mut ManagedAgentRecord,
     runtimes: &mut HashMap<String, ManagedAgentProcess>,
+    owner_hex: Option<&str>,
 ) -> Result<(), String> {
     if let Some(runtime) = runtimes.get_mut(&record.pubkey) {
         if runtime
@@ -667,7 +743,7 @@ pub fn start_managed_agent_process(
         record.runtime_pid = None;
     }
 
-    let (child, log_path) = spawn_agent_child(app, record)?;
+    let (child, log_path) = spawn_agent_child(app, record, owner_hex)?;
 
     let now = now_iso();
     record.updated_at = now.clone();
@@ -768,5 +844,142 @@ mod tests {
     #[test]
     fn unknown_command_returns_none() {
         assert!(known_acp_provider("custom-agent").is_none());
+    }
+
+    // ── build_respond_to_env tests ───────────────────────────────────────
+
+    use super::build_respond_to_env;
+    use crate::managed_agents::types::{ManagedAgentRecord, RespondTo};
+
+    /// Construct a minimal record fixture for env-building tests. Only the
+    /// fields read by `build_respond_to_env` matter here.
+    fn fixture(
+        respond_to: RespondTo,
+        allowlist: Vec<String>,
+        auth_tag: Option<String>,
+    ) -> ManagedAgentRecord {
+        ManagedAgentRecord {
+            pubkey: "p".into(),
+            name: "n".into(),
+            persona_id: None,
+            private_key_nsec: "nsec1fake".into(),
+            auth_tag,
+            relay_url: "ws://localhost:3000".into(),
+            acp_command: "sprout-acp".into(),
+            agent_command: "goose".into(),
+            agent_args: vec![],
+            mcp_command: "sprout-mcp-server".into(),
+            turn_timeout_seconds: 320,
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            parallelism: 1,
+            system_prompt: None,
+            model: None,
+            mcp_toolsets: None,
+            start_on_app_launch: false,
+            runtime_pid: None,
+            backend: Default::default(),
+            backend_agent_id: None,
+            provider_binary_path: None,
+            persona_pack_path: None,
+            persona_name_in_pack: None,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+            last_started_at: None,
+            last_stopped_at: None,
+            last_exit_code: None,
+            last_error: None,
+            respond_to,
+            respond_to_allowlist: allowlist,
+        }
+    }
+
+    #[test]
+    fn build_env_owner_only_sets_mode_and_removes_others() {
+        let rec = fixture(RespondTo::OwnerOnly, vec![], Some("tag".into()));
+        let (set, remove) = build_respond_to_env(&rec, Some("owner")).unwrap();
+        let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
+        assert_eq!(
+            set_map.get("SPROUT_ACP_RESPOND_TO").map(String::as_str),
+            Some("owner-only")
+        );
+        assert!(!set_map.contains_key("SPROUT_ACP_RESPOND_TO_ALLOWLIST"));
+        assert!(remove.contains(&"SPROUT_ACP_RESPOND_TO_ALLOWLIST"));
+        // auth_tag is present → no AGENT_OWNER fallback fires.
+        assert!(remove.contains(&"SPROUT_ACP_AGENT_OWNER"));
+    }
+
+    #[test]
+    fn build_env_allowlist_sets_both_envs_and_joins() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let rec = fixture(
+            RespondTo::Allowlist,
+            vec![a.clone(), b.clone()],
+            Some("tag".into()),
+        );
+        let (set, _remove) = build_respond_to_env(&rec, Some("owner")).unwrap();
+        let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
+        assert_eq!(
+            set_map.get("SPROUT_ACP_RESPOND_TO").map(String::as_str),
+            Some("allowlist")
+        );
+        assert_eq!(
+            set_map
+                .get("SPROUT_ACP_RESPOND_TO_ALLOWLIST")
+                .map(String::as_str),
+            Some(format!("{a},{b}").as_str()),
+        );
+    }
+
+    #[test]
+    fn build_env_anyone_omits_allowlist_var() {
+        let rec = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+        let (set, remove) = build_respond_to_env(&rec, Some("owner")).unwrap();
+        let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
+        assert_eq!(
+            set_map.get("SPROUT_ACP_RESPOND_TO").map(String::as_str),
+            Some("anyone")
+        );
+        assert!(!set_map.contains_key("SPROUT_ACP_RESPOND_TO_ALLOWLIST"));
+        assert!(remove.contains(&"SPROUT_ACP_RESPOND_TO_ALLOWLIST"));
+    }
+
+    #[test]
+    fn build_env_legacy_record_without_auth_tag_emits_agent_owner() {
+        let rec = fixture(RespondTo::OwnerOnly, vec![], None);
+        let (set, remove) = build_respond_to_env(&rec, Some("ownerhex")).unwrap();
+        let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
+        assert_eq!(
+            set_map.get("SPROUT_ACP_AGENT_OWNER").map(String::as_str),
+            Some("ownerhex")
+        );
+        assert!(!remove.contains(&"SPROUT_ACP_AGENT_OWNER"));
+    }
+
+    #[test]
+    fn build_env_legacy_record_without_owner_hex_removes_agent_owner() {
+        // No owner available to forward → make sure we don't inherit a leaked
+        // env var from the parent.
+        let rec = fixture(RespondTo::OwnerOnly, vec![], None);
+        let (_set, remove) = build_respond_to_env(&rec, None).unwrap();
+        assert!(remove.contains(&"SPROUT_ACP_AGENT_OWNER"));
+    }
+
+    #[test]
+    fn build_env_rejects_corrupted_allowlist() {
+        let rec = fixture(
+            RespondTo::Allowlist,
+            vec!["not-hex".into()],
+            Some("tag".into()),
+        );
+        assert!(build_respond_to_env(&rec, Some("owner")).is_err());
+    }
+
+    #[test]
+    fn build_env_rejects_empty_allowlist_in_allowlist_mode() {
+        let rec = fixture(RespondTo::Allowlist, vec![], Some("tag".into()));
+        let err = build_respond_to_env(&rec, Some("owner")).unwrap_err();
+        assert!(err.contains("at least one pubkey"));
     }
 }
