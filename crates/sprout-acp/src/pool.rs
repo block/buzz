@@ -1157,8 +1157,12 @@ pub async fn run_prompt_task(
         }
         Err(e) => {
             tracing::error!(target: "pool::prompt", "session_prompt error: {e}");
-            // Invalidate only the affected session.
-            agent.state.invalidate(&source);
+            // AgentError means the agent caught a problem before mutating
+            // session state (e.g. bad LLM response). The session is healthy —
+            // don't invalidate it. Other errors may have corrupted state.
+            if !matches!(e, AcpError::AgentError(_)) {
+                agent.state.invalidate(&source);
+            }
             let _ = result_tx.send(PromptResult {
                 agent,
                 source,
