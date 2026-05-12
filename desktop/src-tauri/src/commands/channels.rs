@@ -116,6 +116,62 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
             channels.push(info);
         }
     }
+
+    // Populate member_count by batch-fetching kind:39002 for every listed
+    // channel and counting unique p-tag pubkeys. The kind:40901 summary
+    // sidecar that channel_info_from_event prefers isn't emitted by the
+    // relay today, so without this step every channel reports 0 members
+    // in the channel browser (the active-channel top bar masks this with
+    // its own live members query).
+    let all_d_tags: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
+    if !all_d_tags.is_empty() {
+        let members_events = query_relay(
+            &state,
+            &[serde_json::json!({
+                "kinds": [39002],
+                "#d": all_d_tags,
+                "limit": all_d_tags.len(),
+            })],
+        )
+        .await
+        .unwrap_or_default();
+
+        let mut counts: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::with_capacity(members_events.len());
+        for ev in &members_events {
+            let mut d_value: Option<String> = None;
+            let mut unique_pubkeys: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for tag in ev.tags.iter() {
+                let slice = tag.as_slice();
+                match slice.first().map(String::as_str) {
+                    Some("d") if d_value.is_none() => {
+                        if let Some(v) = slice.get(1) {
+                            d_value = Some(v.clone());
+                        }
+                    }
+                    Some("p") => {
+                        if let Some(pk) = slice.get(1) {
+                            if !pk.is_empty() {
+                                unique_pubkeys.insert(pk.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(d) = d_value {
+                counts.insert(d, unique_pubkeys.len() as i64);
+            }
+        }
+
+        for channel in &mut channels {
+            if let Some(count) = counts.get(&channel.id) {
+                channel.member_count = *count;
+            }
+        }
+    }
+
     Ok(channels)
 }
 
