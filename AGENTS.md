@@ -71,6 +71,25 @@ Additional rules:
 relay. Both paths converge on shared DB functions in `sprout-db`. When adding
 a feature, implement the shared DB logic first, then wire up both surfaces.
 
+**Prefer Nostr events over new REST endpoints**: For new feature work, model
+the operation as a Nostr event (new kind in `sprout-core/src/kind.rs`, handler
+in `sprout-relay`) rather than adding a new REST endpoint. REST is reserved
+for things that genuinely need an HTTP-only surface: media upload/download
+(Blossom), OAuth callbacks, health checks, and the existing read endpoints
+that proxy DB queries. Two helpful endpoints already exist and rarely need
+to be duplicated:
+
+- `POST /events` — submit any signed event (same path the WebSocket uses).
+- `POST /query` — Nostr REQ filters over HTTP. NIP-50 `search` filters
+  are routed to `sprout-search` (Typesense-backed) automatically.
+- `POST /count` — Nostr COUNT filters over HTTP.
+
+If you find yourself reaching for a new REST endpoint, first check whether
+an event kind would do the job — it usually will, and you get realtime
+fan-out, NIP-29 scoping, and the existing auth pipeline for free.
+
+Reference https://github.com/nostr-protocol/nips
+
 **Event kinds**: All event kind integers are defined in
 `sprout-core/src/kind.rs`. New features get new kind integers — add them here
 first, then implement handling in the relay.
