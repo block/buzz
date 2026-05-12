@@ -15,6 +15,7 @@ import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { useRepoRefs } from "../use-repo-refs";
 import { useRepo } from "../use-repos";
+import type { CommitInfo, ReadmeResult, TreeEntry } from "../git-client";
 import { useGitTree, useGitLog, useGitReadme } from "../use-git-browse";
 import { ConnectButton } from "./ConnectButton";
 import { PubkeyAvatar } from "./PubkeyAvatar";
@@ -88,6 +89,67 @@ function DetailSkeleton() {
         </div>
       </div>
       <aside className="hidden w-72 shrink-0 lg:block" />
+    </div>
+  );
+}
+
+type Tab = "code" | "commits";
+
+function RepoTabs({
+  treeEntries,
+  treeLoading,
+  commits,
+  commitsLoading,
+  readme,
+  readmeLoading,
+}: {
+  treeEntries: TreeEntry[] | undefined;
+  treeLoading: boolean;
+  commits: CommitInfo[] | undefined;
+  commitsLoading: boolean;
+  readme: ReadmeResult | null | undefined;
+  readmeLoading: boolean;
+}) {
+  const [tab, setTab] = useState<Tab>("code");
+
+  return (
+    <div className="mt-6">
+      {/* Tab bar */}
+      <div className="flex gap-1 border-b border-border">
+        <button
+          type="button"
+          onClick={() => setTab("code")}
+          className={`px-4 py-2 text-sm font-medium transition-colors ${
+            tab === "code"
+              ? "border-b-2 border-foreground text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          Code
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("commits")}
+          className={`px-4 py-2 text-sm font-medium transition-colors ${
+            tab === "commits"
+              ? "border-b-2 border-foreground text-foreground"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          Commits
+        </button>
+      </div>
+
+      {/* Tab content */}
+      {tab === "code" && (
+        <>
+          <RepoTreeSection entries={treeEntries} isLoading={treeLoading} />
+          <RepoReadmeSection readme={readme} isLoading={readmeLoading} />
+        </>
+      )}
+      {tab === "commits" && (
+        <RepoCommitsSection commits={commits} isLoading={commitsLoading} />
+      )}
     </div>
   );
 }
@@ -210,14 +272,15 @@ export function RepoDetailPage() {
           </div>
         )}
 
-        {/* File tree */}
-        <RepoTreeSection entries={treeEntries} isLoading={treeLoading} />
-
-        {/* Recent commits */}
-        <RepoCommitsSection commits={commits} isLoading={commitsLoading} />
-
-        {/* README */}
-        <RepoReadmeSection readme={readme} isLoading={readmeLoading} />
+        {/* Tabs */}
+        <RepoTabs
+          treeEntries={treeEntries}
+          treeLoading={treeLoading}
+          commits={commits}
+          commitsLoading={commitsLoading}
+          readme={readme}
+          readmeLoading={readmeLoading}
+        />
 
         {/* Clone URLs */}
         {repo.cloneUrls.length > 0 && (
