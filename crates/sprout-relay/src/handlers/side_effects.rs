@@ -1620,6 +1620,20 @@ async fn handle_git_repo_announcement(event: &Event, state: &Arc<AppState>) -> a
 
     // Resolve repo path.
     let git_repo_root = &state.config.git_repo_path;
+
+    // Defensive: ensure the configured root exists. Config bootstrap creates
+    // this at startup, but a misconfigured deployment or out-of-band deletion
+    // would otherwise cause every canonicalize() below to fail and the
+    // side-effect to be silently swallowed by the ingest pipeline, leaving the
+    // repo announcement stored but no bare repo on disk (push then 500s with
+    // "git service misconfigured").
+    if let Err(e) = std::fs::create_dir_all(git_repo_root) {
+        return Err(anyhow::anyhow!(
+            "failed to ensure git_repo_path {} exists: {e}",
+            git_repo_root.display()
+        ));
+    }
+
     let repo_dir = git_repo_root
         .join(&owner_hex)
         .join(format!("{repo_id}.git"));

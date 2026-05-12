@@ -287,6 +287,19 @@ impl Config {
         let git_repo_path: std::path::PathBuf = std::env::var("SPROUT_GIT_REPO_PATH")
             .unwrap_or_else(|_| "./repos".to_string())
             .into();
+        // Ensure the git repo root exists. The smart-HTTP transport and the
+        // kind:30617 side-effect handler both canonicalize this path; if it's
+        // missing, all git operations 500 with "git service misconfigured" and
+        // repo announcements silently fail to create their bare repo on disk.
+        // Bootstrapping here makes the relay self-provision its own data dir
+        // (matches how we treat other relay-owned paths) rather than requiring
+        // ops to mkdir it out of band.
+        if let Err(e) = std::fs::create_dir_all(&git_repo_path) {
+            return Err(ConfigError::InvalidValue(format!(
+                "SPROUT_GIT_REPO_PATH={} could not be created: {e}",
+                git_repo_path.display()
+            )));
+        }
         let git_max_pack_bytes: u64 = std::env::var("SPROUT_GIT_MAX_PACK_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -437,6 +450,52 @@ mod tests {
         assert_eq!(
             config.media.server_domain.as_deref(),
             Some("relay.example.com")
+        );
+    }
+
+    #[test]
+    fn git_repo_path_is_created_if_missing() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        // Pick a path under temp_dir that definitely doesn't exist yet.
+        let base = std::env::temp_dir().join(format!(
+            "sprout-test-git-repo-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let nested = base.join("nested").join("repos");
+        assert!(!nested.exists(), "test precondition: path must not exist");
+
+        std::env::set_var("SPROUT_GIT_REPO_PATH", &nested);
+        let result = Config::from_env();
+        std::env::remove_var("SPROUT_GIT_REPO_PATH");
+
+        let config = result.expect("config should self-bootstrap missing git_repo_path");
+        assert_eq!(config.git_repo_path, nested);
+        assert!(
+            nested.is_dir(),
+            "git_repo_path should exist after config load"
+        );
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn git_repo_path_unwritable_returns_error() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        // Try to create a path under a regular file — must fail.
+        // Using /dev/null as the parent guarantees create_dir_all fails on unix.
+        let bogus = std::path::PathBuf::from("/dev/null/cannot-create-here");
+        std::env::set_var("SPROUT_GIT_REPO_PATH", &bogus);
+        let result = Config::from_env();
+        std::env::remove_var("SPROUT_GIT_REPO_PATH");
+        assert!(
+            matches!(result, Err(ConfigError::InvalidValue(ref msg)) if msg.contains("SPROUT_GIT_REPO_PATH")),
+            "expected InvalidValue mentioning SPROUT_GIT_REPO_PATH, got {result:?}"
         );
     }
 
