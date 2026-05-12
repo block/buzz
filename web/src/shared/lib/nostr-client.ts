@@ -32,7 +32,7 @@ const QUERY_TIMEOUT_MS = 10_000;
 
 /** Lazily-generated ephemeral keypair for NIP-42 AUTH. */
 let _secretKey: Uint8Array | null = null;
-function getEphemeralKey(): Uint8Array {
+export function getEphemeralKey(): Uint8Array {
   if (!_secretKey) {
     _secretKey = generateSecretKey();
   }

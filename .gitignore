@@ -35,6 +35,11 @@ node_modules/
 # sqlx offline query data (generated, not portable)
 .sqlx/
 
+# SQLite database (created by relay in CWD)
+sprout.db
+sprout.db-wal
+sprout.db-shm
+
 # Docker volumes (if mounted locally)
 mysql-data/
 typesense-data/

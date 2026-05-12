@@ -15,9 +15,13 @@ import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { useRepoRefs } from "../use-repo-refs";
 import { useRepo } from "../use-repos";
+import { useGitTree, useGitLog, useGitReadme } from "../use-git-browse";
 import { ConnectButton } from "./ConnectButton";
 import { PubkeyAvatar } from "./PubkeyAvatar";
 import { RepoRefsSection } from "./RepoRefsSection";
+import { RepoTreeSection } from "./RepoTreeSection";
+import { RepoCommitsSection } from "./RepoCommitsSection";
+import { RepoReadmeSection } from "./RepoReadmeSection";
 
 function relativeTime(unix: number): string {
   const now = Date.now();
@@ -73,14 +77,17 @@ function CopyableUrl({ url }: { url: string }) {
 
 function DetailSkeleton() {
   return (
-    <div className="mx-auto w-full max-w-3xl px-4 py-8">
-      <div className="h-5 w-24 animate-pulse rounded bg-muted" />
-      <div className="mt-6 h-8 w-64 animate-pulse rounded bg-muted" />
-      <div className="mt-3 h-5 w-96 animate-pulse rounded bg-muted" />
-      <div className="mt-8 space-y-3">
-        <div className="h-4 w-32 animate-pulse rounded bg-muted" />
-        <div className="h-10 w-full animate-pulse rounded bg-muted" />
+    <div className="mx-auto flex w-full max-w-7xl gap-8 px-4 py-8">
+      <div className="min-w-0 flex-1">
+        <div className="h-5 w-24 animate-pulse rounded bg-muted" />
+        <div className="mt-6 h-8 w-64 animate-pulse rounded bg-muted" />
+        <div className="mt-3 h-5 w-96 animate-pulse rounded bg-muted" />
+        <div className="mt-8 space-y-3">
+          <div className="h-4 w-32 animate-pulse rounded bg-muted" />
+          <div className="h-10 w-full animate-pulse rounded bg-muted" />
+        </div>
       </div>
+      <aside className="hidden w-72 shrink-0 lg:block" />
     </div>
   );
 }
@@ -89,6 +96,34 @@ export function RepoDetailPage() {
   const { repoId } = useParams({ from: "/repos/$repoId" });
   const { data: repo, isLoading, error } = useRepo(repoId);
   const { data: refs, isLoading: refsLoading } = useRepoRefs(repoId);
+
+  const defaultRef = refs?.head?.ref ?? "main";
+  const owner = repo?.owner ?? "";
+  const repoName = repo?.id ?? "";
+
+  const {
+    data: treeEntries,
+    isLoading: treeLoading,
+    error: treeError,
+  } = useGitTree(owner, repoName, defaultRef);
+  const {
+    data: commits,
+    isLoading: commitsLoading,
+    error: commitsError,
+  } = useGitLog(owner, repoName, defaultRef);
+  const { data: readme, isLoading: readmeLoading } = useGitReadme(
+    owner,
+    repoName,
+    defaultRef,
+  );
+
+  // Surface clone/browse errors — these are otherwise silent
+  const browseError = treeError || commitsError;
+  useEffect(() => {
+    if (browseError) {
+      console.error("[git-browse]", browseError);
+    }
+  }, [browseError]);
 
   useEffect(() => {
     if (error) {
@@ -102,7 +137,34 @@ export function RepoDetailPage() {
 
   if (!repo) {
     return (
-      <div className="mx-auto w-full max-w-3xl px-4 py-8">
+      <div className="mx-auto flex w-full max-w-7xl gap-8 px-4 py-8">
+        <div className="min-w-0 flex-1">
+          <Link
+            to="/"
+            className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to repositories
+          </Link>
+          <div className="mt-12 text-center">
+            <BookMarked className="mx-auto h-10 w-10 text-muted-foreground" />
+            <h1 className="mt-4 text-xl font-semibold">Repository not found</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              This repository may have been removed or doesn't exist on this
+              relay.
+            </p>
+          </div>
+        </div>
+        <aside className="hidden w-72 shrink-0 lg:block" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-auto flex w-full max-w-7xl gap-8 px-4 py-8">
+      {/* Main content */}
+      <div className="min-w-0 flex-1">
+        {/* Back link */}
         <Link
           to="/"
           className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
@@ -110,109 +172,125 @@ export function RepoDetailPage() {
           <ArrowLeft className="h-4 w-4" />
           Back to repositories
         </Link>
-        <div className="mt-12 text-center">
-          <BookMarked className="mx-auto h-10 w-10 text-muted-foreground" />
-          <h1 className="mt-4 text-xl font-semibold">Repository not found</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            This repository may have been removed or doesn't exist on this
-            relay.
+
+        {/* Mobile-only connect button */}
+        <div className="mt-4 lg:hidden">
+          <ConnectButton className="w-full" />
+        </div>
+
+        {/* Header */}
+        <div className="mt-6">
+          <div className="flex items-center gap-3">
+            <BookMarked className="h-6 w-6 shrink-0 text-muted-foreground" />
+            <h1 className="text-2xl font-semibold tracking-tight">
+              {repo.name}
+            </h1>
+            <Badge variant="outline">Public</Badge>
+          </div>
+          {repo.description && (
+            <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+              {repo.description}
+            </p>
+          )}
+          <p className="mt-2 text-xs text-muted-foreground">
+            Updated {relativeTime(repo.createdAt)}
           </p>
         </div>
-      </div>
-    );
-  }
 
-  return (
-    <div className="mx-auto w-full max-w-3xl px-4 py-8">
-      {/* Back link */}
-      <Link
-        to="/"
-        className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-      >
-        <ArrowLeft className="h-4 w-4" />
-        Back to repositories
-      </Link>
+        {/* Refs & HEAD */}
+        <RepoRefsSection refs={refs} isLoading={refsLoading} />
 
-      {/* Header */}
-      <div className="mt-6">
-        <div className="flex items-center gap-3">
-          <BookMarked className="h-6 w-6 shrink-0 text-muted-foreground" />
-          <h1 className="text-2xl font-semibold tracking-tight">{repo.name}</h1>
-          <Badge variant="outline">Public</Badge>
-        </div>
-        {repo.description && (
-          <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-            {repo.description}
-          </p>
+        {/* Clone/browse error banner */}
+        {browseError && (
+          <div className="mt-6 rounded-md border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            Failed to load repository contents:{" "}
+            {browseError instanceof Error
+              ? browseError.message
+              : String(browseError)}
+          </div>
         )}
-        <p className="mt-2 text-xs text-muted-foreground">
-          Updated {relativeTime(repo.createdAt)}
-        </p>
+
+        {/* File tree */}
+        <RepoTreeSection entries={treeEntries} isLoading={treeLoading} />
+
+        {/* Recent commits */}
+        <RepoCommitsSection commits={commits} isLoading={commitsLoading} />
+
+        {/* README */}
+        <RepoReadmeSection readme={readme} isLoading={readmeLoading} />
+
+        {/* Clone URLs */}
+        {repo.cloneUrls.length > 0 && (
+          <div className="mt-8">
+            <h2 className="mb-3 text-sm font-semibold">Clone</h2>
+            <div className="space-y-2">
+              {repo.cloneUrls.map((url) => (
+                <CopyableUrl key={url} url={url} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* External link — validate scheme to prevent javascript: XSS */}
+        {(() => {
+          if (!repo.webUrl) return null;
+          let safe: string | null = null;
+          try {
+            safe = /^https?:/.test(new URL(repo.webUrl).protocol)
+              ? repo.webUrl
+              : null;
+          } catch {
+            safe = null;
+          }
+          if (!safe) return null;
+          return (
+            <div className="mt-6">
+              <Button variant="outline" asChild>
+                <a href={safe} target="_blank" rel="noopener noreferrer">
+                  <ExternalLink className="h-4 w-4" />
+                  View on web
+                </a>
+              </Button>
+            </div>
+          );
+        })()}
+
+        {/* Channel link */}
+        {repo.channelId && (
+          <div className="mt-8">
+            <Button variant="outline" asChild>
+              <a href={`/channels/${repo.channelId}`}>
+                <MessageSquare className="h-4 w-4" />
+                View channel
+              </a>
+            </Button>
+          </div>
+        )}
       </div>
 
-      {/* Refs & HEAD */}
-      <RepoRefsSection refs={refs} isLoading={refsLoading} />
+      {/* Sidebar */}
+      <aside className="hidden w-72 shrink-0 border-l border-border pl-8 lg:block">
+        <div className="space-y-6">
+          {/* Open in Sprout */}
+          <ConnectButton className="w-full" />
 
-      {/* Clone URLs */}
-      {repo.cloneUrls.length > 0 && (
-        <div className="mt-8">
-          <h2 className="mb-3 text-sm font-semibold">Clone</h2>
-          <div className="space-y-2">
-            {repo.cloneUrls.map((url) => (
-              <CopyableUrl key={url} url={url} />
-            ))}
+          {/* People */}
+          <div>
+            <h3 className="mb-3 flex items-center gap-2 text-sm font-semibold">
+              <Users className="h-4 w-4" />
+              People
+            </h3>
+            <div className="flex flex-wrap gap-2">
+              <PubkeyAvatar pubkey={repo.owner} />
+              {repo.contributors
+                .filter((c) => c !== repo.owner)
+                .map((c) => (
+                  <PubkeyAvatar key={c} pubkey={c} />
+                ))}
+            </div>
           </div>
         </div>
-      )}
-
-      {/* External link */}
-      {repo.webUrl && (
-        <div className="mt-6">
-          <Button variant="outline" asChild>
-            <a href={repo.webUrl} target="_blank" rel="noopener noreferrer">
-              <ExternalLink className="h-4 w-4" />
-              View on web
-            </a>
-          </Button>
-        </div>
-      )}
-
-      {/* Owner & Contributors */}
-      <div className="mt-8">
-        <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
-          <Users className="h-4 w-4" />
-          People
-        </h2>
-        <div className="flex flex-wrap gap-2">
-          <PubkeyAvatar pubkey={repo.owner} />
-          {repo.contributors
-            .filter((c) => c !== repo.owner)
-            .map((c) => (
-              <PubkeyAvatar key={c} pubkey={c} />
-            ))}
-        </div>
-      </div>
-
-      {/* Channel link */}
-      {repo.channelId && (
-        <div className="mt-8">
-          <Button variant="outline" asChild>
-            <a href={`/channels/${repo.channelId}`}>
-              <MessageSquare className="h-4 w-4" />
-              View channel
-            </a>
-          </Button>
-        </div>
-      )}
-
-      {/* Open in Sprout CTA */}
-      <div className="mt-8 rounded-lg border border-border bg-muted/30 p-6 text-center">
-        <p className="mb-3 text-sm text-muted-foreground">
-          Open this relay in the Sprout desktop app to push code and
-          collaborate.
-        </p>
-        <ConnectButton />
-      </div>
+      </aside>
     </div>
   );
 }

@@ -1,3 +1,5 @@
 packages:
   - "desktop"
   - "web"
+patchedDependencies:
+  isomorphic-git: patches/isomorphic-git.patch
