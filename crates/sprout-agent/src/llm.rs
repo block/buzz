@@ -127,7 +127,9 @@ fn anthropic_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> V
                         "name": c.name, "input": c.arguments }));
                 }
                 if content.is_empty() {
-                    content.push(json!({ "type": "text", "text": "" }));
+                    // Anthropic requires non-empty content arrays AND rejects
+                    // empty text blocks. A single space satisfies both.
+                    content.push(json!({ "type": "text", "text": " " }));
                 }
                 messages.push(json!({ "role": "assistant", "content": content }));
             }
