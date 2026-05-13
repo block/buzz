@@ -56,12 +56,13 @@ const overrides = new Map([
   ["src/features/huddle/HuddleContext.tsx", 650], // huddle lifecycle context + joinHuddle + connectAndSetupMedia shared helper + activeSpeakers/isReconnecting state + PTT (reusable AudioContext) + TTS subscription + mic level analyser (10fps throttle) + agent pubkey refresh
   ["src/features/agents/hooks.ts", 540], // agent query/mutation surface now includes built-in persona library activation + useUpdateManagedAgentMutation
   ["src/features/agents/ui/AgentsView.tsx", 880], // remote agent lifecycle controls + persona/team management + persona import-update dialog wiring + built-in catalog/library state orchestration
+  ["src/features/agents/ui/UnifiedAgentsSection.tsx", 570], // unified persona-grouped agent view with collapsible groups, bulk actions, drag-drop import, empty/loading states
   ["src/features/agents/ui/ManagedAgentRow.tsx", 530], // EditAgentDialog integration + provider/local branching
   ["src/features/agents/ui/TeamDialog.tsx", 530], // team create/edit dialog with persona multi-select, import button, window drag detection, removal confirmation
   ["src/features/agents/ui/TeamImportUpdateDialog.tsx", 660], // team import diff preview with member matching/updating/adding/removing sections, LCS line counts, removal confirmation
   ["src/features/agents/ui/useTeamActions.ts", 510], // team CRUD + export + import + import-update orchestration with query invalidation
   ["src/features/agents/ui/CreateAgentDialog.tsx", 685], // provider selector + config form + schema-typed config coercion + required field validation + locked scopes
-  ["src/features/channels/ui/AddChannelBotDialog.tsx", 640], // provider mode: Run on selector, trust warning, probe effect, single-agent enforcement, provider warnings display
+  ["src/features/channels/ui/AddChannelBotDialog.tsx", 660], // provider mode: Run on selector, trust warning, probe effect, single-agent enforcement, provider warnings display + RespondTo field
   ["src/features/settings/ui/ChannelTemplatesSettingsCard.tsx", 850], // template CRUD card + TemplateFormDialog (persona/team chip selectors + provider assignments + canvas template) + TemplateTeamSelector + ProviderAssignments + ProviderRow
   ["src/shared/api/types.ts", 620], // ... + RespondToMode + respondTo/respondToAllowlist on ManagedAgent/Create/Update inputs
   ["src-tauri/src/events.rs", 610], // event builders + build_huddle_guidelines (kind:48106) + post_event_raw transport helper + participant p-tag on join/leave + NIP-43 relay admin builders (add/remove/change-role) + check_relay_role + DM/presence/workflow command builders

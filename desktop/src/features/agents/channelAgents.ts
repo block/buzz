@@ -13,6 +13,7 @@ import type {
   ChannelRole,
   ManagedAgent,
   ManagedAgentBackend,
+  RespondToMode,
 } from "@/shared/api/types";
 
 type ChannelAgentProvider = Pick<
@@ -56,11 +57,15 @@ export type CreateChannelManagedAgentInput = {
   role?: Exclude<ChannelRole, "owner">;
   ensureRunning?: boolean;
   backend?: ManagedAgentBackend;
+  /** Inbound author gate mode. Omitted = server default ("owner-only"). */
+  respondTo?: RespondToMode;
+  /** Hex pubkeys for allowlist mode. */
+  respondToAllowlist?: string[];
 };
 
 export type CreateChannelManagedAgentResult =
   AttachManagedAgentToChannelResult & {
-    created: true;
+    created: boolean;
     providerId: string;
   };
 
@@ -173,6 +178,19 @@ function pickPreferredManagedAgent(agents: ManagedAgent[]) {
   })[0];
 }
 
+function findReusablePersonaAgent(
+  agents: ManagedAgent[],
+  personaId: string,
+  channelMemberPubkeys: ReadonlySet<string>,
+): ManagedAgent | undefined {
+  const candidates = agents.filter(
+    (agent) =>
+      agent.personaId === personaId &&
+      !channelMemberPubkeys.has(normalizePubkey(agent.pubkey)),
+  );
+  return pickPreferredManagedAgent(candidates);
+}
+
 function buildChannelAgentName(providerId: string, providerLabel: string) {
   const normalizedProviderId = providerId.trim().toLowerCase();
   if (normalizedProviderId.length > 0) {
@@ -267,6 +285,10 @@ export async function ensureChannelAgentPresetInChannel(
 export async function createChannelManagedAgent(
   channelId: string,
   input: CreateChannelManagedAgentInput,
+  context?: {
+    managedAgents?: ManagedAgent[];
+    channelMemberPubkeys?: ReadonlySet<string>;
+  },
 ): Promise<CreateChannelManagedAgentResult> {
   const role = input.role ?? "bot";
   const ensureRunning = input.ensureRunning ?? true;
@@ -274,6 +296,32 @@ export async function createChannelManagedAgent(
 
   if (trimmedName.length === 0) {
     throw new Error("Agent name is required.");
+  }
+
+  // Smart reuse: if a managed agent with the same personaId already exists
+  // and is not already in this channel, attach it instead of creating a new one.
+  if (
+    input.personaId &&
+    context?.managedAgents &&
+    context.channelMemberPubkeys
+  ) {
+    const reusable = findReusablePersonaAgent(
+      context.managedAgents,
+      input.personaId,
+      context.channelMemberPubkeys,
+    );
+    if (reusable) {
+      const attached = await attachManagedAgentToChannel(channelId, {
+        agent: reusable,
+        role,
+        ensureRunning,
+      });
+      return {
+        ...attached,
+        created: false,
+        providerId: input.provider.id,
+      };
+    }
   }
 
   // If the avatar is a data URI (e.g. from a persona PNG card import),
@@ -307,6 +355,8 @@ export async function createChannelManagedAgent(
     spawnAfterCreate: isProviderMode,
     startOnAppLaunch: isProviderMode ? false : undefined,
     backend: input.backend,
+    respondTo: input.respondTo,
+    respondToAllowlist: input.respondToAllowlist,
   });
 
   // Tauri returns Ok() even on deploy failure — spawnError carries the message.
@@ -331,8 +381,18 @@ export async function createChannelManagedAgents(
   channelId: string,
   inputs: readonly CreateChannelManagedAgentInput[],
 ): Promise<CreateChannelManagedAgentsResult> {
+  // Fetch managed agents and channel members once for smart reuse checks.
+  const [managedAgents, members] = await Promise.all([
+    listManagedAgents(),
+    getChannelMembers(channelId),
+  ]);
+  const channelMemberPubkeys = new Set(
+    members.map((m) => normalizePubkey(m.pubkey)),
+  );
+  const context = { managedAgents, channelMemberPubkeys };
+
   const results = await Promise.allSettled(
-    inputs.map((input) => createChannelManagedAgent(channelId, input)),
+    inputs.map((input) => createChannelManagedAgent(channelId, input, context)),
   );
 
   const successes: CreateChannelManagedAgentResult[] = [];
