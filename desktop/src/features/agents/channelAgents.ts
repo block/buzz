@@ -409,27 +409,23 @@ export async function createChannelManagedAgents(
   );
   const context = { managedAgents, channelMemberPubkeys };
 
-  const results = await Promise.allSettled(
-    inputs.map((input) => createChannelManagedAgent(channelId, input, context)),
-  );
-
+  // Sequential loop: each agent must be fully created and its relay membership
+  // written before the next starts. Concurrent writes to the replaceable
+  // kind:39002 membership event cause last-write-wins data loss.
   const successes: CreateChannelManagedAgentResult[] = [];
   const failures: CreateChannelManagedAgentBatchFailure[] = [];
 
-  for (let i = 0; i < results.length; i++) {
-    const result = results[i];
+  for (let i = 0; i < inputs.length; i++) {
     const input = inputs[i];
-    if (result.status === "fulfilled") {
-      successes.push(result.value);
-    } else {
+    try {
+      const result = await createChannelManagedAgent(channelId, input, context);
+      successes.push(result);
+    } catch (error) {
       failures.push({
         kind: input.personaId ? "persona" : "generic",
         name: input.name.trim() || "agent",
         personaId: input.personaId ?? null,
-        error:
-          result.reason instanceof Error
-            ? result.reason.message
-            : "Failed to add agent.",
+        error: error instanceof Error ? error.message : "Failed to add agent.",
       });
     }
   }

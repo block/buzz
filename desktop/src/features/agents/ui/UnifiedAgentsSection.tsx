@@ -25,6 +25,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -216,7 +217,6 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
         isActionPending={isActionPending}
         isPersonasPending={isPersonasPending}
         openFilePicker={openFilePicker}
-        personaCount={personas.length}
         runningCount={runningCount}
         stoppedCount={stoppedCount}
         onBulkRemoveStopped={onBulkRemoveStopped}
@@ -358,7 +358,6 @@ function SectionHeader({
   isActionPending,
   isPersonasPending,
   openFilePicker,
-  personaCount,
   runningCount,
   stoppedCount,
   onBulkRemoveStopped,
@@ -374,7 +373,6 @@ function SectionHeader({
   isActionPending: boolean;
   isPersonasPending: boolean;
   openFilePicker: () => void;
-  personaCount: number;
   runningCount: number;
   stoppedCount: number;
   onBulkRemoveStopped: () => void;
@@ -433,33 +431,34 @@ function SectionHeader({
             </DropdownMenuContent>
           </DropdownMenu>
         ) : null}
-        <PersonaLibraryEntryPoints
-          canChooseCatalog={
-            canChooseCatalog && (personaCount > 0 || agentCount > 0)
-          }
-          isPending={isPersonasPending}
-          layout="header"
-          onCreate={onCreatePersona}
-          onChooseCatalog={onChooseCatalog}
-        />
         <DropdownMenu modal={false}>
           <DropdownMenuTrigger asChild>
-            <Button
-              aria-label="Custom agent"
-              size="sm"
-              type="button"
-              variant="outline"
-            >
+            <Button size="sm" type="button" variant="default">
               <Plus className="h-4 w-4" />
-              Advanced
+              New
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent
             align="end"
             onCloseAutoFocus={(e) => e.preventDefault()}
           >
-            <DropdownMenuItem onClick={onCreateAgent}>
+            <DropdownMenuItem
+              disabled={isPersonasPending}
+              onClick={onCreatePersona}
+            >
               <Plus className="h-4 w-4" />
+              Persona
+            </DropdownMenuItem>
+            {canChooseCatalog ? (
+              <DropdownMenuItem
+                disabled={isPersonasPending}
+                onClick={onChooseCatalog}
+              >
+                Choose from Catalog...
+              </DropdownMenuItem>
+            ) : null}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={onCreateAgent}>
               Custom Agent
             </DropdownMenuItem>
             <DropdownMenuItem onClick={openFilePicker}>
