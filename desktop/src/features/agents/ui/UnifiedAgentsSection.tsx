@@ -197,7 +197,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   return (
     <section
       className="relative space-y-4"
-      data-testid="unified-agents-section"
+      data-testid="agents-library-personas"
       {...dropHandlers}
     >
       {isDragOver ? (

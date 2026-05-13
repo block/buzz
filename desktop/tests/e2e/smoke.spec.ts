@@ -106,7 +106,8 @@ test("create agent supports parallelism and system prompt overrides", async ({
 
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "Create agent" }).click();
+  await page.getByRole("button", { name: "New" }).click();
+  await page.getByText("Custom Agent").click();
 
   await page.getByTestId("agent-name-input").fill(agentName);
   await page.getByRole("button", { name: "Advanced setup" }).click();
@@ -121,11 +122,11 @@ test("create agent supports parallelism and system prompt overrides", async ({
   ).toBeVisible();
   await page.getByRole("button", { name: "Done" }).click();
 
-  await expect(page.getByTestId("managed-agents-table")).toContainText(
+  await expect(page.getByTestId("agents-library-personas")).toContainText(
     agentName,
   );
   const inlineLog = page
-    .getByTestId("managed-agents-table")
+    .getByTestId("agents-library-personas")
     .getByTestId("managed-agent-log-content");
 
   await expect(inlineLog).toContainText("parallelism=3");
