@@ -43,6 +43,13 @@ build:
 build-release:
     cargo build --workspace --release
 
+# Rebuild Typesense docs for all kind:0 (user profile) events.
+# Required once after deploying the indexer change that flattens kind:0 content
+# for searchability; new/updated profiles are indexed correctly automatically.
+# Safe to run repeatedly — Typesense upserts.
+reindex-kind0:
+    cargo run --release -p sprout-relay --bin sprout-reindex-kind0
+
 # Run repo lint and formatting checks
 check: fmt-check clippy desktop-check desktop-tauri-fmt-check web-check mobile-check
 

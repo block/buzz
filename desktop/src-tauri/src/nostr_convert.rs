@@ -333,6 +333,123 @@ pub fn search_users_from_events(events: &[Event]) -> SearchUsersResponse {
     SearchUsersResponse { users }
 }
 
+/// Rank and truncate kind:0 events from a NIP-50 search response for the
+/// member-picker / DM-recipient autocomplete.
+///
+/// The relay returns results scored by Typesense BM25 against the whole kind:0
+/// JSON content blob. That ranking is fine as a recall mechanism but not as
+/// final ordering — a user whose `display_name` *is* the query should always
+/// rank above someone whose `about` happens to mention it. We re-rank with a
+/// small deterministic scoring function:
+///
+/// - exact match (case-insensitive)   > prefix match > substring match
+/// - field priority: display_name (or name) > nip05 > pubkey hex
+///
+/// `limit` clamps the output. Pubkey de-duplication keeps only the
+/// highest-scoring result per pubkey (Typesense should already return one doc
+/// per event id, and kind:0 is a NIP-16 replaceable event so stale rows are
+/// soft-deleted in the DB and filtered out before reaching us — this is
+/// defense in depth in case both somehow slip through).
+pub fn rank_user_search_results(
+    events: &[Event],
+    query: &str,
+    limit: usize,
+) -> SearchUsersResponse {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() || limit == 0 {
+        return SearchUsersResponse { users: Vec::new() };
+    }
+
+    // (score, input_index) — input index is a stable tiebreaker preserving
+    // the relay's relevance order for ties.
+    let mut scored: Vec<(u32, usize, UserSearchResultInfo)> = Vec::with_capacity(events.len());
+
+    for (idx, ev) in events.iter().enumerate() {
+        // Defensive: NIP-50 may return kinds we didn't expect if the relay
+        // doesn't honor the `kinds` filter under search. Skip non-kind:0.
+        if ev.kind.as_u16() != 0 {
+            continue;
+        }
+
+        let info = user_search_result_from_event(ev);
+        let display = info.display_name.as_deref().unwrap_or("").to_lowercase();
+        let nip05 = info.nip05_handle.as_deref().unwrap_or("").to_lowercase();
+        let pubkey = info.pubkey.to_lowercase();
+
+        let score = match_score(&q, &display, &nip05, &pubkey);
+        if score == 0 {
+            // Typesense returned this as a content-blob match (e.g. `about`).
+            // No useful name/nip05/pubkey hit — drop it from the autocomplete.
+            continue;
+        }
+        scored.push((score, idx, info));
+    }
+
+    // Sort: higher score first; on tie, earlier input index (= higher Typesense relevance) first.
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+
+    // Dedupe by pubkey, keeping the first occurrence (already best-scored).
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut users: Vec<UserSearchResultInfo> = Vec::with_capacity(limit.min(scored.len()));
+    for (_, _, info) in scored {
+        if !seen.insert(info.pubkey.clone()) {
+            continue;
+        }
+        users.push(info);
+        if users.len() >= limit {
+            break;
+        }
+    }
+
+    SearchUsersResponse { users }
+}
+
+/// Score a user against a lowercased query.
+///
+/// Higher is better. Returns 0 if no field matches — caller should drop.
+fn match_score(q: &str, display_name: &str, nip05: &str, pubkey_hex: &str) -> u32 {
+    // Per-field tier scores. We assign large gaps so a substring match on
+    // display_name still beats an exact match on a lower-priority field —
+    // "the user named alice" is the autocomplete answer to "alice", not
+    // "the user with alice@something.com".
+    const DISPLAY_EXACT: u32 = 1000;
+    const DISPLAY_PREFIX: u32 = 900;
+    const DISPLAY_CONTAINS: u32 = 800;
+    const NIP05_EXACT: u32 = 700;
+    const NIP05_PREFIX: u32 = 600;
+    const NIP05_CONTAINS: u32 = 500;
+    const PUBKEY_PREFIX: u32 = 400;
+
+    let score_field = |field: &str, exact: u32, prefix: u32, contains: u32| -> u32 {
+        if field.is_empty() {
+            0
+        } else if field == q {
+            exact
+        } else if field.starts_with(q) {
+            prefix
+        } else if field.contains(q) {
+            contains
+        } else {
+            0
+        }
+    };
+
+    let display_score = score_field(
+        display_name,
+        DISPLAY_EXACT,
+        DISPLAY_PREFIX,
+        DISPLAY_CONTAINS,
+    );
+    let nip05_score = score_field(nip05, NIP05_EXACT, NIP05_PREFIX, NIP05_CONTAINS);
+    let pubkey_score = if !pubkey_hex.is_empty() && pubkey_hex.starts_with(q) {
+        PUBKEY_PREFIX
+    } else {
+        0
+    };
+
+    display_score.max(nip05_score).max(pubkey_score)
+}
+
 // ── kind:1 (notes) ──────────────────────────────────────────────────────────
 
 /// Convert kind:1 events to [`UserNotesResponse`].
@@ -736,6 +853,145 @@ mod tests {
         assert_eq!(r.users.len(), 2);
         assert_eq!(r.users[0].display_name.as_deref(), Some("a"));
         assert_eq!(r.users[1].display_name.as_deref(), Some("B"));
+    }
+
+    // ── rank_user_search_results ────────────────────────────────────────────
+
+    #[test]
+    fn rank_empty_query_returns_empty() {
+        let e = ev(0, r#"{"display_name":"alice"}"#, vec![]);
+        let r = rank_user_search_results(&[e], "  ", 10);
+        assert!(r.users.is_empty());
+    }
+
+    #[test]
+    fn rank_zero_limit_returns_empty() {
+        let e = ev(0, r#"{"display_name":"alice"}"#, vec![]);
+        let r = rank_user_search_results(&[e], "alice", 0);
+        assert!(r.users.is_empty());
+    }
+
+    #[test]
+    fn rank_skips_non_kind_zero_events() {
+        // Even if a buggy relay returns non-kind:0 hits under a kinds:[0] filter,
+        // we shouldn't surface them as users.
+        let e = ev(1, "alice", vec![]);
+        let r = rank_user_search_results(&[e], "alice", 10);
+        assert!(r.users.is_empty());
+    }
+
+    #[test]
+    fn rank_skips_results_with_no_name_or_nip05_match() {
+        // Typesense matched the kind:0 because "alice" appears in the `about`
+        // field. We don't want that in autocomplete — there's no useful name
+        // to display against the query.
+        let e = ev(
+            0,
+            r#"{"display_name":"Bob","nip05":"bob@example.com","about":"I work with alice"}"#,
+            vec![],
+        );
+        let r = rank_user_search_results(&[e], "alice", 10);
+        assert!(r.users.is_empty());
+    }
+
+    #[test]
+    fn rank_exact_display_name_beats_substring_match() {
+        let exact = ev(0, r#"{"display_name":"alice"}"#, vec![]);
+        let sub = ev(0, r#"{"display_name":"alice-the-second"}"#, vec![]);
+        // Put the substring match first to prove ordering isn't input-driven.
+        let r = rank_user_search_results(&[sub, exact], "alice", 10);
+        assert_eq!(r.users.len(), 2);
+        assert_eq!(r.users[0].display_name.as_deref(), Some("alice"));
+        assert_eq!(r.users[1].display_name.as_deref(), Some("alice-the-second"));
+    }
+
+    #[test]
+    fn rank_display_name_beats_nip05_match_of_same_tier() {
+        // "alice" exact on display_name vs. "alice" prefix on nip05 — display wins.
+        let by_name = ev(0, r#"{"display_name":"alice"}"#, vec![]);
+        let by_nip05 = ev(0, r#"{"display_name":"X","nip05":"alice@x.com"}"#, vec![]);
+        let r = rank_user_search_results(&[by_nip05, by_name], "alice", 10);
+        assert_eq!(r.users[0].display_name.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn rank_display_substring_still_beats_nip05_exact() {
+        // Asserts the field-priority gap is large enough that even a display
+        // substring outranks a perfect nip05 hit.
+        let by_name_sub = ev(0, r#"{"display_name":"my-alice-account"}"#, vec![]);
+        let by_nip05_exact = ev(0, r#"{"display_name":"Bob","nip05":"alice"}"#, vec![]);
+        let r = rank_user_search_results(&[by_nip05_exact, by_name_sub], "alice", 10);
+        assert_eq!(r.users[0].display_name.as_deref(), Some("my-alice-account"));
+    }
+
+    #[test]
+    fn rank_pubkey_prefix_match() {
+        // The query is a hex prefix; the kind:0 has no name match at all.
+        // Build the event then read its pubkey hex; use the first 8 chars as
+        // the query so we know the prefix matches.
+        let e = ev(0, r#"{"display_name":"unrelated"}"#, vec![]);
+        let prefix: String = e.pubkey.to_hex().chars().take(8).collect();
+        let r = rank_user_search_results(std::slice::from_ref(&e), &prefix, 10);
+        assert_eq!(r.users.len(), 1);
+        assert_eq!(r.users[0].pubkey, e.pubkey.to_hex());
+    }
+
+    #[test]
+    fn rank_dedupes_by_pubkey() {
+        // Same author publishing two kind:0s (e.g. one stale row slipping
+        // through). Dedupe should keep only one entry — the higher-scored one.
+        let keys = nostr::Keys::generate();
+        let mk = |content: &str| {
+            EventBuilder::new(Kind::from_u16(0), content)
+                .sign_with_keys(&keys)
+                .expect("sign")
+        };
+        // First event is a substring match on display_name; second is an exact match.
+        let weak = mk(r#"{"display_name":"alice-old"}"#);
+        let strong = mk(r#"{"display_name":"alice"}"#);
+        let r = rank_user_search_results(&[weak, strong], "alice", 10);
+        assert_eq!(r.users.len(), 1);
+        assert_eq!(r.users[0].display_name.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn rank_respects_limit() {
+        let events: Vec<Event> = (0..5)
+            .map(|i| ev(0, &format!(r#"{{"display_name":"alice{}"}}"#, i), vec![]))
+            .collect();
+        let r = rank_user_search_results(&events, "alice", 3);
+        assert_eq!(r.users.len(), 3);
+    }
+
+    #[test]
+    fn rank_case_insensitive() {
+        let e = ev(0, r#"{"display_name":"AlIcE"}"#, vec![]);
+        let r = rank_user_search_results(&[e], "alice", 10);
+        assert_eq!(r.users.len(), 1);
+        let r =
+            rank_user_search_results(&[ev(0, r#"{"display_name":"alice"}"#, vec![])], "ALICE", 10);
+        assert_eq!(r.users.len(), 1);
+    }
+
+    #[test]
+    fn rank_tiebreak_preserves_relay_relevance_order() {
+        // Two equally-scored matches → first one in input wins.
+        let first = ev(0, r#"{"display_name":"alice"}"#, vec![]);
+        let second = ev(0, r#"{"display_name":"alice"}"#, vec![]);
+        let first_pk = first.pubkey.to_hex();
+        let r = rank_user_search_results(&[first, second], "alice", 10);
+        assert_eq!(r.users.len(), 2);
+        assert_eq!(r.users[0].pubkey, first_pk);
+    }
+
+    #[test]
+    fn rank_falls_back_to_name_when_display_name_absent() {
+        // user_search_result_from_event already prefers display_name then name —
+        // make sure the ranker sees the populated display_name and scores it.
+        let e = ev(0, r#"{"name":"alice"}"#, vec![]);
+        let r = rank_user_search_results(&[e], "alice", 10);
+        assert_eq!(r.users.len(), 1);
+        assert_eq!(r.users[0].display_name.as_deref(), Some("alice"));
     }
 
     #[test]

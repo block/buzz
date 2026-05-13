@@ -74,7 +74,9 @@ export function ChannelMemberInviteCard({
   );
   const userSearchQuery = useUserSearchQuery(deferredInviteQuery, {
     enabled: open && deferredInviteQuery.length > 0,
-    limit: 8,
+    // Ask for more than we'll display so server-side ranking has room to be
+    // refined client-side. The Tauri command clamps at 50.
+    limit: 25,
   });
   const inviteSearchResults = React.useMemo(
     () =>

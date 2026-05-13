@@ -43,9 +43,36 @@ pub fn event_to_document(event: &StoredEvent) -> Result<Value, SearchError> {
         .map(|id| id.to_string())
         .unwrap_or_else(|| "__global__".to_string());
 
+    // For kind:0 (user metadata) we append the parsed JSON values to `content`
+    // so Typesense's word-tokenizer can index them cleanly. Without this, a
+    // raw blob like `{"display_name":"alice","about":"loves cats"}` does not
+    // produce a clean `alice` token — the leading `"` glues onto the next
+    // word, so the doc is unreachable for the obvious `q=alice` search.
+    //
+    // We only flatten kind:0 (the structured-metadata kind defined by NIP-01)
+    // and only the small set of fields the member-picker uses. Bio / about /
+    // website are intentionally left out so they don't pollute name-prefix
+    // searches with false positives. Stays consistent with `display_name >
+    // nip05 > pubkey` ranking applied on the desktop side.
+    //
+    // The Typesense `content` field is write-only as far as the relay's read
+    // paths go (the bridge fetches the canonical event from Postgres by id
+    // after Typesense returns hits), so appending derived tokens here doesn't
+    // affect any consumer's view of the event's actual content.
+    //
+    // NOTE: existing kind:0 docs indexed before this change won't have the
+    // appended tokens. Running `just reindex-search` (or the
+    // `sprout-relay reindex-search` admin path) repopulates them. New /
+    // updated profiles get the tokens automatically.
+    let content_indexed = if event_kind_i32(nostr_event) == 0 {
+        flatten_kind0_for_indexing(nostr_event.content.as_str())
+    } else {
+        nostr_event.content.as_str().to_string()
+    };
+
     let doc = json!({
         "id":         nostr_event.id.to_string(),
-        "content":    nostr_event.content.as_str(),
+        "content":    content_indexed,
         // Cast to i32 for Typesense schema (int32 field). nostr Kind is u16; all Sprout kinds fit in i32.
         "kind":       event_kind_i32(nostr_event),
         "pubkey":     nostr_event.pubkey.to_string(),
@@ -55,6 +82,38 @@ pub fn event_to_document(event: &StoredEvent) -> Result<Value, SearchError> {
     });
 
     Ok(doc)
+}
+
+/// For kind:0 events, return the original content with the searchable fields
+/// (`display_name`, `name`, `nip05`) appended as space-separated plain words.
+///
+/// Tolerant of malformed input: anything that fails JSON parsing returns the
+/// original content unchanged, never an error.
+fn flatten_kind0_for_indexing(raw_content: &str) -> String {
+    let Ok(parsed) = serde_json::from_str::<Value>(raw_content) else {
+        return raw_content.to_string();
+    };
+    let Some(obj) = parsed.as_object() else {
+        return raw_content.to_string();
+    };
+
+    let mut extracted: Vec<&str> = Vec::with_capacity(3);
+    for key in ["display_name", "name", "nip05"] {
+        if let Some(val) = obj.get(key).and_then(Value::as_str) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                extracted.push(trimmed);
+            }
+        }
+    }
+
+    if extracted.is_empty() {
+        raw_content.to_string()
+    } else {
+        // Single leading space ensures we don't smash the closing `}` of the
+        // original JSON into the first appended token.
+        format!("{} {}", raw_content, extracted.join(" "))
+    }
 }
 
 /// Indexes a single event via Typesense upsert.
@@ -267,6 +326,134 @@ mod tests {
         let stored = make_stored_event("no channel", Kind::TextNote, None);
         let doc = event_to_document(&stored).unwrap();
         assert_eq!(doc["channel_id"].as_str().unwrap(), "__global__");
+    }
+
+    // ── kind:0 flattening for searchability ─────────────────────────────────
+
+    #[test]
+    fn kind0_appends_display_name_for_tokenization() {
+        let stored = make_stored_event(
+            r#"{"display_name":"alice","about":"loves cats"}"#,
+            Kind::Metadata,
+            None,
+        );
+        let doc = event_to_document(&stored).unwrap();
+        let content = doc["content"].as_str().unwrap();
+        // Original JSON is preserved (read paths don't depend on this but it
+        // costs nothing and makes debugging the index cheaper).
+        assert!(content.contains(r#""display_name":"alice""#));
+        // The display name is also present as a free-standing token so the
+        // default Typesense tokenizer can index it without the leading-quote
+        // gluing onto the next character.
+        assert!(content.ends_with(" alice"), "got: {content:?}");
+    }
+
+    #[test]
+    fn kind0_appends_name_when_display_name_absent() {
+        // NIP-01 allows `name` as the canonical display field too.
+        let stored = make_stored_event(r#"{"name":"bob","about":"x"}"#, Kind::Metadata, None);
+        let doc = event_to_document(&stored).unwrap();
+        let content = doc["content"].as_str().unwrap();
+        assert!(content.ends_with(" bob"), "got: {content:?}");
+    }
+
+    #[test]
+    fn kind0_includes_both_display_name_and_name_when_present() {
+        let stored = make_stored_event(
+            r#"{"display_name":"Alice","name":"alice"}"#,
+            Kind::Metadata,
+            None,
+        );
+        let doc = event_to_document(&stored).unwrap();
+        let content = doc["content"].as_str().unwrap();
+        assert!(content.ends_with(" Alice alice"), "got: {content:?}");
+    }
+
+    #[test]
+    fn kind0_includes_nip05_in_appended_tokens() {
+        let stored = make_stored_event(
+            r#"{"display_name":"alice","nip05":"alice@example.com"}"#,
+            Kind::Metadata,
+            None,
+        );
+        let doc = event_to_document(&stored).unwrap();
+        let content = doc["content"].as_str().unwrap();
+        assert!(
+            content.ends_with(" alice alice@example.com"),
+            "got: {content:?}"
+        );
+    }
+
+    #[test]
+    fn kind0_excludes_about_and_website_from_appended_tokens() {
+        // `about` and `website` deliberately do not get appended — including
+        // them would cause name-prefix searches to return false positives from
+        // bios. The user's own display_name still appears.
+        let stored = make_stored_event(
+            r#"{"display_name":"alice","about":"I work with bob on x","website":"https://carol.example"}"#,
+            Kind::Metadata,
+            None,
+        );
+        let doc = event_to_document(&stored).unwrap();
+        let content = doc["content"].as_str().unwrap();
+        assert!(content.ends_with(" alice"), "got: {content:?}");
+        // Sanity: the about/website are still in the doc because we preserve
+        // the original JSON — they just don't appear in the trailing tokens.
+        assert!(content.contains("bob"));
+        assert!(content.contains("carol"));
+    }
+
+    #[test]
+    fn kind0_malformed_json_is_passed_through_unchanged() {
+        let stored = make_stored_event("not json at all", Kind::Metadata, None);
+        let doc = event_to_document(&stored).unwrap();
+        assert_eq!(doc["content"].as_str().unwrap(), "not json at all");
+    }
+
+    #[test]
+    fn kind0_non_object_json_is_passed_through_unchanged() {
+        // Defensive: NIP-01 says content is a JSON object, but a malformed
+        // client could publish e.g. a JSON array. We don't crash, we just
+        // skip the flattening for that doc.
+        let stored = make_stored_event(r#"["nope"]"#, Kind::Metadata, None);
+        let doc = event_to_document(&stored).unwrap();
+        assert_eq!(doc["content"].as_str().unwrap(), r#"["nope"]"#);
+    }
+
+    #[test]
+    fn kind0_empty_string_values_skipped() {
+        let stored = make_stored_event(
+            r#"{"display_name":"","name":"alice","nip05":"   "}"#,
+            Kind::Metadata,
+            None,
+        );
+        let doc = event_to_document(&stored).unwrap();
+        let content = doc["content"].as_str().unwrap();
+        // Only `name` is non-empty; whitespace-only `nip05` is also skipped.
+        assert!(content.ends_with(" alice"), "got: {content:?}");
+    }
+
+    #[test]
+    fn kind0_no_searchable_fields_is_passed_through() {
+        // Profile with only fields we don't extract.
+        let stored = make_stored_event(
+            r#"{"about":"just a bio","picture":"https://x"}"#,
+            Kind::Metadata,
+            None,
+        );
+        let doc = event_to_document(&stored).unwrap();
+        let content = doc["content"].as_str().unwrap();
+        // No trailing space-separated tokens added; original content unchanged.
+        assert_eq!(content, r#"{"about":"just a bio","picture":"https://x"}"#);
+    }
+
+    #[test]
+    fn non_kind0_events_not_flattened() {
+        // kind:1 (note) with a JSON-looking body must be left strictly alone.
+        let json_looking = r#"{"display_name":"alice"}"#;
+        let stored = make_stored_event(json_looking, Kind::TextNote, None);
+        let doc = event_to_document(&stored).unwrap();
+        assert_eq!(doc["content"].as_str().unwrap(), json_looking);
     }
 
     #[test]
