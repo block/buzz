@@ -4,9 +4,11 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 
 const DEFAULT_ZOOM_FACTOR = 1;
-const MIN_ZOOM_FACTOR = 0.2;
-const MAX_ZOOM_FACTOR = 10;
-const ZOOM_STEP = 0.2;
+const MIN_ZOOM_FACTOR = 0.75;
+const MAX_ZOOM_FACTOR = 1.5;
+const ZOOM_STEP = 0.1;
+const BASE_FONT_SIZE_PX = 16;
+const TEXT_SCALE_STORAGE_KEY = "sprout:text-scale";
 
 type ZoomAction = "increase" | "decrease" | "reset";
 
@@ -55,11 +57,45 @@ function getNextZoomFactor(action: ZoomAction, zoomFactor: number) {
   return Math.max(zoomFactor - ZOOM_STEP, MIN_ZOOM_FACTOR);
 }
 
+function readStoredZoomFactor() {
+  const raw = window.localStorage.getItem(TEXT_SCALE_STORAGE_KEY);
+  if (!raw) {
+    return DEFAULT_ZOOM_FACTOR;
+  }
+
+  const parsed = Number.parseFloat(raw);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_ZOOM_FACTOR;
+  }
+
+  return Math.min(Math.max(parsed, MIN_ZOOM_FACTOR), MAX_ZOOM_FACTOR);
+}
+
+function applyTextScale(zoomFactor: number) {
+  if (zoomFactor === DEFAULT_ZOOM_FACTOR) {
+    document.documentElement.style.fontSize = "";
+    window.localStorage.removeItem(TEXT_SCALE_STORAGE_KEY);
+    return;
+  }
+
+  document.documentElement.style.fontSize = `${BASE_FONT_SIZE_PX * zoomFactor}px`;
+  window.localStorage.setItem(TEXT_SCALE_STORAGE_KEY, String(zoomFactor));
+}
+
 export function useWebviewZoomShortcuts() {
   const zoomFactorRef = React.useRef(DEFAULT_ZOOM_FACTOR);
 
   React.useLayoutEffect(() => {
     const webview = getCurrentWebview();
+    const storedZoomFactor = readStoredZoomFactor();
+
+    zoomFactorRef.current = storedZoomFactor;
+    applyTextScale(storedZoomFactor);
+
+    // Keep the webview coordinate system stable; only text should scale.
+    void webview.setZoom(DEFAULT_ZOOM_FACTOR).catch((error) => {
+      console.error("Failed to reset webview zoom", error);
+    });
 
     function handleKeyDown(event: KeyboardEvent) {
       const action = getZoomAction(event);
@@ -77,11 +113,7 @@ export function useWebviewZoomShortcuts() {
       }
 
       zoomFactorRef.current = nextZoomFactor;
-
-      void webview.setZoom(nextZoomFactor).catch((error) => {
-        zoomFactorRef.current = previousZoomFactor;
-        console.error("Failed to update webview zoom", error);
-      });
+      applyTextScale(nextZoomFactor);
     }
 
     window.addEventListener("keydown", handleKeyDown);
