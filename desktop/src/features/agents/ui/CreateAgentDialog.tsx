@@ -12,6 +12,7 @@ import type {
   BackendProviderProbeResult,
   CreateManagedAgentInput,
   CreateManagedAgentResponse,
+  RespondToMode,
 } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
@@ -31,6 +32,7 @@ import {
   coerceConfigValues,
   ProviderConfigFields,
 } from "./ProviderConfigFields";
+import { CreateAgentRespondToField } from "./RespondToField";
 import { useLastRuntimeProvider } from "@/features/agents/lib/useLastRuntimeProvider";
 
 // ── Dialog ────────────────────────────────────────────────────────────────────
@@ -66,6 +68,10 @@ export function CreateAgentDialog({
   const [hasSyncedProviderSelection, setHasSyncedProviderSelection] =
     React.useState(false);
   const [showAdvanced, setShowAdvanced] = React.useState(false);
+  const [respondTo, setRespondTo] = React.useState<RespondToMode>("owner-only");
+  const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
+    [],
+  );
 
   // ── Backend provider ("Run on") state ──────────────────────────────────────
   const [runOn, setRunOn] = React.useState<"local" | string>("local");
@@ -213,6 +219,8 @@ export function CreateAgentDialog({
     setProviderConfig({});
     setProbedProvider(null);
     setProbeError(null);
+    setRespondTo("owner-only");
+    setRespondToAllowlist([]);
     createMutation.reset();
   }
 
@@ -262,6 +270,12 @@ export function CreateAgentDialog({
     );
   }, [isProviderMode, probedProvider, providerConfig]);
 
+  // Allowlist mode requires at least one entry, mirroring the harness's own
+  // validation. If we let it through empty, the agent crash-loops at startup
+  // with a config error.
+  const respondToValid =
+    respondTo !== "allowlist" || respondToAllowlist.length > 0;
+
   const canSubmit =
     name.trim().length > 0 &&
     !isDiscoveryPending &&
@@ -275,10 +289,20 @@ export function CreateAgentDialog({
     // fields and config schema are only known after a successful probe.
     !(isProviderMode && !probedProvider) &&
     providerConfigComplete &&
+    respondToValid &&
     !createMutation.isPending;
 
   async function handleSubmit() {
     try {
+      // Only send the allowlist when the mode is actually "allowlist".
+      // Other modes ignore it server-side, but keeping the wire clean makes
+      // the agent record easier to inspect.
+      const respondToFields = {
+        respondTo,
+        respondToAllowlist:
+          respondTo === "allowlist" ? respondToAllowlist : undefined,
+      } as const;
+
       const input: CreateManagedAgentInput = isProviderMode
         ? {
             name: name.trim(),
@@ -302,6 +326,7 @@ export function CreateAgentDialog({
                 probedProvider?.config_schema,
               ),
             },
+            ...respondToFields,
           }
         : {
             name: name.trim(),
@@ -326,6 +351,7 @@ export function CreateAgentDialog({
             spawnAfterCreate,
             startOnAppLaunch,
             backend: { type: "local" },
+            ...respondToFields,
           };
 
       const created = await createMutation.mutateAsync(input);
@@ -430,6 +456,13 @@ export function CreateAgentDialog({
               startOnAppLaunchDisabled={isProviderMode}
               spawnAfterCreate={isProviderMode ? true : spawnAfterCreate}
               spawnToggleDisabled={isProviderMode || spawnToggleDisabled}
+            />
+
+            <CreateAgentRespondToField
+              allowlist={respondToAllowlist}
+              mode={respondTo}
+              onAllowlistChange={setRespondToAllowlist}
+              onModeChange={setRespondTo}
             />
 
             <div className="rounded-2xl border border-border/70 bg-muted/20">

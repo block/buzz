@@ -290,7 +290,21 @@ export type ManagedAgent = {
   startOnAppLaunch: boolean;
   backend: ManagedAgentBackend;
   backendAgentId: string | null;
+  /** Who the agent should respond to. Maps to `sprout-acp --respond-to`. */
+  respondTo: RespondToMode;
+  /**
+   * Normalized 64-char lowercase hex pubkeys. Used only when `respondTo` is
+   * `"allowlist"`. Preserved across mode toggles.
+   */
+  respondToAllowlist: string[];
 };
+
+/**
+ * Inbound author gate mode. Mirrors `sprout-acp`'s `--respond-to` CLI flag.
+ * `"nobody"` is supported by the harness but not surfaced through this API —
+ * it's a heartbeat-only mode without a meaningful GUI use case.
+ */
+export type RespondToMode = "owner-only" | "allowlist" | "anyone";
 
 export type BackendProviderCandidate = {
   id: string;
@@ -324,6 +338,13 @@ export type CreateManagedAgentInput = {
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
   backend?: ManagedAgentBackend;
+  /** Inbound author gate mode. Omitted = `"owner-only"` (server default). */
+  respondTo?: RespondToMode;
+  /**
+   * Hex pubkeys to allow when `respondTo === "allowlist"`. Validated &
+   * normalized server-side (must be 64 hex chars each).
+   */
+  respondToAllowlist?: string[];
 };
 
 export type CreateManagedAgentResponse = {
@@ -389,6 +410,13 @@ export type UpdateManagedAgentInput = {
   agentCommand?: string;
   agentArgs?: string[];
   mcpCommand?: string;
+  /** Absent = don't touch. Present = set the mode. */
+  respondTo?: RespondToMode;
+  /**
+   * Absent = don't touch. Present = replace the allowlist with this list
+   * (validated & normalized server-side).
+   */
+  respondToAllowlist?: string[];
 };
 export type AgentPersona = {
   id: string;

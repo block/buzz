@@ -83,18 +83,29 @@ pub fn restore_managed_agents_on_launch(
         return Ok(());
     }
 
+    // Snapshot the workspace owner pubkey once for the legacy auth_tag fallback.
+    // Read outside the per-agent spawn loop so all parallel spawns see the same
+    // value and we don't lock `state.keys` repeatedly.
+    let owner_hex: Option<String> = state
+        .keys
+        .lock()
+        .map_err(|e| e.to_string())
+        .ok()
+        .map(|k| k.public_key().to_hex());
+
     // ── Phase B (no locks): resolve commands and spawn processes in parallel ──
     let spawn_results: Vec<(
         String,
         Result<(std::process::Child, std::path::PathBuf), String>,
     )> = std::thread::scope(|scope| {
+        let owner_hex_ref = owner_hex.as_deref();
         let handles: Vec<_> = agents_to_start
             .iter()
             .filter(|_| !shutdown_started.load(Ordering::SeqCst))
             .map(|record| {
                 let pubkey = record.pubkey.clone();
                 let handle = scope.spawn(move || {
-                    let result = spawn_agent_child(app, record);
+                    let result = spawn_agent_child(app, record, owner_hex_ref);
                     (pubkey, result)
                 });
                 handle

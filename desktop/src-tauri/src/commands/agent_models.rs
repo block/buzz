@@ -171,6 +171,30 @@ pub async fn update_managed_agent(
         if let Some(mcp_command) = input.mcp_command {
             record.mcp_command = mcp_command;
         }
+
+        // Inbound author gate: merge patch onto current values, then validate
+        // the merged state. This lets a single update switch to Allowlist AND
+        // supply pubkeys atomically.
+        let prospective_mode = input.respond_to.unwrap_or(record.respond_to);
+        let prospective_allowlist = match input.respond_to_allowlist.as_ref() {
+            Some(list) => crate::managed_agents::validate_respond_to_allowlist(list)?,
+            None => record.respond_to_allowlist.clone(),
+        };
+        if prospective_mode == crate::managed_agents::RespondTo::Allowlist
+            && prospective_allowlist.is_empty()
+        {
+            return Err(
+                "respond-to mode 'allowlist' requires at least one pubkey in the allowlist"
+                    .to_string(),
+            );
+        }
+        record.respond_to = prospective_mode;
+        // Preserve the persisted allowlist across mode toggles — only replace
+        // when the caller explicitly supplied a new list.
+        if input.respond_to_allowlist.is_some() {
+            record.respond_to_allowlist = prospective_allowlist;
+        }
+
         record.updated_at = now_iso();
 
         save_managed_agents(&app, &records)?;

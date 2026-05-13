@@ -22,7 +22,11 @@ import type {
 } from "@/features/notifications/hooks";
 import { RelayMembersSettingsCard } from "@/features/relay-members/ui/RelayMembersSettingsCard";
 import { cn } from "@/shared/lib/cn";
-import { ACCENT_COLORS, useTheme } from "@/shared/theme/ThemeProvider";
+import {
+  ACCENT_COLORS,
+  NEUTRAL_ACCENT,
+  useTheme,
+} from "@/shared/theme/ThemeProvider";
 import { SYNTAX_THEMES, isLightTheme } from "@/shared/theme/theme-loader";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
 import { DoctorSettingsPanel } from "./DoctorSettingsPanel";
@@ -128,7 +132,8 @@ function formatThemeLabel(name: string): string {
 }
 
 function ThemeSettingsCard() {
-  const { setTheme, themeName, accentColor, setAccentColor } = useTheme();
+  const { setTheme, themeName, isDark, accentColor, setAccentColor } =
+    useTheme();
   const [search, setSearch] = useState("");
   const didScrollRef = useRef(false);
   const activeRef = (node: HTMLButtonElement | null) => {
@@ -209,25 +214,34 @@ function ThemeSettingsCard() {
       <div className="mt-4">
         <h3 className="mb-2 text-sm font-medium">Accent Color</h3>
         <div className="flex gap-2">
-          {ACCENT_COLORS.map((color) => (
-            <button
-              className={cn(
-                "flex h-7 w-7 items-center justify-center rounded-full transition-transform hover:scale-110",
-                accentColor === color.value &&
-                  "ring-2 ring-ring ring-offset-2 ring-offset-background",
-              )}
-              data-testid={`accent-color-${color.name.toLowerCase()}`}
-              key={color.value}
-              onClick={() => setAccentColor(color.value)}
-              style={{ backgroundColor: color.value }}
-              title={color.name}
-              type="button"
-            >
-              {accentColor === color.value && (
-                <Check className="h-3.5 w-3.5 text-white" />
-              )}
-            </button>
-          ))}
+          {ACCENT_COLORS.map((color) => {
+            const isNeutral = color.value === NEUTRAL_ACCENT;
+            const swatchColor = isNeutral
+              ? "hsl(var(--foreground))"
+              : color.value;
+            const checkClassName =
+              isNeutral && isDark ? "text-black" : "text-white";
+
+            return (
+              <button
+                className={cn(
+                  "flex h-7 w-7 items-center justify-center rounded-full border border-border/50 transition-transform hover:scale-110",
+                  accentColor === color.value &&
+                    "ring-2 ring-ring ring-offset-2 ring-offset-background",
+                )}
+                data-testid={`accent-color-${color.name.toLowerCase()}`}
+                key={color.value}
+                onClick={() => setAccentColor(color.value)}
+                style={{ backgroundColor: swatchColor }}
+                title={color.name}
+                type="button"
+              >
+                {accentColor === color.value && (
+                  <Check className={cn("h-3.5 w-3.5", checkClassName)} />
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
     </section>

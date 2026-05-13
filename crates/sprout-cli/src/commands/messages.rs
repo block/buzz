@@ -23,6 +23,78 @@ fn parse_uuid(s: &str) -> Result<Uuid, CliError> {
     Uuid::parse_str(s).map_err(|e| CliError::Usage(format!("invalid channel UUID: {e}")))
 }
 
+/// Extract the thread root event ID from a Nostr tag array.
+///
+/// Parses `"e"` tags with NIP-10 markers:
+/// - If a `"root"` marker exists, returns that event ID.
+/// - Otherwise, if only a `"reply"` marker exists, returns the reply target
+///   (a direct reply's parent IS the root, and nested replies need that root
+///   to thread correctly).
+/// - If no thread markers exist, returns `None` (parent is a top-level message,
+///   so it is itself the root).
+fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
+    fn valid_event_id(s: &str) -> bool {
+        s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+    }
+    let arr = tags.as_array()?;
+    let mut root = None;
+    let mut reply = None;
+    for tag in arr {
+        let Some(parts) = tag.as_array() else {
+            continue;
+        };
+        if parts.len() >= 4 && parts[0].as_str() == Some("e") {
+            // Defensively ignore malformed marker values so a bad tag on the
+            // parent event can't block the reply — fall back to root == parent.
+            let id = parts[1].as_str().filter(|s| valid_event_id(s));
+            match (parts[3].as_str(), id) {
+                (Some("root"), Some(id)) => root = Some(id.to_string()),
+                (Some("reply"), Some(id)) => reply = Some(id.to_string()),
+                _ => {}
+            }
+        }
+    }
+    root.or(reply)
+}
+
+/// Build a `ThreadRef` for a reply, given the immediate parent's event ID.
+///
+/// Fetches the parent event from the relay and inspects its NIP-10 `e` tags to
+/// determine the thread root:
+/// - Direct reply (parent is top-level): `root == parent`.
+/// - Nested reply: `root` is the parent's own root marker; `parent` is unchanged.
+///
+/// This matches the behavior of `sprout-mcp`'s `resolve_thread_ref` so that
+/// CLI-sent replies thread identically to MCP-sent replies.
+async fn resolve_thread_ref(
+    client: &SproutClient,
+    parent_event_id: &str,
+) -> Result<ThreadRef, CliError> {
+    let parent_eid = parse_event_id(parent_event_id)?;
+    let filter = serde_json::json!({ "ids": [parent_event_id], "limit": 1 });
+    let raw = client.query(&filter).await?;
+    let events: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+    let event = events
+        .as_array()
+        .and_then(|a| a.first())
+        .ok_or_else(|| CliError::Other(format!("parent event {parent_event_id} not found")))?;
+    let tags = event
+        .get("tags")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    let root_eid = match find_root_from_tags(&tags) {
+        Some(root_hex) if root_hex != parent_event_id => parse_event_id(&root_hex)?,
+        _ => parent_eid,
+    };
+
+    Ok(ThreadRef {
+        root_event_id: root_eid,
+        parent_event_id: parent_eid,
+    })
+}
+
 /// Resolve the channel UUID for an event by querying for it via POST /query.
 /// Extracts the `h` tag value from the returned event's tags.
 async fn resolve_channel_id(client: &SproutClient, event_id: &str) -> Result<Uuid, CliError> {
@@ -221,13 +293,10 @@ pub async fn cmd_send_message(client: &SproutClient, p: SendMessageParams) -> Re
         format!("{}{media_content}", p.content)
     };
 
-    // Build thread ref if replying
+    // Build thread ref if replying. `--reply-to` is the immediate parent; the
+    // thread root is derived from the parent's NIP-10 tags via the relay.
     let thread_ref = if let Some(ref r) = p.reply_to {
-        let eid = parse_event_id(r)?;
-        Some(ThreadRef {
-            root_event_id: eid,
-            parent_event_id: eid,
-        })
+        Some(resolve_thread_ref(client, r).await?)
     } else {
         None
     };
@@ -310,12 +379,10 @@ pub async fn cmd_send_diff_message(
         _ => "Diff".to_string(),
     };
 
+    // `--reply-to` is the immediate parent; the thread root is derived from
+    // the parent's NIP-10 tags via the relay.
     let thread_ref = if let Some(r) = &p.reply_to {
-        let eid = parse_event_id(r)?;
-        Some(ThreadRef {
-            root_event_id: eid,
-            parent_event_id: eid,
-        })
+        Some(resolve_thread_ref(client, r).await?)
     } else {
         None
     };
@@ -418,4 +485,80 @@ pub async fn cmd_vote_on_post(
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_root_from_tags;
+    use serde_json::json;
+
+    const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const PUBKEY: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn root_marker_wins_over_reply_marker() {
+        let tags = json!([
+            ["e", ID_A, "", "root"],
+            ["e", ID_B, "", "reply"],
+            ["p", PUBKEY],
+        ]);
+        assert_eq!(find_root_from_tags(&tags).as_deref(), Some(ID_A));
+    }
+
+    #[test]
+    fn reply_only_falls_back_to_reply_target() {
+        // Direct reply to a top-level message — the parent's only e-tag is a
+        // "reply" marker pointing at it; treat the reply target as the root.
+        let tags = json!([["e", ID_B, "", "reply"], ["p", PUBKEY],]);
+        assert_eq!(find_root_from_tags(&tags).as_deref(), Some(ID_B));
+    }
+
+    #[test]
+    fn no_thread_markers_returns_none() {
+        let tags = json!([["p", PUBKEY], ["h", "channel-uuid"],]);
+        assert!(find_root_from_tags(&tags).is_none());
+    }
+
+    #[test]
+    fn unmarked_e_tag_ignored() {
+        // NIP-10 deprecated positional markers; ignore e-tags lacking an
+        // explicit "root"/"reply" marker rather than guessing.
+        let tags = json!([["e", ID_A], ["e", ID_B, ""],]);
+        assert!(find_root_from_tags(&tags).is_none());
+    }
+
+    #[test]
+    fn malformed_tags_are_skipped() {
+        let tags = json!([
+            "not-an-array",
+            ["e"],
+            ["e", "short"],
+            ["e", ID_A, "", "root"],
+        ]);
+        assert_eq!(find_root_from_tags(&tags).as_deref(), Some(ID_A));
+    }
+
+    #[test]
+    fn malformed_marker_id_is_ignored() {
+        // Parent event has a "root" marker whose value isn't a valid 64-hex
+        // event id (other-client bug, relay-accepted). Treat the marker as
+        // absent so the caller falls back to root == parent rather than
+        // failing to send the reply.
+        let tags = json!([["e", "not-a-valid-id", "", "root"], ["p", PUBKEY],]);
+        assert!(find_root_from_tags(&tags).is_none());
+    }
+
+    #[test]
+    fn malformed_root_does_not_shadow_valid_reply() {
+        // If "root" is malformed but "reply" is valid, fall back to "reply".
+        let tags = json!([["e", "garbage", "", "root"], ["e", ID_B, "", "reply"],]);
+        assert_eq!(find_root_from_tags(&tags).as_deref(), Some(ID_B));
+    }
+
+    #[test]
+    fn non_array_input_returns_none() {
+        assert!(find_root_from_tags(&json!({})).is_none());
+        assert!(find_root_from_tags(&json!(null)).is_none());
+    }
 }

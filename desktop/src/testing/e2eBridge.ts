@@ -300,6 +300,8 @@ type RawManagedAgent = {
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
   backend_agent_id: string | null;
+  respond_to: "owner-only" | "allowlist" | "anyone";
+  respond_to_allowlist: string[];
 };
 
 type RawCreateManagedAgentResponse = {
@@ -672,6 +674,10 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     start_on_app_launch: agent.start_on_app_launch,
     backend: agent.backend ?? { type: "local" as const },
     backend_agent_id: agent.backend_agent_id ?? null,
+    respond_to: agent.respond_to ?? "owner-only",
+    respond_to_allowlist: agent.respond_to_allowlist
+      ? [...agent.respond_to_allowlist]
+      : [],
   };
 }
 
@@ -3789,6 +3795,8 @@ async function handleCreateManagedAgent(args: {
     backend?:
       | { type: "local" }
       | { type: "provider"; id: string; config: Record<string, unknown> };
+    respondTo?: "owner-only" | "allowlist" | "anyone";
+    respondToAllowlist?: string[];
   };
 }): Promise<RawCreateManagedAgentResponse> {
   if (args.input.personaId) {
@@ -3831,6 +3839,8 @@ async function handleCreateManagedAgent(args: {
     start_on_app_launch: args.input.startOnAppLaunch ?? true,
     backend: args.input.backend ?? { type: "local" as const },
     backend_agent_id: null,
+    respond_to: args.input.respondTo ?? "owner-only",
+    respond_to_allowlist: args.input.respondToAllowlist ?? [],
     private_key_nsec: `nsec1mock${pubkey.slice(0, 20)}`,
     log_lines: [
       `sprout-acp starting: relay=${args.input.relayUrl ?? DEFAULT_RELAY_WS_URL} agent_pubkey=${pubkey} parallelism=${args.input.parallelism ?? 1}`,
@@ -3945,6 +3955,8 @@ async function handleUpdateManagedAgent(args: {
     name?: string;
     model?: string | null;
     systemPrompt?: string | null;
+    respondTo?: "owner-only" | "allowlist" | "anyone";
+    respondToAllowlist?: string[];
   };
 }): Promise<{ agent: RawManagedAgent; profile_sync_error: string | null }> {
   const agent = getMockManagedAgent(args.input.pubkey);
@@ -3956,6 +3968,12 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.systemPrompt !== undefined) {
     agent.system_prompt = args.input.systemPrompt;
+  }
+  if (args.input.respondTo !== undefined) {
+    agent.respond_to = args.input.respondTo;
+  }
+  if (args.input.respondToAllowlist !== undefined) {
+    agent.respond_to_allowlist = args.input.respondToAllowlist;
   }
   agent.updated_at = new Date().toISOString();
   return { agent: cloneManagedAgent(agent), profile_sync_error: null };
