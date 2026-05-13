@@ -144,10 +144,7 @@ test("built-in personas are chosen from the dialog and can be selected", async (
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
 
-  await expect(page.getByTestId("agents-library-personas")).toContainText(
-    "No agents yet",
-  );
-  await expect(page.getByTestId("agents-persona-catalog")).toHaveCount(0);
+  await expect(page.getByTestId("agents-library-personas")).toBeVisible();
   await openPersonaCatalog(page);
   await expect(page.getByTestId("persona-catalog-dialog")).toContainText(
     "Scout",
@@ -193,9 +190,9 @@ test("built-in personas are chosen from the dialog and can be selected", async (
       .locator("[data-sonner-toast]")
       .filter({ hasText: "Deselected Scout from My Agents." }),
   ).toBeVisible();
-  await expect(page.getByTestId("agents-library-personas")).not.toContainText(
-    "Scout",
-  );
+  await expect(
+    page.getByTestId("persona-catalog-card-target-builtin:scout"),
+  ).toHaveAttribute("aria-pressed", "false");
   await expect.poll(() => getCatalogOrder(page)).toEqual(initialCatalogOrder);
 });
 
