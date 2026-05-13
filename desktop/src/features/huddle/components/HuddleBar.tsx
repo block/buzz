@@ -65,7 +65,7 @@ export function HuddleBar({ className }: HuddleBarProps) {
   const [showAddAgent, setShowAddAgent] = React.useState(false);
   const [agentAddError, setAgentAddError] = React.useState<string | null>(null);
   const [modelStatus, setModelStatus] = React.useState<{
-    moonshine: string;
+    stt: string;
     kokoro: string;
   } | null>(null);
   // Huddle state: event-driven + 10s fallback poll.
@@ -132,13 +132,13 @@ export function HuddleBar({ className }: HuddleBarProps) {
     async function pollModels() {
       try {
         const status = await invoke<{
-          moonshine: unknown;
+          stt: unknown;
           kokoro: unknown;
         }>("get_model_status");
         if (cancelled) return;
 
         setModelStatus({
-          moonshine: fmt(status.moonshine),
+          stt: fmt(status.stt),
           kokoro: fmt(status.kokoro),
         });
       } catch {
@@ -228,15 +228,13 @@ export function HuddleBar({ className }: HuddleBarProps) {
 
       {/* Model download progress */}
       {modelStatus &&
-        (modelStatus.moonshine !== "ready" ||
-          modelStatus.kokoro !== "ready") && (
+        (modelStatus.stt !== "ready" || modelStatus.kokoro !== "ready") && (
           <output className="flex items-center gap-1 text-xs text-muted-foreground">
             <span className="animate-pulse">
-              {modelStatus.moonshine !== "ready" &&
-              modelStatus.kokoro !== "ready"
-                ? `Voice models: STT ${modelStatus.moonshine}, TTS ${modelStatus.kokoro}`
-                : modelStatus.moonshine !== "ready"
-                  ? `STT model: ${modelStatus.moonshine}`
+              {modelStatus.stt !== "ready" && modelStatus.kokoro !== "ready"
+                ? `Voice models: STT ${modelStatus.stt}, TTS ${modelStatus.kokoro}`
+                : modelStatus.stt !== "ready"
+                  ? `STT model: ${modelStatus.stt}`
                   : `TTS model: ${modelStatus.kokoro}`}
             </span>
           </output>
@@ -463,8 +461,8 @@ export function HuddleBar({ className }: HuddleBarProps) {
           : "In huddle, no microphone"}
         {`, voice input: ${isPttMode ? "push to talk, press Ctrl+Space to transmit" : "voice activity detection"}`}
         {modelStatus &&
-          modelStatus.moonshine !== "ready" &&
-          `, STT model ${modelStatus.moonshine}`}
+          modelStatus.stt !== "ready" &&
+          `, STT model ${modelStatus.stt}`}
         {modelStatus &&
           modelStatus.kokoro !== "ready" &&
           `, TTS model ${modelStatus.kokoro}`}

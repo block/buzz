@@ -40,7 +40,7 @@ pub(crate) async fn post_connect_setup(
 
     // Ensure voice models are downloading (idempotent).
     if let Some(mgr) = models::global_model_manager() {
-        mgr.start_moonshine_download(state.http_client.clone());
+        mgr.start_stt_download(state.http_client.clone());
         mgr.start_kokoro_download(state.http_client.clone());
     }
 
@@ -81,11 +81,10 @@ pub(crate) async fn maybe_start_stt_pipeline(
     state: &AppState,
     ephemeral_channel_id: &str,
 ) -> Result<bool, String> {
-    if !models::is_moonshine_ready() {
+    if !models::is_stt_ready() {
         return Ok(false); // Models not downloaded yet — voice-only mode.
     }
-    let model_dir =
-        models::moonshine_model_dir().ok_or_else(|| "Moonshine model directory not found")?;
+    let model_dir = models::stt_model_dir().ok_or_else(|| "STT model directory not found")?;
 
     let channel_uuid = parse_channel_uuid(ephemeral_channel_id)?;
 
