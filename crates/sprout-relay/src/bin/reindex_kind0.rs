@@ -16,8 +16,25 @@
 //!
 //! Idempotent — Typesense uses upsert semantics, so running twice is safe.
 //! Streams in batches so memory stays bounded regardless of relay size.
+//!
+//! ## Paging
+//!
+//! Walks `query_events` with a snapshot ceiling (`until = now()` at start) plus
+//! a keyset cursor over `(created_at, id)` matching the underlying
+//! `ORDER BY created_at DESC, id ASC` index. This guarantees:
+//!
+//! - No rows are skipped if new kind:0 events arrive during the run
+//!   (they're newer than the snapshot, so they fall outside the predicate).
+//! - No rows are double-counted at page boundaries (the cursor advances
+//!   strictly past the last row of each batch).
+//! - Bounded total work — won't chase its own tail under live write traffic.
+//!
+//! Newly-arrived kind:0 events that fall outside the snapshot are indexed by
+//! the relay's live write path anyway, so this backfill plus the live path
+//! together cover the full population.
 
 use anyhow::Context;
+use chrono::{DateTime, Utc};
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
@@ -58,18 +75,30 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("ensuring Typesense collection")?;
 
-    let mut offset: i64 = 0;
+    // Snapshot ceiling: we only reindex events that already exist at start.
+    // Anything newer is handled by the relay's live indexing path.
+    let snapshot: DateTime<Utc> = Utc::now();
+
+    // Keyset cursor over (created_at, id) — matches the underlying
+    // `ORDER BY created_at DESC, id ASC` index. On the first iteration both
+    // cursor fields are None and the predicate reduces to `created_at <= snapshot`.
+    // Subsequent iterations advance to strictly past the last row of the prior batch.
+    let mut cursor_until: DateTime<Utc> = snapshot;
+    let mut cursor_before_id: Option<Vec<u8>> = None;
+
     let mut total_indexed: usize = 0;
     let mut total_failed: usize = 0;
+    let mut batches: usize = 0;
 
-    info!("starting kind:0 reindex");
+    info!(?snapshot, "starting kind:0 reindex");
 
     loop {
         let q = EventQuery {
             kinds: Some(vec![0]),
             limit: Some(BATCH),
-            offset: Some(offset),
             max_limit: Some(BATCH),
+            until: Some(cursor_until),
+            before_id: cursor_before_id.clone(),
             ..EventQuery::default()
         };
 
@@ -83,6 +112,20 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let batch_len = batch.len();
+
+        // Capture the tail of the batch for cursor advance *before* the index
+        // call, so we still advance even if indexing fails for this batch.
+        // (We'd otherwise loop forever on a poisoned batch.)
+        let tail = batch
+            .last()
+            .map(|ev| {
+                let ts = ev.event.created_at.as_u64() as i64;
+                let dt = DateTime::<Utc>::from_timestamp(ts, 0).unwrap_or(cursor_until);
+                let id_bytes = ev.event.id.to_bytes().to_vec();
+                (dt, id_bytes)
+            })
+            .expect("batch is non-empty (checked above)");
+
         match search.index_batch(&batch).await {
             Ok(indexed) => {
                 total_indexed += indexed;
@@ -91,22 +134,33 @@ async fn main() -> anyhow::Result<()> {
                     total_failed += failed;
                     warn!(failed, batch_len, "some events failed to index in batch");
                 }
-                info!(indexed, batch_len, offset, total_indexed, "indexed batch");
+                info!(indexed, batch_len, batches, total_indexed, "indexed batch");
             }
             Err(e) => {
-                warn!(error = %e, batch_len, offset, "batch index failed entirely");
+                warn!(error = %e, batch_len, batches, "batch index failed entirely");
                 total_failed += batch_len;
             }
         }
+
+        batches += 1;
+
+        // Tail of the prior batch becomes the cursor for the next page.
+        // `query_events` will use the composite predicate
+        //   created_at < cursor_until OR (created_at = cursor_until AND id > cursor_before_id)
+        // which exactly skips past the last row we just processed.
+        cursor_until = tail.0;
+        cursor_before_id = Some(tail.1);
 
         // If we got fewer than BATCH back, we're at the tail of the table.
         if (batch_len as i64) < BATCH {
             break;
         }
-        offset += BATCH;
     }
 
-    info!(total_indexed, total_failed, "kind:0 reindex complete");
+    info!(
+        total_indexed,
+        total_failed, batches, "kind:0 reindex complete"
+    );
     if total_failed > 0 {
         std::process::exit(1);
     }
