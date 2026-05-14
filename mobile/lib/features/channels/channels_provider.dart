@@ -48,14 +48,26 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
     if (sessionState.status != SessionStatus.connected) {
       _clearLiveSubscriptions();
+      // Preserve cached channels during background/resume reconnect.
+      if (state.value case final cached?) {
+        return Future.value(cached);
+      }
+      // Cold start with no cache — stay in AsyncLoading so the UI shows
+      // the connection banner instead of the empty-state. build() will
+      // re-fire when the session connects via ref.watch.
+      return Completer<List<Channel>>().future;
     }
 
-    return _fetch(
-      subscribeLive: sessionState.status == SessionStatus.connected,
-    );
+    // If we have cached channels, this is a reconnect fetch — protect against
+    // transient empty membership responses from the relay during warmup.
+    final isReconnect = state.hasValue && state.value!.isNotEmpty;
+    return _fetch(subscribeLive: true, isReconnect: isReconnect);
   }
 
-  Future<List<Channel>> _fetch({bool subscribeLive = false}) async {
+  Future<List<Channel>> _fetch({
+    bool subscribeLive = false,
+    bool isReconnect = false,
+  }) async {
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null) throw StateError('No signing identity available');
 
@@ -70,7 +82,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         .whereType<String>()
         .toSet()
         .toList();
-    if (channelIds.isEmpty) return const [];
+    if (channelIds.isEmpty) {
+      if (isReconnect) {
+        // Transient empty membership response during reconnect warmup —
+        // preserve the cached channel list instead of wiping it.
+        return state.value ?? const [];
+      }
+      return const [];
+    }
 
     // Step 2: pull channel metadata in one batched filter.
     final metas = await session.fetchHistory(
@@ -305,11 +324,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   /// Backstop refresh that preserves existing state on transient failure.
   Future<void> _backstopRefresh() async {
+    final sessionState = ref.read(relaySessionProvider);
+    if (sessionState.status != SessionStatus.connected) return;
     try {
-      final sessionState = ref.read(relaySessionProvider);
-      final channels = await _fetch(
-        subscribeLive: sessionState.status == SessionStatus.connected,
-      );
+      final channels = await _fetch(subscribeLive: true);
       state = AsyncData(channels);
     } catch (error) {
       debugPrint('[ChannelsNotifier] backstop refresh failed: $error');
@@ -318,10 +336,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   Future<void> refresh() async {
     final sessionState = ref.read(relaySessionProvider);
-    state = await AsyncValue.guard(
-      () =>
-          _fetch(subscribeLive: sessionState.status == SessionStatus.connected),
-    );
+    if (sessionState.status != SessionStatus.connected) return;
+    state = await AsyncValue.guard(() => _fetch(subscribeLive: true));
   }
 
   void _clearLiveSubscriptions() {

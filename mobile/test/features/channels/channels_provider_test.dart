@@ -215,6 +215,150 @@ void main() {
     },
   );
 
+  test('connecting status returns previous data without fetching', () async {
+    // After a >30s background the session transitions to connecting.
+    // The provider should return its cached channel list — not call
+    // _fetch() which would timeout-resolve with [] and overwrite the
+    // cache, causing an empty-state flash.
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    // Initial load while connected.
+    final initial = await container.read(channelsProvider.future);
+    expect(initial, hasLength(1));
+    expect(initial.single.name, 'general');
+
+    final fetchCountAfterInit = session.historyFilters.length;
+
+    // Simulate disconnect → connecting: change session state, which
+    // triggers a provider rebuild via ref.watch(relaySessionProvider).
+    session.setStatus(SessionStatus.connecting);
+
+    // Let the provider rebuild settle.
+    await container.read(channelsProvider.future);
+
+    // No new fetchHistory calls should have been issued.
+    expect(session.historyFilters.length, fetchCountAfterInit);
+
+    // The provider should still expose the previous channel data.
+    final channels = container.read(channelsProvider).value;
+    expect(channels, isNotNull);
+    expect(channels, hasLength(1));
+    expect(channels!.single.name, 'general');
+  });
+
+  test('refresh() while connecting does not fetch', () async {
+    // The appLifecycleProvider listener calls refresh() on resume, which
+    // can fire while the session is still connecting after a >30s
+    // background. refresh() must bail out without issuing fetch calls.
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    // Initial load while connected.
+    await container.read(channelsProvider.future);
+    final fetchCountAfterInit = session.historyFilters.length;
+
+    // Transition to connecting.
+    session.setStatus(SessionStatus.connecting);
+    await container.read(channelsProvider.future);
+
+    // Explicitly call refresh() — simulates the resume listener firing.
+    await container.read(channelsProvider.notifier).refresh();
+
+    // No new fetchHistory calls should have been issued.
+    expect(session.historyFilters.length, fetchCountAfterInit);
+
+    // Previous data still intact.
+    final channels = container.read(channelsProvider).value;
+    expect(channels, isNotNull);
+    expect(channels, hasLength(1));
+    expect(channels!.single.name, 'general');
+  });
+
+  test('cold start with connecting status stays in AsyncLoading', () async {
+    // On fresh launch the session starts as connecting and there's no
+    // cached state. The provider must stay in AsyncLoading so the UI
+    // renders the connection spinner, not "No conversations yet".
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+      initialStatus: SessionStatus.connecting,
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    // Read the provider — it should be loading, not data.
+    final state = container.read(channelsProvider);
+    expect(state.isLoading, isTrue);
+    expect(state.value, isNull);
+
+    // No fetchHistory calls should have been issued.
+    expect(session.historyFilters, isEmpty);
+  });
+
+  test('reconnect with empty membership preserves previous channels', () async {
+    // After reconnect the relay may return empty memberships transiently
+    // during warmup. The reconnect-scoped guard should preserve cached
+    // channels instead of wiping to [].
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    // Initial load — one channel.
+    final initial = await container.read(channelsProvider.future);
+    expect(initial, hasLength(1));
+    expect(initial.single.name, 'general');
+
+    // Simulate disconnect → reconnect with empty memberships.
+    session.memberships.clear();
+    session.setStatus(SessionStatus.connecting);
+    await container.read(channelsProvider.future);
+    session.setStatus(SessionStatus.connected);
+    final reconnected = await container.read(channelsProvider.future);
+
+    // Previous data should be preserved during reconnect.
+    expect(reconnected, hasLength(1));
+    expect(reconnected.single.name, 'general');
+  });
+
+  test(
+    'normal empty membership returns empty list (user left all channels)',
+    () async {
+      // When already connected (not a reconnect), an empty membership
+      // response means the user genuinely has no channels. Return [].
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      // Initial load — one channel.
+      final initial = await container.read(channelsProvider.future);
+      expect(initial, hasLength(1));
+
+      // User leaves all channels — refresh() while connected.
+      session.memberships.clear();
+      await container.read(channelsProvider.notifier).refresh();
+
+      // Should return empty — user genuinely has no channels.
+      final channels = container.read(channelsProvider).value;
+      expect(channels, isNotNull);
+      expect(channels, isEmpty);
+    },
+  );
+
   test('initial fetch issues membership + metadata queries', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],
@@ -293,17 +437,27 @@ ProviderContainer _buildContainer({required _FakeRelaySession session}) {
 /// Fake [RelaySessionNotifier] that returns canned events from [fetchHistory]
 /// and records subscribe calls.
 class _FakeRelaySession extends RelaySessionNotifier {
-  _FakeRelaySession({required this.memberships, required this.metadata});
+  _FakeRelaySession({
+    required this.memberships,
+    required this.metadata,
+    this.initialStatus = SessionStatus.connected,
+  });
 
   final List<NostrEvent> memberships;
   final List<NostrEvent> metadata;
+  final SessionStatus initialStatus;
 
   final List<NostrFilter> historyFilters = [];
   final List<NostrFilter> subscribeFilters = [];
   final List<void Function(NostrEvent)> _listeners = [];
 
   @override
-  SessionState build() => const SessionState(status: SessionStatus.connected);
+  SessionState build() => SessionState(status: initialStatus);
+
+  /// Simulate a status transition (e.g. connected → connecting).
+  void setStatus(SessionStatus status) {
+    state = SessionState(status: status);
+  }
 
   @override
   Future<List<NostrEvent>> fetchHistory(
