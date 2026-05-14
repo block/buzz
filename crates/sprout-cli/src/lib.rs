@@ -50,7 +50,22 @@ where
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "sprout", about = "Sprout CLI — interact with a Sprout relay")]
+#[command(
+    name = "sprout",
+    about = "Sprout CLI — interact with a Sprout relay",
+    long_about = "\
+Sprout CLI — interact with a Sprout relay
+
+Configuration (flags override env vars):
+  SPROUT_RELAY_URL     Relay base URL        [default: http://localhost:3000]
+  SPROUT_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
+  SPROUT_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+
+The 'pack' subcommand runs locally and does not require a relay connection.
+
+Exit codes: 0=ok  1=bad input  2=relay/network error  3=auth error  4=other
+Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"}"
+)]
 struct Cli {
     /// Relay URL (http:// or https://). Overrides SPROUT_RELAY_URL env var.
     #[arg(
