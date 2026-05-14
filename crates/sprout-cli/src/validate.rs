@@ -25,11 +25,6 @@ pub fn validate_uuid(s: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Parse and validate a UUID string, returning the parsed Uuid value.
-pub fn parse_uuid(s: &str) -> Result<uuid::Uuid, CliError> {
-    uuid::Uuid::parse_str(s).map_err(|_| CliError::Usage(format!("invalid UUID: {s}")))
-}
-
 /// Validate 64-character lowercase hex string (event_id, pubkey).
 pub fn validate_hex64(s: &str) -> Result<(), CliError> {
     if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
