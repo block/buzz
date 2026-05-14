@@ -6,7 +6,11 @@ Agent Engrams
 
 `draft` `optional`
 
-This NIP defines a convention for AI agents to store persistent, structured memory — *engrams* — on Nostr. Memory consists of addressable `kind:30078` events ([NIP-78](78.md), [NIP-01](01.md)) signed by the agent's key and encrypted with [NIP-44](44.md) using the conversation key between the agent and its owner. Because that key is symmetric, both parties decrypt every event; the owner can always read everything the agent remembers.
+This NIP defines a convention for AI agents to store persistent, structured memory — *engrams* — on Nostr. Memory consists of addressable `kind:30174` events ([NIP-01](01.md)) signed by the agent's key and encrypted with [NIP-44](44.md) using the conversation key between the agent and its owner. Because that key is symmetric, both parties decrypt every event; the owner can always read everything the agent remembers.
+
+## Kind
+
+This NIP claims `kind:30174` for agent engrams. It is in the addressable range per [NIP-01](01.md), so relays retain only the newest event per `(kind, pubkey, d)`. A dedicated kind keeps this NIP's address space separate from any other application's events on the same author.
 
 ## Roles
 
@@ -19,7 +23,7 @@ The phrase **configured relays** used throughout this NIP is, in order of preced
 
 ## Record types
 
-Two `kind:30078` record types share the same envelope and differ only by the slug at which they are addressed:
+Two `kind:30174` record types share the same envelope and differ only by the slug at which they are addressed:
 
 - **`core`** — exactly one per `(pubkey_a, pubkey_o)` pair. Holds agent identity/rules/goals and a client-maintained slug index. Bootstrap address.
 - **`memory`** — zero or more per `(pubkey_a, pubkey_o)` pair. Each holds one logical entry.
@@ -54,7 +58,7 @@ Implementations MUST NOT include the slug or any plaintext form of it in tags.
 
 ```jsonc
 {
-  "kind": 30078,
+  "kind": 30174,
   "pubkey": "<pubkey_a>",
   "created_at": <unix_seconds>,
   "tags": [
@@ -100,7 +104,7 @@ A body with `"value": null` is a **tombstone**; the event is still published, bu
 
 `profile` is free-form UTF-8 maintained by the agent. `index` is a client-maintained cache and is **advisory, not authoritative** (see *Listing*).
 
-Implementations MAY additionally publish [NIP-09](09.md) deletion requests for superseded or tombstoned events of either type; the in-band tombstone (for memory) and replacement (for core) are the protocol-level semantics and are what readers act on. Such deletion requests SHOULD include `["k", "30078"]` per NIP-09 and use an `a`-tag identifier `30078:pubkey_a:<d>`. NIP-09 deletes all versions up to the deletion's `created_at`; a subsequent write with a later timestamp resurrects the slug under *Head selection* and is the intended recovery path. Honoring and non-honoring relays will diverge on pre-deletion history.
+Implementations MAY additionally publish [NIP-09](09.md) deletion requests for superseded or tombstoned events of either type; the in-band tombstone (for memory) and replacement (for core) are the protocol-level semantics and are what readers act on. Such deletion requests SHOULD include `["k", "30174"]` per NIP-09 and use an `a`-tag identifier `30174:<pubkey_a>:<d>`. NIP-09 deletes all versions up to the deletion's `created_at`; a subsequent write with a later timestamp resurrects the slug under *Head selection* and is the intended recovery path. Honoring and non-honoring relays will diverge on pre-deletion history.
 
 ## Encryption
 
@@ -110,15 +114,13 @@ Implementations MAY additionally publish [NIP-09](09.md) deletion requests for s
 
 An event is **valid** for this NIP if all of the following hold:
 
-1. `kind == 30078`, `pubkey == pubkey_a`, exactly one `d` tag, exactly one `p` tag, and the `p` tag value is `pubkey_o`.
+1. `kind == 30174`, `pubkey == pubkey_a`, exactly one `d` tag, exactly one `p` tag, and the `p` tag value is `pubkey_o`.
 2. Its signature verifies (per [NIP-01](01.md)). Validation MUST occur before decryption (per [NIP-44](44.md)).
 3. Its `content` decrypts under `K_c` and parses as a JSON object.
 4. The body's `slug` matches the *Slugs* grammar and re-derives to the event's `d` tag per *Addressing*.
 5. The body's shape matches the type its `slug` discriminates (per *Bodies*).
 
-These rules also demultiplex a shared `kind:30078` namespace: if `pubkey_a` publishes 30078 events for unrelated applications, those events fail rule (3) (wrong `K_c`) or rules (4)–(5) (wrong shape) and are discarded. No coordination with other 30078-using applications is required.
-
-Let `d = derive(s)` per *Addressing*. The **head** of slug `s` is computed by querying every configured relay for `kind:30078` events authored by `pubkey_a` whose tags contain `["d", d]` and `["p", pubkey_o]`, taking the union of results, discarding invalid events, and selecting the surviving event with the greatest `created_at` (ties broken by lowest event `id` per [NIP-01](01.md)). The same procedure is used for reading, writing verification, and listing.
+Let `d = derive(s)` per *Addressing*. The **head** of slug `s` is computed by querying every configured relay for `kind:30174` events authored by `pubkey_a` whose tags contain `["d", d]` and `["p", pubkey_o]`, taking the union of results, discarding invalid events, and selecting the surviving event with the greatest `created_at` (ties broken by lowest event `id` per [NIP-01](01.md)). The same procedure is used for reading, writing verification, and listing.
 
 ## Writing
 
@@ -139,7 +141,7 @@ To read slug `s`: compute the head per *Head selection*. If it is absent or a to
 
 Two mechanisms are defined; clients MUST support (a) and SHOULD support (b):
 
-**(a) Walk.** Query every configured relay for `kind:30078` events from `pubkey_a` tagged `["p", pubkey_o]`, take the union, and discard invalid events (per *Head selection*). Group the survivors by `d` tag; for each group, select the event with the greatest `created_at` (ties broken by lowest `id`). Drop tombstones. Return the set of `{slug, event_id, created_at}` tuples (omitting `core`).
+**(a) Walk.** Query every configured relay for `kind:30174` events from `pubkey_a` tagged `["p", pubkey_o]`, take the union, and discard invalid events (per *Head selection*). Group the survivors by `d` tag; for each group, select the event with the greatest `created_at` (ties broken by lowest `id`). Drop tombstones. Return the set of `{slug, event_id, created_at}` tuples (omitting `core`).
 
 **(b) Cache.** Read `index` from core's body. Faster but may be stale; clients SHOULD reconcile against (a) periodically.
 
@@ -161,7 +163,7 @@ The verification step of *Writing* detects two concurrent writers whose events b
 
 - **Agent key compromise.** Holders of `nsec_a` can rewrite or tombstone any record. On relays that honor addressable-event replacement no protocol-level trace remains; archival relays may show *that* rewrites occurred but cannot by themselves identify which version is authoritative. This NIP defines no mechanism for authoritative version chaining.
 - **Owner key compromise.** Holders of `nsec_o` can decrypt all records but cannot write them; the consequence is confidentiality loss, not integrity loss.
-- **Metadata leak.** The triple `(pubkey_a, kind:30078, p=pubkey_o)` reveals that an account uses agent memory and identifies its owner. Pseudonymous, not anonymous.
+- **Metadata leak.** The triple `(pubkey_a, kind:30174, p=pubkey_o)` reveals that an account uses agent memory and identifies its owner. Pseudonymous, not anonymous.
 - **No owner write authority.** Only `nsec_a` can author records. This NIP defines no protocol-level mechanism by which an owner directs the agent's memory; that interaction is out of band.
 - **Memory poisoning.** Encryption protects confidentiality, not the truthfulness of what the agent decides to remember. Admission control is the implementer's problem.
 
@@ -183,7 +185,7 @@ Bodies are pinned as exact UTF-8 byte strings (no whitespace, key order as liste
 body_1 = {"slug":"mem/example","value":"hello, agent memory"}
 body_2 = {"slug":"mem/notes/2026-05-12","value":"meeting note: [[mem/example]]"}
 body_3 = {"slug":"mem/example","value":null}
-body_4 = {"slug":"core","profile":"test agent. see [[mem/example]] and [[mem/notes/2026-05-12]].","index":{"mem/notes/2026-05-12":{"event_id":"47f9c71356c9dc6d07a3312ad25e4b5b44161349102d4a4889d8451502526c9d","created_at":1700000001}}}
+body_4 = {"slug":"core","profile":"test agent. see [[mem/example]] and [[mem/notes/2026-05-12]].","index":{"mem/notes/2026-05-12":{"event_id":"1a43298ea1fa9b73462a85b9f16f5f6bd2a7ab18b0b02424e5ec3f3b8a48e030","created_at":1700000001}}}
 ```
 
 ### Derived
@@ -200,7 +202,7 @@ d("mem/notes/2026-05-12")  = 31651571a312780cfdc1f0b706b682ac9f3f51a053e8dca76fe
 
 ### Events
 
-Each event below uses `kind=30078`, `pubkey=pubkey_a`, `tags=[["d", d], ["p", pubkey_o]]`, and the `created_at`, NIP-44 nonce, and body listed. `sha256(content)` is taken over the base64 payload bytes (ASCII).
+Each event below uses `kind=30174`, `pubkey=pubkey_a`, `tags=[["d", d], ["p", pubkey_o]]`, and the `created_at`, NIP-44 nonce, and body listed. `sha256(content)` is taken over the base64 payload bytes (ASCII).
 
 **Event 1 — write `mem/example`:**
 ```
@@ -209,8 +211,8 @@ nip44_nonce     = 00000000000000000000000000000000000000000000000000000000000000
 content         = AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABedgcxyfmpph68LBjCWZsTI5lb0Cbg8dIPVYVe/WVj/l4Yd8HGgzC8awyBi9bn9ClRdtd2IPsmont0jN/cajVSQhahTOwuNNwoJtZIg35aSsUzeCq4tQfd8E+fLoKomdPxjs=
 content_len     = 176
 sha256(content) = ff680a293019af12709972ae68b6ee79a47f354381a94ca4074d8e0fe3c8bb50
-id              = a523d143e2f5fee889163162695cdae1411e2f877339995d6f9f122da32f9d58
-sig             = 692e69cec2beee34973948470396a97e62801bd0c5fea6bd66121570d9a7a91f02745787472f1214950bf2da0ece4068d3a8a66275cf4c3482854f13da3c3722
+id              = f4a594177b7aeea4fe99a09efbf74ae85f0126244f322135682c405888a38689
+sig             = 0a4582f0bc5995b9a010afda5984f568055988ebbe4552b4e0ec6d11aeb2b303af940f3d84726a7edd1763badb284eb3aa8457664ceba85a90d6252ed4b494cb
 ```
 
 **Event 2 — write `mem/notes/2026-05-12`:**
@@ -220,8 +222,8 @@ nip44_nonce     = 00000000000000000000000000000000000000000000000000000000000000
 content         = AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACG/JBPvdZxDwAxOG7bY3AW2q1slZqBjQC3NxfPVtfcR+TGjp2GKtjyXyqNwG08GK+00I1u1vUZ4cCjcun9A7ra92rleKKJ5w57pqgFspbv1vClUJY5487A/5phVDHkw6DhRCSMDpEMw5Tapj3Wm1ponAVr5PciPOrTxltEfTVdSKaPA==
 content_len     = 220
 sha256(content) = ba7b026809363134c4f8de6cfbd82417b838e265281ff7e0005dc193bf1b32c8
-id              = 47f9c71356c9dc6d07a3312ad25e4b5b44161349102d4a4889d8451502526c9d
-sig             = 724f670cf20b007beec0901e351ee177f8176e02d7b60211dad9cb68ef50004dc27f38c5b02b95e01301d35ebcf5258f0876558f1b9b621194c70320c0d26bef
+id              = 1a43298ea1fa9b73462a85b9f16f5f6bd2a7ab18b0b02424e5ec3f3b8a48e030
+sig             = dc9da456db1c89f070edc5f994786f270fc00e8ff19f33d5b0f6cea49421cd727fcd79bb288f3e3dbd5af9ca1ba67f9bd11b02a47c1e6c37cfd32665c17e4a24
 ```
 
 **Event 3 — tombstone `mem/example` (supersedes Event 1; same `d`, greater `created_at`):**
@@ -231,19 +233,19 @@ nip44_nonce     = 00000000000000000000000000000000000000000000000000000000000000
 content         = AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADuau8i0Wu4+ULnp2qTfd+O23jJAapMRrKGGwabNVOlT9hSF8FViBHIS6f86/7xK4qGOin4IH8Wr/3cvHDcQGQd3IXQJr8LHgJkaYpQPdBO1bgqiFu8K3L/CLb1PgG1X7RQ8E=
 content_len     = 176
 sha256(content) = 0c9f72125f6460e68cb4b7ee42298afc8969840f83a156d90aa98a5f461fea44
-id              = 94c770b5c5b5542ffba829ea51f8dedf0bc9902ed5b7f6ac013f49a3cd7ab327
-sig             = cd6bca1dca339e4898b86d8a907e5fa4e32c733f8f679f471120443679b20a474489dcdeef8d3367e9b93b629c1a0a55bd87c0505b54d1e0daee927c7056d065
+id              = c8604bef05295856a67a88ec895e07b5b47a2febc23c82934734096a7b123b63
+sig             = c8d53859cf08b3a9a20a5b01c61d12fa2f082f462adb635420f05dc6f9bb662a174e729023854bf53e5e35fae8f6f4c9d604e8979a070e298cd77cfb7e6b6468
 ```
 
 **Event 4 — core (references Event 2's `id` in its `index`):**
 ```
 created_at      = 1700000003
 nip44_nonce     = 0000000000000000000000000000000000000000000000000000000000000004
-content         = AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEEV1HAFjhc8DAcKaVSSB7IoKG3nr+dX3LXlU7UIdOKayhIVPXvl4WuFmBSVxLO6yEV5vnLvzbo7rU0uPRYyAJLPNnifVTCw2EQZH70zOwTc/mVvaATHKzqcFotHOCAPboNxUN9fLHJDZ/3Mg/q5GOkQYqUWaa/cDdgQ5FM01oiREPwPOp8xySRQqSmDwS2GE0dPiYmpsSV0OYu1E3EhrhfWcF3YtgSi4r3/SkekuugIo9aLcNsnegKja63h4VyXpStry/lXdGx+kNwnUW958jVT8MM2HpPeYUlSqTwiKnMB6IqLOlM6JjiSoTW9vtMsbfdc+cx4OG6pZlDhtpuMSyoLakZuG/1cw4d/fa7BRMhr3JCjdbFYjJxb6vH9tl1MS0G64=
+content         = AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEEV1HAFjhc8DAcKaVSSB7IoKG3nr+dX3LXlU7UIdOKayhIVPXvl4WuFmBSVxLO6yEV5vnLvzbo7rU0uPRYyAJLPNnifVTCw2EQZH70zOwTc/mVvaATHKzqcFotHOCAPboNxUN9fLHJDZ/3Mg/q5GOkQYqUWaa/cDdgQ5FM01oiREPwPOp8xySRQ/EyjZD1mhiIP+dwsYTVhScugJlGR6xJWUG3ohhTi0rj/L0exv/hYtuaOdZtCKmJmu230USmngFvu++nyQVzb0NwnUW958jVT8MM2HpPeYUlSqTwiKnMB6IqLOlM6JjiSoTW9vtMsbfdc+cx4OG6pZlDhtpuMSyoLak4wtTfqObN49yqR9GUiK2wuI/fj7TKf/BGapsCiIWpYs=
 content_len     = 432
-sha256(content) = 4f17756cb04c52f7fc96f322c9afb3afdbb277b3962b03b5c80e42e981ddbf70
-id              = c14e1c8d25c43fd14c7caf115a38a7eec6ed001f76d1c2c9522940cf5fa47665
-sig             = a593316d85cb5158f53bd9b4e13dd39d4125c1e03bc83bd5e5b46417197e2b14db54c2ae625f57cc2973fb5d6a52bf11b45a5a5368e4c5f4c13dd167ba1ce5cd
+sha256(content) = e3b64fff85354a38fa5dc51a9738a9bd2bc2f8a129075f570af5e163b97b39a4
+id              = 7daeaf5a9d9caeadde1597e38c0b4a3deaf3242f8fb9fdb835e52e54247599e5
+sig             = 31459bc0cf13185b0368a913996211fcfc7aaeae4c124122ec4adf8887c798066494f796cfed29e10d99d60a5c973df1e4e49f33470e00aaa26268110a4ae7d4
 ```
 
 ### Implementation gotchas
