@@ -27,17 +27,20 @@ export const MessageRow = React.memo(
     message,
     onDelete,
     onEdit,
+    onMarkUnread,
     onToggleReaction,
     onReply,
     profiles,
     searchQuery,
   }: {
     activeReplyTargetId?: string | null;
+    channelId?: string | null;
     highlighted?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
     onDelete?: (message: TimelineMessage) => void;
     onEdit?: (message: TimelineMessage) => void;
+    onMarkUnread?: (message: TimelineMessage) => void;
     onToggleReaction?: (
       message: TimelineMessage,
       emoji: string,
@@ -184,6 +187,7 @@ export const MessageRow = React.memo(
               message={message}
               onDelete={onDelete}
               onEdit={onEdit}
+              onMarkUnread={onMarkUnread}
               onReactionSelect={
                 canToggleReactions ? handleReactionSelect : undefined
               }

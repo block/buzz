@@ -561,6 +561,7 @@ export function AppShell() {
         <AppShellProvider
           value={{
             markChannelRead,
+            markChannelUnread,
             openChannelManagement: () => {
               setIsChannelManagementOpen(true);
             },
