@@ -1,6 +1,6 @@
 use crate::client::SproutClient;
 use crate::error::CliError;
-use crate::validate::parse_uuid;
+use crate::validate::{parse_uuid, sdk_err};
 
 /// List DM conversations by querying kind:41010 (DM open) events authored by us.
 pub async fn cmd_list_dms(client: &SproutClient, limit: Option<u32>) -> Result<(), CliError> {
@@ -21,9 +21,8 @@ pub async fn cmd_open_dm(client: &SproutClient, pubkeys: &[String]) -> Result<()
     if pubkeys.is_empty() || pubkeys.len() > 8 {
         return Err(CliError::Usage("--pubkey: must provide 1–8 pubkeys".into()));
     }
-    let refs: Vec<&str> = pubkeys.iter().map(|s| s.as_str()).collect();
-    let builder = sprout_sdk::build_dm_open(&refs)
-        .map_err(|e| CliError::Other(format!("build_dm_open failed: {e}")))?;
+    let refs: Vec<&str> = pubkeys.iter().map(String::as_str).collect();
+    let builder = sprout_sdk::build_dm_open(&refs).map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
@@ -39,8 +38,7 @@ pub async fn cmd_add_dm_member(
 ) -> Result<(), CliError> {
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = sprout_sdk::build_dm_add_member(channel_uuid, pubkey)
-        .map_err(|e| CliError::Other(format!("build_dm_add_member failed: {e}")))?;
+    let builder = sprout_sdk::build_dm_add_member(channel_uuid, pubkey).map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;

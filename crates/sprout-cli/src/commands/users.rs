@@ -218,8 +218,7 @@ pub async fn cmd_get_presence(client: &SproutClient, pubkeys_csv: &str) -> Resul
 /// This will fail until the CLI gains a WS publish path. The kind is correct
 /// per the protocol spec (KIND_PRESENCE_UPDATE = 20001).
 pub async fn cmd_set_presence(client: &SproutClient, status: &str) -> Result<(), CliError> {
-    let builder = sprout_sdk::build_presence_update(status)
-        .map_err(|e| CliError::Other(format!("build_presence_update failed: {e}")))?;
+    let builder = sprout_sdk::build_presence_update(status).map_err(crate::validate::sdk_err)?;
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;

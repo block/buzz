@@ -146,6 +146,16 @@ pub fn infer_language(file_path: &str) -> Option<String> {
     Some(lang.to_string())
 }
 
+/// Map `SdkError` to the appropriate `CliError` variant.
+///
+/// `InvalidInput` is a user error (exit 1), everything else is internal (exit 4).
+pub fn sdk_err(e: sprout_sdk::SdkError) -> CliError {
+    match e {
+        sprout_sdk::SdkError::InvalidInput(msg) => CliError::Usage(msg),
+        other => CliError::Other(other.to_string()),
+    }
+}
+
 /// Read content from a string value or stdin if the value is "-".
 pub fn read_or_stdin(value: &str) -> Result<String, CliError> {
     if value == "-" {

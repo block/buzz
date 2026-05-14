@@ -1,4 +1,4 @@
-//! The 25 typed event builder functions.
+//! Typed event builder functions (38 builders).
 //!
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
@@ -900,22 +900,21 @@ pub fn build_repo_announcement(
     ))
 }
 
-// ---------------------------------------------------------------------------
-// Workflow builders
-// ---------------------------------------------------------------------------
+// ── Builder 31: build_workflow_def ────────────────────────────────────────────
 
 /// Build a workflow definition event (kind 30620).
 ///
 /// - `channel_id`: the channel this workflow belongs to (h-tag)
-/// - `workflow_id`: unique d-tag identifier for this workflow
+/// - `workflow_id`: unique workflow UUID (d-tag)
 /// - `yaml`: workflow YAML definition as content
 pub fn build_workflow_def(
     channel_id: Uuid,
-    workflow_id: &str,
+    workflow_id: Uuid,
     yaml: &str,
 ) -> Result<EventBuilder, SdkError> {
+    check_content(yaml, 64 * 1024)?;
     let tags = vec![
-        tag(&["d", workflow_id])?,
+        tag(&["d", &workflow_id.to_string()])?,
         tag(&["h", &channel_id.to_string()])?,
     ];
     Ok(EventBuilder::new(
@@ -925,12 +924,23 @@ pub fn build_workflow_def(
     ))
 }
 
+// ── Builder 32: build_workflow_update ─────────────────────────────────────────
+
 /// Build a workflow update event (kind 30620) for an existing workflow.
 ///
 /// Updates an existing workflow definition in-place via the parameterized
 /// replaceable event mechanism — same d-tag overwrites the previous version.
-pub fn build_workflow_update(workflow_id: &str, yaml: &str) -> Result<EventBuilder, SdkError> {
-    let tags = vec![tag(&["d", workflow_id])?];
+/// The h-tag (channel scope) is required by the relay for authorization.
+pub fn build_workflow_update(
+    channel_id: Uuid,
+    workflow_id: Uuid,
+    yaml: &str,
+) -> Result<EventBuilder, SdkError> {
+    check_content(yaml, 64 * 1024)?;
+    let tags = vec![
+        tag(&["d", &workflow_id.to_string()])?,
+        tag(&["h", &channel_id.to_string()])?,
+    ];
     Ok(EventBuilder::new(
         Kind::Custom(KIND_WORKFLOW_DEF as u16),
         yaml,
@@ -938,15 +948,21 @@ pub fn build_workflow_update(workflow_id: &str, yaml: &str) -> Result<EventBuild
     ))
 }
 
+// ── Builder 33: build_workflow_delete ─────────────────────────────────────────
+
 /// Build a NIP-09 deletion event targeting a workflow definition (kind 5).
 ///
-/// The `a`-tag addresses the parameterized replaceable event `30620:<pubkey>:<workflow_id>`.
+/// The `a`-tag addresses the parameterized replaceable event
+/// `<KIND_WORKFLOW_DEF>:<pubkey>:<workflow_id>`.
 pub fn build_workflow_delete(
     author_pubkey: &str,
-    workflow_id: &str,
+    workflow_id: Uuid,
 ) -> Result<EventBuilder, SdkError> {
     let pk = check_pubkey_hex(author_pubkey, "author_pubkey")?;
-    let tags = vec![tag(&["a", &format!("30620:{pk}:{workflow_id}")])?];
+    let tags = vec![tag(&[
+        "a",
+        &format!("{}:{pk}:{workflow_id}", KIND_WORKFLOW_DEF),
+    ])?];
     Ok(EventBuilder::new(
         Kind::Custom(KIND_DELETION as u16),
         "",
@@ -954,9 +970,11 @@ pub fn build_workflow_delete(
     ))
 }
 
+// ── Builder 34: build_workflow_trigger ────────────────────────────────────────
+
 /// Build a workflow trigger event (kind 46020).
-pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, SdkError> {
-    let tags = vec![tag(&["d", workflow_id])?];
+pub fn build_workflow_trigger(workflow_id: Uuid) -> Result<EventBuilder, SdkError> {
+    let tags = vec![tag(&["d", &workflow_id.to_string()])?];
     Ok(EventBuilder::new(
         Kind::Custom(KIND_WORKFLOW_TRIGGER as u16),
         "",
@@ -964,9 +982,12 @@ pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, SdkErro
     ))
 }
 
+// ── Builder 35: build_workflow_approval ───────────────────────────────────────
+
 /// Build a workflow approval event — kind 46030 (grant) or 46031 (deny).
 ///
-/// - `token_hash`: hex-encoded SHA-256 of the approval token UUID (d-tag)
+/// - `token_hash`: hex-encoded SHA-256 of the approval token UUID (d-tag).
+///   Must be exactly 64 hex characters.
 /// - `approved`: `true` emits kind 46030 (grant), `false` emits kind 46031 (deny)
 /// - `note`: optional human-readable note as event content
 pub fn build_workflow_approval(
@@ -974,6 +995,11 @@ pub fn build_workflow_approval(
     approved: bool,
     note: &str,
 ) -> Result<EventBuilder, SdkError> {
+    if token_hash.len() != 64 || !token_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(SdkError::InvalidInput(
+            "token_hash must be a 64-character hex SHA-256 digest".into(),
+        ));
+    }
     let kind = if approved {
         KIND_APPROVAL_GRANT
     } else {
@@ -983,13 +1009,11 @@ pub fn build_workflow_approval(
     Ok(EventBuilder::new(Kind::Custom(kind as u16), note, tags))
 }
 
-// ---------------------------------------------------------------------------
-// DM builders
-// ---------------------------------------------------------------------------
+// ── Builder 36: build_dm_open ────────────────────────────────────────────────
 
 /// Build a DM open event (kind 41010).
 ///
-/// `pubkeys` must be 1-8 hex-encoded pubkeys to include in the DM conversation.
+/// `pubkeys` must be 1–8 hex-encoded pubkeys to include in the DM conversation.
 pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
     if pubkeys.is_empty() || pubkeys.len() > 8 {
         return Err(SdkError::InvalidInput(
@@ -1008,6 +1032,8 @@ pub fn build_dm_open(pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
     ))
 }
 
+// ── Builder 37: build_dm_add_member ──────────────────────────────────────────
+
 /// Build a DM add-member event (kind 41011).
 pub fn build_dm_add_member(channel_id: Uuid, pubkey: &str) -> Result<EventBuilder, SdkError> {
     let pk = check_pubkey_hex(pubkey, "pubkey")?;
@@ -1019,13 +1045,13 @@ pub fn build_dm_add_member(channel_id: Uuid, pubkey: &str) -> Result<EventBuilde
     ))
 }
 
-// ---------------------------------------------------------------------------
-// Presence builder
-// ---------------------------------------------------------------------------
+// ── Builder 38: build_presence_update ────────────────────────────────────────
 
 /// Build a presence update event (kind 20001).
 ///
 /// `status` must be one of: `"online"`, `"away"`, `"offline"`.
+/// The status is placed in `event.content` (relay reads it there) and also
+/// in a `["status", ...]` tag for structured access.
 pub fn build_presence_update(status: &str) -> Result<EventBuilder, SdkError> {
     match status {
         "online" | "away" | "offline" => {}
@@ -1038,7 +1064,7 @@ pub fn build_presence_update(status: &str) -> Result<EventBuilder, SdkError> {
     let tags = vec![tag(&["status", status])?];
     Ok(EventBuilder::new(
         Kind::Custom(KIND_PRESENCE_UPDATE as u16),
-        "",
+        status,
         tags,
     ))
 }
@@ -2110,5 +2136,181 @@ mod tests {
         assert_eq!(vals.len(), 2);
         assert_eq!(vals[0], "https://relay.example.com/git/abc/multi-clone");
         assert_eq!(vals[1], "ssh://git@github.com/org/multi-clone.git");
+    }
+
+    // ── Builder 31: build_workflow_def ───────────────────────────────────────
+
+    #[test]
+    fn workflow_def_happy_path() {
+        let cid = uuid();
+        let wid = uuid();
+        let ev = sign(build_workflow_def(cid, wid, "name: test\ntrigger:\n  on: webhook").unwrap());
+        assert_eq!(ev.kind.as_u16(), 30620);
+        assert!(has_tag(&ev, "d", &wid.to_string()));
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(ev.content.contains("name: test"));
+    }
+
+    #[test]
+    fn workflow_def_rejects_oversized_yaml() {
+        let big = "x".repeat(65 * 1024);
+        let err = build_workflow_def(uuid(), uuid(), &big).unwrap_err();
+        assert!(matches!(err, SdkError::ContentTooLarge { .. }));
+    }
+
+    // ── Builder 32: build_workflow_update ────────────────────────────────────
+
+    #[test]
+    fn workflow_update_includes_h_tag() {
+        let cid = uuid();
+        let wid = uuid();
+        let ev = sign(build_workflow_update(cid, wid, "name: updated").unwrap());
+        assert_eq!(ev.kind.as_u16(), 30620);
+        assert!(has_tag(&ev, "d", &wid.to_string()));
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+    }
+
+    #[test]
+    fn workflow_update_rejects_oversized_yaml() {
+        let big = "x".repeat(65 * 1024);
+        let err = build_workflow_update(uuid(), uuid(), &big).unwrap_err();
+        assert!(matches!(err, SdkError::ContentTooLarge { .. }));
+    }
+
+    // ── Builder 33: build_workflow_delete ────────────────────────────────────
+
+    #[test]
+    fn workflow_delete_happy_path() {
+        let pk = "a".repeat(64);
+        let wid = uuid();
+        let ev = sign(build_workflow_delete(&pk, wid).unwrap());
+        assert_eq!(ev.kind.as_u16(), 5);
+        let a_vals = tag_values(&ev, "a");
+        assert_eq!(a_vals.len(), 1);
+        assert!(a_vals[0].starts_with("30620:"));
+        assert!(a_vals[0].contains(&wid.to_string()));
+    }
+
+    #[test]
+    fn workflow_delete_rejects_bad_pubkey() {
+        let err = build_workflow_delete("bad", uuid()).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    // ── Builder 34: build_workflow_trigger ───────────────────────────────────
+
+    #[test]
+    fn workflow_trigger_happy_path() {
+        let wid = uuid();
+        let ev = sign(build_workflow_trigger(wid).unwrap());
+        assert_eq!(ev.kind.as_u16(), 46020);
+        assert!(has_tag(&ev, "d", &wid.to_string()));
+    }
+
+    // ── Builder 35: build_workflow_approval ──────────────────────────────────
+
+    #[test]
+    fn workflow_approval_grant() {
+        let hash = "a".repeat(64);
+        let ev = sign(build_workflow_approval(&hash, true, "lgtm").unwrap());
+        assert_eq!(ev.kind.as_u16(), 46030);
+        assert!(has_tag(&ev, "d", &hash));
+        assert_eq!(ev.content, "lgtm");
+    }
+
+    #[test]
+    fn workflow_approval_deny() {
+        let hash = "b".repeat(64);
+        let ev = sign(build_workflow_approval(&hash, false, "").unwrap());
+        assert_eq!(ev.kind.as_u16(), 46031);
+    }
+
+    #[test]
+    fn workflow_approval_rejects_bad_token_hash() {
+        let err = build_workflow_approval("not-hex", true, "").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn workflow_approval_rejects_short_hash() {
+        let short = "a".repeat(32);
+        let err = build_workflow_approval(&short, true, "").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    // ── Builder 36: build_dm_open ───────────────────────────────────────────
+
+    #[test]
+    fn dm_open_happy_path() {
+        let pk = "a".repeat(64);
+        let ev = sign(build_dm_open(&[&pk]).unwrap());
+        assert_eq!(ev.kind.as_u16(), 41010);
+        assert!(has_tag(&ev, "p", &pk));
+    }
+
+    #[test]
+    fn dm_open_rejects_empty_pubkeys() {
+        let err = build_dm_open(&[]).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn dm_open_rejects_over_8_pubkeys() {
+        let pk = "a".repeat(64);
+        let pks: Vec<&str> = vec![pk.as_str(); 9];
+        let err = build_dm_open(&pks).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn dm_open_rejects_bad_pubkey() {
+        let err = build_dm_open(&["bad-hex"]).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    // ── Builder 37: build_dm_add_member ─────────────────────────────────────
+
+    #[test]
+    fn dm_add_member_happy_path() {
+        let cid = uuid();
+        let pk = "b".repeat(64);
+        let ev = sign(build_dm_add_member(cid, &pk).unwrap());
+        assert_eq!(ev.kind.as_u16(), 41011);
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "p", &pk));
+    }
+
+    #[test]
+    fn dm_add_member_rejects_bad_pubkey() {
+        let err = build_dm_add_member(uuid(), "short").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    // ── Builder 38: build_presence_update ────────────────────────────────────
+
+    #[test]
+    fn presence_update_content_is_status() {
+        let ev = sign(build_presence_update("online").unwrap());
+        assert_eq!(ev.kind.as_u16(), 20001);
+        assert_eq!(ev.content, "online");
+        assert!(has_tag(&ev, "status", "online"));
+    }
+
+    #[test]
+    fn presence_update_away() {
+        let ev = sign(build_presence_update("away").unwrap());
+        assert_eq!(ev.content, "away");
+    }
+
+    #[test]
+    fn presence_update_offline() {
+        let ev = sign(build_presence_update("offline").unwrap());
+        assert_eq!(ev.content, "offline");
+    }
+
+    #[test]
+    fn presence_update_rejects_invalid_status() {
+        let err = build_presence_update("dnd").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 }

@@ -378,6 +378,8 @@ enum Cmd {
     /// Update a workflow
     UpdateWorkflow {
         #[arg(long)]
+        channel: String,
+        #[arg(long)]
         workflow: String,
         #[arg(long)]
         yaml: String,
@@ -819,9 +821,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::CreateWorkflow { channel, yaml } => {
             commands::workflows::cmd_create_workflow(&client, &channel, &yaml).await
         }
-        Cmd::UpdateWorkflow { workflow, yaml } => {
-            commands::workflows::cmd_update_workflow(&client, &workflow, &yaml).await
-        }
+        Cmd::UpdateWorkflow {
+            channel,
+            workflow,
+            yaml,
+        } => commands::workflows::cmd_update_workflow(&client, &channel, &workflow, &yaml).await,
         Cmd::DeleteWorkflow { workflow } => {
             commands::workflows::cmd_delete_workflow(&client, &workflow).await
         }
