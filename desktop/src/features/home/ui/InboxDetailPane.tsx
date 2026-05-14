@@ -129,7 +129,7 @@ export function InboxDetailPane({
   if (!item) {
     return (
       <section
-        className="flex min-h-0 min-w-0 items-center justify-center bg-background px-6 py-10 text-center"
+        className="flex min-h-0 min-w-0 items-center justify-center bg-background/60 px-6 py-10 pt-20 text-center"
         data-testid="home-inbox-detail-empty"
       >
         <div className="max-w-sm">
@@ -189,12 +189,12 @@ export function InboxDetailPane({
 
   return (
     <section
-      className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background"
+      className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background/60"
       data-testid="home-inbox-detail"
       ref={detailPaneRef}
     >
       {!canOpenChannel ? (
-        <div className="px-6 py-4">
+        <div className="px-6 pb-4 pt-14">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-3">
               <UserAvatar
@@ -262,7 +262,7 @@ export function InboxDetailPane({
       ) : null}
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        <div className="absolute inset-0 overflow-y-auto overscroll-contain pb-32 pt-6">
+        <div className="absolute inset-0 overflow-y-auto overscroll-contain pb-32 pt-14">
           <div>
             {isThreadContextLoading ? (
               <div className="px-6 pb-3 text-[11px] text-muted-foreground">
@@ -277,15 +277,14 @@ export function InboxDetailPane({
                 <div className="px-6 py-2">
                   <article
                     className={cn(
-                      "group/message flex items-start gap-2.5 border-l-2 px-2 py-1 transition-colors duration-1000",
+                      "group/message flex items-start gap-2.5 px-2 py-1 transition-colors duration-1000",
                       message.isSelected
                         ? cn(
-                            "border-primary/35",
                             isFocusHighlightVisible
                               ? "bg-primary/[0.07]"
                               : "bg-transparent",
                           )
-                        : "border-transparent hover:bg-muted/20",
+                        : "hover:bg-muted/20",
                     )}
                     data-testid={
                       message.isSelected
@@ -348,7 +347,7 @@ export function InboxDetailPane({
                           </div>
                         ) : null}
                       </div>
-                      <div className="-mt-0.5">
+                      <div className="mt-1">
                         <Markdown
                           className="max-w-full text-left text-sm text-foreground"
                           content={message.content}

@@ -5,7 +5,7 @@ import {
   FileText,
   FolderGit2,
   Hash,
-  Inbox,
+  House,
   Lock,
   Zap,
 } from "lucide-react";
@@ -39,7 +39,7 @@ function ChannelIcon({
   mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
 }) {
   if (mode === "home") {
-    return <Inbox className={HEADER_ICON_CLASS} />;
+    return <House className={HEADER_ICON_CLASS} />;
   }
 
   if (mode === "agents") {

@@ -110,7 +110,7 @@ test("loads the home feed from the relay", async ({ page }) => {
   await installRelayBridge(page, "tyler");
   await page.goto("/");
 
-  await expect(page.getByTestId("chat-title")).toHaveText("Inbox");
+  await expect(page.getByTestId("chat-title")).toHaveText("Home");
   await expect(page.getByTestId("home-inbox")).toBeVisible();
   await expect(page.getByTestId("home-inbox-list")).toContainText(
     "Please review the release checklist.",

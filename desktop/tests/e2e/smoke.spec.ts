@@ -138,7 +138,7 @@ test("opens a mocked channel from the home feed", async ({ page }) => {
 
   await page.goto("/");
 
-  await expect(page.getByTestId("chat-title")).toHaveText("Inbox");
+  await expect(page.getByTestId("chat-title")).toHaveText("Home");
   await expect(inboxList).toContainText("Please review the release checklist.");
 
   await inboxList
