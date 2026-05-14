@@ -1,6 +1,9 @@
 import * as React from "react";
 import { Loader2 } from "lucide-react";
 
+import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
+import type { TranscriptItem } from "@/features/agents/ui/agentSessionTypes";
+import { formatToolTitle } from "@/features/agents/ui/agentSessionToolCatalog";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -11,21 +14,38 @@ export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name">;
 
 type BotActivityBarProps = {
   agents: BotActivityAgent[];
+  channelId?: string | null;
   onOpenAgentSession: (pubkey: string) => void;
   openAgentSessionPubkey: string | null;
   profiles?: UserProfileLookup;
   typingBotPubkeys: string[];
+  variant?: "toolbar" | "inline";
 };
 
 const HOVER_OPEN_DELAY_MS = 150;
 const HOVER_CLOSE_DELAY_MS = 180;
+const HEADLINE_ROTATION_MS = 2200;
+
+function getActivityHeadline(item: TranscriptItem): string | null {
+  if (item.type === "tool") {
+    return formatToolTitle(item.sproutToolName ?? item.toolName, item.title);
+  }
+
+  if (item.type === "message") {
+    return item.role === "assistant" ? "Responding" : item.title;
+  }
+
+  return item.title;
+}
 
 export function BotActivityComposerAction({
   agents,
+  channelId = null,
   onOpenAgentSession,
   openAgentSessionPubkey,
   profiles,
   typingBotPubkeys,
+  variant = "toolbar",
 }: BotActivityBarProps) {
   const [open, setOpen] = React.useState(false);
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
@@ -39,6 +59,39 @@ export function BotActivityComposerAction({
 
     return agents.filter((agent) => typingSet.has(agent.pubkey.toLowerCase()));
   }, [agents, typingBotPubkeys]);
+  const singleTypingAgent =
+    typingAgents.length === 1 ? (typingAgents[0] ?? null) : null;
+  const transcript = useAgentTranscript(
+    Boolean(singleTypingAgent),
+    singleTypingAgent?.pubkey,
+  );
+  const activityHeadlines = React.useMemo(() => {
+    if (!singleTypingAgent) {
+      return [];
+    }
+
+    const seen = new Set<string>();
+    const headlines: string[] = [];
+    const scopedTranscript = channelId
+      ? transcript.filter((item) => item.channelId === channelId)
+      : transcript;
+
+    for (let i = scopedTranscript.length - 1; i >= 0; i--) {
+      const headline = getActivityHeadline(scopedTranscript[i]);
+      if (!headline || seen.has(headline)) {
+        continue;
+      }
+
+      seen.add(headline);
+      headlines.unshift(headline);
+      if (headlines.length >= 5) {
+        break;
+      }
+    }
+
+    return headlines;
+  }, [channelId, singleTypingAgent, transcript]);
+  const [headlineIndex, setHeadlineIndex] = React.useState(0);
 
   const clearHoverTimer = React.useCallback(() => {
     if (hoverTimerRef.current !== null) {
@@ -69,6 +122,18 @@ export function BotActivityComposerAction({
     return () => clearHoverTimer();
   }, [clearHoverTimer]);
 
+  React.useEffect(() => {
+    if (activityHeadlines.length <= 1) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      setHeadlineIndex((current) => (current + 1) % activityHeadlines.length);
+    }, HEADLINE_ROTATION_MS);
+
+    return () => window.clearInterval(interval);
+  }, [activityHeadlines.length]);
+
   if (typingAgents.length === 0) {
     return null;
   }
@@ -80,13 +145,26 @@ export function BotActivityComposerAction({
     typingAgents.length === 1
       ? `${typingAgents[0]?.name ?? "Agent"} is working`
       : `${typingAgents.length} agents working`;
+  const isInline = variant === "inline";
+  const visibleStatusLabel =
+    typingAgents.length === 1
+      ? `${typingAgents[0]?.name ?? "Agent"}: ${
+          activityHeadlines[headlineIndex % activityHeadlines.length] ??
+          "Working"
+        }`
+      : `${typingAgents[0]?.name ?? "Agent"} +${typingAgents.length - 1}`;
 
   return (
     <Popover onOpenChange={setOpen} open={open}>
       <PopoverTrigger asChild>
         <button
           aria-label={`${triggerLabel}. View activity.`}
-          className="inline-flex h-9 min-w-9 items-center justify-center gap-1.5 rounded-full border border-border/60 bg-background px-2 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/30 hover:bg-primary/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring data-[state=open]:border-primary/40 data-[state=open]:bg-primary/10 data-[state=open]:text-primary"
+          className={cn(
+            "inline-flex items-center justify-center rounded-full border border-border/60 bg-background font-medium text-muted-foreground transition-colors hover:border-primary/30 hover:bg-primary/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring data-[state=open]:border-primary/40 data-[state=open]:bg-primary/10 data-[state=open]:text-primary",
+            isInline
+              ? "h-7 min-w-0 gap-2 border-transparent bg-transparent px-0 text-xs font-semibold leading-none shadow-none hover:border-transparent hover:bg-transparent data-[state=open]:border-transparent data-[state=open]:bg-transparent"
+              : "h-9 min-w-9 gap-1.5 px-2 text-xs",
+          )}
           data-testid="bot-activity-composer-trigger"
           onBlur={closeWithDelay}
           onClick={() => {
@@ -102,7 +180,12 @@ export function BotActivityComposerAction({
             {typingAgents.slice(0, 2).map((agent) => (
               <UserAvatar
                 avatarUrl={agentAvatarUrl(agent)}
-                className="!h-5 !w-5 rounded-full border border-background text-[8px]"
+                className={cn(
+                  "rounded-full border border-background",
+                  isInline
+                    ? "!h-[18px] !w-[18px] shadow-sm ring-1 ring-primary/25 text-[7px]"
+                    : "!h-5 !w-5 text-[8px]",
+                )}
                 displayName={agent.name}
                 key={agent.pubkey}
               />
@@ -113,11 +196,20 @@ export function BotActivityComposerAction({
               +{typingAgents.length - 2}
             </span>
           ) : null}
-          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin opacity-70" />
+          <span
+            className={cn(
+              isInline ? "agent-activity-shimmer max-w-40 truncate" : "sr-only",
+            )}
+          >
+            {isInline ? visibleStatusLabel : "working"}
+          </span>
+          {isInline ? null : (
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin opacity-70" />
+          )}
         </button>
       </PopoverTrigger>
       <PopoverContent
-        align="end"
+        align={isInline ? "start" : "end"}
         className="w-64 p-2"
         onMouseEnter={keepOpen}
         onMouseLeave={closeWithDelay}

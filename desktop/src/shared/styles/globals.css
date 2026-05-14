@@ -107,6 +107,47 @@
   font-weight: 600;
 }
 
+.agent-activity-shimmer {
+  display: inline-block;
+  color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    hsl(var(--muted-foreground) / 0.48) 0%,
+    hsl(var(--muted-foreground) / 0.58) 34%,
+    hsl(var(--foreground) / 0.96) 48%,
+    hsl(var(--foreground)) 50%,
+    hsl(var(--foreground) / 0.96) 52%,
+    hsl(var(--muted-foreground) / 0.58) 66%,
+    hsl(var(--muted-foreground) / 0.48) 100%
+  );
+  background-size: 260% 100%;
+  background-position: 100% 50%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: agent-activity-shimmer 4.8s cubic-bezier(0.65, 0, 0.35, 1) infinite
+    alternate;
+}
+
+@keyframes agent-activity-shimmer {
+  0%,
+  18% {
+    background-position: 100% 50%;
+  }
+
+  82%,
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-activity-shimmer {
+    color: hsl(var(--muted-foreground));
+    background-image: none;
+    animation: none;
+  }
+}
+
 @layer base {
   :root {
     /* Catppuccin Latte (mauve accent) */

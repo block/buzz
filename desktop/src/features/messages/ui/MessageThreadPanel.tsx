@@ -310,20 +310,25 @@ export function MessageThreadPanel({
               placeholder={`Reply in thread to ${threadHead.author}`}
               profiles={profiles}
               replyTarget={composerReplyTarget}
-              toolbarExtraActions={toolbarExtraActions}
               typingParentEventId={threadHead.id}
               typingRootEventId={threadHead.rootId}
             />
-            <div className="h-6 bg-background">
-              {threadTypingPubkeys.length > 0 ? (
-                <TypingIndicatorRow
-                  channel={channel}
-                  className="px-4 pb-1 pt-0 sm:px-6"
-                  currentPubkey={currentPubkey}
-                  profiles={profiles}
-                  typingPubkeys={threadTypingPubkeys}
-                />
-              ) : null}
+            <div className="h-7 bg-background px-4 pb-1 pt-0 sm:px-6 -mt-1">
+              <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2">
+                {toolbarExtraActions ? (
+                  <div className="shrink-0">{toolbarExtraActions}</div>
+                ) : null}
+                {threadTypingPubkeys.length > 0 ? (
+                  <TypingIndicatorRow
+                    channel={channel}
+                    className="min-w-0 flex-1 px-0 py-0"
+                    currentPubkey={currentPubkey}
+                    profiles={profiles}
+                    typingPubkeys={threadTypingPubkeys}
+                    variant="activity"
+                  />
+                ) : null}
+              </div>
             </div>
           </div>
         </div>
