@@ -35,6 +35,8 @@ const AGENTS_MD: &str = include_str!("nest_agents.md");
 /// Written to ~/.sprout/.claude/skills/sprout-cli/SKILL.md on first init.
 const SPROUT_CLI_SKILL_MD: &str = include_str!("nest_skill.md");
 
+const BEGIN_MARKER: &str = "<!-- BEGIN SPROUT MANAGED";
+const END_MARKER: &str = "<!-- END SPROUT MANAGED -->";
 /// Returns the nest root path (`~/.sprout`), or `None` if the home
 /// directory cannot be resolved.
 pub fn nest_dir() -> Option<PathBuf> {
@@ -239,6 +241,10 @@ const CLI_QUICK_REFERENCE: &str = "\
 `sprout workflows trigger --workflow <id>` — trigger a workflow
 Run `sprout --help` for the full command reference.";
 
+fn escape_md_cell(s: &str) -> String {
+    s.replace('|', "\\|").replace('\n', " ")
+}
+
 pub fn render_dynamic_section(
     personas: &[PersonaRecord],
     agents: &[ManagedAgentRecord],
@@ -249,7 +255,7 @@ pub fn render_dynamic_section(
             .to_string()
     } else {
         let mut table =
-            "## Active Agents\n\n| Name | Role | How to address |\n|------|------|----------------|"
+            "## Active Agents\n\n| Name | Persona | How to address |\n|------|---------|----------------|"
                 .to_string();
         for agent in agents {
             let role = agent
@@ -258,10 +264,9 @@ pub fn render_dynamic_section(
                 .and_then(|pid| personas.iter().find(|p| p.id == pid))
                 .map(|p| p.display_name.as_str())
                 .unwrap_or("—");
-            table.push_str(&format!(
-                "\n| {} | {} | @{} |",
-                agent.name, role, agent.name
-            ));
+            let name = escape_md_cell(&agent.name);
+            let role_escaped = escape_md_cell(role);
+            table.push_str(&format!("\n| {name} | {role_escaped} | @{name} |"));
         }
         table
     };
@@ -269,45 +274,80 @@ pub fn render_dynamic_section(
     format!("{active_agents}\n\n## Workspace\n- Relay: {relay_url}\n\n{CLI_QUICK_REFERENCE}")
 }
 
+/// Find a marker that appears at the start of a line (position 0 or preceded by `\n`).
+fn find_marker_at_line_start(content: &str, marker: &str) -> Option<usize> {
+    let mut search_from = 0;
+    while let Some(pos) = content[search_from..].find(marker) {
+        let abs_pos = search_from + pos;
+        if abs_pos == 0 || content.as_bytes()[abs_pos - 1] == b'\n' {
+            return Some(abs_pos);
+        }
+        search_from = abs_pos + 1;
+    }
+    None
+}
+
+/// Find the first valid ordered BEGIN/END marker pair, both at line starts.
+/// Returns `(begin_line_start, after_end)` byte offsets for slicing.
+fn find_managed_markers(content: &str) -> Option<(usize, usize)> {
+    let begin_pos = find_marker_at_line_start(content, BEGIN_MARKER)?;
+    let begin_line_start = content[..begin_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let end_pos = content[begin_pos..].find(END_MARKER).map(|p| p + begin_pos)?;
+    let end_of_end = end_pos + END_MARKER.len();
+    let after_end = if content[end_of_end..].starts_with('\n') {
+        end_of_end + 1
+    } else {
+        end_of_end
+    };
+    Some((begin_line_start, after_end))
+}
+
+/// Remove an orphan BEGIN marker line (one with no matching END after it).
+fn strip_orphan_begin_marker(content: &str) -> String {
+    if let Some(pos) = find_marker_at_line_start(content, BEGIN_MARKER) {
+        let line_start = content[..pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let line_end = content[pos..].find('\n').map(|p| pos + p + 1).unwrap_or(content.len());
+        format!(
+            "{}{}",
+            &content[..line_start],
+            content[line_end..].trim_start_matches('\n')
+        )
+    } else {
+        content.to_string()
+    }
+}
+
 pub fn upsert_managed_section(file_path: &Path, new_section_content: &str) -> io::Result<()> {
     let current = fs::read_to_string(file_path)?;
 
-    const BEGIN: &str = "<!-- BEGIN SPROUT MANAGED";
-    const END: &str = "<!-- END SPROUT MANAGED -->";
-
     let replacement = format!(
-        "<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\n{new_section_content}\n<!-- END SPROUT MANAGED -->\n"
+        "{BEGIN_MARKER} — regenerated automatically, do not edit below -->\n{new_section_content}\n{END_MARKER}\n"
     );
 
-    let new_content =
-        if let (Some(begin_pos), Some(end_pos)) = (current.find(BEGIN), current.find(END)) {
-            // Find the start of the BEGIN marker's line.
-            let line_start = current[..begin_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
-            // END marker spans to the end of its content + the newline after it.
-            let end_of_end = end_pos + END.len();
-            let after_end = if current[end_of_end..].starts_with('\n') {
-                end_of_end + 1
-            } else {
-                end_of_end
-            };
+    let new_content = match find_managed_markers(&current) {
+        Some((begin_line_start, after_end)) => {
             format!(
                 "{}{}{}",
-                &current[..line_start],
+                &current[..begin_line_start],
                 replacement,
                 &current[after_end..]
             )
-        } else {
-            format!("{}\n\n{}", current.trim_end_matches('\n'), replacement)
-        };
+        }
+        None => {
+            let cleaned = strip_orphan_begin_marker(&current);
+            format!("{}\n\n{}", cleaned.trim_end_matches('\n'), replacement)
+        }
+    };
 
-    let tmp_path = file_path.with_extension(
-        file_path
-            .extension()
-            .map(|e| format!("{}.tmp", e.to_string_lossy()))
-            .unwrap_or_else(|| "tmp".to_string()),
-    );
-    fs::write(&tmp_path, new_content)?;
-    fs::rename(&tmp_path, file_path)?;
+    let parent = file_path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "file path has no parent directory")
+    })?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    {
+        use std::io::Write;
+        tmp.write_all(new_content.as_bytes())?;
+    }
+    tmp.persist(file_path).map_err(|e| e.error)?;
 
     Ok(())
 }
@@ -576,6 +616,7 @@ mod tests {
         let agents = vec![make_agent("Kit", Some("p1"))];
         let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
         assert!(output.contains("| Kit | Builder | @Kit |"));
+        assert!(output.contains("| Name | Persona | How to address |"));
         assert!(output.contains("## CLI Quick Reference"));
     }
 
@@ -645,10 +686,214 @@ mod tests {
 
         upsert_managed_section(&file, "content").unwrap();
 
-        let tmp_path = file.with_extension("md.tmp");
+        // Verify no stray temp files in the directory
+        let entries: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1, "only AGENTS.md should remain, no temp files");
+        assert_eq!(entries[0].file_name(), "AGENTS.md");
+    }
+
+    #[test]
+    fn test_upsert_end_before_begin() {
+        // An END marker that precedes a BEGIN marker forms no valid ordered pair.
+        // find_managed_markers returns None (BEGIN found, but no END after it),
+        // so the orphan BEGIN line is stripped and a new block is appended.
+        // The stray END line and content between END and BEGIN remain in the file
+        // because strip_orphan_begin_marker only removes the BEGIN line itself.
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("AGENTS.md");
+        fs::write(
+            &file,
+            "# Header\n\n<!-- END SPROUT MANAGED -->\nsome middle content\n<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\nold section\n",
+        )
+        .unwrap();
+
+        upsert_managed_section(&file, "new section").unwrap();
+
+        let result = fs::read_to_string(&file).unwrap();
+
+        assert!(result.contains("# Header"), "original header must survive");
+        assert!(result.contains("new section"), "new content must be present");
+        assert!(result.contains("some middle content"), "content between markers must survive");
+
+        // Exactly one BEGIN marker in the output (the orphan was stripped, new one appended).
+        assert_eq!(
+            result.matches(BEGIN_MARKER).count(),
+            1,
+            "exactly one BEGIN marker after orphan cleanup"
+        );
+
+        // The single BEGIN marker must have a matching END marker after it.
+        let begin_pos = result.find(BEGIN_MARKER).expect("BEGIN marker must be present");
+        let end_pos = result[begin_pos..].find(END_MARKER).map(|p| begin_pos + p);
         assert!(
-            !tmp_path.exists(),
-            ".tmp file should not exist after successful upsert"
+            end_pos.is_some(),
+            "an END marker must appear after the appended BEGIN marker"
+        );
+    }
+
+    #[test]
+    fn test_upsert_begin_only_no_end() {
+        // A file with BEGIN but no END has an orphan marker.
+        // find_managed_markers returns None (no END found after BEGIN),
+        // so strip_orphan_begin_marker removes the BEGIN line.
+        // Content that followed the orphan BEGIN is preserved (only the marker line is stripped,
+        // not the body that came after it).
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("AGENTS.md");
+        fs::write(
+            &file,
+            "# Header\n\nsome content\n\n<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\norphaned section without end marker\n",
+        )
+        .unwrap();
+
+        upsert_managed_section(&file, "fresh section").unwrap();
+
+        let result = fs::read_to_string(&file).unwrap();
+
+        assert!(result.contains("# Header"), "original header must survive");
+        assert!(result.contains("some content"), "original body must survive");
+        assert!(result.contains("fresh section"), "new content must be present");
+
+        let begin_pos = result.find(BEGIN_MARKER).expect("BEGIN marker must be present");
+        let end_pos = result.find(END_MARKER).expect("END marker must be present");
+        assert!(
+            begin_pos < end_pos,
+            "the appended BEGIN marker must precede the appended END marker"
+        );
+
+        // Exactly one BEGIN marker after orphan cleanup.
+        assert_eq!(
+            result.matches(BEGIN_MARKER).count(),
+            1,
+            "exactly one BEGIN marker after orphan cleanup"
+        );
+    }
+
+    #[test]
+    fn test_upsert_duplicate_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("AGENTS.md");
+        fs::write(
+            &file,
+            "# Header\n\n<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\nfirst block\n<!-- END SPROUT MANAGED -->\n\nbetween blocks\n\n<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\nsecond block\n<!-- END SPROUT MANAGED -->\n",
+        )
+        .unwrap();
+
+        upsert_managed_section(&file, "replaced").unwrap();
+
+        let result = fs::read_to_string(&file).unwrap();
+
+        assert!(result.contains("replaced"), "replacement content must be present");
+        assert!(!result.contains("first block"), "first block must be replaced");
+        assert!(result.contains("second block"), "second pair content must survive");
+        assert!(result.contains("between blocks"), "text between pairs must survive");
+    }
+
+    #[test]
+    fn test_upsert_marker_in_code_block() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("AGENTS.md");
+        // Indented by 4 spaces — not at column 0, so should NOT match as a real marker.
+        fs::write(
+            &file,
+            "# Header\n\n    <!-- BEGIN SPROUT MANAGED — some indented marker -->\n\nReal content here\n",
+        )
+        .unwrap();
+
+        upsert_managed_section(&file, "appended content").unwrap();
+
+        let result = fs::read_to_string(&file).unwrap();
+
+        assert!(
+            result.contains("    <!-- BEGIN SPROUT MANAGED — some indented marker -->"),
+            "indented marker inside code block must be preserved verbatim"
+        );
+        assert!(result.contains("appended content"), "new content must be appended");
+        assert!(result.contains("Real content here"), "existing body must survive");
+
+        // The real markers appended at the end must be at line-start (column 0).
+        let begin_pos = result
+            .find("<!-- BEGIN SPROUT MANAGED — regenerated")
+            .expect("regenerated BEGIN marker must be present");
+        assert!(
+            begin_pos == 0 || result.as_bytes()[begin_pos - 1] == b'\n',
+            "appended BEGIN marker must be at line start"
+        );
+    }
+
+    #[test]
+    fn test_render_pipe_in_agent_name() {
+        let personas = vec![make_persona("p1", "Builder")];
+        let agents = vec![make_agent("Kit|Pro", Some("p1"))];
+        let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+
+        assert!(
+            output.contains("Kit\\|Pro"),
+            "pipe in agent name must be escaped as \\|"
+        );
+        // An unescaped bare `|` immediately adjacent to "Kit|Pro" would break table parsing.
+        assert!(
+            !output.contains("| Kit|Pro |"),
+            "unescaped pipe in agent name must not appear as a cell boundary"
+        );
+
+        // The row must start and end with `|` and the escaped name and address must appear.
+        let kit_row = output
+            .lines()
+            .find(|l| l.contains("Kit\\|Pro"))
+            .expect("Kit\\|Pro row must be present");
+        assert!(kit_row.starts_with('|'), "row must start with |");
+        assert!(kit_row.ends_with('|'), "row must end with |");
+        assert!(
+            kit_row.contains("@Kit\\|Pro"),
+            "address cell must use escaped name"
+        );
+    }
+
+    #[test]
+    fn test_render_newline_in_persona_name() {
+        let personas = vec![make_persona("p1", "Builder\nExpert")];
+        let agents = vec![make_agent("Scout", Some("p1"))];
+        let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+
+        assert!(
+            output.contains("Builder Expert"),
+            "newline in persona display_name must be replaced with a space"
+        );
+
+        // The table row for Scout must be a single line (no embedded newline).
+        let scout_row = output
+            .lines()
+            .find(|l| l.contains("Scout"))
+            .expect("Scout row must be present");
+        assert!(
+            scout_row.contains("Builder Expert"),
+            "persona name with newline replaced by space must appear on the Scout row"
+        );
+    }
+
+    #[test]
+    fn test_upsert_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("AGENTS.md");
+        fs::write(
+            &file,
+            "# Header\n\n<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\nexisting section\n<!-- END SPROUT MANAGED -->\n",
+        )
+        .unwrap();
+
+        upsert_managed_section(&file, "same content").unwrap();
+        let after_first = fs::read_to_string(&file).unwrap();
+
+        upsert_managed_section(&file, "same content").unwrap();
+        let after_second = fs::read_to_string(&file).unwrap();
+
+        assert_eq!(
+            after_first, after_second,
+            "upsert must be idempotent: second call must not alter the file"
         );
     }
 }

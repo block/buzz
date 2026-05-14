@@ -677,48 +677,50 @@ pub fn delete_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(&app)?;
-    let mut runtimes = state
-        .managed_agent_processes
-        .lock()
-        .map_err(|error| error.to_string())?;
+    {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|error| error.to_string())?;
 
-    if sync_managed_agent_processes(&mut records, &mut runtimes) {
+        if sync_managed_agent_processes(&mut records, &mut runtimes) {
+            save_managed_agents(&app, &records)?;
+        }
+
+        // Guard: reject deletion of deployed remote agents unless explicitly forced.
+        // This turns "don't orphan remote infra" from a UI convention into a backend
+        // invariant — a buggy or compromised IPC caller cannot silently orphan a live
+        // remote deployment. The frontend sends force_remote_delete: true only after
+        // the user confirms the orphan warning.
+        if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
+            if record.backend != BackendKind::Local
+                && record.backend_agent_id.is_some()
+                && !force_remote_delete.unwrap_or(false)
+            {
+                return Err(
+                    "cannot delete a deployed remote agent without force_remote_delete: true"
+                        .to_string(),
+                );
+            }
+        }
+
+        if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
+            // For local agents: kills the process. For remote agents: no-op (the frontend
+            // sends !shutdown via WebSocket before calling delete). Either way, safe.
+            stop_managed_agent_process(&app, record, &mut runtimes)?;
+        }
+        let initial_len = records.len();
+        records.retain(|record| record.pubkey != pubkey);
+        if records.len() == initial_len {
+            return Err(format!("agent {pubkey} not found"));
+        }
         save_managed_agents(&app, &records)?;
     }
-
-    // Guard: reject deletion of deployed remote agents unless explicitly forced.
-    // This turns "don't orphan remote infra" from a UI convention into a backend
-    // invariant — a buggy or compromised IPC caller cannot silently orphan a live
-    // remote deployment. The frontend sends force_remote_delete: true only after
-    // the user confirms the orphan warning.
-    if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
-        if record.backend != BackendKind::Local
-            && record.backend_agent_id.is_some()
-            && !force_remote_delete.unwrap_or(false)
-        {
-            return Err(
-                "cannot delete a deployed remote agent without force_remote_delete: true"
-                    .to_string(),
-            );
-        }
-    }
-
-    if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
-        // For local agents: kills the process. For remote agents: no-op (the frontend
-        // sends !shutdown via WebSocket before calling delete). Either way, safe.
-        stop_managed_agent_process(&app, record, &mut runtimes)?;
-    }
-    let initial_len = records.len();
-    records.retain(|record| record.pubkey != pubkey);
-    if records.len() == initial_len {
-        return Err(format!("agent {pubkey} not found"));
-    }
-    save_managed_agents(&app, &records)?;
     if let Err(error) = regenerate_nest_context(&app) {
         eprintln!("sprout-desktop: nest context regeneration failed: {error}");
     }

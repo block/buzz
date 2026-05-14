@@ -128,22 +128,20 @@ pub fn update_persona(
         .filter(|s| !s.is_empty())
         .collect();
     if let Some(env_vars) = input.env_vars {
-        // Caller explicitly sent env_vars — replace entirely (empty = clear).
         crate::managed_agents::validate_user_env_keys(&env_vars)?;
         persona.env_vars = env_vars;
     }
-    // Absent env_vars means "don't touch" — preserve existing creds when
-    // the caller only meant to edit a different field.
     persona.updated_at = now_iso();
 
     save_personas(&app, &personas)?;
+    let result = personas
+        .into_iter()
+        .find(|record| record.id == input.id)
+        .ok_or_else(|| format!("persona {} disappeared unexpectedly", input.id))?;
     if let Err(error) = regenerate_nest_context(&app) {
         eprintln!("sprout-desktop: nest context regeneration failed: {error}");
     }
-    personas
-        .into_iter()
-        .find(|record| record.id == input.id)
-        .ok_or_else(|| format!("persona {} disappeared unexpectedly", input.id))
+    Ok(result)
 }
 
 #[tauri::command]
