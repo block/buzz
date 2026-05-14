@@ -12,6 +12,10 @@ const TEXT_SCALE_STORAGE_KEY = "sprout:text-scale";
 
 type ZoomAction = "increase" | "decrease" | "reset";
 
+function roundZoomFactor(zoomFactor: number) {
+  return Math.round(zoomFactor * 10) / 10;
+}
+
 function getZoomAction(event: KeyboardEvent): ZoomAction | null {
   if (!hasPrimaryShortcutModifier(event) || event.altKey) {
     return null;
@@ -51,10 +55,10 @@ function getNextZoomFactor(action: ZoomAction, zoomFactor: number) {
   }
 
   if (action === "increase") {
-    return Math.min(zoomFactor + ZOOM_STEP, MAX_ZOOM_FACTOR);
+    return Math.min(roundZoomFactor(zoomFactor + ZOOM_STEP), MAX_ZOOM_FACTOR);
   }
 
-  return Math.max(zoomFactor - ZOOM_STEP, MIN_ZOOM_FACTOR);
+  return Math.max(roundZoomFactor(zoomFactor - ZOOM_STEP), MIN_ZOOM_FACTOR);
 }
 
 function readStoredZoomFactor() {
