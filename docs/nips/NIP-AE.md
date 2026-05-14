@@ -10,7 +10,9 @@ This NIP defines a convention for AI agents to store persistent, structured memo
 
 ## Kind
 
-This NIP claims `kind:30174` for agent engrams. It is in the addressable range per [NIP-01](01.md), so relays retain only the newest event per `(kind, pubkey, d)`. A dedicated kind keeps this NIP's address space separate from any other application's events on the same author.
+This NIP claims `kind:30174` for agent engrams. It is in the addressable range per [NIP-01](01.md): addressable events store only the latest per `(kind, pubkey, d)`, with relay query and retention behavior governed by NIP-01 (relays SHOULD return only the latest; some may retain older versions).
+
+A dedicated kind (rather than encoding agent memory as a profile over NIP-78 `kind:30078` "Application-specific Data") is taken for two reasons: (1) it isolates this NIP's address space from any other application that the agent's pubkey also writes — `core` and `mem/…` slugs cannot collide with another app's `d` tag choices, regardless of agent reuse; (2) it lets observers, indexers, and unknown-kind viewers identify these events from the kind alone, without attempting NIP-44 decryption as a namespace demultiplexer.
 
 ## Roles
 
@@ -19,16 +21,18 @@ This NIP claims `kind:30174` for agent engrams. It is in the addressable range p
 
 Memory is scoped to a single `(pubkey_a, pubkey_o)` pair. An agent serving multiple owners holds an independent memory per pair.
 
-The phrase **configured relays** used throughout this NIP is, in order of precedence: (1) the agent's write relays as advertised in its [NIP-65](65.md) `kind:10002` relay list (`pubkey_a` is the author of every record), (2) an out-of-band agreed list configured by both parties when no `kind:10002` is published. URLs are compared after **canonicalizing**: lowercase scheme and host, strip default port (443 for `wss`, 80 for `ws`), strip a trailing slash on an otherwise empty path; the path is otherwise preserved verbatim. After canonicalization, duplicates MUST be deduplicated before querying. The owner uses the same list (and the same canonicalization) to locate the agent's memory.
+The phrase **configured relays** used throughout this NIP is, in order of precedence: (1) the agent's write relays as advertised in its [NIP-65](65.md) `kind:10002` relay list (`pubkey_a` is the author of every record) — entries marked `write` or with no marker, ignoring `read`-only entries and entries whose URL is not a syntactically valid `ws://` or `wss://` URL; (2) the out-of-band agreed list when no `kind:10002` is published, when the published list yields zero usable entries after the filtering above, or for the bootstrap window before owner and agent have observed the agent's first `kind:10002`. URLs are compared *for equality only* after **canonicalizing**: lowercase scheme and host, strip default port (443 for `wss`, 80 for `ws`), strip a trailing slash on an otherwise empty path; the path is otherwise preserved verbatim. After canonicalization, duplicates MUST be deduplicated before querying. Connections SHOULD be made to the advertised URL as written, not the canonical form, so that any relay-side path or host disambiguation is preserved. The owner applies the same comparison rule to locate the agent's memory.
+
+Because persistence rides the agent's configured relay set, the agent SHOULD republish current heads to the new set before decommissioning any relay it is leaving. This NIP defines no automatic migration mechanism; agents that rotate relays without migrating their heads will lose access to memory not also present on retained relays.
 
 ## Record types
 
 Two `kind:30174` record types share the same envelope and differ only by the slug at which they are addressed:
 
-- **`core`** — exactly one per `(pubkey_a, pubkey_o)` pair. Holds agent identity/rules/goals and a client-maintained slug index. Bootstrap address.
+- **`core`** — exactly one per `(pubkey_a, pubkey_o)` pair. Holds agent identity, rules, and goals. Bootstrap address.
 - **`memory`** — zero or more per `(pubkey_a, pubkey_o)` pair. Each holds one logical entry.
 
-Both are *addressable* per [NIP-01](01.md): the relay retains only the newest event per `(kind, pubkey_a, d)`.
+Both are *addressable* per [NIP-01](01.md): only the newest event per `(kind, pubkey_a, d)` is served, and head selection (below) tolerates relays that surface older versions anyway.
 
 ## Slugs
 
@@ -45,8 +49,8 @@ with total length ≤ 255 bytes. Wherever this NIP refers to "a slug" elsewhere 
 The `d` tag of a record is derived from its slug:
 
 ```
-K_c = nip44_conversation_key(nsec_a, pubkey_o)
-    = nip44_conversation_key(nsec_o, pubkey_a)         # symmetric per NIP-44
+K_c = nip44_conversation_key(seckey_a, pubkey_o)
+    = nip44_conversation_key(seckey_o, pubkey_a)         # symmetric per NIP-44
 d   = lower_hex(HMAC-SHA256(K_c, utf8("agent-memory/v1/d-tag") || 0x00 || utf8(slug)))
 ```
 
@@ -69,13 +73,13 @@ Implementations MUST NOT include the slug or any plaintext form of it in tags.
 }
 ```
 
-There MUST be exactly one `d` tag and it MUST be the value derived in *Addressing*. There MUST be exactly one `p` tag and it MUST contain `pubkey_o`; it both identifies the owner publicly and tells the agent which counterparty key was used (the owner uses the event's `pubkey` field as the same hint in the opposite direction). The decrypted `content` is a JSON object (see *Bodies*).
+There MUST be exactly one `d` tag and it MUST be the value derived in *Addressing*. There MUST be exactly one `p` tag and it MUST contain `pubkey_o`; it both identifies the owner publicly and tells the agent which counterparty key was used (the owner uses the event's `pubkey` field as the same hint in the opposite direction). Implementations MAY include a [NIP-31](31.md) `["alt", "encrypted agent memory record"]` tag (or equivalent fixed string) to give unknown-kind viewers a non-leaking summary; additional tags beyond `d`, `p`, and `alt` are not defined by this NIP and have no effect on validity. The decrypted `content` is a JSON object (see *Bodies*).
 
 ## Bodies
 
 A body's `slug` discriminates its type: `slug == "core"` is a **core body**; any slug matching the `mem/…` grammar is a **memory body**.
 
-**Memory body** is a JSON object containing `slug` (a valid slug) and `value` (a UTF-8 string or `null`). **Core body** is a JSON object containing `slug` (the string `"core"`), `profile` (a UTF-8 string), and `index` (an object mapping valid `mem/…` slugs to objects containing `event_id` (lowercase 64-hex string, per [NIP-01](01.md)) and `created_at` (non-negative integer)).
+**Memory body** is a JSON object containing `slug` (a valid slug) and `value` (a UTF-8 string or `null`). **Core body** is a JSON object containing `slug` (the string `"core"`) and `profile` (a UTF-8 string).
 
 Bodies MAY contain fields beyond those defined here; unknown fields MUST be ignored by readers and do not affect validity. A body missing a required field, or whose required field has the wrong type, is invalid (see *Head selection* rule (5)).
 
@@ -94,17 +98,13 @@ A body with `"value": null` is a **tombstone**; the event is still published, bu
 ```jsonc
 {
   "slug": "core",
-  "profile": "<agent identity, rules, goals>",
-  "index": {
-    "<slug>": { "event_id": "<lowercase 64-hex>", "created_at": <unix_seconds> },
-    ...
-  }
+  "profile": "<agent identity, rules, goals>"
 }
 ```
 
-`profile` is free-form UTF-8 maintained by the agent. `index` is a client-maintained cache and is **advisory, not authoritative** (see *Listing*).
+`profile` is free-form UTF-8 maintained by the agent. Clients MAY maintain a local cache of `{slug → {event_id, created_at}}` for memory entries to accelerate listing, but such a cache is implementation-local and outside this NIP — the authoritative listing procedure is the walk in *Listing*.
 
-Implementations MAY additionally publish [NIP-09](09.md) deletion requests for superseded or tombstoned events of either type; the in-band tombstone (for memory) and replacement (for core) are the protocol-level semantics and are what readers act on. Such deletion requests SHOULD include `["k", "30174"]` per NIP-09 and use an `a`-tag identifier `30174:<pubkey_a>:<d>`. NIP-09 deletes all versions up to the deletion's `created_at`; a subsequent write with a later timestamp resurrects the slug under *Head selection* and is the intended recovery path. Honoring and non-honoring relays will diverge on pre-deletion history.
+Implementations MAY additionally publish [NIP-09](09.md) deletion requests for superseded or tombstoned events of either type; the in-band tombstone (for memory) and replacement (for core) are the protocol-level semantics and are what readers act on. Per NIP-09 a deletion request MUST be authored by the same key as the events it targets, so only `pubkey_a` may delete these records; such requests SHOULD include `["k", "30174"]` and use an `a`-tag identifier `30174:<pubkey_a>:<d>`. A NIP-09 request asks honoring relays to delete every targeted event with `created_at` ≤ the request's `created_at`; whether relays honor it is their policy. A subsequent write with a later timestamp resurrects the slug under *Head selection* and is the intended recovery path. Honoring and non-honoring relays will diverge on pre-deletion history.
 
 ## Encryption
 
@@ -116,7 +116,7 @@ An event is **valid** for this NIP if all of the following hold:
 
 1. `kind == 30174`, `pubkey == pubkey_a`, exactly one `d` tag, exactly one `p` tag, and the `p` tag value is `pubkey_o`.
 2. Its signature verifies (per [NIP-01](01.md)). Validation MUST occur before decryption (per [NIP-44](44.md)).
-3. Its `content` decrypts under `K_c` and parses as a JSON object.
+3. Its `content` decrypts under `K_c` and parses as a JSON object. Duplicate object member names anywhere in the body MUST cause this rule to fail (parsers that silently first-wins or last-wins would otherwise diverge on head selection).
 4. The body's `slug` matches the *Slugs* grammar and re-derives to the event's `d` tag per *Addressing*.
 5. The body's shape matches the type its `slug` discriminates (per *Bodies*).
 
@@ -127,11 +127,9 @@ Let `d = derive(s)` per *Addressing*. The **head** of slug `s` is computed by qu
 To write slug `s` with body `b`:
 
 1. Compute `d` and serialize `b` to JSON. Implementations MUST reject the write if the serialized body exceeds 65,535 bytes (the NIP-44 plaintext limit).
-2. Compute the head of `s` per *Head selection* and let `T` be its `created_at` (or 0 if no head exists). Set `created_at := max(now, T + 1)`. Monotonicity defeats the NIP-01 same-second tiebreak (unpredictable under NIP-44 random nonces) and ensures fresh clients with no local state still produce strictly newer writes. If this value exceeds `now + 600` (i.e. the prior head's `created_at` is more than ten minutes in the future), the head is considered clock-poisoned: implementations MUST refuse the write and surface a conflict rather than publish a further-future timestamp that relays applying timestamp sanity-checks will also reject. Recovery is out of band.
-3. Encrypt with NIP-44 under `K_c`. Tag `["d", d]`, `["p", pubkey_o]`. Sign and publish to the configured relays. This NIP scopes publishing to the agent's write relays only; owners discover memory by reading the same list, rather than by receiving `p`-tag-routed copies on their own [NIP-65](65.md) read relays — agents SHOULD NOT publish memory events to the owner's read relays.
-4. **Verify.** Wait for at least one relay's `OK` acknowledgement for the published event before re-querying, then recompute the head of `s` per *Head selection*. Implementations SHOULD additionally wait for a small propagation window (default: one second after the first `OK`) before recomputing, to absorb the round-trip skew between relays that already accepted the write and relays that have not. If the recomputed head is not the event just published, treat as a **conflict** and surface to the caller; clients MUST NOT silently retry. Conflicts undetected within this window are treated as eventually-consistent and will be surfaced by the next read whose result differs from the writer's local view.
-
-Memory writes SHOULD be followed by a core write that updates `index[s]` with the new `{event_id, created_at}` (or removes the entry on tombstone). Core writes apply the procedure above directly. Index updates MAY be batched or debounced across multiple memory writes; `index` is advisory.
+2. Compute the head of `s` per *Head selection* and let `T` be its `created_at` (or 0 if no head exists). Set `created_at := max(now, T + 1)`. Monotonicity defeats the NIP-01 same-second tiebreak (unpredictable under NIP-44 random nonces) and ensures fresh clients with no local state still produce strictly newer writes. If the resulting `created_at` is far enough in the future that publishing it would itself be undesirable (e.g. the prior head's `created_at` is implausibly ahead of wall-clock time), the head SHOULD be treated as clock-poisoned and the write surfaced as a conflict rather than published; choice of threshold is left to the implementation.
+3. Encrypt with NIP-44 under `K_c`. Tag `["d", d]`, `["p", pubkey_o]`. Sign and publish to the configured relays. The `p` tag carries its usual [NIP-01](01.md) meaning (a referenced pubkey), which means generic NIP-65-aware clients may also fan it out to the owner's read relays; this NIP neither requires nor forbids that behavior. Authoritative discovery is always from the agent's configured relays so that owners and observers converge on the same head set; copies arriving on owner read relays are a redundant cache, not a separate channel.
+4. **Verify (recommended).** Implementations SHOULD recompute the head of `s` per *Head selection* after waiting for at least one relay's `OK` acknowledgement, optionally with a short propagation delay to absorb inter-relay skew. If the recomputed head is not the event just published, the writer SHOULD surface a **conflict** rather than silently retry. Verification is best-effort: disjoint relay sets, partitions, and writes arriving after the recompute window will not be caught and remain subject to the eventual-consistency semantics described under *Concurrency*.
 
 ## Reading
 
@@ -139,21 +137,17 @@ To read slug `s`: compute the head per *Head selection*. If it is absent or a to
 
 ## Listing
 
-Two mechanisms are defined; clients MUST support (a) and SHOULD support (b):
+To list every memory entry for `(pubkey_a, pubkey_o)`: query every configured relay for `kind:30174` events from `pubkey_a` tagged `["p", pubkey_o]`, take the union, and discard invalid events (per *Head selection*). Group the survivors by `d` tag; for each group, select the event with the greatest `created_at` (ties broken by lowest `id`). Drop tombstones. Return the set of `{slug, event_id, created_at}` tuples (omitting `core`).
 
-**(a) Walk.** Query every configured relay for `kind:30174` events from `pubkey_a` tagged `["p", pubkey_o]`, take the union, and discard invalid events (per *Head selection*). Group the survivors by `d` tag; for each group, select the event with the greatest `created_at` (ties broken by lowest `id`). Drop tombstones. Return the set of `{slug, event_id, created_at}` tuples (omitting `core`).
+Listing is **best-effort**: Nostr has no protocol-level pagination, so relays MAY cap the number of events returned per query, and a result set silently bounded by such a cap will under-report. Implementations SHOULD treat the head-tuple set as a snapshot, not a guaranteed-complete enumeration, and SHOULD surface a per-relay event count or "limit reached" signal where one is available so callers can detect truncation. An out-of-band acceleration (e.g. a relay-maintained materialized view over public `d` tags, or an implementation-local cache) MAY be used so long as it returns the same tuples as the procedure above; a future NIP can standardize one without changing the wire format defined here.
 
-**(b) Cache.** Read `index` from core's body. Faster but may be stale; clients SHOULD reconcile against (a) periodically.
+## References and reachability (non-normative)
 
-**Reindex** is the operation that replaces `index` with the result of (a) and republishes core. It is the recovery path for any divergence (CLI crash, concurrent writer, relay drop) and SHOULD be an explicit operation rather than automatic.
+This section describes an optional convention; conformance does not require honoring it, and validity is unaffected.
 
-Discovery is specified by *result* — the set of head tuples — not by mechanism, so an out-of-band index (e.g. a relay-maintained materialized view over public `d` tags) can be added in a future NIP without changing the wire format defined here.
+A body MAY reference other slugs using wiki-link syntax: `[[<slug>]]`, where `<slug>` matches the *Slugs* grammar. When implementations choose to extract references, they do so by literal substring match over the body's string fields (`profile` for core, `value` for memory); this NIP defines no escaping mechanism and no markup-aware exclusion. Bare slug-shaped strings without brackets are NOT references.
 
-## References and reachability
-
-A body MAY reference other slugs using wiki-link syntax: `[[<slug>]]`, where `<slug>` matches the *Slugs* grammar. References are extracted by literal substring match over the body's string fields (`profile` for core, `value` for memory); this NIP defines no escaping mechanism and no markup-aware exclusion. Bare slug-shaped strings without brackets are NOT references.
-
-The **reachability graph** is rooted at `core.profile`; edges are the `[[…]]` references in `profile` and in reachable memories' `value`. The `index` field contributes no edges. Slugs outside this set are **orphans**; clients SHOULD expose them for review but MUST NOT delete them automatically.
+A **reachability graph** rooted at `core.profile`, with edges being the `[[…]]` references in `profile` and in reachable memories' `value`, gives implementations a deterministic answer to "which memories are referenced from the agent's identity surface." Slugs outside this set are **orphans**. Clients that present this view to users SHOULD expose orphans for review and MUST NOT delete them automatically. A companion NIP may make this normative.
 
 ## Concurrency
 
@@ -161,10 +155,10 @@ The verification step of *Writing* detects two concurrent writers whose events b
 
 ## Security considerations
 
-- **Agent key compromise.** Holders of `nsec_a` can rewrite or tombstone any record. On relays that honor addressable-event replacement no protocol-level trace remains; archival relays may show *that* rewrites occurred but cannot by themselves identify which version is authoritative. This NIP defines no mechanism for authoritative version chaining.
-- **Owner key compromise.** Holders of `nsec_o` can decrypt all records but cannot write them; the consequence is confidentiality loss, not integrity loss.
+- **Agent key compromise.** Holders of `seckey_a` can rewrite or tombstone any record and can derive `K_c` against every known owner pubkey, decrypting all past and future records for those pairs. On relays that honor addressable-event replacement no protocol-level trace of a rewrite remains; archival relays may show *that* rewrites occurred but cannot by themselves identify which version is authoritative. This NIP defines no mechanism for authoritative version chaining.
+- **Owner key compromise.** Holders of `seckey_o` can decrypt all records but cannot write them; the consequence is confidentiality loss, not integrity loss.
 - **Metadata leak.** The triple `(pubkey_a, kind:30174, p=pubkey_o)` reveals that an account uses agent memory and identifies its owner. Pseudonymous, not anonymous.
-- **No owner write authority.** Only `nsec_a` can author records. This NIP defines no protocol-level mechanism by which an owner directs the agent's memory; that interaction is out of band.
+- **No owner write authority.** Only `seckey_a` can author records. This NIP defines no protocol-level mechanism by which an owner directs the agent's memory; that interaction is out of band.
 - **Memory poisoning.** Encryption protects confidentiality, not the truthfulness of what the agent decides to remember. Admission control is the implementer's problem.
 
 ## Reference test vectors
@@ -174,9 +168,9 @@ The verification step of *Writing* detects two concurrent writers whose events b
 ### Inputs
 
 ```
-nsec_a              = 0000000000000000000000000000000000000000000000000000000000000001
-nsec_o              = 0000000000000000000000000000000000000000000000000000000000000002
-schnorr_aux         = 0000000000000000000000000000000000000000000000000000000000000000   (all events)
+seckey_a    = 0000000000000000000000000000000000000000000000000000000000000001
+seckey_o    = 0000000000000000000000000000000000000000000000000000000000000002
+schnorr_aux = 0000000000000000000000000000000000000000000000000000000000000000   (all events)
 ```
 
 Bodies are pinned as exact UTF-8 byte strings (no whitespace, key order as listed):
@@ -185,15 +179,15 @@ Bodies are pinned as exact UTF-8 byte strings (no whitespace, key order as liste
 body_1 = {"slug":"mem/example","value":"hello, agent memory"}
 body_2 = {"slug":"mem/notes/2026-05-12","value":"meeting note: [[mem/example]]"}
 body_3 = {"slug":"mem/example","value":null}
-body_4 = {"slug":"core","profile":"test agent. see [[mem/example]] and [[mem/notes/2026-05-12]].","index":{"mem/notes/2026-05-12":{"event_id":"1a43298ea1fa9b73462a85b9f16f5f6bd2a7ab18b0b02424e5ec3f3b8a48e030","created_at":1700000001}}}
+body_4 = {"slug":"core","profile":"test agent. see [[mem/example]] and [[mem/notes/2026-05-12]]."}
 ```
 
 ### Derived
 
 ```
-pubkey_a            = 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798   (= secp256k1 generator G_x; cute sanity check for sec=1)
-pubkey_o            = c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
-K_c                 = c41c775356fd92eadc63ff5a0dc1da211b268cbea22316767095b2871ea1412d   (matches nip44.vectors.json for sec1=…01, sec2=…02)
+pubkey_a = 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+pubkey_o = c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
+K_c      = c41c775356fd92eadc63ff5a0dc1da211b268cbea22316767095b2871ea1412d   (matches nip44.vectors.json for sec1=…01, sec2=…02)
 
 d("core")                  = bdc233238ffe52e272b44cc233c8f33a2bc510b08be04495b225964283be4a90
 d("mem/example")           = 72d4f9629106451505d7d341ea85bb3ebad4f654fcfd2aad100d5a35f8a85cba
@@ -237,15 +231,15 @@ id              = c8604bef05295856a67a88ec895e07b5b47a2febc23c82934734096a7b123b
 sig             = c8d53859cf08b3a9a20a5b01c61d12fa2f082f462adb635420f05dc6f9bb662a174e729023854bf53e5e35fae8f6f4c9d604e8979a070e298cd77cfb7e6b6468
 ```
 
-**Event 4 — core (references Event 2's `id` in its `index`):**
+**Event 4 — core (publishes the agent profile; references `mem/example` and `mem/notes/2026-05-12` via wiki-links in `profile`):**
 ```
 created_at      = 1700000003
 nip44_nonce     = 0000000000000000000000000000000000000000000000000000000000000004
-content         = AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEEV1HAFjhc8DAcKaVSSB7IoKG3nr+dX3LXlU7UIdOKayhIVPXvl4WuFmBSVxLO6yEV5vnLvzbo7rU0uPRYyAJLPNnifVTCw2EQZH70zOwTc/mVvaATHKzqcFotHOCAPboNxUN9fLHJDZ/3Mg/q5GOkQYqUWaa/cDdgQ5FM01oiREPwPOp8xySRQ/EyjZD1mhiIP+dwsYTVhScugJlGR6xJWUG3ohhTi0rj/L0exv/hYtuaOdZtCKmJmu230USmngFvu++nyQVzb0NwnUW958jVT8MM2HpPeYUlSqTwiKnMB6IqLOlM6JjiSoTW9vtMsbfdc+cx4OG6pZlDhtpuMSyoLak4wtTfqObN49yqR9GUiK2wuI/fj7TKf/BGapsCiIWpYs=
-content_len     = 432
-sha256(content) = e3b64fff85354a38fa5dc51a9738a9bd2bc2f8a129075f570af5e163b97b39a4
-id              = 7daeaf5a9d9caeadde1597e38c0b4a3deaf3242f8fb9fdb835e52e54247599e5
-sig             = 31459bc0cf13185b0368a913996211fcfc7aaeae4c124122ec4adf8887c798066494f796cfed29e10d99d60a5c973df1e4e49f33470e00aaa26268110a4ae7d4
+content         = AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEEeZHAFjhc8DAcKaVSSB7IoKG3nr+dX3LXlU7UIdOKayhIVPXvl4WuFmBSVxLO6yEV5vnLvzbo7rU0uPRYyAJLPNnifVTCw2EQZH70zOwTc/mVvaATHKzqcFo5VHrbpKNTzeNnz1Vds2yg2DXmdxaoWQA4YfnlLwZDOpyu9JP1uB1Yw==
+content_len     = 220
+sha256(content) = 070f0f3e2e2bdc016b3ae06e8754e7814ffd4e98f0d5a70d75d1e8eab0d0e474
+id              = 980419c4d231266471242456c832d0c2eb1e6974468dc795f3ae327484129058
+sig             = ce113fff1205eadb38928b224a90247be1a00b0c3f8ab583d4a5f7274ddba51ebb5eb9d627d44664a78d2e870e61835cf61446cc812ecea139e8b7d41b8e238f
 ```
 
 ### Implementation gotchas
