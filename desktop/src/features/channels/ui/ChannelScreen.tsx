@@ -33,6 +33,7 @@ import {
   formatTimelineMessages,
 } from "@/features/messages/lib/formatTimelineMessages";
 import { buildThreadPanelData } from "@/features/messages/lib/threadPanel";
+import type { TimelineMessage } from "@/features/messages/types";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
@@ -78,7 +79,8 @@ export function ChannelScreen({
   targetMessageEvent,
   targetMessageId,
 }: ChannelScreenProps) {
-  const { markChannelRead, openChannelManagement } = useAppShell();
+  const { markChannelRead, markChannelUnread, openChannelManagement } =
+    useAppShell();
   const [profilePanelPubkey, setProfilePanelPubkey] = React.useState<
     string | null
   >(null);
@@ -330,6 +332,16 @@ export function ChannelScreen({
         : undefined,
     [activeChannel, handleToggleReaction],
   );
+
+  const handleMarkUnread = React.useCallback(
+    (message: TimelineMessage) => {
+      if (!activeChannelId) return;
+      const messageIso = new Date(message.createdAt * 1_000).toISOString();
+      markChannelUnread(activeChannelId, messageIso);
+    },
+    [activeChannelId, markChannelUnread],
+  );
+
   const {
     channelAgentSessionAgents,
     closeAgentSession: handleCloseAgentSession,
@@ -477,6 +489,7 @@ export function ChannelScreen({
                   onEditSave={
                     activeChannel?.archivedAt ? undefined : handleEditSave
                   }
+                  onMarkUnread={handleMarkUnread}
                   onExpandThreadReplies={handleExpandThreadReplies}
                   onOpenAgentSession={handleOpenAgentSession}
                   onOpenDm={handleOpenDm}

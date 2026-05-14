@@ -1,7 +1,17 @@
 import Picker from "@emoji-mart/react";
 import data from "@emoji-mart/data";
-import { CornerUpLeft, Pencil, SmilePlus, Trash2 } from "lucide-react";
+import {
+  Copy,
+  CornerUpLeft,
+  EllipsisVertical,
+  Link,
+  MailOpen,
+  Pencil,
+  SmilePlus,
+  Trash2,
+} from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
 import type {
   TimelineMessage,
@@ -19,15 +29,24 @@ import {
   AlertDialogTitle,
 } from "@/shared/ui/alert-dialog";
 import { Button } from "@/shared/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 export function MessageActionBar({
   activeReplyTargetId = null,
+  channelId,
   message,
   onDelete,
   onEdit,
+  onMarkUnread,
   onReactionSelect,
   onReply,
   reactionErrorMessage = null,
@@ -35,9 +54,11 @@ export function MessageActionBar({
   reactionPending = false,
 }: {
   activeReplyTargetId?: string | null;
+  channelId?: string | null;
   message: TimelineMessage;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
+  onMarkUnread?: (message: TimelineMessage) => void;
   onReactionSelect?: (emoji: string) => Promise<void>;
   onReply?: (message: TimelineMessage) => void;
   reactionErrorMessage?: string | null;
@@ -46,17 +67,19 @@ export function MessageActionBar({
 }) {
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
+  const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
   const hasDeleteAction = Boolean(onDelete);
   const hasEditAction = Boolean(onEdit);
   const hasReplyAction = Boolean(onReply);
   const hasReactionAction = Boolean(onReactionSelect);
+  const hasMarkUnreadAction = Boolean(onMarkUnread);
 
-  if (
-    !hasReplyAction &&
-    !hasReactionAction &&
-    !hasEditAction &&
-    !hasDeleteAction
-  ) {
+  // Copy Link and Copy Text are always available for non-pending messages
+  const hasCopyActions = !message.pending;
+  const hasMoreMenuActions =
+    hasEditAction || hasDeleteAction || hasMarkUnreadAction || hasCopyActions;
+
+  if (!hasReplyAction && !hasReactionAction && !hasMoreMenuActions) {
     return null;
   }
 
@@ -65,6 +88,29 @@ export function MessageActionBar({
     (reaction) => reaction.reactedByCurrentUser,
   ).length;
 
+  const handleCopyLink = () => {
+    const link = `${window.location.origin}/#/channels/${channelId}?messageId=${message.id}`;
+    void navigator.clipboard
+      .writeText(link)
+      .then(() => {
+        toast.success("Link copied to clipboard");
+      })
+      .catch(() => {
+        toast.error("Failed to copy link");
+      });
+  };
+
+  const handleCopyText = () => {
+    void navigator.clipboard
+      .writeText(message.body)
+      .then(() => {
+        toast.success("Message copied to clipboard");
+      })
+      .catch(() => {
+        toast.error("Failed to copy message");
+      });
+  };
+
   return (
     <div
       className={cn(
@@ -72,7 +118,7 @@ export function MessageActionBar({
         "translate-y-0 opacity-100 sm:max-w-0 sm:border-0 sm:shadow-none sm:translate-y-1 sm:opacity-0",
         "sm:group-hover/message:max-w-36 sm:group-hover/message:border sm:group-hover/message:border-border/70 sm:group-hover/message:shadow-sm sm:group-hover/message:translate-y-0 sm:group-hover/message:opacity-100",
         "sm:group-focus-within/message:max-w-36 sm:group-focus-within/message:border sm:group-focus-within/message:border-border/70 sm:group-focus-within/message:shadow-sm sm:group-focus-within/message:translate-y-0 sm:group-focus-within/message:opacity-100",
-        isReplyingToMessage || isReactionPickerOpen
+        isReplyingToMessage || isReactionPickerOpen || isDropdownOpen
           ? "sm:max-w-36 sm:border sm:border-border/70 sm:shadow-sm sm:translate-y-0 sm:opacity-100"
           : "",
       )}
@@ -145,81 +191,6 @@ export function MessageActionBar({
           </Popover>
         ) : null}
 
-        {hasEditAction ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label="Edit"
-                className="h-6 w-6 rounded-full p-0"
-                data-testid={`edit-message-${message.id}`}
-                onClick={() => {
-                  onEdit?.(message);
-                }}
-                size="sm"
-                type="button"
-                variant="ghost"
-              >
-                <Pencil className="h-3 w-3" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Edit</TooltipContent>
-          </Tooltip>
-        ) : null}
-
-        {hasDeleteAction ? (
-          <>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  aria-label="Delete"
-                  className="h-6 w-6 rounded-full p-0"
-                  data-testid={`delete-message-${message.id}`}
-                  onClick={() => {
-                    setIsDeleteDialogOpen(true);
-                  }}
-                  size="sm"
-                  type="button"
-                  variant="ghost"
-                >
-                  <Trash2 className="h-3 w-3" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Delete</TooltipContent>
-            </Tooltip>
-
-            <AlertDialog
-              onOpenChange={setIsDeleteDialogOpen}
-              open={isDeleteDialogOpen}
-            >
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Delete message?</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    This will permanently delete this message and cannot be
-                    undone.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel asChild>
-                    <Button type="button" variant="outline">
-                      Cancel
-                    </Button>
-                  </AlertDialogCancel>
-                  <AlertDialogAction asChild>
-                    <Button
-                      onClick={() => onDelete?.(message)}
-                      type="button"
-                      variant="destructive"
-                    >
-                      Delete
-                    </Button>
-                  </AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </>
-        ) : null}
-
         {hasReplyAction ? (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -242,7 +213,115 @@ export function MessageActionBar({
             </TooltipContent>
           </Tooltip>
         ) : null}
+
+        {hasMoreMenuActions ? (
+          <DropdownMenu open={isDropdownOpen} onOpenChange={setIsDropdownOpen}>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    aria-label="More actions"
+                    className="h-6 w-6 rounded-full p-0"
+                    data-testid={`more-actions-${message.id}`}
+                    size="sm"
+                    type="button"
+                    variant={isDropdownOpen ? "secondary" : "ghost"}
+                  >
+                    <EllipsisVertical className="h-3 w-3" />
+                  </Button>
+                </DropdownMenuTrigger>
+              </TooltipTrigger>
+              <TooltipContent>More actions</TooltipContent>
+            </Tooltip>
+            <DropdownMenuContent align="end" side="top" sideOffset={6}>
+              {hasEditAction ? (
+                <DropdownMenuItem
+                  data-testid={`edit-message-${message.id}`}
+                  onClick={() => {
+                    onEdit?.(message);
+                  }}
+                >
+                  <Pencil className="h-4 w-4" />
+                  Edit message
+                </DropdownMenuItem>
+              ) : null}
+
+              {hasMarkUnreadAction ? (
+                <DropdownMenuItem
+                  onClick={() => {
+                    onMarkUnread?.(message);
+                  }}
+                >
+                  <MailOpen className="h-4 w-4" />
+                  Mark unread
+                </DropdownMenuItem>
+              ) : null}
+
+              {hasCopyActions && channelId ? (
+                <DropdownMenuItem onClick={handleCopyLink}>
+                  <Link className="h-4 w-4" />
+                  Copy link
+                </DropdownMenuItem>
+              ) : null}
+
+              {hasCopyActions ? (
+                <DropdownMenuItem onClick={handleCopyText}>
+                  <Copy className="h-4 w-4" />
+                  Copy message
+                </DropdownMenuItem>
+              ) : null}
+
+              {hasDeleteAction ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    className="text-destructive focus:text-destructive"
+                    data-testid={`delete-message-${message.id}`}
+                    onClick={() => {
+                      setIsDeleteDialogOpen(true);
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Delete message
+                  </DropdownMenuItem>
+                </>
+              ) : null}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
       </div>
+
+      {hasDeleteAction ? (
+        <AlertDialog
+          onOpenChange={setIsDeleteDialogOpen}
+          open={isDeleteDialogOpen}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete message?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This will permanently delete this message and cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel asChild>
+                <Button type="button" variant="outline">
+                  Cancel
+                </Button>
+              </AlertDialogCancel>
+              <AlertDialogAction asChild>
+                <Button
+                  onClick={() => onDelete?.(message)}
+                  type="button"
+                  variant="destructive"
+                >
+                  Delete
+                </Button>
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      ) : null}
     </div>
   );
 }
