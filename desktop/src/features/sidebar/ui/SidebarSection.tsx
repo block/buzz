@@ -269,43 +269,48 @@ export function SidebarSection({
         <SidebarGroupContent id={contentId}>
           {items.length > 0 ? (
             <SidebarMenu data-testid={testId}>
-              {items.map((channel) => (
-                <ContextMenu key={channel.id}>
-                  <ContextMenuTrigger asChild>
-                    <SidebarMenuItem className="group/menu-item">
-                      <ChannelMenuButton
-                        channel={channel}
-                        dmParticipants={dmParticipantsByChannelId?.[channel.id]}
-                        hasUnread={unreadChannelIds.has(channel.id)}
-                        isActive={
-                          isActiveChannel && selectedChannelId === channel.id
-                        }
-                        label={channelLabels?.[channel.id] ?? channel.name}
-                        presenceStatus={presenceByChannelId?.[channel.id]}
-                        onSelectChannel={onSelectChannel}
+              {items.map((channel) => {
+                const menuItem = (
+                  <SidebarMenuItem
+                    key={onMarkChannelUnread ? undefined : channel.id}
+                    className="group/menu-item"
+                  >
+                    <ChannelMenuButton
+                      channel={channel}
+                      dmParticipants={dmParticipantsByChannelId?.[channel.id]}
+                      hasUnread={unreadChannelIds.has(channel.id)}
+                      isActive={
+                        isActiveChannel && selectedChannelId === channel.id
+                      }
+                      label={channelLabels?.[channel.id] ?? channel.name}
+                      presenceStatus={presenceByChannelId?.[channel.id]}
+                      onSelectChannel={onSelectChannel}
+                    />
+                    {channel.channelType === "dm" &&
+                    unreadChannelIds.has(channel.id) &&
+                    !(isActiveChannel && selectedChannelId === channel.id) ? (
+                      <span
+                        aria-hidden="true"
+                        className="absolute right-[9px] top-1/2 h-2.5 w-2.5 -translate-y-1/2 rounded-full bg-primary"
+                        data-testid={`channel-unread-${channel.name}`}
                       />
-                      {channel.channelType === "dm" &&
-                      unreadChannelIds.has(channel.id) &&
-                      !(isActiveChannel && selectedChannelId === channel.id) ? (
-                        <span
-                          aria-hidden="true"
-                          className="absolute right-[9px] top-1/2 h-2.5 w-2.5 -translate-y-1/2 rounded-full bg-primary"
-                          data-testid={`channel-unread-${channel.name}`}
-                        />
-                      ) : null}
-                      {channel.channelType === "dm" && onHideDm ? (
-                        <SidebarMenuAction
-                          aria-label="Close direct message"
-                          data-testid={`hide-dm-${channel.name}`}
-                          onClick={() => onHideDm(channel.id)}
-                          showOnHover
-                        >
-                          <X />
-                        </SidebarMenuAction>
-                      ) : null}
-                    </SidebarMenuItem>
-                  </ContextMenuTrigger>
-                  {onMarkChannelUnread ? (
+                    ) : null}
+                    {channel.channelType === "dm" && onHideDm ? (
+                      <SidebarMenuAction
+                        aria-label="Close direct message"
+                        data-testid={`hide-dm-${channel.name}`}
+                        onClick={() => onHideDm(channel.id)}
+                        showOnHover
+                      >
+                        <X />
+                      </SidebarMenuAction>
+                    ) : null}
+                  </SidebarMenuItem>
+                );
+
+                return onMarkChannelUnread ? (
+                  <ContextMenu key={channel.id}>
+                    <ContextMenuTrigger asChild>{menuItem}</ContextMenuTrigger>
                     <ContextMenuContent>
                       <ContextMenuItem
                         onClick={() =>
@@ -316,9 +321,11 @@ export function SidebarSection({
                         Mark unread
                       </ContextMenuItem>
                     </ContextMenuContent>
-                  ) : null}
-                </ContextMenu>
-              ))}
+                  </ContextMenu>
+                ) : (
+                  menuItem
+                );
+              })}
             </SidebarMenu>
           ) : emptyState ? (
             <div
