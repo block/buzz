@@ -292,7 +292,9 @@ fn find_marker_at_line_start(content: &str, marker: &str) -> Option<usize> {
 fn find_managed_markers(content: &str) -> Option<(usize, usize)> {
     let begin_pos = find_marker_at_line_start(content, BEGIN_MARKER)?;
     let begin_line_start = content[..begin_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
-    let end_pos = content[begin_pos..].find(END_MARKER).map(|p| p + begin_pos)?;
+    let end_pos = content[begin_pos..]
+        .find(END_MARKER)
+        .map(|p| p + begin_pos)?;
     let end_of_end = end_pos + END_MARKER.len();
     let after_end = if content[end_of_end..].starts_with('\n') {
         end_of_end + 1
@@ -306,7 +308,10 @@ fn find_managed_markers(content: &str) -> Option<(usize, usize)> {
 fn strip_orphan_begin_marker(content: &str) -> String {
     if let Some(pos) = find_marker_at_line_start(content, BEGIN_MARKER) {
         let line_start = content[..pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
-        let line_end = content[pos..].find('\n').map(|p| pos + p + 1).unwrap_or(content.len());
+        let line_end = content[pos..]
+            .find('\n')
+            .map(|p| pos + p + 1)
+            .unwrap_or(content.len());
         format!(
             "{}{}",
             &content[..line_start],
@@ -340,7 +345,10 @@ pub fn upsert_managed_section(file_path: &Path, new_section_content: &str) -> io
     };
 
     let parent = file_path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "file path has no parent directory")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "file path has no parent directory",
+        )
     })?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     {
@@ -691,7 +699,11 @@ mod tests {
             .unwrap()
             .filter_map(|e| e.ok())
             .collect();
-        assert_eq!(entries.len(), 1, "only AGENTS.md should remain, no temp files");
+        assert_eq!(
+            entries.len(),
+            1,
+            "only AGENTS.md should remain, no temp files"
+        );
         assert_eq!(entries[0].file_name(), "AGENTS.md");
     }
 
@@ -715,8 +727,14 @@ mod tests {
         let result = fs::read_to_string(&file).unwrap();
 
         assert!(result.contains("# Header"), "original header must survive");
-        assert!(result.contains("new section"), "new content must be present");
-        assert!(result.contains("some middle content"), "content between markers must survive");
+        assert!(
+            result.contains("new section"),
+            "new content must be present"
+        );
+        assert!(
+            result.contains("some middle content"),
+            "content between markers must survive"
+        );
 
         // Exactly one BEGIN marker in the output (the orphan was stripped, new one appended).
         assert_eq!(
@@ -726,7 +744,9 @@ mod tests {
         );
 
         // The single BEGIN marker must have a matching END marker after it.
-        let begin_pos = result.find(BEGIN_MARKER).expect("BEGIN marker must be present");
+        let begin_pos = result
+            .find(BEGIN_MARKER)
+            .expect("BEGIN marker must be present");
         let end_pos = result[begin_pos..].find(END_MARKER).map(|p| begin_pos + p);
         assert!(
             end_pos.is_some(),
@@ -754,10 +774,18 @@ mod tests {
         let result = fs::read_to_string(&file).unwrap();
 
         assert!(result.contains("# Header"), "original header must survive");
-        assert!(result.contains("some content"), "original body must survive");
-        assert!(result.contains("fresh section"), "new content must be present");
+        assert!(
+            result.contains("some content"),
+            "original body must survive"
+        );
+        assert!(
+            result.contains("fresh section"),
+            "new content must be present"
+        );
 
-        let begin_pos = result.find(BEGIN_MARKER).expect("BEGIN marker must be present");
+        let begin_pos = result
+            .find(BEGIN_MARKER)
+            .expect("BEGIN marker must be present");
         let end_pos = result.find(END_MARKER).expect("END marker must be present");
         assert!(
             begin_pos < end_pos,
@@ -786,10 +814,22 @@ mod tests {
 
         let result = fs::read_to_string(&file).unwrap();
 
-        assert!(result.contains("replaced"), "replacement content must be present");
-        assert!(!result.contains("first block"), "first block must be replaced");
-        assert!(result.contains("second block"), "second pair content must survive");
-        assert!(result.contains("between blocks"), "text between pairs must survive");
+        assert!(
+            result.contains("replaced"),
+            "replacement content must be present"
+        );
+        assert!(
+            !result.contains("first block"),
+            "first block must be replaced"
+        );
+        assert!(
+            result.contains("second block"),
+            "second pair content must survive"
+        );
+        assert!(
+            result.contains("between blocks"),
+            "text between pairs must survive"
+        );
     }
 
     #[test]
@@ -811,8 +851,14 @@ mod tests {
             result.contains("    <!-- BEGIN SPROUT MANAGED — some indented marker -->"),
             "indented marker inside code block must be preserved verbatim"
         );
-        assert!(result.contains("appended content"), "new content must be appended");
-        assert!(result.contains("Real content here"), "existing body must survive");
+        assert!(
+            result.contains("appended content"),
+            "new content must be appended"
+        );
+        assert!(
+            result.contains("Real content here"),
+            "existing body must survive"
+        );
 
         // The real markers appended at the end must be at line-start (column 0).
         let begin_pos = result
