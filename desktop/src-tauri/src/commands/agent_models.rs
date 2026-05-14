@@ -8,9 +8,9 @@ use crate::{
     managed_agents::{
         build_managed_agent_summary, default_agent_workdir, find_managed_agent_mut,
         load_managed_agents, managed_agent_avatar_url, missing_command_message,
-        normalize_agent_args, resolve_command, save_managed_agents, sync_managed_agent_processes,
-        AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
-        DEFAULT_MCP_COMMAND,
+        normalize_agent_args, regenerate_nest_context, resolve_command, save_managed_agents,
+        sync_managed_agent_processes, AgentModelInfo, AgentModelsResponse,
+        UpdateManagedAgentRequest, UpdateManagedAgentResponse, DEFAULT_MCP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -250,6 +250,10 @@ pub async fn update_managed_agent(
         let summary = build_managed_agent_summary(&app, record, &runtimes)?;
         (summary, sync_params)
     }; // lock dropped here
+
+    if let Err(error) = regenerate_nest_context(&app) {
+        eprintln!("sprout-desktop: nest context regeneration failed: {error}");
+    }
 
     // Phase 2: relay profile sync (async, best-effort, outside lock)
     let profile_sync_error =

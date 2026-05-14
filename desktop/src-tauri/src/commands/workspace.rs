@@ -1,8 +1,9 @@
 use nostr::Keys;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::app_state::AppState;
+use crate::managed_agents::regenerate_nest_context;
 use crate::relay;
 
 #[derive(Serialize)]
@@ -30,6 +31,7 @@ pub fn get_active_workspace(state: State<'_, AppState>) -> Result<ActiveWorkspac
 pub fn apply_workspace(
     relay_url: String,
     nsec: Option<String>,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     // ── Validate before mutating ──────────────────────────────────────────
@@ -49,6 +51,12 @@ pub fn apply_workspace(
     if let Some(keys) = parsed_keys {
         let mut keys_guard = state.keys.lock().map_err(|e| e.to_string())?;
         *keys_guard = keys;
+    }
+
+    if let Err(error) = regenerate_nest_context(&app) {
+        eprintln!(
+            "sprout-desktop: failed to regenerate nest context after workspace switch: {error}"
+        );
     }
 
     Ok(())

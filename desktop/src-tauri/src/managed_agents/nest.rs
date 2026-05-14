@@ -6,8 +6,15 @@
 //!
 //! Idempotent: existing files and directories are never overwritten.
 
+use super::{
+    load_managed_agents, load_personas, BackendKind, ManagedAgentRecord, PersonaRecord, RespondTo,
+};
+use crate::app_state::AppState;
+use crate::relay::relay_ws_url_with_override;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use tauri::{AppHandle, Manager};
 
 /// Subdirectories created inside the nest.
 const NEST_DIRS: &[&str] = &[
@@ -224,6 +231,107 @@ pub fn ensure_cli_symlink(_exe_parent: &Path) -> Result<(), String> {
     Ok(())
 }
 
+const CLI_QUICK_REFERENCE: &str = "\
+## CLI Quick Reference
+`sprout messages send --channel <id> --content <text>` — send a message
+`sprout messages get --channel <id>` — read recent messages
+`sprout channels list` — list available channels
+`sprout workflows trigger --workflow <id>` — trigger a workflow
+Run `sprout --help` for the full command reference.";
+
+pub fn render_dynamic_section(
+    personas: &[PersonaRecord],
+    agents: &[ManagedAgentRecord],
+    relay_url: &str,
+) -> String {
+    let active_agents = if agents.is_empty() {
+        "## Active Agents\n\n*(No agents deployed yet. Add agents in the Sprout desktop app.)*"
+            .to_string()
+    } else {
+        let mut table =
+            "## Active Agents\n\n| Name | Role | How to address |\n|------|------|----------------|"
+                .to_string();
+        for agent in agents {
+            let role = agent
+                .persona_id
+                .as_deref()
+                .and_then(|pid| personas.iter().find(|p| p.id == pid))
+                .map(|p| p.display_name.as_str())
+                .unwrap_or("—");
+            table.push_str(&format!(
+                "\n| {} | {} | @{} |",
+                agent.name, role, agent.name
+            ));
+        }
+        table
+    };
+
+    format!("{active_agents}\n\n## Workspace\n- Relay: {relay_url}\n\n{CLI_QUICK_REFERENCE}")
+}
+
+pub fn upsert_managed_section(file_path: &Path, new_section_content: &str) -> io::Result<()> {
+    let current = fs::read_to_string(file_path)?;
+
+    const BEGIN: &str = "<!-- BEGIN SPROUT MANAGED";
+    const END: &str = "<!-- END SPROUT MANAGED -->";
+
+    let replacement = format!(
+        "<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\n{new_section_content}\n<!-- END SPROUT MANAGED -->\n"
+    );
+
+    let new_content =
+        if let (Some(begin_pos), Some(end_pos)) = (current.find(BEGIN), current.find(END)) {
+            // Find the start of the BEGIN marker's line.
+            let line_start = current[..begin_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
+            // END marker spans to the end of its content + the newline after it.
+            let end_of_end = end_pos + END.len();
+            let after_end = if current[end_of_end..].starts_with('\n') {
+                end_of_end + 1
+            } else {
+                end_of_end
+            };
+            format!(
+                "{}{}{}",
+                &current[..line_start],
+                replacement,
+                &current[after_end..]
+            )
+        } else {
+            format!("{}\n\n{}", current.trim_end_matches('\n'), replacement)
+        };
+
+    let tmp_path = file_path.with_extension(
+        file_path
+            .extension()
+            .map(|e| format!("{}.tmp", e.to_string_lossy()))
+            .unwrap_or_else(|| "tmp".to_string()),
+    );
+    fs::write(&tmp_path, new_content)?;
+    fs::rename(&tmp_path, file_path)?;
+
+    Ok(())
+}
+
+pub fn regenerate_nest_context(app: &AppHandle) -> Result<(), String> {
+    let nest = nest_dir().ok_or("cannot resolve home directory for nest")?;
+    let agents_md = nest.join("AGENTS.md");
+
+    if !agents_md.exists() {
+        return Ok(());
+    }
+
+    let personas = load_personas(app)?;
+    let agents = load_managed_agents(app)?;
+    let state = app.state::<AppState>();
+    let relay_url = relay_ws_url_with_override(&state);
+    let content = render_dynamic_section(&personas, &agents, &relay_url);
+    upsert_managed_section(&agents_md, &content)
+        .map_err(|e| format!("regenerate nest context: {e}"))?;
+
+    Ok(())
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,5 +513,142 @@ mod tests {
         // directly without controlling dirs::home_dir(), but the logic
         // in the Ok(_) branch of ensure_cli_symlink skips regular files).
         assert_eq!(fs::read_to_string(&link).unwrap(), "user-installed binary");
+    }
+
+    fn make_persona(id: &str, display_name: &str) -> PersonaRecord {
+        PersonaRecord {
+            id: id.to_string(),
+            display_name: display_name.to_string(),
+            avatar_url: None,
+            system_prompt: String::new(),
+            provider: None,
+            model: None,
+            name_pool: vec![],
+            is_builtin: false,
+            is_active: true,
+            source_pack: None,
+            source_pack_persona_slug: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn make_agent(name: &str, persona_id: Option<&str>) -> ManagedAgentRecord {
+        ManagedAgentRecord {
+            pubkey: String::new(),
+            name: name.to_string(),
+            persona_id: persona_id.map(|s| s.to_string()),
+            private_key_nsec: String::new(),
+            auth_tag: None,
+            relay_url: String::new(),
+            acp_command: String::new(),
+            agent_command: String::new(),
+            agent_args: vec![],
+            mcp_command: String::new(),
+            turn_timeout_seconds: 0,
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            parallelism: 1,
+            system_prompt: None,
+            model: None,
+            mcp_toolsets: None,
+            start_on_app_launch: false,
+            runtime_pid: None,
+            backend: BackendKind::default(),
+            backend_agent_id: None,
+            provider_binary_path: None,
+            persona_pack_path: None,
+            persona_name_in_pack: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            last_started_at: None,
+            last_stopped_at: None,
+            last_exit_code: None,
+            last_error: None,
+            respond_to: RespondTo::default(),
+            respond_to_allowlist: vec![],
+        }
+    }
+
+    #[test]
+    fn test_render_dynamic_section_with_agents() {
+        let personas = vec![make_persona("p1", "Builder")];
+        let agents = vec![make_agent("Kit", Some("p1"))];
+        let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+        assert!(output.contains("| Kit | Builder | @Kit |"));
+        assert!(output.contains("## CLI Quick Reference"));
+    }
+
+    #[test]
+    fn test_render_dynamic_section_empty() {
+        let output = render_dynamic_section(&[], &[], "ws://example.com:3000");
+        assert!(output.contains("No agents deployed yet"));
+    }
+
+    #[test]
+    fn test_render_dynamic_section_agent_no_persona() {
+        let personas = vec![make_persona("p1", "Builder")];
+        let agents = vec![make_agent("Scout", Some("nonexistent"))];
+        let output = render_dynamic_section(&personas, &agents, "ws://example.com:3000");
+        assert!(output.contains("| Scout | — | @Scout |"));
+    }
+
+    #[test]
+    fn test_upsert_managed_section_with_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("AGENTS.md");
+        fs::write(
+            &file,
+            "# Header\n\nsome content\n\n<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\nold section\n<!-- END SPROUT MANAGED -->\n\nafter\n",
+        )
+        .unwrap();
+
+        upsert_managed_section(&file, "new section").unwrap();
+
+        let result = fs::read_to_string(&file).unwrap();
+        assert!(result.contains("<!-- BEGIN SPROUT MANAGED"));
+        assert!(result.contains("<!-- END SPROUT MANAGED -->"));
+        assert!(result.contains("new section"));
+        assert!(!result.contains("old section"));
+        assert!(result.contains("# Header"));
+        assert!(result.contains("some content"));
+        assert!(result.contains("after"));
+    }
+
+    #[test]
+    fn test_upsert_managed_section_without_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("AGENTS.md");
+        fs::write(&file, "# Header\n\nexisting content\n").unwrap();
+
+        upsert_managed_section(&file, "injected section").unwrap();
+
+        let result = fs::read_to_string(&file).unwrap();
+        assert!(result.contains("# Header"));
+        assert!(result.contains("existing content"));
+        assert!(result.contains("<!-- BEGIN SPROUT MANAGED"));
+        assert!(result.contains("<!-- END SPROUT MANAGED -->"));
+        assert!(result.contains("injected section"));
+        let begin_pos = result.find("<!-- BEGIN SPROUT MANAGED").unwrap();
+        let header_pos = result.find("# Header").unwrap();
+        assert!(
+            header_pos < begin_pos,
+            "original content should precede the managed section"
+        );
+    }
+
+    #[test]
+    fn test_upsert_managed_section_no_tmp_leftover() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("AGENTS.md");
+        fs::write(&file, "# Header\n").unwrap();
+
+        upsert_managed_section(&file, "content").unwrap();
+
+        let tmp_path = file.with_extension("md.tmp");
+        assert!(
+            !tmp_path.exists(),
+            ".tmp file should not exist after successful upsert"
+        );
     }
 }

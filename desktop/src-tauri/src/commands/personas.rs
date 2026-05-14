@@ -7,7 +7,7 @@ use crate::{
     managed_agents::{
         encode_persona_json, import_persona_pack, list_installed_packs, load_managed_agents,
         load_personas, load_teams, parse_json_persona, parse_md_persona, parse_png_persona,
-        parse_zip_personas, save_managed_agents, save_personas,
+        parse_zip_personas, regenerate_nest_context, save_managed_agents, save_personas,
         uninstall_persona_pack as do_uninstall_persona_pack, validate_persona_activation_change,
         validate_persona_deletion, CreatePersonaRequest, PackSummary, ParsePersonaFilesResult,
         PersonaRecord, UpdatePersonaRequest,
@@ -85,6 +85,9 @@ pub fn create_persona(
     };
     personas.push(persona.clone());
     save_personas(&app, &personas)?;
+    if let Err(error) = regenerate_nest_context(&app) {
+        eprintln!("sprout-desktop: nest context regeneration failed: {error}");
+    }
     Ok(persona)
 }
 
@@ -134,6 +137,9 @@ pub fn update_persona(
     persona.updated_at = now_iso();
 
     save_personas(&app, &personas)?;
+    if let Err(error) = regenerate_nest_context(&app) {
+        eprintln!("sprout-desktop: nest context regeneration failed: {error}");
+    }
     personas
         .into_iter()
         .find(|record| record.id == input.id)
@@ -181,6 +187,9 @@ pub fn delete_persona(
     }
     if changed_agents {
         save_managed_agents(&app, &agents)?;
+    }
+    if let Err(error) = regenerate_nest_context(&app) {
+        eprintln!("sprout-desktop: nest context regeneration failed: {error}");
     }
 
     Ok(())
@@ -230,6 +239,9 @@ pub fn set_persona_active(
 
     let updated = persona.clone();
     save_personas(&app, &personas)?;
+    if let Err(error) = regenerate_nest_context(&app) {
+        eprintln!("sprout-desktop: nest context regeneration failed: {error}");
+    }
     Ok(updated)
 }
 
@@ -383,7 +395,11 @@ pub fn install_persona_pack(
     if !source.is_dir() {
         return Err(format!("pack path is not a directory: {path}"));
     }
-    import_persona_pack(&app, &source)
+    let result = import_persona_pack(&app, &source)?;
+    if let Err(error) = regenerate_nest_context(&app) {
+        eprintln!("sprout-desktop: nest context regeneration failed: {error}");
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -396,7 +412,11 @@ pub fn uninstall_persona_pack(
         .managed_agents_store_lock
         .lock()
         .map_err(|e| e.to_string())?;
-    do_uninstall_persona_pack(&app, &pack_id)
+    do_uninstall_persona_pack(&app, &pack_id)?;
+    if let Err(error) = regenerate_nest_context(&app) {
+        eprintln!("sprout-desktop: nest context regeneration failed: {error}");
+    }
+    Ok(())
 }
 
 #[tauri::command]

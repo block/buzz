@@ -7,12 +7,13 @@ use crate::{
         build_managed_agent_summary, discover_provider_candidates, ensure_persona_is_active,
         find_managed_agent_mut, invoke_provider, load_managed_agents, load_personas,
         managed_agent_avatar_url, managed_agent_log_path, managed_agents_base_dir,
-        normalize_agent_args, provider_deploy, read_log_tail, resolve_provider_binary,
-        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
-        sync_managed_agent_processes, validate_provider_config, BackendKind, BackendProviderInfo,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentLogResponse,
-        ManagedAgentRecord, ManagedAgentSummary, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_COMMAND,
-        DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS, DEFAULT_MCP_COMMAND,
+        normalize_agent_args, provider_deploy, read_log_tail, regenerate_nest_context,
+        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
+        stop_managed_agent_process, sync_managed_agent_processes, validate_provider_config,
+        BackendKind, BackendProviderInfo, CreateManagedAgentRequest, CreateManagedAgentResponse,
+        ManagedAgentLogResponse, ManagedAgentRecord, ManagedAgentSummary, DEFAULT_ACP_COMMAND,
+        DEFAULT_AGENT_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        DEFAULT_MCP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -452,6 +453,10 @@ pub async fn create_managed_agent(
         (agent, spawn_error)
     };
 
+    if let Err(error) = regenerate_nest_context(&app) {
+        eprintln!("sprout-desktop: nest context regeneration failed: {error}");
+    }
+
     // ── Phase 4: sync agent profile on relay (async, outside lock) ───────────
     let avatar_url = input
         .avatar_url
@@ -713,7 +718,11 @@ pub fn delete_managed_agent(
     if records.len() == initial_len {
         return Err(format!("agent {pubkey} not found"));
     }
-    save_managed_agents(&app, &records)
+    save_managed_agents(&app, &records)?;
+    if let Err(error) = regenerate_nest_context(&app) {
+        eprintln!("sprout-desktop: nest context regeneration failed: {error}");
+    }
+    Ok(())
 }
 
 #[tauri::command]
