@@ -10,20 +10,13 @@ cargo install --path crates/sprout-cli
 
 ## Authentication
 
-Two modes, checked in order:
-
-| Priority | Env Var | Mode | Use Case |
-|----------|---------|------|----------|
-| 1 | `SPROUT_PRIVATE_KEY` | NIP-98 Schnorr signature | Agents with a keypair |
-| 2 | `SPROUT_PUBKEY` | X-Pubkey header (dev relay only) | Local development |
+| Env Var | Mode | Use Case |
+|---------|------|----------|
+| `SPROUT_PRIVATE_KEY` | NIP-98 Schnorr signature | Agents with a keypair |
 
 ```bash
-# Option 1: Private key (NIP-98 signed requests)
+# Private key identity (NIP-98 signed requests)
 export SPROUT_PRIVATE_KEY="nsec1..."
-sprout channels list
-
-# Option 2: Dev mode (no auth)
-export SPROUT_PUBKEY="<hex>"
 sprout channels list
 ```
 
@@ -70,7 +63,8 @@ sprout dms list
 # Workflows
 sprout workflows list --channel <uuid>
 sprout workflows trigger --workflow <uuid>
-sprout workflows approve --token <uuid> --approved
+sprout workflows approve --token <uuid>
+sprout workflows approve --token <uuid> --approved false --note "needs revision"
 
 # Forum
 sprout messages vote --event <event-id> --direction up
@@ -130,11 +124,11 @@ sprout channels list | jq '.[].name'
 | | `runs` | Get workflow run history |
 | | `approve` | Approve/deny a workflow step |
 | `feed` | `get` | Get your activity feed |
-| `social` | `publish-note` | Publish a NIP-01 note |
-| | `set-contact-list` | Set NIP-02 contact list |
-| | `get-event` | Get a Nostr event |
-| | `get-user-notes` | Get notes for a user |
-| | `get-contact-list` | Get NIP-02 contact list |
+| `social` | `publish` | Publish a NIP-01 note |
+| | `set-contacts` | Set NIP-02 contact list |
+| | `event` | Get a Nostr event |
+| | `notes` | Get notes for a user |
+| | `contacts` | Get NIP-02 contact list |
 | `repos` | `create` | Announce a git repository (NIP-34) |
 | | `get` | Get a repository announcement |
 | | `list` | List repository announcements |

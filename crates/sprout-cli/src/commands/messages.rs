@@ -313,7 +313,6 @@ pub struct SendMessageParams {
 }
 
 pub async fn cmd_send_message(client: &SproutClient, p: SendMessageParams) -> Result<(), CliError> {
-    validate_uuid(&p.channel_id)?;
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
@@ -399,7 +398,6 @@ pub async fn cmd_send_diff_message(
     client: &SproutClient,
     p: SendDiffParams,
 ) -> Result<(), CliError> {
-    validate_uuid(&p.channel_id)?;
     if let Some(r) = &p.reply_to {
         validate_hex64(r)?;
     }
@@ -541,6 +539,91 @@ pub async fn cmd_vote_on_post(
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+pub async fn dispatch(cmd: crate::MessagesCmd, client: &SproutClient) -> Result<(), CliError> {
+    use crate::MessagesCmd;
+    match cmd {
+        MessagesCmd::Send {
+            channel,
+            content,
+            kind,
+            reply_to,
+            broadcast,
+            mentions,
+            files,
+        } => {
+            cmd_send_message(
+                client,
+                SendMessageParams {
+                    channel_id: channel,
+                    content,
+                    kind,
+                    reply_to,
+                    broadcast,
+                    mentions,
+                    files,
+                },
+            )
+            .await
+        }
+        MessagesCmd::SendDiff {
+            channel,
+            diff,
+            repo,
+            commit,
+            file,
+            parent_commit,
+            source_branch,
+            target_branch,
+            pr,
+            lang,
+            description,
+            reply_to,
+        } => {
+            cmd_send_diff_message(
+                client,
+                SendDiffParams {
+                    channel_id: channel,
+                    diff,
+                    repo_url: repo,
+                    commit_sha: commit,
+                    file_path: file,
+                    parent_commit_sha: parent_commit,
+                    source_branch,
+                    target_branch,
+                    pr_number: pr,
+                    language: lang,
+                    description,
+                    reply_to,
+                },
+            )
+            .await
+        }
+        MessagesCmd::Edit { event, content } => cmd_edit_message(client, &event, &content).await,
+        MessagesCmd::Delete { event } => cmd_delete_message(client, &event).await,
+        MessagesCmd::Get {
+            channel,
+            limit,
+            before,
+            since,
+            kinds,
+        } => cmd_get_messages(client, &channel, limit, before, since, kinds.as_deref()).await,
+        MessagesCmd::Thread {
+            channel,
+            event,
+            depth_limit,
+            limit,
+        } => cmd_get_thread(client, &channel, &event, depth_limit, limit).await,
+        MessagesCmd::Search { query, limit } => cmd_search(client, &query, limit).await,
+        MessagesCmd::Vote { event, direction } => {
+            cmd_vote_on_post(client, &event, &direction).await
+        }
+    }
 }
 
 #[cfg(test)]

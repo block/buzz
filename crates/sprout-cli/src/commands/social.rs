@@ -111,3 +111,24 @@ pub async fn cmd_get_contact_list(client: &SproutClient, pubkey: &str) -> Result
     println!("{resp}");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+pub async fn dispatch(cmd: crate::SocialCmd, client: &SproutClient) -> Result<(), CliError> {
+    use crate::SocialCmd;
+    match cmd {
+        SocialCmd::PublishNote { content, reply_to } => {
+            cmd_publish_note(client, &content, reply_to.as_deref()).await
+        }
+        SocialCmd::SetContactList { contacts } => cmd_set_contact_list(client, &contacts).await,
+        SocialCmd::GetEvent { event } => cmd_get_event(client, &event).await,
+        SocialCmd::GetUserNotes {
+            pubkey,
+            limit,
+            before,
+        } => cmd_get_user_notes(client, &pubkey, limit, before).await,
+        SocialCmd::GetContactList { pubkey } => cmd_get_contact_list(client, &pubkey).await,
+    }
+}

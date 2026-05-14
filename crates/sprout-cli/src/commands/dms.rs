@@ -45,3 +45,16 @@ pub async fn cmd_add_dm_member(
     println!("{resp}");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+pub async fn dispatch(cmd: crate::DmsCmd, client: &SproutClient) -> Result<(), CliError> {
+    use crate::DmsCmd;
+    match cmd {
+        DmsCmd::List { limit } => cmd_list_dms(client, limit).await,
+        DmsCmd::Open { pubkeys } => cmd_open_dm(client, &pubkeys).await,
+        DmsCmd::AddMember { channel, pubkey } => cmd_add_dm_member(client, &channel, &pubkey).await,
+    }
+}

@@ -71,7 +71,6 @@ cargo run -p sprout-admin -- mint-token \
 
 This generates a keypair and prints:
 - **Private key (nsec)** — save for `SPROUT_PRIVATE_KEY` testing
-- **Pubkey** — save for `SPROUT_PUBKEY` testing
 
 Export:
 
@@ -100,7 +99,7 @@ export SPROUT_PRIVATE_KEY="nsec1..."   # from the mint output
 
 ```bash
 cargo test -p sprout-cli
-# Expected: 38 passed, 0 failed
+# Expected: see cargo test -p sprout-cli for current count
 
 cargo clippy -p sprout-cli -- -D warnings
 # Expected: zero warnings
@@ -366,8 +365,9 @@ sprout workflows runs --workflow "$WF_ID" | jq .
 # workflows approve — requires a workflow run waiting for approval
 # This is hard to test ad-hoc without a workflow that has an approval gate.
 # Test the validation instead:
-sprout workflows approve --token "00000000-0000-0000-0000-000000000000" --approved 2>&1 || true
+sprout workflows approve --token "00000000-0000-0000-0000-000000000000" 2>&1 || true
 # Should fail with relay error (token not found), not a validation error
+# To test the deny path: sprout workflows approve --token <UUID> --approved false
 
 # workflows delete
 sprout workflows delete --workflow "$WF_ID" | jq .
@@ -428,9 +428,9 @@ sprout users set-profile 2>&1; echo "exit: $?"
 # exit: 1 (at least one field required)
 
 # Exit 3: No auth configured
-env -u SPROUT_PRIVATE_KEY -u SPROUT_PUBKEY \
+env -u SPROUT_PRIVATE_KEY \
   cargo run -p sprout-cli -- channels list 2>&1; echo "exit: $?"
-# stderr: {"error":"auth_error","message":"auth error: Set SPROUT_PRIVATE_KEY or SPROUT_PUBKEY"}
+# stderr: {"error":"auth_error","message":"SPROUT_PRIVATE_KEY is required (use --private-key or set env var)"}
 # exit: 3
 
 # Exit 2: Non-existent channel (valid UUID)
@@ -441,22 +441,19 @@ sprout channels get --channel "00000000-0000-0000-0000-000000000000" 2>&1; echo 
 
 ---
 
-## 8. Auth Mode Testing
+## 8. Auth Testing
 
-Test both authentication modes.
+Test authentication.
 
 ```bash
-# Mode 1: Private key (SPROUT_PRIVATE_KEY)
+# Private key (SPROUT_PRIVATE_KEY)
 SPROUT_PRIVATE_KEY="nsec1..." sprout channels list | jq .
 # Should succeed
 
-# Mode 2: Dev mode (SPROUT_PUBKEY) — only works with SPROUT_REQUIRE_AUTH_TOKEN=false
-SPROUT_PUBKEY="<your-64-char-hex-pubkey>" sprout channels list | jq .
-# Should succeed
-
 # No auth → exit 3
-env -u SPROUT_PRIVATE_KEY -u SPROUT_PUBKEY \
+env -u SPROUT_PRIVATE_KEY \
   cargo run -p sprout-cli -- channels list 2>&1; echo "exit: $?"
+# stderr: {"error":"auth_error","message":"SPROUT_PRIVATE_KEY is required (use --private-key or set env var)"}
 # exit: 3
 ```
 
@@ -517,13 +514,13 @@ sprout channels delete --channel "$FORUM_ID" | jq .
 | 39 | `workflows trigger` | ☐ | |
 | 40 | `workflows runs` | ☐ | |
 | 41 | `workflows get` | ☐ | |
-| 42 | `workflows approve` | ☐ | Validation only (needs approval gate); use --approved / --no-approved |
+| 42 | `workflows approve` | ☐ | Validation only (needs approval gate); bare = approve, `--approved false` = deny |
 | 43 | `feed get` | ☐ | |
-| 44 | `social publish-note` | ☐ | |
-| 45 | `social set-contact-list` | ☐ | |
-| 46 | `social get-event` | ☐ | |
-| 47 | `social get-user-notes` | ☐ | |
-| 48 | `social get-contact-list` | ☐ | |
+| 44 | `social publish` | ☐ | |
+| 45 | `social set-contacts` | ☐ | |
+| 46 | `social event` | ☐ | |
+| 47 | `social notes` | ☐ | |
+| 48 | `social contacts` | ☐ | |
 | 49 | `repos create` | ☐ | |
 | 50 | `repos get` | ☐ | |
 | 51 | `repos list` | ☐ | |

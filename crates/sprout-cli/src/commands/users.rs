@@ -2,6 +2,8 @@ use crate::client::SproutClient;
 use crate::error::CliError;
 use crate::validate::validate_hex64;
 
+// TODO(phase-4): Replace raw nostr::EventBuilder usage in cmd_set_presence with sprout-sdk builder
+
 /// Get user profiles (kind:0 metadata events).
 ///
 /// - 0 pubkeys, no name → query our own profile
@@ -224,4 +226,32 @@ pub async fn cmd_set_presence(client: &SproutClient, status: &str) -> Result<(),
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+pub async fn dispatch(cmd: crate::UsersCmd, client: &SproutClient) -> Result<(), CliError> {
+    use crate::UsersCmd;
+    match cmd {
+        UsersCmd::Get { pubkeys, name } => cmd_get_users(client, &pubkeys, name.as_deref()).await,
+        UsersCmd::SetProfile {
+            name,
+            avatar,
+            about,
+            nip05,
+        } => {
+            cmd_set_profile(
+                client,
+                name.as_deref(),
+                avatar.as_deref(),
+                about.as_deref(),
+                nip05.as_deref(),
+            )
+            .await
+        }
+        UsersCmd::Presence { pubkeys } => cmd_get_presence(client, &pubkeys).await,
+        UsersCmd::SetPresence { status } => cmd_set_presence(client, &status.to_string()).await,
+    }
 }

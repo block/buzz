@@ -4,6 +4,8 @@ use crate::client::SproutClient;
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_uuid};
 
+// TODO(phase-4): Replace raw nostr::EventBuilder usage with sprout-sdk builder functions
+
 // ---------------------------------------------------------------------------
 // Read commands — POST /query
 // ---------------------------------------------------------------------------
@@ -142,4 +144,37 @@ pub async fn cmd_approve_step(
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &SproutClient) -> Result<(), CliError> {
+    use crate::WorkflowsCmd;
+    match cmd {
+        WorkflowsCmd::List { channel } => cmd_list_workflows(client, &channel).await,
+        WorkflowsCmd::Get { workflow } => cmd_get_workflow(client, &workflow).await,
+        WorkflowsCmd::Create { channel, yaml } => {
+            cmd_create_workflow(client, &channel, &yaml).await
+        }
+        WorkflowsCmd::Update {
+            channel,
+            workflow,
+            yaml,
+        } => cmd_update_workflow(client, &channel, &workflow, &yaml).await,
+        WorkflowsCmd::Delete { workflow } => cmd_delete_workflow(client, &workflow).await,
+        WorkflowsCmd::Trigger { workflow } => cmd_trigger_workflow(client, &workflow).await,
+        WorkflowsCmd::Runs { workflow, limit } => {
+            cmd_get_workflow_runs(client, &workflow, limit).await
+        }
+        WorkflowsCmd::Approve {
+            token,
+            approved,
+            note,
+        } => {
+            // approved is already a bool — no parse_bool_flag needed
+            cmd_approve_step(client, &token, approved, note.as_deref()).await
+        }
+    }
 }

@@ -16,7 +16,7 @@ pub fn parse_event_id(hex: &str) -> Result<nostr::EventId, CliError> {
 /// Note: `validate_uuid` (below) returns `()` for validation only; this function
 /// returns the parsed `Uuid` for callers that need the value.
 pub fn parse_uuid(s: &str) -> Result<uuid::Uuid, CliError> {
-    uuid::Uuid::parse_str(s).map_err(|e| CliError::Usage(format!("invalid channel UUID: {e}")))
+    uuid::Uuid::parse_str(s).map_err(|e| CliError::Usage(format!("invalid UUID: {e}")))
 }
 
 /// Validate UUID string. Returns CliError::Usage on failure.
