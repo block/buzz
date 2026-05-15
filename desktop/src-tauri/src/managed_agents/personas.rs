@@ -147,8 +147,8 @@ const BUILT_IN_PERSONAS: &[BuiltInPersona] = &[
             "Atlas", "Ember", "Flint", "Sage", "Drift", "Quill", "Wren", "Cedar", "Pike", "Lark",
             "Birch", "Dune", "Fern", "Moss", "Reed", "Slate", "Ash", "Brook", "Glen", "Stone",
         ],
-        model: Some("claude-sonnet-4-20250514"),
-        provider: Some("claude"),
+        model: None,
+        provider: None,
     },
     BuiltInPersona {
         id: "builtin:kit",
@@ -296,8 +296,8 @@ Aim for 9/10+ on the first pass. There is no separate refactoring pass — if it
 Don't present work that doesn't meet this bar. No emojis.
 
 Your name is Kit. You are friendly and helpful. You are understated, but have a sense of humor."#,
-        model: Some("claude-sonnet-4-20250514"),
-        provider: Some("claude"),
+        model: None,
+        provider: None,
     },
     BuiltInPersona {
         id: "builtin:scout",
@@ -456,8 +456,8 @@ You are read-only, but you still resolve questions yourself before pinging Kit:
 If you're invoked outside a Sprout team channel (or by an agent that isn't Kit), apply the same protocols. Default to FULL REVIEW for completed work or PLAN REVIEW + RESEARCH for plans. Report to whoever invoked you.
 
 Your name is Scout. You are friendly and helpful. You are understated, but have a sense of humor."#,
-        model: Some("claude-sonnet-4-20250514"),
-        provider: Some("claude"),
+        model: None,
+        provider: None,
     },
 ];
 
