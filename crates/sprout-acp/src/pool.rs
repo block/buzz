@@ -35,8 +35,8 @@ use crate::acp::{
 use crate::config::{DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
-    ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo, PromptProfile,
-    PromptProfileLookup,
+    prepend_base_prompt, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
+    PromptProfile, PromptProfileLookup,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -192,6 +192,12 @@ pub struct PromptContext {
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
     pub heartbeat_prompt: Option<String>,
+    /// Base prompt content, or `None` if `--no-base-prompt` was passed.
+    ///
+    /// `'static` because `PromptContext` is `Arc`-shared across async tasks.
+    /// Content from `--base-prompt-file` is promoted via `Box::leak` in `main.rs`
+    /// after validated file read in `Config::from_cli()`. The compiled-in default
+    /// (`include_str!`) is inherently `'static`.
     pub base_prompt: Option<&'static str>,
     pub cwd: String,
     /// REST client for pre-prompt context fetches (thread/DM history).
@@ -806,7 +812,7 @@ pub async fn run_prompt_task(
             );
             // Prepend base prompt to initial_message for platform orientation.
             let init_msg = match ctx.base_prompt {
-                Some(bp) => format!("[Base]\n{}\n\n{initial_msg}", bp.trim_end()),
+                Some(bp) => prepend_base_prompt(bp, initial_msg),
                 None => initial_msg.to_string(),
             };
             let init_result = agent

@@ -24,7 +24,7 @@ use pool::{
     AgentPool, CancelMode, OwnedAgent, PromptContext, PromptOutcome, PromptResult, PromptSource,
     SessionState,
 };
-use queue::{EventQueue, QueuedEvent, ThreadTags};
+use queue::{prepend_base_prompt, EventQueue, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
 use sprout_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
@@ -794,7 +794,7 @@ async fn tokio_main() -> Result<()> {
         .compact()
         .init();
 
-    let config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
     tracing::info!("sprout-acp starting: {}", config.summary());
 
     let observer = config
@@ -1069,6 +1069,7 @@ async fn tokio_main() -> Result<()> {
     let dedup_mode = config.dedup_mode;
     let mut queue = EventQueue::new(dedup_mode);
 
+    let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -1078,10 +1079,7 @@ async fn tokio_main() -> Result<()> {
         system_prompt: config.system_prompt.clone(),
         base_prompt: if config.no_base_prompt {
             None
-        } else if let Some(ref path) = config.base_prompt_file {
-            let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
-                panic!("failed to read base prompt file {}: {e}", path.display())
-            });
+        } else if let Some(content) = base_prompt_content {
             Some(Box::leak(content.into_boxed_str()))
         } else {
             Some(include_str!("base_prompt.md"))
@@ -2325,7 +2323,7 @@ fn dispatch_heartbeat(
         .clone()
         .unwrap_or_else(default_heartbeat_prompt);
     let prompt_text = match ctx.base_prompt {
-        Some(bp) => format!("[Base]\n{}\n\n{prompt_text}", bp.trim_end()),
+        Some(bp) => prepend_base_prompt(bp, &prompt_text),
         None => prompt_text,
     };
     let result_tx = pool.result_tx();
@@ -2823,7 +2821,7 @@ mod build_mcp_servers_tests {
             relay_observer: false,
             agent_owner: None,
             no_base_prompt: false,
-            base_prompt_file: None,
+            base_prompt_content: None,
         }
     }
 

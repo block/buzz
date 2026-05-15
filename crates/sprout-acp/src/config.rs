@@ -477,8 +477,10 @@ pub struct Config {
     pub agent_owner: Option<String>,
     /// Disable the [Base] platform-context section prepended to every prompt.
     pub no_base_prompt: bool,
-    /// Path to a custom base prompt file that overrides the compiled-in default.
-    pub base_prompt_file: Option<PathBuf>,
+    /// Resolved content from `--base-prompt-file`, read and validated in
+    /// `from_cli()`. `None` when using the compiled-in default or when
+    /// `--no-base-prompt` is set.
+    pub base_prompt_content: Option<String>,
 }
 
 /// Validate and deduplicate allowlist entries: each must be exactly 64 hex chars.
@@ -604,6 +606,22 @@ impl Config {
             Some(text)
         } else if let Some(ref path) = args.heartbeat_prompt_file {
             Some(std::fs::read_to_string(path)?)
+        } else {
+            None
+        };
+
+        let base_prompt_content = if args.no_base_prompt {
+            None
+        } else if let Some(ref path) = args.base_prompt_file {
+            let content = std::fs::read_to_string(path)?;
+            if content.len() > 1_048_576 {
+                return Err(ConfigError::ConfigFile(format!(
+                    "base prompt file {} exceeds 1 MB limit ({} bytes)",
+                    path.display(),
+                    content.len()
+                )));
+            }
+            Some(content)
         } else {
             None
         };
@@ -817,7 +835,7 @@ impl Config {
             relay_observer: args.relay_observer,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
-            base_prompt_file: args.base_prompt_file,
+            base_prompt_content,
         };
 
         Ok(config)
@@ -1182,7 +1200,7 @@ mod tests {
             relay_observer: false,
             agent_owner: None,
             no_base_prompt: false,
-            base_prompt_file: None,
+            base_prompt_content: None,
         }
     }
 

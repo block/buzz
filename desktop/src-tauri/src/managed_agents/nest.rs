@@ -264,6 +264,7 @@ pub fn render_dynamic_section(
         table
     };
 
+    let relay_url = relay_url.replace(['\n', '\r'], "");
     format!("{active_agents}\n\n## Workspace\n- Relay: {relay_url}")
 }
 
@@ -285,9 +286,8 @@ fn find_marker_at_line_start(content: &str, marker: &str) -> Option<usize> {
 fn find_managed_markers(content: &str) -> Option<(usize, usize)> {
     let begin_pos = find_marker_at_line_start(content, BEGIN_MARKER)?;
     let begin_line_start = content[..begin_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
-    let end_pos = content[begin_pos..]
-        .find(END_MARKER)
-        .map(|p| p + begin_pos)?;
+    let end_pos =
+        find_marker_at_line_start(&content[begin_pos..], END_MARKER).map(|p| p + begin_pos)?;
     let end_of_end = end_pos + END_MARKER.len();
     let after_end = if content[end_of_end..].starts_with('\n') {
         end_of_end + 1
@@ -308,7 +308,9 @@ fn strip_orphan_begin_marker(content: &str) -> String {
         format!(
             "{}{}",
             &content[..line_start],
-            content[line_end..].trim_start_matches('\n')
+            content[line_end..]
+                .strip_prefix('\n')
+                .unwrap_or(&content[line_end..])
         )
     } else {
         content.to_string()
@@ -370,6 +372,16 @@ pub fn regenerate_nest_context(app: &AppHandle) -> Result<(), String> {
         .map_err(|e| format!("regenerate nest context: {e}"))?;
 
     Ok(())
+}
+
+/// Convenience wrapper: regenerates nest context, logging a warning on failure.
+///
+/// All call sites treat regeneration as fire-and-forget — agents run fine with
+/// a stale AGENTS.md, so we warn and continue rather than propagating the error.
+pub fn try_regenerate_nest(app: &AppHandle) {
+    if let Err(error) = regenerate_nest_context(app) {
+        eprintln!("sprout-desktop: nest context regeneration failed: {error}");
+    }
 }
 
 
@@ -569,6 +581,7 @@ mod tests {
             is_active: true,
             source_pack: None,
             source_pack_persona_slug: None,
+            env_vars: std::collections::BTreeMap::new(),
             created_at: String::new(),
             updated_at: String::new(),
         }
@@ -608,6 +621,7 @@ mod tests {
             last_error: None,
             respond_to: RespondTo::default(),
             respond_to_allowlist: vec![],
+            env_vars: std::collections::BTreeMap::new(),
         }
     }
 

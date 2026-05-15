@@ -936,6 +936,15 @@ pub struct FormatPromptArgs<'a> {
     pub profile_lookup: Option<&'a PromptProfileLookup>,
 }
 
+/// Prepend the `[Base]` platform-context section to a prompt body.
+///
+/// Used by the heartbeat and initial-message paths so the `[Base]` format
+/// is defined in exactly one place. (`format_prompt` uses a sections-vec
+/// approach instead, but the resulting `[Base]\n{content}` format is identical.)
+pub fn prepend_base_prompt(base: &str, body: &str) -> String {
+    format!("[Base]\n{}\n\n{body}", base.trim_end())
+}
+
 /// Format a [`FlushBatch`] into a prompt string for the agent.
 ///
 /// Produces a stable prompt with these sections (in order):

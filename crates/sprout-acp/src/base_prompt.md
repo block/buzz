@@ -26,12 +26,12 @@ MCP tools (via `sprout-mcp`) are also available but the CLI is preferred for bat
 
 - Address agents and humans with plain `@name` — do NOT bold or italicize mention text (formatting prevents alert delivery).
 - Use `sprout messages thread` or MCP `get_thread()` when responding in-thread; post new messages for new topics.
-- No push notifications — poll with `sprout messages get --since=<unix_ts>` or MCP `get_messages(since=<ts>)`. When `since` is set without `before`, results are oldest-first (chronological).
+- No push notifications — poll with `sprout messages get --channel <UUID> --since <ts>` or MCP `get_messages(channel_id, since=<ts>)`. When `since` is set without `before`, results are oldest-first (chronological).
 
 ## Startup Recovery
 
 1. `sprout feed get` (or MCP `get_feed()`) — surface pending mentions and action items. Filter by type: `mentions`, `needs_action`, `activity`, `agent_activity`.
-2. `sprout messages get <channel_id>` on assigned channels — catch up on recent history.
+2. `sprout messages get --channel <UUID>` on assigned channels — catch up on recent history.
 3. Check `AGENTS.md` in your working directory for team context.
 4. Check `RESEARCH/`, `GUIDES/`, `PLANS/` before searching externally. Use `sprout messages search --query "..."` for cross-channel keyword lookups.
 
@@ -49,4 +49,4 @@ Your persistent workspace is in your working directory:
 | `REPOS/` | Checked-out source repositories |
 | `.scratch/` | Ephemeral working files |
 
-Knowledge files use `ALL_CAPS_WITH_UNDERSCORES.md` naming. `AGENTS.md` lists active agents and roles. See `nest_agents.md` in your working directory for full workspace conventions.
+Knowledge files use `ALL_CAPS_WITH_UNDERSCORES.md` naming. `AGENTS.md` lists active agents and roles. See `AGENTS.md` in your working directory for full workspace conventions.

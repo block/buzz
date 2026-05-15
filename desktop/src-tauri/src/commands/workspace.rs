@@ -3,7 +3,7 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::app_state::AppState;
-use crate::managed_agents::regenerate_nest_context;
+use crate::managed_agents::try_regenerate_nest;
 use crate::relay;
 
 #[derive(Serialize)]
@@ -53,11 +53,7 @@ pub fn apply_workspace(
         *keys_guard = keys;
     }
 
-    if let Err(error) = regenerate_nest_context(&app) {
-        eprintln!(
-            "sprout-desktop: failed to regenerate nest context after workspace switch: {error}"
-        );
-    }
+    try_regenerate_nest(&app);
 
     Ok(())
 }
