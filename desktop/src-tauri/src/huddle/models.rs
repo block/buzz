@@ -13,9 +13,9 @@
 //! Upgrade note: an older Moonshine STT model directory at
 //! `~/.sprout/models/moonshine-tiny/` is removed best-effort once the new STT
 //! model finishes installing successfully. Cleanup is gated on the new model
-//! being Ready, so a failed download never deletes a working fallback. If the
-//! removal fails (permissions, etc.) the leftover is harmless and can be
-//! removed by hand.
+//! being Ready, so a failed download never removes the previous on-disk model
+//! during migration. If removal fails (permissions, etc.) the leftover is
+//! harmless and can be removed by hand.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -96,7 +96,11 @@ const STT_ARCHIVE_SUBDIR: &str = "sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-3600
 const STT_MODEL_DIR_NAME: &str = "parakeet-tdt-ctc-110m-en";
 
 /// All files that must be present for the model to be considered ready.
-const STT_EXPECTED_FILES: &[&str] = &["model.int8.onnx", "tokens.txt"];
+///
+/// Includes the attribution sidecar written by Sprout during install. The
+/// upstream archive does not ship a license file, so readiness should require
+/// the local CC-BY-4.0 attribution to travel with the cached model bytes.
+const STT_EXPECTED_FILES: &[&str] = &["model.int8.onnx", "tokens.txt", STT_LICENSE_FILE_NAME];
 
 /// CC-BY-4.0 §3(a)(1) attribution block written next to the STT model files
 /// after install. Travels with the bytes — if a user copies the model
@@ -556,9 +560,9 @@ impl ModelManager {
     /// Ready**. This covers the "fast-path" upgrade scenario (new model
     /// installed by a previous build, `download_stt_model` short-circuits, the
     /// post-install cleanup never runs). For users mid-migration (old model
-    /// present, new model still downloading) we must NOT delete the fallback
-    /// here: a slow connection would otherwise leave them with no STT until
-    /// the ~100 MB Parakeet archive finishes. The post-install path inside
+    /// present, new model still downloading) we keep the old files until the
+    /// Parakeet install finishes, avoiding unnecessary data loss if the
+    /// ~100 MB download fails. The post-install path inside
     /// `download_stt_model` handles cleanup once the new install reaches Ready.
     pub fn start_stt_download(&self, http_client: reqwest::Client) {
         let manager = self.clone();
@@ -570,8 +574,8 @@ impl ModelManager {
         );
         if self.stt.is_ready(&self.models_dir) {
             // Detached cleanup task — must not block startup. Gated above on
-            // the new model being Ready, so a mid-migration user keeps the
-            // moonshine-tiny fallback until their Parakeet install completes.
+            // the new model being Ready, so a mid-migration user keeps their
+            // existing moonshine-tiny files until Parakeet install completes.
             let models_dir = self.models_dir.clone();
             tauri::async_runtime::spawn(async move {
                 cleanup_legacy_moonshine_dir(&models_dir).await;
