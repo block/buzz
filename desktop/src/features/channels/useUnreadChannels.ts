@@ -3,6 +3,10 @@ import {
   useLiveChannelUpdates,
   type UseLiveChannelUpdatesOptions,
 } from "@/features/channels/useLiveChannelUpdates";
+import {
+  readStoredLatestMessages,
+  writeStoredLatestMessages,
+} from "@/features/channels/latestMessageStorage";
 import { useReadState } from "@/features/channels/readState/useReadState";
 import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { Channel, RelayEvent } from "@/shared/api/types";
@@ -72,10 +76,17 @@ export function useUnreadChannels(
   // Track whether channels have been initialized (for first-load seeding)
   const hasInitializedChannelsRef = React.useRef(false);
 
-  // Reset the in-session state when the identity or relay changes.
+  // Reset the in-session state when the identity or relay changes, then
+  // hydrate the per-channel "latest message at" map from localStorage so
+  // unread badges survive an app restart. Without this, the only source for
+  // `latest` is the live subscription (which uses `since: now` and so
+  // doesn't backfill), meaning every channel's latest would be undefined on
+  // startup and the unread comparison would always be false.
   // biome-ignore lint/correctness/useExhaustiveDependencies: pubkey/relayClient are intentional reset signals
   React.useEffect(() => {
-    latestByChannelRef.current = new Map();
+    latestByChannelRef.current = pubkey
+      ? readStoredLatestMessages(pubkey)
+      : new Map();
     forcedUnreadRef.current = new Set();
     hasInitializedChannelsRef.current = false;
     bumpLatestVersion();
@@ -128,8 +139,13 @@ export function useUnreadChannels(
         didAdvance = true;
       }
     }
-    if (didAdvance) bumpLatestVersion();
-  }, [channels]);
+    if (didAdvance) {
+      if (pubkey) {
+        writeStoredLatestMessages(pubkey, latestByChannelRef.current);
+      }
+      bumpLatestVersion();
+    }
+  }, [channels, pubkey]);
 
   // Seed read state on first load so existing channels don't flash as unread
   // when the backend reports a non-null Channel.lastMessageAt. We deliberately
@@ -171,18 +187,23 @@ export function useUnreadChannels(
   ]);
 
   // Feed the in-session "latest message at" map from live channel events.
-  // Composes with any caller-supplied onChannelMessage handler.
+  // Composes with any caller-supplied onChannelMessage handler. Persists to
+  // localStorage so unread badges survive an app restart — see the hydrate
+  // effect above.
   const callerOnChannelMessage = liveUpdateOptions.onChannelMessage;
   const handleChannelMessage = React.useCallback(
     (channelId: string, event: RelayEvent) => {
       const current = latestByChannelRef.current.get(channelId) ?? 0;
       if (event.created_at > current) {
         latestByChannelRef.current.set(channelId, event.created_at);
+        if (pubkey) {
+          writeStoredLatestMessages(pubkey, latestByChannelRef.current);
+        }
         bumpLatestVersion();
       }
       callerOnChannelMessage?.(channelId, event);
     },
-    [callerOnChannelMessage],
+    [callerOnChannelMessage, pubkey],
   );
 
   useLiveChannelUpdates(channels, activeChannelId, {
