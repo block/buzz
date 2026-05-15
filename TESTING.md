@@ -20,9 +20,10 @@ cargo test -p sprout-test-client -- --ignored
 
 ## Live Local Relay
 
-The fastest way to exercise the relay end-to-end is `just relay` plus the
-`sprout` CLI. The CLI signs every request with NIP-98, so you don't need
-`nak` or hand-rolled `curl`.
+The fastest way to exercise the relay end-to-end is to build the release
+binaries once, run `sprout-relay`, and drive it with the `sprout` CLI. The
+CLI signs every request with NIP-98, so you don't need `nak` or hand-rolled
+`curl`.
 
 ### 1. Setup
 
@@ -48,9 +49,12 @@ Rebuild after any code change — the steps below use the release binaries.
 In a separate terminal (it runs in the foreground):
 
 ```bash
-just relay                       # serves ws://localhost:3000
-# or, equivalently:
-# cargo run --release -p sprout-relay
+sprout-relay                     # release binary from step 2, serves ws://localhost:3000
+# alternatives:
+# cargo run --release -p sprout-relay   # rebuild + run in release
+# just relay                            # DEBUG build — fast to launch on a hot cache,
+#                                       # but mismatched if step 2 left you on release.
+#                                       # Use `just relay-release` if you want the recipe.
 ```
 
 Verify it's up (back in your working terminal):
@@ -69,12 +73,19 @@ log emits a WARN about this — that's expected for local testing. See the env
 vars table at the bottom if you need to lock it down.
 
 > **Already running Sprout Desktop (or another relay) on `:3000` / `:8080`?**
-> Override the relay's three ports and point the CLI at the new main port:
+> Export these *before* launching the relay, and use the matching verify
+> commands instead of the ones above:
 > ```bash
 > export SPROUT_BIND_ADDR=0.0.0.0:3030 SPROUT_HEALTH_PORT=8088 SPROUT_METRICS_PORT=9202
-> export RELAY_URL=ws://localhost:3030       # for the relay (NIP-42 advertisement)
-> export SPROUT_RELAY_URL=http://localhost:3030  # for the CLI in steps 4+
+> export RELAY_URL=ws://localhost:3030             # advertised in NIP-42 challenges
+> export SPROUT_RELAY_URL=http://localhost:3030    # CLI target for steps 4+
+> # verify on the overridden ports:
+> curl -s http://localhost:3030/health             # → ok
+> curl -s http://localhost:8088/_readiness         # → {"status":"ready"}
 > ```
+> Every subsequent snippet in this doc assumes the defaults — when you see
+> `localhost:3000` / `:8080`, mentally substitute your overrides, or the CLI
+> will end up talking to Sprout Desktop's relay.
 
 > **Heads up:** if your shell already has `SPROUT_AUTH_TAG` set (e.g. from a
 > staging relay config), `unset SPROUT_AUTH_TAG` before testing. The local
@@ -167,14 +178,22 @@ AGENT_PUBKEY=$(echo "$AGENT_GEN" | awk '/Public key:/ {print $3}')
 #    sit idle" and silently ignores every mention.
 sprout channels add-member --channel "$CHANNEL" --pubkey "$AGENT_PUBKEY" --role member
 
-# 4. Switch to the agent identity and start it
+# 4. Switch to the agent identity and start it.
+#    sprout-acp wants ws:// (not http://). If you set SPROUT_RELAY_URL to an
+#    http:// URL in step 3, set the ws:// equivalent here — same host/port.
 export SPROUT_PRIVATE_KEY="$AGENT_SK"
-export SPROUT_RELAY_URL=ws://localhost:3000   # or :3030 if you overrode ports in step 3
+export SPROUT_RELAY_URL=ws://localhost:3000   # match step 3 (e.g. ws://localhost:3030 if overridden)
 export SPROUT_ACP_RESPOND_TO=anyone           # default is owner-only; opens the gate for testing
 export GOOSE_MODE=auto                        # must be 'auto' or goose hangs on prompts
 
 sprout-acp                                    # foreground; logs to stdout (run in a separate terminal)
 ```
+
+> **Using a different ACP agent?** The default recipe assumes `goose` is on
+> `$PATH` and configured (`goose --version` should print). For codex / claude
+> code / sprout-agent, set `SPROUT_ACP_AGENT_COMMAND` and `SPROUT_ACP_AGENT_ARGS`
+> accordingly — see `crates/sprout-acp/README.md`. Without these, sprout-acp
+> will fail to spawn the agent subprocess on startup.
 
 If you started the agent before adding it to the channel, just run the
 `add-member` afterwards — it picks up the membership notification live and
@@ -239,7 +258,7 @@ CLI-side, only two matter for testing:
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `relay error 500` or `400: restricted: not a channel member` after a code change | Stale binary | Rebuild and re-export `PATH`; or `cargo run` directly |
-| `Address already in use (os error 48)` on relay start | Another relay (or stale process) holding `:3000` / `:8080` / `:9102` | `lsof -iTCP:3000 -sTCP:LISTEN`; kill the offender, or override `SPROUT_BIND_ADDR` / `SPROUT_HEALTH_PORT` / `SPROUT_METRICS_PORT` |
+| `Address already in use` on relay start (os error 48 on macOS, 98 on Linux) | Another relay (or stale process) holding `:3000` / `:8080` / `:9102` | `lsof -iTCP:3000 -sTCP:LISTEN`; kill the offender, or use the port-override block in step 3 |
 | `auth_error: SPROUT_PRIVATE_KEY is required` | Env not exported into the CLI's shell | `export SPROUT_PRIVATE_KEY=...` (or pass `--private-key`) |
 | `auth-required: verification failed` on a closed relay | NIP-OA attestation needed | Set `SPROUT_AUTH_TAG` to the owner-issued JSON, or relax `SPROUT_REQUIRE_RELAY_MEMBERSHIP` |
 | `channels list` empty after `channels create` | The CLI doesn't echo the channel UUID; use the filter shown in step 4 | Or `POST /query` with `{"kinds":[39002]}` |
