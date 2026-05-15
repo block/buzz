@@ -40,7 +40,7 @@ const overrides = new Map([
   ["src/features/channels/ui/ChannelScreen.tsx", 550], // profile panel state + mutual exclusion wiring + ProfilePanelProvider context + agent typing classification
   ["src/features/notifications/hooks.ts", 535], // notification settings + feed notification lifecycle + profile batch resolution + truncated-pubkey guard + badge state
   ["src/features/messages/hooks.ts", 500], // message query/mutation hooks + optimistic updates
-  ["src/features/messages/ui/MessageComposer.tsx", 710], // media upload handlers (paste, drop, dialog) + channelId reset effect + edit mode (pre-fill, save, cancel, escape) + autofocus on mount/channel switch
+  ["src/features/messages/ui/MessageComposer.tsx", 710], // media upload handlers (paste, drop, dialog) + channelId reset effect + edit mode (pre-fill, save, cancel, escape) + composer autofocus (#572)
   ["src/features/settings/ui/SettingsView.tsx", 600],
   ["src/features/sidebar/ui/AppSidebar.tsx", 860], // channels + forums creation forms + Pulse nav
   ["src/shared/api/relayClientSession.ts", 930], // durable websocket session manager with reconnect/replay/recovery state + sendTypingIndicator + fetchChannelHistoryBefore + subscribeToChannelLive (huddle TTS) + subscribeToHuddleEvents (huddle indicator) + disconnect() for workspace switch teardown + fetchEvents/subscribeLive/publishEvent for NIP-RS read state + publishUserStatus/subscribeToUserStatusUpdates (NIP-38)
@@ -50,9 +50,9 @@ const overrides = new Map([
   ["src-tauri/src/commands/agents.rs", 881], // remote agent lifecycle routing (local + provider branches) + scope enforcement + persona pack metadata wiring + mcp_toolsets field + NIP-OA auth_tag in deploy payload
   ["src-tauri/src/commands/messages.rs", 510], // feed multi-query + NIP-50 search + forum thread resolution + thread ref + reactions via REQ
   ["src-tauri/src/nostr_convert.rs", 1150], // 12 Nostr event→model converters (channels, profiles, members, notes, search, agents, relay members) + rank_user_search_results helper for NIP-50 user search + 33 unit tests
-  ["src-tauri/src/managed_agents/runtime.rs", 990], // ... + respond-to gate env (SPROUT_ACP_RESPOND_TO[_ALLOWLIST]) + per-mode env builder + tests
-  ["src-tauri/src/managed_agents/types.rs", 700], // ManagedAgentRecord/Summary + Create/Update request structs + RespondTo enum + validate_respond_to_allowlist + tests
-  ["src-tauri/src/managed_agents/backend.rs", 530], // provider IPC, validation, discovery, binary resolution + tests
+  ["src-tauri/src/managed_agents/runtime.rs", 1110], // ... + respond-to gate env (SPROUT_ACP_RESPOND_TO[_ALLOWLIST]) + per-mode env builder + tests + persona/agent env_vars spawn merge (helper + tests now in env_vars.rs)
+  ["src-tauri/src/managed_agents/types.rs", 715], // ManagedAgentRecord/Summary + Create/Update request structs + RespondTo enum + validate_respond_to_allowlist + tests + persona/agent env_vars field
+  ["src-tauri/src/managed_agents/backend.rs", 700], // provider IPC, validation, discovery, binary resolution + tests + redact_secrets_with for user env values + env_secrets_from_request + redact_env_values_in (shared with model discovery)
   ["src/features/huddle/HuddleContext.tsx", 650], // huddle lifecycle context + joinHuddle + connectAndSetupMedia shared helper + activeSpeakers/isReconnecting state + PTT (reusable AudioContext) + TTS subscription + mic level analyser (10fps throttle) + agent pubkey refresh
   ["src/features/agents/hooks.ts", 540], // agent query/mutation surface now includes built-in persona library activation + useUpdateManagedAgentMutation
   ["src/features/agents/ui/AgentsView.tsx", 880], // remote agent lifecycle controls + persona/team management + persona import-update dialog wiring + built-in catalog/library state orchestration

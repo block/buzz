@@ -1,6 +1,9 @@
 import * as React from "react";
 
-import { useUpdateManagedAgentMutation } from "@/features/agents/hooks";
+import {
+  usePersonasQuery,
+  useUpdateManagedAgentMutation,
+} from "@/features/agents/hooks";
 import type {
   ManagedAgent,
   RespondToMode,
@@ -18,6 +21,7 @@ import {
   CreateAgentBasicsFields,
   CreateAgentRuntimeFields,
 } from "./CreateAgentDialogSections";
+import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import { CreateAgentRespondToField } from "./RespondToField";
 
 export function EditAgentDialog({
@@ -49,6 +53,13 @@ export function EditAgentDialog({
   const [systemPrompt, setSystemPrompt] = React.useState(
     agent.systemPrompt ?? "",
   );
+  const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
+  const personasQuery = usePersonasQuery();
+  const inheritedEnvVars = React.useMemo(() => {
+    if (!agent.personaId) return {};
+    const persona = personasQuery.data?.find((p) => p.id === agent.personaId);
+    return persona?.envVars ?? {};
+  }, [agent.personaId, personasQuery.data]);
   const [respondTo, setRespondTo] = React.useState<RespondToMode>(
     agent.respondTo,
   );
@@ -73,6 +84,7 @@ export function EditAgentDialog({
       setTurnTimeoutSeconds(String(agent.turnTimeoutSeconds));
       setParallelism(String(agent.parallelism));
       setSystemPrompt(agent.systemPrompt ?? "");
+      setEnvVars(agent.envVars);
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
       updateMutation.reset();
@@ -156,6 +168,7 @@ export function EditAgentDialog({
           (systemPrompt.trim() || null) !== agent.systemPrompt
             ? systemPrompt.trim() || null
             : undefined,
+        envVars: envVarsChanged(envVars, agent.envVars) ? envVars : undefined,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
         // The allowlist is preserved across mode toggles in local UI state
         // (so a user can flip away from allowlist and back without losing
@@ -226,6 +239,15 @@ export function EditAgentDialog({
               turnTimeoutSeconds={turnTimeoutSeconds}
             />
 
+            <EnvVarsEditor
+              disabled={updateMutation.isPending}
+              helperText="Per-agent env vars. Override the persona's vars on collision."
+              inheritedFrom={inheritedEnvVars}
+              inheritedLabel="persona"
+              onChange={setEnvVars}
+              value={envVars}
+            />
+
             {updateMutation.error instanceof Error ? (
               <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
                 {updateMutation.error.message}
@@ -255,4 +277,17 @@ export function EditAgentDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+function envVarsChanged(
+  a: Record<string, string>,
+  b: Record<string, string>,
+): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return true;
+  for (const k of aKeys) {
+    if (a[k] !== b[k]) return true;
+  }
+  return false;
 }

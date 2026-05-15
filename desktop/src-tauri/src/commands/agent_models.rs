@@ -25,7 +25,7 @@ pub async fn get_agent_models(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<AgentModelsResponse, String> {
-    let (resolved_acp, agent_command, agent_args, persisted_model) = {
+    let (resolved_acp, agent_command, agent_args, persisted_model, merged_env) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -53,8 +53,21 @@ pub async fn get_agent_models(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| record.agent_command.clone());
 
-        (resolved, resolved_agent, args, record.model.clone())
+        // Same env layering as runtime spawn: persona env < agent env.
+        // Model discovery needs the user's credentials. Fail closed on
+        // persona-resolution errors so a corrupt personas.json doesn't
+        // produce a model list as if the persona had no credentials.
+        let persona_env =
+            crate::managed_agents::resolve_persona_env(&app, record.persona_id.as_deref())?;
+        let env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
+
+        (resolved, resolved_agent, args, record.model.clone(), env)
     }; // store lock released — subprocess runs without holding the lock
+
+    // Clone the env map for redaction below — `merged_env` is moved
+    // into the spawn_blocking closure and we still need the values to
+    // scrub any user-supplied secrets that the child surfaces in stderr.
+    let env_for_redaction = merged_env.clone();
 
     // Use spawn_blocking because the desktop Tauri crate doesn't enable
     // tokio's `process` feature. std::process::Command is synchronous
@@ -74,8 +87,12 @@ pub async fn get_agent_models(
             .env(
                 "GOOSE_MODE",
                 std::env::var("GOOSE_MODE").unwrap_or_else(|_| "auto".into()),
-            )
-            .stdout(std::process::Stdio::piped())
+            );
+        // User env layering — written LAST so it overrides any Sprout-set env above.
+        for (k, v) in &merged_env {
+            cmd.env(k, v);
+        }
+        cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
             .map_err(|e| format!("failed to spawn sprout-acp models: {e}"))
@@ -86,8 +103,13 @@ pub async fn get_agent_models(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // Scrub any user-supplied env values before surfacing stderr to
+        // the frontend — persona/agent env_vars may carry API keys that
+        // a failing child process echoed back.
+        let stderr_redacted =
+            crate::managed_agents::redact_env_values_in(stderr.as_ref(), &env_for_redaction);
         return Err(format!(
-            "sprout-acp models failed (exit {}): {stderr}",
+            "sprout-acp models failed (exit {}): {stderr_redacted}",
             output.status.code().unwrap_or(-1)
         ));
     }
@@ -170,6 +192,10 @@ pub async fn update_managed_agent(
         }
         if let Some(mcp_command) = input.mcp_command {
             record.mcp_command = mcp_command;
+        }
+        if let Some(env_vars) = input.env_vars {
+            crate::managed_agents::validate_user_env_keys(&env_vars)?;
+            record.env_vars = env_vars;
         }
 
         // Inbound author gate: merge patch onto current values, then validate

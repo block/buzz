@@ -11,6 +11,7 @@ use crate::mcp::McpRegistry;
 
 use crate::types::{
     AgentError, ContentBlock, HistoryItem, ProviderStop, StopReason, ToolCall, ToolResult,
+    ToolResultContent,
 };
 use crate::wire::{self, WireSender};
 
@@ -214,13 +215,17 @@ impl RunCtx<'_> {
         for (i, call) in calls.iter().enumerate() {
             let mut result = results[i].take().unwrap_or_else(|| ToolResult {
                 provider_id: call.provider_id.clone(),
-                text: "internal error: missing result".into(),
+                content: vec![ToolResultContent::Text(
+                    "internal error: missing result".into(),
+                )],
                 is_error: true,
             });
             // On tool error: append a reflection prompt so the LLM
             // diagnoses the failure before blindly retrying.
             if result.is_error {
-                result.text.push_str(ERROR_REFLECTION_SUFFIX);
+                result
+                    .content
+                    .push(ToolResultContent::Text(ERROR_REFLECTION_SUFFIX.to_string()));
             }
             self.history.push(HistoryItem::ToolResult(result));
         }
@@ -445,7 +450,7 @@ async fn emit_completed(wire: &WireSender, sid: &str, call: &ToolCall, result: &
                 "sessionUpdate": "tool_call_update",
                 "toolCallId": call.provider_id,
                 "status": "completed",
-                "content": [{ "type": "content", "content": { "type": "text", "text": result.text } }],
+                "content": [{ "type": "content", "content": { "type": "text", "text": result.text() } }],
                 "rawOutput": { "isError": result.is_error },
             }),
         ),
@@ -537,7 +542,9 @@ pub(crate) fn push_hook_outputs_as_tool_results(
         });
         history.push(HistoryItem::ToolResult(ToolResult {
             provider_id,
-            text: format_hook_output_body(hook, server, text),
+            content: vec![ToolResultContent::Text(format_hook_output_body(
+                hook, server, text,
+            ))],
             is_error: false,
         }));
     }
@@ -555,7 +562,7 @@ fn unique_nonce() -> u64 {
 fn synthetic_tool_result(call: &ToolCall, msg: String) -> ToolResult {
     ToolResult {
         provider_id: call.provider_id.clone(),
-        text: msg,
+        content: vec![ToolResultContent::Text(msg)],
         is_error: true,
     }
 }

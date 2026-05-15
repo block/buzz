@@ -17,6 +17,7 @@ fn custom_persona(id: &str, display_name: &str) -> PersonaRecord {
         is_active: true,
         source_pack: None,
         source_pack_persona_slug: None,
+        env_vars: std::collections::BTreeMap::new(),
         created_at: "2026-03-19T00:00:00Z".to_string(),
         updated_at: "2026-03-19T00:00:00Z".to_string(),
     }
@@ -70,6 +71,35 @@ fn merge_personas_restores_builtin_defaults() {
     assert_eq!(solo.created_at, original_created_at);
     assert_eq!(solo.updated_at, original_updated_at);
     assert!(solo.is_active);
+}
+
+#[test]
+fn merge_personas_restores_builtin_env_vars() {
+    // A hand-edited built-in record with stray env vars should be reset to
+    // the canonical (empty) env on merge. Built-ins are intended immutable —
+    // if a user wants per-persona credentials, they create or duplicate to a
+    // custom persona.
+    let mut tampered = custom_persona("builtin:solo", "Solo");
+    tampered.is_builtin = true;
+    tampered.avatar_url = None;
+    tampered.is_active = true;
+    tampered.env_vars =
+        std::collections::BTreeMap::from([("ANTHROPIC_API_KEY".to_string(), "leaked".to_string())]);
+
+    let (records, changed) = merge_personas(vec![tampered], "2026-03-19T00:00:00Z");
+
+    assert!(changed);
+    let solo = records
+        .iter()
+        .find(|record| record.id == "builtin:solo")
+        .expect("solo built-in should exist");
+    // Built-in persona definitions have no `env_vars` field — they are
+    // always empty. The merge reset should clear the tampered key entirely.
+    assert!(
+        solo.env_vars.is_empty(),
+        "expected empty, got {:?}",
+        solo.env_vars
+    );
 }
 
 #[test]

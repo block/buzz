@@ -9,12 +9,14 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
+mod paths;
 mod rg;
 mod shell;
 mod shim;
 mod str_replace;
 mod todo;
 mod tree;
+mod view_image;
 
 #[derive(Clone)]
 struct DevMcp {
@@ -43,6 +45,17 @@ impl DevMcp {
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         shell::run(&self.state, p, context.ct).await
+    }
+
+    #[tool(
+        name = "view_image",
+        description = "Load an image from a file path, http(s) URL, or data: URL and return it as an MCP image content block that multimodal LLMs (Anthropic, OpenAI-compatible, etc.) can see. Resizes to a longest-edge of 1568px by default (override with `max_dim`, range 64..=2048). Pass-through for already-small PNG/JPEG; transcodes oversize input to PNG (if alpha) or JPEG q85. Animated GIF/WebP rejected — provide a still frame. Hard cap 20 MiB source, ~4 MiB on the wire. Relative paths resolve under `workdir` (defaults to server cwd) and may not escape it."
+    )]
+    async fn view_image(
+        &self,
+        Parameters(p): Parameters<view_image::ViewImageParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        view_image::run(&self.state, p).await
     }
 
     #[tool(

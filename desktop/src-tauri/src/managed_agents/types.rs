@@ -1,4 +1,4 @@
-use std::{path::PathBuf, process::Child};
+use std::{collections::BTreeMap, path::PathBuf, process::Child};
 
 use serde::{Deserialize, Serialize};
 
@@ -44,6 +44,13 @@ pub struct PersonaRecord {
     /// Validated: `[a-zA-Z0-9_-]+`, max 64 chars (safe for env vars and paths).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_pack_persona_slug: Option<String>,
+    /// Environment variables injected when launching agents created from this
+    /// persona. Layered as: desktop parent env < persona `env_vars` <
+    /// individual agent `env_vars` (last wins on collision).
+    ///
+    /// Stored as a BTreeMap for deterministic on-disk ordering.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_vars: BTreeMap<String, String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -98,6 +105,12 @@ pub struct ManagedAgentRecord {
     /// When None, the MCP server uses its own default ("default" toolset).
     #[serde(default)]
     pub mcp_toolsets: Option<String>,
+    /// Environment variables injected at spawn time. Layered as: desktop
+    /// parent env < persona `env_vars` < this agent's `env_vars` (last wins).
+    ///
+    /// To "override" a persona env var: set the same key here.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_vars: BTreeMap<String, String>,
     #[serde(default = "default_start_on_app_launch")]
     pub start_on_app_launch: bool,
     #[serde(default)]
@@ -153,6 +166,8 @@ pub struct ManagedAgentSummary {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub mcp_toolsets: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_vars: BTreeMap<String, String>,
     pub backend: BackendKind,
     pub backend_agent_id: Option<String>,
     pub status: String,
@@ -189,6 +204,9 @@ pub struct CreateManagedAgentRequest {
     pub avatar_url: Option<String>,
     pub model: Option<String>,
     pub mcp_toolsets: Option<String>,
+    /// Environment variables for this agent. Layered on top of persona env.
+    #[serde(default)]
+    pub env_vars: BTreeMap<String, String>,
     #[serde(default)]
     pub spawn_after_create: bool,
     #[serde(default = "default_start_on_app_launch")]
@@ -223,6 +241,9 @@ pub struct CreatePersonaRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub name_pool: Vec<String>,
+    /// Environment variables for agents created from this persona.
+    #[serde(default)]
+    pub env_vars: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,6 +259,14 @@ pub struct UpdatePersonaRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub name_pool: Vec<String>,
+    /// Environment variables for agents created from this persona.
+    ///
+    /// Absent (`None`) = don't touch the stored value (caller didn't include
+    /// the field). `Some(map)` = replace entirely (empty map clears all).
+    /// Defaulting an omitted field to an empty map would silently erase
+    /// stored credentials when an unrelated field is edited.
+    #[serde(default)]
+    pub env_vars: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -297,6 +326,9 @@ pub struct UpdateManagedAgentRequest {
     pub system_prompt: Option<Option<String>>,
     #[serde(default)]
     pub mcp_toolsets: Option<Option<String>>,
+    /// Absent = don't touch. Present = replace the env_vars map entirely.
+    #[serde(default)]
+    pub env_vars: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub parallelism: Option<u32>,
     #[serde(default)]
@@ -386,13 +418,7 @@ pub struct UpdateTeamRequest {
 pub const DEFAULT_ACP_COMMAND: &str = "sprout-acp";
 pub const DEFAULT_AGENT_COMMAND: &str = "goose";
 pub const DEFAULT_MCP_COMMAND: &str = "sprout-mcp-server";
-/// Default for the legacy `turn_timeout_seconds` field on the agent record.
-///
-/// As of the deprecation of `SPROUT_ACP_TURN_TIMEOUT` in sprout-acp, this
-/// field is no longer wired into the spawn path — the harness owns the
-/// effective idle-timeout default. The value is kept here only to satisfy
-/// existing persisted records and the `CreateAgentDialog` form state. Prefer
-/// `idle_timeout_seconds` (mapped to `SPROUT_ACP_IDLE_TIMEOUT`) for overrides.
+/// ~5 min (320s) — matches the CLI harness default (SPROUT_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
 /// 1 hour — absolute wall-clock safety cap per turn.
 pub const DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS: u64 = 3600;

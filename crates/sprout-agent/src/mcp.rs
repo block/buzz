@@ -14,7 +14,7 @@ use tokio::sync::watch;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::config::{Config, HookServers};
-use crate::types::{clamp, AgentError, McpServerStdio, ToolDef, ToolResult};
+use crate::types::{clamp, AgentError, McpServerStdio, ToolDef, ToolResult, ToolResultContent};
 
 const SEP: &str = "__";
 const MAX_NAME_LEN: usize = 128;
@@ -343,8 +343,8 @@ impl McpRegistry {
                     if let Ok(mut counts) = self.hook_timeouts.lock() {
                         counts.remove(&server_name);
                     }
-                    if !r.is_error && !r.text.trim().is_empty() {
-                        indexed.push((idx, server_name, r.text));
+                    if !r.is_error && !r.text().trim().is_empty() {
+                        indexed.push((idx, server_name, r.text()));
                     }
                 }
                 Ok((_idx, server_name, Err(_elapsed))) => {
@@ -594,15 +594,18 @@ impl McpRegistry {
                 // Server is healthy — it correctly rejected bad input. Return to LLM.
                 return Ok(ToolResult {
                     provider_id: provider_id.to_owned(),
-                    text: clamp(format!("Tool call rejected: {e}"), max_bytes),
+                    content: vec![ToolResultContent::Text(clamp(
+                        format!("Tool call rejected: {e}"),
+                        max_bytes,
+                    ))],
                     is_error: true,
                 });
             }
         };
-        let text = collapse_content(&res.content, max_bytes);
+        let content = tool_result_content(&res.content, max_bytes);
         Ok(ToolResult {
             provider_id: provider_id.to_owned(),
-            text: clamp(text, max_bytes),
+            content,
             is_error: res.is_error.unwrap_or(false),
         })
     }
@@ -837,46 +840,133 @@ fn push_bounded(out: &mut String, s: &str, max: usize) {
     }
 }
 
-fn collapse_content(blocks: &[rmcp::model::Content], max_bytes: usize) -> String {
+fn tool_result_content(
+    blocks: &[rmcp::model::Content],
+    max_bytes: usize,
+) -> Vec<ToolResultContent> {
     use rmcp::model::RawContent;
-    let mut out = String::new();
+    let mut out = Vec::new();
+    let mut text = String::new();
+    let mut used = 0usize;
     let mut truncated = false;
     let short = |s: &str| truncate_at_boundary(s, MARKER_FIELD_MAX).to_owned();
+
+    let flush_text = |out: &mut Vec<ToolResultContent>, text: &mut String, used: &mut usize| {
+        if !text.is_empty() {
+            *used = used.saturating_add(text.len());
+            out.push(ToolResultContent::Text(std::mem::take(text)));
+        }
+    };
+
+    let text_budget =
+        |used: usize, text: &str| max_bytes.saturating_sub(used).saturating_sub(text.len());
+
     for c in blocks {
-        if out.len() >= max_bytes {
+        if used + text.len() >= max_bytes {
             truncated = true;
             break;
         }
-        if !out.is_empty() {
-            push_bounded(&mut out, "\n", max_bytes);
-        }
-        let chunk: String = match &c.raw {
-            RawContent::Text(t) => t.text.clone(),
+        match &c.raw {
+            RawContent::Text(t) => {
+                if !text.is_empty() {
+                    let max = text_budget(used, &text);
+                    push_bounded(&mut text, "\n", max);
+                }
+                let before = text.len();
+                let max = text_budget(used, &text);
+                push_bounded(&mut text, &t.text, max);
+                if text.len() - before < t.text.len() {
+                    truncated = true;
+                }
+            }
             RawContent::Image(i) => {
-                format!(
-                    "[image elided: {}, {} bytes]",
-                    short(&i.mime_type),
-                    i.data.len()
-                )
+                flush_text(&mut out, &mut text, &mut used);
+                let image_bytes = i.data.len().saturating_add(i.mime_type.len());
+                if used.saturating_add(image_bytes) <= max_bytes {
+                    used = used.saturating_add(image_bytes);
+                    out.push(ToolResultContent::Image {
+                        data: i.data.clone(),
+                        mime_type: i.mime_type.clone(),
+                    });
+                } else {
+                    truncated = true;
+                    let marker = format!(
+                        "[image elided: {}, {} base64 bytes exceeds remaining tool-result budget]",
+                        short(&i.mime_type),
+                        i.data.len()
+                    );
+                    let max = max_bytes.saturating_sub(used);
+                    push_bounded(&mut text, &marker, max);
+                }
             }
             RawContent::Audio(a) => {
-                format!(
+                if !text.is_empty() {
+                    let max = text_budget(used, &text);
+                    push_bounded(&mut text, "\n", max);
+                }
+                let chunk = format!(
                     "[audio elided: {}, {} bytes]",
                     short(&a.mime_type),
                     a.data.len()
-                )
+                );
+                let max = text_budget(used, &text);
+                push_bounded(&mut text, &chunk, max);
             }
-            RawContent::ResourceLink(r) => format!("[resource: {}]", short(&r.uri)),
-            RawContent::Resource(_) => "[resource elided]".into(),
-        };
-        let before = out.len();
-        push_bounded(&mut out, &chunk, max_bytes);
-        if out.len() - before < chunk.len() {
-            truncated = true;
+            RawContent::ResourceLink(r) => {
+                if !text.is_empty() {
+                    let max = text_budget(used, &text);
+                    push_bounded(&mut text, "\n", max);
+                }
+                let chunk = format!("[resource: {}]", short(&r.uri));
+                let max = text_budget(used, &text);
+                push_bounded(&mut text, &chunk, max);
+            }
+            RawContent::Resource(_) => {
+                if !text.is_empty() {
+                    let max = text_budget(used, &text);
+                    push_bounded(&mut text, "\n", max);
+                }
+                let max = text_budget(used, &text);
+                push_bounded(&mut text, "[resource elided]", max);
+            }
         }
     }
     if truncated {
-        out.push_str("\n[content truncated]");
+        let max = text_budget(used, &text);
+        push_bounded(&mut text, "\n[content truncated]", max);
     }
+    flush_text(&mut out, &mut text, &mut used);
     out
+}
+
+#[cfg(test)]
+mod content_tests {
+    use super::*;
+    use rmcp::model::Content;
+
+    #[test]
+    fn tool_result_content_preserves_images() {
+        let blocks = vec![
+            Content::text("header"),
+            Content::image("aW1n", "image/png"),
+            Content::text("tail"),
+        ];
+        let out = tool_result_content(&blocks, 1024);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(&out[0], ToolResultContent::Text(t) if t == "header"));
+        assert!(matches!(
+            &out[1],
+            ToolResultContent::Image { data, mime_type }
+                if data == "aW1n" && mime_type == "image/png"
+        ));
+        assert!(matches!(&out[2], ToolResultContent::Text(t) if t == "tail"));
+    }
+
+    #[test]
+    fn tool_result_content_elides_images_over_budget() {
+        let blocks = vec![Content::image("a".repeat(300), "image/png")];
+        let out = tool_result_content(&blocks, 256);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0], ToolResultContent::Text(t) if t.contains("image elided")));
+    }
 }

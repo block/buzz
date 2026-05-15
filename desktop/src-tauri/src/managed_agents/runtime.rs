@@ -415,6 +415,7 @@ pub fn build_managed_agent_summary(
         system_prompt: record.system_prompt.clone(),
         model: record.model.clone(),
         mcp_toolsets: record.mcp_toolsets.clone(),
+        env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
         backend_agent_id: record.backend_agent_id.clone(),
         status,
@@ -685,6 +686,22 @@ pub fn spawn_agent_child(
         );
     }
 
+    // ── User env vars: persona first, then per-agent (last wins) ────────
+    //
+    // Precedence: desktop parent env < persona env_vars < agent env_vars.
+    // These writes go LAST so user-provided values win over every Sprout-set
+    // env above — EXCEPT reserved keys (SPROUT_PRIVATE_KEY, NOSTR_PRIVATE_KEY,
+    // SPROUT_AUTH_TAG, SPROUT_API_TOKEN, SPROUT_ACP_PRIVATE_KEY,
+    // SPROUT_ACP_API_TOKEN), which `merged_user_env` strips. Those carry
+    // Sprout's identity and must never be GUI-overridable.
+    // Fail closed on persona-lookup errors: persona env_vars carry API
+    // credentials, so silently substituting an empty map would spawn an
+    // unauthenticated agent and surface as a confusing downstream auth error.
+    let persona_env = super::env_vars::resolve_persona_env(app, record.persona_id.as_deref())?;
+    for (key, value) in super::env_vars::merged_user_env(&persona_env, &record.env_vars) {
+        command.env(key, value);
+    }
+
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.
     #[cfg(unix)]
@@ -876,6 +893,7 @@ mod tests {
             system_prompt: None,
             model: None,
             mcp_toolsets: None,
+            env_vars: std::collections::BTreeMap::new(),
             start_on_app_launch: false,
             runtime_pid: None,
             backend: Default::default(),

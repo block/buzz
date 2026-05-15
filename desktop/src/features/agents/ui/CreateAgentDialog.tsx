@@ -28,6 +28,7 @@ import {
   CreateAgentRuntimeProviderField,
   CreateAgentRuntimeFields,
 } from "./CreateAgentDialogSections";
+import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import {
   coerceConfigValues,
   ProviderConfigFields,
@@ -63,6 +64,7 @@ export function CreateAgentDialog({
   const [turnTimeoutSeconds, setTurnTimeoutSeconds] = React.useState("320");
   const [parallelism, setParallelism] = React.useState("3");
   const [systemPrompt, setSystemPrompt] = React.useState("");
+  const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
   const [selectedProviderId, setSelectedProviderId] =
     React.useState<string>("custom");
   const [hasSyncedProviderSelection, setHasSyncedProviderSelection] =
@@ -212,6 +214,7 @@ export function CreateAgentDialog({
     setTurnTimeoutSeconds("320");
     setParallelism("3");
     setSystemPrompt("");
+    setEnvVars({});
     setSelectedProviderId("custom");
     setHasSyncedProviderSelection(false);
     setShowAdvanced(false);
@@ -316,6 +319,7 @@ export function CreateAgentDialog({
                 ? Number.parseInt(parallelism, 10)
                 : undefined,
             systemPrompt: systemPrompt.trim() || undefined,
+            envVars,
             spawnAfterCreate: true,
             startOnAppLaunch: false, // Remote agents don't auto-start with the desktop
             backend: {
@@ -348,6 +352,7 @@ export function CreateAgentDialog({
                 ? Number.parseInt(parallelism, 10)
                 : undefined,
             systemPrompt: systemPrompt.trim() || undefined,
+            envVars,
             spawnAfterCreate,
             startOnAppLaunch,
             backend: { type: "local" },
@@ -533,6 +538,13 @@ export function CreateAgentDialog({
                 </div>
               ) : null}
             </div>
+
+            <EnvVarsEditor
+              disabled={createMutation.isPending}
+              helperText="Injected at spawn. Overrides the persona's env vars on collision."
+              onChange={setEnvVars}
+              value={envVars}
+            />
 
             {createMutation.error instanceof Error ? (
               <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
