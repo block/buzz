@@ -19,6 +19,8 @@ thiserror  = { workspace = true }
 uuid       = { workspace = true }
 chrono     = { workspace = true }
 hex        = { workspace = true }
+hmac       = { workspace = true }
+sha2       = { workspace = true }
 schemars   = { workspace = true, optional = true }
 rand              = { workspace = true }
 subtle            = { workspace = true }

@@ -2,6 +2,7 @@
 
 mod acp;
 mod config;
+mod engram_fetch;
 mod filter;
 mod observer;
 mod pool;
@@ -967,7 +968,7 @@ async fn tokio_main() -> Result<()> {
             _ => {} // anyone/nobody don't depend on owner
         }
     }
-    let owner_cache = OwnerCache::new(startup_owner);
+    let owner_cache = OwnerCache::new(startup_owner.clone());
 
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
@@ -1084,6 +1085,10 @@ async fn tokio_main() -> Result<()> {
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
+        agent_keys: config.keys.clone(),
+        agent_owner_pubkey: startup_owner
+            .as_deref()
+            .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
     });
 
     // ── Step 6: Heartbeat timer ───────────────────────────────────────────────

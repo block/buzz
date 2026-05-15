@@ -12,23 +12,23 @@ use uuid::Uuid;
 use nostr::Event;
 use sprout_auth::Scope;
 use sprout_core::kind::{
-    event_kind_u32, is_parameterized_replaceable, is_relay_admin_kind, KIND_APPROVAL_DENY,
-    KIND_APPROVAL_GRANT, KIND_AUTH, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION,
-    KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN, KIND_FORUM_COMMENT, KIND_FORUM_POST,
-    KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE,
-    KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED,
-    KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED,
-    KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT,
-    KIND_HUDDLE_RECORDING_AVAILABLE, KIND_HUDDLE_STARTED, KIND_HUDDLE_TRACK_PUBLISHED,
-    KIND_LONG_FORM, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST, KIND_PRESENCE_UPDATE,
-    KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_STREAM_MESSAGE,
-    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
-    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
-    KIND_STREAM_REMINDER, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
-    KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
+    event_kind_u32, is_parameterized_replaceable, is_relay_admin_kind, KIND_AGENT_ENGRAM,
+    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_CANVAS, KIND_CONTACT_LIST,
+    KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN, KIND_FORUM_COMMENT,
+    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
+    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
+    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
+    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
+    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_RECORDING_AVAILABLE, KIND_HUDDLE_STARTED,
+    KIND_HUDDLE_TRACK_PUBLISHED, KIND_LONG_FORM, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_PRESENCE_UPDATE, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE,
+    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE, KIND_USER_STATUS,
+    KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
     RELAY_ADMIN_REMOVE_MEMBER,
 };
 use sprout_core::verification::verify_event;
@@ -150,7 +150,9 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
     match kind {
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
-        KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS => Ok(Scope::UsersWrite),
+        KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM => {
+            Ok(Scope::UsersWrite)
+        }
         KIND_DELETION
         | KIND_REACTION
         | KIND_GIFT_WRAP
@@ -300,6 +302,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_LONG_FORM
             | KIND_USER_STATUS
             | KIND_READ_STATE
+            // NIP-AE agent engrams are addressed by (pubkey_a, kind, d_tag); never channel-scoped.
+            | KIND_AGENT_ENGRAM
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
             | KIND_GIT_REPO_ANNOUNCEMENT
@@ -767,6 +771,62 @@ fn validate_diff_event(event: &Event) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate the public envelope of a NIP-AE `kind:30174` event before it
+/// reaches NIP-33 parameterized replacement.
+///
+/// We deliberately do this here (not in the d-tag length check downstream)
+/// because a malformed envelope can otherwise *replace* a valid head in
+/// storage and then be invisible to readers querying `#p`. The relay sees
+/// no plaintext, but it can — and must — enforce the public tag shape:
+///
+/// * exactly one `d` tag with a 64-hex value (`d_tag = lower_hex(HMAC...)`),
+/// * exactly one `p` tag with a 64-hex pubkey (the owner counterparty).
+///
+/// Content is opaque NIP-44 ciphertext; we do not parse it.
+fn validate_engram_envelope(event: &Event) -> Result<(), String> {
+    let mut d_tags: Vec<&str> = Vec::new();
+    let mut p_tags: Vec<&str> = Vec::new();
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() < 2 {
+            continue;
+        }
+        match parts[0].as_str() {
+            "d" => d_tags.push(&parts[1]),
+            "p" => p_tags.push(&parts[1]),
+            _ => {}
+        }
+    }
+    if d_tags.len() != 1 {
+        return Err(format!(
+            "agent-engram event must have exactly one `d` tag (got {})",
+            d_tags.len()
+        ));
+    }
+    if p_tags.len() != 1 {
+        return Err(format!(
+            "agent-engram event must have exactly one `p` tag (got {})",
+            p_tags.len()
+        ));
+    }
+    let d = d_tags[0];
+    if d.len() != 64
+        || !d
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("agent-engram `d` tag must be 64 lowercase hex chars".to_string());
+    }
+    let p = p_tags[0];
+    if p.len() != 64 || !p.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("agent-engram `p` tag must be a 64-hex pubkey".to_string());
+    }
+    if event.content.is_empty() {
+        return Err("agent-engram content must not be empty (NIP-44 ciphertext)".to_string());
+    }
+    Ok(())
+}
+
 // ── The pipeline ─────────────────────────────────────────────────────────────
 
 /// Ingest a signed Nostr event through the full validation pipeline.
@@ -1162,6 +1222,12 @@ pub async fn ingest_event(
     // ── 15. Diff validation (kind:40008) ─────────────────────────────────
     if kind_u32 == KIND_STREAM_MESSAGE_DIFF {
         validate_diff_event(&event).map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    // ── 15a. Agent engram envelope (kind:30174) ──────────────────────────
+    if kind_u32 == KIND_AGENT_ENGRAM {
+        validate_engram_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
     // Track pre-created channel UUID for compensation on insert failure.
@@ -1693,6 +1759,7 @@ mod tests {
             KIND_FORUM_COMMENT,
             KIND_LONG_FORM,
             KIND_USER_STATUS,
+            KIND_AGENT_ENGRAM,
         ];
         for kind in migrated {
             assert!(
@@ -1841,5 +1908,63 @@ mod tests {
     fn count_e_tags_single_valid() {
         let event = make_event_with_tags(5, "", &[&["e", "a".repeat(64).as_str()]]);
         assert_eq!(count_e_tags(&event), 1);
+    }
+
+    // ── NIP-AE envelope validation ───────────────────────────────────────
+
+    fn make_engram(tags: &[&[&str]], content: &str) -> Event {
+        make_event_with_tags(KIND_AGENT_ENGRAM, content, tags)
+    }
+
+    #[test]
+    fn engram_envelope_accepts_canonical() {
+        let d = "a".repeat(64);
+        let p = "b".repeat(64);
+        let ev = make_engram(&[&["d", &d], &["p", &p]], "ciphertext");
+        assert!(validate_engram_envelope(&ev).is_ok());
+    }
+
+    #[test]
+    fn engram_envelope_rejects_missing_p() {
+        let d = "a".repeat(64);
+        let ev = make_engram(&[&["d", &d]], "ciphertext");
+        let err = validate_engram_envelope(&ev).unwrap_err();
+        assert!(err.contains("`p` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn engram_envelope_rejects_duplicate_p() {
+        let d = "a".repeat(64);
+        let p = "b".repeat(64);
+        let ev = make_engram(&[&["d", &d], &["p", &p], &["p", &p]], "ciphertext");
+        let err = validate_engram_envelope(&ev).unwrap_err();
+        assert!(err.contains("`p` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn engram_envelope_rejects_short_d() {
+        let p = "b".repeat(64);
+        let ev = make_engram(&[&["d", "abcd"], &["p", &p]], "ciphertext");
+        let err = validate_engram_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn engram_envelope_rejects_uppercase_d() {
+        let p = "b".repeat(64);
+        // 64 chars but uppercase — spec mandates lowercase hex.
+        let d = "A".repeat(64);
+        let ev = make_engram(&[&["d", &d], &["p", &p]], "ciphertext");
+        let err = validate_engram_envelope(&ev).unwrap_err();
+        assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    #[test]
+    fn engram_envelope_rejects_empty_content() {
+        let d = "a".repeat(64);
+        let p = "b".repeat(64);
+        let ev = make_engram(&[&["d", &d], &["p", &p]], "");
+        let err = validate_engram_envelope(&ev).unwrap_err();
+        assert!(err.contains("content"), "got: {err}");
     }
 }
