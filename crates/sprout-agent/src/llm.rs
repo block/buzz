@@ -2,7 +2,9 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::config::{Config, Provider};
-use crate::types::{AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef};
+use crate::types::{
+    AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef, ToolResultContent,
+};
 
 const MAX_LLM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LLM_ERROR_BODY_BYTES: usize = 4 * 1024;
@@ -127,7 +129,7 @@ fn anthropic_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> V
             }
             HistoryItem::ToolResult(r) => pending.push(json!({
                 "type": "tool_result", "tool_use_id": r.provider_id,
-                "content": [{ "type": "text", "text": r.text }], "is_error": r.is_error })),
+                "content": anthropic_tool_result_content(&r.content), "is_error": r.is_error })),
         }
     }
     flush(&mut messages, &mut pending);
@@ -144,6 +146,19 @@ fn anthropic_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> V
         body["tools"] = Value::Array(tools_json);
     }
     body
+}
+
+fn anthropic_tool_result_content(content: &[ToolResultContent]) -> Vec<Value> {
+    content
+        .iter()
+        .map(|c| match c {
+            ToolResultContent::Text(text) => json!({ "type": "text", "text": text }),
+            ToolResultContent::Image { data, mime_type } => json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": mime_type, "data": data },
+            }),
+        })
+        .collect()
 }
 
 fn openai_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> Value {
@@ -170,8 +185,15 @@ fn openai_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> Valu
                 }
                 messages.push(Value::Object(msg));
             }
-            HistoryItem::ToolResult(r) => messages.push(json!({
-                "role": "tool", "tool_call_id": r.provider_id, "content": r.text })),
+            HistoryItem::ToolResult(r) => {
+                messages.push(json!({
+                    "role": "tool", "tool_call_id": r.provider_id,
+                    "content": openai_tool_text_content(&r.content) }));
+                let image_content = openai_image_user_content(&r.content);
+                if !image_content.is_empty() {
+                    messages.push(json!({ "role": "user", "content": image_content }));
+                }
+            }
         }
     }
     let tools_json: Vec<Value> = tools
@@ -190,6 +212,33 @@ fn openai_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> Valu
         body["tool_choice"] = json!("auto");
     }
     body
+}
+
+fn openai_tool_text_content(content: &[ToolResultContent]) -> String {
+    let mut parts = Vec::new();
+    for c in content {
+        match c {
+            ToolResultContent::Text(text) => parts.push(text.clone()),
+            ToolResultContent::Image { data, mime_type } => parts.push(format!(
+                "This tool result included an image ({mime_type}, {} base64 bytes) that is provided in the next user message.",
+                data.len()
+            )),
+        }
+    }
+    parts.join("\n")
+}
+
+fn openai_image_user_content(content: &[ToolResultContent]) -> Vec<Value> {
+    content
+        .iter()
+        .filter_map(|c| match c {
+            ToolResultContent::Image { data, mime_type } => Some(json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:{mime_type};base64,{data}") },
+            })),
+            ToolResultContent::Text(_) => None,
+        })
+        .collect()
 }
 
 fn map_stop(s: Option<&str>) -> ProviderStop {
@@ -388,4 +437,91 @@ where
         return serde_json::from_slice(&buf).map_err(|e| AgentError::Llm(format!("json: {e}")));
     }
     Err(AgentError::Llm("exhausted retries".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, HookServers, Provider};
+    use crate::types::{HistoryItem, ToolCall, ToolResult, ToolResultContent};
+    use std::time::Duration;
+
+    fn cfg(provider: Provider) -> Config {
+        Config {
+            provider,
+            system_prompt: "system".into(),
+            max_rounds: 10,
+            max_output_tokens: 1024,
+            llm_timeout: Duration::from_secs(10),
+            tool_timeout: Duration::from_secs(10),
+            mcp_init_timeout: Duration::from_secs(10),
+            mcp_max_restart_attempts: 1,
+            mcp_restart_base_ms: 1,
+            mcp_restart_max_ms: 1,
+            max_sessions: 1,
+            max_line_bytes: 1024 * 1024,
+            max_history_bytes: 16 * 1024 * 1024,
+            max_handoffs: 1,
+            max_parallel_tools: 1,
+            hook_timeout: Duration::from_secs(1),
+            stop_max_rejections: 0,
+            hook_servers: HookServers::None,
+            api_key: "key".into(),
+            model: "model".into(),
+            base_url: "http://example.invalid".into(),
+            anthropic_api_version: "2023-06-01".into(),
+        }
+    }
+
+    fn image_history() -> Vec<HistoryItem> {
+        vec![
+            HistoryItem::User("describe the image".into()),
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "toolu_1".into(),
+                    name: "dev__view_image".into(),
+                    arguments: serde_json::json!({"source":"x.png"}),
+                }],
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "toolu_1".into(),
+                content: vec![
+                    ToolResultContent::Text("10×10, 70 B (image/png from x.png)".into()),
+                    ToolResultContent::Image {
+                        data: "aW1n".into(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+                is_error: false,
+            }),
+        ]
+    }
+
+    #[test]
+    fn anthropic_tool_result_preserves_image_block() {
+        let body = anthropic_body(&cfg(Provider::Anthropic), &image_history(), &[]);
+        let content = &body["messages"][2]["content"][0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "aW1n");
+    }
+
+    #[test]
+    fn openai_tool_result_adds_followup_image_user_message() {
+        let body = openai_body(&cfg(Provider::OpenAi), &image_history(), &[]);
+        assert_eq!(body["messages"][3]["role"], "tool");
+        assert!(body["messages"][3]["content"]
+            .as_str()
+            .unwrap()
+            .contains("provided in the next user message"));
+        assert_eq!(body["messages"][4]["role"], "user");
+        assert_eq!(body["messages"][4]["content"][0]["type"], "image_url");
+        assert_eq!(
+            body["messages"][4]["content"][0]["image_url"]["url"],
+            "data:image/png;base64,aW1n"
+        );
+    }
 }
