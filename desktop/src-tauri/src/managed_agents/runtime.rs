@@ -559,14 +559,14 @@ pub fn spawn_agent_child(
     if known_acp_provider(&record.agent_command).is_some_and(|p| p.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
+    // Only emit SPROUT_ACP_IDLE_TIMEOUT when the user has explicitly set an
+    // override. When unset, the sprout-acp harness applies its own default
+    // (see `DEFAULT_IDLE_TIMEOUT_SECS` in crates/sprout-acp/src/config.rs),
+    // which is the single source of truth. The previously-emitted
+    // `SPROUT_ACP_TURN_TIMEOUT` is deprecated upstream and was pinning every
+    // agent to the desktop's stale default (320s), bypassing harness bumps.
     if let Some(idle) = record.idle_timeout_seconds {
         command.env("SPROUT_ACP_IDLE_TIMEOUT", idle.to_string());
-        command.env("SPROUT_ACP_TURN_TIMEOUT", idle.to_string());
-    } else {
-        command.env(
-            "SPROUT_ACP_TURN_TIMEOUT",
-            record.turn_timeout_seconds.to_string(),
-        );
     }
 
     let max_dur = record

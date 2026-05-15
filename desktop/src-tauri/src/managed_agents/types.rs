@@ -386,7 +386,13 @@ pub struct UpdateTeamRequest {
 pub const DEFAULT_ACP_COMMAND: &str = "sprout-acp";
 pub const DEFAULT_AGENT_COMMAND: &str = "goose";
 pub const DEFAULT_MCP_COMMAND: &str = "sprout-mcp-server";
-/// ~5 min (320s) — matches the CLI harness default (SPROUT_ACP_IDLE_TIMEOUT).
+/// Default for the legacy `turn_timeout_seconds` field on the agent record.
+///
+/// As of the deprecation of `SPROUT_ACP_TURN_TIMEOUT` in sprout-acp, this
+/// field is no longer wired into the spawn path — the harness owns the
+/// effective idle-timeout default. The value is kept here only to satisfy
+/// existing persisted records and the `CreateAgentDialog` form state. Prefer
+/// `idle_timeout_seconds` (mapped to `SPROUT_ACP_IDLE_TIMEOUT`) for overrides.
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
 /// 1 hour — absolute wall-clock safety cap per turn.
 pub const DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS: u64 = 3600;
