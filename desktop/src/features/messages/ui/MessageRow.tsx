@@ -290,44 +290,31 @@ export const MessageRow = React.memo(
           data-testid="message-row"
         >
           {isThreadReplyLayout ? (
-            <div className="flex min-w-0 items-start gap-1.5">
-              {message.pubkey ? (
-                <UserProfilePopover
-                  pubkey={message.pubkey}
-                  role={message.role}
-                  botIdenticonValue={message.author}
-                >
-                  <button
-                    className={cn(
-                      "flex shrink-0 items-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                      avatarButtonRadiusClass,
-                    )}
-                    type="button"
+            <>
+              <div className="flex min-w-0 items-baseline gap-1.5">
+                {message.pubkey ? (
+                  <UserProfilePopover
+                    pubkey={message.pubkey}
+                    role={message.role}
+                    botIdenticonValue={message.author}
                   >
-                    {avatarNode}
-                  </button>
-                </UserProfilePopover>
-              ) : (
-                <div className="flex shrink-0 items-start">{avatarNode}</div>
-              )}
-              <div className="min-w-0 flex-1 space-y-0.5">
-                <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                  {message.pubkey ? (
-                    <UserProfilePopover
-                      pubkey={message.pubkey}
-                      role={message.role}
-                      botIdenticonValue={message.author}
+                    <button
+                      className="flex shrink-0 items-start gap-1.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      type="button"
                     >
-                      <button
-                        className="truncate rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                        type="button"
-                      >
-                        {authorNode}
-                      </button>
-                    </UserProfilePopover>
-                  ) : (
-                    authorNode
-                  )}
+                      {avatarNode}
+                      {authorNode}
+                    </button>
+                  </UserProfilePopover>
+                ) : (
+                  <>
+                    <div className="flex shrink-0 items-start">
+                      {avatarNode}
+                    </div>
+                    {authorNode}
+                  </>
+                )}
+                <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
                   {inlineMetadataNode}
                   {message.personaDisplayName &&
                   message.personaDisplayName !== message.author ? (
@@ -336,9 +323,9 @@ export const MessageRow = React.memo(
                     </span>
                   ) : null}
                 </div>
-                <div className="min-w-0 space-y-0.5">{messageBodyNode}</div>
               </div>
-            </div>
+              <div className="min-w-0 space-y-0.5">{messageBodyNode}</div>
+            </>
           ) : (
             <>
               {message.pubkey ? (
