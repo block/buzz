@@ -68,6 +68,19 @@ The relay starts in dev mode (`SPROUT_REQUIRE_AUTH_TOKEN=false`). The startup
 log emits a WARN about this — that's expected for local testing. See the env
 vars table at the bottom if you need to lock it down.
 
+> **Already running Sprout Desktop (or another relay) on `:3000` / `:8080`?**
+> Override the relay's three ports and point the CLI at the new main port:
+> ```bash
+> export SPROUT_BIND_ADDR=0.0.0.0:3030 SPROUT_HEALTH_PORT=8088 SPROUT_METRICS_PORT=9202
+> export RELAY_URL=ws://localhost:3030       # for the relay (NIP-42 advertisement)
+> export SPROUT_RELAY_URL=http://localhost:3030  # for the CLI in steps 4+
+> ```
+
+> **Heads up:** if your shell already has `SPROUT_AUTH_TAG` set (e.g. from a
+> staging relay config), `unset SPROUT_AUTH_TAG` before testing. The local
+> dev relay tolerates it, but a stale tag will trip you up the moment you
+> point the CLI at a membership-gated relay.
+
 ### 4. Smoke test the CLI against the relay
 
 End-to-end: generate an identity, create a channel, post a message, read it
@@ -132,36 +145,63 @@ agent over stdio, and the agent replies through MCP tools.
 > integration. Keep it in mind if you're poking at the ACP code, but new
 > tests should not depend on it.
 
-Minimum recipe — assumes the relay from step 3 is running:
+Minimum recipe — assumes the relay from step 3 is running and the channel
+`$CHANNEL` from step 4 still exists. The agent identity must be **different**
+from the sender identity (`SPROUT_ACP_RESPOND_TO=anyone` still skips events
+the agent signed itself).
 
 ```bash
 cargo build --release -p sprout-acp -p sprout-mcp
 export PATH="$PWD/target/release:$PATH"
 
-AGENT_GEN=$(sprout-admin generate-key)
-export SPROUT_PRIVATE_KEY=$(echo "$AGENT_GEN" | awk '/Secret key:/ {print $3}')
-export SPROUT_RELAY_URL=ws://localhost:3000
-export SPROUT_ACP_RESPOND_TO=anyone      # default is owner-only; opens the gate for testing
-export GOOSE_MODE=auto                   # must be 'auto' or goose hangs on prompts
+# 1. Save your sender identity from step 4 — you'll need it to @mention the agent
+SENDER_SK="$SPROUT_PRIVATE_KEY"
 
-sprout-acp                               # foreground; logs to stdout
+# 2. Mint a fresh agent identity and capture its pubkey
+AGENT_GEN=$(sprout-admin generate-key)
+AGENT_SK=$(echo "$AGENT_GEN" | awk '/Secret key:/ {print $3}')
+AGENT_PUBKEY=$(echo "$AGENT_GEN" | awk '/Public key:/ {print $3}')
+
+# 3. Add the agent as a member of $CHANNEL — still using the sender identity.
+#    Skip this and the agent boots to "discovered 0 channel(s) → agent will
+#    sit idle" and silently ignores every mention.
+sprout channels add-member --channel "$CHANNEL" --pubkey "$AGENT_PUBKEY" --role member
+
+# 4. Switch to the agent identity and start it
+export SPROUT_PRIVATE_KEY="$AGENT_SK"
+export SPROUT_RELAY_URL=ws://localhost:3000   # or :3030 if you overrode ports in step 3
+export SPROUT_ACP_RESPOND_TO=anyone           # default is owner-only; opens the gate for testing
+export GOOSE_MODE=auto                        # must be 'auto' or goose hangs on prompts
+
+sprout-acp                                    # foreground; logs to stdout (run in a separate terminal)
 ```
+
+If you started the agent before adding it to the channel, just run the
+`add-member` afterwards — it picks up the membership notification live and
+subscribes without restart (`membership notification: subscribing to new channel …`).
 
 The justfile also ships `just goose key="$AGENT_NSEC"` (foreground) and
 `just goose-bg key="$AGENT_NSEC"` (background screen session) which set the
 same env. See `crates/sprout-acp/README.md` for parallel agents, heartbeats,
 respond-to gates, and forum subscriptions.
 
-To send the agent a task, @mention its pubkey from another identity:
+Send the agent a task — switch your shell back to the **sender** identity
+from step 4 and @mention the agent:
 
 ```bash
+export SPROUT_PRIVATE_KEY=$SENDER_SK          # the key from step 4
 sprout messages send --channel "$CHANNEL" \
-  --content "Hey agent, say hello." \
+  --content "Hey agent, reply PONG only." \
   --mention "$AGENT_PUBKEY"
+
+# Wait 10–90s, then read the channel — the agent's reply is a kind:9 from
+# AGENT_PUBKEY. The current ACP build is quiet on stdout during a turn, so
+# `sprout messages get` is how you confirm it ran.
+sprout messages get --channel "$CHANNEL" --limit 5 | jq '.[] | {pubkey, content}'
 ```
 
-Agent turns typically take 10–90s. Replies appear as kind:9 threaded events;
-`sprout messages thread --channel <id> --event <event_id>` fetches them.
+Replies are kind:9 in the same channel; `sprout messages thread --channel <id>
+--event <event_id>` fetches the reply chain for a specific mention.
 
 ---
 
@@ -204,5 +244,6 @@ CLI-side, only two matter for testing:
 | `auth-required: verification failed` on a closed relay | NIP-OA attestation needed | Set `SPROUT_AUTH_TAG` to the owner-issued JSON, or relax `SPROUT_REQUIRE_RELAY_MEMBERSHIP` |
 | `channels list` empty after `channels create` | The CLI doesn't echo the channel UUID; use the filter shown in step 4 | Or `POST /query` with `{"kinds":[39002]}` |
 | ACP agent ignores all events | `SPROUT_ACP_RESPOND_TO=owner-only` (default) with no owner configured | Set `SPROUT_ACP_RESPOND_TO=anyone` for testing |
+| ACP logs `discovered 0 channel(s)` / `no channel subscriptions resolved` | Agent identity isn't a member of any channel | `sprout channels add-member --channel "$CHANNEL" --pubkey "$AGENT_PUBKEY" --role member` from another identity |
 | `GOOSE_MODE` warning, agent hangs | Not set | `export GOOSE_MODE=auto` |
 | Tests pass locally but CI fails | Forgot to run `just ci` | `just ci` runs the gate (fmt, clippy, unit tests, desktop/web builds) |
