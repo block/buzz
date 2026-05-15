@@ -269,7 +269,9 @@ export function getAgentTranscript(
   return state?.items ?? EMPTY_TRANSCRIPT;
 }
 
-export function useManagedAgentObserverBridge(agents: readonly ManagedAgent[]) {
+export function useManagedAgentObserverBridge(
+  agents: readonly Pick<ManagedAgent, "pubkey" | "status">[],
+) {
   const hasActiveAgent = React.useMemo(
     () =>
       agents.some(

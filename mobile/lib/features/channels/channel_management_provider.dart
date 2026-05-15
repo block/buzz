@@ -108,6 +108,40 @@ final currentPubkeyProvider = Provider<String?>((ref) {
   return null;
 });
 
+/// Build [ChannelDetails] from a kind:39000 metadata event.
+///
+/// Exposed as a pure function so the mapping can be unit-tested without
+/// Riverpod / WebSocket scaffolding. Make sure all fields parsed by
+/// [ChannelData.fromEvent] that exist on [ChannelDetails] are propagated —
+/// any omission silently drops state when [Channel.mergeDetails] is called.
+@visibleForTesting
+ChannelDetails channelDetailsFromEvent(NostrEvent event) {
+  final data = ChannelData.fromEvent(event);
+  final eventTime = DateTime.fromMillisecondsSinceEpoch(
+    event.createdAt * 1000,
+    isUtc: true,
+  );
+  return ChannelDetails(
+    id: data.id,
+    name: data.name,
+    channelType: data.channelType,
+    visibility: data.visibility,
+    description: data.description,
+    topic: data.topic,
+    createdBy: event.pubkey,
+    createdAt: eventTime,
+    memberCount: 0,
+    // Same archival-timestamp convention as `_channelFromMeta` — the event's
+    // `createdAt` is when the relay republished the metadata. Without this,
+    // `Channel.mergeDetails(details)` would clobber the archived state set
+    // on the base channel and the detail view would show compose/manage
+    // actions for expired/archived channels.
+    archivedAt: data.isArchived ? eventTime : null,
+    ttlSeconds: data.ttlSeconds,
+    ttlDeadline: data.ttlDeadline,
+  );
+}
+
 /// Single channel's metadata via kind:39000.
 final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
   ref,
@@ -126,22 +160,7 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
   if (events.isEmpty) {
     throw Exception('Channel not found: $channelId');
   }
-  final event = events.first;
-  final data = ChannelData.fromEvent(event);
-  return ChannelDetails(
-    id: data.id,
-    name: data.name,
-    channelType: data.channelType,
-    visibility: data.visibility,
-    description: data.description,
-    topic: data.topic,
-    createdBy: event.pubkey,
-    createdAt: DateTime.fromMillisecondsSinceEpoch(
-      event.createdAt * 1000,
-      isUtc: true,
-    ),
-    memberCount: 0,
-  );
+  return channelDetailsFromEvent(events.first);
 });
 
 /// Channel members from kind:39002 NIP-29 members event.

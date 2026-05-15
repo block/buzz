@@ -95,10 +95,7 @@ export function UserProfilePanel({
   const isBot = Boolean(relayAgent || managedAgent);
   const isSelf =
     currentPubkey !== undefined && pubkeyLower === currentPubkey.toLowerCase();
-  const canViewActivity =
-    isBot &&
-    managedAgent?.backend.type === "local" &&
-    Boolean(onOpenAgentSession);
+  const canViewActivity = isBot && Boolean(onOpenAgentSession);
 
   const handleCopyPubkey = React.useCallback(() => {
     void navigator.clipboard.writeText(pubkey).then(() => {

@@ -248,6 +248,7 @@ class ChannelData {
   final List<String> participantPubkeys;
   final int? ttlSeconds;
   final DateTime? ttlDeadline;
+  final bool isArchived;
 
   const ChannelData({
     required this.id,
@@ -259,6 +260,7 @@ class ChannelData {
     this.participantPubkeys = const [],
     this.ttlSeconds,
     this.ttlDeadline,
+    this.isArchived = false,
   });
 
   factory ChannelData.fromEvent(NostrEvent event) {
@@ -290,6 +292,12 @@ class ChannelData {
     final ttlDeadline = ttlDeadlineRaw != null
         ? DateTime.tryParse(ttlDeadlineRaw)
         : null;
+    // Relay republishes kind:39000 with `["archived", "true"]` when a channel
+    // is archived (including the auto-archive emitted by the TTL reaper). The
+    // tag value "false" is also accepted server-side, so only treat "true" as
+    // archived — anything else (missing tag, "false", unexpected value) means
+    // active.
+    final isArchived = event.getTagValue('archived') == 'true';
     return ChannelData(
       id: id,
       name: name,
@@ -300,6 +308,7 @@ class ChannelData {
       participantPubkeys: participants,
       ttlSeconds: ttlSeconds,
       ttlDeadline: ttlDeadline,
+      isArchived: isArchived,
     );
   }
 }

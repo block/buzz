@@ -13,12 +13,13 @@ import {
   BotActivityComposerAction,
   type BotActivityAgent,
 } from "@/features/channels/ui/BotActivityBar";
+import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
 import { Button } from "@/shared/ui/button";
 import type { useChannelFind } from "@/features/search/useChannelFind";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import type { Channel, ManagedAgent } from "@/shared/api/types";
+import type { Channel } from "@/shared/api/types";
 
 const THREAD_PANEL_DEFAULT_WIDTH_PX = 380;
 const THREAD_PANEL_MIN_WIDTH_PX = 320;
@@ -57,7 +58,7 @@ function getInitialThreadPanelWidth(): number {
 type ChannelPaneProps = {
   activeChannel: Channel | null;
   activityAgents?: BotActivityAgent[];
-  agentSessionAgents: ManagedAgent[];
+  agentSessionAgents: ChannelAgentSessionAgent[];
   botTypingEntries: TypingIndicatorEntry[];
   channelFind: ReturnType<typeof useChannelFind>;
   currentPubkey?: string;
@@ -81,6 +82,7 @@ type ChannelPaneProps = {
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onEditSave?: (content: string) => Promise<void>;
+  onMarkUnread?: (message: TimelineMessage) => void;
   onExpandThreadReplies: (message: TimelineMessage) => void;
   onJoinChannel?: () => Promise<void>;
   onOpenAgentSession: (pubkey: string) => void;
@@ -143,6 +145,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onDelete,
   onEdit,
   onEditSave,
+  onMarkUnread,
   onExpandThreadReplies,
   onJoinChannel,
   onOpenAgentSession,
@@ -250,6 +253,10 @@ export const ChannelPane = React.memo(function ChannelPane({
   const composerBotTypingPubkeys = React.useMemo(() => {
     const pubkeys: string[] = [];
     for (const entry of botTypingEntries) {
+      if (entry.threadHeadId !== null) {
+        continue;
+      }
+
       if (
         !pubkeys.some(
           (pubkey) => pubkey.toLowerCase() === entry.pubkey.toLowerCase(),
@@ -260,6 +267,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     }
     return pubkeys;
   }, [botTypingEntries]);
+  const hasComposerBotActivity = composerBotTypingPubkeys.length > 0;
   const threadComposerBotTypingPubkeys = React.useMemo(() => {
     if (!openThreadHeadId) {
       return [];
@@ -281,6 +289,8 @@ export const ChannelPane = React.memo(function ChannelPane({
     }
     return pubkeys;
   }, [botTypingEntries, openThreadHeadId]);
+  const hasThreadComposerBotActivity =
+    threadComposerBotTypingPubkeys.length > 0;
 
   const selectedAgent = React.useMemo(
     () =>
@@ -331,6 +341,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           messages={messages}
           onDelete={onDelete}
           onEdit={onEdit}
+          onMarkUnread={onMarkUnread}
           onReply={activeChannel?.archivedAt ? undefined : onOpenThread}
           onTargetReached={onTargetReached}
           onToggleReaction={onToggleReaction}
@@ -378,15 +389,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onEditSave={onEditSave}
                 onSend={onSendMessage}
                 profiles={profiles}
-                toolbarExtraActions={
-                  <BotActivityComposerAction
-                    agents={activityAgents}
-                    onOpenAgentSession={onOpenAgentSession}
-                    openAgentSessionPubkey={openAgentSessionPubkey}
-                    profiles={profiles}
-                    typingBotPubkeys={composerBotTypingPubkeys}
-                  />
-                }
                 placeholder={
                   activeChannel?.archivedAt
                     ? "Archived channels are read-only."
@@ -398,16 +400,32 @@ export const ChannelPane = React.memo(function ChannelPane({
                 }
                 showTopBorder={false}
               />
-              <div className="h-6 bg-background">
-                {hasTypingActivity ? (
-                  <TypingIndicatorRow
-                    channel={activeChannel}
-                    className="px-4 pb-1 pt-0 sm:px-6"
-                    currentPubkey={currentPubkey}
-                    profiles={profiles}
-                    typingPubkeys={typingPubkeys}
-                  />
-                ) : null}
+              <div className="h-7 bg-background px-4 pb-1 pt-0 sm:px-6 -mt-1">
+                <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2">
+                  {hasComposerBotActivity ? (
+                    <div className="shrink-0">
+                      <BotActivityComposerAction
+                        agents={activityAgents}
+                        channelId={activeChannel?.id ?? null}
+                        onOpenAgentSession={onOpenAgentSession}
+                        openAgentSessionPubkey={openAgentSessionPubkey}
+                        profiles={profiles}
+                        typingBotPubkeys={composerBotTypingPubkeys}
+                        variant="inline"
+                      />
+                    </div>
+                  ) : null}
+                  {hasTypingActivity ? (
+                    <TypingIndicatorRow
+                      channel={activeChannel}
+                      className="min-w-0 flex-1 px-0 py-0"
+                      currentPubkey={currentPubkey}
+                      profiles={profiles}
+                      typingPubkeys={typingPubkeys}
+                      variant="activity"
+                    />
+                  ) : null}
+                </div>
               </div>
             </div>
           </div>
@@ -429,6 +447,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           onDelete={onDelete}
           onEdit={onEdit}
           onEditSave={onEditSave}
+          onMarkUnread={onMarkUnread}
           onExpandReplies={onExpandThreadReplies}
           onSelectReplyTarget={onSelectThreadReplyTarget}
           onSend={onSendThreadReply}
@@ -446,19 +465,24 @@ export const ChannelPane = React.memo(function ChannelPane({
           threadReplies={threadMessages}
           threadTypingPubkeys={threadTypingPubkeys}
           toolbarExtraActions={
-            <BotActivityComposerAction
-              agents={activityAgents}
-              onOpenAgentSession={onOpenAgentSession}
-              openAgentSessionPubkey={openAgentSessionPubkey}
-              profiles={profiles}
-              typingBotPubkeys={threadComposerBotTypingPubkeys}
-            />
+            hasThreadComposerBotActivity ? (
+              <BotActivityComposerAction
+                agents={activityAgents}
+                channelId={activeChannel?.id ?? null}
+                onOpenAgentSession={onOpenAgentSession}
+                openAgentSessionPubkey={openAgentSessionPubkey}
+                profiles={profiles}
+                typingBotPubkeys={threadComposerBotTypingPubkeys}
+                variant="inline"
+              />
+            ) : null
           }
         />
       ) : activeChannel && selectedAgent ? (
         <AgentSessionThreadPanel
           agent={selectedAgent}
           canResetWidth={canResetThreadPanelWidth}
+          canInterruptTurn={selectedAgent.canInterruptTurn}
           channel={activeChannel}
           isWorking={botTypingEntries.some(
             (entry) =>

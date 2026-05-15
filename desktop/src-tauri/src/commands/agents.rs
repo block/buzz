@@ -19,9 +19,32 @@ use crate::{
     util::now_iso,
 };
 
+/// Read the workspace owner's pubkey hex from app state without holding the
+/// lock for longer than necessary. Used to populate `SPROUT_ACP_AGENT_OWNER`
+/// as a fallback for legacy agent records that have no NIP-OA `auth_tag`.
+fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
+    let keys = state.keys.lock().map_err(|e| e.to_string())?;
+    Ok(keys.public_key().to_hex())
+}
+
 /// Build the standard agent JSON payload for provider deploy calls.
-fn build_deploy_payload(record: &ManagedAgentRecord) -> serde_json::Value {
-    serde_json::json!({
+///
+/// Fails closed if the agent points at a `persona_id` we can't load — persona
+/// env_vars typically hold API credentials, and silently deploying with an
+/// empty map would surface as an opaque 401 from the provider.
+fn build_deploy_payload(
+    app: &AppHandle,
+    record: &ManagedAgentRecord,
+) -> Result<serde_json::Value, String> {
+    // Merge persona env_vars + agent env_vars for provider deploy. Same
+    // precedence as local spawn: persona first, agent overrides last. Without
+    // this, provider-backed agents wouldn't receive credentials saved on the
+    // persona or the agent itself.
+    let persona_env =
+        crate::managed_agents::resolve_persona_env(app, record.persona_id.as_deref())?;
+    let merged_env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
+
+    Ok(serde_json::json!({
         "name": &record.name,
         "relay_url": &record.relay_url,
         "private_key_nsec": &record.private_key_nsec,
@@ -34,7 +57,39 @@ fn build_deploy_payload(record: &ManagedAgentRecord) -> serde_json::Value {
         "idle_timeout_seconds": record.idle_timeout_seconds,
         "max_turn_duration_seconds": record.max_turn_duration_seconds,
         "parallelism": record.parallelism,
-    })
+        // Inbound author gate. Providers that don't yet read these fall back
+        // to the harness default (`owner-only`) — no protocol break.
+        "respond_to": record.respond_to,
+        "respond_to_allowlist": &record.respond_to_allowlist,
+        // Merged persona + agent env vars. Providers that don't read this
+        // field will simply ignore it — no protocol break.
+        "env_vars": merged_env,
+    }))
+}
+
+/// Persist a deploy-preparation error (currently: persona env resolution
+/// failure inside `build_deploy_payload`) into the agent's `last_error`
+/// so a refresh shows the cause. Mirrors what `deploy_to_provider` does
+/// on its own failures — without this, an agent created with an invalid
+/// persona_id would appear as `not_deployed` with no recorded reason.
+fn persist_create_deploy_error(
+    app: &AppHandle,
+    state: &AppState,
+    pubkey: &str,
+    error: &str,
+) -> Result<(), String> {
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let mut records = load_managed_agents(app)?;
+    let rec = records
+        .iter_mut()
+        .find(|r| r.pubkey == pubkey)
+        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+    rec.last_error = Some(error.to_string());
+    rec.updated_at = now_iso();
+    save_managed_agents(app, &records)
 }
 
 /// Deploy an agent to a provider backend. Resolves the binary, calls deploy via
@@ -150,6 +205,25 @@ pub async fn create_managed_agent(
             return Err("parallelism must be between 1 and 32".to_string());
         }
     }
+    crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+
+    // Validate & normalize the respond-to allowlist BEFORE any side effects.
+    // The harness has its own validator (sprout-acp/src/config.rs) but we want
+    // to catch malformed input at the boundary so the agent never tries to
+    // start with a list that will crash it on launch.
+    let respond_to_allowlist =
+        crate::managed_agents::validate_respond_to_allowlist(&input.respond_to_allowlist)?;
+    if input.respond_to == crate::managed_agents::RespondTo::Allowlist
+        && respond_to_allowlist.is_empty()
+    {
+        return Err(
+            "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
+        );
+    }
+
+    // Snapshot the workspace owner pubkey for the legacy-record auth_tag
+    // fallback. Computed outside the records lock to keep lock ordering simple.
+    let owner_hex = workspace_owner_hex(&state)?;
 
     // ── Phase 1: generate keys (sync lock) ────────────────────────────────────
     let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input) = {
@@ -344,12 +418,15 @@ pub async fn create_managed_agent(
             // NOT the display_name — ACP's resolve_persona_by_name() matches slugs.
             persona_pack_path: pack_metadata.as_ref().map(|(path, _)| path.clone()),
             persona_name_in_pack: pack_metadata.as_ref().map(|(_, name)| name.clone()),
+            env_vars: input.env_vars.clone(),
             created_at: now_iso(),
             updated_at: now_iso(),
             last_started_at: None,
             last_stopped_at: None,
             last_exit_code: None,
             last_error: None,
+            respond_to: input.respond_to,
+            respond_to_allowlist: respond_to_allowlist.clone(),
         };
 
         records.push(record);
@@ -357,7 +434,9 @@ pub async fn create_managed_agent(
         let mut spawn_error = None;
         if input.spawn_after_create && input.backend == BackendKind::Local {
             let record = find_managed_agent_mut(&mut records, &pubkey)?;
-            if let Err(error) = start_managed_agent_process(&app, record, &mut runtimes) {
+            if let Err(error) =
+                start_managed_agent_process(&app, record, &mut runtimes, Some(&owner_hex))
+            {
                 record.updated_at = now_iso();
                 record.last_error = Some(error.clone());
                 spawn_error = Some(error);
@@ -408,11 +487,31 @@ pub async fn create_managed_agent(
                     .iter()
                     .find(|r| r.pubkey == pubkey)
                     .ok_or_else(|| "agent disappeared".to_string())?;
-                build_deploy_payload(rec)
+                build_deploy_payload(&app, rec)
             };
-            match deploy_to_provider(&app, &state, &pubkey, id, config, agent_json, None).await {
-                Ok(()) => spawn_error,
-                Err(e) => Some(e),
+            // The agent was already persisted in Phase 3 — converting a
+            // persona-resolution failure into `spawn_error` (rather than
+            // unwinding) keeps the record on disk and surfaces the cause
+            // in the agent's last_error / UI status. We persist the same
+            // error string into `last_error` so a refresh after restart
+            // still shows *why* deploy never happened, matching what
+            // `deploy_to_provider` does on its own failures.
+            match agent_json {
+                Err(e) => {
+                    if let Err(persist_err) = persist_create_deploy_error(&app, &state, &pubkey, &e)
+                    {
+                        eprintln!(
+                            "sprout-desktop: failed to persist deploy-prep error for {pubkey}: {persist_err}"
+                        );
+                    }
+                    Some(e)
+                }
+                Ok(json) => {
+                    match deploy_to_provider(&app, &state, &pubkey, id, config, json, None).await {
+                        Ok(()) => spawn_error,
+                        Err(e) => Some(e),
+                    }
+                }
             }
         } else {
             spawn_error
@@ -455,6 +554,9 @@ pub async fn start_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
+    // Snapshot the workspace owner pubkey for the legacy auth_tag fallback.
+    // Read outside the records lock to keep lock ordering simple.
+    let owner_hex = workspace_owner_hex(&state)?;
     // Collect backend info and handle local vs provider under lock.
     let (backend, cached_binary_path, agent_json) = {
         let _store_guard = state
@@ -475,7 +577,7 @@ pub async fn start_managed_agent(
 
         if record.backend == BackendKind::Local {
             // Local: spawn in-process and return immediately.
-            start_managed_agent_process(&app, record, &mut runtimes)?;
+            start_managed_agent_process(&app, record, &mut runtimes, Some(&owner_hex))?;
             save_managed_agents(&app, &records)?;
             let record = records
                 .iter()
@@ -484,7 +586,7 @@ pub async fn start_managed_agent(
             return build_managed_agent_summary(&app, record, &runtimes);
         }
 
-        let payload = build_deploy_payload(record);
+        let payload = build_deploy_payload(&app, record)?;
         (
             record.backend.clone(),
             record.provider_binary_path.clone(),

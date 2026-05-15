@@ -2729,7 +2729,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "sprout-mcp-server".into(),
-            idle_timeout_secs: 320,
+            idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: 3600,
             agents: 1,
             heartbeat_interval_secs: 0,

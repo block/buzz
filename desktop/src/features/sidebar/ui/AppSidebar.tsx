@@ -3,6 +3,7 @@ import {
   Activity,
   Bot,
   ChevronDown,
+  CircleDot,
   FolderGit2,
   Home,
   PenSquare,
@@ -37,6 +38,12 @@ import type {
 } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/shared/ui/context-menu";
 import {
   Sidebar,
   SidebarContent,
@@ -119,6 +126,10 @@ type AppSidebarProps = {
   onOpenBrowseForums: () => void;
   onOpenSearch: () => void;
   onHideDm: (channelId: string) => void;
+  onMarkChannelUnread: (
+    channelId: string,
+    lastMessageAt: string | null | undefined,
+  ) => void;
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
   onUpdateWorkspace: (
     id: string,
@@ -204,6 +215,7 @@ function ChannelGroupSection({
   listTestId,
   onBrowse,
   onCreateClick,
+  onMarkChannelUnread,
   onSelectChannel,
   onToggleCollapsed,
   selectedChannelId,
@@ -220,6 +232,10 @@ function ChannelGroupSection({
   listTestId: string;
   onBrowse: () => void;
   onCreateClick: () => void;
+  onMarkChannelUnread: (
+    channelId: string,
+    lastMessageAt: string | null | undefined,
+  ) => void;
   onSelectChannel: (channelId: string) => void;
   onToggleCollapsed: () => void;
   selectedChannelId: string | null;
@@ -263,16 +279,30 @@ function ChannelGroupSection({
           {items.length > 0 ? (
             <SidebarMenu data-testid={listTestId}>
               {items.map((channel) => (
-                <SidebarMenuItem key={channel.id}>
-                  <ChannelMenuButton
-                    channel={channel}
-                    hasUnread={unreadChannelIds.has(channel.id)}
-                    isActive={
-                      isActiveChannel && selectedChannelId === channel.id
-                    }
-                    onSelectChannel={onSelectChannel}
-                  />
-                </SidebarMenuItem>
+                <ContextMenu key={channel.id}>
+                  <ContextMenuTrigger asChild>
+                    <SidebarMenuItem>
+                      <ChannelMenuButton
+                        channel={channel}
+                        hasUnread={unreadChannelIds.has(channel.id)}
+                        isActive={
+                          isActiveChannel && selectedChannelId === channel.id
+                        }
+                        onSelectChannel={onSelectChannel}
+                      />
+                    </SidebarMenuItem>
+                  </ContextMenuTrigger>
+                  <ContextMenuContent>
+                    <ContextMenuItem
+                      onClick={() =>
+                        onMarkChannelUnread(channel.id, channel.lastMessageAt)
+                      }
+                    >
+                      <CircleDot className="h-4 w-4" />
+                      Mark unread
+                    </ContextMenuItem>
+                  </ContextMenuContent>
+                </ContextMenu>
               ))}
             </SidebarMenu>
           ) : null}
@@ -313,6 +343,7 @@ export function AppSidebar({
   onOpenBrowseForums,
   onOpenSearch,
   onHideDm,
+  onMarkChannelUnread,
   onOpenDm,
   onUpdateWorkspace,
   onRemoveWorkspace,
@@ -564,6 +595,7 @@ export function AppSidebar({
               listTestId="stream-list"
               onBrowse={onOpenBrowseChannels}
               onCreateClick={() => setCreateDialogKind("stream")}
+              onMarkChannelUnread={onMarkChannelUnread}
               onSelectChannel={onSelectChannel}
               onToggleCollapsed={() => toggleCollapsedGroup("channels")}
               selectedChannelId={selectedChannelId}
@@ -580,6 +612,7 @@ export function AppSidebar({
               listTestId="forum-list"
               onBrowse={onOpenBrowseForums}
               onCreateClick={() => setCreateDialogKind("forum")}
+              onMarkChannelUnread={onMarkChannelUnread}
               onSelectChannel={onSelectChannel}
               onToggleCollapsed={() => toggleCollapsedGroup("forums")}
               selectedChannelId={selectedChannelId}
@@ -610,6 +643,7 @@ export function AppSidebar({
               items={directMessages}
               channelLabels={dmChannelLabels}
               onHideDm={onHideDm}
+              onMarkChannelUnread={onMarkChannelUnread}
               onSelectChannel={onSelectChannel}
               onToggleCollapsed={() => toggleCollapsedGroup("directMessages")}
               presenceByChannelId={dmPresenceByChannelId}

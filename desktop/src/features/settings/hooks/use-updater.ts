@@ -37,9 +37,13 @@ function canRunBackgroundCheck(status: UpdateStatus): boolean {
   return !BACKGROUND_BLOCKED_STATES.has(status.state);
 }
 
+function initialUpdateStatus(): UpdateStatus {
+  return { state: "idle" };
+}
+
 export function useUpdater() {
-  const [status, setStatusState] = useState<UpdateStatus>({ state: "idle" });
-  const statusRef = useRef<UpdateStatus>({ state: "idle" });
+  const [status, setStatusState] = useState<UpdateStatus>(initialUpdateStatus);
+  const statusRef = useRef<UpdateStatus>(initialUpdateStatus());
   const updateRef = useRef<Update | null>(null);
   const checkInFlightRef = useRef(false);
   const downloadInFlightRef = useRef(false);

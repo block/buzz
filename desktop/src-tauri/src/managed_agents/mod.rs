@@ -1,5 +1,6 @@
 mod backend;
 mod discovery;
+mod env_vars;
 mod nest;
 mod persona_avatars;
 mod persona_card;
@@ -12,6 +13,7 @@ mod types;
 
 pub use backend::*;
 pub use discovery::*;
+pub use env_vars::*;
 pub use nest::*;
 pub use persona_card::*;
 pub use personas::*;

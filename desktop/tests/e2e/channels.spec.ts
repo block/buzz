@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { KIND_TYPING_INDICATOR } from "../../src/shared/constants/kinds";
 import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
@@ -32,81 +33,30 @@ async function openMembersSidebar(
 async function waitForMockLiveSubscription(
   page: import("@playwright/test").Page,
   channelName: string,
+  kind?: number,
 ) {
   await expect
     .poll(async () => {
-      return page.evaluate((currentChannelName) => {
-        return (
-          (
-            window as Window & {
-              __SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
-                channelName: string;
-              }) => boolean;
-            }
-          ).__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
-            channelName: currentChannelName,
-          }) ?? false
-        );
-      }, channelName);
+      return page.evaluate(
+        ({ currentChannelName, kind }) => {
+          return (
+            (
+              window as Window & {
+                __SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                  channelName: string;
+                  kind?: number;
+                }) => boolean;
+              }
+            ).__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+              channelName: currentChannelName,
+              kind,
+            }) ?? false
+          );
+        },
+        { currentChannelName: channelName, kind },
+      );
     })
     .toBe(true);
-}
-
-async function sendMockChannelMessage(
-  page: import("@playwright/test").Page,
-  {
-    channelName,
-    content,
-    kind,
-    mentionPubkeys,
-  }: {
-    channelName: string;
-    content: string;
-    kind?: number | null;
-    mentionPubkeys?: string[] | null;
-  },
-) {
-  await page.evaluate(
-    async ({
-      channelName: targetChannelName,
-      content,
-      kind,
-      mentionPubkeys,
-    }) => {
-      const tauriWindow = window as Window & {
-        __TAURI_INTERNALS__?: {
-          invoke: (
-            command: string,
-            payload?: Record<string, unknown>,
-          ) => Promise<unknown>;
-        };
-      };
-
-      const invoke = tauriWindow.__TAURI_INTERNALS__?.invoke;
-      if (!invoke) {
-        throw new Error("Tauri invoke bridge is unavailable.");
-      }
-
-      const channels = (await invoke("get_channels")) as Array<{
-        id: string;
-        name: string;
-      }>;
-      const channel = channels.find(({ name }) => name === targetChannelName);
-      if (!channel) {
-        throw new Error(`Channel not found: ${targetChannelName}`);
-      }
-
-      await invoke("send_channel_message", {
-        channelId: channel.id,
-        content,
-        kind: kind ?? null,
-        mediaTags: null,
-        mentionPubkeys: mentionPubkeys ?? null,
-        parentEventId: null,
-      });
-    },
-    { channelName, content, kind, mentionPubkeys },
-  );
 }
 
 async function openMemberMenu(
@@ -514,26 +464,37 @@ test("channel with messages shows content", async ({ page }) => {
   );
 });
 
-test("shows and clears typing indicators for active channel bots", async ({
+test("shows and clears activity indicators for active channel agents", async ({
   page,
 }) => {
   await page.goto("/");
 
   await page.getByTestId("channel-agents").click();
   await expect(page.getByTestId("chat-title")).toHaveText("agents");
-  await waitForMockLiveSubscription(page, "agents");
+  await waitForMockLiveSubscription(page, "agents", KIND_TYPING_INDICATOR);
 
   await page.evaluate((pubkey) => {
     window.__SPROUT_E2E_EMIT_MOCK_TYPING__?.({
       channelName: "agents",
       pubkey,
     });
-  }, TEST_IDENTITIES.charlie.pubkey);
+  }, TEST_IDENTITIES.alice.pubkey);
 
-  await expect(page.getByTestId("message-typing-indicator")).toBeVisible();
+  await expect(page.getByTestId("bot-activity-composer-trigger")).toBeVisible();
+  await page.getByTestId("bot-activity-composer-trigger").click();
   await expect(
-    page.getByTestId("message-typing-indicator-label"),
-  ).toContainText("charlie is typing");
+    page.getByTestId(
+      `bot-activity-composer-item-${TEST_IDENTITIES.alice.pubkey}`,
+    ),
+  ).toBeVisible();
+  await page
+    .getByTestId(`bot-activity-composer-item-${TEST_IDENTITIES.alice.pubkey}`)
+    .click({ force: true });
+  await expect(page.getByTestId("agent-session-thread-panel")).toBeVisible();
+  await expect(page.getByTestId("agent-session-thread-panel")).toContainText(
+    "alice",
+  );
+  await expect(page.getByTestId("message-typing-indicator")).toHaveCount(0);
 
   await page.evaluate((pubkey) => {
     window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -541,10 +502,12 @@ test("shows and clears typing indicators for active channel bots", async ({
       content: "Done.",
       pubkey,
     });
-  }, TEST_IDENTITIES.charlie.pubkey);
+  }, TEST_IDENTITIES.alice.pubkey);
 
   await expect(page.getByTestId("message-timeline")).toContainText("Done.");
-  await expect(page.getByTestId("message-typing-indicator")).toHaveCount(0);
+  await expect(page.getByTestId("bot-activity-composer-trigger")).toHaveCount(
+    0,
+  );
 
   await page.waitForTimeout(1_200);
   await page.evaluate((pubkey) => {
@@ -552,9 +515,11 @@ test("shows and clears typing indicators for active channel bots", async ({
       channelName: "agents",
       pubkey,
     });
-  }, TEST_IDENTITIES.charlie.pubkey);
+  }, TEST_IDENTITIES.alice.pubkey);
 
-  await expect(page.getByTestId("message-typing-indicator")).toHaveCount(0);
+  await expect(page.getByTestId("bot-activity-composer-trigger")).toHaveCount(
+    0,
+  );
 });
 
 test("typing indicator shows avatars and maintains stable name order", async ({
@@ -562,14 +527,14 @@ test("typing indicator shows avatars and maintains stable name order", async ({
 }) => {
   await page.goto("/");
 
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await waitForMockLiveSubscription(page, "general");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", KIND_TYPING_INDICATOR);
 
   // Alice starts typing first
   await page.evaluate((pubkey) => {
     window.__SPROUT_E2E_EMIT_MOCK_TYPING__?.({
-      channelName: "general",
+      channelName: "random",
       pubkey,
     });
   }, TEST_IDENTITIES.alice.pubkey);
@@ -588,7 +553,7 @@ test("typing indicator shows avatars and maintains stable name order", async ({
   // Bob starts typing second
   await page.evaluate((pubkey) => {
     window.__SPROUT_E2E_EMIT_MOCK_TYPING__?.({
-      channelName: "general",
+      channelName: "random",
       pubkey,
     });
   }, TEST_IDENTITIES.bob.pubkey);
@@ -601,7 +566,7 @@ test("typing indicator shows avatars and maintains stable name order", async ({
   // Alice re-broadcasts — order should stay "alice and bob", not flip
   await page.evaluate((pubkey) => {
     window.__SPROUT_E2E_EMIT_MOCK_TYPING__?.({
-      channelName: "general",
+      channelName: "random",
       pubkey,
     });
   }, TEST_IDENTITIES.alice.pubkey);
@@ -613,7 +578,7 @@ test("typing indicator shows avatars and maintains stable name order", async ({
   // Bob re-broadcasts — order should still stay "alice and bob"
   await page.evaluate((pubkey) => {
     window.__SPROUT_E2E_EMIT_MOCK_TYPING__?.({
-      channelName: "general",
+      channelName: "random",
       pubkey,
     });
   }, TEST_IDENTITIES.bob.pubkey);
@@ -631,12 +596,19 @@ test("sidebar shows unread indicator for newly active channels", async ({
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
   await waitForMockLiveSubscription(page, "random");
 
-  await sendMockChannelMessage(page, {
-    channelName: "random",
-    content: "Unread update for #random",
-    kind: 40002,
-    mentionPubkeys: [MOCK_IDENTITY_PUBKEY],
-  });
+  // The unread tracker ignores the current user's own messages, so emit as
+  // alice — simulating a real "another user posted while I was elsewhere".
+  await page.evaluate(
+    ({ pubkey }) => {
+      window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: "Unread update for #random",
+        kind: 40002,
+        pubkey,
+      });
+    },
+    { pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
 
   await expect(page.getByTestId("channel-unread-random")).toBeVisible();
 
@@ -654,11 +626,18 @@ test("sidebar shows unread indicator for new forum posts", async ({ page }) => {
   await expect(page.getByTestId("channel-unread-watercooler")).toHaveCount(0);
   await waitForMockLiveSubscription(page, "watercooler");
 
-  await sendMockChannelMessage(page, {
-    channelName: "watercooler",
-    content: "Unread update for the forum",
-    kind: 45001,
-  });
+  // Emit as alice — the unread tracker ignores self-authored messages.
+  await page.evaluate(
+    ({ pubkey }) => {
+      window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "watercooler",
+        content: "Unread update for the forum",
+        kind: 45001,
+        pubkey,
+      });
+    },
+    { pubkey: TEST_IDENTITIES.alice.pubkey },
+  );
 
   await expect(page.getByTestId("channel-unread-watercooler")).toBeVisible();
 

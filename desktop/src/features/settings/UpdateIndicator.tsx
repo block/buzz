@@ -1,26 +1,27 @@
-import { Download, Loader2, RefreshCw } from "lucide-react";
+import { Loader2, RefreshCcw, RotateCw } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
 import type { UpdateStatus } from "./hooks/use-updater";
 
 const indicatorButtonClass =
-  "relative h-7 px-2 text-xs text-muted-foreground/70 hover:bg-muted/60 hover:text-foreground";
+  "relative h-8 w-8 text-muted-foreground/80 hover:bg-muted/60 hover:text-foreground";
 
-const iconClass = "h-3 w-3";
+const iconClass = "h-4 w-4";
 
 const variants: Record<
   "available" | "downloading" | "installing" | "ready",
   {
-    Icon: typeof Download;
+    Icon: typeof RefreshCcw;
     label: string;
     badgeColor: string;
     iconClass: string;
   }
 > = {
   available: {
-    Icon: Download,
+    Icon: RefreshCcw,
     label: "Update available",
     badgeColor: "bg-primary",
     iconClass: iconClass,
@@ -38,7 +39,7 @@ const variants: Record<
     iconClass: `${iconClass} animate-spin`,
   },
   ready: {
-    Icon: RefreshCw,
+    Icon: RotateCw,
     label: "Restart to update",
     badgeColor: "bg-emerald-500",
     iconClass: iconClass,
@@ -57,12 +58,8 @@ function getVariant(state: UpdateStatus["state"]) {
   return null;
 }
 
-export function UpdateIndicator({
-  onOpenUpdates,
-}: {
-  onOpenUpdates: () => void;
-}) {
-  const { status } = useUpdaterContext();
+export function UpdateIndicator({ className }: { className?: string }) {
+  const { status, downloadAndInstall, relaunch } = useUpdaterContext();
   const variant = getVariant(status.state);
 
   if (!variant) {
@@ -70,20 +67,37 @@ export function UpdateIndicator({
   }
 
   const { Icon, label, badgeColor, iconClass: variantIconClass } = variant;
+  const isActionable = status.state === "available" || status.state === "ready";
+  const handleClick =
+    status.state === "ready"
+      ? relaunch
+      : status.state === "available"
+        ? downloadAndInstall
+        : null;
 
   return (
-    <Button
-      aria-label={label}
-      className={indicatorButtonClass}
-      onClick={onOpenUpdates}
-      size="sm"
-      variant="ghost"
-    >
-      <Icon className={variantIconClass} />
-      {label}
-      <span
-        className={`absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full ${badgeColor} animate-pulse`}
-      />
-    </Button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          aria-label={label}
+          className={`${indicatorButtonClass} ${className ?? ""}`}
+          disabled={!isActionable}
+          onClick={() => {
+            if (handleClick) {
+              void handleClick();
+            }
+          }}
+          size="icon"
+          type="button"
+          variant="ghost"
+        >
+          <Icon className={variantIconClass} />
+          <span
+            className={`absolute right-1 top-1 h-1.5 w-1.5 rounded-full ${badgeColor} animate-pulse`}
+          />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{label}</TooltipContent>
+    </Tooltip>
   );
 }

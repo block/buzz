@@ -278,6 +278,8 @@ export type ManagedAgent = {
   systemPrompt: string | null;
   model: string | null;
   mcpToolsets: string | null;
+  /** Per-agent env vars. Layered on top of persona envVars. */
+  envVars: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
   pid: number | null;
   createdAt: string;
@@ -290,7 +292,21 @@ export type ManagedAgent = {
   startOnAppLaunch: boolean;
   backend: ManagedAgentBackend;
   backendAgentId: string | null;
+  /** Who the agent should respond to. Maps to `sprout-acp --respond-to`. */
+  respondTo: RespondToMode;
+  /**
+   * Normalized 64-char lowercase hex pubkeys. Used only when `respondTo` is
+   * `"allowlist"`. Preserved across mode toggles.
+   */
+  respondToAllowlist: string[];
 };
+
+/**
+ * Inbound author gate mode. Mirrors `sprout-acp`'s `--respond-to` CLI flag.
+ * `"nobody"` is supported by the harness but not surfaced through this API —
+ * it's a heartbeat-only mode without a meaningful GUI use case.
+ */
+export type RespondToMode = "owner-only" | "allowlist" | "anyone";
 
 export type BackendProviderCandidate = {
   id: string;
@@ -321,9 +337,17 @@ export type CreateManagedAgentInput = {
   avatarUrl?: string;
   model?: string;
   mcpToolsets?: string;
+  envVars?: Record<string, string>;
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
   backend?: ManagedAgentBackend;
+  /** Inbound author gate mode. Omitted = `"owner-only"` (server default). */
+  respondTo?: RespondToMode;
+  /**
+   * Hex pubkeys to allow when `respondTo === "allowlist"`. Validated &
+   * normalized server-side (must be 64 hex chars each).
+   */
+  respondToAllowlist?: string[];
 };
 
 export type CreateManagedAgentResponse = {
@@ -382,6 +406,8 @@ export type UpdateManagedAgentInput = {
   model?: string | null;
   systemPrompt?: string | null;
   mcpToolsets?: string | null;
+  /** Absent = don't touch. Present = replace the env_vars map entirely. */
+  envVars?: Record<string, string>;
   parallelism?: number;
   turnTimeoutSeconds?: number;
   relayUrl?: string;
@@ -389,6 +415,13 @@ export type UpdateManagedAgentInput = {
   agentCommand?: string;
   agentArgs?: string[];
   mcpCommand?: string;
+  /** Absent = don't touch. Present = set the mode. */
+  respondTo?: RespondToMode;
+  /**
+   * Absent = don't touch. Present = replace the allowlist with this list
+   * (validated & normalized server-side).
+   */
+  respondToAllowlist?: string[];
 };
 export type AgentPersona = {
   id: string;
@@ -404,6 +437,9 @@ export type AgentPersona = {
   isActive: boolean;
   /** Pack ID if this persona was imported from a persona pack. Pack personas are non-editable. */
   sourcePack?: string | null;
+  /** Environment variables injected for agents created from this persona.
+   * Layered as: desktop parent env < persona envVars < agent envVars. */
+  envVars: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 };
@@ -415,6 +451,7 @@ export type CreatePersonaInput = {
   provider?: string;
   model?: string;
   namePool?: string[];
+  envVars?: Record<string, string>;
 };
 
 export type UpdatePersonaInput = {
@@ -425,6 +462,7 @@ export type UpdatePersonaInput = {
   provider?: string;
   model?: string;
   namePool?: string[];
+  envVars?: Record<string, string>;
 };
 
 // ── Team types ────────────────────────────────────────────────────────────────

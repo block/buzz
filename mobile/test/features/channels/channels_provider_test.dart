@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:sprout_mobile/features/channels/channel_management_provider.dart';
 import 'package:sprout_mobile/features/channels/channels_provider.dart';
 import 'package:sprout_mobile/shared/relay/relay.dart';
 
@@ -80,6 +81,140 @@ void main() {
     expect(channels.single.lastMessageAt?.millisecondsSinceEpoch, 20 * 1000);
   });
 
+  test('ephemeral (TTL) channels appear in the list', () async {
+    // Regression: previously the provider unconditionally dropped any channel
+    // with a `ttl` tag, which made TTL channels invisible on iOS even when the
+    // user was a member. They should be included so the existing
+    // `_EphemeralBadge` UI in `channels_page.dart` can render them.
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk), _membership(_channelB, myPk)],
+      metadata: [
+        _meta(id: _channelA, name: 'general'),
+        _meta(
+          id: _channelB,
+          name: 'agent-creation-deep-dive',
+          ttlSeconds: 86400,
+        ),
+      ],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    final channels = await container.read(channelsProvider.future);
+
+    expect(
+      channels.map((c) => c.name),
+      containsAll(['general', 'agent-creation-deep-dive']),
+    );
+    final ephemeral = channels.firstWhere(
+      (c) => c.name == 'agent-creation-deep-dive',
+    );
+    expect(ephemeral.isEphemeral, isTrue);
+    expect(ephemeral.ttlSeconds, 86400);
+  });
+
+  test(
+    'archived kind:39000 metadata sets Channel.isArchived (covers TTL auto-archive)',
+    () async {
+      // The relay's TTL reaper auto-archives expired ephemeral channels and
+      // republishes kind:39000 with `["archived", "true"]`. The Channel needs
+      // `archivedAt != null` so the `_SliverChannelsList` filter
+      // (`!channel.isArchived`) hides it from the sidebar after expiry.
+      // Previously the mobile parser ignored the `archived` tag, so expired
+      // TTL channels would have stayed visible after the `!isEphemeral` guard
+      // was removed.
+      final session = _FakeRelaySession(
+        memberships: [
+          _membership(_channelA, myPk),
+          _membership(_channelB, myPk),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'active'),
+          _meta(
+            id: _channelB,
+            name: 'expired-ttl',
+            ttlSeconds: 86400,
+            archived: true,
+          ),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final channels = await container.read(channelsProvider.future);
+      final expired = channels.firstWhere((c) => c.name == 'expired-ttl');
+      expect(expired.isArchived, isTrue);
+      expect(expired.isEphemeral, isTrue);
+      // The active channel must not be flagged archived.
+      final active = channels.firstWhere((c) => c.name == 'active');
+      expect(active.isArchived, isFalse);
+    },
+  );
+
+  test(
+    'archive transition invalidates cached channelDetailsProvider',
+    () async {
+      // Codex review v2 caught: if a TTL channel is opened (caching its
+      // ChannelDetails) and then the reaper archives it, the cached details
+      // — built from the pre-archive kind:39000 — would clobber the newer
+      // archivedAt set on the base Channel during `mergeDetails`. We invalidate
+      // the details provider when the archived state flips so the next
+      // mergeDetails sees fresh data.
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'active')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      // Initial load.
+      final initial = await container.read(channelsProvider.future);
+      expect(initial.single.isArchived, isFalse);
+
+      // Prime the detail cache.
+      final detailsFiltersBefore = session.historyFilters
+          .where((f) => f.kinds.contains(39000) && f.tags['#d'] != null)
+          .length;
+      await container.read(channelDetailsProvider(_channelA).future);
+      final detailsFetchesAfterPrime =
+          session.historyFilters
+              .where((f) => f.kinds.contains(39000) && f.tags['#d'] != null)
+              .length -
+          detailsFiltersBefore;
+      expect(detailsFetchesAfterPrime, 1);
+
+      // Simulate the reaper auto-archiving the channel by swapping the
+      // metadata the fake returns, then refreshing the channels provider.
+      session.metadata
+        ..clear()
+        ..add(_meta(id: _channelA, name: 'active', archived: true));
+      await container.read(channelsProvider.notifier).refresh();
+      final refreshed = container.read(channelsProvider).value!;
+      expect(refreshed.single.isArchived, isTrue);
+
+      // Take a fresh baseline AFTER the refresh — the refresh itself issues a
+      // `kinds:[39000], #d:[id]` query as part of channel metadata refetch and
+      // we must not count that toward our invalidation assertion. Only the
+      // fetch triggered by the second `channelDetailsProvider` read should be
+      // attributed to invalidation.
+      final detailsFiltersAfterRefresh = session.historyFilters
+          .where((f) => f.kinds.contains(39000) && f.tags['#d'] != null)
+          .length;
+
+      // Reading the details provider again must trigger a fresh fetch — proving
+      // the prior cache was invalidated by the archive transition. Without
+      // invalidation, Riverpod would return the cached pre-archive details and
+      // no new `kinds:[39000], #d:[id]` filter would be sent.
+      await container.read(channelDetailsProvider(_channelA).future);
+      final detailsFetchesFromInvalidation =
+          session.historyFilters
+              .where((f) => f.kinds.contains(39000) && f.tags['#d'] != null)
+              .length -
+          detailsFiltersAfterRefresh;
+      expect(detailsFetchesFromInvalidation, greaterThan(0));
+    },
+  );
+
   test('initial fetch issues membership + metadata queries', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],
@@ -126,6 +261,8 @@ NostrEvent _meta({
   required String name,
   String channelType = 'stream',
   int createdAt = 1,
+  int? ttlSeconds,
+  bool archived = false,
 }) => NostrEvent(
   id: 'meta-$id',
   pubkey: 'creator',
@@ -136,6 +273,8 @@ NostrEvent _meta({
     ['name', name],
     ['t', channelType],
     ['public'],
+    if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
+    if (archived) ['archived', 'true'],
   ],
   content: '',
   sig: 'sig',

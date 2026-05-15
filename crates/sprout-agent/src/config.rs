@@ -3,7 +3,7 @@ use std::time::Duration;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
-pub const MAX_TOOL_RESULT_BYTES: usize = 256 * 1024;
+pub const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 64;
 
 /// Leaves headroom for the summary call.
@@ -93,7 +93,7 @@ impl Config {
             base_url,
             anthropic_api_version: env_or("ANTHROPIC_API_VERSION", "2023-06-01"),
             max_rounds: parse_env("SPROUT_AGENT_MAX_ROUNDS", 0)?,
-            max_output_tokens: parse_env("SPROUT_AGENT_MAX_OUTPUT_TOKENS", 4096)?,
+            max_output_tokens: parse_env("SPROUT_AGENT_MAX_OUTPUT_TOKENS", 32_768)?,
             llm_timeout: Duration::from_secs(parse_env("SPROUT_AGENT_LLM_TIMEOUT_SECS", 120)?),
             tool_timeout: Duration::from_secs(parse_env("SPROUT_AGENT_TOOL_TIMEOUT_SECS", 660)?),
             mcp_init_timeout: Duration::from_secs(parse_env(
@@ -105,7 +105,7 @@ impl Config {
             mcp_restart_max_ms: parse_env("SPROUT_AGENT_MCP_RESTART_MAX_MS", 30_000u64)?,
             max_sessions: parse_env("SPROUT_AGENT_MAX_SESSIONS", usize::MAX)?,
             max_line_bytes: parse_env("SPROUT_AGENT_MAX_LINE_BYTES", 4 * 1024 * 1024)?,
-            max_history_bytes: parse_env("SPROUT_AGENT_MAX_HISTORY_BYTES", 1024 * 1024)?,
+            max_history_bytes: parse_env("SPROUT_AGENT_MAX_HISTORY_BYTES", 16 * 1024 * 1024)?,
             max_handoffs: parse_env("SPROUT_AGENT_MAX_HANDOFFS", 5)?,
             max_parallel_tools: parse_env("SPROUT_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
             hook_timeout: Duration::from_millis(parse_env(

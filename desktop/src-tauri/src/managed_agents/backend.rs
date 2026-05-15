@@ -179,7 +179,9 @@ pub fn invoke_provider(
     stdout_buf.truncate(STDOUT_CAP);
 
     let stderr = String::from_utf8_lossy(&stderr_bytes);
-    let stderr_redacted = redact_secrets(&stderr);
+    let env_secrets = env_secrets_from_request(request);
+    let env_secret_refs: Vec<&str> = env_secrets.iter().map(String::as_str).collect();
+    let stderr_redacted = redact_secrets_with(&stderr, &env_secret_refs);
 
     let exit_info = exit_status
         .code()
@@ -222,7 +224,7 @@ pub fn invoke_provider(
 
     if response.get("ok").and_then(|v| v.as_bool()) == Some(false) {
         let error = response["error"].as_str().unwrap_or("unknown error");
-        return Err(redact_secrets(error));
+        return Err(redact_secrets_with(error, &env_secret_refs));
     }
 
     Ok(response)
@@ -267,8 +269,43 @@ fn split_config_key(key: &str) -> Vec<String> {
     words
 }
 
+#[cfg(test)]
 fn redact_secrets(s: &str) -> String {
+    redact_secrets_with(s, &[])
+}
+
+/// Like the (test-only) prefix-only `redact_secrets`, but also redacts
+/// every occurrence of each
+/// `extras` entry verbatim. Used to scrub user-supplied env values out of
+/// provider stderr/JSON-error text — providers may echo their request
+/// back in failure messages, and persona/agent `env_vars` may carry API
+/// keys that the desktop just persisted via `last_error`.
+///
+/// Entries shorter than 4 chars are skipped: too noisy to scrub blindly
+/// (would match every short token in normal log output). Entries are
+/// applied in decreasing length order so superstrings get scrubbed before
+/// substrings — protects against partial overlap leaks.
+fn redact_secrets_with(s: &str, extras: &[&str]) -> String {
     let mut result = s.to_string();
+
+    // Extras: longest first to avoid partial-overlap leaks. We use
+    // `str::replace` (single-pass, non-overlapping) instead of a `find` +
+    // `replace_range` loop — the loop variant would never terminate if a
+    // user-supplied env value happened to be a substring of the
+    // replacement marker (e.g. value="REDACTED" or "EDACTE").
+    let mut sorted: Vec<&str> = extras.iter().copied().filter(|v| v.len() >= 4).collect();
+    sorted.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    sorted.dedup();
+    for value in sorted {
+        if !value.is_empty() {
+            result = result.replace(value, "[REDACTED]");
+        }
+    }
+
+    // Then prefix-based scrubbing. This loop *can* re-scan because each
+    // replacement shortens the buffer past the matched prefix — the
+    // replacement marker `[REDACTED]` does not contain `nsec1` or
+    // `sprt_tok_`, so progress is guaranteed.
     for prefix in &["nsec1", "sprt_tok_"] {
         while let Some(pos) = result.find(prefix) {
             let end = result[pos..]
@@ -279,6 +316,41 @@ fn redact_secrets(s: &str) -> String {
         }
     }
     result
+}
+
+/// Collect string values from `request["agent"]["env_vars"]` (if present)
+/// to feed into [`redact_secrets_with`]. Returns an empty Vec if the
+/// request shape doesn't match, which is fine — falls back to the default
+/// prefix-based scrubbing.
+fn env_secrets_from_request(request: &serde_json::Value) -> Vec<String> {
+    request
+        .get("agent")
+        .and_then(|a| a.get("env_vars"))
+        .and_then(|e| e.as_object())
+        .map(|obj| {
+            obj.values()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Public-in-crate helper: redact every non-empty value from `env` (plus
+/// the standard nsec/sprt_tok prefix scrubbing) out of `s`. Used by
+/// callers that already have a flat env map handy — e.g. model discovery
+/// formatting child stderr into a frontend-visible error.
+pub(crate) fn redact_env_values_in(
+    s: &str,
+    env: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let values: Vec<&str> = env
+        .values()
+        .filter(|v| !v.is_empty())
+        .map(String::as_str)
+        .collect();
+    redact_secrets_with(s, &values)
 }
 
 /// Deploy an agent via provider binary. Returns the provider-assigned agent_id.
@@ -441,6 +513,86 @@ mod tests {
         let r = redact_secrets(s);
         assert!(r.contains("[REDACTED]"));
         assert!(!r.contains("sprt_tok_xyz789"));
+    }
+
+    #[test]
+    fn redact_secrets_with_extras_scrubs_user_env_values() {
+        // If a provider echoes back a user-supplied API key in its error
+        // output, the desktop must not surface that secret unredacted via
+        // `last_error`. We scrub the literal values that came from the
+        // request's `agent.env_vars`.
+        let secret = "sk-ant-api03-abc123def456";
+        let stderr = format!("auth failed with key {secret} on host api.anthropic.com");
+        let r = redact_secrets_with(&stderr, &[secret]);
+        assert!(r.contains("[REDACTED]"));
+        assert!(!r.contains(secret));
+    }
+
+    #[test]
+    fn redact_secrets_with_extras_skips_short_values() {
+        // Don't scrub values shorter than 4 chars — too noisy.
+        let r = redact_secrets_with("error code: 42", &["42"]);
+        assert!(r.contains("42"));
+    }
+
+    #[test]
+    fn redact_secrets_with_extras_terminates_when_value_substring_of_marker() {
+        // Regression: an earlier impl used `while let Some(pos) = find(value)`
+        // which never terminates if the user's env value is a substring of
+        // the replacement marker `[REDACTED]` — each replacement
+        // reintroduces the same text. Now uses `str::replace` (single-pass).
+        for value in ["REDACTED", "EDACTE", "REDA", "ACTED"] {
+            let r = redact_secrets_with(&format!("leak={value}"), &[value]);
+            assert!(r.contains("[REDACTED]"));
+        }
+    }
+
+    #[test]
+    fn redact_secrets_with_extras_handles_overlapping_secrets() {
+        // Longer entries get scrubbed first so the substring "abc12" isn't
+        // matched before "abc123" is consumed.
+        let s = "key1=abc123 key2=abc12";
+        let r = redact_secrets_with(s, &["abc12", "abc123"]);
+        assert!(!r.contains("abc123"));
+        assert!(!r.contains("abc12 "));
+    }
+
+    #[test]
+    fn env_secrets_from_request_extracts_string_values() {
+        let req = serde_json::json!({
+            "op": "deploy",
+            "agent": {
+                "env_vars": {
+                    "ANTHROPIC_API_KEY": "sk-ant-test",
+                    "EMPTY": "",
+                    "NUMERIC": 42,
+                },
+            },
+        });
+        let secrets = env_secrets_from_request(&req);
+        assert!(secrets.iter().any(|v| v == "sk-ant-test"));
+        // Empty and non-string values are filtered out.
+        assert_eq!(secrets.len(), 1);
+    }
+
+    #[test]
+    fn env_secrets_from_request_handles_missing_shape() {
+        assert!(env_secrets_from_request(&serde_json::json!({})).is_empty());
+        assert!(env_secrets_from_request(&serde_json::json!({"agent": {}})).is_empty());
+        assert!(
+            env_secrets_from_request(&serde_json::json!({"agent": {"env_vars": null}})).is_empty()
+        );
+    }
+
+    #[test]
+    fn redact_env_values_in_scrubs_map_values() {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("ANTHROPIC_API_KEY".to_string(), "sk-ant-real".to_string());
+        env.insert("EMPTY".to_string(), String::new());
+        let stderr = "auth=sk-ant-real failed; other context";
+        let r = redact_env_values_in(stderr, &env);
+        assert!(!r.contains("sk-ant-real"));
+        assert!(r.contains("[REDACTED]"));
     }
 
     #[test]

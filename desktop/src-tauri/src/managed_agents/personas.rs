@@ -474,6 +474,7 @@ fn built_in_persona_records(now: &str) -> Vec<PersonaRecord> {
             is_active: true,
             source_pack: None,
             source_pack_persona_slug: None,
+            env_vars: std::collections::BTreeMap::new(),
             created_at: now.to_string(),
             updated_at: now.to_string(),
         })
@@ -520,6 +521,7 @@ fn merge_personas(mut stored: Vec<PersonaRecord>, now: &str) -> (Vec<PersonaReco
                 || existing.avatar_url != built_in.avatar_url
                 || existing.system_prompt != built_in.system_prompt
                 || existing.name_pool != built_in.name_pool
+                || existing.env_vars != built_in.env_vars
                 || existing.provider.is_some()
                 || existing.model.is_some()
                 || !existing.is_builtin
@@ -759,6 +761,7 @@ pub fn import_persona_pack(
             is_active: true,
             source_pack: Some(resolved.id.clone()),
             source_pack_persona_slug: Some(p.name.clone()),
+            env_vars: std::collections::BTreeMap::new(),
             created_at: now.clone(),
             updated_at: now.clone(),
         })

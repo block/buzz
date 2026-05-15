@@ -522,3 +522,114 @@ test("thread panel width uses session storage and reset handle", async ({
     })
     .toBe(defaultWidthPx);
 });
+
+test("composer is focused after selecting a channel", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  // Without clicking the input, typing should land in the composer.
+  const input = page.getByTestId("message-input");
+  await expect(input).toBeFocused();
+
+  await page.keyboard.type("autofocus-on-channel-select");
+  await expect(input).toHaveText("autofocus-on-channel-select");
+});
+
+test("composer is focused after switching to a different channel", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+  const input = page.getByTestId("message-input");
+  await expect(input).toBeFocused();
+});
+
+test("thread composer is focused after clicking the reply icon", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  // Seed a message to reply to.
+  const seed = `Thread autofocus seed ${Date.now()}`;
+  const mainInput = page.getByTestId("message-input");
+  await mainInput.fill(seed);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(seed);
+
+  const rootMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+
+  const threadInput = threadPanel.getByTestId("message-input");
+  await expect(threadInput).toBeFocused();
+
+  await page.keyboard.type("typed-into-thread");
+  await expect(threadInput).toHaveText("typed-into-thread");
+});
+
+test("thread composer keeps focus after sending a thread reply", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  // Seed a root message we can open a thread on. At this point only one
+  // composer is mounted, so plain getByTestId is unambiguous.
+  const seed = `Thread focus-after-send seed ${Date.now()}`;
+  await page.getByTestId("message-input").fill(seed);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(seed);
+
+  const rootMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+
+  const threadInput = threadPanel.getByTestId("message-input");
+  await expect(threadInput).toBeFocused();
+
+  // Send a thread reply. After the send, `isSending` flips and back to false
+  // in both the main and thread composers; the thread input must keep focus.
+  const reply = `Thread reply ${Date.now()}`;
+  await page.keyboard.type(reply);
+  await expect(threadInput).toHaveText(reply);
+  await page.keyboard.press("Enter");
+
+  // Wait for the send to settle.
+  await expect(threadPanel).toContainText(reply);
+
+  // The thread input should still be focused — not the main composer.
+  // Both composers expose the same `message-input` data-testid, so we
+  // verify directly that `document.activeElement` lives inside the thread
+  // panel rather than the main pane.
+  const focusInThreadPanel = await page.evaluate(() => {
+    const panel = document.querySelector<HTMLElement>(
+      '[data-testid="message-thread-panel"]',
+    );
+    const active = document.activeElement as HTMLElement | null;
+    return Boolean(panel && active && panel.contains(active));
+  });
+  expect(focusInThreadPanel).toBe(true);
+
+  await expect(threadInput).toBeFocused();
+});

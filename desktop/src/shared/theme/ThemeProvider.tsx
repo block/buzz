@@ -18,8 +18,10 @@ import {
 const STORAGE_KEY = "sprout-theme";
 const CACHE_KEY = "sprout-theme-cache";
 const ACCENT_KEY = "sprout-accent-color";
+export const NEUTRAL_ACCENT = "neutral";
 
 export const ACCENT_COLORS = [
+  { name: "Neutral", value: NEUTRAL_ACCENT },
   { name: "Blue", value: "#3b82f6" },
   { name: "Cyan", value: "#06b6d4" },
   { name: "Green", value: "#22c55e" },
@@ -75,8 +77,20 @@ function getContrastColor(hex: string): string {
   return lum > 0.5 ? "#000000" : "#ffffff";
 }
 
-function applyAccentColor(hex: string) {
+function applyAccentColor(value: string) {
   const root = document.documentElement;
+  if (value === NEUTRAL_ACCENT) {
+    const styles = window.getComputedStyle(root);
+    const foreground = styles.getPropertyValue("--foreground").trim();
+    const background = styles.getPropertyValue("--background").trim();
+    root.style.setProperty("--primary", foreground);
+    root.style.setProperty("--primary-foreground", background);
+    root.style.setProperty("--sidebar-primary", foreground);
+    root.style.setProperty("--sidebar-primary-foreground", background);
+    return;
+  }
+
+  const hex = value;
   const accentHsl = hexToHsl(hex);
   const fgHsl = hexToHsl(getContrastColor(hex));
   root.style.setProperty("--primary", accentHsl);

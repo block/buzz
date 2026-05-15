@@ -1,27 +1,36 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-import { updateChannelLastMessageAt } from "@/features/channels/lib/channelCache";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import { getChannelIdFromTags } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
-import { CHANNEL_EVENT_KINDS } from "@/shared/constants/kinds";
+import {
+  CHANNEL_EVENT_KINDS,
+  CHANNEL_MESSAGE_EVENT_KINDS,
+} from "@/shared/constants/kinds";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 
 export type UseLiveChannelUpdatesOptions = {
   currentPubkey?: string;
   onDmMessage?: (event: RelayEvent, channel: Channel) => void;
   onLiveMention?: () => void;
+  /**
+   * Fired for live "new content" events in a member channel (chat messages,
+   * forum posts/comments) authored by someone other than the current user.
+   * Used to drive the in-session "latest message at" map that powers sidebar
+   * unread badges. See `UNREAD_TRIGGER_KINDS` for the exact kind set.
+   */
+  onChannelMessage?: (channelId: string, event: RelayEvent) => void;
 };
 
 const LIVE_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
 const LIVE_SUBSCRIPTION_RETRY_MAX_MS = 30_000;
 
-function getMessageTimestamp(event: RelayEvent) {
-  return new Date(event.created_at * 1_000).toISOString();
-}
+// Only "new content" kinds should bump unread state. Shared with the
+// catch-up query in useUnreadChannels so the two paths stay in lockstep.
+const UNREAD_TRIGGER_KINDS = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
 
 function isExternalMentionEvent(event: RelayEvent, currentPubkey: string) {
   return (
@@ -135,12 +144,22 @@ export function useLiveChannelUpdates(
       return;
     }
 
-    // Always update the cache — even for the active channel.
+    // Notify the unread tracker. Restricted to human-visible message kinds
+    // and to events authored by someone other than the current user — your
+    // own outgoing messages should never make a channel unread, and
+    // reactions / edits / system messages aren't "new content".
+    if (
+      UNREAD_TRIGGER_KINDS.has(event.kind) &&
+      (normalizedCurrentPubkey.length === 0 ||
+        event.pubkey.toLowerCase() !== normalizedCurrentPubkey)
+    ) {
+      options.onChannelMessage?.(channelId, event);
+    }
+
+    // Merge into the timeline cache for the active channel.
     // useChannelSubscription also writes to this cache, but there's a
     // race window where it hasn't connected yet. Writes are idempotent
     // (mergeTimelineCacheMessages deduplicates by event ID).
-    const messageTimestamp = getMessageTimestamp(event);
-    updateChannelLastMessageAt(queryClient, channelId, messageTimestamp);
     queryClient.setQueryData<RelayEvent[]>(
       channelMessagesKey(channelId),
       (current) => {

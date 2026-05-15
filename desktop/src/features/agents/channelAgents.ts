@@ -6,6 +6,7 @@ import {
   listManagedAgents,
   startManagedAgent,
   stopManagedAgent,
+  updateManagedAgent,
   uploadMediaBytes,
 } from "@/shared/api/tauri";
 import type {
@@ -13,6 +14,7 @@ import type {
   ChannelRole,
   ManagedAgent,
   ManagedAgentBackend,
+  RespondToMode,
 } from "@/shared/api/types";
 
 type ChannelAgentProvider = Pick<
@@ -56,11 +58,15 @@ export type CreateChannelManagedAgentInput = {
   role?: Exclude<ChannelRole, "owner">;
   ensureRunning?: boolean;
   backend?: ManagedAgentBackend;
+  /** Inbound author gate mode. Omitted = server default ("owner-only"). */
+  respondTo?: RespondToMode;
+  /** Hex pubkeys for allowlist mode. */
+  respondToAllowlist?: string[];
 };
 
 export type CreateChannelManagedAgentResult =
   AttachManagedAgentToChannelResult & {
-    created: true;
+    created: boolean;
     providerId: string;
   };
 
@@ -173,6 +179,19 @@ function pickPreferredManagedAgent(agents: ManagedAgent[]) {
   })[0];
 }
 
+function findReusablePersonaAgent(
+  agents: ManagedAgent[],
+  personaId: string,
+  channelMemberPubkeys: ReadonlySet<string>,
+): ManagedAgent | undefined {
+  const candidates = agents.filter(
+    (agent) =>
+      agent.personaId === personaId &&
+      !channelMemberPubkeys.has(normalizePubkey(agent.pubkey)),
+  );
+  return pickPreferredManagedAgent(candidates);
+}
+
 function buildChannelAgentName(providerId: string, providerLabel: string) {
   const normalizedProviderId = providerId.trim().toLowerCase();
   if (normalizedProviderId.length > 0) {
@@ -267,6 +286,10 @@ export async function ensureChannelAgentPresetInChannel(
 export async function createChannelManagedAgent(
   channelId: string,
   input: CreateChannelManagedAgentInput,
+  context?: {
+    managedAgents?: ManagedAgent[];
+    channelMemberPubkeys?: ReadonlySet<string>;
+  },
 ): Promise<CreateChannelManagedAgentResult> {
   const role = input.role ?? "bot";
   const ensureRunning = input.ensureRunning ?? true;
@@ -274,6 +297,49 @@ export async function createChannelManagedAgent(
 
   if (trimmedName.length === 0) {
     throw new Error("Agent name is required.");
+  }
+
+  // Smart reuse: if a managed agent with the same personaId already exists
+  // and is not already in this channel, attach it instead of creating a new one.
+  if (
+    input.personaId &&
+    context?.managedAgents &&
+    context.channelMemberPubkeys
+  ) {
+    const reusable = findReusablePersonaAgent(
+      context.managedAgents,
+      input.personaId,
+      context.channelMemberPubkeys,
+    );
+    if (reusable) {
+      // Apply the caller's respondTo settings so the user's permission
+      // choice in the dialog is always honored, even when reusing.
+      const needsRespondToUpdate =
+        input.respondTo && input.respondTo !== "owner-only";
+      const updatedAgent = needsRespondToUpdate
+        ? (
+            await updateManagedAgent({
+              pubkey: reusable.pubkey,
+              respondTo: input.respondTo,
+              respondToAllowlist:
+                input.respondTo === "allowlist"
+                  ? input.respondToAllowlist
+                  : undefined,
+            })
+          ).agent
+        : reusable;
+
+      const attached = await attachManagedAgentToChannel(channelId, {
+        agent: updatedAgent,
+        role,
+        ensureRunning,
+      });
+      return {
+        ...attached,
+        created: false,
+        providerId: input.provider.id,
+      };
+    }
   }
 
   // If the avatar is a data URI (e.g. from a persona PNG card import),
@@ -307,6 +373,8 @@ export async function createChannelManagedAgent(
     spawnAfterCreate: isProviderMode,
     startOnAppLaunch: isProviderMode ? false : undefined,
     backend: input.backend,
+    respondTo: input.respondTo,
+    respondToAllowlist: input.respondToAllowlist,
   });
 
   // Tauri returns Ok() even on deploy failure — spawnError carries the message.
@@ -331,27 +399,33 @@ export async function createChannelManagedAgents(
   channelId: string,
   inputs: readonly CreateChannelManagedAgentInput[],
 ): Promise<CreateChannelManagedAgentsResult> {
-  const results = await Promise.allSettled(
-    inputs.map((input) => createChannelManagedAgent(channelId, input)),
+  // Fetch managed agents and channel members once for smart reuse checks.
+  const [managedAgents, members] = await Promise.all([
+    listManagedAgents(),
+    getChannelMembers(channelId),
+  ]);
+  const channelMemberPubkeys = new Set(
+    members.map((m) => normalizePubkey(m.pubkey)),
   );
+  const context = { managedAgents, channelMemberPubkeys };
 
+  // Sequential loop: each agent must be fully created and its relay membership
+  // written before the next starts. Concurrent writes to the replaceable
+  // kind:39002 membership event cause last-write-wins data loss.
   const successes: CreateChannelManagedAgentResult[] = [];
   const failures: CreateChannelManagedAgentBatchFailure[] = [];
 
-  for (let i = 0; i < results.length; i++) {
-    const result = results[i];
+  for (let i = 0; i < inputs.length; i++) {
     const input = inputs[i];
-    if (result.status === "fulfilled") {
-      successes.push(result.value);
-    } else {
+    try {
+      const result = await createChannelManagedAgent(channelId, input, context);
+      successes.push(result);
+    } catch (error) {
       failures.push({
         kind: input.personaId ? "persona" : "generic",
         name: input.name.trim() || "agent",
         personaId: input.personaId ?? null,
-        error:
-          result.reason instanceof Error
-            ? result.reason.message
-            : "Failed to add agent.",
+        error: error instanceof Error ? error.message : "Failed to add agent.",
       });
     }
   }

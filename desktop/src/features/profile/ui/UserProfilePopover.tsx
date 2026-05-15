@@ -83,10 +83,7 @@ export function UserProfilePopover({
   const managedAgent = managedAgentsQuery.data?.find(
     (a) => a.pubkey === pubkey,
   );
-  const canViewActivity =
-    role === "bot" &&
-    managedAgent?.backend.type === "local" &&
-    Boolean(onOpenAgentSession);
+  const canViewActivity = role === "bot" && Boolean(onOpenAgentSession);
   const profile = profileQuery.data;
   const presenceStatus = presenceQuery.data?.[pubkey.toLowerCase()];
   const userStatus = userStatusQuery.data?.[pubkey.toLowerCase()];

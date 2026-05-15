@@ -1,4 +1,3 @@
-import type { FeedItem } from "@/shared/api/types";
 import { ChatHeader } from "@/features/chat/ui/ChatHeader";
 import { useHomeFeedQuery } from "@/features/home/hooks";
 import { HomeView } from "@/features/home/ui/HomeView";
@@ -6,15 +5,11 @@ import { HomeView } from "@/features/home/ui/HomeView";
 type HomeScreenProps = {
   availableChannelIds: ReadonlySet<string>;
   currentPubkey?: string;
-  onOpenFeedItem: (item: FeedItem) => void;
-  onOpenPulse: () => void;
 };
 
 export function HomeScreen({
   availableChannelIds,
   currentPubkey,
-  onOpenFeedItem,
-  onOpenPulse,
 }: HomeScreenProps) {
   const homeFeedQuery = useHomeFeedQuery();
 
@@ -38,8 +33,6 @@ export function HomeScreen({
           }
           feed={homeFeedQuery.data}
           isLoading={homeFeedQuery.isLoading}
-          onOpenFeedItem={onOpenFeedItem}
-          onOpenPulse={onOpenPulse}
           onRefresh={() => {
             void homeFeedQuery.refetch();
           }}

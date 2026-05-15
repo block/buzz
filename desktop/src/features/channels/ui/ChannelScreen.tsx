@@ -16,6 +16,7 @@ import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
 import {
   useManagedAgentsQuery,
   usePersonasQuery,
+  useRelayAgentsQuery,
 } from "@/features/agents/hooks";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import {
@@ -32,12 +33,10 @@ import {
   formatTimelineMessages,
 } from "@/features/messages/lib/formatTimelineMessages";
 import { buildThreadPanelData } from "@/features/messages/lib/threadPanel";
+import type { TimelineMessage } from "@/features/messages/types";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
-import {
-  type TypingIndicatorEntry,
-  useChannelTyping,
-} from "@/features/messages/useChannelTyping";
+import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import type {
@@ -45,11 +44,16 @@ import type {
   Identity,
   Profile,
   RelayEvent,
+  RespondToMode,
 } from "@/shared/api/types";
 import { useChannelFind } from "@/features/search/useChannelFind";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 import { AgentSessionProvider } from "@/shared/context/AgentSessionContext";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
+import {
+  mergeAgentNamesIntoProfiles,
+  useChannelActivityTyping,
+} from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 type ChannelScreenProps = {
@@ -75,7 +79,8 @@ export function ChannelScreen({
   targetMessageEvent,
   targetMessageId,
 }: ChannelScreenProps) {
-  const { markChannelRead, openChannelManagement } = useAppShell();
+  const { markChannelRead, markChannelUnread, openChannelManagement } =
+    useAppShell();
   const [profilePanelPubkey, setProfilePanelPubkey] = React.useState<
     string | null
   >(null);
@@ -112,7 +117,6 @@ export function ChannelScreen({
 
     markChannelRead(activeChannelId, activeReadAt);
   }, [activeChannel?.isMember, activeChannelId, activeReadAt, markChannelRead]);
-
   const {
     activeChannelTitle,
     activeDmPresenceStatus,
@@ -145,13 +149,6 @@ export function ChannelScreen({
     currentPubkey,
     latestMessageEvent,
   );
-  const threadTypingPubkeys = React.useMemo(
-    () =>
-      typingEntries
-        .filter((entry) => entry.threadHeadId === openThreadHeadId)
-        .map((entry) => entry.pubkey),
-    [openThreadHeadId, typingEntries],
-  );
   const messageProfilePubkeys = React.useMemo(
     () => [
       ...new Set([
@@ -164,74 +161,55 @@ export function ChannelScreen({
   const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
     enabled: messageProfilePubkeys.length > 0,
   });
+  const channelMembersQuery = useChannelMembersQuery(activeChannel?.id ?? null);
+  const channelMembers = channelMembersQuery.data;
   const managedAgentsQuery = useManagedAgentsQuery();
-  useManagedAgentObserverBridge(managedAgentsQuery.data ?? []);
-  const { botTypingEntries, humanTypingPubkeys } = React.useMemo<{
-    botTypingEntries: TypingIndicatorEntry[];
-    humanTypingPubkeys: string[];
-  }>(() => {
-    const localAgentSet = new Set(
-      (managedAgentsQuery.data ?? [])
-        .filter((agent) => agent.backend.type === "local")
-        .map((agent) => agent.pubkey.toLowerCase()),
-    );
-    const channelTypingEntries = typingEntries.filter(
-      (entry) => entry.threadHeadId === null,
-    );
-    const agentTypingEntries = typingEntries.filter((entry) =>
-      localAgentSet.has(entry.pubkey.toLowerCase()),
-    );
-    return {
-      botTypingEntries: agentTypingEntries,
-      humanTypingPubkeys: channelTypingEntries
-        .filter((entry) => !localAgentSet.has(entry.pubkey.toLowerCase()))
-        .map((entry) => entry.pubkey),
-    };
-  }, [managedAgentsQuery.data, typingEntries]);
+  const managedAgents = managedAgentsQuery.data ?? [];
+  const relayAgentsQuery = useRelayAgentsQuery();
+  const relayAgents = relayAgentsQuery.data ?? [];
+  const {
+    botTypingEntries,
+    channelAgentSessionAgents: activeChannelAgentSessionAgents,
+    humanTypingPubkeys,
+    threadTypingPubkeys,
+  } = useChannelActivityTyping({
+    activeChannel,
+    activeChannelId,
+    channelMembers,
+    managedAgents,
+    openThreadHeadId,
+    relayAgents,
+    typingEntries,
+  });
+  useManagedAgentObserverBridge(activeChannelAgentSessionAgents);
   const messageProfiles = React.useMemo(() => {
     const base =
       mergeCurrentProfileIntoLookup(
         messageProfilesQuery.data?.profiles,
         currentProfile,
       ) ?? {};
-    // Merge managed agent names so system messages resolve instantly
-    // (without waiting for the relay profile batch query).
-    const agents = managedAgentsQuery.data ?? [];
-    const merged = { ...base };
-    for (const agent of agents) {
-      const key = agent.pubkey.toLowerCase();
-      if (!merged[key]?.displayName) {
-        merged[key] = {
-          ...merged[key],
-          displayName: agent.name,
-          avatarUrl: null,
-          nip05Handle: null,
-        };
-      }
-    }
-    return merged;
+    return mergeAgentNamesIntoProfiles(base, managedAgents, relayAgents);
   }, [
     currentProfile,
-    managedAgentsQuery.data,
+    managedAgents,
     messageProfilesQuery.data?.profiles,
+    relayAgents,
   ]);
-  const channelMembersQuery = useChannelMembersQuery(activeChannel?.id ?? null);
-  const channelMembers = channelMembersQuery.data;
   const personasQuery = usePersonasQuery();
-  const personaLookup = React.useMemo(() => {
+  const { personaLookup, respondToLookup } = React.useMemo(() => {
     const agents = managedAgentsQuery.data ?? [];
-    const personas = personasQuery.data ?? [];
-    const personaById = new Map(personas.map((p) => [p.id, p.displayName]));
-    const lookup = new Map<string, string>();
+    const personaById = new Map(
+      (personasQuery.data ?? []).map((p) => [p.id, p.displayName]),
+    );
+    const pLookup = new Map<string, string>();
+    const rLookup = new Map<string, RespondToMode>();
     for (const agent of agents) {
-      if (agent.personaId) {
-        const personaName = personaById.get(agent.personaId);
-        if (personaName) {
-          lookup.set(agent.pubkey.toLowerCase(), personaName);
-        }
-      }
+      const key = agent.pubkey.toLowerCase();
+      rLookup.set(key, agent.respondTo);
+      const pName = agent.personaId ? personaById.get(agent.personaId) : null;
+      if (pName) pLookup.set(key, pName);
     }
-    return lookup;
+    return { personaLookup: pLookup, respondToLookup: rLookup };
   }, [managedAgentsQuery.data, personasQuery.data]);
   const timelineMessages = React.useMemo(
     () =>
@@ -243,6 +221,7 @@ export function ChannelScreen({
         messageProfiles,
         channelMembers,
         personaLookup,
+        respondToLookup,
       ),
     [
       activeChannel,
@@ -251,6 +230,7 @@ export function ChannelScreen({
       currentPubkey,
       messageProfiles,
       personaLookup,
+      respondToLookup,
       resolvedMessages,
     ],
   );
@@ -258,7 +238,6 @@ export function ChannelScreen({
     channelId: activeChannelId,
     messages: timelineMessages,
   });
-
   const directReplyIdsByParentId = React.useMemo(() => {
     const map = new Map<string, string[]>();
     for (const message of timelineMessages) {
@@ -353,6 +332,16 @@ export function ChannelScreen({
         : undefined,
     [activeChannel, handleToggleReaction],
   );
+
+  const handleMarkUnread = React.useCallback(
+    (message: TimelineMessage) => {
+      if (!activeChannelId) return;
+      const messageIso = new Date(message.createdAt * 1_000).toISOString();
+      markChannelUnread(activeChannelId, messageIso);
+    },
+    [activeChannelId, markChannelUnread],
+  );
+
   const {
     channelAgentSessionAgents,
     closeAgentSession: handleCloseAgentSession,
@@ -364,7 +353,7 @@ export function ChannelScreen({
     activeChannelId,
     channelMembers,
     handleOpenThread,
-    managedAgents: managedAgentsQuery.data ?? [],
+    managedAgents: activeChannelAgentSessionAgents,
     setExpandedThreadReplyIds,
     setOpenThreadHeadId,
     setProfilePanelPubkey,
@@ -500,6 +489,7 @@ export function ChannelScreen({
                   onEditSave={
                     activeChannel?.archivedAt ? undefined : handleEditSave
                   }
+                  onMarkUnread={handleMarkUnread}
                   onExpandThreadReplies={handleExpandThreadReplies}
                   onOpenAgentSession={handleOpenAgentSession}
                   onOpenDm={handleOpenDm}

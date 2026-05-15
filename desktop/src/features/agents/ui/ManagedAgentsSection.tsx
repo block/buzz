@@ -1,4 +1,11 @@
-import { Ellipsis, OctagonX, Trash2 } from "lucide-react";
+import * as React from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Ellipsis,
+  OctagonX,
+  Trash2,
+} from "lucide-react";
 
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
@@ -14,6 +21,61 @@ import {
 import { Skeleton } from "@/shared/ui/skeleton";
 import { CreateNewButton } from "./CreateNewButton";
 import { ManagedAgentRow } from "./ManagedAgentRow";
+
+type PersonaGroup = {
+  key: string;
+  label: string;
+  agents: ManagedAgent[];
+};
+
+function groupAgentsByPersona(
+  agents: ManagedAgent[],
+  personaLabelsById: Record<string, string>,
+): PersonaGroup[] {
+  const grouped = new Map<string, ManagedAgent[]>();
+  const ungrouped: ManagedAgent[] = [];
+  const unknownPersona: ManagedAgent[] = [];
+
+  for (const agent of agents) {
+    if (!agent.personaId) {
+      ungrouped.push(agent);
+    } else if (personaLabelsById[agent.personaId]) {
+      const existing = grouped.get(agent.personaId) ?? [];
+      existing.push(agent);
+      grouped.set(agent.personaId, existing);
+    } else {
+      unknownPersona.push(agent);
+    }
+  }
+
+  const groups: PersonaGroup[] = [];
+
+  for (const [personaId, groupAgents] of grouped) {
+    groups.push({
+      key: personaId,
+      label: personaLabelsById[personaId],
+      agents: groupAgents,
+    });
+  }
+
+  if (unknownPersona.length > 0) {
+    groups.push({
+      key: "__unknown__",
+      label: "Unknown Persona",
+      agents: unknownPersona,
+    });
+  }
+
+  if (ungrouped.length > 0) {
+    groups.push({
+      key: "__ungrouped__",
+      label: "Custom Agents",
+      agents: ungrouped,
+    });
+  }
+
+  return groups;
+}
 
 export function ManagedAgentsSection({
   actionErrorMessage,
@@ -68,6 +130,27 @@ export function ManagedAgentsSection({
   const stoppedCount = agents.filter(
     (a) => a.status === "stopped" || a.status === "not_deployed",
   ).length;
+
+  const groups = React.useMemo(
+    () => groupAgentsByPersona(agents, personaLabelsById),
+    [agents, personaLabelsById],
+  );
+
+  const [collapsedGroups, setCollapsedGroups] = React.useState<Set<string>>(
+    new Set(),
+  );
+
+  function toggleGroup(key: string) {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }
 
   useFeedbackToasts(actionNoticeMessage, actionErrorMessage);
 
@@ -154,32 +237,64 @@ export function ManagedAgentsSection({
       ) : null}
 
       {!isLoading && agents.length > 0 ? (
-        <div className="space-y-2" data-testid="managed-agents-table">
-          {agents.map((agent) => (
-            <ManagedAgentRow
-              agent={agent}
-              channelNames={channelsByPubkey[agent.pubkey] ?? []}
-              isActionPending={isActionPending}
-              isLogSelected={selectedLogAgentPubkey === agent.pubkey}
-              key={agent.pubkey}
-              logContent={
-                selectedLogAgentPubkey === agent.pubkey ? logContent : null
-              }
-              logError={
-                selectedLogAgentPubkey === agent.pubkey ? logError : null
-              }
-              logLoading={selectedLogAgentPubkey === agent.pubkey && logLoading}
-              personaLabelsById={personaLabelsById}
-              presenceLoaded={presenceLoaded}
-              presenceLookup={presenceLookup}
-              onAddToChannel={onAddToChannel}
-              onDelete={onDelete}
-              onSelectLogAgent={onSelectLogAgent}
-              onStart={onStart}
-              onStop={onStop}
-              onToggleStartOnAppLaunch={onToggleStartOnAppLaunch}
-            />
-          ))}
+        <div className="space-y-3" data-testid="managed-agents-table">
+          {groups.map((group) => {
+            const isCollapsed = collapsedGroups.has(group.key);
+            return (
+              <div key={group.key} className="space-y-2">
+                <button
+                  className="flex w-full items-center gap-2 rounded-lg px-1 py-1 text-left transition-colors hover:bg-muted/40"
+                  onClick={() => toggleGroup(group.key)}
+                  type="button"
+                >
+                  {isCollapsed ? (
+                    <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  )}
+                  <span className="text-sm font-medium">{group.label}</span>
+                  <span className="text-xs text-muted-foreground">
+                    ({group.agents.length})
+                  </span>
+                </button>
+                {!isCollapsed ? (
+                  <div className="space-y-2">
+                    {group.agents.map((agent) => (
+                      <ManagedAgentRow
+                        agent={agent}
+                        channelNames={channelsByPubkey[agent.pubkey] ?? []}
+                        isActionPending={isActionPending}
+                        isLogSelected={selectedLogAgentPubkey === agent.pubkey}
+                        key={agent.pubkey}
+                        logContent={
+                          selectedLogAgentPubkey === agent.pubkey
+                            ? logContent
+                            : null
+                        }
+                        logError={
+                          selectedLogAgentPubkey === agent.pubkey
+                            ? logError
+                            : null
+                        }
+                        logLoading={
+                          selectedLogAgentPubkey === agent.pubkey && logLoading
+                        }
+                        personaLabelsById={personaLabelsById}
+                        presenceLoaded={presenceLoaded}
+                        presenceLookup={presenceLookup}
+                        onAddToChannel={onAddToChannel}
+                        onDelete={onDelete}
+                        onSelectLogAgent={onSelectLogAgent}
+                        onStart={onStart}
+                        onStop={onStop}
+                        onToggleStartOnAppLaunch={onToggleStartOnAppLaunch}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       ) : null}
 

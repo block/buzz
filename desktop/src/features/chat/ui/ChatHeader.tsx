@@ -5,20 +5,21 @@ import {
   FileText,
   FolderGit2,
   Hash,
-  Home,
+  House,
   Lock,
   Zap,
 } from "lucide-react";
 import type * as React from "react";
 
 import type { ChannelType, ChannelVisibility } from "@/shared/api/types";
+import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import { cn } from "@/shared/lib/cn";
 import { useSidebar } from "@/shared/ui/sidebar";
 
 type ChatHeaderProps = {
   actions?: React.ReactNode;
   title: string;
-  description: string;
+  description?: string;
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
   mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
@@ -26,7 +27,7 @@ type ChatHeaderProps = {
   statusBadge?: React.ReactNode;
 };
 
-const HEADER_ICON_CLASS = "h-3.5 w-3.5 text-muted-foreground";
+const HEADER_ICON_CLASS = "h-[14px] w-[14px] text-muted-foreground";
 
 function ChannelIcon({
   channelType,
@@ -38,7 +39,7 @@ function ChannelIcon({
   mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
 }) {
   if (mode === "home") {
-    return <Home className={HEADER_ICON_CLASS} />;
+    return <House className={HEADER_ICON_CLASS} />;
   }
 
   if (mode === "agents") {
@@ -82,22 +83,22 @@ export function ChatHeader({
   overlaysContent = false,
   statusBadge,
 }: ChatHeaderProps) {
-  const trimmedDescription = description.trim();
+  const trimmedDescription = description?.trim() ?? "";
   const { state: sidebarState } = useSidebar();
   const reserveGlobalControls = sidebarState === "collapsed";
 
   return (
     <header
       className={cn(
-        "relative z-30 flex min-h-11 min-w-0 shrink-0 cursor-default select-none items-center gap-2.5 bg-background/70 py-1.5 pl-4 pr-2 shadow-[0_4px_24px_rgba(0,0,0,0.06)] backdrop-blur-xl transition-[margin,padding] duration-200 ease-linear supports-[backdrop-filter]:bg-background/55 dark:shadow-[0_4px_24px_rgba(0,0,0,0.25)] sm:pl-6 sm:pr-3",
-        overlaysContent && "-mb-11",
-        reserveGlobalControls && "md:pl-40",
+        "relative z-30 flex min-h-[44px] min-w-0 shrink-0 cursor-default select-none items-center gap-[10px] bg-background/70 py-[6px] pl-[16px] pr-[8px] backdrop-blur-xl transition-[margin,padding] duration-200 ease-linear supports-[backdrop-filter]:bg-background/55 sm:pl-[24px] sm:pr-[12px]",
+        overlaysContent && "-mb-[44px]",
+        reserveGlobalControls && "md:pl-[160px]",
       )}
       data-testid="chat-header"
       data-tauri-drag-region
     >
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 flex-wrap items-center gap-1">
+        <div className="flex min-w-0 flex-wrap items-center gap-[4px]">
           <ChannelIcon
             channelType={channelType}
             mode={mode}
@@ -118,7 +119,10 @@ export function ChatHeader({
         </div>
       </div>
 
-      {actions ? <div className="shrink-0">{actions}</div> : null}
+      <div className="flex shrink-0 items-center gap-1">
+        <UpdateIndicator />
+        {actions ? <div className="shrink-0">{actions}</div> : null}
+      </div>
     </header>
   );
 }

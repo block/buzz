@@ -62,22 +62,17 @@ export class ReadStateManager {
 
   // Last-published blob content (for diff to suppress no-op publishes)
   private lastPublishedContexts: Record<string, number> = {};
-
-  // Debounce timer
   private debounceTimer: number | null = null;
-
-  // Subscribers for React integration
   private listeners = new Set<() => void>();
-
-  // Live subscription teardown
   private unsubscribeLive: (() => void) | null = null;
-
-  // Track whether we've initialized
   private initialized = false;
 
   // Track the max created_at seen from fetched blobs so publishes can satisfy
   // NIP-RS clock-skew monotonicity for our d-tag coordinate.
   private maxFetchedCreatedAt = 0;
+
+  // Contexts rolled back by mark-unread, protected from merge until next publish.
+  private forcedContexts = new Set<string>();
 
   constructor(pubkey: string, relayClient: RelayClient) {
     this.pubkey = pubkey;
@@ -111,6 +106,19 @@ export class ReadStateManager {
 
   seedContextRead(contextId: string, unixTimestamp: number): void {
     this.advanceContext(contextId, unixTimestamp, { publishable: false });
+  }
+
+  markContextUnread(contextId: string, lastMessageUnix: number): void {
+    // Roll back the read timestamp to just before the last message so the
+    // channel appears unread. This is published via NIP-RS and syncs across
+    // devices.
+    const rollbackTo = lastMessageUnix - 1;
+    this.effectiveState.set(contextId, rollbackTo);
+    this.publishableContextIds.add(contextId);
+    this.forcedContexts.add(contextId);
+    this.persistLocalState();
+    this.notifyListeners();
+    this.schedulePublish();
   }
 
   private advanceContext(
@@ -230,6 +238,7 @@ export class ReadStateManager {
 
       // Merge into effective state
       for (const [ctx, ts] of Object.entries(blob.contexts)) {
+        if (this.forcedContexts.has(ctx)) continue;
         const current = this.effectiveState.get(ctx) ?? 0;
         if (ts > current) {
           this.effectiveState.set(ctx, ts);
@@ -331,6 +340,7 @@ export class ReadStateManager {
     // Merge into effective state
     let anyAdvanced = false;
     for (const [ctx, ts] of Object.entries(blob.contexts)) {
+      if (this.forcedContexts.has(ctx)) continue;
       const current = this.effectiveState.get(ctx) ?? 0;
       if (ts > current) {
         this.effectiveState.set(ctx, ts);
@@ -404,6 +414,7 @@ export class ReadStateManager {
       );
 
       this.lastPublishedContexts = contexts;
+      this.forcedContexts.clear();
       this.maxFetchedCreatedAt = Math.max(
         this.maxFetchedCreatedAt,
         event.created_at,

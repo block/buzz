@@ -82,6 +82,12 @@ export function useChannelTyping(
       return;
     }
 
+    const now = Date.now();
+    const eventExpiresAt = event.created_at * 1_000 + TYPING_INDICATOR_TTL_MS;
+    if (eventExpiresAt <= now) {
+      return;
+    }
+
     if (getChannelIdFromTags(event.tags) !== channelId) {
       return;
     }
@@ -108,14 +114,13 @@ export function useChannelTyping(
       return;
     }
 
-    const now = Date.now();
     setTypingByPubkey((current) => {
       const pruned = pruneTypingState(current, now);
       const existing = pruned[typingKey];
       return {
         ...pruned,
         [typingKey]: {
-          expiresAt: now + TYPING_INDICATOR_TTL_MS,
+          expiresAt: Math.min(now + TYPING_INDICATOR_TTL_MS, eventExpiresAt),
           firstSeenAt: existing?.firstSeenAt ?? now,
           pubkey: typingPubkey,
           threadHeadId,

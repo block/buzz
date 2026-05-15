@@ -17,6 +17,7 @@ import type {
   BackendProviderCandidate,
   BackendProviderProbeResult,
   ManagedAgentBackend,
+  RespondToMode,
 } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import { Dialog } from "@/shared/ui/dialog";
@@ -39,6 +40,7 @@ import {
 import { getActivePersonas } from "@/features/agents/lib/catalog";
 import { getUsableTeams } from "@/features/agents/lib/teamPersonas";
 import { useLastRuntimeProvider } from "@/features/agents/lib/useLastRuntimeProvider";
+import { CreateAgentRespondToField } from "@/features/agents/ui/RespondToField";
 
 type AddChannelBotDialogProps = {
   backendProviders?: BackendProviderCandidate[];
@@ -128,6 +130,10 @@ export function AddChannelBotDialog({
   );
   const [submissionError, setSubmissionError] = React.useState<string | null>(
     null,
+  );
+  const [respondTo, setRespondTo] = React.useState<RespondToMode>("owner-only");
+  const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
+    [],
   );
 
   const resolvedBackendProviders = backendProviders ?? [];
@@ -264,6 +270,8 @@ export function AddChannelBotDialog({
     setProviderConfig({});
     setProbedProvider(null);
     setProbeError(null);
+    setRespondTo("owner-only");
+    setRespondToAllowlist([]);
     createBotsMutation.reset();
   }
 
@@ -313,6 +321,15 @@ export function AddChannelBotDialog({
         }
       : { type: "local" };
 
+    const respondToFields =
+      respondTo !== "owner-only"
+        ? {
+            respondTo,
+            respondToAllowlist:
+              respondTo === "allowlist" ? respondToAllowlist : undefined,
+          }
+        : {};
+
     const inputs = [
       ...(includeGeneric
         ? [
@@ -322,6 +339,7 @@ export function AddChannelBotDialog({
               systemPrompt: customPrompt,
               role: "bot" as const,
               backend,
+              ...respondToFields,
             },
           ]
         : []),
@@ -340,6 +358,7 @@ export function AddChannelBotDialog({
           model: persona.model ?? undefined,
           role: "bot" as const,
           backend,
+          ...respondToFields,
         };
       }),
     ];
@@ -384,10 +403,17 @@ export function AddChannelBotDialog({
     }
   }
 
+  // Allowlist mode requires at least one entry, mirroring the harness's own
+  // validation. If we let it through empty, the agent crash-loops at startup
+  // with a config error.
+  const respondToValid =
+    respondTo !== "allowlist" || respondToAllowlist.length > 0;
+
   const canSubmit =
     selectedProvider !== null &&
     selectedCount > 0 &&
     (!includeGeneric || customName.trim().length > 0) &&
+    respondToValid &&
     !(isProviderMode && !probedProvider) &&
     providerConfigComplete &&
     !providersLoading &&
@@ -565,6 +591,16 @@ export function AddChannelBotDialog({
             }}
             onPromptChange={setCustomPrompt}
             prompt={customPrompt}
+          />
+        ) : null}
+
+        {selectedCount > 0 ? (
+          <CreateAgentRespondToField
+            allowlist={respondToAllowlist}
+            disabled={createBotsMutation.isPending}
+            mode={respondTo}
+            onAllowlistChange={setRespondToAllowlist}
+            onModeChange={setRespondTo}
           />
         ) : null}
 

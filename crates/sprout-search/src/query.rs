@@ -59,7 +59,21 @@ impl SearchQuery {
 pub struct SearchHit {
     /// Hex event ID of the matching event.
     pub event_id: String,
-    /// Event content text.
+    /// Event content text **as indexed in Typesense** — not necessarily the
+    /// canonical event content.
+    ///
+    /// For kind:0 (user metadata) events, `flatten_kind0_for_indexing` in
+    /// `index.rs` appends the parsed `display_name` / `name` / `nip05` values
+    /// to the original JSON content (space-separated) so the default
+    /// tokenizer can produce clean word tokens. That doctored string is what
+    /// lands here.
+    ///
+    /// All production read paths (`bridge.rs::handle_bridge_search`,
+    /// `handlers/req.rs` WS REQ) refetch the canonical `StoredEvent` from
+    /// Postgres by `event_id` and ignore this field — which is why the
+    /// append-to-content trick is safe. If you're adding a new feature that
+    /// reads this field directly, do the same: fetch the canonical event by
+    /// id rather than trusting `content` to round-trip.
     pub content: String,
     /// Nostr kind number.
     pub kind: u16,

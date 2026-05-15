@@ -105,73 +105,32 @@ fn find_root_from_tags(tags: &serde_json::Value) -> Option<String> {
 /// Maximum allowed content size for a single message (64 KiB).
 const MAX_CONTENT_BYTES: usize = 65_536;
 
-/// Extract @mention names from message content.
-/// Returns lowercased names found after `@` tokens.
-/// Only matches `@word` preceded by whitespace or start-of-string.
-/// Characters allowed in names: alphanumeric, `.`, `-`, `_`.
-fn extract_at_names(content: &str) -> Vec<String> {
-    if content.is_empty() || !content.contains('@') {
-        return vec![];
-    }
-    let mut names: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let chars: Vec<char> = content.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-    while i < len {
-        if chars[i] == '@' {
-            // Must be at start-of-string or preceded by whitespace
-            let preceded_by_ws = i == 0 || chars[i - 1].is_ascii_whitespace();
-            if preceded_by_ws && i + 1 < len {
-                // Capture the name token: [a-zA-Z0-9._-]+
-                let start = i + 1;
-                let mut end = start;
-                while end < len {
-                    let c = chars[end];
-                    if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                        end += 1;
-                    } else {
-                        break;
-                    }
-                }
-                if end > start {
-                    let name: String = chars[start..end].iter().collect();
-                    let lower = name.to_ascii_lowercase();
-                    if seen.insert(lower.clone()) {
-                        names.push(lower);
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    names
-}
-
-/// Resolve @names in content against channel members.
-/// Returns matching pubkeys. On any error, returns empty vec — never blocks a send.
+/// Resolve `@name` mentions in `content` against this channel's members.
+///
+/// Performs the I/O (member + profile queries) and delegates parsing
+/// and matching to [`sprout_sdk::mentions`]. On any query failure or
+/// missing data, returns an empty vec — auto-tagging is best-effort
+/// and must never block a send.
 async fn resolve_content_mentions(
     client: &RelayClient,
     channel_id: &str,
     content: &str,
 ) -> Vec<String> {
-    let names = extract_at_names(content);
+    let names = sprout_sdk::mentions::extract_at_names(content);
     if names.is_empty() {
         return vec![];
     }
-    // Query membership list (kind:39002) for this channel.
+    // Query channel membership (kind 39002, addressed by `d` tag).
     let filter = Filter::new()
         .kind(k(kind::KIND_NIP29_GROUP_MEMBERS))
         .custom_tag(tag_d(), [channel_id])
         .limit(1);
-    let events = match client.query(vec![filter]).await {
-        Ok(e) => e,
-        Err(_) => return vec![],
+    let Ok(events) = client.query(vec![filter]).await else {
+        return vec![];
     };
     let Some(event) = events.first() else {
         return vec![];
     };
-    // Members are in p-tags. We need profiles to match display names.
     let member_pubkeys: Vec<&str> = event
         .tags
         .iter()
@@ -181,7 +140,7 @@ async fn resolve_content_mentions(
     if member_pubkeys.is_empty() {
         return vec![];
     }
-    // Fetch profiles for members.
+    // Fetch profiles for those members.
     let authors: Vec<nostr::PublicKey> = member_pubkeys
         .iter()
         .filter_map(|pk| nostr::PublicKey::from_hex(pk).ok())
@@ -190,25 +149,20 @@ async fn resolve_content_mentions(
         .kind(k(kind::KIND_PROFILE))
         .authors(authors)
         .limit(member_pubkeys.len());
-    let profiles = match client.query(vec![profile_filter]).await {
-        Ok(e) => e,
-        Err(_) => return vec![],
+    let Ok(profiles) = client.query(vec![profile_filter]).await else {
+        return vec![];
     };
-    let mut pubkeys = Vec::new();
-    for profile in &profiles {
-        let Ok(content) = serde_json::from_str::<serde_json::Value>(&profile.content) else {
-            continue;
-        };
-        let display_name = content
-            .get("display_name")
-            .or_else(|| content.get("name"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if names.iter().any(|n| n.eq_ignore_ascii_case(display_name)) {
-            pubkeys.push(profile.pubkey.to_hex());
-        }
-    }
-    pubkeys
+    // Stable lowercase-hex strings for borrowing into MentionProfile.
+    let hex_pubkeys: Vec<String> = profiles.iter().map(|p| p.pubkey.to_hex()).collect();
+    let entries: Vec<sprout_sdk::mentions::MentionProfile<'_>> = profiles
+        .iter()
+        .zip(hex_pubkeys.iter())
+        .map(|(p, pk)| sprout_sdk::mentions::MentionProfile {
+            pubkey: pk.as_str(),
+            content_json: p.content.as_str(),
+        })
+        .collect();
+    sprout_sdk::mentions::match_names_to_profiles(&names, &entries)
 }
 
 /// Parameters for the `send_message` tool.
@@ -978,30 +932,16 @@ Default kind is 9 (stream message)."
         let kind_num = p
             .kind
             .unwrap_or(sprout_core::kind::KIND_STREAM_MESSAGE as u16);
-        // Collect explicit pubkeys, dedup case-insensitively.
-        let mut seen = std::collections::HashSet::new();
-        let mut mentions: Vec<String> = p
-            .mention_pubkeys
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .map(|s| s.to_ascii_lowercase())
-            .filter(|s| seen.insert(s.clone()))
-            .collect();
-
-        // Auto-resolve @names in content and merge, up to SDK cap of 50.
+        // Normalize explicit mentions, then merge auto-resolved `@names` from
+        // the body up to the SDK mention cap.
+        let explicit = p.mention_pubkeys.as_deref().unwrap_or(&[]);
+        let mut mentions = sprout_sdk::mentions::normalize_mention_pubkeys(explicit, None);
         let auto = resolve_content_mentions(&self.client, &p.channel_id, &p.content).await;
-        let budget = 50usize.saturating_sub(mentions.len());
-        let mut added = 0usize;
-        for pk in &auto {
-            if added >= budget {
-                break;
-            }
-            if !mentions.contains(pk) {
-                mentions.push(pk.clone());
-                added += 1;
-            }
-        }
+        sprout_sdk::mentions::merge_mentions(
+            &mut mentions,
+            &auto,
+            sprout_sdk::mentions::MENTION_CAP,
+        );
 
         let mention_refs: Vec<&str> = mentions.iter().map(String::as_str).collect();
         let broadcast = p.broadcast_to_channel.unwrap_or(false);
@@ -3269,33 +3209,9 @@ mod tests {
         assert!(matches!(parsed.direction, VoteDirection::Up));
     }
 
-    // ── extract_at_names ──────────────────────────────────────────────────────
-
-    #[test]
-    fn extract_at_names_matches() {
-        // basic, start-of-string, dedup, newline, dots/hyphens/underscores
-        assert_eq!(extract_at_names("Hello @Tyler"), vec!["tyler"]);
-        assert_eq!(extract_at_names("@Tyler are you there?"), vec!["tyler"]);
-        assert_eq!(
-            extract_at_names("Hey @Alice and @alice, meet @Bob"),
-            vec!["alice", "bob"]
-        );
-        assert_eq!(extract_at_names("first line\n@Tyler second"), vec!["tyler"]);
-        assert_eq!(
-            extract_at_names("@john.doe @mary_jane @bob-smith"),
-            vec!["john.doe", "mary_jane", "bob-smith"]
-        );
-    }
-
-    #[test]
-    fn extract_at_names_rejects() {
-        // empty, no @, email, bare @, @ at EOF
-        assert!(extract_at_names("").is_empty());
-        assert!(extract_at_names("no mentions").is_empty());
-        assert!(extract_at_names("user@example.com").is_empty());
-        assert!(extract_at_names("hello @ world").is_empty());
-        assert!(extract_at_names("hello @").is_empty());
-    }
+    // Note: `extract_at_names` is now exercised by `sprout-sdk::mentions`
+    // tests. The MCP-side I/O wrapper around it (`resolve_content_mentions`)
+    // is covered by integration tests against a running relay.
 }
 
 #[cfg(test)]

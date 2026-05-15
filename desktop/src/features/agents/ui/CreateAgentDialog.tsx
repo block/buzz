@@ -12,6 +12,7 @@ import type {
   BackendProviderProbeResult,
   CreateManagedAgentInput,
   CreateManagedAgentResponse,
+  RespondToMode,
 } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
@@ -27,10 +28,12 @@ import {
   CreateAgentRuntimeProviderField,
   CreateAgentRuntimeFields,
 } from "./CreateAgentDialogSections";
+import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import {
   coerceConfigValues,
   ProviderConfigFields,
 } from "./ProviderConfigFields";
+import { CreateAgentRespondToField } from "./RespondToField";
 import { useLastRuntimeProvider } from "@/features/agents/lib/useLastRuntimeProvider";
 
 // ── Dialog ────────────────────────────────────────────────────────────────────
@@ -61,11 +64,16 @@ export function CreateAgentDialog({
   const [turnTimeoutSeconds, setTurnTimeoutSeconds] = React.useState("320");
   const [parallelism, setParallelism] = React.useState("3");
   const [systemPrompt, setSystemPrompt] = React.useState("");
+  const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
   const [selectedProviderId, setSelectedProviderId] =
     React.useState<string>("custom");
   const [hasSyncedProviderSelection, setHasSyncedProviderSelection] =
     React.useState(false);
   const [showAdvanced, setShowAdvanced] = React.useState(false);
+  const [respondTo, setRespondTo] = React.useState<RespondToMode>("owner-only");
+  const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
+    [],
+  );
 
   // ── Backend provider ("Run on") state ──────────────────────────────────────
   const [runOn, setRunOn] = React.useState<"local" | string>("local");
@@ -206,6 +214,7 @@ export function CreateAgentDialog({
     setTurnTimeoutSeconds("320");
     setParallelism("3");
     setSystemPrompt("");
+    setEnvVars({});
     setSelectedProviderId("custom");
     setHasSyncedProviderSelection(false);
     setShowAdvanced(false);
@@ -213,6 +222,8 @@ export function CreateAgentDialog({
     setProviderConfig({});
     setProbedProvider(null);
     setProbeError(null);
+    setRespondTo("owner-only");
+    setRespondToAllowlist([]);
     createMutation.reset();
   }
 
@@ -262,6 +273,12 @@ export function CreateAgentDialog({
     );
   }, [isProviderMode, probedProvider, providerConfig]);
 
+  // Allowlist mode requires at least one entry, mirroring the harness's own
+  // validation. If we let it through empty, the agent crash-loops at startup
+  // with a config error.
+  const respondToValid =
+    respondTo !== "allowlist" || respondToAllowlist.length > 0;
+
   const canSubmit =
     name.trim().length > 0 &&
     !isDiscoveryPending &&
@@ -275,10 +292,20 @@ export function CreateAgentDialog({
     // fields and config schema are only known after a successful probe.
     !(isProviderMode && !probedProvider) &&
     providerConfigComplete &&
+    respondToValid &&
     !createMutation.isPending;
 
   async function handleSubmit() {
     try {
+      // Only send the allowlist when the mode is actually "allowlist".
+      // Other modes ignore it server-side, but keeping the wire clean makes
+      // the agent record easier to inspect.
+      const respondToFields = {
+        respondTo,
+        respondToAllowlist:
+          respondTo === "allowlist" ? respondToAllowlist : undefined,
+      } as const;
+
       const input: CreateManagedAgentInput = isProviderMode
         ? {
             name: name.trim(),
@@ -292,6 +319,7 @@ export function CreateAgentDialog({
                 ? Number.parseInt(parallelism, 10)
                 : undefined,
             systemPrompt: systemPrompt.trim() || undefined,
+            envVars,
             spawnAfterCreate: true,
             startOnAppLaunch: false, // Remote agents don't auto-start with the desktop
             backend: {
@@ -302,6 +330,7 @@ export function CreateAgentDialog({
                 probedProvider?.config_schema,
               ),
             },
+            ...respondToFields,
           }
         : {
             name: name.trim(),
@@ -323,9 +352,11 @@ export function CreateAgentDialog({
                 ? Number.parseInt(parallelism, 10)
                 : undefined,
             systemPrompt: systemPrompt.trim() || undefined,
+            envVars,
             spawnAfterCreate,
             startOnAppLaunch,
             backend: { type: "local" },
+            ...respondToFields,
           };
 
       const created = await createMutation.mutateAsync(input);
@@ -432,6 +463,13 @@ export function CreateAgentDialog({
               spawnToggleDisabled={isProviderMode || spawnToggleDisabled}
             />
 
+            <CreateAgentRespondToField
+              allowlist={respondToAllowlist}
+              mode={respondTo}
+              onAllowlistChange={setRespondToAllowlist}
+              onModeChange={setRespondTo}
+            />
+
             <div className="rounded-2xl border border-border/70 bg-muted/20">
               <button
                 aria-expanded={showAdvanced}
@@ -500,6 +538,13 @@ export function CreateAgentDialog({
                 </div>
               ) : null}
             </div>
+
+            <EnvVarsEditor
+              disabled={createMutation.isPending}
+              helperText="Injected at spawn. Overrides the persona's env vars on collision."
+              onChange={setEnvVars}
+              value={envVars}
+            />
 
             {createMutation.error instanceof Error ? (
               <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">

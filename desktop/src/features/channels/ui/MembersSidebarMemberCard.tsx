@@ -1,6 +1,7 @@
 import {
   Activity,
   Ellipsis,
+  Pencil,
   Play,
   RotateCcw,
   Shield,
@@ -43,6 +44,7 @@ type MembersSidebarMemberCardProps = {
   memberIsBot: boolean;
   memberLabel: string;
   onChangeRole: (member: ChannelMember, role: string) => void;
+  onEditRespondTo?: (agent: ManagedAgent) => void;
   onManagedAgentAction: (agent: ManagedAgent) => void;
   onRemoveMember: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
@@ -56,6 +58,17 @@ function formatRoleLabel(member: ChannelMember, memberIsBot: boolean) {
   }
 
   return `${member.role[0]?.toUpperCase() ?? ""}${member.role.slice(1)}`;
+}
+
+function formatRespondToLabel(agent: ManagedAgent) {
+  switch (agent.respondTo) {
+    case "anyone":
+      return "Anyone";
+    case "allowlist":
+      return `Allowlist (${agent.respondToAllowlist.length})`;
+    default:
+      return "Owner only";
+  }
 }
 
 function formatManagedAgentStatus(agent: ManagedAgent) {
@@ -82,6 +95,7 @@ export function MembersSidebarMemberCard({
   memberIsBot,
   memberLabel,
   onChangeRole,
+  onEditRespondTo,
   onManagedAgentAction,
   onRemoveMember,
   onViewActivity,
@@ -129,13 +143,22 @@ export function MembersSidebarMemberCard({
               {roleLabel}
             </Badge>
             {managedAgent ? (
-              <Badge
-                className="shrink-0"
-                data-testid={`sidebar-managed-agent-status-${member.pubkey}`}
-                variant="secondary"
-              >
-                {formatManagedAgentStatus(managedAgent)}
-              </Badge>
+              <>
+                <Badge
+                  className="shrink-0"
+                  data-testid={`sidebar-managed-agent-status-${member.pubkey}`}
+                  variant="secondary"
+                >
+                  {formatManagedAgentStatus(managedAgent)}
+                </Badge>
+                <Badge
+                  className="shrink-0"
+                  data-testid={`sidebar-managed-agent-respond-to-${member.pubkey}`}
+                  variant="outline"
+                >
+                  {formatRespondToLabel(managedAgent)}
+                </Badge>
+              </>
             ) : null}
           </div>
           <p className="truncate font-mono text-[10px] text-muted-foreground/50">
@@ -153,6 +176,7 @@ export function MembersSidebarMemberCard({
           member={member}
           memberIsBot={memberIsBot}
           onChangeRole={onChangeRole}
+          onEditRespondTo={onEditRespondTo}
           onManagedAgentAction={onManagedAgentAction}
           onRemoveMember={onRemoveMember}
           onViewActivity={onViewActivity}
@@ -173,6 +197,7 @@ function MemberActionsMenu({
   member,
   memberIsBot,
   onChangeRole,
+  onEditRespondTo,
   onManagedAgentAction,
   onRemoveMember,
   onViewActivity,
@@ -185,6 +210,7 @@ function MemberActionsMenu({
   member: ChannelMember;
   memberIsBot: boolean;
   onChangeRole: (member: ChannelMember, role: string) => void;
+  onEditRespondTo?: (agent: ManagedAgent) => void;
   onManagedAgentAction: (agent: ManagedAgent) => void;
   onRemoveMember: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
@@ -227,6 +253,16 @@ function MemberActionsMenu({
               {getManagedAgentActionIcon(managedAgent)}
               {getManagedAgentPrimaryActionLabel(managedAgent)}
             </DropdownMenuItem>
+            {onEditRespondTo ? (
+              <DropdownMenuItem
+                data-testid={`sidebar-edit-respond-to-${member.pubkey}`}
+                disabled={disabled}
+                onClick={() => onEditRespondTo(managedAgent)}
+              >
+                <Pencil className="h-4 w-4" />
+                Edit respond-to...
+              </DropdownMenuItem>
+            ) : null}
             {canRemoveMember || showChangeRole ? (
               <DropdownMenuSeparator />
             ) : null}

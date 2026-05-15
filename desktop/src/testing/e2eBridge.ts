@@ -286,6 +286,7 @@ type RawManagedAgent = {
   parallelism: number;
   system_prompt: string | null;
   model: string | null;
+  env_vars?: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
   pid: number | null;
   created_at: string;
@@ -300,6 +301,8 @@ type RawManagedAgent = {
     | { type: "local" }
     | { type: "provider"; id: string; config: Record<string, unknown> };
   backend_agent_id: string | null;
+  respond_to: "owner-only" | "allowlist" | "anyone";
+  respond_to_allowlist: string[];
 };
 
 type RawCreateManagedAgentResponse = {
@@ -341,6 +344,7 @@ type RawPersona = {
   system_prompt: string;
   is_builtin: boolean;
   is_active: boolean;
+  env_vars?: Record<string, string>;
   created_at: string;
   updated_at: string;
 };
@@ -363,9 +367,14 @@ type MockManagedAgent = RawManagedAgent & {
 type WsHandler = (message: unknown) => void;
 const GLOBAL_MOCK_SUBSCRIPTION = "*";
 
+type MockSubscription = {
+  channelId: string;
+  kinds: number[] | null;
+};
+
 type MockSocket = {
   handler: WsHandler;
-  subscriptions: Map<string, string>;
+  subscriptions: Map<string, MockSubscription>;
 };
 
 function createMockRelayMembershipEvent(): RelayEvent {
@@ -424,12 +433,14 @@ declare global {
     __SPROUT_E2E_WEBVIEW_ZOOM__?: number;
     __SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
       channelName: string;
+      kind?: number;
     }) => boolean;
     __SPROUT_E2E_EMIT_MOCK_MESSAGE__?: (input: {
       channelName: string;
       content: string;
       parentEventId?: string | null;
       pubkey?: string;
+      kind?: number;
     }) => RelayEvent;
     __SPROUT_E2E_EMIT_MOCK_TYPING__?: (input: {
       channelName: string;
@@ -660,6 +671,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     parallelism: agent.parallelism,
     system_prompt: agent.system_prompt,
     model: agent.model,
+    env_vars: { ...(agent.env_vars ?? {}) },
     status: agent.status,
     pid: agent.pid,
     created_at: agent.created_at,
@@ -672,6 +684,10 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     start_on_app_launch: agent.start_on_app_launch,
     backend: agent.backend ?? { type: "local" as const },
     backend_agent_id: agent.backend_agent_id ?? null,
+    respond_to: agent.respond_to ?? "owner-only",
+    respond_to_allowlist: agent.respond_to_allowlist
+      ? [...agent.respond_to_allowlist]
+      : [],
   };
 }
 
@@ -1666,10 +1682,11 @@ function emitMockHistory(socket: MockSocket, subId: string, channelId: string) {
 
 function emitMockLiveEvent(channelId: string, event: RelayEvent) {
   for (const socket of mockSockets.values()) {
-    for (const [subId, subscribedChannelId] of socket.subscriptions) {
+    for (const [subId, subscription] of socket.subscriptions) {
       if (
-        subscribedChannelId === channelId ||
-        subscribedChannelId === GLOBAL_MOCK_SUBSCRIPTION
+        (subscription.channelId === channelId ||
+          subscription.channelId === GLOBAL_MOCK_SUBSCRIPTION) &&
+        (!subscription.kinds || subscription.kinds.includes(event.kind))
       ) {
         sendWsText(socket.handler, ["EVENT", subId, event]);
       }
@@ -1677,12 +1694,15 @@ function emitMockLiveEvent(channelId: string, event: RelayEvent) {
   }
 }
 
-function hasMockLiveSubscription(channelId: string) {
+function hasMockLiveSubscription(channelId: string, kind?: number) {
   for (const socket of mockSockets.values()) {
-    for (const subscribedChannelId of socket.subscriptions.values()) {
+    for (const subscription of socket.subscriptions.values()) {
       if (
-        subscribedChannelId === channelId ||
-        subscribedChannelId === GLOBAL_MOCK_SUBSCRIPTION
+        (subscription.channelId === channelId ||
+          subscription.channelId === GLOBAL_MOCK_SUBSCRIPTION) &&
+        (kind === undefined ||
+          !subscription.kinds ||
+          subscription.kinds.includes(kind))
       ) {
         return true;
       }
@@ -1710,9 +1730,16 @@ function emitMockChannelMessage(
   content: string,
   parentEventId?: string | null,
   pubkey?: string,
+  kind?: number,
 ) {
+  const eventKind = kind ?? 9;
   if (!parentEventId) {
-    const event = createMockEvent(9, content, [["h", channelId]], pubkey);
+    const event = createMockEvent(
+      eventKind,
+      content,
+      [["h", channelId]],
+      pubkey,
+    );
     recordMockMessage(channelId, event);
     emitMockLiveEvent(channelId, event);
     return event;
@@ -1730,7 +1757,7 @@ function emitMockChannelMessage(
   const rootEventId = parentThread.rootEventId ?? parentEventId;
   const authorPubkey = pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey;
   const event = createMockEvent(
-    9,
+    eventKind,
     content,
     buildReplyMessageTags(
       channelId,
@@ -3519,6 +3546,7 @@ async function handleCreatePersona(args: {
     displayName: string;
     avatarUrl?: string;
     systemPrompt: string;
+    envVars?: Record<string, string>;
   };
 }): Promise<RawPersona> {
   const now = new Date().toISOString();
@@ -3529,6 +3557,7 @@ async function handleCreatePersona(args: {
     system_prompt: args.input.systemPrompt.trim(),
     is_builtin: false,
     is_active: true,
+    env_vars: { ...(args.input.envVars ?? {}) },
     created_at: now,
     updated_at: now,
   };
@@ -3542,6 +3571,7 @@ async function handleUpdatePersona(args: {
     displayName: string;
     avatarUrl?: string;
     systemPrompt: string;
+    envVars?: Record<string, string>;
   };
 }): Promise<RawPersona> {
   const persona = mockPersonas.find(
@@ -3557,6 +3587,10 @@ async function handleUpdatePersona(args: {
   persona.display_name = args.input.displayName.trim();
   persona.avatar_url = args.input.avatarUrl?.trim() || null;
   persona.system_prompt = args.input.systemPrompt.trim();
+  if (args.input.envVars !== undefined) {
+    // Absent = preserve; present = replace entirely (matches Rust handler).
+    persona.env_vars = { ...args.input.envVars };
+  }
   persona.updated_at = new Date().toISOString();
 
   return { ...persona };
@@ -3784,11 +3818,14 @@ async function handleCreateManagedAgent(args: {
     systemPrompt?: string;
     avatarUrl?: string;
     model?: string;
+    envVars?: Record<string, string>;
     spawnAfterCreate?: boolean;
     startOnAppLaunch?: boolean;
     backend?:
       | { type: "local" }
       | { type: "provider"; id: string; config: Record<string, unknown> };
+    respondTo?: "owner-only" | "allowlist" | "anyone";
+    respondToAllowlist?: string[];
   };
 }): Promise<RawCreateManagedAgentResponse> {
   if (args.input.personaId) {
@@ -3819,6 +3856,7 @@ async function handleCreateManagedAgent(args: {
     parallelism: args.input.parallelism ?? 1,
     system_prompt: args.input.systemPrompt?.trim() || null,
     model: args.input.model?.trim() || null,
+    env_vars: { ...(args.input.envVars ?? {}) },
     status: args.input.spawnAfterCreate ? "running" : "stopped",
     pid: args.input.spawnAfterCreate ? 42000 + mockManagedAgents.length : null,
     created_at: now,
@@ -3831,6 +3869,8 @@ async function handleCreateManagedAgent(args: {
     start_on_app_launch: args.input.startOnAppLaunch ?? true,
     backend: args.input.backend ?? { type: "local" as const },
     backend_agent_id: null,
+    respond_to: args.input.respondTo ?? "owner-only",
+    respond_to_allowlist: args.input.respondToAllowlist ?? [],
     private_key_nsec: `nsec1mock${pubkey.slice(0, 20)}`,
     log_lines: [
       `sprout-acp starting: relay=${args.input.relayUrl ?? DEFAULT_RELAY_WS_URL} agent_pubkey=${pubkey} parallelism=${args.input.parallelism ?? 1}`,
@@ -3945,6 +3985,9 @@ async function handleUpdateManagedAgent(args: {
     name?: string;
     model?: string | null;
     systemPrompt?: string | null;
+    envVars?: Record<string, string>;
+    respondTo?: "owner-only" | "allowlist" | "anyone";
+    respondToAllowlist?: string[];
   };
 }): Promise<{ agent: RawManagedAgent; profile_sync_error: string | null }> {
   const agent = getMockManagedAgent(args.input.pubkey);
@@ -3956,6 +3999,15 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.systemPrompt !== undefined) {
     agent.system_prompt = args.input.systemPrompt;
+  }
+  if (args.input.envVars !== undefined) {
+    agent.env_vars = { ...args.input.envVars };
+  }
+  if (args.input.respondTo !== undefined) {
+    agent.respond_to = args.input.respondTo;
+  }
+  if (args.input.respondToAllowlist !== undefined) {
+    agent.respond_to_allowlist = args.input.respondToAllowlist;
   }
   agent.updated_at = new Date().toISOString();
   return { agent: cloneManagedAgent(agent), profile_sync_error: null };
@@ -4375,19 +4427,23 @@ function sendToMockSocket(args: {
     if (subId.startsWith("live-")) {
       // Collect channel IDs from all filters in the REQ
       const channelIds = new Set<string>();
+      const kinds = new Set<number>();
       for (let i = 1; i < rest.length; i++) {
-        const f = rest[i] as { "#h"?: string[] };
+        const f = rest[i] as { "#h"?: string[]; kinds?: number[] };
         const cid = f["#h"]?.[0];
         if (cid) channelIds.add(cid);
+        for (const kind of f.kinds ?? []) {
+          kinds.add(kind);
+        }
       }
       const onlyChannelId =
         channelIds.size === 1
           ? (channelIds.values().next().value as string)
           : undefined;
-      socket.subscriptions.set(
-        subId,
-        onlyChannelId ?? GLOBAL_MOCK_SUBSCRIPTION,
-      );
+      socket.subscriptions.set(subId, {
+        channelId: onlyChannelId ?? GLOBAL_MOCK_SUBSCRIPTION,
+        kinds: kinds.size > 0 ? [...kinds] : null,
+      });
       sendWsText(socket.handler, ["EOSE", subId]);
       return;
     }
@@ -4483,6 +4539,7 @@ export function maybeInstallE2eTauriMocks() {
     content,
     parentEventId,
     pubkey,
+    kind,
   }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
@@ -4491,7 +4548,13 @@ export function maybeInstallE2eTauriMocks() {
       throw new Error(`Mock channel ${channelName} not found.`);
     }
 
-    return emitMockChannelMessage(channel.id, content, parentEventId, pubkey);
+    return emitMockChannelMessage(
+      channel.id,
+      content,
+      parentEventId,
+      pubkey,
+      kind,
+    );
   };
   window.__SPROUT_E2E_EMIT_MOCK_TYPING__ = ({ channelName, pubkey }) => {
     const channel = mockChannels.find(
@@ -4503,7 +4566,10 @@ export function maybeInstallE2eTauriMocks() {
 
     return emitMockTypingIndicator(channel.id, pubkey ?? CHARLIE_PUBKEY);
   };
-  window.__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__ = ({ channelName }) => {
+  window.__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__ = ({
+    channelName,
+    kind,
+  }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
     );
@@ -4511,7 +4577,7 @@ export function maybeInstallE2eTauriMocks() {
       throw new Error(`Mock channel ${channelName} not found.`);
     }
 
-    return hasMockLiveSubscription(channel.id);
+    return hasMockLiveSubscription(channel.id, kind);
   };
   window.__SPROUT_E2E_PUSH_MOCK_FEED_ITEM__ = (item) => {
     const category = item.category === "mention" ? "mentions" : item.category;

@@ -3960,11 +3960,14 @@ dependencies = [
 name = "sprout-dev-mcp"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "git-credential-nostr",
  "git-sign-nostr",
  "ignore",
+ "image",
  "nix",
  "nostr",
+ "reqwest 0.13.3",
  "rmcp",
  "schemars",
  "serde",

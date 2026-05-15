@@ -57,6 +57,7 @@ type RawPersona = {
   name_pool?: string[];
   is_builtin: boolean;
   is_active?: boolean;
+  env_vars?: Record<string, string>;
   created_at: string;
   updated_at: string;
 };
@@ -72,6 +73,7 @@ function fromRawPersona(persona: RawPersona): AgentPersona {
     namePool: persona.name_pool ?? [],
     isBuiltIn: persona.is_builtin,
     isActive: persona.is_active ?? true,
+    envVars: persona.env_vars ?? {},
     createdAt: persona.created_at,
     updatedAt: persona.updated_at,
   };
@@ -93,6 +95,7 @@ export async function createPersona(
         provider: input.provider,
         model: input.model,
         namePool: input.namePool ?? [],
+        envVars: input.envVars ?? {},
       },
     }),
   );
@@ -111,6 +114,10 @@ export async function updatePersona(
         provider: input.provider,
         model: input.model,
         namePool: input.namePool ?? [],
+        // Send envVars only when caller explicitly provided it; omitting
+        // tells the backend "don't touch the stored env vars" so editing
+        // unrelated fields can't silently wipe saved credentials.
+        envVars: input.envVars,
       },
     }),
   );

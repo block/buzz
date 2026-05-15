@@ -231,7 +231,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Called by the app lifecycle provider when the app goes to background.
   void onAppPaused() {
     _backgroundGraceTimer?.cancel();
-    _backgroundGraceTimer = Timer(const Duration(seconds: 30), () {
+    _backgroundGraceTimer = Timer(const Duration(seconds: 5), () {
       _socket?.disconnect();
       state = const SessionState(status: SessionStatus.disconnected);
     });
@@ -241,11 +241,17 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void onAppResumed() {
     _backgroundGraceTimer?.cancel();
     _backgroundGraceTimer = null;
-    if (state.status == SessionStatus.disconnected) {
-      _reconnectDelayMs = _baseReconnectDelayMs;
-      final config = ref.read(relayConfigProvider);
-      _connect(config);
-    }
+
+    // If still connected, nothing to do — the socket survived the background
+    // grace window.
+    if (state.status == SessionStatus.connected) return;
+
+    // Cancel any in-flight reconnect backoff timer so we reconnect immediately
+    // instead of waiting for the (possibly large) exponential delay.
+    _reconnectTimer?.cancel();
+    _reconnectDelayMs = _baseReconnectDelayMs;
+    final config = ref.read(relayConfigProvider);
+    _connect(config);
   }
 
   // -------------------------------------------------------------------------

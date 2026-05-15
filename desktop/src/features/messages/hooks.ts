@@ -1,7 +1,6 @@
 import { useEffect, useEffectEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { updateChannelLastMessageAt } from "@/features/channels/lib/channelCache";
 import {
   channelMessagesKey,
   dedupeMessagesById,
@@ -179,11 +178,6 @@ export function useChannelSubscription(channel: Channel | null) {
       return;
     }
 
-    updateChannelLastMessageAt(
-      queryClient,
-      channelId,
-      new Date(event.created_at * 1_000).toISOString(),
-    );
     queryClient.setQueryData<RelayEvent[]>(
       channelMessagesKey(channelId),
       (current = []) => mergeTimelineCacheMessages(current, event),
@@ -400,14 +394,6 @@ export function useSendMessageMutation(
       queryClient.setQueryData(context.queryKey, context.previousMessages);
     },
     onSuccess: (message, _variables, context) => {
-      if (channel) {
-        updateChannelLastMessageAt(
-          queryClient,
-          channel.id,
-          new Date(message.created_at * 1_000).toISOString(),
-        );
-      }
-
       if (!context) {
         return;
       }

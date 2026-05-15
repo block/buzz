@@ -2,12 +2,10 @@ import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { BatchImportDialog } from "./BatchImportDialog";
 import { CreateAgentDialog } from "./CreateAgentDialog";
-import { ManagedAgentsSection } from "./ManagedAgentsSection";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDialog } from "./PersonaDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaImportUpdateDialog } from "./PersonaImportUpdateDialog";
-import { PersonasSection } from "./PersonasSection";
 import { RelayDirectorySection } from "./RelayDirectorySection";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
@@ -15,6 +13,7 @@ import { TeamDialog } from "./TeamDialog";
 import { TeamImportDialog } from "./TeamImportDialog";
 import { TeamImportUpdateDialog } from "./TeamImportUpdateDialog";
 import { TeamsSection } from "./TeamsSection";
+import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
@@ -46,38 +45,91 @@ export function AgentsView() {
       <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-4 pt-14 sm:px-6">
         <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
           <div className="flex flex-col gap-6">
-            <PersonasSection
+            <UnifiedAgentsSection
+              actionErrorMessage={agents.actionErrorMessage}
+              actionNoticeMessage={agents.actionNoticeMessage}
+              agents={agents.managedAgents}
+              channelsByPubkey={agents.channelsByPubkey}
+              agentsError={
+                agents.managedAgentsQuery.error instanceof Error
+                  ? agents.managedAgentsQuery.error
+                  : null
+              }
+              isActionPending={isActionPending}
+              isAgentsLoading={agents.managedAgentsQuery.isLoading}
+              logContent={agents.managedAgentLogQuery.data?.content ?? null}
+              logError={
+                agents.managedAgentLogQuery.error instanceof Error
+                  ? agents.managedAgentLogQuery.error
+                  : null
+              }
+              logLoading={agents.managedAgentLogQuery.isLoading}
+              personaLabelsById={personas.personaLabelsById}
+              presenceLoaded={agents.managedPresenceQuery.isSuccess}
+              presenceLookup={agents.managedPresenceQuery.data ?? {}}
+              onAddToChannel={(agent) => {
+                agents.setActionNoticeMessage(null);
+                agents.setActionErrorMessage(null);
+                agents.setAgentToAddToChannel(agent);
+              }}
+              onBulkRemoveStopped={() => {
+                void agents.handleBulkRemoveStopped();
+              }}
+              onBulkStopRunning={() => {
+                void agents.handleBulkStopRunning();
+              }}
+              onCreateAgent={() => {
+                agents.setIsCreateOpen(true);
+              }}
+              onDeleteAgent={(pubkey) => {
+                void agents.handleDelete(pubkey);
+              }}
+              onSelectLogAgent={agents.setLogAgentPubkey}
+              onStartAgent={(pubkey) => {
+                void agents.handleStart(pubkey);
+              }}
+              onStopAgent={(pubkey) => {
+                void agents.handleStop(pubkey);
+              }}
+              onToggleStartOnAppLaunch={(pubkey, startOnAppLaunch) => {
+                void agents.handleToggleStartOnAppLaunch(
+                  pubkey,
+                  startOnAppLaunch,
+                );
+              }}
+              selectedLogAgentPubkey={agents.logAgentPubkey}
+              // Persona props
               canChooseCatalog={personas.catalogPersonas.length > 0}
-              error={
+              personas={personas.personasQuery.data ?? []}
+              personasError={
                 personas.personasQuery.error instanceof Error
                   ? personas.personasQuery.error
                   : null
               }
-              feedbackErrorMessage={
+              personaFeedbackErrorMessage={
                 personas.personaFeedbackSurface === "library"
                   ? personas.personaErrorMessage
                   : null
               }
-              feedbackNoticeMessage={
+              personaFeedbackNoticeMessage={
                 personas.personaFeedbackSurface === "library"
                   ? personas.personaNoticeMessage
                   : null
               }
-              isLoading={personas.personasQuery.isLoading}
-              isPending={personas.isPending}
+              isPersonasLoading={personas.personasQuery.isLoading}
+              isPersonasPending={personas.isPending}
+              onCreatePersona={personas.openCreate}
               onChooseCatalog={personas.openCatalog}
-              onCreate={personas.openCreate}
-              onDelete={personas.openDelete}
-              onDeactivate={(persona) => {
+              onDuplicatePersona={personas.openDuplicate}
+              onEditPersona={personas.openEdit}
+              onExportPersona={personas.handleExport}
+              onDeactivatePersona={(persona) => {
                 void personas.handleSetActive(persona, false, "library");
               }}
-              onDuplicate={personas.openDuplicate}
-              onEdit={personas.openEdit}
-              onImportFile={(fileBytes, fileName) => {
+              onDeletePersona={personas.openDelete}
+              onImportPersonaFile={(fileBytes, fileName) => {
                 void personas.handleImportFile(fileBytes, fileName);
               }}
-              onExport={personas.handleExport}
-              personas={personas.libraryPersonas}
             />
 
             <TeamsSection
@@ -101,61 +153,6 @@ export function AgentsView() {
               onAddToChannel={teamActions.setTeamToAddToChannel}
               personas={personas.libraryPersonas}
               teams={teamActions.teams}
-            />
-
-            <ManagedAgentsSection
-              actionErrorMessage={agents.actionErrorMessage}
-              actionNoticeMessage={agents.actionNoticeMessage}
-              agents={agents.managedAgents}
-              channelsByPubkey={agents.channelsByPubkey}
-              error={
-                agents.managedAgentsQuery.error instanceof Error
-                  ? agents.managedAgentsQuery.error
-                  : null
-              }
-              isActionPending={isActionPending}
-              isLoading={agents.managedAgentsQuery.isLoading}
-              logContent={agents.managedAgentLogQuery.data?.content ?? null}
-              logError={
-                agents.managedAgentLogQuery.error instanceof Error
-                  ? agents.managedAgentLogQuery.error
-                  : null
-              }
-              logLoading={agents.managedAgentLogQuery.isLoading}
-              personaLabelsById={personas.personaLabelsById}
-              presenceLoaded={agents.managedPresenceQuery.isSuccess}
-              presenceLookup={agents.managedPresenceQuery.data ?? {}}
-              onAddToChannel={(agent) => {
-                agents.setActionNoticeMessage(null);
-                agents.setActionErrorMessage(null);
-                agents.setAgentToAddToChannel(agent);
-              }}
-              onBulkRemoveStopped={() => {
-                void agents.handleBulkRemoveStopped();
-              }}
-              onBulkStopRunning={() => {
-                void agents.handleBulkStopRunning();
-              }}
-              onCreate={() => {
-                agents.setIsCreateOpen(true);
-              }}
-              onDelete={(pubkey) => {
-                void agents.handleDelete(pubkey);
-              }}
-              onSelectLogAgent={agents.setLogAgentPubkey}
-              onStart={(pubkey) => {
-                void agents.handleStart(pubkey);
-              }}
-              onStop={(pubkey) => {
-                void agents.handleStop(pubkey);
-              }}
-              onToggleStartOnAppLaunch={(pubkey, startOnAppLaunch) => {
-                void agents.handleToggleStartOnAppLaunch(
-                  pubkey,
-                  startOnAppLaunch,
-                );
-              }}
-              selectedLogAgentPubkey={agents.logAgentPubkey}
             />
 
             <RelayDirectorySection

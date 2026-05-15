@@ -346,40 +346,67 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("chat-title")).toHaveText("Home");
 
-  await page.keyboard.press(
-    process.platform === "darwin" ? "Meta+Shift+Equal" : "Control+Shift+Equal",
-  );
+  const getTextScaleState = () =>
+    page.evaluate(() => ({
+      fontSize: getComputedStyle(document.documentElement).fontSize,
+      storedScale: localStorage.getItem("sprout:text-scale"),
+      webviewZoom: window.__SPROUT_E2E_WEBVIEW_ZOOM__,
+    }));
+  const dispatchPrimaryShortcut = (
+    key: string,
+    code: string,
+    shiftKey = false,
+  ) =>
+    page.evaluate(
+      ({ code, key, shiftKey }) => {
+        const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            bubbles: true,
+            cancelable: true,
+            code,
+            ctrlKey: !isMac,
+            key,
+            metaKey: isMac,
+            shiftKey,
+          }),
+        );
+      },
+      { code, key, shiftKey },
+    );
 
-  await expect
-    .poll(() => page.evaluate(() => window.__SPROUT_E2E_WEBVIEW_ZOOM__))
-    .toBe(1.2);
+  await dispatchPrimaryShortcut("+", "Equal", true);
 
-  await page.keyboard.press(
-    process.platform === "darwin" ? "Meta+Minus" : "Control+Minus",
-  );
+  await expect.poll(getTextScaleState).toEqual({
+    fontSize: "17.6px",
+    storedScale: "1.1",
+    webviewZoom: 1,
+  });
 
-  await expect
-    .poll(() => page.evaluate(() => window.__SPROUT_E2E_WEBVIEW_ZOOM__))
-    .toBe(1);
+  await dispatchPrimaryShortcut("-", "Minus");
 
-  await page.keyboard.press(
-    process.platform === "darwin" ? "Meta+Shift+Equal" : "Control+Shift+Equal",
-  );
-  await page.keyboard.press(
-    process.platform === "darwin" ? "Meta+Shift+Equal" : "Control+Shift+Equal",
-  );
+  await expect.poll(getTextScaleState).toEqual({
+    fontSize: "16px",
+    storedScale: null,
+    webviewZoom: 1,
+  });
 
-  await expect
-    .poll(() => page.evaluate(() => window.__SPROUT_E2E_WEBVIEW_ZOOM__))
-    .toBe(1.4);
+  await dispatchPrimaryShortcut("+", "Equal", true);
+  await dispatchPrimaryShortcut("+", "Equal", true);
 
-  await page.keyboard.press(
-    process.platform === "darwin" ? "Meta+Digit0" : "Control+Digit0",
-  );
+  await expect.poll(getTextScaleState).toEqual({
+    fontSize: "19.2px",
+    storedScale: "1.2",
+    webviewZoom: 1,
+  });
 
-  await expect
-    .poll(() => page.evaluate(() => window.__SPROUT_E2E_WEBVIEW_ZOOM__))
-    .toBe(1);
+  await dispatchPrimaryShortcut("0", "Digit0");
+
+  await expect.poll(getTextScaleState).toEqual({
+    fontSize: "16px",
+    storedScale: null,
+    webviewZoom: 1,
+  });
 });
 
 test("shows doctor checks for local sprout tooling", async ({ page }) => {

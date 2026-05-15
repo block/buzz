@@ -1,7 +1,14 @@
 import * as React from "react";
 
-import { useUpdateManagedAgentMutation } from "@/features/agents/hooks";
-import type { ManagedAgent, UpdateManagedAgentInput } from "@/shared/api/types";
+import {
+  usePersonasQuery,
+  useUpdateManagedAgentMutation,
+} from "@/features/agents/hooks";
+import type {
+  ManagedAgent,
+  RespondToMode,
+  UpdateManagedAgentInput,
+} from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -14,6 +21,8 @@ import {
   CreateAgentBasicsFields,
   CreateAgentRuntimeFields,
 } from "./CreateAgentDialogSections";
+import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
+import { CreateAgentRespondToField } from "./RespondToField";
 
 export function EditAgentDialog({
   agent,
@@ -44,6 +53,19 @@ export function EditAgentDialog({
   const [systemPrompt, setSystemPrompt] = React.useState(
     agent.systemPrompt ?? "",
   );
+  const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
+  const personasQuery = usePersonasQuery();
+  const inheritedEnvVars = React.useMemo(() => {
+    if (!agent.personaId) return {};
+    const persona = personasQuery.data?.find((p) => p.id === agent.personaId);
+    return persona?.envVars ?? {};
+  }, [agent.personaId, personasQuery.data]);
+  const [respondTo, setRespondTo] = React.useState<RespondToMode>(
+    agent.respondTo,
+  );
+  const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
+    agent.respondToAllowlist,
+  );
 
   // Reset form state only when the dialog opens or when switching to a different
   // agent. Omitting the full agent object and its array fields from deps prevents
@@ -62,6 +84,9 @@ export function EditAgentDialog({
       setTurnTimeoutSeconds(String(agent.turnTimeoutSeconds));
       setParallelism(String(agent.parallelism));
       setSystemPrompt(agent.systemPrompt ?? "");
+      setEnvVars(agent.envVars);
+      setRespondTo(agent.respondTo);
+      setRespondToAllowlist(agent.respondToAllowlist);
       updateMutation.reset();
     }
   }, [open, agent.pubkey]);
@@ -81,12 +106,19 @@ export function EditAgentDialog({
   // cause a runtime failure.
   const acpCommandValid = !(agent.acpCommand && acpCommand.trim() === "");
   const mcpCommandValid = !(agent.mcpCommand && mcpCommand.trim() === "");
+  // Allowlist mode requires at least one entry — mirrors the harness's own
+  // validation. The backend would reject the request anyway; we block early
+  // so the user sees the disabled button instead of a round-tripped error.
+  const respondToValid =
+    respondTo !== "allowlist" || respondToAllowlist.length > 0;
+
   const canSubmit =
     name.trim().length > 0 &&
     parallelismValid &&
     timeoutValid &&
     acpCommandValid &&
     mcpCommandValid &&
+    respondToValid &&
     !updateMutation.isPending;
 
   async function handleSubmit() {
@@ -136,6 +168,19 @@ export function EditAgentDialog({
           (systemPrompt.trim() || null) !== agent.systemPrompt
             ? systemPrompt.trim() || null
             : undefined,
+        envVars: envVarsChanged(envVars, agent.envVars) ? envVars : undefined,
+        respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
+        // The allowlist is preserved across mode toggles in local UI state
+        // (so a user can flip away from allowlist and back without losing
+        // their entries), but we only send it on the wire when (a) it
+        // actually changed, AND (b) the saved mode will need it. Sending
+        // an allowlist while switching to a non-allowlist mode would be
+        // harmless server-side, but it's noise in the persisted record.
+        respondToAllowlist:
+          respondTo === "allowlist" &&
+          respondToAllowlist.join(",") !== agent.respondToAllowlist.join(",")
+            ? respondToAllowlist
+            : undefined,
       };
 
       const result = await updateMutation.mutateAsync(input);
@@ -165,6 +210,13 @@ export function EditAgentDialog({
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
             <CreateAgentBasicsFields name={name} onNameChange={setName} />
 
+            <CreateAgentRespondToField
+              allowlist={respondToAllowlist}
+              mode={respondTo}
+              onAllowlistChange={setRespondToAllowlist}
+              onModeChange={setRespondTo}
+            />
+
             <CreateAgentRuntimeFields
               acpCommand={acpCommand}
               agentArgs={agentArgs}
@@ -185,6 +237,15 @@ export function EditAgentDialog({
               selectedProviderId="custom"
               systemPrompt={systemPrompt}
               turnTimeoutSeconds={turnTimeoutSeconds}
+            />
+
+            <EnvVarsEditor
+              disabled={updateMutation.isPending}
+              helperText="Per-agent env vars. Override the persona's vars on collision."
+              inheritedFrom={inheritedEnvVars}
+              inheritedLabel="persona"
+              onChange={setEnvVars}
+              value={envVars}
             />
 
             {updateMutation.error instanceof Error ? (
@@ -216,4 +277,17 @@ export function EditAgentDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+function envVarsChanged(
+  a: Record<string, string>,
+  b: Record<string, string>,
+): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return true;
+  for (const k of aKeys) {
+    if (a[k] !== b[k]) return true;
+  }
+  return false;
 }

@@ -8,6 +8,7 @@ import {
   XCircle,
 } from "lucide-react";
 
+import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
@@ -23,7 +24,7 @@ import { shorten } from "./agentSessionUtils";
 import { useObserverEvents, useAgentTranscript } from "./useObserverEvents";
 
 type ManagedAgentSessionPanelProps = {
-  agent: ManagedAgent;
+  agent: Pick<ManagedAgent, "pubkey" | "name" | "status">;
   channelId?: string | null;
   className?: string;
   emptyDescription?: string;
@@ -39,12 +40,12 @@ export function ManagedAgentSessionPanel({
   showHeader = true,
   showRaw = true,
 }: ManagedAgentSessionPanelProps) {
-  const isRunning = agent.status === "running";
+  const hasObserver = isManagedAgentActive(agent);
   const { connectionState, errorMessage, events } = useObserverEvents(
-    isRunning,
+    hasObserver,
     agent.pubkey,
   );
-  const transcript = useAgentTranscript(isRunning, agent.pubkey);
+  const transcript = useAgentTranscript(hasObserver, agent.pubkey);
 
   // Filter transcript items by channelId (lightweight — items now carry channelId)
   const scopedTranscript = React.useMemo(
@@ -83,7 +84,7 @@ export function ManagedAgentSessionPanel({
         <SessionHeader
           connectionState={connectionState}
           eventCount={scopedEvents.length}
-          hasObserver={isRunning}
+          hasObserver={hasObserver}
           latestSessionId={latestSessionId}
         />
       ) : null}
@@ -94,7 +95,7 @@ export function ManagedAgentSessionPanel({
         emptyDescription={emptyDescription}
         errorMessage={errorMessage}
         events={scopedEvents}
-        hasObserver={isRunning}
+        hasObserver={hasObserver}
         showRaw={showRaw}
         transcript={scopedTranscript}
       />

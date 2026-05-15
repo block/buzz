@@ -13,6 +13,7 @@
 //! No keys are held here. No network calls are made.
 
 pub mod builders;
+pub mod mentions;
 pub mod nip_oa;
 
 pub use builders::*;

@@ -6,6 +6,19 @@ pub const MAX_CONTENT_BYTES: usize = 65_536;
 /// Maximum diff size in bytes (60 KiB).
 pub const MAX_DIFF_BYTES: usize = 61_440;
 
+/// Parse a hex string into a `nostr::EventId`. Returns `CliError::Usage` on failure.
+pub fn parse_event_id(hex: &str) -> Result<nostr::EventId, CliError> {
+    nostr::EventId::parse(hex).map_err(|e| CliError::Usage(format!("invalid event ID: {e}")))
+}
+
+/// Parse a UUID string into a `uuid::Uuid`. Returns `CliError::Usage` on failure.
+///
+/// Note: `validate_uuid` (below) returns `()` for validation only; this function
+/// returns the parsed `Uuid` for callers that need the value.
+pub fn parse_uuid(s: &str) -> Result<uuid::Uuid, CliError> {
+    uuid::Uuid::parse_str(s).map_err(|e| CliError::Usage(format!("invalid UUID: {e}")))
+}
+
 /// Validate UUID string. Returns CliError::Usage on failure.
 pub fn validate_uuid(s: &str) -> Result<(), CliError> {
     uuid::Uuid::parse_str(s).map_err(|_| CliError::Usage(format!("invalid UUID: {s}")))?;
@@ -141,75 +154,14 @@ pub fn infer_language(file_path: &str) -> Option<String> {
     Some(lang.to_string())
 }
 
-/// Extract @mention names from message content.
-/// Returns lowercased names found after `@` tokens.
-/// Only matches `@word` preceded by whitespace or start-of-string.
-/// Characters allowed in names: alphanumeric, `.`, `-`, `_`.
-pub fn extract_at_names(content: &str) -> Vec<String> {
-    if content.is_empty() || !content.contains('@') {
-        return vec![];
+/// Map `SdkError` to the appropriate `CliError` variant.
+///
+/// `InvalidInput` is a user error (exit 1), everything else is internal (exit 4).
+pub fn sdk_err(e: sprout_sdk::SdkError) -> CliError {
+    match e {
+        sprout_sdk::SdkError::InvalidInput(msg) => CliError::Usage(msg),
+        other => CliError::Other(other.to_string()),
     }
-    let mut names: Vec<String> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let chars: Vec<char> = content.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-    while i < len {
-        if chars[i] == '@' {
-            // Must be at start-of-string or preceded by whitespace
-            let preceded_by_ws = i == 0 || chars[i - 1].is_ascii_whitespace();
-            if preceded_by_ws && i + 1 < len {
-                // Capture the name token: [a-zA-Z0-9._-]+
-                let start = i + 1;
-                let mut end = start;
-                while end < len {
-                    let c = chars[end];
-                    if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
-                        end += 1;
-                    } else {
-                        break;
-                    }
-                }
-                if end > start {
-                    let name: String = chars[start..end].iter().collect();
-                    let lower = name.to_ascii_lowercase();
-                    if seen.insert(lower.clone()) {
-                        names.push(lower);
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    names
-}
-
-/// Merge auto-resolved pubkeys into an explicit mention list, up to `cap`.
-/// Explicit mentions have priority; auto-resolved are added only if not already present.
-pub fn merge_mentions(explicit: &mut Vec<String>, auto_resolved: &[String], cap: usize) {
-    let budget = cap.saturating_sub(explicit.len());
-    let mut added = 0usize;
-    for pk in auto_resolved {
-        if added >= budget {
-            break;
-        }
-        if !explicit.contains(pk) {
-            explicit.push(pk.clone());
-            added += 1;
-        }
-    }
-}
-
-/// Normalize mention pubkeys: lowercase, deduplicate, remove sender's own pubkey.
-pub fn normalize_mention_pubkeys(pubkeys: &[String], sender_pubkey: &str) -> Vec<String> {
-    let sender = sender_pubkey.to_ascii_lowercase();
-    let mut seen = std::collections::HashSet::new();
-    pubkeys
-        .iter()
-        .map(|pk| pk.to_ascii_lowercase())
-        .filter(|pk| pk != &sender)
-        .filter(|pk| seen.insert(pk.clone()))
-        .collect()
 }
 
 /// Read content from a string value or stdin if the value is "-".
@@ -420,101 +372,32 @@ mod tests {
         );
     }
 
-    // --- extract_at_names ---
+    // Note: `extract_at_names`, `merge_mentions`, and `normalize_mention_pubkeys`
+    // moved to `sprout_sdk::mentions` and are tested there.
+
+    // --- parse_event_id ---
 
     #[test]
-    fn extract_at_names_matches() {
-        assert_eq!(extract_at_names("hello @alice"), vec!["alice"]);
-        assert_eq!(extract_at_names("@bob hello"), vec!["bob"]);
-        assert_eq!(
-            extract_at_names("@alice and @alice, meet @Bob"),
-            vec!["alice", "bob"]
-        );
-        assert_eq!(extract_at_names("line1\n@tyler line2"), vec!["tyler"]);
-        assert_eq!(
-            extract_at_names("@john.doe @mary_jane @bob-smith"),
-            vec!["john.doe", "mary_jane", "bob-smith"]
-        );
+    fn parse_event_id_valid() {
+        let hex = "a".repeat(64);
+        assert!(super::parse_event_id(&hex).is_ok());
     }
 
     #[test]
-    fn extract_at_names_rejects() {
-        assert!(extract_at_names("").is_empty());
-        assert!(extract_at_names("no mentions").is_empty());
-        assert!(extract_at_names("user@example.com").is_empty());
-        assert!(extract_at_names("hello @ world").is_empty());
-        assert!(extract_at_names("hello @").is_empty());
+    fn parse_event_id_invalid() {
+        assert!(super::parse_event_id("not-a-hex-id").is_err());
     }
 
-    // --- normalize_mention_pubkeys ---
+    // --- parse_uuid ---
 
     #[test]
-    fn normalize_mention_pubkeys_lowercases() {
-        // 64 chars total
-        let pk = "AABBCC".repeat(10) + "aabb";
-        assert_eq!(pk.len(), 64);
-        let result = normalize_mention_pubkeys(std::slice::from_ref(&pk), "sender");
-        assert_eq!(result, vec![pk.to_ascii_lowercase()]);
+    fn parse_uuid_valid() {
+        assert!(super::parse_uuid("550e8400-e29b-41d4-a716-446655440000").is_ok());
     }
 
     #[test]
-    fn normalize_mention_pubkeys_removes_sender() {
-        let sender = "a".repeat(64);
-        let other = "b".repeat(64);
-        let pubkeys = vec![sender.clone(), other.clone()];
-        let result = normalize_mention_pubkeys(&pubkeys, &sender);
-        assert_eq!(result, vec![other]);
-    }
-
-    #[test]
-    fn normalize_mention_pubkeys_deduplicates() {
-        let pk = "c".repeat(64);
-        let pubkeys = vec![pk.clone(), pk.clone(), pk.clone()];
-        let result = normalize_mention_pubkeys(&pubkeys, "sender");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0], pk);
-    }
-
-    #[test]
-    fn normalize_mention_pubkeys_removes_sender_case_insensitive() {
-        let sender_lower = "d".repeat(64);
-        let sender_upper = sender_lower.to_ascii_uppercase();
-        let other = "e".repeat(64);
-        let pubkeys = vec![sender_upper, other.clone()];
-        let result = normalize_mention_pubkeys(&pubkeys, &sender_lower);
-        assert_eq!(result, vec![other]);
-    }
-
-    #[test]
-    fn normalize_mention_pubkeys_empty_input() {
-        let result = normalize_mention_pubkeys(&[], "sender");
-        assert!(result.is_empty());
-    }
-
-    // --- merge_mentions ---
-
-    #[test]
-    fn merge_mentions_dedup_and_cap() {
-        // basic merge
-        let mut m = vec!["a".into()];
-        merge_mentions(&mut m, &["b".into()], 50);
-        assert_eq!(m, ["a", "b"]);
-
-        // dedup: "a" already present
-        let mut m = vec!["a".into()];
-        merge_mentions(&mut m, &["a".into(), "b".into()], 50);
-        assert_eq!(m, ["a", "b"]);
-
-        // cap: 49 explicit + 2 auto → only 1 added
-        let mut m: Vec<String> = (0..49).map(|i| format!("{i:064}")).collect();
-        merge_mentions(&mut m, &["x".into(), "y".into()], 50);
-        assert_eq!(m.len(), 50);
-        assert_eq!(m.last().unwrap(), "x");
-
-        // at cap: 50 explicit → nothing added
-        let mut m: Vec<String> = (0..50).map(|i| format!("{i:064}")).collect();
-        merge_mentions(&mut m, &["extra".into()], 50);
-        assert_eq!(m.len(), 50);
+    fn parse_uuid_invalid() {
+        assert!(super::parse_uuid("not-a-uuid").is_err());
     }
 
     // ── validate_repo_id ─────────────────────────────────────────────────────

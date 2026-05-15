@@ -29,6 +29,11 @@ async function gotoApp(page: import("@playwright/test").Page) {
   throw lastError;
 }
 
+async function openPersonaCatalog(page: import("@playwright/test").Page) {
+  await page.getByRole("button", { name: "New" }).click();
+  await page.getByText("Choose from Catalog...").click();
+}
+
 async function getCatalogOrder(page: import("@playwright/test").Page) {
   return page
     .locator('[data-testid^="persona-catalog-card-target-"]')
@@ -139,11 +144,8 @@ test("built-in personas are chosen from the dialog and can be selected", async (
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
 
-  await expect(page.getByTestId("agents-library-personas")).toContainText(
-    "No agents yet",
-  );
-  await expect(page.getByTestId("agents-persona-catalog")).toHaveCount(0);
-  await page.getByTestId("open-persona-catalog").click();
+  await expect(page.getByTestId("agents-library-personas")).toBeVisible();
+  await openPersonaCatalog(page);
   await expect(page.getByTestId("persona-catalog-dialog")).toContainText(
     "Scout",
   );
@@ -188,9 +190,9 @@ test("built-in personas are chosen from the dialog and can be selected", async (
       .locator("[data-sonner-toast]")
       .filter({ hasText: "Deselected Scout from My Agents." }),
   ).toBeVisible();
-  await expect(page.getByTestId("agents-library-personas")).not.toContainText(
-    "Scout",
-  );
+  await expect(
+    page.getByTestId("persona-catalog-card-target-builtin:scout"),
+  ).toHaveAttribute("aria-pressed", "false");
   await expect.poll(() => getCatalogOrder(page)).toEqual(initialCatalogOrder);
 });
 
@@ -199,7 +201,7 @@ test("persona catalog can reopen from the populated library header", async ({
 }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await page.getByTestId("open-persona-catalog").click();
+  await openPersonaCatalog(page);
 
   await page.getByTestId("persona-catalog-card-target-builtin:scout").click();
   await expect(page.getByTestId("agents-library-personas")).toContainText(
@@ -207,7 +209,7 @@ test("persona catalog can reopen from the populated library header", async ({
   );
 
   await page.getByTestId("persona-catalog-dialog-done").click();
-  await page.getByTestId("open-persona-catalog").click();
+  await openPersonaCatalog(page);
 
   await expect(page.getByTestId("persona-catalog-dialog")).toBeVisible();
   await expect(
@@ -220,7 +222,7 @@ test("persona catalog chooser order stays stable when selection changes", async 
 }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await page.getByTestId("open-persona-catalog").click();
+  await openPersonaCatalog(page);
 
   const before = await getCatalogOrder(page);
 
@@ -239,7 +241,7 @@ test("catalog details sheet shows the full persona details", async ({
 }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await page.getByTestId("open-persona-catalog").click();
+  await openPersonaCatalog(page);
 
   await page.getByTestId("persona-catalog-details-builtin:scout").click();
   const detailSelectionTarget = page.getByTestId(
@@ -296,7 +298,7 @@ test("built-in deselection failures show up in Persona Catalog", async ({
   await gotoApp(page);
 
   await page.getByTestId("open-agents-view").click();
-  await page.getByTestId("open-persona-catalog").click();
+  await openPersonaCatalog(page);
   await page.getByTestId("persona-catalog-card-target-builtin:scout").click();
 
   await invokeTauri(page, "create_team", {

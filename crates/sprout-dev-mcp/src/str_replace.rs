@@ -154,29 +154,7 @@ pub fn run(state: &SharedState, p: StrReplaceParams) -> Result<String, ErrorData
     }
 }
 
-pub(crate) fn resolve_within(root: &Path, path: &str) -> Result<PathBuf, String> {
-    let raw = Path::new(path);
-    let candidate: PathBuf = if raw.is_absolute() {
-        raw.to_path_buf()
-    } else {
-        root.join(raw)
-    };
-
-    let root_canon = std::fs::canonicalize(root)
-        .map_err(|e| format!("workdir not accessible: {} ({e})", root.display()))?;
-
-    let resolved = std::fs::canonicalize(&candidate)
-        .map_err(|e| format!("path not accessible: {} ({e})", candidate.display()))?;
-
-    if !resolved.starts_with(&root_canon) {
-        return Err(format!(
-            "path escapes workspace: {} not within {}",
-            resolved.display(),
-            root_canon.display()
-        ));
-    }
-    Ok(resolved)
-}
+pub(crate) use crate::paths::resolve_within;
 
 pub(crate) fn count_occurrences_capped(text: &str, pattern: &str) -> usize {
     if pattern.is_empty() {
@@ -299,28 +277,6 @@ mod tests {
         assert_eq!(count_occurrences_capped("hello world", "hello"), 1);
         assert_eq!(count_occurrences_capped("a a a a a", "a"), 2); // capped at 2
         assert_eq!(count_occurrences_capped("abc", ""), 0);
-    }
-
-    #[test]
-    fn resolve_within_rejects_escape() {
-        let dir = tempdir().expect("tempdir");
-        let inside = dir.path().join("file.txt");
-        fs::write(&inside, b"x").expect("write");
-        // Symlink targeting outside the dir should be rejected.
-        #[cfg(unix)]
-        {
-            let outside = std::env::temp_dir().join("sprout-mcp-escape-target");
-            let _ = fs::remove_file(&outside);
-            fs::write(&outside, b"y").expect("write outside");
-            let link = dir.path().join("link.txt");
-            std::os::unix::fs::symlink(&outside, &link).expect("symlink");
-            let err = resolve_within(dir.path(), "link.txt").unwrap_err();
-            assert!(err.contains("escapes workspace"), "got: {err}");
-            let _ = fs::remove_file(&outside);
-        }
-        // Resolves a normal path inside.
-        let p = resolve_within(dir.path(), "file.txt").expect("resolve");
-        assert!(p.ends_with("file.txt"));
     }
 
     fn make_state(cwd: &std::path::Path) -> SharedState {

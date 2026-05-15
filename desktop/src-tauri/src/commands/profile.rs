@@ -177,51 +177,38 @@ pub async fn search_users(
     limit: Option<u32>,
     state: State<'_, AppState>,
 ) -> Result<SearchUsersResponse, String> {
-    let q = query.trim().to_lowercase();
+    let trimmed = query.trim();
     let max = limit.unwrap_or(8).min(50) as usize;
 
-    if q.is_empty() {
+    if trimmed.is_empty() || max == 0 {
         return Ok(SearchUsersResponse { users: Vec::new() });
     }
 
-    // Fetch all kind:0 profiles and filter client-side. The old REST endpoint
-    // used a DB ILIKE query; this is equivalent for small-to-medium relays.
-    // NIP-50 search doesn't work well for user lookup because Typesense indexes
-    // raw JSON content and short names don't tokenize at JSON boundaries.
+    // NIP-50 full-text search on kind:0 profiles. The relay's HTTP bridge
+    // intercepts the `search` field on POST /query and routes to Typesense
+    // (see `crates/sprout-relay/src/api/bridge.rs::handle_bridge_search`),
+    // so we get indexed, server-side search instead of fetching every kind:0
+    // and scanning client-side. The old path was capped at 2000 kind:0 events
+    // by the relay's HTTP bridge limit, which silently hid users on busy relays.
+    //
+    // We over-fetch (limit=50, which the bridge accepts up to 500) and re-rank
+    // locally because Typesense scores BM25 against the whole kind:0 JSON
+    // `content` blob, where a hit in `display_name` is not weighted any higher
+    // than a substring hit in `about`. Re-ranking ≤50 results client-side is
+    // cheap and keeps display ordering predictable for autocomplete.
     let events = query_relay(
         &state,
         &[serde_json::json!({
             "kinds": [0],
-            "limit": 2000,
+            "search": trimmed,
+            "limit": 50,
         })],
     )
     .await?;
 
-    let mut users = Vec::new();
-    for ev in &events {
-        let pubkey_hex = ev.pubkey.to_hex();
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&ev.content) {
-            let display_name = v
-                .get("display_name")
-                .and_then(|v| v.as_str())
-                .or_else(|| v.get("name").and_then(|v| v.as_str()))
-                .unwrap_or("");
-            let nip05 = v.get("nip05").and_then(|v| v.as_str()).unwrap_or("");
-
-            let matches = display_name.to_lowercase().contains(&q)
-                || nip05.to_lowercase().contains(&q)
-                || pubkey_hex.starts_with(&q);
-
-            if matches {
-                users.push(nostr_convert::user_search_result_from_event(ev));
-                if users.len() >= max {
-                    break;
-                }
-            }
-        }
-    }
-
-    Ok(SearchUsersResponse { users })
+    Ok(nostr_convert::rank_user_search_results(
+        &events, trimmed, max,
+    ))
 }
 
 #[tauri::command]

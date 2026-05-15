@@ -3,8 +3,9 @@ import { Activity, Bot, CircleDot, Octagon, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
+import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
-import type { Channel, ManagedAgent } from "@/shared/api/types";
+import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { useStickToBottom } from "@/shared/hooks/useStickToBottom";
@@ -17,11 +18,13 @@ import {
   PANEL_OVERLAY_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
 
 type AgentSessionThreadPanelProps = {
-  agent: ManagedAgent;
+  agent: ChannelAgentSessionAgent;
   canResetWidth: boolean;
   channel: Channel;
+  canInterruptTurn: boolean;
   isWorking: boolean;
   onClose: () => void;
   onResetWidth: () => void;
@@ -32,6 +35,7 @@ type AgentSessionThreadPanelProps = {
 export function AgentSessionThreadPanel({
   agent,
   canResetWidth,
+  canInterruptTurn,
   channel,
   isWorking,
   onClose,
@@ -39,7 +43,7 @@ export function AgentSessionThreadPanel({
   onResizeStart,
   widthPx,
 }: AgentSessionThreadPanelProps) {
-  const isLive = agent.status === "running";
+  const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
   useEscapeKey(onClose, isOverlay);
 
@@ -118,7 +122,7 @@ export function AgentSessionThreadPanel({
               <Button
                 aria-label="Stop current agent turn"
                 data-testid="agent-session-stop-turn"
-                disabled={!isLive || !isWorking}
+                disabled={!canInterruptTurn || !isLive || !isWorking}
                 onClick={() => {
                   void handleInterruptTurn();
                 }}
@@ -132,7 +136,9 @@ export function AgentSessionThreadPanel({
             </TooltipTrigger>
             <TooltipContent side="bottom" className="text-xs">
               {isWorking
-                ? "Interrupt the current ACP turn without stopping the agent process."
+                ? canInterruptTurn
+                  ? "Interrupt the current ACP turn without stopping the agent process."
+                  : "This agent cannot be interrupted from this workspace."
                 : "No active turn to interrupt."}
             </TooltipContent>
           </Tooltip>

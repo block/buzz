@@ -35,6 +35,7 @@ type MessageThreadPanelProps = {
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onEditSave?: (content: string) => Promise<void>;
+  onMarkUnread?: (message: TimelineMessage) => void;
   onExpandReplies: (message: TimelineMessage) => void;
   onResetWidth: () => void;
   onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
@@ -87,6 +88,7 @@ export function MessageThreadPanel({
   onDelete,
   onEdit,
   onEditSave,
+  onMarkUnread,
   onExpandReplies,
   onResetWidth,
   onResizeStart,
@@ -201,6 +203,7 @@ export function MessageThreadPanel({
               <div className="rounded-2xl">
                 <MessageRow
                   activeReplyTargetId={replyTargetId}
+                  channelId={channelId}
                   layoutVariant="thread-reply"
                   message={threadHead}
                   onDelete={
@@ -213,6 +216,7 @@ export function MessageThreadPanel({
                       ? onEdit
                       : undefined
                   }
+                  onMarkUnread={onMarkUnread}
                   onToggleReaction={onToggleReaction}
                   profiles={profiles}
                 />
@@ -230,6 +234,7 @@ export function MessageThreadPanel({
                       <div key={entry.message.id}>
                         <MessageRow
                           activeReplyTargetId={replyTargetId}
+                          channelId={channelId}
                           layoutVariant="thread-reply"
                           message={entry.message}
                           onDelete={
@@ -244,6 +249,7 @@ export function MessageThreadPanel({
                               ? onEdit
                               : undefined
                           }
+                          onMarkUnread={onMarkUnread}
                           onReply={onSelectReplyTarget}
                           onToggleReaction={onToggleReaction}
                           profiles={profiles}
@@ -310,20 +316,25 @@ export function MessageThreadPanel({
               placeholder={`Reply in thread to ${threadHead.author}`}
               profiles={profiles}
               replyTarget={composerReplyTarget}
-              toolbarExtraActions={toolbarExtraActions}
               typingParentEventId={threadHead.id}
               typingRootEventId={threadHead.rootId}
             />
-            <div className="h-6 bg-background">
-              {threadTypingPubkeys.length > 0 ? (
-                <TypingIndicatorRow
-                  channel={channel}
-                  className="px-4 pb-1 pt-0 sm:px-6"
-                  currentPubkey={currentPubkey}
-                  profiles={profiles}
-                  typingPubkeys={threadTypingPubkeys}
-                />
-              ) : null}
+            <div className="h-7 bg-background px-4 pb-1 pt-0 sm:px-6 -mt-1">
+              <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2">
+                {toolbarExtraActions ? (
+                  <div className="shrink-0">{toolbarExtraActions}</div>
+                ) : null}
+                {threadTypingPubkeys.length > 0 ? (
+                  <TypingIndicatorRow
+                    channel={channel}
+                    className="min-w-0 flex-1 px-0 py-0"
+                    currentPubkey={currentPubkey}
+                    profiles={profiles}
+                    typingPubkeys={threadTypingPubkeys}
+                    variant="activity"
+                  />
+                ) : null}
+              </div>
             </div>
           </div>
         </div>

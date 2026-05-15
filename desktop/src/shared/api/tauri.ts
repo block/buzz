@@ -214,6 +214,7 @@ export type RawManagedAgent = {
   system_prompt: string | null;
   model: string | null;
   mcp_toolsets: string | null;
+  env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
   pid: number | null;
   created_at: string;
@@ -226,6 +227,10 @@ export type RawManagedAgent = {
   start_on_app_launch: boolean;
   backend: ManagedAgentBackend;
   backend_agent_id: string | null;
+  // Optional: pre-feature mock fixtures may omit these. Mapped to
+  // `"owner-only"` / `[]` in `fromRawManagedAgent`.
+  respond_to?: ManagedAgent["respondTo"];
+  respond_to_allowlist?: string[];
 };
 
 type RawCreateManagedAgentResponse = {
@@ -821,6 +826,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     systemPrompt: agent.system_prompt,
     model: agent.model,
     mcpToolsets: agent.mcp_toolsets,
+    envVars: agent.env_vars ?? {},
     status: agent.status,
     pid: agent.pid,
     createdAt: agent.created_at,
@@ -833,6 +839,10 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     startOnAppLaunch: agent.start_on_app_launch,
     backend: agent.backend,
     backendAgentId: agent.backend_agent_id,
+    // Fallbacks for pre-feature mocks/fixtures that don't carry these fields.
+    // Real agent records always include them (defaulted server-side).
+    respondTo: agent.respond_to ?? "owner-only",
+    respondToAllowlist: agent.respond_to_allowlist ?? [],
   };
 }
 
@@ -942,9 +952,12 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         systemPrompt: input.systemPrompt,
         avatarUrl: input.avatarUrl,
         model: input.model,
+        envVars: input.envVars ?? {},
         spawnAfterCreate: input.spawnAfterCreate,
         startOnAppLaunch: input.startOnAppLaunch,
         backend: input.backend,
+        respondTo: input.respondTo,
+        respondToAllowlist: input.respondToAllowlist,
       },
     },
   );

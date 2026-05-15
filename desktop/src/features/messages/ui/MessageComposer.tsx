@@ -3,6 +3,7 @@ import * as React from "react";
 import { EditorContent } from "@tiptap/react";
 import { X } from "lucide-react";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
+import { useComposerAutofocus } from "@/features/messages/lib/useComposerAutofocus";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
 import { useDrafts } from "@/features/messages/lib/useDrafts";
 import { useEmojiAutocomplete } from "@/features/messages/lib/useEmojiAutocomplete";
@@ -34,6 +35,7 @@ import { MessageComposerToolbar } from "./MessageComposerToolbar";
 type MessageComposerProps = {
   channelId?: string | null;
   channelName: string;
+  containerClassName?: string;
   disabled?: boolean;
   draftKey?: string;
   editTarget?: {
@@ -66,6 +68,7 @@ type MessageComposerProps = {
 export function MessageComposer({
   channelId = null,
   channelName,
+  containerClassName,
   disabled = false,
   draftKey,
   editTarget = null,
@@ -82,7 +85,6 @@ export function MessageComposer({
   typingParentEventId = null,
   typingRootEventId = null,
 }: MessageComposerProps) {
-  // ── Markdown content state (synced from Tiptap on every update) ──────
   const [content, setContent] = React.useState("");
   const contentRef = React.useRef(content);
   contentRef.current = content;
@@ -98,6 +100,8 @@ export function MessageComposer({
   const drafts = useDrafts();
   const effectiveDraftKey = draftKey ?? channelId;
   const previousDraftKeyRef = React.useRef<string | null>(null);
+  const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
+  effectiveDraftKeyRef.current = effectiveDraftKey;
   const preEditContentRef = React.useRef<string | null>(null);
   const mentions = useMentions(channelId, undefined, profiles);
   const channelLinks = useChannelLinks();
@@ -108,24 +112,20 @@ export function MessageComposer({
     typingRootEventId,
   );
 
-  // ── Media upload ─────────────────────────────────────────────────────
   // We pass a custom setter that both updates React state AND inserts
   // markdown into the Tiptap editor when media upload completes.
   const media = useMediaUpload();
 
-  // ── Stable refs for callbacks ────────────────────────────────────────
   const disabledRef = React.useRef(disabled);
   const isSendingRef = React.useRef(isSending);
   const onSendRef = React.useRef(onSend);
   const onEditSaveRef = React.useRef(onEditSave);
   const editTargetRef = React.useRef(editTarget);
-  const channelIdRef = React.useRef(channelId);
   disabledRef.current = disabled;
   isSendingRef.current = isSending;
   onSendRef.current = onSend;
   onEditSaveRef.current = onEditSave;
   editTargetRef.current = editTarget;
-  channelIdRef.current = channelId;
 
   const isAutocompleteOpenRef = React.useRef(false);
   isAutocompleteOpenRef.current =
@@ -142,7 +142,6 @@ export function MessageComposer({
         ? `Reply to ${replyTarget.author} in #${channelName}`
         : `Message #${channelName}`));
 
-  // ── Tiptap editor ───────────────────────────────────────────────────
   const richText = useRichTextEditor({
     placeholder: computedPlaceholder,
     editable: !disabled,
@@ -166,7 +165,6 @@ export function MessageComposer({
     },
   });
 
-  // ── Channel switching: save/restore drafts ──────────────────────────
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
   React.useEffect(() => {
     const prevKey = previousDraftKeyRef.current;
@@ -202,7 +200,6 @@ export function MessageComposer({
     };
   }, [effectiveDraftKey]);
 
-  // ── Edit mode: pre-fill content & restore on cancel ─────────────────
   // biome-ignore lint/correctness/useExhaustiveDependencies: editTarget?.id is the trigger
   React.useEffect(() => {
     if (editTarget) {
@@ -225,6 +222,9 @@ export function MessageComposer({
     if (!replyTarget || disabled) return;
     richText.focus();
   }, [disabled, replyTarget, richText.focus]);
+
+  // ── Autofocus on mount / channel switch ─────────────────────────────
+  useComposerAutofocus(richText.focus, effectiveDraftKey, disabled);
 
   // ── Mention / channel autocomplete insertion ────────────────────────
   const applyMentionInsert = React.useCallback(
@@ -391,11 +391,11 @@ export function MessageComposer({
     emojiAutocomplete.clearEmojis();
     setIsEmojiPickerOpen(false);
 
-    const sendChannelId = channelIdRef.current;
+    const sentDraftKey = effectiveDraftKeyRef.current;
     try {
       await onSendRef.current(finalContent, pubkeys, mediaTags);
-      if (sendChannelId) {
-        drafts.clearDraft(sendChannelId);
+      if (sentDraftKey) {
+        drafts.clearDraft(sentDraftKey);
       }
     } catch {
       setContent(savedContent);
@@ -550,8 +550,9 @@ export function MessageComposer({
   return (
     <footer
       className={cn(
-        "relative shrink-0 bg-transparent px-4 pb-2 pt-0",
+        "relative z-10 shrink-0 bg-transparent px-4 pb-2 pt-0",
         showTopBorder ? "border-t border-border/40 pt-3" : "",
+        containerClassName,
       )}
     >
       <div
@@ -630,16 +631,18 @@ export function MessageComposer({
                   {replyTarget.body}
                 </p>
               </div>
-              <Button
-                aria-label="Cancel reply"
-                className="h-7 w-7 shrink-0 px-0"
-                onClick={onCancelReply}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                <X className="h-4 w-4" />
-              </Button>
+              {onCancelReply ? (
+                <Button
+                  aria-label="Cancel reply"
+                  className="h-7 w-7 shrink-0 px-0"
+                  onClick={onCancelReply}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              ) : null}
             </div>
           ) : null}
 

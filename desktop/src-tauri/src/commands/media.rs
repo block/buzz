@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 use crate::app_state::AppState;
+use crate::managed_agents::resolve_command;
 use crate::relay::relay_api_base_url_with_override;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,25 +235,28 @@ pub async fn upload_media(
 
 // ── Video transcode helpers ──────────────────────────────────────────────────
 
-/// Check if ffmpeg is available on PATH.
-fn find_ffmpeg() -> Result<(), String> {
-    match std::process::Command::new("ffmpeg")
+/// Locate ffmpeg using the same discovery logic as managed agents
+/// (login shell PATH, /opt/homebrew/bin, /usr/local/bin, etc.).
+/// Returns the resolved absolute path on success.
+fn find_ffmpeg() -> Result<std::path::PathBuf, String> {
+    let ffmpeg_path = resolve_command("ffmpeg", None).ok_or_else(|| {
+        "ffmpeg is required for video uploads but was not found.\n\n\
+         Install it:\n  \
+         macOS:   brew install ffmpeg\n  \
+         Linux:   sudo apt install ffmpeg\n  \
+         Windows: winget install ffmpeg"
+            .to_string()
+    })?;
+
+    match std::process::Command::new(&ffmpeg_path)
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
     {
-        Ok(s) if s.success() => Ok(()),
+        Ok(s) if s.success() => Ok(ffmpeg_path),
         Ok(_) => Err(
             "ffmpeg was found but returned an error — it may be broken or misconfigured"
-                .to_string(),
-        ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(
-            "ffmpeg is required for video uploads but was not found.\n\n\
-             Install it:\n  \
-             macOS:   brew install ffmpeg\n  \
-             Linux:   sudo apt install ffmpeg\n  \
-             Windows: winget install ffmpeg"
                 .to_string(),
         ),
         Err(e) => Err(format!("failed to check for ffmpeg: {e}")),
@@ -330,15 +334,16 @@ fn run_ffmpeg_with_timeout(
 /// relay's `validate_video_file()`.
 ///
 /// Returns the path to a temp file. Caller must clean up.
-fn transcode_to_mp4(source: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    find_ffmpeg()?;
-
+fn transcode_to_mp4(
+    source: &std::path::Path,
+    ffmpeg: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     // UUID-based temp path — unique across concurrent uploads.
     let output =
         std::env::temp_dir().join(format!("sprout-transcode-{}.mp4", uuid::Uuid::new_v4()));
 
     let result = run_ffmpeg_with_timeout(
-        std::process::Command::new("ffmpeg")
+        std::process::Command::new(ffmpeg)
             .args(["-y", "-loglevel", "error"]) // suppress progress spam — prevents stderr pipe deadlock
             .arg("-i")
             .arg(source) // OsStr — handles non-UTF-8 paths on Unix
@@ -386,7 +391,10 @@ fn transcode_to_mp4(source: &std::path::Path) -> Result<std::path::PathBuf, Stri
 ///
 /// Best-effort: returns `Err` on failure — callers should log and continue
 /// without a poster rather than failing the entire video upload.
-fn extract_poster_frame(mp4_path: &std::path::Path) -> Result<std::path::PathBuf, String> {
+fn extract_poster_frame(
+    mp4_path: &std::path::Path,
+    ffmpeg: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     let output = std::env::temp_dir().join(format!("sprout-poster-{}.jpg", uuid::Uuid::new_v4()));
 
     // Poster extraction is a single-frame decode — 30s is generous.
@@ -394,7 +402,7 @@ fn extract_poster_frame(mp4_path: &std::path::Path) -> Result<std::path::PathBuf
 
     // Try seeking to 1s first (avoids black first frames from fade-ins).
     let result = run_ffmpeg_with_timeout(
-        std::process::Command::new("ffmpeg")
+        std::process::Command::new(ffmpeg)
             .args(["-y", "-loglevel", "error"])
             .arg("-ss")
             .arg("1")
@@ -418,7 +426,7 @@ fn extract_poster_frame(mp4_path: &std::path::Path) -> Result<std::path::PathBuf
         }
         let _ = std::fs::remove_file(&output);
         let fallback = run_ffmpeg_with_timeout(
-            std::process::Command::new("ffmpeg")
+            std::process::Command::new(ffmpeg)
                 .args(["-y", "-loglevel", "error"])
                 .arg("-i")
                 .arg(mp4_path)
@@ -447,10 +455,11 @@ fn extract_poster_frame(mp4_path: &std::path::Path) -> Result<std::path::PathBuf
 fn transcode_and_extract_poster(
     source: &std::path::Path,
 ) -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
-    let transcoded = transcode_to_mp4(source)?;
+    let ffmpeg_path = find_ffmpeg()?;
+    let transcoded = transcode_to_mp4(source, &ffmpeg_path)?;
 
     // Extract poster from the transcoded file (not the original — guarantees decodability).
-    let poster_bytes = match extract_poster_frame(&transcoded) {
+    let poster_bytes = match extract_poster_frame(&transcoded, &ffmpeg_path) {
         Ok(poster_path) => {
             let bytes = std::fs::read(&poster_path).ok();
             let _ = std::fs::remove_file(&poster_path);
