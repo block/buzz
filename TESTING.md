@@ -3,178 +3,194 @@
 ## Automated Tests
 
 ```bash
-just test-unit                    # unit tests — no infrastructure needed
-just test                         # unit + integration (starts Docker if needed)
+just test-unit          # unit tests — no infrastructure needed
+just test               # unit + integration (starts Docker if needed)
 ```
 
-`just test` runs unit tests plus integration tests against Postgres, Redis, and
-Typesense. It does **not** run the E2E suites in `sprout-test-client` — those
-require a running relay and are marked `#[ignore]`:
+`just test` runs unit tests plus integration tests against Postgres and Redis
+(started via `docker compose`). Neither task runs the E2E suites in
+`sprout-test-client` — those are marked `#[ignore]` and require a running relay:
 
 ```bash
-# E2E tests — start the relay first, then:
+# Start a relay first (see below), then:
 cargo test -p sprout-test-client -- --ignored
 ```
 
-Each E2E test file documents its own `RELAY_URL` / `RELAY_HTTP_URL` defaults.
-See `crates/sprout-test-client/tests/` for source and per-file instructions.
-
 ---
 
-## Live Testing with ACP Agents
+## Live Local Relay
 
-Run AI agents against a local relay to exercise the full stack end-to-end.
+The fastest way to exercise the relay end-to-end is `just relay` plus the
+`sprout` CLI. The CLI signs every request with NIP-98, so you don't need
+`nak` or hand-rolled `curl`.
 
-```
-User ──nak event──→ POST /api/events ──→ Relay ──WS──→ sprout-acp ──stdio──→ goose
-                                                                                │
-                                                                        sprout-mcp-server
-                                                                     (send_message, etc.)
-```
-
-### Prerequisites
-
-- Docker running
-- `screen` installed (macOS: built-in; Linux: `apt install screen`)
-- [nak](https://github.com/fiatjaf/nak) on PATH (`brew install nak` or `go install github.com/fiatjaf/nak@latest`)
-- `goose` on PATH and configured with a provider/model
-
-All commands below assume you're in the **repo root** (`sprout/`).
-
-### 1. Build
-
-**Rebuild after every code change** — screen sessions run the release binary.
+### 1. Setup
 
 ```bash
-. bin/activate-hermit
-just setup                          # Docker services + schema + deps
-cargo build --release --workspace
+. ./bin/activate-hermit          # activate pinned toolchain
+cp .env.example .env             # one-time
+just setup                       # start Docker services, run migrations
+```
+
+`just reset` wipes all local data and starts over.
+
+### 2. Build the binaries
+
+```bash
+cargo build --release -p sprout-relay -p sprout-cli -p sprout-admin
 export PATH="$PWD/target/release:$PATH"
 ```
 
-To wipe everything and start fresh: `just reset` (destroys all data).
+Rebuild after any code change — the steps below use the release binaries.
 
-> **Already built?** You still need the PATH export in every new shell:
-> `export PATH="$PWD/target/release:$PATH"`
+### 3. Start the relay
 
-### 2. Start the Relay
-
-```bash
-screen -dmS relay bash -c "cd $PWD && . .env 2>/dev/null; sprout-relay 2>&1 | tee /tmp/sprout-relay.log"
-
-sleep 3 && curl -s http://localhost:3000/health   # → "ok"
-```
-
-> The relay has built-in dev defaults matching docker-compose. Sourcing `.env`
-> is only needed if you've customized ports or want the `RUST_LOG` level it sets.
-
-### 3. Generate Keys
-
-Each agent needs a Nostr keypair. Authentication uses NIP-42 (WebSocket) and
-NIP-98 Schnorr signatures (REST).
+In a separate terminal (it runs in the foreground):
 
 ```bash
-# Agent identity
-AGENT_SK=$(nak key generate)
-AGENT_NSEC=$(nak encode nsec "$AGENT_SK")
-AGENT_PK=$(nak key public "$AGENT_SK")
-
-# Human user identity (for sending tasks)
-USER_SK=$(nak key generate)
-USER_NSEC=$(nak encode nsec "$USER_SK")
-USER_PK=$(nak key public "$USER_SK")
-
-echo "AGENT_PK=$AGENT_PK"
-echo "USER_PK=$USER_PK"
+just relay                       # serves ws://localhost:3000
+# or, equivalently:
+# cargo run --release -p sprout-relay
 ```
 
-### 4. Create a Channel and Add the Agent
-
-Channels are created via signed Nostr events submitted to `POST /api/events`.
+Verify it's up (back in your working terminal):
 
 ```bash
-CHANNEL=$(python3 -c "import uuid; print(uuid.uuid4())")
-echo "CHANNEL=$CHANNEL"
-
-# Create channel (kind:9007)
-nak event --sec "$USER_NSEC" -k 9007 \
-  -t h="$CHANNEL" -t name="testing" -t channel_type="stream" -t visibility="open" -c "" \
-| curl -s -X POST -H "Content-Type: application/json" -H "X-Pubkey: $USER_PK" \
-  http://localhost:3000/api/events -d @-
-
-# Add the agent to the channel (kind:9000)
-nak event --sec "$USER_NSEC" -k 9000 \
-  -t h="$CHANNEL" -t p="$AGENT_PK" -c "" \
-| curl -s -X POST -H "Content-Type: application/json" -H "X-Pubkey: $USER_PK" \
-  http://localhost:3000/api/events -d @-
+curl -s http://localhost:3000/health           # → ok
+curl -s http://localhost:8080/_readiness        # → {"status":"ready"}
 ```
 
-### 5. Launch an ACP Agent
+> Health/readiness/liveness live on a **separate port** (default `8080`,
+> `SPROUT_HEALTH_PORT`) so K8s probes bypass auth middleware. The main app
+> port also exposes `/health` for convenience.
+
+The relay starts in dev mode (`SPROUT_REQUIRE_AUTH_TOKEN=false`). The startup
+log emits a WARN about this — that's expected for local testing. See the env
+vars table at the bottom if you need to lock it down.
+
+### 4. Smoke test the CLI against the relay
+
+End-to-end: generate an identity, create a channel, post a message, read it
+back. This is the minimum sequence an agent needs to verify a local relay.
 
 ```bash
-screen -dmS agent bash -c "
-  export PATH=\"$PWD/target/release:\$PATH\"
-  export SPROUT_PRIVATE_KEY=\"$AGENT_NSEC\"
-  export SPROUT_RELAY_URL=ws://localhost:3000
-  export SPROUT_ACP_RESPOND_TO=anyone
-  export GOOSE_MODE=auto
-  sprout-acp 2>&1 | tee /tmp/sprout-agent.log
-"
+# Generate a keypair
+GEN=$(sprout-admin generate-key)
+export SPROUT_PRIVATE_KEY=$(echo "$GEN" | awk '/Secret key:/ {print $3}')
+PUBKEY=$(echo "$GEN"           | awk '/Public key:/ {print $3}')
+echo "pubkey: $PUBKEY"
+
+# Create a channel (the CLI generates the UUID client-side and embeds it in
+# the kind:9007 event; it does NOT return the UUID in the response yet)
+sprout channels create --name "smoke-$$" --type stream --visibility open
+
+# Find your new channel's UUID. kind:39002 (channel metadata) lists you as
+# owner; the channel UUID is in the `d` tag.
+CHANNEL=$(sprout channels list --member \
+  | jq -r --arg pk "$PUBKEY" '
+      .[]
+      | select(any(.tags[]; .[0]=="p" and .[1]==$pk and .[3]=="owner"))
+      | (.tags[] | select(.[0]=="d") | .[1])' \
+  | head -1)
+echo "channel: $CHANNEL"
+
+# Send a message and read it back
+sprout messages send --channel "$CHANNEL" --content "hello from smoke test"
+sprout messages get --channel "$CHANNEL" --limit 5 | jq .
 ```
 
-Wait ~10 seconds, then verify:
+A successful run prints `{"event_id":"…","accepted":true,"message":""}` for
+the send, and the message body in the `get` output.
+
+### 5. Going deeper
+
+For full coverage of every CLI command (54 subcommands across 12 groups),
+follow [`crates/sprout-cli/TESTING.md`](crates/sprout-cli/TESTING.md).
+
+The relay's HTTP bridge accepts three endpoints — useful if you're testing
+a client other than `sprout-cli`:
+
+| Endpoint        | Purpose                            |
+|-----------------|------------------------------------|
+| `POST /events`  | Submit a signed Nostr event        |
+| `POST /query`   | NIP-01 filter query (returns events) |
+| `POST /count`   | NIP-45 count query                 |
+
+All three accept NIP-98 auth (recommended) or, in dev mode, an `X-Pubkey`
+header fallback. There is no REST API for fetching message threads — use
+`POST /query` with an `#e` filter, or `sprout messages thread`.
+
+---
+
+## ACP Harness (optional, end-to-end with a real agent)
+
+`sprout-acp` connects an ACP-speaking agent (goose, codex, claude code,
+sprout-agent) to the relay. The harness listens for events, drives the
+agent over stdio, and the agent replies through MCP tools.
+
+> The `sprout-mcp` server is being deprecated in favour of direct CLI/relay
+> integration. Keep it in mind if you're poking at the ACP code, but new
+> tests should not depend on it.
+
+Minimum recipe — assumes the relay from step 3 is running:
 
 ```bash
-tail -5 /tmp/sprout-agent.log   # should show "discovered N channel(s)"
+cargo build --release -p sprout-acp -p sprout-mcp
+export PATH="$PWD/target/release:$PATH"
+
+AGENT_GEN=$(sprout-admin generate-key)
+export SPROUT_PRIVATE_KEY=$(echo "$AGENT_GEN" | awk '/Secret key:/ {print $3}')
+export SPROUT_RELAY_URL=ws://localhost:3000
+export SPROUT_ACP_RESPOND_TO=anyone      # default is owner-only; opens the gate for testing
+export GOOSE_MODE=auto                   # must be 'auto' or goose hangs on prompts
+
+sprout-acp                               # foreground; logs to stdout
 ```
 
-| Variable | Required | Why |
-|----------|----------|-----|
-| `SPROUT_PRIVATE_KEY` | yes | Agent's `nsec1...` identity |
-| `SPROUT_RELAY_URL` | no | Defaults to `ws://localhost:3000` |
-| `SPROUT_ACP_RESPOND_TO` | no | Set to `anyone` for testing (default `owner-only` drops all events) |
-| `GOOSE_MODE` | yes | Must be `auto` or goose hangs on permission prompts |
+The justfile also ships `just goose key="$AGENT_NSEC"` (foreground) and
+`just goose-bg key="$AGENT_NSEC"` (background screen session) which set the
+same env. See `crates/sprout-acp/README.md` for parallel agents, heartbeats,
+respond-to gates, and forum subscriptions.
 
-The harness auto-discovers `sprout-mcp-server` on PATH — make sure
-`target/release` is in PATH inside the screen session.
-
-### 6. Send a Task and Check Results
+To send the agent a task, @mention its pubkey from another identity:
 
 ```bash
-# @mention the agent (kind:9 with p-tag) and capture the event ID
-EVENT_ID=$(nak event --sec "$USER_NSEC" -k 9 \
-  -t h="$CHANNEL" -t p="$AGENT_PK" -c "Hey, say hello!" \
-| curl -s -X POST -H "Content-Type: application/json" -H "X-Pubkey: $USER_PK" \
-  http://localhost:3000/api/events -d @- \
-| python3 -c "import json,sys; print(json.load(sys.stdin)['event_id'])")
-
-echo "Sent event: $EVENT_ID"
+sprout messages send --channel "$CHANNEL" \
+  --content "Hey agent, say hello." \
+  --mention "$AGENT_PUBKEY"
 ```
 
-Agent turns typically take 10–90 seconds depending on the task and model. The
-ACP log goes quiet during turns — this is normal (agent I/O goes through the
-stdio pipe). Check the relay for the agent's reply:
+Agent turns typically take 10–90s. Replies appear as kind:9 threaded events;
+`sprout messages thread --channel <id> --event <event_id>` fetches them.
 
-```bash
-# Agent replies are threaded — use the thread endpoint
-curl -s -H "X-Pubkey: $USER_PK" \
-  "http://localhost:3000/api/channels/$CHANNEL/threads/$EVENT_ID" \
-| python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for r in data.get('replies', []):
-    print(f'{r[\"pubkey\"][:12]}... {r[\"content\"][:200]}')
-"
-```
+---
 
-### 7. Teardown
+## Configuration reference
 
-```bash
-screen -S agent -X quit
-screen -S relay -X quit
-docker compose down            # stop services, keep data
-# or: just reset               # stop services, destroy all data
-```
+The relay reads all configuration from environment variables. Defaults work
+out of the box with `docker compose up`. Common overrides:
+
+| Variable                          | Default                     | Notes |
+|-----------------------------------|-----------------------------|-------|
+| `SPROUT_BIND_ADDR`                | `0.0.0.0:3000`              | Main app port |
+| `SPROUT_HEALTH_PORT`              | `8080`                      | `/_liveness`, `/_readiness` |
+| `SPROUT_METRICS_PORT`             | `9102`                      | Prometheus `/metrics` |
+| `RELAY_URL`                       | `ws://localhost:3000`       | Advertised in NIP-11 / NIP-42 challenges. **Note: no `SPROUT_` prefix.** |
+| `DATABASE_URL`                    | `postgres://sprout:sprout_dev@localhost:5432/sprout` | |
+| `REDIS_URL`                       | `redis://localhost:6379`    | |
+| `TYPESENSE_URL`                   | `http://localhost:8108`     | |
+| `SPROUT_REQUIRE_AUTH_TOKEN`       | `false`                     | When true, REST requires NIP-98 (no `X-Pubkey` fallback) |
+| `SPROUT_REQUIRE_RELAY_MEMBERSHIP` | `false`                     | When true, only pubkeys in `relay_members` can connect |
+| `RELAY_OWNER_PUBKEY`              | unset                       | Bootstrapped as `owner` in `relay_members` at first start |
+| `SPROUT_ALLOW_NIP_OA_AUTH`        | `false`                     | Enable NIP-OA owner attestation for membership |
+
+CLI-side, only two matter for testing:
+
+| Variable                | Default                  | Notes |
+|-------------------------|--------------------------|-------|
+| `SPROUT_RELAY_URL`      | `http://localhost:3000`  | CLI relay base; accepts `ws(s)://` and normalises |
+| `SPROUT_PRIVATE_KEY`    | — (**required**)         | `nsec1…` or 64-char hex |
+| `SPROUT_AUTH_TAG`       | unset                    | Optional NIP-OA owner attestation JSON |
 
 ---
 
@@ -182,12 +198,11 @@ docker compose down            # stop services, keep data
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| Testing stale code | Forgot to rebuild | `cargo build --release --workspace` after every change |
-| `all events will be dropped` | Default `respond-to=owner-only` | Set `SPROUT_ACP_RESPOND_TO=anyone` |
-| Agent hangs forever | `GOOSE_MODE` not set | Must be `auto` |
-| Env vars not reaching agent | Unexported shell variables | All exports go inside `bash -c '...'` |
-| `discovered 0 channel(s)` | Agent not a member | Create channel + add agent **before** launching |
-| Agent reacts but no reply | Normal — goose is working | Wait 30–90s; check thread endpoint for replies |
-| ACP log stops after startup | Normal — agent I/O is stdio | Check relay messages for evidence |
-| Relay won't start | Port 3000 in use or DB stale | Kill old processes; `just reset` for clean slate |
-| Need more ACP debug output | Default log level is info | Add `export RUST_LOG=sprout_acp=debug` to the screen command |
+| `relay error 500` or `400: restricted: not a channel member` after a code change | Stale binary | Rebuild and re-export `PATH`; or `cargo run` directly |
+| `Address already in use (os error 48)` on relay start | Another relay (or stale process) holding `:3000` / `:8080` / `:9102` | `lsof -iTCP:3000 -sTCP:LISTEN`; kill the offender, or override `SPROUT_BIND_ADDR` / `SPROUT_HEALTH_PORT` / `SPROUT_METRICS_PORT` |
+| `auth_error: SPROUT_PRIVATE_KEY is required` | Env not exported into the CLI's shell | `export SPROUT_PRIVATE_KEY=...` (or pass `--private-key`) |
+| `auth-required: verification failed` on a closed relay | NIP-OA attestation needed | Set `SPROUT_AUTH_TAG` to the owner-issued JSON, or relax `SPROUT_REQUIRE_RELAY_MEMBERSHIP` |
+| `channels list` empty after `channels create` | The CLI doesn't echo the channel UUID; use the filter shown in step 4 | Or `POST /query` with `{"kinds":[39002]}` |
+| ACP agent ignores all events | `SPROUT_ACP_RESPOND_TO=owner-only` (default) with no owner configured | Set `SPROUT_ACP_RESPOND_TO=anyone` for testing |
+| `GOOSE_MODE` warning, agent hangs | Not set | `export GOOSE_MODE=auto` |
+| Tests pass locally but CI fails | Forgot to run `just ci` | `just ci` runs the gate (fmt, clippy, unit tests, desktop/web builds) |
