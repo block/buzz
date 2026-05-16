@@ -82,29 +82,30 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Resolved version=$VERSION channel=$CHANNEL"
 
-      - name: Build binaries
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          cross build --release --target "$TARGET" \
-            -p sprout-acp \
-            -p sprout-agent \
-            -p sprout-dev-mcp
-
-      - name: Package bundle
+      - name: Build & package bundle
         id: pkg
         env:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ steps.ver.outputs.version }}
+          CHANNEL: ${{ steps.ver.outputs.channel }}
           GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          ./scripts/build-agent-bundle.sh "$VERSION" "$TARGET"
-          # Capture the produced archive path for the upload step.
-          ARCHIVE="dist/sprout-agent-bundle-${VERSION}-${TARGET}.tar.gz"
+          # Rolling releases use stable, version-less filenames so the
+          # asset overwrites cleanly on every push to main. Tagged
+          # releases keep the version in the filename for traceability.
+          # The git SHA + version always live inside bundle.json.
+          if [[ "$CHANNEL" == "tag" ]]; then
+            ARCHIVE_BASENAME="sprout-agent-bundle-${VERSION}-${TARGET}"
+          else
+            ARCHIVE_BASENAME="sprout-agent-bundle-${TARGET}"
+          fi
+          ARCHIVE_BASENAME="$ARCHIVE_BASENAME" \
+            ./scripts/build-agent-bundle.sh "$VERSION" "$TARGET"
+          ARCHIVE="dist/${ARCHIVE_BASENAME}.tar.gz"
           test -f "$ARCHIVE"
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
-          echo "archive_name=$(basename "$ARCHIVE")" >> "$GITHUB_OUTPUT"
+          echo "archive_name=${ARCHIVE_BASENAME}.tar.gz" >> "$GITHUB_OUTPUT"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -142,21 +143,43 @@ jobs:
       - name: Update rolling release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           TAG="sprout-agent-bundle-latest"
           TITLE="Sprout Agent Bundle (rolling)"
-          NOTES="Rolling Linux build of the Sprout Agent Bundle (sprout-acp + sprout-agent + sprout-dev-mcp), tracking \`main\` (\`${GITHUB_SHA}\`)."
+          NOTES="Rolling Linux build of the Sprout Agent Bundle (sprout-acp + sprout-agent + sprout-dev-mcp), tracking \`main\` (\`${SHA}\`)."
+
+          # Force-move the underlying git tag to the current SHA before
+          # we touch the release. `gh release edit` updates release
+          # metadata but does *not* move the tag, so without this the
+          # tag would stick to whatever SHA first created the release.
+          if gh api "repos/${REPO}/git/refs/tags/${TAG}" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${REPO}/git/refs/tags/${TAG}" \
+              -f sha="${SHA}" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/${REPO}/git/refs" \
+              -f ref="refs/tags/${TAG}" -f sha="${SHA}" >/dev/null
+          fi
 
           # Create the release if it doesn't exist; otherwise reuse it.
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --prerelease \
+              --target "${SHA}" \
               --title "$TITLE" \
               --notes "$NOTES"
           else
-            gh release edit "$TAG" --prerelease --title "$TITLE" --notes "$NOTES"
+            gh release edit "$TAG" \
+              --prerelease \
+              --target "${SHA}" \
+              --title "$TITLE" \
+              --notes "$NOTES"
           fi
+          # Asset filenames are stable for rolling builds (no version
+          # in filename — see the package step), so --clobber overwrites
+          # them in place. No stale-asset accumulation.
           gh release upload "$TAG" dist/* --clobber
 
   publish-tag:

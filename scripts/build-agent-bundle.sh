@@ -12,10 +12,18 @@
 # Environment overrides:
 #   TARGET            cross-compile target (defaults to host)
 #   USE_CROSS=1       use `cross` instead of `cargo` for the build
+#   SKIP_BUILD=1      skip the cargo/cross build (use prebuilt binaries
+#                     already present in target/[<target>/]release)
+#   ARCHIVE_BASENAME  override the archive basename (sans .tar.gz). Useful
+#                     for rolling releases where the asset filename should
+#                     be stable across builds (e.g. `sprout-agent-bundle-
+#                     <target>`). Defaults to
+#                     `sprout-agent-bundle-<version>-<target>`.
+#   DIST_DIR          output directory (default: dist)
 #
 # Output:
-#   dist/sprout-agent-bundle-<version>-<target>.tar.gz
-#   dist/sprout-agent-bundle-<version>-<target>.tar.gz.sha256
+#   ${DIST_DIR}/${ARCHIVE_BASENAME}.tar.gz
+#   ${DIST_DIR}/${ARCHIVE_BASENAME}.tar.gz.sha256
 #
 # The tarball contains:
 #   sprout-acp
@@ -182,7 +190,8 @@ symlink these names next to `sprout-dev-mcp` on the PATH.
 EOF
 
 # Tar.
-ARCHIVE_NAME="sprout-agent-bundle-${VERSION}-${TARGET}.tar.gz"
+ARCHIVE_BASENAME="${ARCHIVE_BASENAME:-sprout-agent-bundle-${VERSION}-${TARGET}}"
+ARCHIVE_NAME="${ARCHIVE_BASENAME}.tar.gz"
 ARCHIVE_PATH="${DIST_DIR}/${ARCHIVE_NAME}"
 
 # Deterministic-ish tar: sorted entries, no owner/group info.
