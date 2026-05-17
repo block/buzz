@@ -1,7 +1,7 @@
 use reqwest::Client;
 use serde_json::{json, Value};
 
-use crate::config::{Config, Provider};
+use crate::config::{Config, OpenAiApi, Provider};
 use crate::types::{
     AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef, ToolResultContent,
 };
@@ -40,12 +40,20 @@ impl Llm {
                 .await?;
                 parse_anthropic(v)
             }
-            Provider::OpenAi => {
-                let body = openai_body(cfg, history, tools);
-                let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-                let v = post(&self.http, &url, &body, |r| r.bearer_auth(&cfg.api_key)).await?;
-                parse_openai(v)
-            }
+            Provider::OpenAi => match cfg.openai_api {
+                OpenAiApi::ChatCompletions => {
+                    let body = openai_body(cfg, history, tools);
+                    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+                    let v = post(&self.http, &url, &body, |r| r.bearer_auth(&cfg.api_key)).await?;
+                    parse_openai(v)
+                }
+                OpenAiApi::Responses => {
+                    let body = responses_body(cfg, history, tools);
+                    let url = format!("{}/responses", cfg.base_url.trim_end_matches('/'));
+                    let v = post(&self.http, &url, &body, |r| r.bearer_auth(&cfg.api_key)).await?;
+                    parse_responses(v)
+                }
+            },
         }
     }
 
@@ -75,20 +83,33 @@ impl Llm {
                 .await?;
                 Ok(parse_anthropic(v)?.text)
             }
-            Provider::OpenAi => {
-                let body = json!({
-                    "model": cfg.model,
-                    "stream": false,
-                    "max_completion_tokens": max_output_tokens,
-                    "messages": [
-                        { "role": "system", "content": system_prompt },
-                        { "role": "user", "content": user_prompt },
-                    ],
-                });
-                let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
-                let v = post(&self.http, &url, &body, |r| r.bearer_auth(&cfg.api_key)).await?;
-                Ok(parse_openai(v)?.text)
-            }
+            Provider::OpenAi => match cfg.openai_api {
+                OpenAiApi::ChatCompletions => {
+                    let body = json!({
+                        "model": cfg.model,
+                        "stream": false,
+                        "max_completion_tokens": max_output_tokens,
+                        "messages": [
+                            { "role": "system", "content": system_prompt },
+                            { "role": "user", "content": user_prompt },
+                        ],
+                    });
+                    let url = format!("{}/chat/completions", cfg.base_url.trim_end_matches('/'));
+                    let v = post(&self.http, &url, &body, |r| r.bearer_auth(&cfg.api_key)).await?;
+                    Ok(parse_openai(v)?.text)
+                }
+                OpenAiApi::Responses => {
+                    let body = json!({
+                        "model": cfg.model,
+                        "max_output_tokens": max_output_tokens,
+                        "instructions": system_prompt,
+                        "input": user_prompt,
+                    });
+                    let url = format!("{}/responses", cfg.base_url.trim_end_matches('/'));
+                    let v = post(&self.http, &url, &body, |r| r.bearer_auth(&cfg.api_key)).await?;
+                    Ok(parse_responses(v)?.text)
+                }
+            },
         }
     }
 }
@@ -239,6 +260,198 @@ fn openai_image_user_content(content: &[ToolResultContent]) -> Vec<Value> {
             ToolResultContent::Text(_) => None,
         })
         .collect()
+}
+
+// ── OpenAI Responses API ───────────────────────────────────────────────────
+//
+// Wire shape (model-facing, see https://platform.openai.com/docs/api-reference/responses):
+//
+//   {
+//     "model": "...",
+//     "instructions": "<system prompt>",
+//     "max_output_tokens": N,
+//     "input": [<input_item>, ...],
+//     "tools": [<tool>, ...]    // flat schema, no nested `function: {…}`
+//   }
+//
+// `input_item` is one of:
+//   { "role": "user"|"assistant", "content": [{"type":"input_text"|"output_text", "text": …}] }
+//   { "type": "function_call", "call_id": …, "name": …, "arguments": "<json string>" }
+//   { "type": "function_call_output", "call_id": …, "output": "<text>" }
+//
+// On replay (next turn) the prior assistant `function_call` items **must**
+// precede their `function_call_output`s, otherwise the API rejects with
+// "No tool call found for call_id ...". The serializer below emits them in
+// the order they appear in `history`, which matches the order the agent
+// loop produced them.
+//
+// Image tool results: Responses accepts image parts on user messages
+// (`{type: "input_image", image_url: "data:..."}`), so we attach them on a
+// trailing user message after the textual `function_call_output`, mirroring
+// the Chat Completions branch.
+
+fn responses_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> Value {
+    let mut input: Vec<Value> = Vec::with_capacity(history.len());
+    for item in history {
+        match item {
+            HistoryItem::User(text) => input.push(json!({
+                "role": "user",
+                "content": [{ "type": "input_text", "text": text }],
+            })),
+            HistoryItem::Assistant { text, tool_calls } => {
+                if !text.is_empty() {
+                    input.push(json!({
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": text }],
+                    }));
+                }
+                for c in tool_calls {
+                    input.push(json!({
+                        "type": "function_call",
+                        "call_id": c.provider_id,
+                        "name": c.name,
+                        "arguments": serde_json::to_string(&c.arguments)
+                            .unwrap_or_else(|_| "{}".into()),
+                    }));
+                }
+            }
+            HistoryItem::ToolResult(r) => {
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": r.provider_id,
+                    "output": openai_tool_text_content(&r.content),
+                }));
+                let image_content = responses_image_user_content(&r.content);
+                if !image_content.is_empty() {
+                    input.push(json!({ "role": "user", "content": image_content }));
+                }
+            }
+        }
+    }
+
+    let tools_json: Vec<Value> = tools
+        .iter()
+        .map(|t| {
+            json!({
+                "type": "function",
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.input_schema,
+            })
+        })
+        .collect();
+
+    let mut body = json!({
+        "model": cfg.model,
+        "instructions": cfg.system_prompt,
+        "max_output_tokens": cfg.max_output_tokens,
+        "input": input,
+    });
+    if !tools_json.is_empty() {
+        body["tools"] = Value::Array(tools_json);
+        body["tool_choice"] = json!("auto");
+    }
+    body
+}
+
+fn responses_image_user_content(content: &[ToolResultContent]) -> Vec<Value> {
+    content
+        .iter()
+        .filter_map(|c| match c {
+            ToolResultContent::Image { data, mime_type } => Some(json!({
+                "type": "input_image",
+                "image_url": format!("data:{mime_type};base64,{data}"),
+            })),
+            ToolResultContent::Text(_) => None,
+        })
+        .collect()
+}
+
+fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
+    let mut text = String::new();
+    let mut tool_calls = Vec::new();
+    let mut saw_function_call = false;
+
+    if let Some(items) = v.get("output").and_then(Value::as_array) {
+        for item in items {
+            match item.get("type").and_then(Value::as_str) {
+                Some("message") => {
+                    if let Some(parts) = item.get("content").and_then(Value::as_array) {
+                        for p in parts {
+                            // Responses uses "output_text" for assistant text.
+                            // Also accept "text" as a forward-compat fallback.
+                            if matches!(
+                                p.get("type").and_then(Value::as_str),
+                                Some("output_text" | "text")
+                            ) {
+                                if let Some(t) = p.get("text").and_then(Value::as_str) {
+                                    text.push_str(t);
+                                }
+                            }
+                        }
+                    }
+                }
+                Some("function_call") => {
+                    saw_function_call = true;
+                    let raw = item
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("{}");
+                    let args: Value = serde_json::from_str(raw).map_err(|e| {
+                        AgentError::Llm(format!("function_call.arguments not valid JSON: {e}"))
+                    })?;
+                    tool_calls.push(make_tool_call(
+                        str_field(item, "call_id"),
+                        str_field(item, "name"),
+                        args,
+                    )?);
+                }
+                // Reasoning items are model-internal. Sprout's flow is
+                // stateless across turns and we have no use for the (opaque)
+                // reasoning summary, so we skip them.
+                Some("reasoning") => {}
+                // Unknown item types are ignored for forward compatibility.
+                _ => {}
+            }
+        }
+    }
+
+    let stop = responses_stop(&v, saw_function_call);
+    Ok(LlmResponse {
+        text,
+        tool_calls,
+        stop,
+    })
+}
+
+/// Map a Responses API result to our `ProviderStop`.
+///
+/// Status `incomplete` with `reason == "max_output_tokens"` → `MaxTokens`.
+/// Status `completed` with one or more `function_call` items → `ToolUse`.
+/// Status `completed` otherwise → `EndTurn`. Anything else (`failed`,
+/// `cancelled`, …) → `Other`.
+fn responses_stop(v: &Value, saw_function_call: bool) -> ProviderStop {
+    match v.get("status").and_then(Value::as_str) {
+        Some("incomplete") => {
+            let reason = v
+                .get("incomplete_details")
+                .and_then(|d| d.get("reason"))
+                .and_then(Value::as_str);
+            if matches!(reason, Some("max_output_tokens")) {
+                ProviderStop::MaxTokens
+            } else {
+                ProviderStop::Other
+            }
+        }
+        Some("completed") => {
+            if saw_function_call {
+                ProviderStop::ToolUse
+            } else {
+                ProviderStop::EndTurn
+            }
+        }
+        _ => ProviderStop::Other,
+    }
 }
 
 fn map_stop(s: Option<&str>) -> ProviderStop {
@@ -442,7 +655,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, HookServers, Provider};
+    use crate::config::{Config, HookServers, OpenAiApi, Provider};
     use crate::types::{HistoryItem, ToolCall, ToolResult, ToolResultContent};
     use std::time::Duration;
 
@@ -470,6 +683,7 @@ mod tests {
             model: "model".into(),
             base_url: "http://example.invalid".into(),
             anthropic_api_version: "2023-06-01".into(),
+            openai_api: OpenAiApi::ChatCompletions,
         }
     }
 
@@ -507,6 +721,203 @@ mod tests {
         assert_eq!(content[1]["source"]["type"], "base64");
         assert_eq!(content[1]["source"]["media_type"], "image/png");
         assert_eq!(content[1]["source"]["data"], "aW1n");
+    }
+
+    // ── Responses API unit tests ───────────────────────────────────────
+
+    fn cfg_responses() -> Config {
+        let mut c = cfg(Provider::OpenAi);
+        c.openai_api = OpenAiApi::Responses;
+        c
+    }
+
+    fn tool_call_history() -> Vec<HistoryItem> {
+        vec![
+            HistoryItem::User("call the tool".into()),
+            HistoryItem::Assistant {
+                text: "ok, calling".into(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "call_abc".into(),
+                    name: "dev__shell".into(),
+                    arguments: serde_json::json!({"command": "ls"}),
+                }],
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "call_abc".into(),
+                content: vec![ToolResultContent::Text("file.txt".into())],
+                is_error: false,
+            }),
+        ]
+    }
+
+    #[test]
+    fn responses_body_top_level_shape() {
+        let tools = vec![ToolDef {
+            name: "dev__shell".into(),
+            description: "run a shell command".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+            }),
+        }];
+        let body = responses_body(&cfg_responses(), &[HistoryItem::User("hi".into())], &tools);
+        assert_eq!(body["model"], "model");
+        assert_eq!(body["instructions"], "system");
+        assert_eq!(body["max_output_tokens"], 1024);
+        assert!(
+            body.get("messages").is_none(),
+            "must use `input`, not `messages`"
+        );
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
+
+        // Tools are flat — top-level type/name/description/parameters.
+        let tool = &body["tools"][0];
+        assert_eq!(tool["type"], "function");
+        assert_eq!(tool["name"], "dev__shell");
+        assert!(
+            tool.get("function").is_none(),
+            "Responses tool schema is flat"
+        );
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn responses_body_replay_emits_function_call_before_output() {
+        // Replay requirement from the live API: the assistant's prior
+        // function_call item *must* appear in `input[]` before its matching
+        // function_call_output, otherwise the API rejects with
+        // "No tool call found for call_id ...".
+        let body = responses_body(&cfg_responses(), &tool_call_history(), &[]);
+        let input = body["input"].as_array().unwrap();
+
+        // [0] user, [1] assistant text, [2] function_call, [3] function_call_output
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][0]["text"], "call the tool");
+
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[1]["content"][0]["type"], "output_text");
+        assert_eq!(input[1]["content"][0]["text"], "ok, calling");
+
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[2]["call_id"], "call_abc");
+        assert_eq!(input[2]["name"], "dev__shell");
+        // Arguments are a JSON-encoded string per spec.
+        assert_eq!(input[2]["arguments"], "{\"command\":\"ls\"}");
+
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_eq!(input[3]["call_id"], "call_abc");
+        assert_eq!(input[3]["output"], "file.txt");
+    }
+
+    #[test]
+    fn responses_body_skips_empty_assistant_text() {
+        // Mirrors the Chat Completions behavior (#559/#560): empty assistant
+        // turns are skipped so we don't emit an empty `output_text` block,
+        // but the tool_call(s) on that assistant turn still go through.
+        let history = vec![
+            HistoryItem::User("u".into()),
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    provider_id: "call_x".into(),
+                    name: "t".into(),
+                    arguments: serde_json::json!({}),
+                }],
+            },
+        ];
+        let body = responses_body(&cfg_responses(), &history, &[]);
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[1]["type"], "function_call");
+    }
+
+    #[test]
+    fn responses_body_image_tool_result_attaches_input_image() {
+        let body = responses_body(&cfg_responses(), &image_history(), &[]);
+        let input = body["input"].as_array().unwrap();
+        // function_call_output carries the text part; image rides on a
+        // trailing user message as `input_image`.
+        let fco = input
+            .iter()
+            .find(|i| i["type"] == "function_call_output")
+            .unwrap();
+        assert_eq!(fco["call_id"], "toolu_1");
+        let img_msg = input.iter().rev().find(|i| i["role"] == "user").unwrap();
+        assert_eq!(img_msg["content"][0]["type"], "input_image");
+        assert_eq!(
+            img_msg["content"][0]["image_url"],
+            "data:image/png;base64,aW1n"
+        );
+    }
+
+    #[test]
+    fn parse_responses_completed_with_text_is_end_turn() {
+        let v = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello"}],
+            }],
+        });
+        let r = parse_responses(v).unwrap();
+        assert_eq!(r.text, "hello");
+        assert!(r.tool_calls.is_empty());
+        assert_eq!(r.stop, ProviderStop::EndTurn);
+    }
+
+    #[test]
+    fn parse_responses_completed_with_function_call_is_tool_use() {
+        let v = serde_json::json!({
+            "status": "completed",
+            "output": [
+                {"type": "reasoning", "id": "rs_1", "summary": []},
+                {
+                    "type": "function_call",
+                    "call_id": "call_z",
+                    "name": "dev__shell",
+                    "arguments": "{\"command\":\"ls\"}",
+                },
+            ],
+        });
+        let r = parse_responses(v).unwrap();
+        assert_eq!(r.text, "");
+        assert_eq!(r.tool_calls.len(), 1);
+        assert_eq!(r.tool_calls[0].provider_id, "call_z");
+        assert_eq!(r.tool_calls[0].name, "dev__shell");
+        assert_eq!(
+            r.tool_calls[0].arguments,
+            serde_json::json!({"command": "ls"})
+        );
+        assert_eq!(r.stop, ProviderStop::ToolUse);
+    }
+
+    #[test]
+    fn parse_responses_incomplete_max_output_tokens() {
+        let v = serde_json::json!({
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [],
+        });
+        let r = parse_responses(v).unwrap();
+        assert_eq!(r.stop, ProviderStop::MaxTokens);
+    }
+
+    #[test]
+    fn parse_responses_rejects_malformed_function_arguments() {
+        let v = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_z",
+                "name": "t",
+                "arguments": "not json {",
+            }],
+        });
+        assert!(matches!(parse_responses(v), Err(AgentError::Llm(_))));
     }
 
     #[test]
