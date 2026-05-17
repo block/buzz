@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "sprout_dev_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sprout-dev-mcp"
 path = "src/main.rs"

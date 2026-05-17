@@ -10,6 +10,10 @@ readme = "README.md"
 keywords = ["acp", "agent", "llm", "mcp", "minimal"]
 categories = ["command-line-utilities", "web-programming"]
 
+[lib]
+name = "sprout_agent"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sprout-agent"
 path = "src/main.rs"

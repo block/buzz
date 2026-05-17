@@ -1,9 +1,6 @@
-name: Sprout Agent Bundle
+name: Sprig
 
-# Builds and publishes the Sprout Agent Bundle — a Linux tarball containing
-# the three binaries an external service (e.g. sprout-backend-blox) needs to
-# run a Sprout agent end-to-end:
-#
+# Builds and publishes Sprig — one deploy-anywhere Linux multicall binary for:
 #   sprout-acp       ACP harness that bridges Sprout events to the LLM agent
 #   sprout-agent     ACP-compliant agent (spawns MCP, calls LLMs)
 #   sprout-dev-mcp   Developer MCP server (multicall: rg, tree, sprout,
@@ -13,14 +10,14 @@ name: Sprout Agent Bundle
 # musl so the tarball runs on any modern Linux without libc surprises).
 #
 # Triggers:
-#   - push to main          → updates rolling `sprout-agent-bundle-latest` release
-#   - tag `sprout-agent-bundle-v*` → versioned release
-#   - workflow_dispatch     → manual canary build (no release publish)
+#   - push to main     → updates rolling `sprig-latest` release
+#   - tag `sprig-v*`  → versioned release
+#   - workflow_dispatch → manual canary build (no release publish unless asked)
 
 on:
   push:
     branches: [main]
-    tags: ["sprout-agent-bundle-v*"]
+    tags: ["sprig-v*"]
   workflow_dispatch:
     inputs:
       publish:
@@ -59,16 +56,11 @@ jobs:
         run: |
           set -euo pipefail
           WORKSPACE_VERSION=$(cargo metadata --no-deps --format-version=1 \
-            | jq -r '.workspace_default_members[0] as $m | .packages[] | select(.id==$m) | .version')
-          if [[ -z "$WORKSPACE_VERSION" || "$WORKSPACE_VERSION" == "null" ]]; then
-            # Fallback: read sprout-acp's version directly.
-            WORKSPACE_VERSION=$(cargo metadata --no-deps --format-version=1 \
-              | jq -r '.packages[] | select(.name=="sprout-acp") | .version')
-          fi
+            | jq -r '.packages[] | select(.name=="sprig") | .version')
 
           REF="${GITHUB_REF#refs/tags/}"
-          if [[ "$GITHUB_REF" == refs/tags/sprout-agent-bundle-v* ]]; then
-            VERSION="${REF#sprout-agent-bundle-v}"
+          if [[ "$GITHUB_REF" == refs/tags/sprig-v* ]]; then
+            VERSION="${REF#sprig-v}"
             CHANNEL="tag"
           else
             SHORT_SHA="${GITHUB_SHA::7}"
@@ -82,7 +74,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Resolved version=$VERSION channel=$CHANNEL"
 
-      - name: Build & package bundle
+      - name: Build & package Sprig
         id: pkg
         env:
           TARGET: ${{ matrix.target }}
@@ -91,17 +83,13 @@ jobs:
           GIT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          # Rolling releases use stable, version-less filenames so the
-          # asset overwrites cleanly on every push to main. Tagged
-          # releases keep the version in the filename for traceability.
-          # The git SHA + version always live inside bundle.json.
           if [[ "$CHANNEL" == "tag" ]]; then
-            ARCHIVE_BASENAME="sprout-agent-bundle-${VERSION}-${TARGET}"
+            ARCHIVE_BASENAME="sprig-${VERSION}-${TARGET}"
           else
-            ARCHIVE_BASENAME="sprout-agent-bundle-${TARGET}"
+            ARCHIVE_BASENAME="sprig-${TARGET}"
           fi
           ARCHIVE_BASENAME="$ARCHIVE_BASENAME" \
-            ./scripts/build-agent-bundle.sh "$VERSION" "$TARGET"
+            ./scripts/build-sprig.sh "$VERSION" "$TARGET"
           ARCHIVE="dist/${ARCHIVE_BASENAME}.tar.gz"
           test -f "$ARCHIVE"
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
@@ -110,7 +98,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sprout-agent-bundle-${{ matrix.target }}
+          name: sprig-${{ matrix.target }}
           path: |
             ${{ steps.pkg.outputs.archive }}
             ${{ steps.pkg.outputs.archive }}.sha256
@@ -130,11 +118,11 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Download all bundle artifacts
+      - name: Download all Sprig artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
-          pattern: sprout-agent-bundle-*
+          pattern: sprig-*
           merge-multiple: true
 
       - name: List assets
@@ -147,14 +135,10 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          TAG="sprout-agent-bundle-latest"
-          TITLE="Sprout Agent Bundle (rolling)"
-          NOTES="Rolling Linux build of the Sprout Agent Bundle (sprout-acp + sprout-agent + sprout-dev-mcp), tracking \`main\` (\`${SHA}\`)."
+          TAG="sprig-latest"
+          TITLE="Sprig (rolling)"
+          NOTES="Rolling Linux build of Sprig (all-in-one sprout-acp + sprout-agent + sprout-dev-mcp), tracking \`main\` (\`${SHA}\`)."
 
-          # Force-move the underlying git tag to the current SHA before
-          # we touch the release. `gh release edit` updates release
-          # metadata but does *not* move the tag, so without this the
-          # tag would stick to whatever SHA first created the release.
           if gh api "repos/${REPO}/git/refs/tags/${TAG}" >/dev/null 2>&1; then
             gh api -X PATCH "repos/${REPO}/git/refs/tags/${TAG}" \
               -f sha="${SHA}" -F force=true >/dev/null
@@ -163,7 +147,6 @@ jobs:
               -f ref="refs/tags/${TAG}" -f sha="${SHA}" >/dev/null
           fi
 
-          # Create the release if it doesn't exist; otherwise reuse it.
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --prerelease \
@@ -177,15 +160,12 @@ jobs:
               --title "$TITLE" \
               --notes "$NOTES"
           fi
-          # Asset filenames are stable for rolling builds (no version
-          # in filename — see the package step), so --clobber overwrites
-          # them in place. No stale-asset accumulation.
           gh release upload "$TAG" dist/* --clobber
 
   publish-tag:
     name: Publish tagged release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/sprout-agent-bundle-v')
+    if: startsWith(github.ref, 'refs/tags/sprig-v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -193,18 +173,18 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Download all bundle artifacts
+      - name: Download all Sprig artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
-          pattern: sprout-agent-bundle-*
+          pattern: sprig-*
           merge-multiple: true
 
       - name: Resolve tag version
         id: ver
         run: |
           REF="${GITHUB_REF#refs/tags/}"
-          VERSION="${REF#sprout-agent-bundle-v}"
+          VERSION="${REF#sprig-v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$REF" >> "$GITHUB_OUTPUT"
 
@@ -216,6 +196,6 @@ jobs:
         run: |
           set -euo pipefail
           gh release create "$TAG" \
-            --title "Sprout Agent Bundle v${VERSION}" \
-            --notes "Sprout Agent Bundle v${VERSION} — Linux builds of sprout-acp + sprout-agent + sprout-dev-mcp." \
+            --title "Sprig v${VERSION}" \
+            --notes "Sprig v${VERSION} — Linux all-in-one builds of sprout-acp + sprout-agent + sprout-dev-mcp." \
             dist/*
