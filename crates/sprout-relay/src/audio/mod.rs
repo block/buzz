@@ -11,6 +11,7 @@
 
 pub mod handler;
 pub mod room;
+pub mod wire;
 
 pub use handler::ws_audio_handler;
 pub use room::AudioRoomManager;

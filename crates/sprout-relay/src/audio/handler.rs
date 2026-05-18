@@ -368,6 +368,7 @@ async fn handle_audio_connection(socket: WebSocket, state: Arc<AppState>, channe
         ws_recv,
         Arc::clone(&room),
         peer_id,
+        requested_version,
         ctrl_tx,
         Arc::clone(&missed_pongs),
         cancel.clone(),
@@ -444,10 +445,13 @@ async fn recv_loop(
     mut ws_recv: futures_util::stream::SplitStream<WebSocket>,
     room: Arc<crate::audio::room::Room>,
     peer_id: Uuid,
+    protocol_version: u8,
     ctrl_tx: mpsc::Sender<WsMessage>,
     missed_pongs: Arc<AtomicU8>,
     cancel: CancellationToken,
 ) {
+    use crate::audio::wire::{FrameHeader, V2_HEADER_LEN};
+
     loop {
         tokio::select! {
             biased;
@@ -459,6 +463,52 @@ async fn recv_loop(
                             warn!(peer_id = %peer_id, bytes = data.len(), "audio frame too large — dropping");
                             continue;
                         }
+
+                        // Protocol v2 sanity-parse: validate the header is
+                        // present and well-shaped, then forward opaquely.
+                        // We never strip, rewrite, or re-encode bytes — the
+                        // header is sender-authored telemetry only — but we
+                        // do refuse to broadcast frames that are clearly
+                        // malformed for the room's pinned protocol so we
+                        // don't help v2 peers feed garbage to other v2 peers.
+                        if protocol_version >= 2 {
+                            // Frame must carry at least the 8-byte header
+                            // plus a non-empty Opus payload.
+                            if data.len() <= V2_HEADER_LEN {
+                                warn!(
+                                    peer_id = %peer_id,
+                                    bytes = data.len(),
+                                    "v2 frame missing header or payload — dropping"
+                                );
+                                continue;
+                            }
+                            match FrameHeader::parse(&data) {
+                                Some((header, payload)) if !payload.is_empty() => {
+                                    // Header is well-formed. `level_dbov` is
+                                    // already clamped by `parse` — bad values
+                                    // do not drop the frame, they just lose
+                                    // the metric (which the relay does not
+                                    // trust for anything anyway).
+                                    tracing::trace!(
+                                        peer_id = %peer_id,
+                                        seq = header.seq,
+                                        ts_48k = header.ts_48k,
+                                        level_dbov = header.level_dbov,
+                                        is_dtx = header.is_dtx(),
+                                        "v2 audio frame"
+                                    );
+                                }
+                                _ => {
+                                    warn!(
+                                        peer_id = %peer_id,
+                                        bytes = data.len(),
+                                        "v2 frame failed header parse — dropping"
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+
                         room.broadcast_frame(peer_id, data);
                     }
                     Some(Ok(WsMessage::Text(text))) => {
