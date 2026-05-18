@@ -29,8 +29,8 @@ export function InboxListPane({
   selectedId,
 }: InboxListPaneProps) {
   return (
-    <section className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r border-border/70 bg-background/60">
-      <div className="px-4 pb-3 pt-14">
+    <section className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background/60">
+      <div className="px-5 pb-3 pt-14">
         <div className="flex flex-nowrap gap-1">
           {FILTER_OPTIONS.map((option) => (
             <Button
@@ -72,7 +72,7 @@ export function InboxListPane({
               return (
                 <button
                   className={cn(
-                    "flex w-full items-start gap-2.5 border-l px-4 py-2 text-left transition-colors",
+                    "flex w-full items-start gap-2.5 border-l px-5 py-2 text-left transition-colors",
                     isSelected
                       ? "border-l-primary bg-muted/30"
                       : "border-l-transparent hover:bg-muted/25 active:bg-muted/40",

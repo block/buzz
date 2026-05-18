@@ -91,7 +91,6 @@ export function TypingIndicatorRow({
           className={cn(
             "flex w-full items-center gap-2",
             isActivityVariant && "h-full",
-            !isActivityVariant && "mx-auto max-w-4xl",
           )}
         >
           <div className="flex shrink-0 items-center">

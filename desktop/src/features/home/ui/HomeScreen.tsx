@@ -5,11 +5,13 @@ import { HomeView } from "@/features/home/ui/HomeView";
 type HomeScreenProps = {
   availableChannelIds: ReadonlySet<string>;
   currentPubkey?: string;
+  onOpenContext: (channelId: string, messageId: string) => void;
 };
 
 export function HomeScreen({
   availableChannelIds,
   currentPubkey,
+  onOpenContext,
 }: HomeScreenProps) {
   const homeFeedQuery = useHomeFeedQuery();
 
@@ -33,6 +35,7 @@ export function HomeScreen({
           }
           feed={homeFeedQuery.data}
           isLoading={homeFeedQuery.isLoading}
+          onOpenContext={onOpenContext}
           onRefresh={() => {
             void homeFeedQuery.refetch();
           }}

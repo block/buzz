@@ -1,14 +1,21 @@
-//! Model download manager for STT (Moonshine) and TTS (Kokoro) models.
+//! Model download manager for STT (Parakeet TDT-CTC 110M) and TTS (Pocket TTS) models.
 //!
 //! Mental model:
-//!   app launch → start_moonshine_download (background) → ~/.sprout/models/moonshine-tiny/
-//!   app launch → start_kokoro_download (background) → ~/.sprout/models/kokoro/
-//!   STT pipeline → is_moonshine_ready() → moonshine_model_dir() → run inference
-//!   TTS pipeline → is_kokoro_ready() → kokoro_model_dir() → run synthesis
+//!   app launch → start_stt_download (background) → ~/.sprout/models/parakeet-tdt-ctc-110m-en/
+//!   app launch → start_tts_download (background) → ~/.sprout/models/pocket-tts/
+//!   STT pipeline → is_stt_ready() → stt_model_dir() → run inference
+//!   TTS pipeline → is_tts_ready() → tts_model_dir() → run synthesis
 //!
 //! Models are downloaded once and cached. A version manifest (`.sprout-model-manifest`)
 //! is written alongside model files — if the on-disk version doesn't match the
 //! compiled-in version, the model is re-downloaded.
+//!
+//! Upgrade note: an older Moonshine STT model directory at
+//! `~/.sprout/models/moonshine-tiny/` is removed best-effort once the new STT
+//! model finishes installing successfully. Cleanup is gated on the new model
+//! being Ready, so a failed download never removes the previous on-disk model
+//! during migration. If removal fails (permissions, etc.) the leftover is
+//! harmless and can be removed by hand.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,23 +33,43 @@ use sha2::{Digest, Sha256};
 // To recompute hashes: download each file, run `shasum -a 256 <file>`, and
 // update the corresponding constant.
 
-/// SHA-256 hash of the Moonshine archive (sherpa-onnx-moonshine-tiny-en-int8.tar.bz2).
+/// SHA-256 hash of the STT archive
+/// (sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8.tar.bz2).
 /// Computed from a known-good download. Update when upgrading model versions.
-const MOONSHINE_ARCHIVE_SHA256: &str =
-    "d5fe6ec4334fef36255b2a4010412cad4c007e33103fec62fb5d17cad88086f2";
+const STT_ARCHIVE_SHA256: &str = "17f945007b52ccd8b7200ffc7c5652e9e8e961dfdf479cefcabd06cf5703630b";
 
-/// SHA-256 hashes for individual Kokoro model files.
-/// Computed from known-good downloads. Update when upgrading model versions.
+/// HuggingFace base URL for the sherpa-onnx Pocket TTS int8 repackage.
 ///
-/// model.onnx (model_q8f16.onnx, 86 MB):
-///   curl -sL "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_q8f16.onnx" | shasum -a 256
+/// Pinned to commit e715955cf50d18d919d37231513c0e914b83661a
+/// (2026-02-10) for reproducible downloads.
+const POCKET_HF_BASE: &str =
+    "https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-int8-2026-01-26/resolve/e715955cf50d18d919d37231513c0e914b83661a";
+
+/// Reference voice WAV: "Mary (f, conversation)" from the Kyutai TTS demo
+/// voice set — VCTK speaker p333, ai-coustics-enhanced. Pinned to
+/// kyutai/tts-voices commit 323332d33f997de8394f24a193e1a76df720e01a.
+///
+/// Mapping comes from the speaker dropdown on <https://kyutai.org/tts>:
+/// the Pocket TTS preset "Mary (f, conversation)" maps to
+/// `vctk/p333_023_enhanced.wav`. We rename to `reference_sample.wav` on disk
+/// so the rest of the engine code stays voice-agnostic; the friendly label
+/// only matters for attribution and PR-body docs.
+const POCKET_REFERENCE_WAV_URL: &str =
+    "https://huggingface.co/kyutai/tts-voices/resolve/323332d33f997de8394f24a193e1a76df720e01a/vctk/p333_023_enhanced.wav";
+
+/// SHA-256 hashes for individual Pocket TTS model files.
+/// Computed from known-good pinned downloads. Update when upgrading model versions.
 #[rustfmt::skip]
-const KOKORO_FILE_HASHES: &[(&str, &str)] = &[
-    ("model.onnx",    "04c658aec1b6008857c2ad10f8c589d4180d0ec427e7e6118ceb487e215c3cd0"),
-    ("af_heart.bin",  "d583ccff3cdca2f7fae535cb998ac07e9fcb90f09737b9a41fa2734ec44a8f0b"),
-    ("us_gold.json",   "dc414872a49a28ae6c141463d502fd945f3b2fde040484fdc47d00cc4612686f"),
-    ("us_silver.json", "de8f67be911bb6c659187b4a65fd966b6a30e56350e0f790d763210b053ac475"),
-    ("cmudict.dict",   "81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22"),
+const TTS_FILE_HASHES: &[(&str, &str)] = &[
+    ("decoder.int8.onnx",     "12b0857402d31aead94df19d6783b4350d1f740e811f3a3202c70ad89ae11eea"),
+    ("encoder.onnx",          "e8f2f6d301ffb96e398b138a7dc6d3038622d236044636b73d920bab85890260"),
+    ("lm_flow.int8.onnx",     "8d627d235c44a597da908e1085ebe241cbbe358964c502c5a5063d18851a5529"),
+    ("lm_main.int8.onnx",     "bfc0c7e7e3d72864fa3bb2ee499f62f21ddc1474b885f5f3ca570f8be73e787e"),
+    ("text_conditioner.onnx", "0b84e837d7bfaf2c896627b03e3f080320309f37f4fc7df7698c644f7ba5e6b1"),
+    ("vocab.json",            "6fb646346cf931016f70c4921aab0900ce7a304b893cb02135c74e294abfea01"),
+    ("token_scores.json",     "5be2f278caf9b9800741f0fd82bff677f4943ec764c356f907213434b622d958"),
+    ("LICENSE",               "fe7b4ce83b8381cc5b216bbb4af73c570688d1b819c73bbaed8ca401f4677cd6"),
+    ("reference_sample.wav",  "a35b0468382218e9f37a9a7494d1e4b74deaf18d7ced22265b4e325bb55c183f"),
 ];
 
 // ── Model versioning ──────────────────────────────────────────────────────────
@@ -51,71 +78,131 @@ const KOKORO_FILE_HASHES: &[(&str, &str)] = &[
 // If the on-disk manifest doesn't match the compiled-in version, the model is
 // considered stale and re-downloaded. Increment when upgrading model files.
 
-/// Model manifest version for Moonshine. Increment when upgrading model files.
-const MOONSHINE_MODEL_VERSION: &str = "1";
+/// Model manifest version for the STT model. Increment when upgrading model files.
+/// Bumped from "1" → "2" alongside the migration from Moonshine Tiny to
+/// Parakeet TDT-CTC 110M — the model directory name also changed, so this
+/// is technically belt-and-suspenders, but it keeps the manifest semantics
+/// honest (each version tag identifies one specific set of model bytes).
+const STT_MODEL_VERSION: &str = "2";
 
-/// Model manifest version for Kokoro. Increment when upgrading model files.
-const KOKORO_MODEL_VERSION: &str = "1";
+/// Model manifest version for Pocket TTS. Increment when upgrading model files.
+/// Bumped "1" → "2" when the bundled reference voice changed from KevinAHM's
+/// anonymous 16 kHz sample to Mary (VCTK p333, 32 kHz, ai-coustics-enhanced)
+/// from kyutai/tts-voices. The hash mismatch on `reference_sample.wav` would
+/// fail readiness on its own, but the manifest bump makes the re-download
+/// reason explicit and skips the failing-then-re-fetching transient state.
+const TTS_MODEL_VERSION: &str = "2";
 
 /// Filename for the version manifest written alongside model files.
 const MANIFEST_FILENAME: &str = ".sprout-model-manifest";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-/// Maximum expected Moonshine archive size (200 MB — actual is ~50 MB).
-const MAX_MOONSHINE_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
+/// Maximum expected STT archive size (200 MB — actual is ~100 MB).
+const MAX_STT_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
 
-/// Maximum expected Kokoro file size (200 MB per file — model is 86 MB).
-const MAX_KOKORO_FILE_BYTES: u64 = 200 * 1024 * 1024;
+/// Maximum expected Pocket TTS file size (200 MB per file — largest is ~73 MB).
+const MAX_TTS_FILE_BYTES: u64 = 200 * 1024 * 1024;
 
-const MOONSHINE_DOWNLOAD_URL: &str =
+/// NVIDIA Parakeet TDT-CTC 110M (English, int8) — packaged for sherpa-onnx by
+/// k2-fsa. Single ONNX file (CTC head) + tokens.txt. Avg WER ~7.5% across
+/// the OpenASR-style benchmarks; ~half the WER of Moonshine Tiny at ~2× the
+/// disk footprint. CTC blank-token decoding eliminates the silence/cut-audio
+/// hallucination class that hurts encoder-decoder models on noisy huddle audio.
+/// License: CC-BY-4.0 (attribution required — see About dialog).
+const STT_DOWNLOAD_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/\
-     sherpa-onnx-moonshine-tiny-en-int8.tar.bz2";
+     sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8.tar.bz2";
 
 /// Subdirectory name produced by `tar xjf` on the archive.
-const MOONSHINE_ARCHIVE_SUBDIR: &str = "sherpa-onnx-moonshine-tiny-en-int8";
+const STT_ARCHIVE_SUBDIR: &str = "sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8";
 
 /// Final directory name under `~/.sprout/models/`.
-const MOONSHINE_MODEL_DIR_NAME: &str = "moonshine-tiny";
+const STT_MODEL_DIR_NAME: &str = "parakeet-tdt-ctc-110m-en";
 
 /// All files that must be present for the model to be considered ready.
-const MOONSHINE_EXPECTED_FILES: &[&str] = &[
-    "preprocess.onnx",
-    "encode.int8.onnx",
-    "cached_decode.int8.onnx",
-    "uncached_decode.int8.onnx",
-    "tokens.txt",
-];
+///
+/// Includes the attribution sidecar written by Sprout during install. The
+/// upstream archive does not ship a license file, so readiness should require
+/// the local CC-BY-4.0 attribution to travel with the cached model bytes.
+const STT_EXPECTED_FILES: &[&str] = &["model.int8.onnx", "tokens.txt", STT_LICENSE_FILE_NAME];
 
-// ── Kokoro TTS model ─────────────────────────────────────────────────────────
+/// CC-BY-4.0 §3(a)(1) attribution block written next to the STT model files
+/// after install. Travels with the bytes — if a user copies the model
+/// directory, the attribution comes with it. Mirrored in About/Credits.
+///
+/// Covers all five §3(a)(1) bullets: creator, copyright notice, license
+/// notice, warranty disclaimer reference, and URI to the source material.
+const STT_LICENSE_FILE_NAME: &str = "MODEL_LICENSE.txt";
+const STT_LICENSE_TEXT: &str = "\
+NVIDIA Parakeet TDT-CTC 110M (English)
+© NVIDIA Corporation.
 
-/// HuggingFace base URL for Kokoro ONNX model files.
-const KOKORO_HF_BASE: &str =
-    "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main";
+Licensed under the Creative Commons Attribution 4.0 International License
+(CC-BY-4.0). License text: https://creativecommons.org/licenses/by/4.0/
 
-/// Misaki G2P lexicons — pinned to commit fba1236 for reproducibility.
-/// Gold = curated pronunciations. Silver = broader coverage (93K words).
-/// Both are needed: gold is checked first, silver catches common words gold misses.
-const KOKORO_LEXICON_GOLD_URL: &str =
-    "https://raw.githubusercontent.com/hexgrad/misaki/fba1236/misaki/data/us_gold.json";
-const KOKORO_LEXICON_SILVER_URL: &str =
-    "https://raw.githubusercontent.com/hexgrad/misaki/fba1236/misaki/data/us_silver.json";
+Original model: https://huggingface.co/nvidia/parakeet-tdt_ctc-110m
+Converted to ONNX with int8 quantization by the sherpa-onnx project
+(https://github.com/k2-fsa/sherpa-onnx); Sprout ships this conversion
+unmodified.
 
-/// CMU Pronouncing Dictionary — 135K entries including inflected forms.
-/// BSD 2-Clause license (Carnegie Mellon University). Compatible with Apache-2.0.
-const KOKORO_CMUDICT_URL: &str =
-    "https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict";
+Provided \"AS IS\", without warranty of any kind, express or implied. See the
+license text for full warranty disclaimer.
+";
+
+// ── Pocket TTS model ──────────────────────────────────────────────────────────
 
 /// Final directory name under `~/.sprout/models/`.
-const KOKORO_MODEL_DIR_NAME: &str = "kokoro";
+const TTS_MODEL_DIR_NAME: &str = "pocket-tts";
 
-/// All files that must be present for Kokoro to be considered ready.
-const KOKORO_EXPECTED_FILES: &[&str] = &[
-    "model.onnx",
-    "af_heart.bin",
-    "us_gold.json",
-    "us_silver.json",
-    "cmudict.dict",
+/// Attribution sidecar written next to the Pocket TTS model files.
+const TTS_LICENSE_FILE_NAME: &str = "MODEL_LICENSE.txt";
+
+/// CC-BY-4.0 §3(a)(1) attribution block for Pocket TTS, its ONNX packaging,
+/// and the bundled reference voice WAV.
+const TTS_LICENSE_TEXT: &str = "\
+Pocket TTS
+© Kyutai.
+
+Licensed under the Creative Commons Attribution 4.0 International License
+(CC-BY-4.0). License text: https://creativecommons.org/licenses/by/4.0/
+
+Original model by Kyutai: https://huggingface.co/kyutai/pocket-tts
+Paper: Charles, Roebel, et al., Pocket TTS (arXiv:2509.06926).
+Mimi neural codec by Kyutai is bundled as part of the model.
+
+ONNX export by KevinAHM: https://huggingface.co/KevinAHM/pocket-tts-onnx
+Sherpa-onnx repackage by csukuangfj / k2-fsa:
+https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-int8-2026-01-26
+
+Bundled reference voice (reference_sample.wav):
+\"Mary (f, conversation)\" preset from the Kyutai TTS demo voice catalogue
+(https://kyutai.org/tts), distributed via
+https://huggingface.co/kyutai/tts-voices as `vctk/p333_023_enhanced.wav`.
+Original recording from the Voice Cloning Toolkit (VCTK) corpus, speaker p333:
+https://datashare.ed.ac.uk/handle/10283/3443 (CC-BY-4.0).
+Recording enhancement (denoise/dereverb) by ai-coustics:
+https://ai-coustics.com/
+
+Sprout ships all ONNX/model artifacts and the reference voice WAV unmodified,
+renamed only by placement in the local model directory.
+
+Provided \"AS IS\", without warranty of any kind, express or implied. See the
+license text for full warranty disclaimer.
+";
+
+/// All files that must be present for Pocket TTS to be considered ready.
+const TTS_EXPECTED_FILES: &[&str] = &[
+    "decoder.int8.onnx",
+    "encoder.onnx",
+    "lm_flow.int8.onnx",
+    "lm_main.int8.onnx",
+    "text_conditioner.onnx",
+    "vocab.json",
+    "token_scores.json",
+    "LICENSE",
+    "reference_sample.wav",
+    TTS_LICENSE_FILE_NAME,
 ];
 
 // ── Status types ──────────────────────────────────────────────────────────────
@@ -131,10 +218,14 @@ pub enum ModelStatus {
 }
 
 /// Combined status for all voice models (returned to the frontend).
+///
+/// `stt` is the speech-to-text model status (currently Parakeet TDT-CTC 110M;
+/// historically Moonshine Tiny). The field name describes the role, not the
+/// specific model, so future model swaps don't ripple into the API surface.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceModelStatus {
-    pub moonshine: ModelStatus,
-    pub kokoro: ModelStatus,
+    pub stt: ModelStatus,
+    pub tts: ModelStatus,
 }
 
 // ── Safe archive extraction ───────────────────────────────────────────────────
@@ -297,7 +388,7 @@ where
 
 // ── ModelSlot ─────────────────────────────────────────────────────────────────
 
-/// Per-model state + config. `ModelManager` owns two of these (moonshine, kokoro).
+/// Per-model state + config. `ModelManager` owns two of these (stt, tts).
 #[derive(Clone)]
 struct ModelSlot {
     dir_name: &'static str,                  // subdir under ~/.sprout/models/
@@ -390,7 +481,7 @@ impl ModelSlot {
     }
 
     /// Verify files in `source_dir`, atomic-swap into final location, write manifest, signal ready.
-    /// `temp_cleanup`: optional extra dir to remove (e.g. outer extraction dir for Moonshine).
+    /// `temp_cleanup`: optional extra dir to remove (e.g. outer extraction dir for STT archive).
     async fn verify_and_install(
         &self,
         models_dir: &Path,
@@ -450,8 +541,8 @@ impl ModelSlot {
 pub struct ModelManager {
     /// `~/.sprout/models/`
     models_dir: PathBuf,
-    moonshine: ModelSlot,
-    kokoro: ModelSlot,
+    stt: ModelSlot,
+    tts: ModelSlot,
 }
 
 impl ModelManager {
@@ -462,101 +553,116 @@ impl ModelManager {
         let models_dir = dirs::home_dir()?.join(".sprout").join("models");
         Some(Self {
             models_dir,
-            moonshine: ModelSlot::new(
-                MOONSHINE_MODEL_DIR_NAME,
-                MOONSHINE_EXPECTED_FILES,
-                MOONSHINE_MODEL_VERSION,
-            ),
-            kokoro: ModelSlot::new(
-                KOKORO_MODEL_DIR_NAME,
-                KOKORO_EXPECTED_FILES,
-                KOKORO_MODEL_VERSION,
-            ),
+            stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),
+            tts: ModelSlot::new(TTS_MODEL_DIR_NAME, TTS_EXPECTED_FILES, TTS_MODEL_VERSION),
         })
     }
 
-    // ── Moonshine accessors ───────────────────────────────────────────────────
+    // ── STT accessors ────────────────────────────────────────────────────────
 
-    /// Path to the Moonshine model directory, or `None` if not ready.
-    pub fn moonshine_model_dir(&self) -> Option<PathBuf> {
-        self.moonshine.dir_if_ready(&self.models_dir)
+    /// Path to the STT model directory, or `None` if not ready.
+    pub fn stt_model_dir(&self) -> Option<PathBuf> {
+        self.stt.dir_if_ready(&self.models_dir)
     }
-    /// `true` if all Moonshine files are present and the manifest version matches.
-    pub fn is_moonshine_ready(&self) -> bool {
-        self.moonshine.is_ready(&self.models_dir)
+    /// `true` if all STT files are present and the manifest version matches.
+    pub fn is_stt_ready(&self) -> bool {
+        self.stt.is_ready(&self.models_dir)
     }
-    /// Current Moonshine download status.
-    pub fn moonshine_status(&self) -> ModelStatus {
-        self.moonshine.status()
+    /// Current STT download status.
+    pub fn stt_status(&self) -> ModelStatus {
+        self.stt.status()
     }
-    /// Returns `true` once when Moonshine just became ready. Resets the flag.
-    pub fn take_moonshine_ready(&self) -> bool {
-        self.moonshine.take_ready()
+    /// Returns `true` once when the STT model just became ready. Resets the flag.
+    pub fn take_stt_ready(&self) -> bool {
+        self.stt.take_ready()
     }
 
-    // ── Kokoro accessors ──────────────────────────────────────────────────────
+    // ── TTS accessors ─────────────────────────────────────────────────────────
 
-    /// Path to the Kokoro model directory, or `None` if not ready.
-    pub fn kokoro_model_dir(&self) -> Option<PathBuf> {
-        self.kokoro.dir_if_ready(&self.models_dir)
+    /// Path to the TTS model directory, or `None` if not ready.
+    pub fn tts_model_dir(&self) -> Option<PathBuf> {
+        self.tts.dir_if_ready(&self.models_dir)
     }
-    /// `true` if all Kokoro files are present and the manifest version matches.
-    pub fn is_kokoro_ready(&self) -> bool {
-        self.kokoro.is_ready(&self.models_dir)
+    /// `true` if all TTS files are present and the manifest version matches.
+    pub fn is_tts_ready(&self) -> bool {
+        self.tts.is_ready(&self.models_dir)
     }
-    /// Current Kokoro download status.
-    pub fn kokoro_status(&self) -> ModelStatus {
-        self.kokoro.status()
+    /// Current TTS download status.
+    pub fn tts_status(&self) -> ModelStatus {
+        self.tts.status()
     }
-    /// Returns `true` once when Kokoro just became ready. Resets the flag.
-    pub fn take_kokoro_ready(&self) -> bool {
-        self.kokoro.take_ready()
+    /// Returns `true` once when TTS just became ready. Resets the flag.
+    pub fn take_tts_ready(&self) -> bool {
+        self.tts.take_ready()
     }
 
     // ── Download triggers ─────────────────────────────────────────────────────
 
-    /// Start a background Moonshine download. No-op if already ready or downloading.
-    pub fn start_moonshine_download(&self, http_client: reqwest::Client) {
+    /// Start a background STT model download. No-op if already ready or downloading.
+    ///
+    /// Also schedules a best-effort cleanup of the legacy Moonshine model
+    /// directory — but **only when the new STT model is already on disk and
+    /// Ready**. This covers the "fast-path" upgrade scenario (new model
+    /// installed by a previous build, `download_stt_model` short-circuits, the
+    /// post-install cleanup never runs). For users mid-migration (old model
+    /// present, new model still downloading) we keep the old files until the
+    /// Parakeet install finishes, avoiding unnecessary data loss if the
+    /// ~100 MB download fails. The post-install path inside
+    /// `download_stt_model` handles cleanup once the new install reaches Ready.
+    pub fn start_stt_download(&self, http_client: reqwest::Client) {
         let manager = self.clone();
-        self.moonshine.start_download(
+        self.stt.start_download(
             &self.models_dir,
             http_client,
-            "moonshine",
-            move |client| async move { manager.download_moonshine_model(client).await },
+            "stt",
+            move |client| async move { manager.download_stt_model(client).await },
         );
+        if self.stt.is_ready(&self.models_dir) {
+            // Detached cleanup task — must not block startup. Gated above on
+            // the new model being Ready, so a mid-migration user keeps their
+            // existing moonshine-tiny files until Parakeet install completes.
+            let models_dir = self.models_dir.clone();
+            tauri::async_runtime::spawn(async move {
+                cleanup_legacy_moonshine_dir(&models_dir).await;
+            });
+        }
     }
 
-    /// Start a background Kokoro download (~87 MB). No-op if already ready or downloading.
-    pub fn start_kokoro_download(&self, http_client: reqwest::Client) {
+    /// Start a background Pocket TTS download (~189 MB). No-op if already ready or downloading.
+    pub fn start_tts_download(&self, http_client: reqwest::Client) {
         let manager = self.clone();
-        self.kokoro.start_download(
+        self.tts.start_download(
             &self.models_dir,
             http_client,
-            "kokoro",
-            move |client| async move { manager.download_kokoro_model(client).await },
+            "tts",
+            move |client| async move { manager.download_tts_model(client).await },
         );
     }
 
     // ── Private download implementations ─────────────────────────────────────
 
-    /// Download, extract, and verify the Moonshine model archive.
-    async fn download_moonshine_model(&self, http_client: reqwest::Client) -> Result<(), String> {
+    /// Download, extract, and verify the STT model archive.
+    async fn download_stt_model(&self, http_client: reqwest::Client) -> Result<(), String> {
         tokio::fs::create_dir_all(&self.models_dir)
             .await
             .map_err(|e| format!("create models dir: {e}"))?;
 
-        let archive_path = self.models_dir.join("moonshine-tiny.tar.bz2");
-        let temp_dir = self.models_dir.join("moonshine-tiny.tmp");
+        // Temp filenames derive from the final directory name to avoid colliding
+        // with leftovers from any previous STT model (e.g. moonshine-tiny.*).
+        let archive_path = self
+            .models_dir
+            .join(format!("{STT_MODEL_DIR_NAME}.tar.bz2"));
+        let temp_dir = self.models_dir.join(format!("{STT_MODEL_DIR_NAME}.tmp"));
 
-        eprintln!("sprout-desktop: downloading Moonshine model from {MOONSHINE_DOWNLOAD_URL}");
-        let response = fetch_url(&http_client, MOONSHINE_DOWNLOAD_URL, "moonshine archive").await?;
+        eprintln!("sprout-desktop: downloading STT model from {STT_DOWNLOAD_URL}");
+        let response = fetch_url(&http_client, STT_DOWNLOAD_URL, "stt archive").await?;
 
-        let slot = self.moonshine.clone();
+        let slot = self.stt.clone();
         let bytes = download_file(
             response,
             &archive_path,
-            MAX_MOONSHINE_DOWNLOAD_BYTES,
-            "moonshine archive",
+            MAX_STT_DOWNLOAD_BYTES,
+            "stt archive",
             |downloaded, content_length| {
                 if let Some(total) = content_length {
                     if total > 0 {
@@ -573,35 +679,46 @@ impl ModelManager {
 
         // Verify archive integrity before extraction.
         let hash = sha256_file(&archive_path).await?;
-        if hash != MOONSHINE_ARCHIVE_SHA256 {
+        if hash != STT_ARCHIVE_SHA256 {
             let _ = tokio::fs::remove_file(&archive_path).await;
             return Err(format!(
-                "Moonshine archive integrity check failed: expected {MOONSHINE_ARCHIVE_SHA256}, got {hash}"
+                "STT archive integrity check failed: expected {STT_ARCHIVE_SHA256}, got {hash}"
             ));
         }
 
-        self.moonshine.set_status(ModelStatus::Downloading {
+        self.stt.set_status(ModelStatus::Downloading {
             progress_percent: 90,
         });
         fresh_temp_dir(&temp_dir).await?;
 
-        eprintln!("sprout-desktop: extracting Moonshine archive…");
+        eprintln!("sprout-desktop: extracting STT archive…");
         let (ap, td) = (archive_path.clone(), temp_dir.clone());
         tokio::task::spawn_blocking(move || extract_archive(&ap, &td))
             .await
             .map_err(|e| format!("tar task panicked: {e}"))??;
 
-        let extracted_subdir = temp_dir.join(MOONSHINE_ARCHIVE_SUBDIR);
+        let extracted_subdir = temp_dir.join(STT_ARCHIVE_SUBDIR);
         if !extracted_subdir.is_dir() {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;
             return Err(format!(
-                "expected subdir '{MOONSHINE_ARCHIVE_SUBDIR}' not found after extraction"
+                "expected subdir '{STT_ARCHIVE_SUBDIR}' not found after extraction"
             ));
+        }
+
+        // Write the CC-BY-4.0 attribution sidecar before the atomic install,
+        // so it lands in the final model dir as part of the same rename. The
+        // upstream tarball ships no LICENSE/NOTICE, so we provide it ourselves
+        // per §3(a)(1) (license must travel with Shared material).
+        let license_path = extracted_subdir.join(STT_LICENSE_FILE_NAME);
+        if let Err(e) = tokio::fs::write(&license_path, STT_LICENSE_TEXT).await {
+            let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+            let _ = tokio::fs::remove_file(&archive_path).await;
+            return Err(format!("write model license sidecar: {e}"));
         }
 
         // verify_and_install takes the subdir (actual model files); temp_cleanup removes outer dir.
         if let Err(e) = self
-            .moonshine
+            .stt
             .verify_and_install(&self.models_dir, &extracted_subdir, Some(&temp_dir))
             .await
         {
@@ -611,47 +728,56 @@ impl ModelManager {
         }
         let _ = tokio::fs::remove_file(&archive_path).await;
 
+        // Best-effort cleanup of the previous default STT model dir (Moonshine
+        // Tiny, ~70 MB). Runs only after the new install reaches Ready, so a
+        // failed download never removes the previous on-disk model during
+        // migration. The same cleanup also runs from `start_stt_download` to
+        // cover users who already have the new model installed.
+        cleanup_legacy_moonshine_dir(&self.models_dir).await;
+
         eprintln!(
-            "sprout-desktop: Moonshine model ready at {}",
-            self.moonshine.model_dir(&self.models_dir).display()
+            "sprout-desktop: STT model ready at {}",
+            self.stt.model_dir(&self.models_dir).display()
         );
         Ok(())
     }
 
-    /// Download and verify the Kokoro TTS model files from HuggingFace and GitHub.
+    /// Download and verify the Pocket TTS model files from HuggingFace.
     ///
-    /// Downloads files into `~/.sprout/models/kokoro/`:
-    ///   - `model.onnx`   — Kokoro-82M mixed-precision ONNX (86 MB)
-    ///   - `af_heart.bin` — best-quality American English voice embedding (510 KB)
-    ///   - `us_gold.json` — Misaki G2P lexicon, pinned to commit fba1236 (3 MB)
+    /// Downloads files into `~/.sprout/models/pocket-tts/`:
+    ///   - five ONNX sessions (Pocket TTS + Mimi codec)
+    ///   - `vocab.json` / `token_scores.json` for sherpa-onnx text conditioning
+    ///   - upstream `LICENSE` plus Sprout's `MODEL_LICENSE.txt` attribution sidecar
+    ///   - `reference_sample.wav` as the bundled default voice
     ///
     /// Files are written to a temp directory first, then moved atomically.
-    async fn download_kokoro_model(&self, http_client: reqwest::Client) -> Result<(), String> {
+    async fn download_tts_model(&self, http_client: reqwest::Client) -> Result<(), String> {
         tokio::fs::create_dir_all(&self.models_dir)
             .await
             .map_err(|e| format!("create models dir: {e}"))?;
 
-        let temp_dir = self.models_dir.join("kokoro.tmp");
+        let temp_dir = self.models_dir.join("pocket-tts.tmp");
         fresh_temp_dir(&temp_dir).await?;
 
-        // (url, local_filename)
-        let downloads: &[(&str, &str)] = &[
-            (
-                &format!("{KOKORO_HF_BASE}/onnx/model_q8f16.onnx"),
-                "model.onnx",
-            ),
-            (
-                &format!("{KOKORO_HF_BASE}/voices/af_heart.bin"),
-                "af_heart.bin",
-            ),
-            (KOKORO_LEXICON_GOLD_URL, "us_gold.json"),
-            (KOKORO_LEXICON_SILVER_URL, "us_silver.json"),
-            (KOKORO_CMUDICT_URL, "cmudict.dict"),
+        let model_files = [
+            "decoder.int8.onnx",
+            "encoder.onnx",
+            "lm_flow.int8.onnx",
+            "lm_main.int8.onnx",
+            "text_conditioner.onnx",
+            "vocab.json",
+            "token_scores.json",
+            "LICENSE",
         ];
+        let mut downloads: Vec<(String, &'static str)> = model_files
+            .iter()
+            .map(|filename| (format!("{POCKET_HF_BASE}/{filename}"), *filename))
+            .collect();
+        downloads.push((POCKET_REFERENCE_WAV_URL.to_string(), "reference_sample.wav"));
         let total_files = downloads.len() as u32;
 
         for (i, (url, filename)) in downloads.iter().enumerate() {
-            eprintln!("sprout-desktop: downloading Kokoro {filename} from {url}");
+            eprintln!("sprout-desktop: downloading Pocket TTS {filename} from {url}");
 
             let response = fetch_url(&http_client, url, filename).await.map_err(|e| {
                 let _ = std::fs::remove_dir_all(&temp_dir);
@@ -659,12 +785,12 @@ impl ModelManager {
             })?;
 
             let dest = temp_dir.join(filename);
-            let slot = self.kokoro.clone();
+            let slot = self.tts.clone();
             let file_index = i as u32;
             let bytes = download_file(
                 response,
                 &dest,
-                MAX_KOKORO_FILE_BYTES,
+                MAX_TTS_FILE_BYTES,
                 filename,
                 |downloaded, content_length| {
                     if let Some(total) = content_length {
@@ -687,30 +813,36 @@ impl ModelManager {
             })?;
             eprintln!("sprout-desktop: downloaded {bytes} bytes ({filename}), wrote to disk");
 
-            // Verify file integrity against pinned hash.
-            if let Some(&(_, expected)) = KOKORO_FILE_HASHES.iter().find(|(n, _)| *n == *filename) {
-                let actual = sha256_file(&dest).await?;
-                if actual != expected {
-                    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-                    return Err(format!(
-                        "Kokoro {filename} integrity check failed: expected {expected}, got {actual}"
-                    ));
-                }
+            let expected = TTS_FILE_HASHES
+                .iter()
+                .find(|(n, _)| *n == *filename)
+                .map(|(_, hash)| *hash)
+                .ok_or_else(|| format!("missing expected hash for Pocket TTS file: {filename}"))?;
+            let actual = sha256_file(&dest).await?;
+            if actual != expected {
+                let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+                return Err(format!(
+                    "Pocket TTS {filename} integrity check failed: expected {expected}, got {actual}"
+                ));
             }
 
             // Ensure progress reflects file completion even without content-length.
             let pct = (((i as u32 + 1) * 89) / total_files).min(89) as u8;
-            self.kokoro.set_status(ModelStatus::Downloading {
+            self.tts.set_status(ModelStatus::Downloading {
                 progress_percent: pct,
             });
         }
 
-        self.kokoro.set_status(ModelStatus::Downloading {
+        tokio::fs::write(temp_dir.join(TTS_LICENSE_FILE_NAME), TTS_LICENSE_TEXT)
+            .await
+            .map_err(|e| format!("write TTS model license sidecar: {e}"))?;
+
+        self.tts.set_status(ModelStatus::Downloading {
             progress_percent: 90,
         });
 
         if let Err(e) = self
-            .kokoro
+            .tts
             .verify_and_install(&self.models_dir, &temp_dir, None)
             .await
         {
@@ -719,8 +851,8 @@ impl ModelManager {
         }
 
         eprintln!(
-            "sprout-desktop: Kokoro model ready at {}",
-            self.kokoro.model_dir(&self.models_dir).display()
+            "sprout-desktop: Pocket TTS model ready at {}",
+            self.tts.model_dir(&self.models_dir).display()
         );
         Ok(())
     }
@@ -737,26 +869,77 @@ pub fn global_model_manager() -> Option<&'static ModelManager> {
 
 // ── Standalone helpers ────────────────────────────────────────────────────────
 
-/// Path to the Moonshine model directory, or `None` if not ready.
-pub fn moonshine_model_dir() -> Option<PathBuf> {
-    global_model_manager()?.moonshine_model_dir()
+/// Path to the STT model directory, or `None` if not ready.
+pub fn stt_model_dir() -> Option<PathBuf> {
+    global_model_manager()?.stt_model_dir()
 }
 
-/// `true` if all expected Moonshine model files are present on disk.
-pub fn is_moonshine_ready() -> bool {
+/// `true` if all expected STT model files are present on disk.
+pub fn is_stt_ready() -> bool {
     global_model_manager()
-        .map(|m| m.is_moonshine_ready())
+        .map(|m| m.is_stt_ready())
         .unwrap_or(false)
 }
 
-/// Path to the Kokoro model directory, or `None` if not ready.
-pub fn kokoro_model_dir() -> Option<PathBuf> {
-    global_model_manager()?.kokoro_model_dir()
+/// Best-effort cleanup of the legacy Moonshine STT model directory.
+///
+/// Removes `~/.sprout/models/moonshine-tiny/` if present (~70 MB on disk).
+/// Idempotent — no-op if the directory is absent. Errors are logged and
+/// swallowed; the leftover is harmless and the user can remove it manually.
+///
+/// This is intentionally a free function rather than a method: it has no
+/// dependency on `ModelManager` state, runs from both pre- and post-install
+/// code paths, and the call site is meant to be easy to delete in a future
+/// release once we're confident no users are still on the old model dir.
+async fn cleanup_legacy_moonshine_dir(models_dir: &Path) {
+    let legacy = models_dir.join("moonshine-tiny");
+    if !legacy.exists() {
+        return;
+    }
+    match tokio::fs::remove_dir_all(&legacy).await {
+        Ok(()) => eprintln!(
+            "sprout-desktop: removed legacy STT model dir {}",
+            legacy.display()
+        ),
+        Err(e) => eprintln!(
+            "sprout-desktop: could not remove legacy STT model dir {}: {e} \
+             (harmless — remove manually to reclaim disk space)",
+            legacy.display()
+        ),
+    }
 }
 
-/// `true` if all expected Kokoro model files are present on disk.
-pub fn is_kokoro_ready() -> bool {
+/// Path to the TTS model directory, or `None` if not ready.
+pub fn tts_model_dir() -> Option<PathBuf> {
+    global_model_manager()?.tts_model_dir()
+}
+
+/// `true` if all expected TTS model files are present on disk.
+pub fn is_tts_ready() -> bool {
     global_model_manager()
-        .map(|m| m.is_kokoro_ready())
+        .map(|m| m.is_tts_ready())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tts_readiness_requires_license_sidecar() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let slot = ModelSlot::new(TTS_MODEL_DIR_NAME, TTS_EXPECTED_FILES, TTS_MODEL_VERSION);
+        let model_dir = temp.path().join(TTS_MODEL_DIR_NAME);
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+
+        for file in TTS_EXPECTED_FILES {
+            std::fs::write(model_dir.join(file), b"test").expect("write expected file");
+        }
+        std::fs::write(model_dir.join(MANIFEST_FILENAME), TTS_MODEL_VERSION).expect("manifest");
+
+        assert!(slot.is_ready(temp.path()));
+
+        std::fs::remove_file(model_dir.join(TTS_LICENSE_FILE_NAME)).expect("remove sidecar");
+        assert!(!slot.is_ready(temp.path()));
+    }
 }

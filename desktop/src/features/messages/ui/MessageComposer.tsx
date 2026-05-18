@@ -559,7 +559,7 @@ export function MessageComposer({
         aria-hidden="true"
         className="absolute inset-x-0 bottom-0 h-5 bg-background"
       />
-      <div className="relative mx-auto flex w-full max-w-4xl flex-col gap-3">
+      <div className="relative flex w-full flex-col gap-3">
         <form
           className="relative isolate rounded-2xl border border-border/50 bg-background/70 px-3 pb-2 pt-3 shadow-[0_4px_24px_rgba(0,0,0,0.08)] backdrop-blur-xl supports-[backdrop-filter]:bg-background/55 dark:shadow-[0_4px_24px_rgba(0,0,0,0.35)] sm:px-4"
           data-testid="message-composer"

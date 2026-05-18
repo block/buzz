@@ -7,7 +7,7 @@ export function useHomeFeedQuery() {
     queryKey: ["home-feed"],
     queryFn: () =>
       getHomeFeed({
-        limit: 12,
+        limit: 50,
         types: "mentions,needs_action,activity,agent_activity",
       }),
     staleTime: 15_000,

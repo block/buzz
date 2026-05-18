@@ -12,16 +12,18 @@ import type {
   InboxItem,
   InboxReply,
 } from "@/features/home/lib/inbox";
+import {
+  type InboxDisplayMessage,
+  InboxMessageRow,
+} from "@/features/home/ui/InboxMessageRow";
 import type { TimelineMessage } from "@/features/messages/types";
-import { MessageActionBar } from "@/features/messages/ui/MessageActionBar";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
-import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { Markdown } from "@/shared/ui/markdown";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import {
@@ -30,7 +32,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/shared/ui/tooltip";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type InboxDetailPaneProps = {
   canDelete: boolean;
@@ -44,37 +45,22 @@ type InboxDetailPaneProps = {
   item: InboxItem | null;
   messages?: InboxContextMessage[];
   replies?: InboxReply[];
+  contextChannelName?: string | null;
   onDelete: () => void;
+  onOpenContext?: (channelId: string, messageId: string) => void;
   onSendReply: (input: {
     content: string;
     mediaTags?: string[][];
     mentionPubkeys: string[];
     parentEventId: string;
   }) => Promise<void>;
-  onToggleDone: () => void;
   onToggleReaction?: (
     message: TimelineMessage,
     emoji: string,
     remove: boolean,
   ) => Promise<void>;
+  onToggleDone: () => void;
 };
-
-type InboxDisplayMessage = InboxContextMessage & {
-  depth: number;
-};
-
-function toActionBarMessage(message: InboxDisplayMessage): TimelineMessage {
-  return {
-    id: message.id,
-    author: message.authorLabel,
-    avatarUrl: message.avatarUrl,
-    body: message.content,
-    createdAt: 0,
-    depth: message.depth,
-    reactions: message.reactions ?? [],
-    time: message.fullTimestampLabel,
-  };
-}
 
 export function InboxDetailPane({
   canDelete,
@@ -88,16 +74,28 @@ export function InboxDetailPane({
   item,
   messages = [],
   replies = [],
+  contextChannelName = null,
   onDelete,
+  onOpenContext,
   onSendReply,
-  onToggleDone,
   onToggleReaction,
+  onToggleDone,
 }: InboxDetailPaneProps) {
   const detailPaneRef = React.useRef<HTMLElement | null>(null);
   const [replyTargetId, setReplyTargetId] = React.useState<string | null>(null);
   const [isFocusHighlightVisible, setIsFocusHighlightVisible] =
     React.useState(true);
   const selectedItemId = item?.id ?? null;
+  const selectedMessageScrollKey = React.useMemo(() => {
+    if (!selectedItemId) {
+      return null;
+    }
+
+    const selectedMessageIndex = messages.findIndex(
+      (message) => message.isSelected,
+    );
+    return `${selectedItemId}:${selectedMessageIndex}:${messages.length}`;
+  }, [messages, selectedItemId]);
 
   const focusComposer = React.useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -125,6 +123,20 @@ export function InboxDetailPane({
       window.clearTimeout(timeoutId);
     };
   }, [selectedItemId]);
+
+  React.useEffect(() => {
+    if (!selectedMessageScrollKey) {
+      return;
+    }
+
+    window.requestAnimationFrame(() => {
+      detailPaneRef.current
+        ?.querySelector<HTMLElement>(
+          '[data-testid="home-inbox-selected-message"]',
+        )
+        ?.scrollIntoView({ block: "center" });
+    });
+  }, [selectedMessageScrollKey]);
 
   if (!item) {
     return (
@@ -179,6 +191,11 @@ export function InboxDetailPane({
           id: replyTarget.id,
         }
       : null;
+  const channelContextName = contextChannelName ?? item.channelLabel;
+  const contextLabel = channelContextName
+    ? `#${channelContextName}`
+    : item.categoryLabel;
+  const contextChannelId = item.item.channelId;
 
   const handleSelectReplyTarget = (message: InboxDisplayMessage) => {
     setReplyTargetId((currentReplyTargetId) =>
@@ -193,75 +210,41 @@ export function InboxDetailPane({
       data-testid="home-inbox-detail"
       ref={detailPaneRef}
     >
-      {!canOpenChannel ? (
-        <div className="px-6 pb-4 pt-14">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-3">
-              <UserAvatar
-                avatarUrl={item.avatarUrl}
-                className="h-8 w-8 rounded-xl"
-                displayName={item.senderLabel}
-                size="md"
-              />
-              <div className="min-w-0">
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <p className="truncate text-base font-semibold">
-                    {item.senderLabel}
-                  </p>
-                  <span
-                    className={cn(
-                      "inline-flex items-center text-[10px] font-semibold uppercase tracking-[0.14em]",
-                      item.isActionRequired
-                        ? "text-amber-600 dark:text-amber-300"
-                        : "text-primary",
-                    )}
-                  >
-                    {item.categoryLabel}
-                  </span>
-                  {item.channelLabel ? (
-                    <span className="inline-flex items-center text-[11px] font-medium text-muted-foreground">
-                      #{item.channelLabel}
-                    </span>
-                  ) : null}
-                </div>
-
-                <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                  <span>{item.fullTimestampLabel}</span>
-                  <span>Inbox only</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="flex shrink-0 items-center gap-4">
-              <TooltipProvider delayDuration={200}>
-                <div className="flex items-center gap-4">
-                  <div className="flex items-center gap-0.5">
-                    <HeaderIconAction
-                      label={isDone ? "Mark unread" : "Mark done"}
-                      onClick={onToggleDone}
-                      icon={
-                        isDone ? (
-                          <MailOpen className="h-4 w-4" />
-                        ) : (
-                          <CheckCheck className="h-4 w-4" />
-                        )
-                      }
-                    />
-                  </div>
-                  {canDelete ? (
-                    <HeaderMoreMenu
-                      isDeletingMessage={isDeletingMessage}
-                      onDelete={onDelete}
-                    />
-                  ) : null}
-                </div>
-              </TooltipProvider>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
       <div className="relative min-h-0 flex-1 overflow-hidden">
+        <div className="absolute inset-x-0 top-0 z-40 flex min-h-[44px] items-center justify-between gap-3 bg-background/70 py-[6px] pl-6 pr-3 backdrop-blur-xl supports-[backdrop-filter]:bg-background/55">
+          <div className="min-w-0">
+            {canOpenChannel && contextChannelId && onOpenContext ? (
+              <button
+                className="truncate text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                onClick={() => onOpenContext(contextChannelId, item.id)}
+                title={item.fullTimestampLabel}
+                type="button"
+              >
+                {contextLabel}
+              </button>
+            ) : (
+              <h2
+                className="truncate text-sm font-semibold leading-5 tracking-tight text-foreground"
+                title={item.fullTimestampLabel}
+              >
+                {contextLabel}
+              </h2>
+            )}
+          </div>
+
+          <TooltipProvider delayDuration={200}>
+            <div className="flex shrink-0 items-center gap-1">
+              <HeaderMoreMenu
+                canDelete={canDelete}
+                isDeletingMessage={isDeletingMessage}
+                isDone={isDone}
+                onDelete={onDelete}
+                onToggleDone={onToggleDone}
+              />
+            </div>
+          </TooltipProvider>
+        </div>
+
         <div className="absolute inset-0 overflow-y-auto overscroll-contain pb-32 pt-14">
           <div>
             {isThreadContextLoading ? (
@@ -274,90 +257,14 @@ export function InboxDetailPane({
                 {index === 1 ? (
                   <div className="mx-6 my-3 border-t border-border/60" />
                 ) : null}
-                <div className="px-6 py-2">
-                  <article
-                    className={cn(
-                      "group/message flex items-start gap-2.5 px-2 py-1 transition-colors duration-1000",
-                      message.isSelected
-                        ? cn(
-                            isFocusHighlightVisible
-                              ? "bg-primary/[0.07]"
-                              : "bg-transparent",
-                          )
-                        : "hover:bg-muted/20",
-                    )}
-                    data-testid={
-                      message.isSelected
-                        ? "home-inbox-selected-message"
-                        : "home-inbox-context-message"
-                    }
-                  >
-                    <UserAvatar
-                      avatarUrl={message.avatarUrl}
-                      className="h-8 w-8 shrink-0 rounded-xl"
-                      displayName={message.authorLabel}
-                      size="md"
-                    />
-                    <div className="-mt-1 min-w-0 flex-1">
-                      <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-0">
-                        <p className="truncate text-sm font-semibold leading-none tracking-tight text-foreground">
-                          {message.authorLabel}
-                        </p>
-                        {message.isSelected ? (
-                          <span className="text-[10px] font-semibold uppercase leading-none tracking-[0.14em] text-muted-foreground/70">
-                            Inbox item
-                          </span>
-                        ) : null}
-                        <p className="ml-auto text-xs text-muted-foreground">
-                          {message.fullTimestampLabel}
-                        </p>
-                        {canReply || onToggleReaction ? (
-                          <div className="relative ml-1">
-                            <div className="absolute right-0 top-1/2 -translate-y-1/2">
-                              <MessageActionBar
-                                activeReplyTargetId={replyTargetId}
-                                message={toActionBarMessage(message)}
-                                onReactionSelect={
-                                  onToggleReaction
-                                    ? (emoji) => {
-                                        const actionBarMessage =
-                                          toActionBarMessage(message);
-                                        const remove =
-                                          actionBarMessage.reactions?.some(
-                                            (reaction) =>
-                                              reaction.emoji === emoji &&
-                                              reaction.reactedByCurrentUser,
-                                          ) ?? false;
-                                        return onToggleReaction(
-                                          actionBarMessage,
-                                          emoji,
-                                          remove,
-                                        );
-                                      }
-                                    : undefined
-                                }
-                                onReply={
-                                  canReply
-                                    ? () => handleSelectReplyTarget(message)
-                                    : undefined
-                                }
-                                reactions={message.reactions ?? []}
-                              />
-                            </div>
-                          </div>
-                        ) : null}
-                      </div>
-                      <div className="mt-1">
-                        <Markdown
-                          className="max-w-full text-left text-sm text-foreground"
-                          content={message.content}
-                          mentionNames={message.mentionNames}
-                          tight
-                        />
-                      </div>
-                    </div>
-                  </article>
-                </div>
+                <InboxMessageRow
+                  activeReplyTargetId={replyTargetId}
+                  canReply={canReply}
+                  isFocusHighlightVisible={isFocusHighlightVisible}
+                  message={message}
+                  onSelectReplyTarget={handleSelectReplyTarget}
+                  onToggleReaction={onToggleReaction}
+                />
               </React.Fragment>
             ))}
           </div>
@@ -398,42 +305,18 @@ export function InboxDetailPane({
   );
 }
 
-function HeaderIconAction({
-  icon,
-  label,
-  onClick,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  onClick?: () => void;
-}) {
-  const button = (
-    <Button
-      aria-label={label}
-      className="h-8 w-8 rounded-full p-0 text-muted-foreground"
-      onClick={onClick}
-      size="icon"
-      type="button"
-      variant="ghost"
-    >
-      {icon}
-    </Button>
-  );
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>{button}</TooltipTrigger>
-      <TooltipContent>{label}</TooltipContent>
-    </Tooltip>
-  );
-}
-
 function HeaderMoreMenu({
+  canDelete,
   isDeletingMessage,
+  isDone,
   onDelete,
+  onToggleDone,
 }: {
+  canDelete: boolean;
   isDeletingMessage: boolean;
+  isDone: boolean;
   onDelete: () => void;
+  onToggleDone: () => void;
 }) {
   const trigger = (
     <Button
@@ -456,14 +339,25 @@ function HeaderMoreMenu({
         <TooltipContent>More actions</TooltipContent>
       </Tooltip>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem
-          className="text-destructive focus:text-destructive"
-          disabled={isDeletingMessage}
-          onClick={onDelete}
-        >
-          <Trash2 className="h-4 w-4" />
-          Delete message
+        <DropdownMenuItem onClick={onToggleDone}>
+          {isDone ? (
+            <MailOpen className="h-4 w-4" />
+          ) : (
+            <CheckCheck className="h-4 w-4" />
+          )}
+          {isDone ? "Unmark as read" : "Mark as read"}
         </DropdownMenuItem>
+        {canDelete ? <DropdownMenuSeparator /> : null}
+        {canDelete ? (
+          <DropdownMenuItem
+            className="text-destructive focus:text-destructive"
+            disabled={isDeletingMessage}
+            onClick={onDelete}
+          >
+            <Trash2 className="h-4 w-4" />
+            Delete message
+          </DropdownMenuItem>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );

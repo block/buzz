@@ -40,8 +40,8 @@ pub(crate) async fn post_connect_setup(
 
     // Ensure voice models are downloading (idempotent).
     if let Some(mgr) = models::global_model_manager() {
-        mgr.start_moonshine_download(state.http_client.clone());
-        mgr.start_kokoro_download(state.http_client.clone());
+        mgr.start_stt_download(state.http_client.clone());
+        mgr.start_tts_download(state.http_client.clone());
     }
 
     // Connect audio relay WebSocket (Opus encode/decode pipeline).
@@ -81,11 +81,10 @@ pub(crate) async fn maybe_start_stt_pipeline(
     state: &AppState,
     ephemeral_channel_id: &str,
 ) -> Result<bool, String> {
-    if !models::is_moonshine_ready() {
+    if !models::is_stt_ready() {
         return Ok(false); // Models not downloaded yet — voice-only mode.
     }
-    let model_dir =
-        models::moonshine_model_dir().ok_or_else(|| "Moonshine model directory not found")?;
+    let model_dir = models::stt_model_dir().ok_or_else(|| "STT model directory not found")?;
 
     let channel_uuid = parse_channel_uuid(ephemeral_channel_id)?;
 
@@ -154,7 +153,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
     Ok(true)
 }
 
-/// Attempt to start the TTS pipeline if Kokoro models are present and TTS is enabled.
+/// Attempt to start the TTS pipeline if TTS models are present and TTS is enabled.
 ///
 /// Returns `Ok(true)` if the pipeline was started, `Ok(false)` if preconditions
 /// aren't met (model not ready, pipeline exists, TTS disabled), or `Err` on failure.
@@ -165,11 +164,11 @@ pub(crate) async fn maybe_start_stt_pipeline(
 /// leaks ~200MB of ONNX sessions. The sentinel is set under the lock before
 /// releasing it for the expensive construction step.
 pub(crate) async fn maybe_start_tts_pipeline(state: &AppState) -> Result<bool, String> {
-    if !models::is_kokoro_ready() {
-        return Ok(false); // Kokoro not downloaded yet — TTS unavailable.
+    if !models::is_tts_ready() {
+        return Ok(false); // TTS model not downloaded yet — TTS unavailable.
     }
 
-    let model_dir = match models::kokoro_model_dir() {
+    let model_dir = match models::tts_model_dir() {
         Some(d) => d,
         None => return Ok(false),
     };

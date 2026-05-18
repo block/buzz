@@ -10,6 +10,7 @@ members = [
     "crates/sprout-mcp",
     "crates/sprout-acp",
     "crates/sprout-agent",
+    "crates/sprig",
     "crates/sprout-proxy",
     "crates/sprout-test-client",
     "crates/sprout-admin",
@@ -125,3 +126,16 @@ sprout-sdk = { path = "crates/sprout-sdk" }
 [profile.ci]
 inherits = "release"
 lto = false
+
+# Sprig profile — optimized for deploy-anywhere Sprig release artifacts.
+# Sprig is distributed over the network and installed on fresh hosts, so binary
+# size matters more than compile speed here. Keep this separate from the normal
+# `release` profile so desktop/dev release builds do not inherit the slower
+# size-focused settings unless they opt in explicitly.
+[profile.sprig]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

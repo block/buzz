@@ -101,7 +101,7 @@ export function ReposPage() {
 
   if (isLoading) {
     return (
-      <div className="mx-auto flex w-full max-w-7xl gap-8 px-4 py-8">
+      <div className="flex w-full gap-8 px-4 py-8">
         <div className="min-w-0 flex-1">
           <h2 className="mb-4 flex items-center gap-2 text-lg font-semibold">
             <BookMarked className="h-5 w-5" /> Repositories
@@ -122,7 +122,7 @@ export function ReposPage() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-7xl gap-8 px-4 py-8">
+    <div className="flex w-full gap-8 px-4 py-8">
       {/* Main content */}
       <div className="min-w-0 flex-1">
         {/* Mobile-only connect button */}

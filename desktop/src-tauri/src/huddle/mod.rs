@@ -25,9 +25,9 @@
 
 pub mod agents;
 pub mod audio_output;
-pub mod kokoro;
 pub mod models;
 pub mod pipeline;
+pub mod pocket;
 pub mod preprocessing;
 pub mod relay_api;
 pub mod state;
@@ -658,21 +658,21 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
     };
 
     // Check if models just became ready (one-shot flags).
-    let moonshine_ready = models::global_model_manager()
-        .map(|m| m.take_moonshine_ready())
+    let stt_ready = models::global_model_manager()
+        .map(|m| m.take_stt_ready())
         .unwrap_or(false);
-    let kokoro_ready = models::global_model_manager()
-        .map(|m| m.take_kokoro_ready())
+    let tts_ready = models::global_model_manager()
+        .map(|m| m.take_tts_ready())
         .unwrap_or(false);
 
     // Start TTS first (so STT can capture tts_cancel).
-    if !has_tts && (kokoro_ready || models::is_kokoro_ready()) {
+    if !has_tts && (tts_ready || models::is_tts_ready()) {
         if let Err(e) = maybe_start_tts_pipeline(&state).await {
             eprintln!("sprout-desktop: TTS hotstart failed: {e}");
         }
     }
 
-    if !has_stt && (moonshine_ready || models::is_moonshine_ready()) {
+    if !has_stt && (stt_ready || models::is_stt_ready()) {
         if let Some(eph_id) = &ephemeral_channel_id {
             if let Err(e) = maybe_start_stt_pipeline(&state, eph_id).await {
                 eprintln!("sprout-desktop: STT hotstart failed: {e}");
@@ -746,12 +746,12 @@ pub async fn start_stt_pipeline(state: State<'_, AppState>) -> Result<(), String
 
     match maybe_start_stt_pipeline(&state, &ephemeral_channel_id).await {
         Ok(true) => Ok(()),
-        Ok(false) => Err("Moonshine model not ready".to_string()),
+        Ok(false) => Err("STT model not ready".to_string()),
         Err(e) => Err(e),
     }
 }
 
-/// Trigger a background download of voice models (Moonshine STT + Kokoro TTS).
+/// Trigger a background download of voice models (Parakeet STT + Pocket TTS).
 ///
 /// Returns immediately — downloads run in tokio background tasks.
 /// Poll `get_model_status` to track progress.
@@ -760,8 +760,8 @@ pub async fn start_stt_pipeline(state: State<'_, AppState>) -> Result<(), String
 pub async fn download_voice_models(state: State<'_, AppState>) -> Result<(), String> {
     let manager = models::global_model_manager()
         .ok_or("model manager unavailable (home directory could not be resolved)")?;
-    manager.start_moonshine_download(state.http_client.clone());
-    manager.start_kokoro_download(state.http_client.clone());
+    manager.start_stt_download(state.http_client.clone());
+    manager.start_tts_download(state.http_client.clone());
     Ok(())
 }
 
@@ -771,16 +771,15 @@ pub fn get_model_status(_state: State<'_, AppState>) -> Result<models::VoiceMode
     let manager = models::global_model_manager()
         .ok_or("model manager unavailable (home directory could not be resolved)")?;
     Ok(models::VoiceModelStatus {
-        moonshine: manager.moonshine_status(),
-
-        kokoro: manager.kokoro_status(),
+        stt: manager.stt_status(),
+        tts: manager.tts_status(),
     })
 }
 
 /// Enable or disable TTS output.
 ///
 /// When disabled, the TTS pipeline is shut down and audio output stops.
-/// When re-enabled, the pipeline is restarted if Kokoro models are available.
+/// When re-enabled, the pipeline is restarted if TTS models are available.
 ///
 /// Takes the pipeline handle out of the lock before calling shutdown() — the
 /// thread join in Drop can block for ~200 ms (ONNX inference) and we don't

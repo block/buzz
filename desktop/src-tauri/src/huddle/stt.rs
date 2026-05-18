@@ -9,7 +9,7 @@
 //!   → stt_worker thread
 //!       rubato: 48 kHz → 16 kHz mono
 //!       earshot VAD: accumulate speech frames
-//!       sherpa-onnx Moonshine: transcribe on silence
+//!       sherpa-onnx Parakeet TDT-CTC 110M: transcribe on silence
 //!   → text_rx  [mpsc channel]
 //!   → tokio task (start_stt_pipeline)
 //!       builds kind:9 event → relay
@@ -190,6 +190,17 @@ const RECV_TIMEOUT: Duration = Duration::from_millis(50);
 /// immediately after the agent finished.
 const TTS_COOLDOWN: Duration = Duration::from_millis(50);
 
+/// Number of ONNX Runtime intra-op threads used by the offline recognizer.
+///
+/// Held at 1 (conservative) until we have a local A/B on real huddle audio.
+/// Sherpa-onnx's Parakeet example uses 2 and most published RTF numbers are
+/// at 2 threads on x86_64 server class hardware, but the encoder runs only
+/// on VAD chunk boundaries on a dedicated thread, so the threading knob
+/// trades worker latency against potential oversubscription with the audio
+/// worklet on small Macs (4-core Intel especially). Bump to 2 once the A/B
+/// shows it's safe on the minimum-spec target.
+const STT_NUM_THREADS: i32 = 1;
+
 fn stt_worker(
     model_dir: PathBuf,
     audio_rx: Receiver<Vec<u8>>,
@@ -216,31 +227,32 @@ fn stt_worker(
     let mut vad = Detector::new(DefaultPredictor::new());
 
     // ── 3. Initialise sherpa-onnx recognizer ─────────────────────────────────
-    use sherpa_onnx::{OfflineMoonshineModelConfig, OfflineRecognizer, OfflineRecognizerConfig};
+    //
+    // Parakeet TDT-CTC 110M ships as a single `model.int8.onnx` (CTC head) plus
+    // `tokens.txt`. sherpa-onnx infers the model family from which inner config
+    // has a `model` path set, so we don't need to set `model_type` explicitly.
+    // (See rust-api-examples/parakeet_tdt_ctc_simulate_streaming_microphone.rs
+    // in k2-fsa/sherpa-onnx.)
+    use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 
     let tokens_path = model_dir.join("tokens.txt");
-    if !tokens_path.exists() {
+    let model_path = model_dir.join("model.int8.onnx");
+    if !tokens_path.exists() || !model_path.exists() {
         eprintln!(
-            "sprout-desktop: STT models not found at {} — STT disabled",
+            "sprout-desktop: STT model not found at {} — STT disabled",
             model_dir.display()
         );
         drain_until_shutdown(audio_rx, &shutdown);
         return;
     }
 
-    let model_dir_str = model_dir.to_string_lossy().into_owned();
-
     let mut cfg = OfflineRecognizerConfig::default();
-    cfg.model_config.moonshine = OfflineMoonshineModelConfig {
-        preprocessor: Some(format!("{model_dir_str}/preprocess.onnx")),
-        encoder: Some(format!("{model_dir_str}/encode.int8.onnx")),
-        uncached_decoder: Some(format!("{model_dir_str}/uncached_decode.int8.onnx")),
-        cached_decoder: Some(format!("{model_dir_str}/cached_decode.int8.onnx")),
-        merged_decoder: None,
-    };
+    cfg.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
     cfg.model_config.tokens = Some(tokens_path.to_string_lossy().into_owned());
-    cfg.model_config.num_threads = 1;
-    cfg.model_config.model_type = Some("moonshine".into());
+    cfg.model_config.num_threads = STT_NUM_THREADS;
+    // Explicit — defaults are not part of the API contract, and noisy debug
+    // logging in release builds would be expensive on every VAD chunk.
+    cfg.model_config.debug = false;
 
     let recognizer = match OfflineRecognizer::create(&cfg) {
         Some(r) => r,

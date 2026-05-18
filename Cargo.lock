@@ -3800,6 +3800,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sprig"
+version = "0.1.0"
+dependencies = [
+ "sprout-acp",
+ "sprout-agent",
+ "sprout-dev-mcp",
+]
+
+[[package]]
 name = "sprout-acp"
 version = "0.1.0"
 dependencies = [
