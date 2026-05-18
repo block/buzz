@@ -200,7 +200,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
 
   return (
     <div
-      className="group/message rounded-2xl px-2 py-1 transition-colors"
+      className="group/message relative rounded-2xl px-2 py-1 transition-colors"
       data-testid="system-message-row"
     >
       <div className="flex items-start gap-2.5">
@@ -211,9 +211,15 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
           testId="system-message-avatar"
         />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold leading-none tracking-tight text-foreground/90">
-            {description.title}
-          </p>
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <p className="truncate text-sm font-semibold leading-none tracking-tight text-foreground/90">
+              {description.title}
+            </p>
+            <MessageTimestamp
+              createdAt={message.createdAt}
+              time={message.time}
+            />
+          </div>
           <p className="mt-1 text-sm leading-snug text-muted-foreground/70">
             {description.action}
           </p>
@@ -235,86 +241,77 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
             ) : null}
           </div>
         </div>
-        <div className="ml-auto flex items-center gap-1 text-xs text-muted-foreground/60">
-          <div className="relative">
-            <div className="absolute right-0 top-1/2 -translate-y-1/2">
-              {canToggleReactions ? (
-                <div
-                  className={cn(
-                    "overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/85 transition-all duration-150 ease-out",
-                    "max-w-0 border-0 shadow-none translate-y-1 opacity-0",
-                    "group-hover/message:max-w-9 group-hover/message:border group-hover/message:border-border/70 group-hover/message:shadow-sm group-hover/message:translate-y-0 group-hover/message:opacity-100",
-                    "group-focus-within/message:max-w-9 group-focus-within/message:border group-focus-within/message:border-border/70 group-focus-within/message:shadow-sm group-focus-within/message:translate-y-0 group-focus-within/message:opacity-100",
-                    isReactionPickerOpen
-                      ? "max-w-9 border border-border/70 shadow-sm translate-y-0 opacity-100"
-                      : "",
-                  )}
+        <div className="absolute right-2 top-1 z-10">
+          {canToggleReactions ? (
+            <div
+              className={cn(
+                "overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/85 transition-all duration-150 ease-out",
+                "max-w-0 border-0 shadow-none translate-y-1 opacity-0",
+                "group-hover/message:max-w-9 group-hover/message:border group-hover/message:border-border/70 group-hover/message:shadow-sm group-hover/message:translate-y-0 group-hover/message:opacity-100",
+                "group-focus-within/message:max-w-9 group-focus-within/message:border group-focus-within/message:border-border/70 group-focus-within/message:shadow-sm group-focus-within/message:translate-y-0 group-focus-within/message:opacity-100",
+                isReactionPickerOpen
+                  ? "max-w-9 border border-border/70 shadow-sm translate-y-0 opacity-100"
+                  : "",
+              )}
+            >
+              <div className="flex items-center gap-1 p-1">
+                <Popover
+                  onOpenChange={setIsReactionPickerOpen}
+                  open={isReactionPickerOpen}
                 >
-                  <div className="flex items-center gap-1 p-1">
-                    <Popover
-                      onOpenChange={setIsReactionPickerOpen}
-                      open={isReactionPickerOpen}
-                    >
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <PopoverTrigger asChild>
-                            <Button
-                              aria-label="Open reactions"
-                              className="h-6 w-6 rounded-full p-0"
-                              disabled={reactionPending}
-                              size="sm"
-                              type="button"
-                              variant={
-                                isReactionPickerOpen ? "secondary" : "ghost"
-                              }
-                            >
-                              {reactionPending ? (
-                                <Spinner className="h-3 w-3" />
-                              ) : (
-                                <SmilePlus className="h-3 w-3" />
-                              )}
-                            </Button>
-                          </PopoverTrigger>
-                        </TooltipTrigger>
-                        <TooltipContent>React</TooltipContent>
-                      </Tooltip>
-                      <PopoverContent
-                        align="end"
-                        className="w-auto p-0 rounded-2xl overflow-hidden border-0 bg-transparent shadow-none"
-                        side="top"
-                        sideOffset={10}
-                      >
-                        {reactionErrorMessage ? (
-                          <div className="px-3 pt-3 pb-0">
-                            <p className="text-xs text-destructive">
-                              {reactionErrorMessage}
-                            </p>
-                          </div>
-                        ) : null}
-                        <Picker
-                          data={data}
-                          onEmojiSelect={(emoji: { native: string }) => {
-                            void handleReactionSelect(emoji.native).finally(
-                              () => {
-                                setIsReactionPickerOpen(false);
-                              },
-                            );
-                          }}
-                          theme="auto"
-                          previewPosition="none"
-                          skinTonePosition="search"
-                          set="native"
-                          maxFrequentRows={2}
-                          perLine={8}
-                        />
-                      </PopoverContent>
-                    </Popover>
-                  </div>
-                </div>
-              ) : null}
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <PopoverTrigger asChild>
+                        <Button
+                          aria-label="Open reactions"
+                          className="h-6 w-6 rounded-full p-0"
+                          disabled={reactionPending}
+                          size="sm"
+                          type="button"
+                          variant={isReactionPickerOpen ? "secondary" : "ghost"}
+                        >
+                          {reactionPending ? (
+                            <Spinner className="h-3 w-3" />
+                          ) : (
+                            <SmilePlus className="h-3 w-3" />
+                          )}
+                        </Button>
+                      </PopoverTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent>React</TooltipContent>
+                  </Tooltip>
+                  <PopoverContent
+                    align="end"
+                    className="w-auto p-0 rounded-2xl overflow-hidden border-0 bg-transparent shadow-none"
+                    side="top"
+                    sideOffset={10}
+                  >
+                    {reactionErrorMessage ? (
+                      <div className="px-3 pt-3 pb-0">
+                        <p className="text-xs text-destructive">
+                          {reactionErrorMessage}
+                        </p>
+                      </div>
+                    ) : null}
+                    <Picker
+                      data={data}
+                      onEmojiSelect={(emoji: { native: string }) => {
+                        void handleReactionSelect(emoji.native).finally(() => {
+                          setIsReactionPickerOpen(false);
+                        });
+                      }}
+                      theme="auto"
+                      previewPosition="none"
+                      skinTonePosition="search"
+                      set="native"
+                      maxFrequentRows={2}
+                      perLine={8}
+                    />
+                  </PopoverContent>
+                </Popover>
+              </div>
             </div>
-          </div>
-          <MessageTimestamp createdAt={message.createdAt} time={message.time} />
+          ) : null}
         </div>
       </div>
     </div>

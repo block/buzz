@@ -5,7 +5,7 @@ import {
   FileText,
   FolderGit2,
   Hash,
-  Home,
+  House,
   Lock,
   Zap,
 } from "lucide-react";
@@ -19,7 +19,7 @@ import { useSidebar } from "@/shared/ui/sidebar";
 type ChatHeaderProps = {
   actions?: React.ReactNode;
   title: string;
-  description: string;
+  description?: string;
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
   mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
@@ -39,7 +39,7 @@ function ChannelIcon({
   mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
 }) {
   if (mode === "home") {
-    return <Home className={HEADER_ICON_CLASS} />;
+    return <House className={HEADER_ICON_CLASS} />;
   }
 
   if (mode === "agents") {
@@ -83,7 +83,7 @@ export function ChatHeader({
   overlaysContent = false,
   statusBadge,
 }: ChatHeaderProps) {
-  const trimmedDescription = description.trim();
+  const trimmedDescription = description?.trim() ?? "";
   const { state: sidebarState } = useSidebar();
   const reserveGlobalControls = sidebarState === "collapsed";
 

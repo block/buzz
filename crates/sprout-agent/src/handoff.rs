@@ -180,7 +180,7 @@ fn push_history_snippet(out: &mut String, item: &HistoryItem) {
         }
         HistoryItem::ToolResult(r) => {
             out.push_str(if r.is_error { "[tool_err] " } else { "[tool] " });
-            out.push_str(&clamp_for_snippet(&r.text));
+            out.push_str(&clamp_for_snippet(&r.text()));
             out.push('\n');
         }
     }

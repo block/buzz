@@ -131,6 +131,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `OPENAI_COMPAT_API_KEY` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, OpenRouter, Ollama, etc. |
+| `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
 | `SPROUT_AGENT_SYSTEM_PROMPT` | built-in | Inline system prompt. |
 | `SPROUT_AGENT_SYSTEM_PROMPT_FILE` | — | File path. Mutually exclusive with the above. |
 | `SPROUT_AGENT_MAX_ROUNDS` | `0` | Tool-loop iteration cap. 0 = unlimited. |
@@ -147,17 +148,19 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 `sprout-agent` speaks two HTTP dialects. Pick with `SPROUT_AGENT_PROVIDER`.
 
-| Provider | `SPROUT_AGENT_PROVIDER` | Endpoint | Tested with |
+| Provider | `SPROUT_AGENT_PROVIDER` | Endpoint (auto) | Tested with |
 |---|---|---|---|
 | Anthropic | `anthropic` | `POST {base}/v1/messages` | claude-sonnet-4-5, claude-opus-4 |
-| OpenAI | `openai` | `POST {base}/chat/completions` | gpt-5, gpt-4o |
-| vLLM | `openai` | OpenAI-compatible endpoint | any tool-calling model |
-| llama.cpp | `openai` | `--api-server` mode | any tool-calling GGUF |
-| Ollama | `openai` | `http://localhost:11434/v1` | llama3.1, qwen2.5-coder |
-| OpenRouter | `openai` | `https://openrouter.ai/api/v1` | anything they route |
-| Block Gateway | `openai` | internal | gpt-5, claude |
+| OpenAI | `openai` | `POST {base}/responses` | gpt-5, gpt-5-mini, o4-mini, gpt-4o |
+| vLLM | `openai` | `POST {base}/chat/completions` | any tool-calling model |
+| llama.cpp | `openai` | `POST {base}/chat/completions` | any tool-calling GGUF |
+| Ollama | `openai` | `POST {base}/chat/completions` | llama3.1, qwen2.5-coder |
+| OpenRouter | `openai` | `POST {base}/chat/completions` | anything they route |
+| Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
 
-The "OpenAI" path is wire-compatible with the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat). If a provider claims OpenAI compatibility and supports `tools` + `tool_choice: auto`, it works here.
+`provider=openai` speaks two HTTP dialects: the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format).
+
+By default (`OPENAI_COMPAT_API=auto`) the agent picks **Responses** when `OPENAI_COMPAT_BASE_URL` points at an `*.openai.com` host and **Chat Completions** everywhere else. Pin the choice explicitly with `OPENAI_COMPAT_API=chat` or `OPENAI_COMPAT_API=responses` for providers that diverge from the default (e.g. a Responses-compatible self-hosted gateway).
 
 `Provider` is a Rust `enum` with one `match` in `Llm::complete`. There is no trait, no `Box<dyn>`, no async-trait. Adding a third provider is a `match` arm and one `body`/`parse` pair in `llm.rs`.
 

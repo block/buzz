@@ -80,3 +80,16 @@ pub async fn cmd_get_reactions(client: &SproutClient, event_id: &str) -> Result<
     println!("{resp}");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+pub async fn dispatch(cmd: crate::ReactionsCmd, client: &SproutClient) -> Result<(), CliError> {
+    use crate::ReactionsCmd;
+    match cmd {
+        ReactionsCmd::Add { event, emoji } => cmd_add_reaction(client, &event, &emoji).await,
+        ReactionsCmd::Remove { event, emoji } => cmd_remove_reaction(client, &event, &emoji).await,
+        ReactionsCmd::Get { event } => cmd_get_reactions(client, &event).await,
+    }
+}

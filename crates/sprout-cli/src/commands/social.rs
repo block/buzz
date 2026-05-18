@@ -1,14 +1,8 @@
-use nostr::EventId;
 use serde::Deserialize;
 
 use crate::client::SproutClient;
 use crate::error::CliError;
-use crate::validate::validate_hex64;
-
-/// Per-module helper.
-fn parse_event_id(hex: &str) -> Result<EventId, CliError> {
-    EventId::parse(hex).map_err(|e| CliError::Usage(format!("invalid event ID: {e}")))
-}
+use crate::validate::{parse_event_id, validate_hex64};
 
 /// A single contact entry (CLI-local, not from sprout-sdk).
 #[derive(Debug, Deserialize)]
@@ -116,4 +110,25 @@ pub async fn cmd_get_contact_list(client: &SproutClient, pubkey: &str) -> Result
     let resp = client.query(&filter).await?;
     println!("{resp}");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+pub async fn dispatch(cmd: crate::SocialCmd, client: &SproutClient) -> Result<(), CliError> {
+    use crate::SocialCmd;
+    match cmd {
+        SocialCmd::PublishNote { content, reply_to } => {
+            cmd_publish_note(client, &content, reply_to.as_deref()).await
+        }
+        SocialCmd::SetContactList { contacts } => cmd_set_contact_list(client, &contacts).await,
+        SocialCmd::GetEvent { event } => cmd_get_event(client, &event).await,
+        SocialCmd::GetUserNotes {
+            pubkey,
+            limit,
+            before,
+        } => cmd_get_user_notes(client, &pubkey, limit, before).await,
+        SocialCmd::GetContactList { pubkey } => cmd_get_contact_list(client, &pubkey).await,
+    }
 }

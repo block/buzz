@@ -5,13 +5,16 @@ export function TimelineSkeleton() {
 
   return (
     <>
-      {skeletonRows.map((row) => (
+      {skeletonRows.map((row, index) => (
         <div className="flex gap-2.5" key={row}>
-          <Skeleton className="h-8 w-8 rounded-lg" />
+          <Skeleton className="h-9 w-9 shrink-0 rounded-xl" />
           <div className="min-w-0 flex-1 space-y-1">
-            <Skeleton className="h-3.5 w-44" />
-            <Skeleton className="h-4 w-full max-w-2xl" />
-            <Skeleton className="h-4 w-full max-w-xl" />
+            <div className="flex items-baseline gap-2">
+              <Skeleton className="h-3.5 w-28" />
+              <Skeleton className="h-3 w-12" />
+            </div>
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className={index % 2 === 0 ? "h-4 w-4/5" : "h-4 w-2/3"} />
           </div>
         </div>
       ))}

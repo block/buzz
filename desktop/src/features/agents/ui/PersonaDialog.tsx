@@ -18,6 +18,7 @@ import {
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
+import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import {
   getImportButtonLabel,
   getImportButtonTone,
@@ -66,6 +67,7 @@ export function PersonaDialog({
   const [provider, setProvider] = React.useState("");
   const [model, setModel] = React.useState("");
   const [namePoolText, setNamePoolText] = React.useState("");
+  const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
   const [isImportingUpdate, setIsImportingUpdate] = React.useState(false);
   const [importErrorMessage, setImportErrorMessage] = React.useState<
     string | null
@@ -94,6 +96,7 @@ export function PersonaDialog({
         : undefined
       )?.join(", ") ?? "",
     );
+    setEnvVars(initialValues.envVars ?? {});
     setImportErrorMessage(null);
     setIsImportingUpdate(false);
   }, [initialValues, open]);
@@ -238,6 +241,7 @@ export function PersonaDialog({
       provider: provider.trim() || undefined,
       model: model.trim() || undefined,
       namePool: namePool.length > 0 ? namePool : undefined,
+      envVars,
     };
 
     if ("id" in initialValues) {
@@ -401,6 +405,13 @@ export function PersonaDialog({
                 random name from this pool. Leave empty to use generic defaults.
               </p>
             </div>
+
+            <EnvVarsEditor
+              disabled={isPending}
+              helperText="Injected when agents created from this persona spawn. Per-agent overrides can replace these."
+              onChange={setEnvVars}
+              value={envVars}
+            />
 
             {error ? (
               <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">

@@ -66,6 +66,7 @@ pub fn create_persona(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
     let persona = PersonaRecord {
         id: Uuid::new_v4().to_string(),
         display_name,
@@ -78,6 +79,7 @@ pub fn create_persona(
         is_active: true,
         source_pack: None,
         source_pack_persona_slug: None,
+        env_vars: input.env_vars,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -122,6 +124,13 @@ pub fn update_persona(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    if let Some(env_vars) = input.env_vars {
+        // Caller explicitly sent env_vars — replace entirely (empty = clear).
+        crate::managed_agents::validate_user_env_keys(&env_vars)?;
+        persona.env_vars = env_vars;
+    }
+    // Absent env_vars means "don't touch" — preserve existing creds when
+    // the caller only meant to edit a different field.
     persona.updated_at = now_iso();
 
     save_personas(&app, &personas)?;
@@ -318,6 +327,12 @@ pub async fn export_persona_to_json(
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
     // Load persona data under lock, then drop lock before dialog.
+    //
+    // NOTE: `env_vars` are deliberately NOT included in the exported card.
+    // Persona cards are designed to be shareable artifacts (uploaded,
+    // forked, distributed), and bundling API keys / credentials in them
+    // would be a significant footgun. Users who import a card and need
+    // credentials must supply them post-import via the persona dialog.
     let (display_name, system_prompt, avatar_url, provider, model, name_pool) = {
         let _store_guard = state
             .managed_agents_store_lock

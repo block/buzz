@@ -415,6 +415,7 @@ pub fn build_managed_agent_summary(
         system_prompt: record.system_prompt.clone(),
         model: record.model.clone(),
         mcp_toolsets: record.mcp_toolsets.clone(),
+        env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
         backend_agent_id: record.backend_agent_id.clone(),
         status,
@@ -559,14 +560,14 @@ pub fn spawn_agent_child(
     if known_acp_provider(&record.agent_command).is_some_and(|p| p.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
+    // Only emit SPROUT_ACP_IDLE_TIMEOUT when the user has explicitly set an
+    // override. When unset, the sprout-acp harness applies its own default
+    // (see `DEFAULT_IDLE_TIMEOUT_SECS` in crates/sprout-acp/src/config.rs),
+    // which is the single source of truth. The previously-emitted
+    // `SPROUT_ACP_TURN_TIMEOUT` is deprecated upstream and was pinning every
+    // agent to the desktop's stale default (320s), bypassing harness bumps.
     if let Some(idle) = record.idle_timeout_seconds {
         command.env("SPROUT_ACP_IDLE_TIMEOUT", idle.to_string());
-        command.env("SPROUT_ACP_TURN_TIMEOUT", idle.to_string());
-    } else {
-        command.env(
-            "SPROUT_ACP_TURN_TIMEOUT",
-            record.turn_timeout_seconds.to_string(),
-        );
     }
 
     let max_dur = record
@@ -683,6 +684,22 @@ pub fn spawn_agent_child(
             "sprout-desktop: git-credential-nostr not found — agent {} will not have automatic Sprout git auth",
             record.name,
         );
+    }
+
+    // ── User env vars: persona first, then per-agent (last wins) ────────
+    //
+    // Precedence: desktop parent env < persona env_vars < agent env_vars.
+    // These writes go LAST so user-provided values win over every Sprout-set
+    // env above — EXCEPT reserved keys (SPROUT_PRIVATE_KEY, NOSTR_PRIVATE_KEY,
+    // SPROUT_AUTH_TAG, SPROUT_API_TOKEN, SPROUT_ACP_PRIVATE_KEY,
+    // SPROUT_ACP_API_TOKEN), which `merged_user_env` strips. Those carry
+    // Sprout's identity and must never be GUI-overridable.
+    // Fail closed on persona-lookup errors: persona env_vars carry API
+    // credentials, so silently substituting an empty map would spawn an
+    // unauthenticated agent and surface as a confusing downstream auth error.
+    let persona_env = super::env_vars::resolve_persona_env(app, record.persona_id.as_deref())?;
+    for (key, value) in super::env_vars::merged_user_env(&persona_env, &record.env_vars) {
+        command.env(key, value);
     }
 
     // Spawn the harness in its own process group so we can kill the entire
@@ -876,6 +893,7 @@ mod tests {
             system_prompt: None,
             model: None,
             mcp_toolsets: None,
+            env_vars: std::collections::BTreeMap::new(),
             start_on_app_launch: false,
             runtime_pid: None,
             backend: Default::default(),

@@ -82,6 +82,7 @@ type ChannelPaneProps = {
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onEditSave?: (content: string) => Promise<void>;
+  onMarkUnread?: (message: TimelineMessage) => void;
   onExpandThreadReplies: (message: TimelineMessage) => void;
   onJoinChannel?: () => Promise<void>;
   onOpenAgentSession: (pubkey: string) => void;
@@ -144,6 +145,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onDelete,
   onEdit,
   onEditSave,
+  onMarkUnread,
   onExpandThreadReplies,
   onJoinChannel,
   onOpenAgentSession,
@@ -339,6 +341,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           messages={messages}
           onDelete={onDelete}
           onEdit={onEdit}
+          onMarkUnread={onMarkUnread}
           onReply={activeChannel?.archivedAt ? undefined : onOpenThread}
           onTargetReached={onTargetReached}
           onToggleReaction={onToggleReaction}
@@ -398,7 +401,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 showTopBorder={false}
               />
               <div className="h-7 bg-background px-4 pb-1 pt-0 sm:px-6 -mt-1">
-                <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2">
+                <div className="flex h-full w-full items-center gap-2">
                   {hasComposerBotActivity ? (
                     <div className="shrink-0">
                       <BotActivityComposerAction
@@ -444,6 +447,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           onDelete={onDelete}
           onEdit={onEdit}
           onEditSave={onEditSave}
+          onMarkUnread={onMarkUnread}
           onExpandReplies={onExpandThreadReplies}
           onSelectReplyTarget={onSelectThreadReplyTarget}
           onSend={onSendThreadReply}

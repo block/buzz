@@ -1,6 +1,6 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 
-import { installRelayBridge } from "../helpers/bridge";
+import { installRelayBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { assertRelaySeeded } from "../helpers/seed";
 
 const isCi = Boolean(process.env.CI);
@@ -43,7 +43,7 @@ async function ensureTimelineScrollable(
 
     const message = `${prefix} seed ${index}`;
 
-    await expect(input).toHaveAttribute("contenteditable", "true");
+    await expect(input).toBeEnabled();
     await input.fill(message);
     await sendButton.click();
     await expectTimelineToContain(receiverPage, message);
@@ -73,6 +73,56 @@ async function createAndJoinSharedStream(
   await expect(memberPage.getByTestId("chat-title")).toHaveText(channelName);
   await expect(memberPage.getByTestId("stream-list")).toContainText(
     channelName,
+  );
+}
+
+async function sendChannelMessage(
+  page: Page,
+  {
+    channelName,
+    content,
+    mentionPubkeys,
+  }: {
+    channelName: string;
+    content: string;
+    mentionPubkeys?: string[];
+  },
+) {
+  await page.evaluate(
+    async ({ channelName: targetChannelName, content, mentionPubkeys }) => {
+      const tauriWindow = window as Window & {
+        __TAURI_INTERNALS__?: {
+          invoke: (
+            command: string,
+            payload?: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      };
+
+      const invoke = tauriWindow.__TAURI_INTERNALS__?.invoke;
+      if (!invoke) {
+        throw new Error("Tauri invoke bridge is unavailable.");
+      }
+
+      const channels = (await invoke("get_channels")) as Array<{
+        id: string;
+        name: string;
+      }>;
+      const channel = channels.find(({ name }) => name === targetChannelName);
+      if (!channel) {
+        throw new Error(`Channel not found: ${targetChannelName}`);
+      }
+
+      await invoke("send_channel_message", {
+        channelId: channel.id,
+        content,
+        kind: null,
+        mediaTags: null,
+        mentionPubkeys: mentionPubkeys ?? null,
+        parentEventId: null,
+      });
+    },
+    { channelName, content, mentionPubkeys },
   );
 }
 
@@ -106,21 +156,74 @@ test("loads channels from the relay", async ({ page }) => {
   await expect(page.getByTestId("dm-list")).toContainText("alice-tyler");
 });
 
-test("loads the home feed from the relay", async ({ page }) => {
-  await installRelayBridge(page, "tyler");
-  await page.goto("/");
+test("loads the home feed from the relay", async ({ browser }) => {
+  const message = `Relay home mention ${Date.now()}`;
+  const targetContext = await browser.newContext();
+  const senderContext = await browser.newContext();
+  const page = await targetContext.newPage();
+  const senderPage = await senderContext.newPage();
 
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
-  await expect(page.getByRole("heading", { name: "Mentions" })).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Needs Action" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Channel Activity" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: "Agent Updates" }),
-  ).toBeVisible();
+  try {
+    await installRelayBridge(page, "tyler");
+    await installRelayBridge(senderPage, "alice");
+    await page.goto("/");
+    await senderPage.goto("/");
+
+    await expect(page.getByTestId("chat-title")).toHaveText("Home");
+    await expect(page.getByTestId("home-inbox")).toBeVisible();
+
+    await sendChannelMessage(senderPage, {
+      channelName: "general",
+      content: message,
+      mentionPubkeys: [TEST_IDENTITIES.tyler.pubkey],
+    });
+
+    await expect(page.getByTestId("home-inbox-list")).toContainText(message, {
+      timeout: relayDeliveryTimeoutMs,
+    });
+    await expect(page.getByTestId("home-inbox-detail")).toBeVisible();
+  } finally {
+    await targetContext.close();
+    await senderContext.close();
+  }
+});
+
+test("shows sent inbox replies immediately in the inbox detail pane", async ({
+  browser,
+}) => {
+  const message = `Relay inbox reply target ${Date.now()}`;
+  const reply = `Inbox reply ${Date.now()}`;
+  const targetContext = await browser.newContext();
+  const senderContext = await browser.newContext();
+  const page = await targetContext.newPage();
+  const senderPage = await senderContext.newPage();
+
+  try {
+    await installRelayBridge(page, "tyler");
+    await installRelayBridge(senderPage, "alice");
+    await page.goto("/");
+    await senderPage.goto("/");
+
+    await sendChannelMessage(senderPage, {
+      channelName: "general",
+      content: message,
+      mentionPubkeys: [TEST_IDENTITIES.tyler.pubkey],
+    });
+
+    await page.getByTestId("home-inbox-list").getByText(message).click({
+      timeout: relayDeliveryTimeoutMs,
+    });
+    await expect(page.getByTestId("home-inbox-detail")).toBeVisible();
+    await expect(page.getByTestId("message-input")).toBeEnabled();
+
+    await page.getByTestId("message-input").fill(reply);
+    await page.getByTestId("send-message").click();
+
+    await expect(page.getByTestId("home-inbox-detail")).toContainText(reply);
+  } finally {
+    await targetContext.close();
+    await senderContext.close();
+  }
 });
 
 test("creates a relay-backed stream", async ({ page }) => {

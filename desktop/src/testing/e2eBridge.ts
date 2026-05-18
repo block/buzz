@@ -286,6 +286,7 @@ type RawManagedAgent = {
   parallelism: number;
   system_prompt: string | null;
   model: string | null;
+  env_vars?: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
   pid: number | null;
   created_at: string;
@@ -343,6 +344,7 @@ type RawPersona = {
   system_prompt: string;
   is_builtin: boolean;
   is_active: boolean;
+  env_vars?: Record<string, string>;
   created_at: string;
   updated_at: string;
 };
@@ -669,6 +671,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     parallelism: agent.parallelism,
     system_prompt: agent.system_prompt,
     model: agent.model,
+    env_vars: { ...(agent.env_vars ?? {}) },
     status: agent.status,
     pid: agent.pid,
     created_at: agent.created_at,
@@ -3543,6 +3546,7 @@ async function handleCreatePersona(args: {
     displayName: string;
     avatarUrl?: string;
     systemPrompt: string;
+    envVars?: Record<string, string>;
   };
 }): Promise<RawPersona> {
   const now = new Date().toISOString();
@@ -3553,6 +3557,7 @@ async function handleCreatePersona(args: {
     system_prompt: args.input.systemPrompt.trim(),
     is_builtin: false,
     is_active: true,
+    env_vars: { ...(args.input.envVars ?? {}) },
     created_at: now,
     updated_at: now,
   };
@@ -3566,6 +3571,7 @@ async function handleUpdatePersona(args: {
     displayName: string;
     avatarUrl?: string;
     systemPrompt: string;
+    envVars?: Record<string, string>;
   };
 }): Promise<RawPersona> {
   const persona = mockPersonas.find(
@@ -3581,6 +3587,10 @@ async function handleUpdatePersona(args: {
   persona.display_name = args.input.displayName.trim();
   persona.avatar_url = args.input.avatarUrl?.trim() || null;
   persona.system_prompt = args.input.systemPrompt.trim();
+  if (args.input.envVars !== undefined) {
+    // Absent = preserve; present = replace entirely (matches Rust handler).
+    persona.env_vars = { ...args.input.envVars };
+  }
   persona.updated_at = new Date().toISOString();
 
   return { ...persona };
@@ -3808,6 +3818,7 @@ async function handleCreateManagedAgent(args: {
     systemPrompt?: string;
     avatarUrl?: string;
     model?: string;
+    envVars?: Record<string, string>;
     spawnAfterCreate?: boolean;
     startOnAppLaunch?: boolean;
     backend?:
@@ -3845,6 +3856,7 @@ async function handleCreateManagedAgent(args: {
     parallelism: args.input.parallelism ?? 1,
     system_prompt: args.input.systemPrompt?.trim() || null,
     model: args.input.model?.trim() || null,
+    env_vars: { ...(args.input.envVars ?? {}) },
     status: args.input.spawnAfterCreate ? "running" : "stopped",
     pid: args.input.spawnAfterCreate ? 42000 + mockManagedAgents.length : null,
     created_at: now,
@@ -3973,6 +3985,7 @@ async function handleUpdateManagedAgent(args: {
     name?: string;
     model?: string | null;
     systemPrompt?: string | null;
+    envVars?: Record<string, string>;
     respondTo?: "owner-only" | "allowlist" | "anyone";
     respondToAllowlist?: string[];
   };
@@ -3986,6 +3999,9 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.systemPrompt !== undefined) {
     agent.system_prompt = args.input.systemPrompt;
+  }
+  if (args.input.envVars !== undefined) {
+    agent.env_vars = { ...args.input.envVars };
   }
   if (args.input.respondTo !== undefined) {
     agent.respond_to = args.input.respondTo;

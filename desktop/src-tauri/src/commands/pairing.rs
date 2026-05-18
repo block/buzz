@@ -89,9 +89,13 @@ pub async fn start_pairing(
     let ws_url = relay_ws_url_with_override(&state);
     let http_url = relay_api_base_url_with_override(&state);
 
-    // Detect NIP-43: if the relay requires auth, the target device should
-    // connect to the /pair sidecar instead of the main relay.
-    let qr_relay_url = if probe_relay_requires_auth(&ws_url).await {
+    // NIP-43 relays gate connections on membership, so an unpaired peer can't
+    // reach the main relay yet — it must go through the /pair sidecar. Open
+    // relays (no NIP-43) accept the peer directly. We key off the relay's
+    // own NIP-11 declaration of NIP-43 support rather than `auth_required`,
+    // which is also true for plain NIP-42 / NIP-OA relays where the main
+    // relay is reachable.
+    let qr_relay_url = if probe_relay_supports_nip43(&ws_url).await {
         let mut url = url::Url::parse(&ws_url).map_err(|e| format!("invalid relay URL: {e}"))?;
         let path = url.path().trim_end_matches('/').to_string();
         url.set_path(&format!("{path}/pair"));
@@ -422,13 +426,20 @@ fn parse_relay_event(text: &str, sub_id: &str) -> Option<nostr_compat::Event> {
     serde_json::from_value(arr[2].clone()).ok()
 }
 
-/// Check the relay's NIP-11 information document to determine if auth is
-/// required (indicating NIP-43 access control). Returns `true` if the relay
-/// advertises `limitation.auth_required: true`, `false` otherwise.
+/// Check the relay's NIP-11 document to determine whether it advertises
+/// NIP-43 (relay membership). Returns `true` only if NIP-43 appears in the
+/// relay's `supported_nips`. Unreachable relays, malformed responses, and
+/// non-`ws(s)://` URLs all return `false`: we'd rather fail loudly against
+/// the main relay than misroute pairing to an undeployed `/pair` sidecar.
 ///
 /// Converts the WebSocket URL to HTTP(S) and fetches `GET /` with
 /// `Accept: application/nostr+json` per NIP-11.
-async fn probe_relay_requires_auth(relay_url: &str) -> bool {
+///
+/// We test for NIP-43 specifically rather than the broader
+/// `limitation.auth_required` flag because the latter is also set on plain
+/// NIP-42 / NIP-OA relays, which accept unpaired peers on the main relay
+/// and have no `/pair` sidecar.
+async fn probe_relay_supports_nip43(relay_url: &str) -> bool {
     // Convert ws(s):// to http(s):// for the NIP-11 fetch.
     let http_url = if let Some(rest) = relay_url.strip_prefix("wss://") {
         format!("https://{rest}")
@@ -458,10 +469,9 @@ async fn probe_relay_requires_auth(relay_url: &str) -> bool {
         Err(_) => return false,
     };
 
-    // Check limitation.auth_required per NIP-11.
-    json.get("limitation")
-        .and_then(|l| l.get("auth_required"))
-        .and_then(|v| v.as_bool())
+    json.get("supported_nips")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().any(|n| n.as_u64() == Some(43)))
         .unwrap_or(false)
 }
 

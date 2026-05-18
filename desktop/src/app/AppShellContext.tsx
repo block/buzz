@@ -5,11 +5,16 @@ type AppShellContextValue = {
     channelId: string,
     readAt: string | null | undefined,
   ) => void;
+  markChannelUnread: (
+    channelId: string,
+    lastMessageAt: string | null | undefined,
+  ) => void;
   openChannelManagement: () => void;
 };
 
 const AppShellContext = React.createContext<AppShellContextValue>({
   markChannelRead: () => {},
+  markChannelUnread: () => {},
   openChannelManagement: () => {},
 });
 

@@ -8,10 +8,7 @@ import { getChannelIdFromTags } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   CHANNEL_EVENT_KINDS,
-  KIND_FORUM_COMMENT,
-  KIND_FORUM_POST,
-  KIND_STREAM_MESSAGE,
-  KIND_STREAM_MESSAGE_V2,
+  CHANNEL_MESSAGE_EVENT_KINDS,
 } from "@/shared/constants/kinds";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 
@@ -31,15 +28,9 @@ export type UseLiveChannelUpdatesOptions = {
 const LIVE_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
 const LIVE_SUBSCRIPTION_RETRY_MAX_MS = 30_000;
 
-// Only "new content" kinds should bump unread state. Reactions, edits,
-// diffs, deletions, and system messages can all arrive after the last
-// human-visible message and would otherwise create phantom unreads.
-const UNREAD_TRIGGER_KINDS = new Set<number>([
-  KIND_STREAM_MESSAGE,
-  KIND_STREAM_MESSAGE_V2,
-  KIND_FORUM_POST,
-  KIND_FORUM_COMMENT,
-]);
+// Only "new content" kinds should bump unread state. Shared with the
+// catch-up query in useUnreadChannels so the two paths stay in lockstep.
+const UNREAD_TRIGGER_KINDS = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
 
 function isExternalMentionEvent(event: RelayEvent, currentPubkey: string) {
   return (

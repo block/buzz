@@ -35,6 +35,7 @@ type MessageThreadPanelProps = {
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onEditSave?: (content: string) => Promise<void>;
+  onMarkUnread?: (message: TimelineMessage) => void;
   onExpandReplies: (message: TimelineMessage) => void;
   onResetWidth: () => void;
   onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
@@ -87,6 +88,7 @@ export function MessageThreadPanel({
   onDelete,
   onEdit,
   onEditSave,
+  onMarkUnread,
   onExpandReplies,
   onResetWidth,
   onResizeStart,
@@ -201,6 +203,7 @@ export function MessageThreadPanel({
               <div className="rounded-2xl">
                 <MessageRow
                   activeReplyTargetId={replyTargetId}
+                  channelId={channelId}
                   layoutVariant="thread-reply"
                   message={threadHead}
                   onDelete={
@@ -213,6 +216,7 @@ export function MessageThreadPanel({
                       ? onEdit
                       : undefined
                   }
+                  onMarkUnread={onMarkUnread}
                   onToggleReaction={onToggleReaction}
                   profiles={profiles}
                 />
@@ -230,6 +234,7 @@ export function MessageThreadPanel({
                       <div key={entry.message.id}>
                         <MessageRow
                           activeReplyTargetId={replyTargetId}
+                          channelId={channelId}
                           layoutVariant="thread-reply"
                           message={entry.message}
                           onDelete={
@@ -244,6 +249,7 @@ export function MessageThreadPanel({
                               ? onEdit
                               : undefined
                           }
+                          onMarkUnread={onMarkUnread}
                           onReply={onSelectReplyTarget}
                           onToggleReaction={onToggleReaction}
                           profiles={profiles}

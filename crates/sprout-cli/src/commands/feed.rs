@@ -24,3 +24,18 @@ pub async fn cmd_get_feed(
     println!("{resp}");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+pub async fn dispatch(cmd: crate::FeedCmd, client: &SproutClient) -> Result<(), CliError> {
+    use crate::FeedCmd;
+    match cmd {
+        FeedCmd::Get {
+            since,
+            limit,
+            types,
+        } => cmd_get_feed(client, since, limit, types.as_deref()).await,
+    }
+}

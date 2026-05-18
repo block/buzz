@@ -1,60 +1,102 @@
 import * as React from "react";
-import { Activity, AtSign, Bot, CircleAlert, RefreshCcw } from "lucide-react";
+import { RefreshCcw } from "lucide-react";
 
-import { useRelayAgentsQuery } from "@/features/agents/hooks";
+import { useChannelsQuery } from "@/features/channels/hooks";
+import {
+  type InboxFilter,
+  type InboxContextMessage,
+  type InboxReply,
+  buildInboxItems,
+  formatInboxFullTimestamp,
+} from "@/features/home/lib/inbox";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
+import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
+import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
+import { InboxListPane } from "@/features/home/ui/InboxListPane";
+import {
+  useChannelMessagesQuery,
+  useToggleReactionMutation,
+} from "@/features/messages/hooks";
+import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { useContactListQuery, useTimelineQuery } from "@/features/pulse/hooks";
-import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
-import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
+import { resolveUserLabel } from "@/features/profile/lib/identity";
+import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
+import type { HomeFeedResponse, RelayEvent } from "@/shared/api/types";
+import { KIND_REACTION } from "@/shared/constants/kinds";
+import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
 import { Button } from "@/shared/ui/button";
 import { Skeleton } from "@/shared/ui/skeleton";
 
-const FeedSection = React.lazy(async () => {
-  const module = await import("./FeedSection");
-  return { default: module.FeedSection };
-});
+function matchesInboxFilter(
+  item: { categories: InboxFilter[] },
+  filter: InboxFilter,
+) {
+  if (filter === "all") {
+    return item.categories.some((category) => category !== "activity");
+  }
 
-const RecentNotesSection = React.lazy(async () => {
-  const module = await import("./RecentNotesSection");
-  return { default: module.RecentNotesSection };
-});
-
-type FeedFilter =
-  | "all"
-  | "mention"
-  | "needs_action"
-  | "activity"
-  | "agent_activity";
+  return item.categories.includes(filter);
+}
 
 function HomeLoadingState() {
   return (
-    <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-3 pt-14 sm:px-6">
-      <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
-        <div className="grid gap-4">
-          {["mentions", "actions"].map((section) => (
-            <div key={section}>
-              <Skeleton className="mb-2 h-4 w-24" />
-              <div className="space-y-0 rounded-md border border-border/60">
-                {["a", "b", "c"].map((row) => (
-                  <Skeleton className="h-16" key={row} />
-                ))}
-              </div>
-            </div>
-          ))}
+    <div className="flex-1 overflow-hidden">
+      <div className="grid h-full min-h-0 w-full lg:grid-cols-[320px_minmax(0,1fr)]">
+        <div className="overflow-hidden border-r border-border/70 bg-background/60">
+          <div className="border-b border-border/70 px-4 pb-4 pt-14">
+            <Skeleton className="h-4 w-20" />
+            <Skeleton className="mt-2 h-4 w-28" />
+            <Skeleton className="mt-4 h-10 rounded-md" />
+          </div>
+          <div className="space-y-3 px-4 py-4">
+            {["a", "b", "c", "d"].map((row) => (
+              <Skeleton className="h-20 rounded-md" key={row} />
+            ))}
+          </div>
+        </div>
+
+        <div className="overflow-hidden bg-background/60">
+          <div className="border-b border-border/70 px-5 pb-4 pt-14">
+            <Skeleton className="h-5 w-48" />
+            <Skeleton className="mt-3 h-8 w-72" />
+          </div>
+          <div className="px-5 py-5">
+            <Skeleton className="h-64 rounded-md" />
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-const FILTER_OPTIONS: { value: FeedFilter; label: string }[] = [
-  { value: "all", label: "All" },
-  { value: "mention", label: "Mentions" },
-  { value: "needs_action", label: "Needs Action" },
-  { value: "activity", label: "Activity" },
-  { value: "agent_activity", label: "Agent Updates" },
-];
+function getContextMessageDepth(
+  event: RelayEvent,
+  eventById: ReadonlyMap<string, RelayEvent>,
+): number {
+  let depth = 0;
+  let parentId = getThreadReference(event.tags).parentId;
+  const seen = new Set<string>([event.id]);
+
+  while (parentId && eventById.has(parentId) && !seen.has(parentId)) {
+    depth += 1;
+    seen.add(parentId);
+    parentId = getThreadReference(eventById.get(parentId)?.tags ?? []).parentId;
+  }
+
+  return depth;
+}
+
+function getReactionTargetId(tags: string[][]) {
+  for (let index = tags.length - 1; index >= 0; index -= 1) {
+    const tag = tags[index];
+    if (tag?.[0] === "e" && typeof tag[1] === "string") {
+      return tag[1];
+    }
+  }
+
+  return null;
+}
 
 type HomeViewProps = {
   feed?: HomeFeedResponse;
@@ -62,8 +104,6 @@ type HomeViewProps = {
   errorMessage?: string;
   currentPubkey?: string;
   availableChannelIds: ReadonlySet<string>;
-  onOpenFeedItem: (item: FeedItem) => void;
-  onOpenPulse: () => void;
   onRefresh: () => void;
 };
 
@@ -73,64 +113,170 @@ export function HomeView({
   errorMessage,
   currentPubkey,
   availableChannelIds,
-  onOpenFeedItem,
-  onOpenPulse,
   onRefresh,
 }: HomeViewProps) {
-  const [filter, setFilter] = React.useState<FeedFilter>("all");
+  const [filter, setFilter] = React.useState<InboxFilter>("all");
+  const [selectedItemId, setSelectedItemId] = React.useState<string | null>(
+    null,
+  );
+  const [isDeletingMessage, setIsDeletingMessage] = React.useState(false);
+  const [isSendingReply, setIsSendingReply] = React.useState(false);
+  const [localRepliesByItemId, setLocalRepliesByItemId] = React.useState<
+    Record<string, InboxReply[]>
+  >({});
   const { doneSet, markDone, undoDone } = useFeedItemState(currentPubkey);
-
-  // Defer Pulse widget queries until the shell is interactive
-  const startupReady = useDeferredStartup();
-  const deferredPubkey = startupReady ? currentPubkey : undefined;
-
-  // Recent notes for the Pulse widget
-  const contactListQuery = useContactListQuery(deferredPubkey);
-  const contactPubkeys = React.useMemo(
-    () => (contactListQuery.data?.contacts ?? []).map((c) => c.pubkey),
-    [contactListQuery.data],
-  );
-  const notesPubkeys = React.useMemo(
+  const feedItems = React.useMemo(
     () =>
-      deferredPubkey
-        ? [...new Set([deferredPubkey, ...contactPubkeys])]
-        : contactPubkeys,
-    [deferredPubkey, contactPubkeys],
+      feed
+        ? [
+            ...feed.feed.mentions,
+            ...feed.feed.needsAction,
+            ...feed.feed.activity,
+            ...feed.feed.agentActivity,
+          ]
+        : [],
+    [feed],
   );
-  const notesTimelineQuery = useTimelineQuery(
-    notesPubkeys,
-    notesPubkeys.length > 0,
-  );
-  const recentNotes = notesTimelineQuery.data?.notes?.slice(0, 5) ?? [];
-  const noteAuthorPubkeys = React.useMemo(
-    () => [...new Set(recentNotes.map((n) => n.pubkey))],
-    [recentNotes],
-  );
-  const noteProfilesQuery = useUsersBatchQuery(noteAuthorPubkeys, {
-    enabled: noteAuthorPubkeys.length > 0,
-  });
-  const noteProfiles = noteProfilesQuery.data?.profiles ?? {};
-  const relayAgentsQuery = useRelayAgentsQuery({ enabled: startupReady });
-  const agentPubkeySet = React.useMemo(
-    () => new Set((relayAgentsQuery.data ?? []).map((a) => a.pubkey)),
-    [relayAgentsQuery.data],
+  const selectedFeedItem =
+    feedItems.find((item) => item.id === selectedItemId) ?? null;
+
+  const channelsQuery = useChannelsQuery();
+  const channels = channelsQuery.data;
+  const selectedChannelIdCandidate = React.useMemo(() => {
+    return selectedFeedItem?.channelId ?? null;
+  }, [selectedFeedItem]);
+  const selectedChannel = React.useMemo(() => {
+    if (!selectedChannelIdCandidate || !channels) return null;
+    return (
+      channels.find((channel) => channel.id === selectedChannelIdCandidate) ??
+      null
+    );
+  }, [channels, selectedChannelIdCandidate]);
+
+  const channelMessagesQuery = useChannelMessagesQuery(selectedChannel);
+  const toggleReactionMutation = useToggleReactionMutation();
+  const channelMessages = channelMessagesQuery.data;
+  const threadContext = useInboxThreadContext(
+    selectedFeedItem,
+    channelMessages,
   );
 
-  const feedItems = feed
-    ? [
-        ...feed.feed.mentions,
-        ...feed.feed.needsAction,
-        ...(feed.feed.activity ?? []),
-        ...(feed.feed.agentActivity ?? []),
-      ]
-    : [];
-  const feedProfilesQuery = useUsersBatchQuery(
-    feedItems.map((item) => item.pubkey),
-    {
-      enabled: feedItems.length > 0,
-    },
+  const feedProfilePubkeys = React.useMemo(
+    () => [
+      ...new Set([
+        ...feedItems.map((item) => item.pubkey),
+        ...threadContext.events.map((event) => event.pubkey),
+        ...(channelMessages ?? [])
+          .filter((event) => event.kind === KIND_REACTION)
+          .map((event) => event.pubkey),
+        ...(currentPubkey ? [currentPubkey] : []),
+      ]),
+    ],
+    [channelMessages, currentPubkey, feedItems, threadContext.events],
   );
+  const feedProfilesQuery = useUsersBatchQuery(feedProfilePubkeys, {
+    enabled: feedProfilePubkeys.length > 0,
+  });
   const feedProfiles = feedProfilesQuery.data?.profiles;
+  const inboxItems = React.useMemo(
+    () =>
+      buildInboxItems({
+        currentPubkey,
+        feed,
+        profiles: feedProfiles,
+      }),
+    [currentPubkey, feed, feedProfiles],
+  );
+  const filteredItems = React.useMemo(() => {
+    return inboxItems.filter((item) => matchesInboxFilter(item, filter));
+  }, [filter, inboxItems]);
+  const selectedItem =
+    filteredItems.find((item) => item.id === selectedItemId) ?? null;
+  const contextMessages = React.useMemo<InboxContextMessage[]>(() => {
+    if (!selectedItem) {
+      return [];
+    }
+
+    const eventById = new Map(
+      threadContext.events.map((event) => [event.id, event]),
+    );
+    const contextEventIds = new Set(eventById.keys());
+    const reactionEvents = (channelMessages ?? []).filter((event) => {
+      if (event.kind !== KIND_REACTION) {
+        return false;
+      }
+
+      const targetId = getReactionTargetId(event.tags);
+      return Boolean(targetId && contextEventIds.has(targetId));
+    });
+    const currentUserAvatarUrl = currentPubkey
+      ? (feedProfiles?.[currentPubkey.toLowerCase()]?.avatarUrl ?? null)
+      : null;
+    const timelineMessages = formatTimelineMessages(
+      [...threadContext.events, ...reactionEvents],
+      selectedChannel,
+      currentPubkey,
+      currentUserAvatarUrl,
+      feedProfiles,
+    );
+
+    return timelineMessages.map((message) => {
+      const event = eventById.get(message.id);
+      return {
+        id: message.id,
+        authorLabel: message.author,
+        avatarUrl: message.avatarUrl ?? null,
+        content: message.body,
+        depth: event ? getContextMessageDepth(event, eventById) : message.depth,
+        fullTimestampLabel: formatInboxFullTimestamp(message.createdAt),
+        isSelected: message.id === selectedItem.id,
+        mentionNames:
+          resolveMentionNames(message.tags ?? [], feedProfiles) ?? [],
+        reactions: message.reactions,
+      };
+    });
+  }, [
+    channelMessages,
+    currentPubkey,
+    feedProfiles,
+    selectedChannel,
+    selectedItem,
+    threadContext.events,
+  ]);
+  const selectedItemReplies = React.useMemo<InboxReply[]>(() => {
+    if (!selectedItem) return [];
+    const localReplies = localRepliesByItemId[selectedItem.id] ?? [];
+    const contextIds = new Set(contextMessages.map((message) => message.id));
+    return localReplies.filter((reply) => !contextIds.has(reply.id));
+  }, [contextMessages, localRepliesByItemId, selectedItem]);
+  React.useEffect(() => {
+    if (filteredItems.length === 0) {
+      setSelectedItemId(null);
+      return;
+    }
+
+    if (!filteredItems.some((item) => item.id === selectedItemId)) {
+      setSelectedItemId(filteredItems[0]?.id ?? null);
+    }
+  }, [filteredItems, selectedItemId]);
+
+  React.useEffect(() => {
+    void selectedItemId;
+    setIsDeletingMessage(false);
+    setIsSendingReply(false);
+  }, [selectedItemId]);
+
+  const handleToggleDone = React.useCallback(
+    (itemId: string) => {
+      if (doneSet.has(itemId)) {
+        undoDone(itemId);
+        return;
+      }
+
+      markDone(itemId);
+    },
+    [doneSet, markDone, undoDone],
+  );
 
   if (isLoading && !feed) {
     return <HomeLoadingState />;
@@ -138,8 +284,8 @@ export function HomeView({
 
   if (!feed) {
     return (
-      <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-3 pt-14 sm:px-6">
-        <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
+      <div className="flex-1 overflow-hidden px-4 pb-3 pt-14 sm:px-6">
+        <div className="flex w-full max-w-3xl flex-col gap-4">
           <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-5">
             <p className="text-base font-semibold tracking-tight">
               Home feed unavailable
@@ -157,111 +303,142 @@ export function HomeView({
     );
   }
 
-  const showMentions = filter === "all" || filter === "mention";
-  const showNeedsAction = filter === "all" || filter === "needs_action";
-  const showActivity = filter === "all" || filter === "activity";
-  const showAgentActivity = filter === "all" || filter === "agent_activity";
+  const canReply =
+    selectedItem !== null &&
+    selectedItem.item.channelId !== null &&
+    availableChannelIds.has(selectedItem.item.channelId) &&
+    selectedItem.item.kind !== 45001 &&
+    selectedItem.item.kind !== 45003;
+  const disabledReplyReason =
+    canReply || !selectedItem
+      ? null
+      : selectedItem.item.channelId
+        ? availableChannelIds.has(selectedItem.item.channelId)
+          ? "This item does not support inline replies yet."
+          : "Open the linked channel to reply."
+        : "This inbox item does not have a reply target.";
+  const canDelete =
+    selectedItem !== null &&
+    currentPubkey?.trim().toLowerCase() ===
+      selectedItem.item.pubkey.trim().toLowerCase();
+
   return (
-    <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-3 pt-14 sm:px-6">
-      <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
-        <div className="flex items-center gap-1.5">
-          {FILTER_OPTIONS.map((option) => (
-            <Button
-              key={option.value}
-              onClick={() => setFilter(option.value)}
-              size="sm"
-              type="button"
-              variant={filter === option.value ? "default" : "ghost"}
-              className="h-7 px-2.5 text-xs"
-            >
-              {option.label}
-            </Button>
-          ))}
-        </div>
+    <div className="flex-1 overflow-hidden">
+      <div
+        className="grid h-full min-h-0 w-full lg:grid-cols-[320px_minmax(0,1fr)]"
+        data-testid="home-inbox"
+      >
+        <InboxListPane
+          doneSet={doneSet}
+          filter={filter}
+          items={filteredItems}
+          onFilterChange={setFilter}
+          onSelect={(itemId) => {
+            setSelectedItemId(itemId);
+            markDone(itemId);
+          }}
+          selectedId={selectedItemId}
+        />
 
-        {recentNotes.length > 0 ? (
-          <React.Suspense fallback={null}>
-            <RecentNotesSection
-              agentPubkeys={agentPubkeySet}
-              notes={recentNotes}
-              onOpenPulse={onOpenPulse}
-              profiles={noteProfiles}
-            />
-          </React.Suspense>
-        ) : null}
+        <InboxDetailPane
+          canDelete={canDelete}
+          canOpenChannel={Boolean(
+            selectedItem?.item.channelId &&
+              availableChannelIds.has(selectedItem.item.channelId),
+          )}
+          canReply={canReply}
+          disabledReplyReason={disabledReplyReason}
+          isDone={selectedItem ? doneSet.has(selectedItem.id) : false}
+          isDeletingMessage={isDeletingMessage}
+          isSendingReply={isSendingReply}
+          isThreadContextLoading={threadContext.isLoading}
+          item={selectedItem}
+          messages={contextMessages}
+          replies={selectedItemReplies}
+          onDelete={() => {
+            if (!selectedItem || !canDelete) {
+              return;
+            }
 
-        <React.Suspense fallback={null}>
-          <div className="grid gap-5">
-            {showMentions ? (
-              <FeedSection
-                availableChannelIds={availableChannelIds}
-                currentPubkey={currentPubkey}
-                profiles={feedProfiles}
-                doneSet={doneSet}
-                emptyDescription="When someone mentions you, it will land here."
-                emptyTitle="No mentions right now"
-                icon={AtSign}
-                items={feed.feed.mentions}
-                onMarkDone={markDone}
-                onOpenItem={onOpenFeedItem}
-                onUndoDone={undoDone}
-                showDoneAction={false}
-                title="Mentions"
-              />
-            ) : null}
-            {showNeedsAction ? (
-              <FeedSection
-                availableChannelIds={availableChannelIds}
-                currentPubkey={currentPubkey}
-                profiles={feedProfiles}
-                doneSet={doneSet}
-                emptyDescription="Approval requests and reminders will appear here."
-                emptyTitle="Nothing needs action"
-                icon={CircleAlert}
-                items={feed.feed.needsAction}
-                onMarkDone={markDone}
-                onOpenItem={onOpenFeedItem}
-                onUndoDone={undoDone}
-                showDoneAction={true}
-                title="Needs Action"
-              />
-            ) : null}
-            {showActivity ? (
-              <FeedSection
-                availableChannelIds={availableChannelIds}
-                currentPubkey={currentPubkey}
-                profiles={feedProfiles}
-                doneSet={doneSet}
-                emptyDescription="Recent channel messages and forum posts will show up here."
-                emptyTitle="No channel activity yet"
-                icon={Activity}
-                items={feed.feed.activity ?? []}
-                onMarkDone={markDone}
-                onOpenItem={onOpenFeedItem}
-                onUndoDone={undoDone}
-                showDoneAction={false}
-                title="Channel Activity"
-              />
-            ) : null}
-            {showAgentActivity ? (
-              <FeedSection
-                availableChannelIds={availableChannelIds}
-                currentPubkey={currentPubkey}
-                profiles={feedProfiles}
-                doneSet={doneSet}
-                emptyDescription="Agent job requests, progress, and results will appear here."
-                emptyTitle="No agent updates yet"
-                icon={Bot}
-                items={feed.feed.agentActivity ?? []}
-                onMarkDone={markDone}
-                onOpenItem={onOpenFeedItem}
-                onUndoDone={undoDone}
-                showDoneAction={false}
-                title="Agent Updates"
-              />
-            ) : null}
-          </div>
-        </React.Suspense>
+            setIsDeletingMessage(true);
+            void deleteMessage(selectedItem.id)
+              .then(() => {
+                onRefresh();
+              })
+              .finally(() => {
+                setIsDeletingMessage(false);
+              });
+          }}
+          onSendReply={async ({
+            content,
+            mediaTags,
+            mentionPubkeys,
+            parentEventId,
+          }) => {
+            const channelId = selectedItem?.item.channelId;
+            if (!selectedItem || !channelId || !canReply) {
+              throw new Error("Replies are not available for this item.");
+            }
+
+            const itemToReply = selectedItem;
+            setIsSendingReply(true);
+            try {
+              const result = await sendChannelMessage(
+                channelId,
+                content,
+                parentEventId,
+                mediaTags,
+                mentionPubkeys,
+              );
+              const authorPubkey = currentPubkey ?? itemToReply.item.pubkey;
+              const reply: InboxReply = {
+                authorLabel: currentPubkey
+                  ? resolveUserLabel({
+                      currentPubkey,
+                      profiles: feedProfiles,
+                      pubkey: authorPubkey,
+                    })
+                  : "You",
+                avatarUrl:
+                  currentPubkey && feedProfiles
+                    ? (feedProfiles[currentPubkey.trim().toLowerCase()]
+                        ?.avatarUrl ?? null)
+                    : null,
+                content,
+                depth: result.depth,
+                fullTimestampLabel: formatInboxFullTimestamp(result.createdAt),
+                id: result.eventId,
+                parentId: result.parentEventId,
+                rootId: result.rootEventId,
+              };
+              setLocalRepliesByItemId((current) => ({
+                ...current,
+                [itemToReply.id]: [...(current[itemToReply.id] ?? []), reply],
+              }));
+              onRefresh();
+            } finally {
+              setIsSendingReply(false);
+            }
+          }}
+          onToggleDone={() => {
+            if (selectedItem) {
+              handleToggleDone(selectedItem.id);
+            }
+          }}
+          onToggleReaction={
+            canReply
+              ? async (message, emoji, remove) => {
+                  await toggleReactionMutation.mutateAsync({
+                    emoji,
+                    eventId: message.id,
+                    remove,
+                  });
+                  await channelMessagesQuery.refetch();
+                  onRefresh();
+                }
+              : undefined
+          }
+        />
       </div>
     </div>
   );
