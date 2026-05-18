@@ -44,6 +44,7 @@
 //! Kokoro engine but are unused — Pocket TTS does its own language ID from
 //! the input text and is not a diffusion model (consistency LM, one step).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig, Wave};
@@ -84,6 +85,35 @@ const SYNTH_NUM_STEPS: i32 = 1;
 /// `INTER_SENTENCE_SILENCE` in `tts.rs` ourselves and don't want a double
 /// helping of leading silence on every utterance.
 const SYNTH_SILENCE_SCALE: f32 = 0.0;
+
+/// Mimi codec frame rate — the LM samples one latent per 80 ms. Used to convert
+/// a token-count estimate into a `max_frames` cap, mirroring upstream
+/// `pocket_tts.models.tts_model._estimate_max_gen_len`.
+const MIMI_FRAME_RATE: f32 = 12.5;
+
+/// Upstream-derived "expected tokens per second of speech" for short inputs.
+/// Used by [`estimate_max_frames`] together with `GEN_SECONDS_PADDING` to cap
+/// runaway generation when the EOS logit fails to fire. Source:
+/// `pocket_tts.models.tts_model.TTSModel._TOKENS_PER_SECOND_ESTIMATE`.
+const TOKENS_PER_SECOND_ESTIMATE: f32 = 3.0;
+
+/// Slack added to the token-derived gen-length estimate, in seconds. Source:
+/// `pocket_tts.models.tts_model.TTSModel._GEN_SECONDS_PADDING`.
+const GEN_SECONDS_PADDING: f32 = 2.0;
+
+/// Hard ceiling on per-chunk generation length, in Mimi frames. Matches the
+/// sherpa-onnx upstream default (`offline-tts-pocket-impl.h:max_frames`) and
+/// is the worst-case bound we'll ever ask for. 500 frames = 40 s of audio.
+const MAX_FRAMES_HARD_CEILING: i32 = 500;
+
+/// Word-count threshold (inclusive) below which we (a) pad the prompt with
+/// leading spaces and (b) ask for `frames_after_eos = 3` instead of 1.
+/// Matches upstream `pocket_tts.models.tts_model.prepare_text_prompt`.
+const SHORT_PROMPT_WORD_THRESHOLD: usize = 4;
+
+/// Number of leading spaces prepended to short prompts. The upstream Python
+/// uses exactly 8 — keep parity rather than tuning blindly.
+const SHORT_PROMPT_PAD_SPACES: usize = 8;
 
 // ── ONNX file names (five Pocket TTS sessions plus two JSON tables) ───────────
 
@@ -187,6 +217,122 @@ pub fn load_text_to_speech(model_dir: &str) -> Result<PocketTts, String> {
     Ok(PocketTts { inner })
 }
 
+// ── Prompt preparation ────────────────────────────────────────────────────────
+
+/// Result of [`prepare_pocket_prompt`]: a synthesizer-ready prompt plus the
+/// per-call generation hints derived from the original text.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PreparedPrompt {
+    /// Text to hand to `OfflineTts::generate_with_config`. Capitalized,
+    /// punctuation-terminated, and (for short inputs) left-padded with spaces.
+    pub text: String,
+    /// Value to pass via `GenerationConfig.extra["frames_after_eos"]`.
+    pub frames_after_eos: i32,
+    /// Value to pass via `GenerationConfig.extra["max_frames"]`. Adaptive to
+    /// text length — short prompts get a much tighter cap to prevent runaway
+    /// "monster breathing" generation when the EOS logit fails to fire.
+    pub max_frames: i32,
+}
+
+/// Mirror of upstream `pocket_tts.models.tts_model.prepare_text_prompt` plus
+/// `_estimate_max_gen_len`. Sherpa-onnx's C++ Pocket TTS impl does not run
+/// these preparation steps, so short / unpunctuated / lowercase inputs can
+/// trigger up to 40 s of runaway generation when the EOS logit never crosses
+/// its threshold. We replicate the upstream Python recipe here:
+///
+/// 1. Collapse interior whitespace (already done by `preprocess_for_tts`, but
+///    cheap to re-check after sentence splitting).
+/// 2. Capitalize the first letter.
+/// 3. Append `.` if the text doesn't end in punctuation.
+/// 4. If fewer than five words, prepend `SHORT_PROMPT_PAD_SPACES` spaces and
+///    bump `frames_after_eos` from 1 → 3.
+/// 5. Compute an adaptive `max_frames` from the (post-padding) word count.
+///
+/// Returns `None` only if the input is empty after trimming — caller should
+/// skip synthesis in that case.
+pub(crate) fn prepare_pocket_prompt(input: &str) -> Option<PreparedPrompt> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Collapse stray double-spaces / embedded newlines that may slip past
+    // `preprocess_for_tts` when sentences are spliced back together.
+    let mut cleaned = String::with_capacity(trimmed.len());
+    let mut last_was_space = false;
+    for ch in trimmed.chars() {
+        let is_ws = ch.is_whitespace();
+        if is_ws {
+            if !last_was_space {
+                cleaned.push(' ');
+            }
+            last_was_space = true;
+        } else {
+            cleaned.push(ch);
+            last_was_space = false;
+        }
+    }
+
+    // Capitalize first character. Uses `to_uppercase` (multi-codepoint safe).
+    let first = cleaned.chars().next().expect("cleaned non-empty above");
+    if first.is_lowercase() {
+        let upper: String = first.to_uppercase().collect();
+        let mut iter = cleaned.chars();
+        iter.next();
+        cleaned = upper + iter.as_str();
+    }
+
+    // Ensure terminal punctuation. Anything not in `.!?;:,` gets a period.
+    // The upstream Python only checks `isalnum` → period, but for our agent
+    // text we already may end in `!` `?` `.` etc. — treat any of those as OK.
+    let last = cleaned
+        .chars()
+        .next_back()
+        .expect("cleaned non-empty above");
+    if !matches!(last, '.' | '!' | '?' | ';' | ':' | ',') {
+        cleaned.push('.');
+    }
+
+    // Word count of the *cleaned but not padded* text — padding is whitespace
+    // only and would just lie to the threshold check below.
+    let word_count = cleaned.split_whitespace().count();
+    let is_short = word_count <= SHORT_PROMPT_WORD_THRESHOLD;
+
+    let final_text = if is_short {
+        let mut padded = String::with_capacity(cleaned.len() + SHORT_PROMPT_PAD_SPACES);
+        for _ in 0..SHORT_PROMPT_PAD_SPACES {
+            padded.push(' ');
+        }
+        padded.push_str(&cleaned);
+        padded
+    } else {
+        cleaned
+    };
+
+    let frames_after_eos = if is_short { 3 } else { 1 };
+    let max_frames = estimate_max_frames(word_count);
+
+    Some(PreparedPrompt {
+        text: final_text,
+        frames_after_eos,
+        max_frames,
+    })
+}
+
+/// Convert a word count into a Mimi-frame cap, matching upstream
+/// `_estimate_max_gen_len`. We use words as a sentencepiece-token proxy: real
+/// SP tokenization runs ~1.2–1.5 tokens/word for English, which the
+/// `GEN_SECONDS_PADDING` slack absorbs. Saturates at
+/// `MAX_FRAMES_HARD_CEILING` so we never *raise* the upstream default.
+fn estimate_max_frames(word_count: usize) -> i32 {
+    // Treat each word as ~1.3 tokens — within the slack envelope but a touch
+    // generous so we don't truncate genuine short utterances.
+    let approx_tokens = word_count as f32 * 1.3;
+    let gen_len_sec = approx_tokens / TOKENS_PER_SECOND_ESTIMATE + GEN_SECONDS_PADDING;
+    let frames = (gen_len_sec * MIMI_FRAME_RATE).ceil() as i32;
+    frames.clamp(1, MAX_FRAMES_HARD_CEILING)
+}
+
 impl PocketTts {
     /// Synthesise `text` with the given reference voice.
     ///
@@ -202,9 +348,29 @@ impl PocketTts {
         _steps: usize,
         speed: f32,
     ) -> Result<Vec<f32>, String> {
-        if text.trim().is_empty() {
-            return Ok(Vec::new());
-        }
+        // Mirror upstream pocket-tts prompt prep — without this short or
+        // unpunctuated inputs can cause the LM's EOS logit to never trip,
+        // producing up to 40 s of "monster breathing" garbage on the first
+        // utterance. See `prepare_pocket_prompt` for the full recipe.
+        let prepared = match prepare_pocket_prompt(text) {
+            Some(p) => p,
+            None => return Ok(Vec::new()),
+        };
+
+        // Per-call generation hints sherpa-onnx forwards to
+        // `offline-tts-pocket-impl.h`. `frames_after_eos` is bumped for short
+        // prompts to give the model trailing room to gracefully decay; the
+        // adaptive `max_frames` is the safety net that bounds runaway
+        // generation when EOS never fires.
+        let mut extra: HashMap<String, serde_json::Value> = HashMap::with_capacity(2);
+        extra.insert(
+            "frames_after_eos".to_string(),
+            serde_json::Value::from(prepared.frames_after_eos),
+        );
+        extra.insert(
+            "max_frames".to_string(),
+            serde_json::Value::from(prepared.max_frames),
+        );
 
         let cfg = GenerationConfig {
             speed,
@@ -212,6 +378,7 @@ impl PocketTts {
             silence_scale: SYNTH_SILENCE_SCALE,
             reference_audio: Some(style.samples.clone()),
             reference_sample_rate: style.sample_rate,
+            extra: Some(extra),
             ..Default::default()
         };
 
@@ -221,11 +388,11 @@ impl PocketTts {
         // `generate_with_config` generic parameter.
         let audio = self
             .inner
-            .generate_with_config(text, &cfg, None::<fn(&[f32], f32) -> bool>)
+            .generate_with_config(&prepared.text, &cfg, None::<fn(&[f32], f32) -> bool>)
             .ok_or_else(|| {
                 format!(
                     "Pocket TTS synthesis failed for text ({} chars)",
-                    text.len()
+                    prepared.text.len()
                 )
             })?;
 
@@ -238,5 +405,124 @@ impl PocketTts {
         }
 
         Ok(audio.samples().to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── prepare_pocket_prompt ────────────────────────────────────────────────
+
+    #[test]
+    fn prepare_prompt_returns_none_for_empty_input() {
+        assert!(prepare_pocket_prompt("").is_none());
+        assert!(prepare_pocket_prompt("   ").is_none());
+        assert!(prepare_pocket_prompt("\n\t  ").is_none());
+    }
+
+    #[test]
+    fn prepare_prompt_pads_and_capitalizes_one_word() {
+        // The "yep" case Tyler hit in production — bare lowercase one-word
+        // utterance with no punctuation. Must be padded, capitalized, and
+        // terminated.
+        let out = prepare_pocket_prompt("yep").expect("non-empty");
+        let pad = " ".repeat(SHORT_PROMPT_PAD_SPACES);
+        assert_eq!(out.text, format!("{pad}Yep."));
+        assert_eq!(out.frames_after_eos, 3);
+        // 1 word → very low frame cap (well under the 500 hard ceiling).
+        assert!(out.max_frames < MAX_FRAMES_HARD_CEILING);
+    }
+
+    #[test]
+    fn prepare_prompt_preserves_existing_punctuation() {
+        let out = prepare_pocket_prompt("yes!").expect("non-empty");
+        let pad = " ".repeat(SHORT_PROMPT_PAD_SPACES);
+        assert_eq!(out.text, format!("{pad}Yes!")); // exclamation kept
+        let out = prepare_pocket_prompt("really?").expect("non-empty");
+        assert_eq!(out.text, format!("{pad}Really?"));
+    }
+
+    #[test]
+    fn prepare_prompt_threshold_is_inclusive_at_four_words() {
+        // 4 words = short (padded); 5 words = long (not padded).
+        let four = prepare_pocket_prompt("one two three four").expect("non-empty");
+        assert!(
+            four.text.starts_with(' '),
+            "four-word input should be padded"
+        );
+        assert_eq!(four.frames_after_eos, 3);
+
+        let five = prepare_pocket_prompt("one two three four five").expect("non-empty");
+        assert!(
+            !five.text.starts_with(' '),
+            "five-word input should NOT be padded"
+        );
+        assert_eq!(five.frames_after_eos, 1);
+    }
+
+    #[test]
+    fn prepare_prompt_does_not_pad_long_text() {
+        let long = "This is a longer sentence that the model should handle just fine.";
+        let out = prepare_pocket_prompt(long).expect("non-empty");
+        assert!(!out.text.starts_with(' '));
+        assert_eq!(out.frames_after_eos, 1);
+        assert!(out.text.ends_with('.'));
+    }
+
+    #[test]
+    fn prepare_prompt_collapses_whitespace() {
+        let out = prepare_pocket_prompt("Hello    world\n\nfriend").expect("non-empty");
+        // No padding (3 words → short → padded), but interior is collapsed.
+        let pad = " ".repeat(SHORT_PROMPT_PAD_SPACES);
+        assert_eq!(out.text, format!("{pad}Hello world friend."));
+    }
+
+    #[test]
+    fn prepare_prompt_does_not_double_capitalize_already_uppercase() {
+        let out = prepare_pocket_prompt("HELLO there").expect("non-empty");
+        let pad = " ".repeat(SHORT_PROMPT_PAD_SPACES);
+        assert_eq!(out.text, format!("{pad}HELLO there."));
+    }
+
+    #[test]
+    fn prepare_prompt_handles_non_ascii_first_letter() {
+        // Cyrillic lowercase 'д' → uppercase 'Д'. Must not panic / produce
+        // mojibake.
+        let out = prepare_pocket_prompt("дa").expect("non-empty");
+        assert!(out.text.contains("Дa."));
+    }
+
+    // ── estimate_max_frames ──────────────────────────────────────────────────
+
+    #[test]
+    fn estimate_max_frames_is_tight_for_short_input() {
+        // 1 word: 1 * 1.3 / 3.0 + 2.0 ≈ 2.43s ≈ 31 frames. Well below 500.
+        let frames = estimate_max_frames(1);
+        assert!(frames > 0);
+        assert!(frames < 50, "got {frames}");
+    }
+
+    #[test]
+    fn estimate_max_frames_saturates_at_ceiling() {
+        // 5000 words ≈ a runaway prompt; must clamp at the hard ceiling.
+        assert_eq!(estimate_max_frames(5_000), MAX_FRAMES_HARD_CEILING);
+    }
+
+    #[test]
+    fn estimate_max_frames_grows_with_word_count() {
+        let small = estimate_max_frames(2);
+        let medium = estimate_max_frames(20);
+        let large = estimate_max_frames(100);
+        assert!(small < medium);
+        assert!(medium < large);
+        assert!(large <= MAX_FRAMES_HARD_CEILING);
+    }
+
+    #[test]
+    fn estimate_max_frames_never_zero() {
+        // Sanity: even a 0-word prompt yields ≥1 frame so we never ask the
+        // engine for an impossible cap.
+        assert!(estimate_max_frames(0) >= 1);
     }
 }
