@@ -43,6 +43,15 @@ const FRAME_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 /// Playout clock: NetEq emits 10 ms frames, so we tick at 10 ms.
 const PLAYOUT_TICK_MS: u64 = 10;
 
+/// How long after the last received packet we keep pulling frames out of a
+/// peer's NetEq into its rodio Player. NetEq always emits a frame on every
+/// `get_audio` call — silent/Expand when there are no packets — so without
+/// this bound an idle peer (one that disconnected without sending `left`)
+/// would have its Player queue 100 silence buffers/sec forever. We pull for
+/// a short grace window past the last packet so brief DTX gaps still feed
+/// NetEq's PLC/expand path normally.
+const IDLE_PEER_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// One remote peer's slot: jitter buffer + dedicated rodio Player.
 ///
 /// Per-frame seq/timestamp come from the v2 wire header (sender-authored).
@@ -52,6 +61,10 @@ const PLAYOUT_TICK_MS: u64 = 10;
 struct PeerSlot {
     jitter: PeerJitterBuffer,
     player: rodio::Player,
+    /// Wall-clock time of the most recent inbound packet for this peer. Read
+    /// by the playout tick to decide whether to keep draining NetEq into the
+    /// Player. Updated on every successful `insert_packet`.
+    last_packet_at: tokio::time::Instant,
 }
 
 impl PeerSlot {
@@ -60,12 +73,21 @@ impl PeerSlot {
             Ok(jitter) => Some(Self {
                 jitter,
                 player: rodio::Player::connect_new(sink_mixer),
+                last_packet_at: tokio::time::Instant::now(),
             }),
             Err(e) => {
                 eprintln!("sprout-desktop: jitter buffer init peer {peer_idx}: {e}");
                 None
             }
         }
+    }
+
+    /// Whether this peer is still actively sending — used by the playout tick
+    /// to gate the rodio append so disconnected peers don't pump silence
+    /// indefinitely. Window is generous compared to typical DTX comfort-noise
+    /// cadence (≤400 ms) so normal speech gaps still flow through NetEq.
+    fn is_active(&self) -> bool {
+        self.last_packet_at.elapsed() < IDLE_PEER_GRACE
     }
 }
 
@@ -102,18 +124,35 @@ pub(crate) async fn run_playout_recv_loop(
     let mut speaker_tick = tokio::time::interval(std::time::Duration::from_millis(SPEAKER_TICK_MS));
     speaker_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut playout_tick = tokio::time::interval(std::time::Duration::from_millis(PLAYOUT_TICK_MS));
-    playout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // `Delay` (not `Skip`) so a brief stall in another select arm — e.g. the
+    // ws_tx_for_pongs mutex contending with the encode-side task on a Ping —
+    // doesn't drop a playout tick outright. Dropped ticks would leave the
+    // per-peer Player queues empty for 10 ms and the device mixer would
+    // produce audible silence. `Delay` catches up immediately when the loop
+    // returns to the select.
+    playout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => break,
             _ = playout_tick.tick() => {
-                // Drain one 10 ms frame from each peer's NetEq into its Player.
-                // NetEq's contract is to always emit a frame (Expand/silence
-                // when empty), so the audio device's pull from the mixer never
-                // starves.
+                // Drain one 10 ms frame from each *active* peer's NetEq into
+                // its Player. NetEq always emits a frame (Expand/silence when
+                // empty), so for peers that recently sent we keep the device
+                // mixer fed without starving; for peers that have stopped
+                // sending — disconnected without a `left`, or simply quiet —
+                // we skip the append so we don't pump 100 silence buffers/sec
+                // per idle peer into rodio forever. `is_active` is a 500 ms
+                // grace past the last received packet, far longer than typical
+                // DTX comfort-noise cadence.
                 for (peer_idx, slot) in peers.iter_mut() {
+                    if !slot.is_active() {
+                        // Still drain the frame to keep NetEq's internal clock
+                        // advancing; just don't enqueue it for playback.
+                        let _ = slot.jitter.get_audio();
+                        continue;
+                    }
                     match slot.jitter.get_audio() {
                         Ok((samples, _vad)) => {
                             slot.player.append(SamplesBuffer::new(channels, rate, samples));
@@ -162,7 +201,14 @@ pub(crate) async fn run_playout_recv_loop(
                             continue;
                         }
                         let is_dtx = (header.flags & FLAG_DTX) != 0;
-                        active_indices.insert(peer_idx);
+                        // Only count non-DTX arrivals toward the UI's
+                        // active-speaker set. DTX/comfort packets are emitted
+                        // by an idle peer to keep the codec alive — they
+                        // don't mean the peer is speaking, and shouldn't
+                        // make their tile flash for the 500 ms speaker tick.
+                        if !is_dtx {
+                            active_indices.insert(peer_idx);
+                        }
 
                         // TTS interrupt frame counter — reset on TTS rising edge.
                         let tts_now = tts_active.load(Ordering::Acquire);
@@ -192,6 +238,11 @@ pub(crate) async fn run_playout_recv_loop(
                             eprintln!(
                                 "sprout-desktop: jitter insert peer {peer_idx}: {err}"
                             );
+                        } else {
+                            // Heartbeat for the playout tick's idle-peer
+                            // guard — only on successful insert so a stream
+                            // of bad packets can't keep a dead peer "active".
+                            slot.last_packet_at = tokio::time::Instant::now();
                         }
 
                         // Count remote-speech frame arrivals for the TTS
