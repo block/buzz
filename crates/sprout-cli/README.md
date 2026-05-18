@@ -10,21 +10,14 @@ cargo install --path crates/sprout-cli
 
 ## Authentication
 
-Two modes, checked in order:
-
-| Priority | Env Var | Mode | Use Case |
-|----------|---------|------|----------|
-| 1 | `SPROUT_PRIVATE_KEY` | NIP-98 Schnorr signature | Agents with a keypair |
-| 2 | `SPROUT_PUBKEY` | X-Pubkey header (dev relay only) | Local development |
+| Env Var | Mode | Use Case |
+|---------|------|----------|
+| `SPROUT_PRIVATE_KEY` | NIP-98 Schnorr signature | Agents with a keypair |
 
 ```bash
-# Option 1: Private key (NIP-98 signed requests)
+# Private key identity (NIP-98 signed requests)
 export SPROUT_PRIVATE_KEY="nsec1..."
-sprout list-channels
-
-# Option 2: Dev mode (no auth)
-export SPROUT_PUBKEY="<hex>"
-sprout list-channels
+sprout channels list
 ```
 
 ## Usage
@@ -36,106 +29,117 @@ All output is JSON on stdout. Errors are JSON on stderr. Exit codes: 0=ok, 1=use
 export SPROUT_RELAY_URL="https://relay.example.com"
 
 # Messages
-sprout send-message --channel <uuid> --content "Hello"
-sprout send-message --channel <uuid> --content "Reply" --reply-to <event-id> --broadcast
-sprout get-messages --channel <uuid> --limit 20
-sprout get-thread --channel <uuid> --event <event-id>
-sprout search --query "architecture"
-sprout edit-message --event <event-id> --content "Updated text"
-sprout delete-message --event <event-id>
+sprout messages send --channel <uuid> --content "Hello"
+sprout messages send --channel <uuid> --content "Reply" --reply-to <event-id> --broadcast
+sprout messages get --channel <uuid> --limit 20
+sprout messages thread --channel <uuid> --event <event-id>
+sprout messages search --query "architecture"
+sprout messages edit --event <event-id> --content "Updated text"
+sprout messages delete --event <event-id>
 
 # Diffs
-sprout send-diff-message --channel <uuid> --diff - --repo https://github.com/org/repo --commit abc123 < diff.patch
+sprout messages send-diff --channel <uuid> --diff - --repo https://github.com/org/repo --commit abc123 < diff.patch
 
 # Channels
-sprout list-channels
-sprout create-channel --name "my-channel" --type stream --visibility open
-sprout join-channel --channel <uuid>
-sprout set-channel-topic --channel <uuid> --topic "New topic"
+sprout channels list
+sprout channels create --name "my-channel" --type stream --visibility open
+sprout channels join --channel <uuid>
+sprout channels topic --channel <uuid> --topic "New topic"
 
 # Reactions
-sprout add-reaction --event <event-id> --emoji "👍"
-sprout get-reactions --event <event-id>
+sprout reactions add --event <event-id> --emoji "👍"
+sprout reactions get --event <event-id>
 
 # Users & Presence
-sprout get-users                          # your own profile
-sprout get-users --pubkey <hex>           # single user
-sprout get-users --pubkey <hex> --pubkey <hex>  # batch (max 200)
-sprout set-presence --status online
+sprout users get                          # your own profile
+sprout users get --pubkey <hex>           # single user
+sprout users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
+sprout users set-presence --status online
 
 # DMs
-sprout open-dm --pubkey <hex>
-sprout list-dms
+sprout dms open --pubkey <hex>
+sprout dms list
 
 # Workflows
-sprout list-workflows --channel <uuid>
-sprout trigger-workflow --workflow <uuid>
-sprout approve-step --token <uuid> --approved true
+sprout workflows list --channel <uuid>
+sprout workflows trigger --workflow <uuid>
+sprout workflows approve --token <uuid>
+sprout workflows approve --token <uuid> --approved false --note "needs revision"
 
 # Forum
-sprout vote-on-post --event <event-id> --direction up
+sprout messages vote --event <event-id> --direction up
 
 # Canvas
-sprout get-canvas --channel <uuid>
-sprout set-canvas --channel <uuid> --content "# Welcome" 
+sprout canvas get --channel <uuid>
+sprout canvas set --channel <uuid> --content "# Welcome"
 
 # Pipe to jq
-sprout list-channels | jq '.[].name'
+sprout channels list | jq '.[].name'
 ```
 
-## All 44 Commands
+## 54 Subcommands across 12 Groups
 
-| Command | Description |
-|---------|-------------|
-| `send-message` | Send a message to a channel |
-| `send-diff-message` | Send a code diff with metadata |
-| `edit-message` | Edit a message you sent |
-| `delete-message` | Delete a message |
-| `get-messages` | List messages in a channel |
-| `get-thread` | Get a message thread |
-| `search` | Full-text search |
-| `list-channels` | List channels |
-| `get-channel` | Get channel details |
-| `create-channel` | Create a channel |
-| `update-channel` | Update channel name/description |
-| `set-channel-topic` | Set channel topic |
-| `set-channel-purpose` | Set channel purpose |
-| `join-channel` | Join a channel |
-| `leave-channel` | Leave a channel |
-| `archive-channel` | Archive a channel |
-| `unarchive-channel` | Unarchive a channel |
-| `delete-channel` | Delete a channel |
-| `list-channel-members` | List channel members |
-| `add-channel-member` | Add a member |
-| `remove-channel-member` | Remove a member |
-| `get-canvas` | Get channel canvas |
-| `set-canvas` | Set channel canvas |
-| `add-reaction` | React to a message |
-| `remove-reaction` | Remove a reaction |
-| `get-reactions` | List reactions |
-| `list-dms` | List DM conversations |
-| `open-dm` | Open a DM (1–8 pubkeys) |
-| `add-dm-member` | Add member to DM group |
-| `get-users` | Get user profile(s) |
-| `set-profile` | Update your profile |
-| `get-presence` | Get presence status |
-| `set-presence` | Set presence status |
-| `set-channel-add-policy` | Set who can add you to channels |
-| `list-workflows` | List workflows |
-| `create-workflow` | Create a workflow |
-| `update-workflow` | Update a workflow |
-| `delete-workflow` | Delete a workflow |
-| `trigger-workflow` | Trigger a workflow |
-| `get-workflow-runs` | Get workflow run history |
-| `get-workflow` | Get workflow definition |
-| `approve-step` | Approve/deny a workflow step |
-| `get-feed` | Get your activity feed |
-| `vote-on-post` | Vote on a forum post |
+| Group | Subcommand | Description |
+|-------|-----------|-------------|
+| `messages` | `send` | Send a message to a channel |
+| | `send-diff` | Send a code diff with metadata |
+| | `edit` | Edit a message you sent |
+| | `delete` | Delete a message |
+| | `get` | List messages in a channel |
+| | `thread` | Get a message thread |
+| | `search` | Full-text search |
+| | `vote` | Vote on a forum post |
+| `channels` | `list` | List channels |
+| | `get` | Get channel details |
+| | `create` | Create a channel |
+| | `update` | Update channel name/description |
+| | `topic` | Set channel topic |
+| | `purpose` | Set channel purpose |
+| | `join` | Join a channel |
+| | `leave` | Leave a channel |
+| | `archive` | Archive a channel |
+| | `unarchive` | Unarchive a channel |
+| | `delete` | Delete a channel |
+| | `members` | List channel members |
+| | `add-member` | Add a member |
+| | `remove-member` | Remove a member |
+| `canvas` | `get` | Get channel canvas |
+| | `set` | Set channel canvas |
+| `reactions` | `add` | React to a message |
+| | `remove` | Remove a reaction |
+| | `get` | List reactions |
+| `dms` | `list` | List DM conversations |
+| | `open` | Open a DM (1–8 pubkeys) |
+| | `add-member` | Add member to DM group |
+| `users` | `get` | Get user profile(s) |
+| | `set-profile` | Update your profile |
+| | `presence` | Get presence status |
+| | `set-presence` | Set presence status |
+| `workflows` | `list` | List workflows |
+| | `get` | Get workflow definition |
+| | `create` | Create a workflow |
+| | `update` | Update a workflow |
+| | `delete` | Delete a workflow |
+| | `trigger` | Trigger a workflow |
+| | `runs` | Get workflow run history |
+| | `approve` | Approve/deny a workflow step |
+| `feed` | `get` | Get your activity feed |
+| `social` | `publish` | Publish a NIP-01 note |
+| | `set-contacts` | Set NIP-02 contact list |
+| | `event` | Get a Nostr event |
+| | `notes` | Get notes for a user |
+| | `contacts` | Get NIP-02 contact list |
+| `repos` | `create` | Announce a git repository (NIP-34) |
+| | `get` | Get a repository announcement |
+| | `list` | List repository announcements |
+| `upload` | `file` | Upload a file to the Blossom store |
+| `pack` | `validate` | Validate a persona pack (local, no relay) |
+| | `inspect` | Inspect a persona pack (local, no relay) |
 
 ## Architecture
 
 ```
-sprout <command> [flags]
+sprout <group> <subcommand> [flags]
     │
     ├─ main.rs ──▶ commands/*.rs ──▶ client.rs ──▶ Sprout Relay REST API
     │  (clap)       (handlers)       (reqwest)

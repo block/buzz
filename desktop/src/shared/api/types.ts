@@ -278,6 +278,8 @@ export type ManagedAgent = {
   systemPrompt: string | null;
   model: string | null;
   mcpToolsets: string | null;
+  /** Per-agent env vars. Layered on top of persona envVars. */
+  envVars: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
   pid: number | null;
   createdAt: string;
@@ -335,6 +337,7 @@ export type CreateManagedAgentInput = {
   avatarUrl?: string;
   model?: string;
   mcpToolsets?: string;
+  envVars?: Record<string, string>;
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
   backend?: ManagedAgentBackend;
@@ -403,6 +406,8 @@ export type UpdateManagedAgentInput = {
   model?: string | null;
   systemPrompt?: string | null;
   mcpToolsets?: string | null;
+  /** Absent = don't touch. Present = replace the env_vars map entirely. */
+  envVars?: Record<string, string>;
   parallelism?: number;
   turnTimeoutSeconds?: number;
   relayUrl?: string;
@@ -432,6 +437,9 @@ export type AgentPersona = {
   isActive: boolean;
   /** Pack ID if this persona was imported from a persona pack. Pack personas are non-editable. */
   sourcePack?: string | null;
+  /** Environment variables injected for agents created from this persona.
+   * Layered as: desktop parent env < persona envVars < agent envVars. */
+  envVars: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 };
@@ -443,6 +451,7 @@ export type CreatePersonaInput = {
   provider?: string;
   model?: string;
   namePool?: string[];
+  envVars?: Record<string, string>;
 };
 
 export type UpdatePersonaInput = {
@@ -453,6 +462,7 @@ export type UpdatePersonaInput = {
   provider?: string;
   model?: string;
   namePool?: string[];
+  envVars?: Record<string, string>;
 };
 
 // ── Team types ────────────────────────────────────────────────────────────────

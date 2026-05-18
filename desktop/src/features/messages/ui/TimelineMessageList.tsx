@@ -15,12 +15,14 @@ import { SystemMessageRow } from "./SystemMessageRow";
 
 type TimelineMessageListProps = {
   activeReplyTargetId?: string | null;
+  channelId?: string | null;
   currentPubkey?: string;
   highlightedMessageId?: string | null;
   messageFooters?: Record<string, React.ReactNode>;
   messages: TimelineMessage[];
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
+  onMarkUnread?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
   onToggleReaction?: (
     message: TimelineMessage,
@@ -40,12 +42,14 @@ type TimelineMessageListProps = {
 
 export const TimelineMessageList = React.memo(function TimelineMessageList({
   activeReplyTargetId = null,
+  channelId,
   currentPubkey,
   highlightedMessageId = null,
   messageFooters,
   messages,
   onDelete,
   onEdit,
+  onMarkUnread,
   onReply,
   onToggleReaction,
   personaLookup,
@@ -98,6 +102,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         <div key={message.id} className="flex flex-col gap-0">
           <MessageRow
             activeReplyTargetId={activeReplyTargetId}
+            channelId={channelId}
             highlighted={message.id === highlightedMessageId}
             message={message}
             onDelete={
@@ -110,6 +115,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
                 ? onEdit
                 : undefined
             }
+            onMarkUnread={onMarkUnread}
             onToggleReaction={onToggleReaction}
             onReply={onReply}
             profiles={profiles}
@@ -132,6 +138,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         <div key={message.id} className="flex flex-col gap-1">
           <MessageRow
             activeReplyTargetId={activeReplyTargetId}
+            channelId={channelId}
             highlighted={message.id === highlightedMessageId || isSearchActive}
             message={message}
             onDelete={
@@ -144,6 +151,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
                 ? onEdit
                 : undefined
             }
+            onMarkUnread={onMarkUnread}
             onToggleReaction={onToggleReaction}
             onReply={onReply}
             profiles={profiles}

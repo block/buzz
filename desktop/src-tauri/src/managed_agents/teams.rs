@@ -336,6 +336,7 @@ mod tests {
             is_active: true,
             source_pack: None,
             source_pack_persona_slug: None,
+            env_vars: std::collections::BTreeMap::new(),
             created_at: "2026-03-20T00:00:00Z".to_string(),
             updated_at: "2026-03-20T00:00:00Z".to_string(),
         }

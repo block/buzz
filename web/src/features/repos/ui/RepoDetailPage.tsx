@@ -60,7 +60,7 @@ function CopyableUrl({ url }: { url: string }) {
 
 function DetailSkeleton() {
   return (
-    <div className="mx-auto flex w-full max-w-7xl gap-8 px-4 py-8">
+    <div className="flex w-full gap-8 px-4 py-8">
       <div className="min-w-0 flex-1">
         <div className="h-5 w-24 animate-pulse rounded bg-muted" />
         <div className="mt-6 h-8 w-64 animate-pulse rounded bg-muted" />
@@ -181,7 +181,7 @@ export function RepoDetailPage() {
 
   if (!repo) {
     return (
-      <div className="mx-auto flex w-full max-w-7xl gap-8 px-4 py-8">
+      <div className="flex w-full gap-8 px-4 py-8">
         <div className="min-w-0 flex-1">
           <Link
             to="/"
@@ -205,7 +205,7 @@ export function RepoDetailPage() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-7xl gap-8 px-4 py-8">
+    <div className="flex w-full gap-8 px-4 py-8">
       {/* Main content */}
       <div className="min-w-0 flex-1">
         {/* Back link */}

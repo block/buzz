@@ -50,8 +50,24 @@ where
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "sprout", about = "Sprout CLI — interact with a Sprout relay")]
+#[command(
+    name = "sprout",
+    about = "Sprout CLI — interact with a Sprout relay",
+    long_about = "\
+Sprout CLI — interact with a Sprout relay
+
+Configuration (flags override env vars):
+  SPROUT_RELAY_URL     Relay base URL        [default: http://localhost:3000]
+  SPROUT_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
+  SPROUT_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+
+The 'pack' subcommand runs locally and does not require a relay connection.
+
+Exit codes: 0=ok  1=bad input  2=relay/network error  3=auth error  4=other
+Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"}"
+)]
 struct Cli {
+    /// Relay URL (http:// or https://). Overrides SPROUT_RELAY_URL env var.
     #[arg(
         long,
         env = "SPROUT_RELAY_URL",
@@ -72,95 +88,181 @@ struct Cli {
 }
 
 // ---------------------------------------------------------------------------
-// Subcommands
+// Value enums for typed --type / --visibility / --status flags
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, clap::ValueEnum)]
+pub enum ChannelType {
+    #[value(name = "stream")]
+    Stream,
+    #[value(name = "forum")]
+    Forum,
+}
+
+impl std::fmt::Display for ChannelType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stream => write!(f, "stream"),
+            Self::Forum => write!(f, "forum"),
+        }
+    }
+}
+
+#[derive(Clone, clap::ValueEnum)]
+pub enum ChannelVisibility {
+    #[value(name = "open")]
+    Open,
+    #[value(name = "private")]
+    Private,
+}
+
+impl std::fmt::Display for ChannelVisibility {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Open => write!(f, "open"),
+            Self::Private => write!(f, "private"),
+        }
+    }
+}
+
+#[derive(Clone, clap::ValueEnum)]
+pub enum PresenceStatus {
+    #[value(name = "online")]
+    Online,
+    #[value(name = "away")]
+    Away,
+    #[value(name = "offline")]
+    Offline,
+}
+
+impl std::fmt::Display for PresenceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Online => write!(f, "online"),
+            Self::Away => write!(f, "away"),
+            Self::Offline => write!(f, "offline"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand groups
 // ---------------------------------------------------------------------------
 
 #[derive(Subcommand)]
 enum Cmd {
-    // ---- Messages ----------------------------------------------------------
+    /// Send, read, search, and manage messages
+    #[command(subcommand)]
+    Messages(MessagesCmd),
+    /// Create, configure, and manage channels
+    #[command(subcommand)]
+    Channels(ChannelsCmd),
+    /// Get and set channel canvas documents
+    #[command(subcommand)]
+    Canvas(CanvasCmd),
+    /// Add, remove, and list emoji reactions
+    #[command(subcommand)]
+    Reactions(ReactionsCmd),
+    /// List, open, and manage direct messages
+    #[command(subcommand)]
+    Dms(DmsCmd),
+    /// Look up users and manage profiles and presence
+    #[command(subcommand)]
+    Users(UsersCmd),
+    /// Create, trigger, and manage workflows
+    #[command(subcommand)]
+    Workflows(WorkflowsCmd),
+    /// Read the activity feed
+    #[command(subcommand)]
+    Feed(FeedCmd),
+    /// Publish notes and manage the social graph (NIP-01/02)
+    #[command(subcommand)]
+    Social(SocialCmd),
+    /// Announce and discover git repositories (NIP-34)
+    #[command(subcommand)]
+    Repos(ReposCmd),
+    /// Upload files to the relay's Blossom store
+    #[command(subcommand)]
+    Upload(UploadCmd),
+    /// Persona pack operations (local, no relay connection needed)
+    #[command(subcommand)]
+    Pack(PackCmd),
+}
+
+// ---------------------------------------------------------------------------
+// Messages subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum MessagesCmd {
     /// Send a message to a channel
-    SendMessage {
+    #[command(
+        after_help = "Examples:\n  sprout messages send --channel <UUID> --content \"hello\"\n  sprout messages send --channel <UUID> --content \"@alice check this\""
+    )]
+    Send {
+        /// Channel UUID (from 'sprout channels list')
         #[arg(long)]
         channel: String,
+        /// Message text — supports @mentions and markdown
         #[arg(long)]
         content: String,
+        /// Nostr event kind (default: channel default)
         #[arg(long)]
         kind: Option<u16>,
+        /// Event ID to reply to (creates a thread)
         #[arg(long)]
         reply_to: Option<String>,
+        /// Also publish to the Nostr network
         #[arg(long, default_value_t = false)]
         broadcast: bool,
+        /// Explicit mention pubkeys (64-char hex)
         #[arg(long = "mention")]
         mentions: Vec<String>,
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
         files: Vec<String>,
     },
-    /// Send a diff/code-review message
-    SendDiffMessage {
+    /// Send a code diff / patch to a channel
+    SendDiff {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// Diff/patch content (use '-' to read from stdin)
         #[arg(long)]
         diff: String,
+        /// Repository URL (e.g. https://github.com/org/repo)
         #[arg(long)]
         repo: String,
+        /// Commit SHA
         #[arg(long)]
         commit: String,
+        /// Single file path within the repo
         #[arg(long)]
         file: Option<String>,
+        /// Parent commit SHA for three-way diff context
         #[arg(long)]
         parent_commit: Option<String>,
+        /// Source branch name
         #[arg(long)]
         source_branch: Option<String>,
+        /// Target branch name
         #[arg(long)]
         target_branch: Option<String>,
+        /// Pull request number
         #[arg(long)]
         pr: Option<u32>,
+        /// Language hint (auto-detected from file extension if omitted)
         #[arg(long)]
         lang: Option<String>,
+        /// Human-readable description of the change
         #[arg(long)]
         description: Option<String>,
+        /// Event ID to reply to (creates a thread)
         #[arg(long)]
         reply_to: Option<String>,
     },
-    /// Delete a message by event ID
-    DeleteMessage {
-        #[arg(long)]
-        event: String,
-    },
-    /// Get messages from a channel
-    GetMessages {
-        #[arg(long)]
-        channel: String,
-        #[arg(long)]
-        limit: Option<u32>,
-        #[arg(long)]
-        before: Option<i64>,
-        #[arg(long)]
-        since: Option<i64>,
-        #[arg(long)]
-        kinds: Option<String>,
-    },
-    /// Get a message thread
-    GetThread {
-        #[arg(long)]
-        channel: String,
-        #[arg(long)]
-        event: String,
-        #[arg(long)]
-        depth_limit: Option<u32>,
-        #[arg(long)]
-        limit: Option<u32>,
-    },
-    /// Search messages
-    Search {
-        #[arg(long)]
-        query: String,
-        #[arg(long)]
-        limit: Option<u32>,
-    },
-    /// Edit a message you previously sent
-    EditMessage {
+    /// Edit a previously sent message
+    Edit {
         /// Event ID of the message to edit (64-char hex)
         #[arg(long)]
         event: String,
@@ -168,8 +270,59 @@ enum Cmd {
         #[arg(long)]
         content: String,
     },
-    /// Vote on a forum post or comment (up or down)
-    VoteOnPost {
+    /// Delete a message by event ID
+    Delete {
+        /// Event ID to delete (64-char hex)
+        #[arg(long)]
+        event: String,
+    },
+    /// Retrieve messages from a channel
+    #[command(
+        after_help = "Examples:\n  sprout messages get --channel <UUID>\n  sprout messages get --channel <UUID> --limit 50 --kinds 1,1984"
+    )]
+    Get {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Maximum number of results to return
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Unix timestamp — return messages before this time
+        #[arg(long)]
+        before: Option<i64>,
+        /// Unix timestamp — return messages after this time
+        #[arg(long)]
+        since: Option<i64>,
+        /// Comma-separated event kinds to filter (e.g. 1,1984)
+        #[arg(long)]
+        kinds: Option<String>,
+    },
+    /// Get a message thread (replies to a root message)
+    Thread {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Root message event ID (64-char hex)
+        #[arg(long)]
+        event: String,
+        /// Maximum reply depth to traverse
+        #[arg(long)]
+        depth_limit: Option<u32>,
+        /// Maximum number of results to return
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Full-text search across messages
+    Search {
+        /// Search query string
+        #[arg(long)]
+        query: String,
+        /// Maximum number of results to return
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Upvote or downvote a forum post
+    Vote {
         /// Event ID of the post to vote on (64-char hex)
         #[arg(long)]
         event: String,
@@ -177,259 +330,377 @@ enum Cmd {
         #[arg(long)]
         direction: String,
     },
+}
 
-    /// Upload a file to the relay (returns BlobDescriptor JSON)
-    UploadFile {
-        /// Path to the file to upload
-        #[arg(long)]
-        file: String,
-    },
+// ---------------------------------------------------------------------------
+// Channels subcommands
+// ---------------------------------------------------------------------------
 
-    // ---- Channels ----------------------------------------------------------
-    /// List channels
-    ListChannels {
-        #[arg(long)]
-        visibility: Option<String>,
+#[derive(Subcommand)]
+pub enum ChannelsCmd {
+    /// List channels visible to the current identity
+    #[command(
+        after_help = "Examples:\n  sprout channels list\n  sprout channels list --visibility open"
+    )]
+    List {
+        /// Filter by visibility
+        #[arg(long, value_enum)]
+        visibility: Option<ChannelVisibility>,
+        /// Only show channels where the current identity is a member
         #[arg(long, default_value_t = false)]
         member: bool,
     },
-    /// Get a channel by ID
-    GetChannel {
+    /// Get details for a single channel
+    Get {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
     },
     /// Create a new channel
-    CreateChannel {
+    #[command(
+        after_help = "Examples:\n  sprout channels create --name general --type stream --visibility open\n  sprout channels create --name design --type forum --visibility open --description \"Design discussions\""
+    )]
+    Create {
+        /// Channel name
         #[arg(long)]
         name: String,
-        #[arg(long = "type")]
-        channel_type: String,
-        #[arg(long)]
-        visibility: String,
+        /// Channel type
+        #[arg(long = "type", value_enum)]
+        channel_type: ChannelType,
+        /// Channel visibility
+        #[arg(long, value_enum)]
+        visibility: ChannelVisibility,
+        /// Channel description
         #[arg(long)]
         description: Option<String>,
     },
-    /// Update a channel's name or description
-    UpdateChannel {
+    /// Update channel name or description
+    Update {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// New channel name
         #[arg(long)]
         name: Option<String>,
+        /// New channel description
         #[arg(long)]
         description: Option<String>,
     },
-    /// Set a channel's topic
-    SetChannelTopic {
+    /// Set the channel topic
+    Topic {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// New topic text
         #[arg(long)]
         topic: String,
     },
-    /// Set a channel's purpose
-    SetChannelPurpose {
+    /// Set the channel purpose
+    Purpose {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// New purpose text
         #[arg(long)]
         purpose: String,
     },
     /// Join a channel
-    JoinChannel {
+    Join {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
     },
     /// Leave a channel
-    LeaveChannel {
+    Leave {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
     },
     /// Archive a channel
-    ArchiveChannel {
+    Archive {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
     },
     /// Unarchive a channel
-    UnarchiveChannel {
+    Unarchive {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
     },
-    /// Delete a channel
-    DeleteChannel {
+    /// Delete a channel permanently
+    Delete {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
     },
-    /// List channel members
-    ListChannelMembers {
+    /// List members of a channel
+    Members {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
     },
     /// Add a member to a channel
-    AddChannelMember {
+    #[command(name = "add-member")]
+    AddMember {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// Member pubkey (64-char hex)
         #[arg(long)]
         pubkey: String,
+        /// Member role (owner, admin, member, guest, bot)
         #[arg(long)]
         role: Option<String>,
     },
     /// Remove a member from a channel
-    RemoveChannelMember {
+    #[command(name = "remove-member")]
+    RemoveMember {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// Member pubkey (64-char hex)
         #[arg(long)]
         pubkey: String,
     },
-    /// Get a channel's canvas
-    GetCanvas {
+}
+
+// ---------------------------------------------------------------------------
+// Canvas subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum CanvasCmd {
+    /// Get the canvas document for a channel
+    Get {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
     },
-    /// Set a channel's canvas content
-    SetCanvas {
+    /// Set (replace) the canvas document for a channel
+    Set {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// Canvas content (markdown; use '-' to read from stdin)
         #[arg(long)]
         content: String,
     },
+}
 
-    // ---- Reactions ---------------------------------------------------------
-    /// Add a reaction to a message
-    AddReaction {
+// ---------------------------------------------------------------------------
+// Reactions subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum ReactionsCmd {
+    /// Add an emoji reaction to a message
+    Add {
+        /// Event ID (64-char hex)
         #[arg(long)]
         event: String,
+        /// Emoji character (e.g. '👍')
         #[arg(long)]
         emoji: String,
     },
-    /// Remove a reaction from a message
-    RemoveReaction {
+    /// Remove an emoji reaction from a message
+    Remove {
+        /// Event ID (64-char hex)
         #[arg(long)]
         event: String,
+        /// Emoji character to remove
         #[arg(long)]
         emoji: String,
     },
-    /// Get reactions on a message
-    GetReactions {
+    /// List reactions on a message
+    Get {
+        /// Event ID (64-char hex)
         #[arg(long)]
         event: String,
     },
+}
 
-    // ---- DMs ---------------------------------------------------------------
-    /// List DM conversations
-    ListDms {
+// ---------------------------------------------------------------------------
+// DMs subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum DmsCmd {
+    /// List direct message conversations
+    List {
+        /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
     },
-    /// Open a DM with one or more users (1–8 pubkeys)
-    OpenDm {
+    /// Open a new direct message with one or more users
+    Open {
+        /// User pubkey(s) to DM (64-char hex, 1-8)
         #[arg(long = "pubkey")]
         pubkeys: Vec<String>,
     },
-    /// Add a member to a DM group
-    AddDmMember {
+    /// Add a member to an existing DM conversation
+    AddMember {
+        /// DM conversation UUID
         #[arg(long)]
         channel: String,
+        /// User pubkey to add (64-char hex)
         #[arg(long)]
         pubkey: String,
     },
+}
 
-    // ---- Users -------------------------------------------------------------
-    /// Get user profiles by pubkey or display name
-    GetUsers {
+// ---------------------------------------------------------------------------
+// Users subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum UsersCmd {
+    /// Look up user profiles by pubkey or name
+    Get {
+        /// User pubkey(s) to look up (64-char hex). Omit for your own profile
         #[arg(long = "pubkey")]
         pubkeys: Vec<String>,
         /// Search by display name (case-insensitive substring match)
         #[arg(long = "name")]
         name: Option<String>,
     },
-    /// Update your profile
+    /// Update the current identity's profile
+    #[command(name = "set-profile")]
     SetProfile {
+        /// Display name
         #[arg(long)]
         name: Option<String>,
+        /// Avatar URL
         #[arg(long)]
         avatar: Option<String>,
+        /// Bio / about text
         #[arg(long)]
         about: Option<String>,
+        /// NIP-05 identifier (e.g. user@example.com)
         #[arg(long)]
         nip05: Option<String>,
     },
-    /// Get presence status for users (comma-separated pubkeys)
-    GetPresence {
+    /// Get presence status for users
+    Presence {
+        /// Comma-separated pubkeys (64-char hex)
         #[arg(long)]
         pubkeys: String,
     },
-    /// Set your presence status
+    /// Set your presence status (online/away/offline)
+    #[command(name = "set-presence")]
     SetPresence {
-        #[arg(long)]
-        status: String,
+        /// Presence status
+        #[arg(long, value_enum)]
+        status: PresenceStatus,
     },
+}
 
-    // ---- Workflows ---------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Workflows subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum WorkflowsCmd {
     /// List workflows in a channel
-    ListWorkflows {
+    List {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
     },
-    /// Create a workflow in a channel
-    CreateWorkflow {
+    /// Get details for a single workflow
+    Get {
+        /// Workflow UUID
+        #[arg(long)]
+        workflow: String,
+    },
+    /// Create a workflow from a YAML definition
+    Create {
+        /// Channel UUID
         #[arg(long)]
         channel: String,
+        /// Workflow YAML definition
         #[arg(long)]
         yaml: String,
     },
-    /// Update a workflow
-    UpdateWorkflow {
+    /// Update a workflow's YAML definition
+    Update {
+        /// Channel UUID the workflow belongs to
+        #[arg(long)]
+        channel: String,
+        /// Workflow UUID
         #[arg(long)]
         workflow: String,
+        /// Updated workflow YAML definition
         #[arg(long)]
         yaml: String,
     },
     /// Delete a workflow
-    DeleteWorkflow {
+    Delete {
+        /// Workflow UUID
         #[arg(long)]
         workflow: String,
     },
-    /// Trigger a workflow manually
-    TriggerWorkflow {
+    /// Trigger a workflow run
+    #[command(after_help = "Examples:\n  sprout workflows trigger --workflow <UUID>")]
+    Trigger {
+        /// Workflow UUID
         #[arg(long)]
         workflow: String,
     },
-    /// Get workflow run history
-    GetWorkflowRuns {
+    /// List runs for a workflow
+    Runs {
+        /// Workflow UUID
         #[arg(long)]
         workflow: String,
+        /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
     },
-    /// Get a workflow definition
-    GetWorkflow {
-        #[arg(long)]
-        workflow: String,
-    },
-    /// Approve or deny a workflow approval step
-    ApproveStep {
+    /// Approve or deny a workflow step
+    #[command(
+        after_help = "Examples:\n  sprout workflows approve --token <UUID>\n  sprout workflows approve --token <UUID> --approved false --note \"needs revision\""
+    )]
+    Approve {
         /// The approval token UUID (from the approval request)
         #[arg(long)]
         token: String,
-        /// Whether to approve: "true" or "false"
-        #[arg(long)]
-        approved: String,
+        /// Approve (true) or deny (false) the step
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        approved: bool,
+        /// Optional note to include with the approval/denial
         #[arg(long)]
         note: Option<String>,
     },
+}
 
-    // ---- Feed --------------------------------------------------------------
-    /// Get your activity feed
-    GetFeed {
+// ---------------------------------------------------------------------------
+// Feed subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum FeedCmd {
+    /// Get recent activity feed entries
+    Get {
+        /// Unix timestamp — return entries after this time
         #[arg(long)]
         since: Option<i64>,
+        /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
+        /// Comma-separated feed entry types to filter
         #[arg(long)]
         types: Option<String>,
     },
+}
 
-    // Social
-    /// Publish a short text note (kind:1) to the global feed.
-    #[command(name = "publish-note")]
+// ---------------------------------------------------------------------------
+// Social subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum SocialCmd {
+    /// Publish a text note (NIP-01 kind:1)
+    #[command(name = "publish")]
     PublishNote {
         /// Text content of the note.
         #[arg(long)]
@@ -438,25 +709,22 @@ enum Cmd {
         #[arg(long)]
         reply_to: Option<String>,
     },
-
-    /// Set the authenticated user's contact/follow list (kind:3). Replaces the entire list.
-    #[command(name = "set-contact-list")]
+    /// Set your contact list (NIP-02 kind:3)
+    #[command(name = "set-contacts")]
     SetContactList {
         /// JSON array of contacts: [{"pubkey":"hex","relay_url":"...","petname":"..."}]
         #[arg(long)]
         contacts: String,
     },
-
-    /// Get a single event by event ID (notes, profiles, contacts, articles, channel events).
-    #[command(name = "get-event")]
+    /// Get a single event by ID
+    #[command(name = "event")]
     GetEvent {
         /// 64-char hex event ID.
         #[arg(long)]
         event: String,
     },
-
-    /// List kind:1 text notes by a specific user.
-    #[command(name = "get-user-notes")]
+    /// Get recent notes published by a user
+    #[command(name = "notes")]
     GetUserNotes {
         /// 64-char hex pubkey of the author.
         #[arg(long)]
@@ -468,19 +736,23 @@ enum Cmd {
         #[arg(long)]
         before: Option<i64>,
     },
-
-    /// Get a user's contact/follow list (kind:3) by hex pubkey.
-    #[command(name = "get-contact-list")]
+    /// Get a user's contact list
+    #[command(name = "contacts")]
     GetContactList {
         /// 64-char hex pubkey.
         #[arg(long)]
         pubkey: String,
     },
+}
 
-    // ---- Git Repos ---------------------------------------------------------
-    /// Create a git repository (publishes kind:30617 announcement)
-    #[command(name = "create-repo")]
-    CreateRepo {
+// ---------------------------------------------------------------------------
+// Repos subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum ReposCmd {
+    /// Announce a git repository (NIP-34)
+    Create {
         /// Repository identifier: [a-zA-Z0-9._-]{1,64}
         #[arg(long)]
         id: String,
@@ -496,13 +768,12 @@ enum Cmd {
         /// Web browsing URL
         #[arg(long)]
         web: Option<String>,
-        /// Preferred relay(s) — can be specified multiple times
-        #[arg(long = "relay")]
+        /// Preferred Nostr relay(s) for repo discovery — can be specified multiple times
+        #[arg(long = "nostr-relay")]
         relays: Vec<String>,
     },
-    /// Get a repository's announcement event by ID
-    #[command(name = "get-repo")]
-    GetRepo {
+    /// Get a repository announcement
+    Get {
         /// Repository identifier (d-tag)
         #[arg(long)]
         id: String,
@@ -510,9 +781,8 @@ enum Cmd {
         #[arg(long)]
         owner: Option<String>,
     },
-    /// List repositories (defaults to your own)
-    #[command(name = "list-repos")]
-    ListRepos {
+    /// List repository announcements
+    List {
         /// Owner pubkey (64-char hex). Omit for your repos.
         #[arg(long)]
         owner: Option<String>,
@@ -520,16 +790,29 @@ enum Cmd {
         #[arg(long)]
         limit: Option<u32>,
     },
-
-    // ---- Pack (local) ------------------------------------------------------
-    /// Persona pack operations (local, no relay connection needed)
-    #[command(subcommand)]
-    Pack(PackCmd),
 }
+
+// ---------------------------------------------------------------------------
+// Upload subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum UploadCmd {
+    /// Upload a file to the relay's Blossom store
+    File {
+        /// Path to the file to upload
+        #[arg(long)]
+        file: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Pack subcommands (local, no relay connection needed)
+// ---------------------------------------------------------------------------
 
 /// Subcommands for `sprout pack`.
 #[derive(Subcommand)]
-enum PackCmd {
+pub enum PackCmd {
     /// Validate a persona pack directory
     Validate {
         /// Path to the pack directory
@@ -543,19 +826,8 @@ enum PackCmd {
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// Command dispatch
 // ---------------------------------------------------------------------------
-
-/// Parse a string flag that must be "true" or "false".
-fn parse_bool_flag(flag_name: &str, value: &str) -> Result<bool, CliError> {
-    match value {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        other => Err(CliError::Usage(format!(
-            "{flag_name} must be 'true' or 'false' (got: {other})"
-        ))),
-    }
-}
 
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
@@ -595,306 +867,17 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let client = SproutClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
 
     match cli.command {
-        // ---- Messages ------------------------------------------------------
-        Cmd::SendMessage {
-            channel,
-            content,
-            kind,
-            reply_to,
-            broadcast,
-            mentions,
-            files,
-        } => {
-            commands::messages::cmd_send_message(
-                &client,
-                commands::messages::SendMessageParams {
-                    channel_id: channel,
-                    content,
-                    kind,
-                    reply_to,
-                    broadcast,
-                    mentions,
-                    files,
-                },
-            )
-            .await
-        }
-        Cmd::SendDiffMessage {
-            channel,
-            diff,
-            repo,
-            commit,
-            file,
-            parent_commit,
-            source_branch,
-            target_branch,
-            pr,
-            lang,
-            description,
-            reply_to,
-        } => {
-            commands::messages::cmd_send_diff_message(
-                &client,
-                commands::messages::SendDiffParams {
-                    channel_id: channel,
-                    diff,
-                    repo_url: repo,
-                    commit_sha: commit,
-                    file_path: file,
-                    parent_commit_sha: parent_commit,
-                    source_branch,
-                    target_branch,
-                    pr_number: pr,
-                    language: lang,
-                    description,
-                    reply_to,
-                },
-            )
-            .await
-        }
-        Cmd::DeleteMessage { event } => {
-            commands::messages::cmd_delete_message(&client, &event).await
-        }
-        Cmd::GetMessages {
-            channel,
-            limit,
-            before,
-            since,
-            kinds,
-        } => {
-            commands::messages::cmd_get_messages(
-                &client,
-                &channel,
-                limit,
-                before,
-                since,
-                kinds.as_deref(),
-            )
-            .await
-        }
-        Cmd::GetThread {
-            channel,
-            event,
-            depth_limit,
-            limit,
-        } => {
-            commands::messages::cmd_get_thread(&client, &channel, &event, depth_limit, limit).await
-        }
-        Cmd::Search { query, limit } => {
-            commands::messages::cmd_search(&client, &query, limit).await
-        }
-        Cmd::EditMessage { event, content } => {
-            commands::messages::cmd_edit_message(&client, &event, &content).await
-        }
-        Cmd::VoteOnPost { event, direction } => {
-            commands::messages::cmd_vote_on_post(&client, &event, &direction).await
-        }
-        Cmd::UploadFile { file } => {
-            let desc = client.upload_file(&file).await?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&desc).map_err(|e| CliError::Other(e.to_string()))?
-            );
-            Ok(())
-        }
-
-        // ---- Channels ------------------------------------------------------
-        Cmd::ListChannels { visibility, member } => {
-            commands::channels::cmd_list_channels(&client, visibility.as_deref(), Some(member))
-                .await
-        }
-        Cmd::GetChannel { channel } => commands::channels::cmd_get_channel(&client, &channel).await,
-        Cmd::CreateChannel {
-            name,
-            channel_type,
-            visibility,
-            description,
-        } => {
-            commands::channels::cmd_create_channel(
-                &client,
-                &name,
-                &channel_type,
-                &visibility,
-                description.as_deref(),
-            )
-            .await
-        }
-        Cmd::UpdateChannel {
-            channel,
-            name,
-            description,
-        } => {
-            commands::channels::cmd_update_channel(
-                &client,
-                &channel,
-                name.as_deref(),
-                description.as_deref(),
-            )
-            .await
-        }
-        Cmd::SetChannelTopic { channel, topic } => {
-            commands::channels::cmd_set_channel_topic(&client, &channel, &topic).await
-        }
-        Cmd::SetChannelPurpose { channel, purpose } => {
-            commands::channels::cmd_set_channel_purpose(&client, &channel, &purpose).await
-        }
-        Cmd::JoinChannel { channel } => {
-            commands::channels::cmd_join_channel(&client, &channel).await
-        }
-        Cmd::LeaveChannel { channel } => {
-            commands::channels::cmd_leave_channel(&client, &channel).await
-        }
-        Cmd::ArchiveChannel { channel } => {
-            commands::channels::cmd_archive_channel(&client, &channel).await
-        }
-        Cmd::UnarchiveChannel { channel } => {
-            commands::channels::cmd_unarchive_channel(&client, &channel).await
-        }
-        Cmd::DeleteChannel { channel } => {
-            commands::channels::cmd_delete_channel(&client, &channel).await
-        }
-        Cmd::ListChannelMembers { channel } => {
-            commands::channels::cmd_list_channel_members(&client, &channel).await
-        }
-        Cmd::AddChannelMember {
-            channel,
-            pubkey,
-            role,
-        } => {
-            commands::channels::cmd_add_channel_member(&client, &channel, &pubkey, role.as_deref())
-                .await
-        }
-        Cmd::RemoveChannelMember { channel, pubkey } => {
-            commands::channels::cmd_remove_channel_member(&client, &channel, &pubkey).await
-        }
-        Cmd::GetCanvas { channel } => commands::channels::cmd_get_canvas(&client, &channel).await,
-        Cmd::SetCanvas { channel, content } => {
-            commands::channels::cmd_set_canvas(&client, &channel, &content).await
-        }
-
-        // ---- Reactions -----------------------------------------------------
-        Cmd::AddReaction { event, emoji } => {
-            commands::reactions::cmd_add_reaction(&client, &event, &emoji).await
-        }
-        Cmd::RemoveReaction { event, emoji } => {
-            commands::reactions::cmd_remove_reaction(&client, &event, &emoji).await
-        }
-        Cmd::GetReactions { event } => {
-            commands::reactions::cmd_get_reactions(&client, &event).await
-        }
-
-        // ---- DMs -----------------------------------------------------------
-        Cmd::ListDms { limit } => commands::dms::cmd_list_dms(&client, limit).await,
-        Cmd::OpenDm { pubkeys } => commands::dms::cmd_open_dm(&client, &pubkeys).await,
-        Cmd::AddDmMember { channel, pubkey } => {
-            commands::dms::cmd_add_dm_member(&client, &channel, &pubkey).await
-        }
-
-        // ---- Users ---------------------------------------------------------
-        Cmd::GetUsers { pubkeys, name } => {
-            commands::users::cmd_get_users(&client, &pubkeys, name.as_deref()).await
-        }
-        Cmd::SetProfile {
-            name,
-            avatar,
-            about,
-            nip05,
-        } => {
-            commands::users::cmd_set_profile(
-                &client,
-                name.as_deref(),
-                avatar.as_deref(),
-                about.as_deref(),
-                nip05.as_deref(),
-            )
-            .await
-        }
-        Cmd::GetPresence { pubkeys } => commands::users::cmd_get_presence(&client, &pubkeys).await,
-        Cmd::SetPresence { status } => commands::users::cmd_set_presence(&client, &status).await,
-
-        // ---- Workflows -----------------------------------------------------
-        Cmd::ListWorkflows { channel } => {
-            commands::workflows::cmd_list_workflows(&client, &channel).await
-        }
-        Cmd::CreateWorkflow { channel, yaml } => {
-            commands::workflows::cmd_create_workflow(&client, &channel, &yaml).await
-        }
-        Cmd::UpdateWorkflow { workflow, yaml } => {
-            commands::workflows::cmd_update_workflow(&client, &workflow, &yaml).await
-        }
-        Cmd::DeleteWorkflow { workflow } => {
-            commands::workflows::cmd_delete_workflow(&client, &workflow).await
-        }
-        Cmd::TriggerWorkflow { workflow } => {
-            commands::workflows::cmd_trigger_workflow(&client, &workflow).await
-        }
-        Cmd::GetWorkflowRuns { workflow, limit } => {
-            commands::workflows::cmd_get_workflow_runs(&client, &workflow, limit).await
-        }
-        Cmd::GetWorkflow { workflow } => {
-            commands::workflows::cmd_get_workflow(&client, &workflow).await
-        }
-        Cmd::ApproveStep {
-            token,
-            approved,
-            note,
-        } => {
-            let approved = parse_bool_flag("--approved", &approved)?;
-            commands::workflows::cmd_approve_step(&client, &token, approved, note.as_deref()).await
-        }
-
-        // ---- Feed ----------------------------------------------------------
-        Cmd::GetFeed {
-            since,
-            limit,
-            types,
-        } => commands::feed::cmd_get_feed(&client, since, limit, types.as_deref()).await,
-
-        // ---- Social --------------------------------------------------------
-        Cmd::PublishNote { content, reply_to } => {
-            commands::social::cmd_publish_note(&client, &content, reply_to.as_deref()).await
-        }
-        Cmd::SetContactList { contacts } => {
-            commands::social::cmd_set_contact_list(&client, &contacts).await
-        }
-        Cmd::GetEvent { event } => commands::social::cmd_get_event(&client, &event).await,
-        Cmd::GetUserNotes {
-            pubkey,
-            limit,
-            before,
-        } => commands::social::cmd_get_user_notes(&client, &pubkey, limit, before).await,
-        Cmd::GetContactList { pubkey } => {
-            commands::social::cmd_get_contact_list(&client, &pubkey).await
-        }
-
-        // ---- Git Repos -------------------------------------------------
-        Cmd::CreateRepo {
-            id,
-            name,
-            description,
-            clone_urls,
-            web,
-            relays,
-        } => {
-            commands::repos::cmd_create_repo(
-                &client,
-                &id,
-                name.as_deref(),
-                description.as_deref(),
-                &clone_urls,
-                web.as_deref(),
-                &relays,
-            )
-            .await
-        }
-        Cmd::GetRepo { id, owner } => {
-            commands::repos::cmd_get_repo(&client, &id, owner.as_deref()).await
-        }
-        Cmd::ListRepos { owner, limit } => {
-            commands::repos::cmd_list_repos(&client, owner.as_deref(), limit).await
-        }
-
-        // ---- Pack (local) --------------------------------------------------
+        Cmd::Messages(sub) => commands::messages::dispatch(sub, &client).await,
+        Cmd::Channels(sub) => commands::channels::dispatch(sub, &client).await,
+        Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
+        Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
+        Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
+        Cmd::Users(sub) => commands::users::dispatch(sub, &client).await,
+        Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
+        Cmd::Feed(sub) => commands::feed::dispatch(sub, &client).await,
+        Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
+        Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
+        Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -914,112 +897,147 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    /// Regression: parse_bool_flag rejects values other than "true"/"false".
-    #[test]
-    fn parse_bool_flag_accepts_true() {
-        assert!(super::parse_bool_flag("--approved", "true").unwrap());
-    }
-
-    #[test]
-    fn parse_bool_flag_accepts_false() {
-        assert!(!super::parse_bool_flag("--approved", "false").unwrap());
-    }
-
-    #[test]
-    fn parse_bool_flag_rejects_invalid() {
-        let err = super::parse_bool_flag("--approved", "maybe").unwrap_err();
-        match err {
-            super::CliError::Usage(msg) => {
-                assert!(msg.contains("must be 'true' or 'false'"), "got: {msg}");
-                assert!(msg.contains("maybe"), "got: {msg}");
-            }
-            other => panic!("expected Usage error, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_bool_flag_rejects_empty() {
-        assert!(super::parse_bool_flag("--approved", "").is_err());
-    }
-
-    /// Parity: the CLI exposes exactly the expected set of commands.
-    /// Token commands removed (auth, list-tokens, delete-token, delete-all-tokens).
-    /// SetChannelAddPolicy removed (relay-side policy now).
-    /// Cursor removed from get-thread, list-dms. before_id removed from get-user-notes.
     #[test]
     fn command_inventory_is_stable() {
-        let expected: Vec<&str> = vec![
-            "add-channel-member",
-            "add-dm-member",
-            "add-reaction",
-            "approve-step",
-            "archive-channel",
-            "create-channel",
-            "create-repo",
-            "create-workflow",
-            "delete-channel",
-            "delete-message",
-            "delete-workflow",
-            "edit-message",
-            "get-canvas",
-            "get-channel",
-            "get-contact-list",
-            "get-event",
-            "get-feed",
-            "get-messages",
-            "get-presence",
-            "get-reactions",
-            "get-repo",
-            "get-thread",
-            "get-user-notes",
-            "get-users",
-            "get-workflow",
-            "get-workflow-runs",
-            "join-channel",
-            "leave-channel",
-            "list-channel-members",
-            "list-channels",
-            "list-dms",
-            "list-repos",
-            "list-workflows",
-            "open-dm",
+        let expected_groups: Vec<&str> = vec![
+            "canvas",
+            "channels",
+            "dms",
+            "feed",
+            "messages",
             "pack",
-            "publish-note",
-            "remove-channel-member",
-            "remove-reaction",
-            "search",
-            "send-diff-message",
-            "send-message",
-            "set-canvas",
-            "set-channel-purpose",
-            "set-channel-topic",
-            "set-contact-list",
-            "set-presence",
-            "set-profile",
-            "trigger-workflow",
-            "unarchive-channel",
-            "update-channel",
-            "update-workflow",
-            "upload-file",
-            "vote-on-post",
+            "reactions",
+            "repos",
+            "social",
+            "upload",
+            "users",
+            "workflows",
         ];
 
         let cmd = Cli::command();
         let mut actual: Vec<String> = cmd
             .get_subcommands()
             .map(|s| s.get_name().to_string())
-            .filter(|n| n != "help") // clap auto-adds "help"
+            .filter(|n| n != "help")
             .collect();
         actual.sort();
 
         assert_eq!(
             actual.len(),
-            expected.len(),
-            "Expected {} commands, got {}. Actual: {:?}",
-            expected.len(),
+            expected_groups.len(),
+            "Expected {} groups, got {}. Actual: {:?}",
+            expected_groups.len(),
             actual.len(),
             actual
         );
-        assert_eq!(actual, expected, "Command inventory drift detected");
+        assert_eq!(
+            actual, expected_groups,
+            "Command group inventory drift detected"
+        );
+    }
+
+    #[test]
+    fn subcommand_names_are_stable() {
+        fn names(cmd: &clap::Command, group: &str) -> Vec<String> {
+            let group_cmd = cmd
+                .get_subcommands()
+                .find(|s| s.get_name() == group)
+                .unwrap_or_else(|| panic!("group '{}' not found", group));
+            let mut names: Vec<String> = group_cmd
+                .get_subcommands()
+                .map(|s| s.get_name().to_string())
+                .filter(|n| n != "help")
+                .collect();
+            names.sort();
+            names
+        }
+
+        let cmd = Cli::command();
+        assert_eq!(
+            names(&cmd, "messages"),
+            vec![
+                "delete",
+                "edit",
+                "get",
+                "search",
+                "send",
+                "send-diff",
+                "thread",
+                "vote"
+            ]
+        );
+        assert_eq!(
+            names(&cmd, "channels"),
+            vec![
+                "add-member",
+                "archive",
+                "create",
+                "delete",
+                "get",
+                "join",
+                "leave",
+                "list",
+                "members",
+                "purpose",
+                "remove-member",
+                "topic",
+                "unarchive",
+                "update"
+            ]
+        );
+        assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
+        assert_eq!(names(&cmd, "dms"), vec!["add-member", "list", "open"]);
+        assert_eq!(
+            names(&cmd, "users"),
+            vec!["get", "presence", "set-presence", "set-profile"]
+        );
+        assert_eq!(
+            names(&cmd, "workflows"),
+            vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
+        );
+        assert_eq!(names(&cmd, "feed"), vec!["get"]);
+        assert_eq!(
+            names(&cmd, "social"),
+            vec!["contacts", "event", "notes", "publish", "set-contacts"]
+        );
+        assert_eq!(names(&cmd, "repos"), vec!["create", "get", "list"]);
+        assert_eq!(names(&cmd, "upload"), vec!["file"]);
+        assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
+    }
+
+    #[test]
+    fn subcommand_counts_are_stable() {
+        let expected: Vec<(&str, usize)> = vec![
+            ("canvas", 2),
+            ("channels", 14),
+            ("dms", 3),
+            ("feed", 1),
+            ("messages", 8),
+            ("pack", 2),
+            ("reactions", 3),
+            ("repos", 3),
+            ("social", 5),
+            ("upload", 1),
+            ("users", 4),
+            ("workflows", 8),
+        ];
+
+        let cmd = Cli::command();
+        for (group_name, expected_count) in &expected {
+            let group = cmd
+                .get_subcommands()
+                .find(|s| s.get_name() == *group_name)
+                .unwrap_or_else(|| panic!("group '{}' not found", group_name));
+            let actual_count = group
+                .get_subcommands()
+                .filter(|s| s.get_name() != "help")
+                .count();
+            assert_eq!(
+                actual_count, *expected_count,
+                "Group '{}': expected {} subcommands, got {}",
+                group_name, expected_count, actual_count
+            );
+        }
     }
 }

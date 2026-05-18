@@ -95,3 +95,34 @@ pub async fn cmd_list_repos(
     println!("{resp}");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+pub async fn dispatch(cmd: crate::ReposCmd, client: &SproutClient) -> Result<(), CliError> {
+    use crate::ReposCmd;
+    match cmd {
+        ReposCmd::Create {
+            id,
+            name,
+            description,
+            clone_urls,
+            web,
+            relays,
+        } => {
+            cmd_create_repo(
+                client,
+                &id,
+                name.as_deref(),
+                description.as_deref(),
+                &clone_urls,
+                web.as_deref(),
+                &relays,
+            )
+            .await
+        }
+        ReposCmd::Get { id, owner } => cmd_get_repo(client, &id, owner.as_deref()).await,
+        ReposCmd::List { owner, limit } => cmd_list_repos(client, owner.as_deref(), limit).await,
+    }
+}

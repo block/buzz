@@ -2,6 +2,33 @@ use serde::Deserialize;
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
+pub enum ToolResultContent {
+    Text(String),
+    Image { data: String, mime_type: String },
+}
+
+impl ToolResultContent {
+    pub fn estimated_bytes(&self) -> usize {
+        match self {
+            Self::Text(s) => s.len(),
+            // This is request-size pressure accounting, not a visual-token
+            // estimate. Count the base64 bytes we will actually serialize so
+            // image-heavy sessions cannot silently exceed provider/body caps.
+            Self::Image { data, mime_type } => data.len() + mime_type.len(),
+        }
+    }
+
+    pub fn as_text_lossy(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Image { data, mime_type } => {
+                format!("[image: {mime_type}, {} base64 bytes]", data.len())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum HistoryItem {
     User(String),
     Assistant {
@@ -28,7 +55,13 @@ impl HistoryItem {
                         })
                         .sum::<usize>()
             }
-            Self::ToolResult(r) => r.provider_id.len() + r.text.len(),
+            Self::ToolResult(r) => {
+                r.provider_id.len()
+                    + r.content
+                        .iter()
+                        .map(ToolResultContent::estimated_bytes)
+                        .sum::<usize>()
+            }
         }
     }
 }
@@ -43,8 +76,18 @@ pub struct ToolCall {
 #[derive(Debug, Clone)]
 pub struct ToolResult {
     pub provider_id: String,
-    pub text: String,
+    pub content: Vec<ToolResultContent>,
     pub is_error: bool,
+}
+
+impl ToolResult {
+    pub fn text(&self) -> String {
+        self.content
+            .iter()
+            .map(ToolResultContent::as_text_lossy)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 #[derive(Debug, Clone)]

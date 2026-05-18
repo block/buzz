@@ -13,10 +13,12 @@ import type {
   InboxItem,
   InboxReply,
 } from "@/features/home/lib/inbox";
+import {
+  type InboxDisplayMessage,
+  InboxMessageRow,
+} from "@/features/home/ui/InboxMessageRow";
 import type { TimelineMessage } from "@/features/messages/types";
-import { MessageActionBar } from "@/features/messages/ui/MessageActionBar";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
-import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -24,14 +26,12 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { Markdown } from "@/shared/ui/markdown";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/shared/ui/tooltip";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type InboxDetailPaneProps = {
   canDelete: boolean;
@@ -61,23 +61,6 @@ type InboxDetailPaneProps = {
   ) => Promise<void>;
   onToggleDone: () => void;
 };
-
-type InboxDisplayMessage = InboxContextMessage & {
-  depth: number;
-};
-
-function toActionBarMessage(message: InboxDisplayMessage): TimelineMessage {
-  return {
-    id: message.id,
-    author: message.authorLabel,
-    avatarUrl: message.avatarUrl,
-    body: message.content,
-    createdAt: 0,
-    depth: message.depth,
-    reactions: message.reactions ?? [],
-    time: message.fullTimestampLabel,
-  };
-}
 
 export function InboxDetailPane({
   canDelete,
@@ -267,90 +250,14 @@ export function InboxDetailPane({
                 {index === 1 ? (
                   <div className="mx-6 my-3 border-t border-border/60" />
                 ) : null}
-                <div className="px-6 py-2">
-                  <article
-                    className={cn(
-                      "group/message flex items-start gap-2.5 px-2 py-1 transition-colors duration-1000",
-                      message.isSelected
-                        ? cn(
-                            isFocusHighlightVisible
-                              ? "bg-primary/[0.07]"
-                              : "bg-transparent",
-                          )
-                        : "hover:bg-muted/20",
-                    )}
-                    data-testid={
-                      message.isSelected
-                        ? "home-inbox-selected-message"
-                        : "home-inbox-context-message"
-                    }
-                  >
-                    <UserAvatar
-                      avatarUrl={message.avatarUrl}
-                      className="h-8 w-8 shrink-0 rounded-xl"
-                      displayName={message.authorLabel}
-                      size="md"
-                    />
-                    <div className="-mt-1 min-w-0 flex-1">
-                      <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-0">
-                        <p className="truncate text-sm font-semibold leading-none tracking-tight text-foreground">
-                          {message.authorLabel}
-                        </p>
-                        {message.isSelected ? (
-                          <span className="text-[10px] font-semibold uppercase leading-none tracking-[0.14em] text-muted-foreground/70">
-                            Inbox item
-                          </span>
-                        ) : null}
-                        <p className="ml-auto text-xs text-muted-foreground">
-                          {message.fullTimestampLabel}
-                        </p>
-                        {canReply || onToggleReaction ? (
-                          <div className="relative ml-1">
-                            <div className="absolute right-0 top-1/2 -translate-y-1/2">
-                              <MessageActionBar
-                                activeReplyTargetId={replyTargetId}
-                                message={toActionBarMessage(message)}
-                                onReactionSelect={
-                                  onToggleReaction
-                                    ? (emoji) => {
-                                        const actionBarMessage =
-                                          toActionBarMessage(message);
-                                        const remove =
-                                          actionBarMessage.reactions?.some(
-                                            (reaction) =>
-                                              reaction.emoji === emoji &&
-                                              reaction.reactedByCurrentUser,
-                                          ) ?? false;
-                                        return onToggleReaction(
-                                          actionBarMessage,
-                                          emoji,
-                                          remove,
-                                        );
-                                      }
-                                    : undefined
-                                }
-                                onReply={
-                                  canReply
-                                    ? () => handleSelectReplyTarget(message)
-                                    : undefined
-                                }
-                                reactions={message.reactions ?? []}
-                              />
-                            </div>
-                          </div>
-                        ) : null}
-                      </div>
-                      <div className="mt-1">
-                        <Markdown
-                          className="max-w-full text-left text-sm text-foreground"
-                          content={message.content}
-                          mentionNames={message.mentionNames}
-                          tight
-                        />
-                      </div>
-                    </div>
-                  </article>
-                </div>
+                <InboxMessageRow
+                  activeReplyTargetId={replyTargetId}
+                  canReply={canReply}
+                  isFocusHighlightVisible={isFocusHighlightVisible}
+                  message={message}
+                  onSelectReplyTarget={handleSelectReplyTarget}
+                  onToggleReaction={onToggleReaction}
+                />
               </React.Fragment>
             ))}
           </div>

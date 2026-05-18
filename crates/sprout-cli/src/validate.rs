@@ -6,6 +6,19 @@ pub const MAX_CONTENT_BYTES: usize = 65_536;
 /// Maximum diff size in bytes (60 KiB).
 pub const MAX_DIFF_BYTES: usize = 61_440;
 
+/// Parse a hex string into a `nostr::EventId`. Returns `CliError::Usage` on failure.
+pub fn parse_event_id(hex: &str) -> Result<nostr::EventId, CliError> {
+    nostr::EventId::parse(hex).map_err(|e| CliError::Usage(format!("invalid event ID: {e}")))
+}
+
+/// Parse a UUID string into a `uuid::Uuid`. Returns `CliError::Usage` on failure.
+///
+/// Note: `validate_uuid` (below) returns `()` for validation only; this function
+/// returns the parsed `Uuid` for callers that need the value.
+pub fn parse_uuid(s: &str) -> Result<uuid::Uuid, CliError> {
+    uuid::Uuid::parse_str(s).map_err(|e| CliError::Usage(format!("invalid UUID: {e}")))
+}
+
 /// Validate UUID string. Returns CliError::Usage on failure.
 pub fn validate_uuid(s: &str) -> Result<(), CliError> {
     uuid::Uuid::parse_str(s).map_err(|_| CliError::Usage(format!("invalid UUID: {s}")))?;
@@ -139,6 +152,16 @@ pub fn infer_language(file_path: &str) -> Option<String> {
         _ => return None,
     };
     Some(lang.to_string())
+}
+
+/// Map `SdkError` to the appropriate `CliError` variant.
+///
+/// `InvalidInput` is a user error (exit 1), everything else is internal (exit 4).
+pub fn sdk_err(e: sprout_sdk::SdkError) -> CliError {
+    match e {
+        sprout_sdk::SdkError::InvalidInput(msg) => CliError::Usage(msg),
+        other => CliError::Other(other.to_string()),
+    }
 }
 
 /// Read content from a string value or stdin if the value is "-".
@@ -351,6 +374,31 @@ mod tests {
 
     // Note: `extract_at_names`, `merge_mentions`, and `normalize_mention_pubkeys`
     // moved to `sprout_sdk::mentions` and are tested there.
+
+    // --- parse_event_id ---
+
+    #[test]
+    fn parse_event_id_valid() {
+        let hex = "a".repeat(64);
+        assert!(super::parse_event_id(&hex).is_ok());
+    }
+
+    #[test]
+    fn parse_event_id_invalid() {
+        assert!(super::parse_event_id("not-a-hex-id").is_err());
+    }
+
+    // --- parse_uuid ---
+
+    #[test]
+    fn parse_uuid_valid() {
+        assert!(super::parse_uuid("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    }
+
+    #[test]
+    fn parse_uuid_invalid() {
+        assert!(super::parse_uuid("not-a-uuid").is_err());
+    }
 
     // ── validate_repo_id ─────────────────────────────────────────────────────
 

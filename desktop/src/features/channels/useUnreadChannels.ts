@@ -6,11 +6,19 @@ import {
 import { useReadState } from "@/features/channels/readState/useReadState";
 import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { Channel, RelayEvent } from "@/shared/api/types";
+import { CHANNEL_MESSAGE_EVENT_KINDS } from "@/shared/constants/kinds";
 
 type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
   pubkey?: string;
   relayClient?: RelayClient;
 };
+
+// Per-channel cap on the catch-up REQ. We only consume the *max matching*
+// event per channel, but the relay can return self-authored / non-trigger
+// events that we discard client-side, so we need enough head-room for the
+// filter to find one external trigger message. 1000 matches the live sub's
+// per-channel limit elsewhere in the app.
+const CATCH_UP_LIMIT = 1000;
 
 function parseTimestamp(value: string | null | undefined) {
   if (!value) {
@@ -35,6 +43,7 @@ export function useUnreadChannels(
   const { pubkey, relayClient, ...liveUpdateOptions } = options;
   const activeChannelId = activeChannel?.id ?? null;
   const activeChannelLastMessageAt = activeChannel?.lastMessageAt ?? null;
+  const normalizedPubkey = pubkey?.toLowerCase() ?? null;
 
   // Let callers pass `null` to intentionally suppress the optimistic
   // channel-metadata fallback until a real timeline position is known.
@@ -47,37 +56,42 @@ export function useUnreadChannels(
     markContextRead,
     markContextUnread,
     readStateVersion,
-    seedContextRead,
   } = useReadState(pubkey, relayClient);
 
-  // In-session "latest message at" per channel (unix seconds), driven by the
-  // live subscription. The backend doesn't populate Channel.lastMessageAt, so
-  // unread state cannot rely on it; this map is the authoritative source for
-  // sidebar badges. Monotonic: only advances. Reset when the identity or
-  // relay changes. Stale entries for channels the user has left are silently
+  // Observed "latest external trigger event" per channel (unix seconds). This
+  // is *derived relay evidence*, not source-of-truth: it's populated from a
+  // one-shot catch-up REQ per channel (keyed on the NIP-RS read marker) plus
+  // ongoing live events. The only thing we ever do with it is compare against
+  // the NIP-RS read marker — see the unread memo below. Reset on identity
+  // change. Stale entries for channels the user has left are silently
   // ignored by the memo (it iterates the current channels list, not the map).
   const latestByChannelRef = React.useRef(new Map<string, number>());
 
   // Channels manually marked unread this session (e.g., right-click → "mark
-  // unread"). Tracked separately from latestByChannelRef so we don't have to
-  // synthesise a "latest message" timestamp and risk the corresponding read
-  // marker becoming sticky. Cleared when the user opens the channel.
+  // unread"). The NIP-RS rollback (markContextUnread) is the cross-device
+  // mechanism; this in-session flag is what makes the badge appear *now* in
+  // the case where we don't yet have an observed latest timestamp to compare
+  // against. Cleared when the user opens the channel.
   const forcedUnreadRef = React.useRef(new Set<string>());
+
+  // Tracks which channels we've already issued a catch-up REQ for this
+  // session. Prevents re-fetching on every channels-list refetch, while still
+  // letting newly-joined channels be caught up. Reset on identity change.
+  const caughtUpChannelsRef = React.useRef(new Set<string>());
 
   const [latestVersion, bumpLatestVersion] = React.useReducer(
     (x: number) => x + 1,
     0,
   );
 
-  // Track whether channels have been initialized (for first-load seeding)
-  const hasInitializedChannelsRef = React.useRef(false);
-
-  // Reset the in-session state when the identity or relay changes.
+  // Reset all in-session state when the identity or relay changes. Unread
+  // tracking depends only on NIP-RS read markers + observed relay events for
+  // this user; nothing here is persisted across restarts.
   // biome-ignore lint/correctness/useExhaustiveDependencies: pubkey/relayClient are intentional reset signals
   React.useEffect(() => {
     latestByChannelRef.current = new Map();
     forcedUnreadRef.current = new Set();
-    hasInitializedChannelsRef.current = false;
+    caughtUpChannelsRef.current = new Set();
     bumpLatestVersion();
   }, [pubkey, relayClient]);
 
@@ -95,65 +109,28 @@ export function useUnreadChannels(
   );
 
   // Manually mark a channel unread (e.g., right-click → "mark unread"). Sets
-  // the in-session forced-unread flag so the sidebar badge appears immediately
-  // without us inventing a synthetic latest-message timestamp, and rolls the
-  // NIP-RS read marker back so the unread state syncs across devices. The
-  // forced flag is cleared when the user opens the channel (markChannelRead).
+  // the in-session forced flag so the sidebar badge appears immediately, and
+  // rolls the NIP-RS read marker back so the unread state syncs across
+  // devices. The forced flag is cleared in markChannelRead when the user
+  // opens the channel. If lastMessageAt is unknown we still set the forced
+  // flag, but skip the NIP-RS rollback — without a target timestamp we have
+  // nothing honest to publish.
   const markChannelUnread = React.useCallback(
     (channelId: string, lastMessageAt: string | null | undefined) => {
       if (!forcedUnreadRef.current.has(channelId)) {
         forcedUnreadRef.current.add(channelId);
         bumpLatestVersion();
       }
-      const unixSeconds = toUnixSeconds(lastMessageAt);
+      const unixSeconds =
+        toUnixSeconds(lastMessageAt) ??
+        latestByChannelRef.current.get(channelId) ??
+        null;
       if (unixSeconds !== null) {
         markContextUnread(channelId, unixSeconds);
       }
     },
     [markContextUnread],
   );
-
-  // Opportunistic backfill: if Channel.lastMessageAt is ever populated by the
-  // backend (today it isn't), seed the in-session map. Strict max — never
-  // overwrites a more recent live value.
-  React.useEffect(() => {
-    if (channels.length === 0) return;
-    let didAdvance = false;
-    for (const channel of channels) {
-      const seedUnix = toUnixSeconds(channel.lastMessageAt);
-      if (seedUnix === null) continue;
-      const current = latestByChannelRef.current.get(channel.id) ?? 0;
-      if (seedUnix > current) {
-        latestByChannelRef.current.set(channel.id, seedUnix);
-        didAdvance = true;
-      }
-    }
-    if (didAdvance) bumpLatestVersion();
-  }, [channels]);
-
-  // Seed read state on first load so existing channels don't flash as unread
-  // when the backend reports a non-null Channel.lastMessageAt. We deliberately
-  // seed from the backend-provided value (not from the live map), so a live
-  // event that races ahead of NIP-RS readiness can't be silently swallowed as
-  // already-read. Today the backend always returns null and this is a no-op;
-  // it becomes meaningful once last_message_at is wired up server-side.
-  React.useEffect(() => {
-    if (!isReadStateReady) return;
-    if (channels.length === 0) return;
-    if (hasInitializedChannelsRef.current) return;
-
-    for (const channel of channels) {
-      const existing = getEffectiveTimestamp(channel.id);
-      if (existing !== null) continue;
-
-      const seedUnix = toUnixSeconds(channel.lastMessageAt);
-      if (seedUnix !== null) {
-        seedContextRead(channel.id, seedUnix);
-      }
-    }
-
-    hasInitializedChannelsRef.current = true;
-  }, [channels, getEffectiveTimestamp, isReadStateReady, seedContextRead]);
 
   // Mark the active channel as read when it changes or new messages arrive.
   // Honours the caller's contract that a null activeReadAt suppresses
@@ -170,8 +147,11 @@ export function useUnreadChannels(
     markChannelRead,
   ]);
 
-  // Feed the in-session "latest message at" map from live channel events.
-  // Composes with any caller-supplied onChannelMessage handler.
+  // Feed the in-session "latest external trigger" map from live channel
+  // events. Composes with any caller-supplied onChannelMessage handler.
+  // useLiveChannelUpdates already filters this callback to trigger kinds
+  // and external authors, so the map is always a strict subset of "newest
+  // external trigger message this client has observed."
   const callerOnChannelMessage = liveUpdateOptions.onChannelMessage;
   const handleChannelMessage = React.useCallback(
     (channelId: string, event: RelayEvent) => {
@@ -190,9 +170,121 @@ export function useUnreadChannels(
     onChannelMessage: handleChannelMessage,
   });
 
+  // Effect-key the catch-up on the *set* of channel IDs, not the array
+  // reference. React Query refetches return new array identities even when
+  // the contents are unchanged; without this we'd cancel and never re-fire
+  // every in-flight catch-up.
+  const channelIdsKey = React.useMemo(
+    () => [...new Set(channels.map((channel) => channel.id))].sort().join(","),
+    [channels],
+  );
+
+  // Catch-up: for each channel we haven't already caught up this session,
+  // ask the relay "are there any external trigger messages newer than the
+  // NIP-RS read marker?" If yes, advance latestByChannelRef so the unread
+  // predicate fires. This is the only way historical unreads survive an
+  // app restart now that we don't persist any client-side "latest" state.
+  React.useEffect(() => {
+    if (!isReadStateReady) return;
+    if (!relayClient) return;
+    if (channelIdsKey.length === 0) return;
+
+    const targetIds = channelIdsKey.split(",");
+    const toFetch = targetIds.filter(
+      (id) => !caughtUpChannelsRef.current.has(id),
+    );
+    if (toFetch.length === 0) return;
+
+    // Claim optimistically so re-renders mid-flight don't kick off duplicate
+    // REQs. If the effect is cancelled (cleanup) we release the claims so
+    // the next run retries.
+    for (const id of toFetch) {
+      caughtUpChannelsRef.current.add(id);
+    }
+
+    let isCancelled = false;
+
+    type CatchUpResult =
+      | { channelId: string; ok: true; maxExternal: number }
+      | { channelId: string; ok: false };
+
+    void Promise.all(
+      toFetch.map(async (channelId): Promise<CatchUpResult> => {
+        try {
+          const readAt = getEffectiveTimestamp(channelId);
+          // NIP-01 `since` is inclusive of `created_at >= since`. The +1
+          // makes the relay-side filter strict-newer; the client-side
+          // `> readAt` check below is the belt to the suspenders.
+          const sinceParam = readAt === null ? 0 : readAt + 1;
+
+          const events = await relayClient.fetchEvents({
+            kinds: [...CHANNEL_MESSAGE_EVENT_KINDS],
+            "#h": [channelId],
+            since: sinceParam,
+            limit: CATCH_UP_LIMIT,
+          });
+
+          let maxExternal = 0;
+          for (const event of events) {
+            if (
+              normalizedPubkey !== null &&
+              event.pubkey.toLowerCase() === normalizedPubkey
+            ) {
+              continue;
+            }
+            if (readAt !== null && event.created_at <= readAt) continue;
+            if (event.created_at > maxExternal) {
+              maxExternal = event.created_at;
+            }
+          }
+
+          return { channelId, ok: true, maxExternal };
+        } catch {
+          // Transient relay failure for this channel — release the claim
+          // so we retry on the next effect run instead of staying stuck
+          // until identity reset.
+          return { channelId, ok: false };
+        }
+      }),
+    ).then((results) => {
+      if (isCancelled) return;
+      let didAdvance = false;
+      for (const result of results) {
+        if (!result.ok) {
+          caughtUpChannelsRef.current.delete(result.channelId);
+          continue;
+        }
+        const { channelId, maxExternal } = result;
+        if (maxExternal === 0) continue;
+        const current = latestByChannelRef.current.get(channelId) ?? 0;
+        if (maxExternal > current) {
+          latestByChannelRef.current.set(channelId, maxExternal);
+          didAdvance = true;
+        }
+      }
+      if (didAdvance) bumpLatestVersion();
+    });
+
+    return () => {
+      isCancelled = true;
+      // Release the claims so the next effect run can retry these channels.
+      // The identity-reset effect replaces the Set entirely, so this is a
+      // no-op in that case (harmless).
+      for (const id of toFetch) {
+        caughtUpChannelsRef.current.delete(id);
+      }
+    };
+  }, [
+    channelIdsKey,
+    getEffectiveTimestamp,
+    isReadStateReady,
+    normalizedPubkey,
+    relayClient,
+  ]);
+
   // Unread = channels (excluding active) that have either been manually
-  // marked unread this session, or whose in-session latest message timestamp
-  // is strictly newer than their NIP-RS read marker.
+  // marked unread this session, or whose observed latest external trigger
+  // timestamp is strictly newer than their NIP-RS read marker.
   // readStateVersion and latestVersion are intentional invalidation signals.
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion and latestVersion are intentional invalidation signals
   const unreadChannelIds = React.useMemo(() => {

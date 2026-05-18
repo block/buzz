@@ -658,8 +658,8 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
     };
 
     // Check if models just became ready (one-shot flags).
-    let moonshine_ready = models::global_model_manager()
-        .map(|m| m.take_moonshine_ready())
+    let stt_ready = models::global_model_manager()
+        .map(|m| m.take_stt_ready())
         .unwrap_or(false);
     let kokoro_ready = models::global_model_manager()
         .map(|m| m.take_kokoro_ready())
@@ -672,7 +672,7 @@ pub async fn check_pipeline_hotstart(state: State<'_, AppState>) -> Result<(), S
         }
     }
 
-    if !has_stt && (moonshine_ready || models::is_moonshine_ready()) {
+    if !has_stt && (stt_ready || models::is_stt_ready()) {
         if let Some(eph_id) = &ephemeral_channel_id {
             if let Err(e) = maybe_start_stt_pipeline(&state, eph_id).await {
                 eprintln!("sprout-desktop: STT hotstart failed: {e}");
@@ -746,12 +746,12 @@ pub async fn start_stt_pipeline(state: State<'_, AppState>) -> Result<(), String
 
     match maybe_start_stt_pipeline(&state, &ephemeral_channel_id).await {
         Ok(true) => Ok(()),
-        Ok(false) => Err("Moonshine model not ready".to_string()),
+        Ok(false) => Err("STT model not ready".to_string()),
         Err(e) => Err(e),
     }
 }
 
-/// Trigger a background download of voice models (Moonshine STT + Kokoro TTS).
+/// Trigger a background download of voice models (Parakeet STT + Kokoro TTS).
 ///
 /// Returns immediately — downloads run in tokio background tasks.
 /// Poll `get_model_status` to track progress.
@@ -760,7 +760,7 @@ pub async fn start_stt_pipeline(state: State<'_, AppState>) -> Result<(), String
 pub async fn download_voice_models(state: State<'_, AppState>) -> Result<(), String> {
     let manager = models::global_model_manager()
         .ok_or("model manager unavailable (home directory could not be resolved)")?;
-    manager.start_moonshine_download(state.http_client.clone());
+    manager.start_stt_download(state.http_client.clone());
     manager.start_kokoro_download(state.http_client.clone());
     Ok(())
 }
@@ -771,8 +771,7 @@ pub fn get_model_status(_state: State<'_, AppState>) -> Result<models::VoiceMode
     let manager = models::global_model_manager()
         .ok_or("model manager unavailable (home directory could not be resolved)")?;
     Ok(models::VoiceModelStatus {
-        moonshine: manager.moonshine_status(),
-
+        stt: manager.stt_status(),
         kokoro: manager.kokoro_status(),
     })
 }

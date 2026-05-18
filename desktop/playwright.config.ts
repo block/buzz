@@ -39,6 +39,7 @@ export default defineConfig({
         "**/integration.spec.ts",
         "**/profile.spec.ts",
         "**/tokens.spec.ts",
+        "**/persona-env-vars.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

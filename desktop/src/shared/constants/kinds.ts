@@ -21,7 +21,12 @@ export const KIND_USER_STATUS = 30315;
 export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_REPO_ANNOUNCEMENT = 30617;
 
-const CHANNEL_MESSAGE_EVENT_KINDS = [
+// Human-visible "new content" message kinds. Used as the unread trigger set
+// (sidebar badges, catch-up queries) and as the Home-feed mention query.
+// Reactions, edits, diffs, deletions, and system messages are deliberately
+// excluded: they can land after the last human-visible message and would
+// otherwise create phantom unreads.
+export const CHANNEL_MESSAGE_EVENT_KINDS = [
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_V2,
   KIND_FORUM_POST,

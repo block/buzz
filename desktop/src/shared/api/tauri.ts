@@ -214,6 +214,7 @@ export type RawManagedAgent = {
   system_prompt: string | null;
   model: string | null;
   mcp_toolsets: string | null;
+  env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
   pid: number | null;
   created_at: string;
@@ -825,6 +826,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     systemPrompt: agent.system_prompt,
     model: agent.model,
     mcpToolsets: agent.mcp_toolsets,
+    envVars: agent.env_vars ?? {},
     status: agent.status,
     pid: agent.pid,
     createdAt: agent.created_at,
@@ -950,6 +952,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         systemPrompt: input.systemPrompt,
         avatarUrl: input.avatarUrl,
         model: input.model,
+        envVars: input.envVars ?? {},
         spawnAfterCreate: input.spawnAfterCreate,
         startOnAppLaunch: input.startOnAppLaunch,
         backend: input.backend,

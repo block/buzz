@@ -29,6 +29,7 @@ type MessageTimelineProps = {
   profiles?: UserProfileLookup;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
+  onMarkUnread?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
   onToggleReaction?: (
     message: TimelineMessage,
@@ -61,6 +62,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   profiles,
   onDelete,
   onEdit,
+  onMarkUnread,
   onReply,
   onToggleReaction,
   searchActiveMessageId = null,
@@ -133,7 +135,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
           ref={scrollContainerRef}
         >
           <div
-            className="mx-auto flex w-full max-w-4xl flex-col gap-2 pb-10 pt-16"
+            className="flex w-full flex-col gap-2 pb-10 pt-16"
             ref={contentRef}
           >
             <div ref={topSentinelRef} aria-hidden className="h-px" />
@@ -176,12 +178,14 @@ export const MessageTimeline = React.memo(function MessageTimeline({
             {!isLoading && messages.length > 0 ? (
               <TimelineMessageList
                 activeReplyTargetId={activeReplyTargetId}
+                channelId={channelId}
                 currentPubkey={currentPubkey}
                 highlightedMessageId={highlightedMessageId}
                 messageFooters={messageFooters}
                 messages={messages}
                 onDelete={onDelete}
                 onEdit={onEdit}
+                onMarkUnread={onMarkUnread}
                 onReply={onReply}
                 onToggleReaction={onToggleReaction}
                 personaLookup={personaLookup}

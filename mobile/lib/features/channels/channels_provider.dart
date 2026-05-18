@@ -48,6 +48,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
     if (sessionState.status != SessionStatus.connected) {
       _clearLiveSubscriptions();
+      // Preserve the last successfully loaded channels while reconnecting
+      // instead of re-entering a loading/error state. The UI will show cached
+      // channels with a "Reconnecting…" banner overlay, which is far better
+      // than a blank screen.
+      final previous = state.value;
+      if (previous != null && previous.isNotEmpty) {
+        return Future.value(previous);
+      }
     }
 
     return _fetch(
@@ -318,10 +326,13 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   Future<void> refresh() async {
     final sessionState = ref.read(relaySessionProvider);
-    state = await AsyncValue.guard(
-      () =>
-          _fetch(subscribeLive: sessionState.status == SessionStatus.connected),
-    );
+    // Don't attempt to fetch when the session isn't connected — fetchHistory
+    // would send REQs over an unauthenticated socket that either time out
+    // (returning empty results) or get cancelled on disconnect, replacing the
+    // cached channel list with [] or an error. Wait for `build()` to re-run
+    // when the session transitions to connected.
+    if (sessionState.status != SessionStatus.connected) return;
+    state = await AsyncValue.guard(() => _fetch(subscribeLive: true));
   }
 
   void _clearLiveSubscriptions() {

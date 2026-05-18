@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "ACP harness that bridges Sprout events to AI agents"
 
+[lib]
+name = "sprout_acp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sprout-acp"
 path = "src/main.rs"

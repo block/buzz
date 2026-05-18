@@ -116,7 +116,57 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
             channels.push(info);
         }
     }
+
+    // Populate member_count by batch-fetching kind:39002 for every listed
+    // channel and counting unique p-tag pubkeys. The kind:40901 summary
+    // sidecar that channel_info_from_event prefers isn't emitted by the
+    // relay today, so without this step every channel reports 0 members
+    // in the channel browser (the active-channel top bar masks this with
+    // its own live members query).
+    let all_d_tags: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
+    if !all_d_tags.is_empty() {
+        let members_events = query_relay(
+            &state,
+            &[serde_json::json!({
+                "kinds": [39002],
+                "#d": all_d_tags,
+                "limit": all_d_tags.len(),
+            })],
+        )
+        .await
+        .unwrap_or_default();
+
+        let counts = count_members_by_channel(&members_events);
+        for channel in &mut channels {
+            if let Some(count) = counts.get(&channel.id) {
+                channel.member_count = *count;
+            }
+        }
+    }
+
     Ok(channels)
+}
+
+/// Build a `channel_id → unique-member-count` map from a batch of kind:39002
+/// events. Events without a `d` tag are skipped; member dedupe is delegated to
+/// [`nostr_convert::channel_members_from_event`] so the parsing rules match the
+/// per-channel `get_channel_members` path.
+fn count_members_by_channel(events: &[nostr::Event]) -> std::collections::HashMap<String, i64> {
+    let mut counts: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::with_capacity(events.len());
+    for ev in events {
+        let Some(d) = ev.tags.iter().find_map(|t| {
+            let s = t.as_slice();
+            (s.len() >= 2 && s[0] == "d").then(|| s[1].clone())
+        }) else {
+            continue;
+        };
+        let Ok(resp) = nostr_convert::channel_members_from_event(ev) else {
+            continue;
+        };
+        counts.insert(d, resp.members.len() as i64);
+    }
+    counts
 }
 
 #[tauri::command]
@@ -415,3 +465,7 @@ pub async fn leave_channel(channel_id: String, state: State<'_, AppState>) -> Re
     submit_event(builder, &state).await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "channels_tests.rs"]
+mod tests;

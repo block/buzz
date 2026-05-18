@@ -1,9 +1,10 @@
-use nostr::{EventBuilder, Kind, Tag};
 use sha2::{Digest, Sha256};
 
 use crate::client::SproutClient;
 use crate::error::CliError;
-use crate::validate::{read_or_stdin, validate_uuid};
+use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_uuid};
+
+// TODO(phase-4): Replace raw nostr::EventBuilder usage with sprout-sdk builder functions
 
 // ---------------------------------------------------------------------------
 // Read commands — POST /query
@@ -61,17 +62,12 @@ pub async fn cmd_create_workflow(
     channel_id: &str,
     yaml: &str,
 ) -> Result<(), CliError> {
-    validate_uuid(channel_id)?;
+    let channel_uuid = parse_uuid(channel_id)?;
     let yaml_definition = read_or_stdin(yaml)?;
 
-    // Generate a unique d-tag for this workflow
-    let workflow_id = uuid::Uuid::new_v4().to_string();
-    let tags = vec![
-        Tag::parse(&["d", &workflow_id]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-        Tag::parse(&["h", channel_id]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-    ];
-
-    let builder = EventBuilder::new(Kind::Custom(30620), &yaml_definition, tags);
+    let workflow_id = uuid::Uuid::new_v4();
+    let builder = sprout_sdk::build_workflow_def(channel_uuid, workflow_id, &yaml_definition)
+        .map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
@@ -82,17 +78,16 @@ pub async fn cmd_create_workflow(
 /// Update a workflow — sign and submit an updated kind:30620 event with same d-tag.
 pub async fn cmd_update_workflow(
     client: &SproutClient,
+    channel_id: &str,
     workflow_id: &str,
     yaml: &str,
 ) -> Result<(), CliError> {
-    validate_uuid(workflow_id)?;
+    let channel_uuid = parse_uuid(channel_id)?;
+    let wf_uuid = parse_uuid(workflow_id)?;
     let yaml_definition = read_or_stdin(yaml)?;
 
-    let tags =
-        vec![Tag::parse(&["d", workflow_id])
-            .map_err(|e| CliError::Other(format!("tag error: {e}")))?];
-
-    let builder = EventBuilder::new(Kind::Custom(30620), &yaml_definition, tags);
+    let builder = sprout_sdk::build_workflow_update(channel_uuid, wf_uuid, &yaml_definition)
+        .map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
@@ -102,17 +97,11 @@ pub async fn cmd_update_workflow(
 
 /// Delete a workflow — sign and submit a kind:5 deletion event.
 pub async fn cmd_delete_workflow(client: &SproutClient, workflow_id: &str) -> Result<(), CliError> {
-    validate_uuid(workflow_id)?;
+    let wf_uuid = parse_uuid(workflow_id)?;
     let keys = client.keys();
 
-    // NIP-09 deletion targeting the parameterized replaceable event
-    let tags = vec![Tag::parse(&[
-        "a",
-        &format!("30620:{}:{}", keys.public_key().to_hex(), workflow_id),
-    ])
-    .map_err(|e| CliError::Other(format!("tag error: {e}")))?];
-
-    let builder = EventBuilder::new(Kind::Custom(5), "", tags);
+    let builder =
+        sprout_sdk::build_workflow_delete(&keys.public_key().to_hex(), wf_uuid).map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
@@ -125,13 +114,9 @@ pub async fn cmd_trigger_workflow(
     client: &SproutClient,
     workflow_id: &str,
 ) -> Result<(), CliError> {
-    validate_uuid(workflow_id)?;
+    let wf_uuid = parse_uuid(workflow_id)?;
 
-    let tags =
-        vec![Tag::parse(&["d", workflow_id])
-            .map_err(|e| CliError::Other(format!("tag error: {e}")))?];
-
-    let builder = EventBuilder::new(Kind::Custom(46020), "", tags);
+    let builder = sprout_sdk::build_workflow_trigger(wf_uuid).map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
@@ -148,19 +133,48 @@ pub async fn cmd_approve_step(
 ) -> Result<(), CliError> {
     validate_uuid(approval_token)?;
 
-    let kind = if approved { 46030 } else { 46031 };
     let content = note.unwrap_or("");
 
     // The relay expects d-tag = hex(SHA256(token)), not the raw token UUID.
     let token_hash = hex::encode(Sha256::digest(approval_token.as_bytes()));
-    let tags =
-        vec![Tag::parse(&["d", &token_hash])
-            .map_err(|e| CliError::Other(format!("tag error: {e}")))?];
-
-    let builder = EventBuilder::new(Kind::Custom(kind), content, tags);
+    let builder =
+        sprout_sdk::build_workflow_approval(&token_hash, approved, content).map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &SproutClient) -> Result<(), CliError> {
+    use crate::WorkflowsCmd;
+    match cmd {
+        WorkflowsCmd::List { channel } => cmd_list_workflows(client, &channel).await,
+        WorkflowsCmd::Get { workflow } => cmd_get_workflow(client, &workflow).await,
+        WorkflowsCmd::Create { channel, yaml } => {
+            cmd_create_workflow(client, &channel, &yaml).await
+        }
+        WorkflowsCmd::Update {
+            channel,
+            workflow,
+            yaml,
+        } => cmd_update_workflow(client, &channel, &workflow, &yaml).await,
+        WorkflowsCmd::Delete { workflow } => cmd_delete_workflow(client, &workflow).await,
+        WorkflowsCmd::Trigger { workflow } => cmd_trigger_workflow(client, &workflow).await,
+        WorkflowsCmd::Runs { workflow, limit } => {
+            cmd_get_workflow_runs(client, &workflow, limit).await
+        }
+        WorkflowsCmd::Approve {
+            token,
+            approved,
+            note,
+        } => {
+            // approved is already a bool — no parse_bool_flag needed
+            cmd_approve_step(client, &token, approved, note.as_deref()).await
+        }
+    }
 }

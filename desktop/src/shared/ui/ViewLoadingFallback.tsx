@@ -45,13 +45,16 @@ function LoadingHeaderSkeleton() {
 function MessageRowsSkeleton() {
   return (
     <>
-      {["first", "second", "third", "fourth", "fifth"].map((row) => (
+      {["first", "second", "third", "fourth", "fifth"].map((row, index) => (
         <div className="flex gap-3" key={row}>
-          <Skeleton className="h-8 w-8 shrink-0 rounded-lg" />
-          <div className="min-w-0 flex-1 space-y-2 pt-0.5">
-            <Skeleton className="h-3.5 w-40 max-w-[40%]" />
-            <Skeleton className="h-4 w-full max-w-3xl" />
-            <Skeleton className="h-4 w-full max-w-xl" />
+          <Skeleton className="h-9 w-9 shrink-0 rounded-xl" />
+          <div className="min-w-0 flex-1 space-y-1 pt-0.5">
+            <div className="flex items-baseline gap-2">
+              <Skeleton className="h-3.5 w-28" />
+              <Skeleton className="h-3 w-12" />
+            </div>
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className={index % 2 === 0 ? "h-4 w-4/5" : "h-4 w-2/3"} />
           </div>
         </div>
       ))}
@@ -177,13 +180,13 @@ function ChannelLoadingBody() {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div className="flex-1 overflow-y-auto px-4 py-3 sm:px-6">
-        <div className="mx-auto flex w-full max-w-4xl flex-col gap-4">
+        <div className="flex w-full flex-col gap-4">
           <MessageRowsSkeleton />
         </div>
       </div>
 
       <div className="border-t border-border/60 bg-background px-4 py-4 sm:px-6">
-        <div className="mx-auto w-full max-w-4xl space-y-3">
+        <div className="w-full space-y-3">
           <Skeleton className="h-10 w-full rounded-2xl" />
           <div className="flex items-center gap-2">
             <Skeleton className="h-8 w-20 rounded-lg" />
