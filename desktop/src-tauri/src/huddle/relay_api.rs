@@ -11,10 +11,7 @@
 //! ```
 
 use futures_util::{SinkExt, StreamExt};
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::{atomic::AtomicBool, Arc};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMsg};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -198,12 +195,12 @@ pub(crate) async fn connect_audio_relay(
 }
 
 /// Background Opus encode/decode pipeline spawned by `connect_audio_relay`.
-type WsStream =
+pub(crate) type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn audio_relay_pipeline(
     ws_tx: futures_util::stream::SplitSink<WsStream, WsMsg>,
-    mut ws_rx: futures_util::stream::SplitStream<WsStream>,
+    ws_rx: futures_util::stream::SplitStream<WsStream>,
     mut pcm_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     cancel: CancellationToken,
     app_handle: Option<tauri::AppHandle>,
@@ -222,11 +219,6 @@ async fn audio_relay_pipeline(
         .map_err(|e| format!("opus dtx: {e}"))?;
 
     let sink_handle = super::audio_output::open_output_sink_by_name(output_device_name.as_deref())?;
-    let player = rodio::Player::connect_new(&sink_handle.mixer());
-
-    let decoders: std::collections::HashMap<u8, opus::Decoder> = std::collections::HashMap::new();
-    const FRAME_SAMPLES: usize = 960; // 20 ms at 48 kHz
-    let decode_buf = vec![0f32; FRAME_SAMPLES];
 
     use std::sync::Arc as StdArc;
     let ws_tx = StdArc::new(tokio::sync::Mutex::new(ws_tx));
@@ -290,154 +282,16 @@ async fn audio_relay_pipeline(
         let _ = tx.send(WsMsg::Close(None)).await;
     });
 
-    let recv_task = tokio::spawn(async move {
-        let mut decoders = decoders;
-        let mut decode_buf = decode_buf;
-        let cancel_recv = cancel;
-        let ws_tx_recv = ws_tx;
-
-        // Active speaker tracking: peer_index → pubkey, emit every 500ms.
-        let mut index_to_pubkey: std::collections::HashMap<u8, String> =
-            initial_peers.into_iter().collect();
-        let mut active_indices: std::collections::HashSet<u8> = std::collections::HashSet::new();
-        // Per-peer frame counter with Instant-based window (starvation-proof).
-        let mut frame_counts: std::collections::HashMap<u8, u16> = std::collections::HashMap::new();
-        let mut last_frame_reset = tokio::time::Instant::now();
-        const FRAME_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
-        let mut tts_was_active = false;
-        let mut speaker_tick = tokio::time::interval(std::time::Duration::from_millis(500));
-        speaker_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            use futures_util::future::Either;
-            let cancelled = std::pin::pin!(cancel_recv.cancelled());
-            let next = std::pin::pin!(ws_rx.next());
-            let tick = std::pin::pin!(speaker_tick.tick());
-
-            // Three-way select: cancel, WS message, or speaker tick.
-            let ws_or_tick = std::pin::pin!(futures_util::future::select(next, tick));
-            match futures_util::future::select(cancelled, ws_or_tick).await {
-                Either::Left(_) => break, // Cancelled.
-                Either::Right((Either::Right((_, _)), _)) => {
-                    // Speaker tick: emit active speakers and reset.
-                    if let Some(ref app) = app_handle {
-                        use tauri::Emitter;
-                        let pubkeys: Vec<String> = active_indices
-                            .iter()
-                            .filter_map(|idx| index_to_pubkey.get(idx).cloned())
-                            .collect();
-                        let _ = app.emit("huddle-active-speakers", &pubkeys);
-                    }
-                    active_indices.clear();
-                    continue;
-                }
-                Either::Right((Either::Left((Some(Ok(msg)), _)), _)) => {
-                    // WS message — process below.
-                    match msg {
-                        WsMsg::Binary(data) => {
-                            if data.len() < 2 {
-                                continue;
-                            }
-                            let peer_idx = data[0];
-                            let opus_bytes = &data[1..];
-                            active_indices.insert(peer_idx);
-
-                            // Track TTS transitions at frame level (not decode level).
-                            let tts_now = tts_active.load(Ordering::Acquire);
-                            if tts_now && !tts_was_active {
-                                frame_counts.clear();
-                                last_frame_reset = tokio::time::Instant::now();
-                            }
-                            tts_was_active = tts_now;
-
-                            let decoder = match decoders.entry(peer_idx) {
-                                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                                std::collections::hash_map::Entry::Vacant(e) => {
-                                    match opus::Decoder::new(48000, opus::Channels::Mono) {
-                                        Ok(d) => e.insert(d),
-                                        Err(err) => {
-                                            eprintln!("sprout-desktop: opus decoder init peer {peer_idx}: {err}");
-                                            continue;
-                                        }
-                                    }
-                                }
-                            };
-                            match decoder.decode_float(opus_bytes, &mut decode_buf, false) {
-                                Ok(n) if n > 0 => {
-                                    if tts_now {
-                                        if last_frame_reset.elapsed() >= FRAME_WINDOW {
-                                            frame_counts.clear();
-                                            last_frame_reset = tokio::time::Instant::now();
-                                        }
-                                        let count = frame_counts.entry(peer_idx).or_insert(0);
-                                        *count = count.saturating_add(1);
-                                        if *count >= REMOTE_SPEECH_THRESHOLD {
-                                            tts_cancel.store(true, Ordering::Release);
-                                        }
-                                    }
-                                    use rodio::buffer::SamplesBuffer;
-                                    use std::num::NonZero;
-                                    let channels = NonZero::new(1u16).unwrap();
-                                    let rate = NonZero::new(48000u32).unwrap();
-                                    player.append(SamplesBuffer::new(
-                                        channels,
-                                        rate,
-                                        decode_buf[..n].to_vec(),
-                                    ));
-                                }
-                                Ok(_) => {} // DTX silence — not counted.
-                                Err(e) => {
-                                    eprintln!("sprout-desktop: opus decode peer {peer_idx}: {e}");
-                                }
-                            }
-                        }
-                        WsMsg::Text(text) => {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                                match v["type"].as_str() {
-                                    Some("joined") => {
-                                        if let Some(peers) = v["peers"].as_array() {
-                                            for p in peers {
-                                                if let (Some(pk), Some(idx)) =
-                                                    (p["pubkey"].as_str(), p["peer_index"].as_u64())
-                                                {
-                                                    let key = idx as u8;
-                                                    if index_to_pubkey.get(&key).map(|s| s.as_str())
-                                                        != Some(pk)
-                                                    {
-                                                        decoders.remove(&key);
-                                                        frame_counts.remove(&key);
-                                                        active_indices.remove(&key);
-                                                    }
-                                                    index_to_pubkey.insert(key, pk.to_string());
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Some("left") => {
-                                        if let Some(idx) = v["peer_index"].as_u64() {
-                                            let key = idx as u8;
-                                            index_to_pubkey.remove(&key);
-                                            frame_counts.remove(&key);
-                                            decoders.remove(&key);
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        WsMsg::Ping(data) => {
-                            let mut tx = ws_tx_recv.lock().await;
-                            let _ = tx.send(WsMsg::Pong(data)).await;
-                        }
-                        WsMsg::Close(_) => break,
-                        _ => {}
-                    }
-                }
-                // WS error or closed.
-                Either::Right((Either::Left(_), _)) => break,
-            }
-        }
-    });
+    let recv_task = tokio::spawn(super::playout::run_playout_recv_loop(
+        ws_rx,
+        ws_tx,
+        sink_handle,
+        cancel,
+        app_handle,
+        initial_peers,
+        tts_active,
+        tts_cancel,
+    ));
 
     // Wait for either task to finish, then abort the survivor.
     use futures_util::future::Either;

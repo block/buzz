@@ -50,6 +50,9 @@ pub const FRAME_DURATION_MS: u32 = 20;
 /// 48 kHz media-time increment per encoder frame.
 pub const FRAME_TIMESTAMP_DELTA: u32 = SAMPLE_RATE_HZ / 1000 * FRAME_DURATION_MS; // 960
 /// NetEq returns 10 ms frames; this is the sample count per `get_audio` call.
+/// Kept as a documented constant for the protocol-v2 follow-up and consumers
+/// that want to size their own buffers around the playout contract.
+#[allow(dead_code)]
 pub const PLAYOUT_SAMPLES: usize = (SAMPLE_RATE_HZ as usize / 1000) * 10; // 480
 
 /// Minimum jitter delay NetEq is allowed to converge to (ms).
@@ -185,7 +188,10 @@ impl PeerJitterBuffer {
 
     /// True when NetEq's buffer has no packets queued and it would emit
     /// expand/silence on `get_audio` — useful to skip mixing for peers that
-    /// haven't sent in a while.
+    /// haven't sent in a while. Currently only exercised by tests; the
+    /// playout loop always pulls a frame regardless to keep NetEq's clock
+    /// advancing.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.neteq.is_empty()
     }
