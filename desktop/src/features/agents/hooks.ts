@@ -55,6 +55,7 @@ import type {
   EnsureChannelAgentPresetInput,
   EnsureChannelAgentPresetResult,
 } from "@/features/agents/channelAgents";
+export { findReusableAgent } from "@/features/agents/agentReuse";
 export type {
   AttachManagedAgentToChannelInput,
   AttachManagedAgentToChannelResult,

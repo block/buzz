@@ -62,7 +62,7 @@ const overrides = new Map([
   ["src/features/agents/ui/TeamImportUpdateDialog.tsx", 660], // team import diff preview with member matching/updating/adding/removing sections, LCS line counts, removal confirmation
   ["src/features/agents/ui/useTeamActions.ts", 510], // team CRUD + export + import + import-update orchestration with query invalidation
   ["src/features/agents/ui/CreateAgentDialog.tsx", 685], // provider selector + config form + schema-typed config coercion + required field validation + locked scopes
-  ["src/features/channels/ui/AddChannelBotDialog.tsx", 660], // provider mode: Run on selector, trust warning, probe effect, single-agent enforcement, provider warnings display + RespondTo field
+  ["src/features/channels/ui/AddChannelBotDialog.tsx", 690], // provider mode: Run on selector, trust warning, probe effect, single-agent enforcement, provider warnings display + RespondTo field + reuse guardrail
   ["src/features/settings/ui/ChannelTemplatesSettingsCard.tsx", 850], // template CRUD card + TemplateFormDialog (persona/team chip selectors + provider assignments + canvas template) + TemplateTeamSelector + ProviderAssignments + ProviderRow
   ["src/shared/api/types.ts", 620], // ... + RespondToMode + respondTo/respondToAllowlist on ManagedAgent/Create/Update inputs
   ["src-tauri/src/events.rs", 610], // event builders + build_huddle_guidelines (kind:48106) + post_event_raw transport helper + participant p-tag on join/leave + NIP-43 relay admin builders (add/remove/change-role) + check_relay_role + DM/presence/workflow command builders

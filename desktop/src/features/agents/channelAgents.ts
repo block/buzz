@@ -1,3 +1,10 @@
+import {
+  commandsMatch,
+  findReusableGenericAgent,
+  findReusablePersonaAgent,
+  pickPreferredManagedAgent,
+} from "@/features/agents/agentReuse";
+export { findReusableAgent } from "@/features/agents/agentReuse";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   addChannelMembers,
@@ -62,6 +69,8 @@ export type CreateChannelManagedAgentInput = {
   respondTo?: RespondToMode;
   /** Hex pubkeys for allowlist mode. */
   respondToAllowlist?: string[];
+  /** Skip reuse logic and always create a fresh agent instance. */
+  forceNewInstance?: boolean;
 };
 
 export type CreateChannelManagedAgentResult =
@@ -81,33 +90,6 @@ export type CreateChannelManagedAgentsResult = {
   successes: CreateChannelManagedAgentResult[];
   failures: CreateChannelManagedAgentBatchFailure[];
 };
-
-function commandBasename(command: string) {
-  const normalized = command.trim().replace(/\\/g, "/");
-  const parts = normalized.split("/");
-  return parts[parts.length - 1] ?? normalized;
-}
-
-function normalizeCommandIdentity(command: string) {
-  const lower = commandBasename(command).toLowerCase();
-  if (lower === "claude-code-acp" || lower === "claude-agent-acp") {
-    return "claude-acp";
-  }
-  return lower;
-}
-
-function commandsMatch(left: string, right: string) {
-  return normalizeCommandIdentity(left) === normalizeCommandIdentity(right);
-}
-
-function parseTimestamp(value: string | null | undefined) {
-  if (!value) {
-    return 0;
-  }
-
-  const timestamp = Date.parse(value);
-  return Number.isNaN(timestamp) ? 0 : timestamp;
-}
 
 export async function attachManagedAgentToChannel(
   channelId: string,
@@ -163,33 +145,6 @@ export async function attachManagedAgentToChannel(
     restarted,
     started,
   } satisfies AttachManagedAgentToChannelResult;
-}
-
-function pickPreferredManagedAgent(agents: ManagedAgent[]) {
-  return [...agents].sort((left, right) => {
-    const leftRunningScore =
-      left.status === "running" || left.status === "deployed" ? 1 : 0;
-    const rightRunningScore =
-      right.status === "running" || right.status === "deployed" ? 1 : 0;
-    if (leftRunningScore !== rightRunningScore) {
-      return rightRunningScore - leftRunningScore;
-    }
-
-    return parseTimestamp(right.updatedAt) - parseTimestamp(left.updatedAt);
-  })[0];
-}
-
-function findReusablePersonaAgent(
-  agents: ManagedAgent[],
-  personaId: string,
-  channelMemberPubkeys: ReadonlySet<string>,
-): ManagedAgent | undefined {
-  const candidates = agents.filter(
-    (agent) =>
-      agent.personaId === personaId &&
-      !channelMemberPubkeys.has(normalizePubkey(agent.pubkey)),
-  );
-  return pickPreferredManagedAgent(candidates);
 }
 
 function buildChannelAgentName(providerId: string, providerLabel: string) {
@@ -303,6 +258,7 @@ export async function createChannelManagedAgent(
   // and is not already in this channel, attach it instead of creating a new one.
   if (
     input.personaId &&
+    !input.forceNewInstance &&
     context?.managedAgents &&
     context.channelMemberPubkeys
   ) {
@@ -314,6 +270,49 @@ export async function createChannelManagedAgent(
     if (reusable) {
       // Apply the caller's respondTo settings so the user's permission
       // choice in the dialog is always honored, even when reusing.
+      const needsRespondToUpdate =
+        input.respondTo && input.respondTo !== "owner-only";
+      const updatedAgent = needsRespondToUpdate
+        ? (
+            await updateManagedAgent({
+              pubkey: reusable.pubkey,
+              respondTo: input.respondTo,
+              respondToAllowlist:
+                input.respondTo === "allowlist"
+                  ? input.respondToAllowlist
+                  : undefined,
+            })
+          ).agent
+        : reusable;
+
+      const attached = await attachManagedAgentToChannel(channelId, {
+        agent: updatedAgent,
+        role,
+        ensureRunning,
+      });
+      return {
+        ...attached,
+        created: false,
+        providerId: input.provider.id,
+      };
+    }
+  }
+
+  // Generic agent reuse: if no persona is set and the system prompt is blank,
+  // look for an existing agent with the same command and no custom prompt.
+  if (
+    !input.personaId &&
+    !input.systemPrompt?.trim() &&
+    !input.forceNewInstance &&
+    context?.managedAgents &&
+    context.channelMemberPubkeys
+  ) {
+    const reusable = findReusableGenericAgent(
+      context.managedAgents,
+      input.provider.command,
+      context.channelMemberPubkeys,
+    );
+    if (reusable) {
       const needsRespondToUpdate =
         input.respondTo && input.respondTo !== "owner-only";
       const updatedAgent = needsRespondToUpdate

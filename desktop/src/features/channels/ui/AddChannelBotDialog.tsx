@@ -10,6 +10,8 @@ import {
 import { useInChannelPersonaIds } from "@/features/channels/ui/useInChannelPersonaIds";
 import { AddChannelBotGenericSection } from "@/features/channels/ui/AddChannelBotGenericSection";
 import { AddChannelBotPersonasSection } from "@/features/channels/ui/AddChannelBotPersonasSection";
+import { AddChannelBotReuseGuard } from "@/features/channels/ui/AddChannelBotReuseGuard";
+import { useReusableAgentDetection } from "@/features/channels/ui/useReusableAgentDetection";
 import { AddChannelBotTeamsSection } from "@/features/channels/ui/AddChannelBotTeamsSection";
 import { probeBackendProvider } from "@/shared/api/tauri";
 import type {
@@ -135,6 +137,7 @@ export function AddChannelBotDialog({
   const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
     [],
   );
+  const [forceNewInstance, setForceNewInstance] = React.useState(false);
 
   const resolvedBackendProviders = backendProviders ?? [];
   const resolvedBackendProvidersLoading = backendProvidersLoading ?? false;
@@ -159,6 +162,15 @@ export function AddChannelBotDialog({
     [personas, selectedPersonaIds],
   );
   const selectedCount = selectedPersonas.length + (includeGeneric ? 1 : 0);
+
+  const reusableAgent = useReusableAgentDetection(
+    channelId,
+    open && channelId !== null,
+    selectedProvider,
+    selectedPersonas,
+    includeGeneric,
+    customPrompt,
+  );
 
   // Surface warnings when a persona's preferred provider differs from the
   // user-selected provider. In this dialog the user explicitly picks a
@@ -272,6 +284,7 @@ export function AddChannelBotDialog({
     setProbeError(null);
     setRespondTo("owner-only");
     setRespondToAllowlist([]);
+    setForceNewInstance(false);
     createBotsMutation.reset();
   }
 
@@ -339,6 +352,7 @@ export function AddChannelBotDialog({
               systemPrompt: customPrompt,
               role: "bot" as const,
               backend,
+              forceNewInstance,
               ...respondToFields,
             },
           ]
@@ -358,6 +372,7 @@ export function AddChannelBotDialog({
           model: persona.model ?? undefined,
           role: "bot" as const,
           backend,
+          forceNewInstance,
           ...respondToFields,
         };
       }),
@@ -591,6 +606,15 @@ export function AddChannelBotDialog({
             }}
             onPromptChange={setCustomPrompt}
             prompt={customPrompt}
+          />
+        ) : null}
+
+        {reusableAgent ? (
+          <AddChannelBotReuseGuard
+            disabled={createBotsMutation.isPending}
+            forceNew={forceNewInstance}
+            onForceNewChange={setForceNewInstance}
+            reusableAgent={reusableAgent}
           />
         ) : null}
 
