@@ -11,6 +11,7 @@ use sprout_pubsub::PubSubManager;
 use sprout_search::{SearchConfig, SearchService};
 
 use sprout_relay::config::Config;
+use sprout_relay::iroh_relay;
 use sprout_relay::metrics as relay_metrics;
 use sprout_relay::router::{build_health_router, build_router};
 use sprout_relay::state::AppState;
@@ -482,6 +483,65 @@ async fn serve(
         .map_err(|e| anyhow::anyhow!("Failed to bind {}: {e}", config.bind_addr))?;
     info!(addr = %config.bind_addr, "sprout-relay TCP listening");
 
+    // ── Embedded iroh-relay (mesh-LLM, optional) ─────────────────────────────
+    // Started only when both `SPROUT_IROH_RELAY_PUBLIC_URL` and
+    // `SPROUT_IROH_RELAY_BIND_ADDR` are configured. Advertising a URL without
+    // a listener (or vice-versa) is a deploy footgun, so we log loudly and
+    // refuse to start the iroh-relay if exactly one is set.
+    let iroh_relay_task = match (
+        config.iroh_relay_public_url.as_deref(),
+        config.iroh_relay_bind_addr,
+    ) {
+        (Some(_), Some(bind_addr)) => {
+            match iroh_relay::spawn(Arc::clone(&state), bind_addr).await {
+                Ok(Some(handle)) => {
+                    info!(
+                        bind_addr = %bind_addr,
+                        http_addr = ?handle.http_addr,
+                        "embedded iroh-relay started",
+                    );
+                    let mut iroh_rx = shutdown_tx.subscribe();
+                    Some(tokio::spawn(async move {
+                        // Wait for the workspace shutdown signal, then drain
+                        // the iroh-relay gracefully so in-flight QUIC sessions
+                        // get a chance to finish.
+                        iroh_rx.changed().await.ok();
+                        info!("draining embedded iroh-relay");
+                        if let Err(e) = handle.shutdown().await {
+                            tracing::error!("embedded iroh-relay shutdown error: {e}");
+                        }
+                    }))
+                }
+                Ok(None) => {
+                    // `spawn` returned None — likely an unparseable
+                    // `iroh_relay_public_url`. Already logged inside `spawn`.
+                    None
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "Failed to spawn embedded iroh-relay on {bind_addr}: {e}"
+                    ));
+                }
+            }
+        }
+        (Some(_), None) => {
+            tracing::warn!(
+                "SPROUT_IROH_RELAY_PUBLIC_URL set but SPROUT_IROH_RELAY_BIND_ADDR is not — \
+                 NIP-11 will advertise a URL that nothing serves. Mesh-LLM will not work.",
+            );
+            None
+        }
+        (None, Some(_)) => {
+            tracing::warn!(
+                "SPROUT_IROH_RELAY_BIND_ADDR set but SPROUT_IROH_RELAY_PUBLIC_URL is not — \
+                 iroh-relay refused to start because clients cannot construct the canonical \
+                 NIP-98 `u` tag without a public URL.",
+            );
+            None
+        }
+        (None, None) => None,
+    };
+
     // ── App listener (UDS, optional) ─────────────────────────────────────────
     #[cfg(unix)]
     if let Some(ref uds_path) = config.uds_path {
@@ -524,6 +584,10 @@ async fn serve(
         .map_err(|e| anyhow::anyhow!("TCP server error: {e}"))?;
 
         uds_handle.abort();
+        if let Some(task) = iroh_relay_task {
+            // Already triggered by shutdown_tx; just wait for the drain task.
+            let _ = task.await;
+        }
         return Ok(());
     }
 
@@ -543,6 +607,10 @@ async fn serve(
     })
     .await
     .map_err(|e| anyhow::anyhow!("Server error: {e}"))?;
+
+    if let Some(task) = iroh_relay_task {
+        let _ = task.await;
+    }
 
     Ok(())
 }

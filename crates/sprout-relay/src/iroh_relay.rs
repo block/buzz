@@ -69,13 +69,30 @@ const NIP98_METHOD: &str = "GET";
 /// able to coerce the relay into multi-megabyte allocations.
 const MAX_BEARER_LEN: usize = 64 * 1024;
 
-/// Handle returned by [`spawn`] — dropping it stops the server.
+/// Handle returned by [`spawn`].
+///
+/// Dropping the handle aborts the iroh-relay supervisor task (via
+/// `AbortOnDropHandle` inside `Server`). For graceful drain, prefer
+/// [`IrohRelayHandle::shutdown`] which waits for in-flight connections to
+/// finish before returning.
 pub struct IrohRelayHandle {
     /// The bound HTTP address (resolved if the caller passed port 0).
     pub http_addr: Option<SocketAddr>,
     /// The bound HTTPS address, if TLS was configured.
     pub https_addr: Option<SocketAddr>,
-    _server: Server,
+    server: Server,
+}
+
+impl IrohRelayHandle {
+    /// Request graceful shutdown of the embedded iroh-relay.
+    ///
+    /// Returns once all relay tasks have stopped. Used by the Sprout main
+    /// shutdown loop so SIGTERM stops admitting new mesh-LLM connections
+    /// alongside the HTTP listener, instead of yanking the socket out from
+    /// under in-flight QUIC sessions.
+    pub async fn shutdown(self) -> Result<(), iroh_relay::server::SupervisorError> {
+        self.server.shutdown().await
+    }
 }
 
 /// Spawn an embedded iroh-relay bound to `bind_addr`, gated by Sprout's
@@ -128,7 +145,7 @@ pub async fn spawn(
     Ok(Some(IrohRelayHandle {
         http_addr: server.http_addr(),
         https_addr: server.https_addr(),
-        _server: server,
+        server,
     }))
 }
 
