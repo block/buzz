@@ -14,6 +14,18 @@ import {
   MentionHighlightExtension,
   mentionHighlightKey,
 } from "./mentionHighlightExtension";
+import { buildPlainTextProjection } from "./plainTextProjection";
+
+/**
+ * Plain-text edit descriptor returned by autocomplete hooks
+ * (mentions / channel links / emoji). Offsets are in plain-text space —
+ * see `buildPlainTextProjection`.
+ */
+export type AutocompleteEdit = {
+  replaceFromOffset: number;
+  replaceToOffset: number;
+  insertText: string;
+};
 
 export type RichTextEditorOptions = {
   placeholder?: string;
@@ -262,7 +274,11 @@ export function useRichTextEditor({
       },
       onUpdate: ({ editor: ed }) => {
         const markdown = getMarkdownFromEditor(ed);
-        const text = ed.state.doc.textContent;
+        // Use the same plain-text projection that `getPlainTextAndCursor`
+        // uses, so autocomplete detection sees the *same* string the
+        // cursor offset is mapped against. `state.doc.textContent` would
+        // diverge by 1 per hard-break / block boundary.
+        const text = buildPlainTextProjection(ed.state.doc).text;
         onUpdateRef.current?.({ markdown, text });
       },
     },
@@ -332,76 +348,62 @@ export function useRichTextEditor({
   }, [editor]);
 
   /**
-   * Replace editor content and append a trailing space that survives parsing.
+   * Plain-text view of the document plus the cursor position in
+   * plain-text offset space. Used by autocomplete detection (mentions,
+   * channel links, emoji) which is shaped like a textarea.
    *
-   * `setContent(markdown)` roundtrips through TipTap's markdown parser which
-   * strips trailing whitespace from text nodes. TipTap's `insertContent(" ")`
-   * also normalises it away. This method bypasses both by creating a raw
-   * ProseMirror text node and inserting it via a direct transaction — the
-   * only path that reliably preserves a literal trailing space.
-   *
-   * Used by mention and channel-link autocomplete insertion.
+   * The plain-text projection treats both `hardBreak` and inter-block
+   * boundaries as `\n` — matching `doc.textBetween(0, end, "\n", "\n")`.
+   * See `plainTextProjection.ts`.
    */
-  const setContentWithTrailingSpace = React.useCallback(
-    (markdown: string) => {
+  const getPlainTextAndCursor = React.useCallback((): {
+    text: string;
+    cursor: number;
+  } => {
+    if (!editor) return { text: "", cursor: 0 };
+    const projection = buildPlainTextProjection(editor.state.doc);
+    const anchor = editor.state.selection.anchor;
+    return {
+      text: projection.text,
+      cursor: projection.mapPMToTextOffset(anchor),
+    };
+  }, [editor]);
+
+  /**
+   * Replace a plain-text range with literal text, in a single native
+   * ProseMirror transaction.
+   *
+   * `fromOffset` and `toOffset` are in plain-text-offset space (the
+   * same space as `getPlainTextAndCursor`). `text` is inserted verbatim
+   * — including any trailing space — without a markdown re-parse.
+   *
+   * This replaces the old `setContentWithTrailingSpace` + full-doc
+   * markdown round-trip used by autocomplete: by going through
+   * `tr.insertText` we preserve active marks, hard breaks, list
+   * structure, undo history continuity, and any whitespace.
+   *
+   * Returns the new cursor PM position, mapped through `tr.mapping` so
+   * callers get a position that's valid after the transaction is
+   * applied.
+   */
+  const replacePlainTextRange = React.useCallback(
+    (fromOffset: number, toOffset: number, text: string) => {
       if (!editor) return;
-      editor.commands.setContent(markdown);
-      // Insert a literal space via a raw ProseMirror transaction so it
-      // bypasses TipTap's content parser which strips trailing whitespace.
-      const { tr, schema, doc } = editor.state;
-      const endPos = doc.content.size - 1; // before the closing node token
-      const spaceNode = schema.text(" ");
-      tr.insert(endPos, spaceNode);
-      // Place cursor after the inserted space.
-      const cursorPos = endPos + spaceNode.nodeSize;
-      tr.setSelection(TextSelection.create(tr.doc, cursorPos));
+      const projection = buildPlainTextProjection(editor.state.doc);
+      const fromPM = projection.mapTextOffsetToPM(fromOffset);
+      const toPM = projection.mapTextOffsetToPM(toOffset);
+
+      const tr = editor.state.tr.insertText(text, fromPM, toPM);
+      // Place cursor at the end of the inserted text, mapped through the
+      // transaction in case anything else shifted positions (e.g. mark
+      // normalisation). Robust even if `text` becomes non-pure in future.
+      const cursorPM = tr.mapping.map(fromPM + text.length);
+      tr.setSelection(TextSelection.create(tr.doc, cursorPM));
       editor.view.dispatch(tr);
       editor.view.focus();
     },
     [editor],
   );
-
-  /**
-   * Returns the plain-text content and an approximate cursor offset.
-   * Used to bridge the existing useMentions / useChannelLinks hooks which
-   * were designed for a plain <textarea>.
-   */
-  const getTextAndCursor = React.useCallback((): {
-    text: string;
-    cursor: number;
-  } => {
-    if (!editor) return { text: "", cursor: 0 };
-
-    const { state } = editor;
-    const text = state.doc.textContent;
-    // Map ProseMirror position → plain-text offset.
-    // Walk through text nodes and accumulate length until we pass the anchor.
-    const anchor = state.selection.anchor;
-    let offset = 0;
-    let found = false;
-    state.doc.descendants((node, pos) => {
-      if (found) return false;
-      if (node.isText) {
-        const nodeEnd = pos + node.nodeSize;
-        if (anchor <= nodeEnd) {
-          offset += anchor - pos;
-          found = true;
-          return false;
-        }
-        offset += node.nodeSize;
-      } else if (node.isBlock && pos > 0) {
-        // Block boundaries add a newline in textContent
-        // (but only between blocks, not at the very start)
-        offset += 1;
-      }
-      return undefined;
-    });
-    if (!found) {
-      offset = text.length;
-    }
-
-    return { text, cursor: offset };
-  }, [editor]);
 
   return {
     editor,
@@ -409,9 +411,9 @@ export function useRichTextEditor({
     isEmpty,
     clearContent,
     setContent,
-    setContentWithTrailingSpace,
     focus,
-    getTextAndCursor,
+    getPlainTextAndCursor,
+    replacePlainTextRange,
   };
 }
 
