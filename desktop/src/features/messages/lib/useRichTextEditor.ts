@@ -394,10 +394,14 @@ export function useRichTextEditor({
       const toPM = projection.mapTextOffsetToPM(toOffset);
 
       const tr = editor.state.tr.insertText(text, fromPM, toPM);
-      // Place cursor at the end of the inserted text, mapped through the
-      // transaction in case anything else shifted positions (e.g. mark
-      // normalisation). Robust even if `text` becomes non-pure in future.
-      const cursorPM = tr.mapping.map(fromPM + text.length);
+      // Place cursor at the end of the inserted text. We map `toPM` (the
+      // right end of the replaced range) through the transaction's
+      // mapping — that's the post-transaction position right after the
+      // inserted text, valid even if mark normalisation shifted things.
+      // (Mapping `fromPM + text.length` directly would be a pre-image
+      // position that may not exist in the original doc, which throws
+      // "Position N out of range".)
+      const cursorPM = tr.mapping.map(toPM);
       tr.setSelection(TextSelection.create(tr.doc, cursorPM));
       editor.view.dispatch(tr);
       editor.view.focus();
