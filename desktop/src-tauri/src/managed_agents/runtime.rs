@@ -553,7 +553,11 @@ pub fn spawn_agent_child(
         if let Some(shell_path) = login_shell_path() {
             parts.push(shell_path);
         }
-        if parts.is_empty() { None } else { Some(parts.join(":")) }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(":"))
+        }
     };
 
     let mut command = std::process::Command::new(&resolved_acp_command);

@@ -141,8 +141,7 @@ pub fn ensure_cli_symlink(exe_parent: &Path) -> Result<(), String> {
         .ok_or("cannot resolve home directory")?
         .join(".local")
         .join("bin");
-    fs::create_dir_all(&local_bin)
-        .map_err(|e| format!("create {}: {e}", local_bin.display()))?;
+    fs::create_dir_all(&local_bin).map_err(|e| format!("create {}: {e}", local_bin.display()))?;
 
     let link = local_bin.join("sprout");
     match link.symlink_metadata() {
