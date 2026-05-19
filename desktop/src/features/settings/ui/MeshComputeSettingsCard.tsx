@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Cpu, Users } from "lucide-react";
 
 import { useMeshLlmOffers } from "@/features/settings/hooks/useMeshLlmOffers";
+import { useMeshOfferHeartbeat } from "@/features/settings/hooks/useMeshOfferHeartbeat";
 import { Switch } from "@/shared/ui/switch";
 import { Input } from "@/shared/ui/input";
 
@@ -57,11 +58,24 @@ function formatCap(value: number | null): string {
 export function MeshComputeSettingsCard() {
   const [prefs, setPrefs] = React.useState<ComputeSharingPrefs | null>(null);
   const [endpoint, setEndpoint] = React.useState<MeshEndpointInfo | null>(null);
+  const [irohRelayUrl, setIrohRelayUrl] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [saving, setSaving] = React.useState(false);
   const { offers, error: offersError } = useMeshLlmOffers();
 
-  // Load the persisted prefs + the iroh endpoint identity on mount.
+  // While the card is mounted AND the user has compute-sharing enabled,
+  // re-publish the offer every ~5 min so its `expires_at` doesn't lapse
+  // (see useMeshOfferHeartbeat for the rationale). The heartbeat hook
+  // no-ops when `enabled` is false or `irohRelayUrl` is missing.
+  useMeshOfferHeartbeat({
+    enabled: prefs?.enabled === true,
+    irohRelayUrl,
+  });
+
+  // Load the persisted prefs + the iroh endpoint identity + the relay's
+  // iroh_relay_url on mount. The latter is what the heartbeat republishes
+  // against, so we have to know it before the heartbeat fires its first
+  // tick.
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -70,9 +84,20 @@ export function MeshComputeSettingsCard() {
           invoke<ComputeSharingPrefs>("mesh_get_sharing_prefs"),
           invoke<MeshEndpointInfo>("mesh_get_endpoint_id"),
         ]);
-        if (!cancelled) {
-          setPrefs(p);
-          setEndpoint(e);
+        if (cancelled) return;
+        setPrefs(p);
+        setEndpoint(e);
+        // Probe the relay's iroh_relay_url so the heartbeat hook has
+        // something to publish against. Failures here are non-fatal —
+        // the user can still see/edit prefs; we just won't heartbeat.
+        try {
+          const relayWsUrl = await invoke<string>("get_relay_ws_url");
+          const irohUrl = await invoke<string | null>("mesh_relay_iroh_url", {
+            relayWsUrl,
+          });
+          if (!cancelled) setIrohRelayUrl(irohUrl ?? null);
+        } catch (probeErr) {
+          console.warn("mesh-llm iroh url probe failed:", probeErr);
         }
       } catch (e) {
         if (!cancelled) setError(String(e));
@@ -99,6 +124,7 @@ export function MeshComputeSettingsCard() {
       const irohUrl = await invoke<string | null>("mesh_relay_iroh_url", {
         relayWsUrl,
       });
+      setIrohRelayUrl(irohUrl ?? null);
       if (irohUrl) {
         await invoke("mesh_publish_offer", { irohRelayUrl: irohUrl });
       } else if (next.enabled) {
