@@ -743,6 +743,32 @@ pub enum SocialCmd {
         #[arg(long)]
         pubkey: String,
     },
+    /// Publish a NIP-51/NIP-65 social list or set.
+    #[command(name = "set-list")]
+    SetList {
+        /// Supported kind: 10000, 10001, 10002, 10003, 30000, or 30003.
+        #[arg(long)]
+        kind: u16,
+        /// JSON array of Nostr tags, e.g. [["p","<hex>"],["d","friends"]].
+        #[arg(long)]
+        tags: String,
+        /// Event content.
+        #[arg(long, default_value = "")]
+        content: String,
+    },
+    /// Get NIP-51/NIP-65 social lists or sets by author and kind.
+    #[command(name = "list")]
+    GetList {
+        /// 64-char hex pubkey of the author.
+        #[arg(long)]
+        pubkey: String,
+        /// Supported kind: 10000, 10001, 10002, 10003, 30000, or 30003.
+        #[arg(long)]
+        kind: u32,
+        /// Optional d-tag for parameterized replaceable sets.
+        #[arg(long)]
+        d_tag: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -999,7 +1025,15 @@ mod tests {
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
         assert_eq!(
             names(&cmd, "social"),
-            vec!["contacts", "event", "notes", "publish", "set-contacts"]
+            vec![
+                "contacts",
+                "event",
+                "list",
+                "notes",
+                "publish",
+                "set-contacts",
+                "set-list"
+            ]
         );
         assert_eq!(names(&cmd, "repos"), vec!["create", "get", "list"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
@@ -1017,7 +1051,7 @@ mod tests {
             ("pack", 2),
             ("reactions", 3),
             ("repos", 3),
-            ("social", 5),
+            ("social", 7),
             ("upload", 1),
             ("users", 4),
             ("workflows", 8),

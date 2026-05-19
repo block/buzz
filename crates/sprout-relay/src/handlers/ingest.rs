@@ -13,23 +13,24 @@ use nostr::Event;
 use sprout_auth::Scope;
 use sprout_core::kind::{
     event_kind_u32, is_parameterized_replaceable, is_relay_admin_kind, KIND_APPROVAL_DENY,
-    KIND_APPROVAL_GRANT, KIND_AUTH, KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION,
-    KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN, KIND_FORUM_COMMENT, KIND_FORUM_POST,
-    KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE,
-    KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED,
-    KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED,
-    KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT,
-    KIND_HUDDLE_RECORDING_AVAILABLE, KIND_HUDDLE_STARTED, KIND_HUDDLE_TRACK_PUBLISHED,
-    KIND_LONG_FORM, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_CANVAS,
+    KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
+    KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
+    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+    KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_RECORDING_AVAILABLE,
+    KIND_HUDDLE_STARTED, KIND_HUDDLE_TRACK_PUBLISHED, KIND_LONG_FORM,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MUTE_LIST,
     KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
     KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST, KIND_PRESENCE_UPDATE,
-    KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_STREAM_MESSAGE,
-    KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
-    KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
-    KIND_STREAM_REMINDER, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
-    KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
-    RELAY_ADMIN_REMOVE_MEMBER,
+    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
+    KIND_NIP65_RELAY_LIST_METADATA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE, KIND_PROFILE,
+    KIND_REACTION, KIND_READ_STATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
+    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
+    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEXT_NOTE,
+    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
+    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
 };
 use sprout_core::verification::verify_event;
 
@@ -151,6 +152,14 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS => Ok(Scope::UsersWrite),
+        // NIP-51 standard lists and NIP-65 relay list — user-owned global state,
+        // same ownership shape as kind:3 (contacts) and kind:0 (profile).
+        KIND_MUTE_LIST
+        | KIND_PIN_LIST
+        | KIND_NIP65_RELAY_LIST_METADATA
+        | KIND_BOOKMARK_LIST
+        | KIND_FOLLOW_SET
+        | KIND_BOOKMARK_SET => Ok(Scope::UsersWrite),
         KIND_DELETION
         | KIND_REACTION
         | KIND_GIFT_WRAP
@@ -300,6 +309,15 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_LONG_FORM
             | KIND_USER_STATUS
             | KIND_READ_STATE
+            // NIP-51 standard lists + sets and NIP-65 relay list — user-owned global state.
+            // Same as kind:3 (contacts): keyed by (pubkey, kind) or (pubkey, kind, d_tag),
+            // never channel-scoped. A stray `h` tag must not channel-scope them.
+            | KIND_MUTE_LIST
+            | KIND_PIN_LIST
+            | KIND_NIP65_RELAY_LIST_METADATA
+            | KIND_BOOKMARK_LIST
+            | KIND_FOLLOW_SET
+            | KIND_BOOKMARK_SET
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
             | KIND_GIT_REPO_ANNOUNCEMENT
@@ -1693,11 +1711,58 @@ mod tests {
             KIND_FORUM_COMMENT,
             KIND_LONG_FORM,
             KIND_USER_STATUS,
+            // NIP-51 lists + sets, NIP-65 relay list
+            KIND_MUTE_LIST,
+            KIND_PIN_LIST,
+            KIND_NIP65_RELAY_LIST_METADATA,
+            KIND_BOOKMARK_LIST,
+            KIND_FOLLOW_SET,
+            KIND_BOOKMARK_SET,
         ];
         for kind in migrated {
             assert!(
                 required_scope_for_kind(kind, &dummy).is_ok(),
                 "kind {kind} should be in the allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn nip51_and_nip65_lists_require_users_write() {
+        let dummy = make_dummy_event();
+        for kind in [
+            KIND_MUTE_LIST,
+            KIND_PIN_LIST,
+            KIND_NIP65_RELAY_LIST_METADATA,
+            KIND_BOOKMARK_LIST,
+            KIND_FOLLOW_SET,
+            KIND_BOOKMARK_SET,
+        ] {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).ok(),
+                Some(Scope::UsersWrite),
+                "kind {kind} should require UsersWrite scope"
+            );
+        }
+    }
+
+    #[test]
+    fn nip51_and_nip65_lists_are_global_only() {
+        for kind in [
+            KIND_MUTE_LIST,
+            KIND_PIN_LIST,
+            KIND_NIP65_RELAY_LIST_METADATA,
+            KIND_BOOKMARK_LIST,
+            KIND_FOLLOW_SET,
+            KIND_BOOKMARK_SET,
+        ] {
+            assert!(
+                is_global_only_kind(kind),
+                "kind {kind} should be global-only (never channel-scoped)"
+            );
+            assert!(
+                !requires_h_channel_scope(kind),
+                "kind {kind} must not require an h-tag channel scope"
             );
         }
     }

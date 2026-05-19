@@ -11,6 +11,34 @@ pub const KIND_PROFILE: u32 = 0;
 pub const KIND_TEXT_NOTE: u32 = 1;
 /// NIP-02: Contact list / follow list.
 pub const KIND_CONTACT_LIST: u32 = 3;
+/// NIP-51: Mute list (replaceable, 10000–19999 range) — pubkeys/events/threads/words a user has muted.
+///
+/// User-owned global state, keyed by `(pubkey, kind)`. Same ownership/scope shape as kind:3.
+pub const KIND_MUTE_LIST: u32 = 10000;
+/// NIP-51: Pin list (replaceable) — events the user has pinned to their profile.
+///
+/// User-owned global state, keyed by `(pubkey, kind)`. The events referenced may live in
+/// channels, but the pin list itself is profile-level state.
+pub const KIND_PIN_LIST: u32 = 10001;
+/// NIP-65: Relay list metadata (replaceable) — read/write relay preferences for the outbox model.
+///
+/// User-owned global state, keyed by `(pubkey, kind)`. Tags are `["r", url]` or
+/// `["r", url, "read"]` / `["r", url, "write"]`.
+pub const KIND_NIP65_RELAY_LIST_METADATA: u32 = 10002;
+/// NIP-51: Bookmark list (replaceable) — events/articles/hashtags/URLs the user has bookmarked.
+///
+/// User-owned global state, keyed by `(pubkey, kind)`. References content but is not itself
+/// channel-scoped content.
+pub const KIND_BOOKMARK_LIST: u32 = 10003;
+/// NIP-51: Follow set (parameterized replaceable, 30000–39999 range) — named curated lists of pubkeys.
+///
+/// User-owned, keyed by `(pubkey, kind, d_tag)`. Allows multiple named follow lists on top of
+/// the single kind:3 contact list (e.g. "close-friends", "news", "devs").
+pub const KIND_FOLLOW_SET: u32 = 30000;
+/// NIP-51: Bookmark set (parameterized replaceable) — named curated bookmark collections.
+///
+/// User-owned, keyed by `(pubkey, kind, d_tag)`.
+pub const KIND_BOOKMARK_SET: u32 = 30003;
 /// NIP-01: Channel metadata (replaceable). Not used by Sprout today.
 pub const KIND_CHANNEL_METADATA: u32 = 41;
 /// NIP-09: Event deletion request.
@@ -315,6 +343,12 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PROFILE,
     KIND_TEXT_NOTE,
     KIND_CONTACT_LIST,
+    KIND_MUTE_LIST,
+    KIND_PIN_LIST,
+    KIND_NIP65_RELAY_LIST_METADATA,
+    KIND_BOOKMARK_LIST,
+    KIND_FOLLOW_SET,
+    KIND_BOOKMARK_SET,
     KIND_CHANNEL_METADATA,
     KIND_DELETION,
     KIND_REACTION,

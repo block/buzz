@@ -1,4 +1,9 @@
+use nostr::{EventBuilder, Kind, Tag};
 use serde::Deserialize;
+use sprout_sdk::kind::{
+    KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_FOLLOW_SET, KIND_MUTE_LIST,
+    KIND_NIP65_RELAY_LIST_METADATA, KIND_PIN_LIST,
+};
 
 use crate::client::SproutClient;
 use crate::error::CliError;
@@ -112,6 +117,90 @@ pub async fn cmd_get_contact_list(client: &SproutClient, pubkey: &str) -> Result
     Ok(())
 }
 
+fn validate_social_list_kind(kind: u32) -> Result<(), CliError> {
+    match kind {
+        KIND_MUTE_LIST
+        | KIND_PIN_LIST
+        | KIND_NIP65_RELAY_LIST_METADATA
+        | KIND_BOOKMARK_LIST
+        | KIND_FOLLOW_SET
+        | KIND_BOOKMARK_SET => Ok(()),
+        _ => Err(CliError::Usage(format!(
+            "unsupported social list kind {kind}; supported kinds: 10000, 10001, 10002, 10003, 30000, 30003"
+        ))),
+    }
+}
+
+fn is_parameterized_social_list_kind(kind: u32) -> bool {
+    matches!(kind, KIND_FOLLOW_SET | KIND_BOOKMARK_SET)
+}
+
+fn parse_tags_json(tags_json: &str) -> Result<Vec<Tag>, CliError> {
+    let raw_tags: Vec<Vec<String>> = serde_json::from_str(tags_json)
+        .map_err(|e| CliError::Usage(format!("invalid tags JSON: {e}")))?;
+    raw_tags
+        .iter()
+        .map(|parts| {
+            let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+            Tag::parse(&refs).map_err(|e| CliError::Usage(format!("invalid tag {parts:?}: {e}")))
+        })
+        .collect::<Result<_, _>>()
+}
+
+fn has_d_tag(tags: &[Tag]) -> bool {
+    tags.iter()
+        .any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("d"))
+}
+
+pub async fn cmd_set_list(
+    client: &SproutClient,
+    kind: u16,
+    tags_json: &str,
+    content: &str,
+) -> Result<(), CliError> {
+    let kind_u32 = u32::from(kind);
+    validate_social_list_kind(kind_u32)?;
+    let tags = parse_tags_json(tags_json)?;
+    if is_parameterized_social_list_kind(kind_u32) && !has_d_tag(&tags) {
+        return Err(CliError::Usage(format!(
+            "kind {kind} is parameterized replaceable and requires a d tag"
+        )));
+    }
+
+    let builder = EventBuilder::new(Kind::Custom(kind), content, tags);
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{resp}");
+    Ok(())
+}
+
+pub async fn cmd_get_list(
+    client: &SproutClient,
+    pubkey: &str,
+    kind: u32,
+    d_tag: Option<&str>,
+) -> Result<(), CliError> {
+    validate_hex64(pubkey)?;
+    validate_social_list_kind(kind)?;
+    if !is_parameterized_social_list_kind(kind) && d_tag.is_some() {
+        return Err(CliError::Usage(format!(
+            "kind {kind} is not parameterized; omit --d-tag"
+        )));
+    }
+
+    let mut filter = serde_json::json!({
+        "kinds": [kind],
+        "authors": [pubkey],
+        "limit": 10
+    });
+    if let Some(d) = d_tag {
+        filter["#d"] = serde_json::json!([d]);
+    }
+    let resp = client.query(&filter).await?;
+    println!("{resp}");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
@@ -130,5 +219,62 @@ pub async fn dispatch(cmd: crate::SocialCmd, client: &SproutClient) -> Result<()
             before,
         } => cmd_get_user_notes(client, &pubkey, limit, before).await,
         SocialCmd::GetContactList { pubkey } => cmd_get_contact_list(client, &pubkey).await,
+        SocialCmd::SetList {
+            kind,
+            tags,
+            content,
+        } => cmd_set_list(client, kind, &tags, &content).await,
+        SocialCmd::GetList {
+            pubkey,
+            kind,
+            d_tag,
+        } => cmd_get_list(client, &pubkey, kind, d_tag.as_deref()).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn social_list_kind_validation_accepts_supported_kinds() {
+        for kind in [
+            KIND_MUTE_LIST,
+            KIND_PIN_LIST,
+            KIND_NIP65_RELAY_LIST_METADATA,
+            KIND_BOOKMARK_LIST,
+            KIND_FOLLOW_SET,
+            KIND_BOOKMARK_SET,
+        ] {
+            assert!(validate_social_list_kind(kind).is_ok(), "kind {kind}");
+        }
+    }
+
+    #[test]
+    fn social_list_kind_validation_rejects_unsupported_kinds() {
+        let err = validate_social_list_kind(30002).unwrap_err();
+        assert!(
+            matches!(err, CliError::Usage(msg) if msg.contains("unsupported social list kind 30002"))
+        );
+    }
+
+    #[test]
+    fn parses_tags_json_and_detects_d_tag() {
+        let tags = parse_tags_json(r#"[["d","friends"],["p","aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]]"#)
+            .expect("tags parse");
+        assert!(has_d_tag(&tags));
+    }
+
+    #[test]
+    fn malformed_tags_json_is_usage_error() {
+        let err = parse_tags_json("not json").unwrap_err();
+        assert!(matches!(err, CliError::Usage(msg) if msg.contains("invalid tags JSON")));
+    }
+
+    #[test]
+    fn parameterized_social_list_kind_detection() {
+        assert!(is_parameterized_social_list_kind(KIND_FOLLOW_SET));
+        assert!(is_parameterized_social_list_kind(KIND_BOOKMARK_SET));
+        assert!(!is_parameterized_social_list_kind(KIND_MUTE_LIST));
     }
 }
