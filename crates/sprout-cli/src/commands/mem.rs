@@ -339,6 +339,94 @@ fn sha256_hex(s: &str) -> String {
     hex::encode(h.finalize())
 }
 
+/// Verify that each hunk's preimage lines (Context + Delete) match the
+/// current value byte-for-byte starting at the line number the hunk declares.
+///
+/// Diffy's `apply` is strict on context content but will *slide* a hunk
+/// forward or backward through the file to find a position where the
+/// preimage matches. For memory-edit safety we want the stronger property:
+/// the patch must apply at exactly the line number it was generated against.
+/// Drift in line numbers usually means lines were inserted or deleted before
+/// the hunk — at which point regenerating the patch is the correct response,
+/// not silently landing the change at a different position.
+///
+/// Returns `Ok(())` on a clean match, `Err(message)` otherwise.
+///
+/// Line-number convention: unified-diff `@@ -N,M @@` uses 1-based line
+/// numbers. A pure-insertion hunk against an empty file is encoded as
+/// `@@ -0,0 +1,M @@` (`start == 0`, `len == 0`), which we treat as
+/// "apply at index 0 of an empty preimage."
+fn verify_hunks_at_declared_position(
+    current: &str,
+    patch: &diffy::Patch<'_, str>,
+) -> Result<(), String> {
+    // `split_inclusive('\n')` preserves the trailing newline on each line,
+    // matching diffy's own line representation. A value with no trailing
+    // newline produces a last segment with no `\n`, which also matches how
+    // diffy stores the "no newline at EOF" case (parser strips the `\n`).
+    let current_lines: Vec<&str> = current.split_inclusive('\n').collect();
+
+    for (i, hunk) in patch.hunks().iter().enumerate() {
+        let preimage: Vec<&str> = hunk
+            .lines()
+            .iter()
+            .filter_map(|l| match l {
+                diffy::Line::Context(s) | diffy::Line::Delete(s) => Some(*s),
+                diffy::Line::Insert(_) => None,
+            })
+            .collect();
+
+        // Pure insertion at start of empty file: `@@ -0,0 +1,M @@`.
+        if preimage.is_empty() {
+            if hunk.old_range().start() == 0 {
+                continue;
+            }
+            return Err(format!(
+                "hunk #{} has empty preimage but declared start line {} \
+                 (expected 0 for pure insertion)",
+                i + 1,
+                hunk.old_range().start()
+            ));
+        }
+
+        // Convert 1-based line number to 0-based index.
+        let declared_start = hunk
+            .old_range()
+            .start()
+            .checked_sub(1)
+            .ok_or_else(|| format!("hunk #{} has invalid line number 0", i + 1))?;
+
+        let end = declared_start
+            .checked_add(preimage.len())
+            .ok_or_else(|| format!("hunk #{} line range overflows", i + 1))?;
+        if end > current_lines.len() {
+            return Err(format!(
+                "hunk #{} expects {} preimage line(s) starting at line {}, \
+                 but the value only has {} line(s)",
+                i + 1,
+                preimage.len(),
+                declared_start + 1,
+                current_lines.len()
+            ));
+        }
+
+        for (offset, expected) in preimage.iter().enumerate() {
+            let actual = current_lines[declared_start + offset];
+            if *expected != actual {
+                return Err(format!(
+                    "hunk #{} preimage mismatch at line {}: \
+                     patch expects {:?} but value has {:?}",
+                    i + 1,
+                    declared_start + offset + 1,
+                    expected,
+                    actual
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Extract the current slug value as a `String` (or return `NotFound`).
 /// Used by `mem hash` and `mem patch` — they both need "the value or fail".
 /// Returns `(head_event, value)` so the caller can preserve monotonic ordering.
@@ -483,10 +571,26 @@ pub async fn cmd_patch(
 
     let patch = diffy::Patch::from_str(&diff_text)
         .map_err(|e| CliError::Usage(format!("malformed unified diff: {e}")))?;
+
+    // Strict positional check — diffy's `apply` allows the hunk to slide
+    // forward/backward in the file if it finds the preimage elsewhere. For
+    // memory edits we want the stronger guarantee: the hunk must apply at
+    // exactly the line number it claims. If the file has drifted enough that
+    // the hunk's declared position no longer matches, we'd rather refuse and
+    // make the operator regenerate the patch than risk landing the change
+    // somewhere unintended.
+    verify_hunks_at_declared_position(&current, &patch).map_err(|msg| {
+        CliError::Usage(format!(
+            "patch did not apply cleanly to slug `{slug}`: {msg}. \
+             Context must match the current value verbatim at the declared \
+             line numbers — no fuzz, no offset."
+        ))
+    })?;
+
     let new_value = diffy::apply(&current, &patch).map_err(|e| {
         CliError::Usage(format!(
             "patch did not apply cleanly to slug `{slug}`: {e}. \
-             Context must match the current value verbatim — no fuzz, no offset on content."
+             Context must match the current value verbatim — no fuzz, no offset."
         ))
     })?;
 
@@ -699,6 +803,83 @@ mod tests {
         let p = diffy::create_patch(current, new);
         let applied = diffy::apply(current, &p).unwrap();
         assert_eq!(applied, new);
+    }
+
+    // Max's offset-search case: a hunk declaring `@@ -1,3 @@ alpha/-beta/+delta/gamma`
+    // against `zero\nalpha\nbeta\ngamma\n` must be rejected. Diffy's `apply`
+    // would happily slide the hunk forward and land it at line 2; the
+    // positional check refuses.
+    #[test]
+    fn strict_position_rejects_offset_slide() {
+        let current = "zero\nalpha\nbeta\ngamma\n";
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++delta
+ gamma
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        // Sanity: diffy's apply *would* slide and produce a result.
+        let diffy_result = diffy::apply(current, &patch).unwrap();
+        assert_eq!(diffy_result, "zero\nalpha\ndelta\ngamma\n");
+        // Our positional check rejects.
+        let err = verify_hunks_at_declared_position(current, &patch).unwrap_err();
+        assert!(err.contains("preimage mismatch"), "got: {err}");
+    }
+
+    #[test]
+    fn strict_position_accepts_exact_match() {
+        let current = "alpha\nbeta\ngamma\n";
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++delta
+ gamma
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        verify_hunks_at_declared_position(current, &patch).unwrap();
+    }
+
+    // Pure insertion against an empty value: `@@ -0,0 +1,N @@`.
+    #[test]
+    fn strict_position_accepts_pure_insertion_into_empty() {
+        let current = "";
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -0,0 +1,2 @@
++first
++second
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        verify_hunks_at_declared_position(current, &patch).unwrap();
+    }
+
+    // Value with no trailing newline must still round-trip. `split_inclusive`
+    // produces a final segment without `\n`; diffy strips `\n` from the last
+    // hunk line when the patch carries `\\ No newline at end of file`. Both
+    // representations must match here.
+    #[test]
+    fn strict_position_handles_no_trailing_newline() {
+        let current = "alpha\nbeta\ngamma"; // no trailing \n
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -1,3 +1,3 @@
+ alpha
+-beta
++delta
+ gamma
+\\ No newline at end of file
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        verify_hunks_at_declared_position(current, &patch).unwrap();
     }
 
     // Lock the multi-file detection. The check is a simple count of lines
