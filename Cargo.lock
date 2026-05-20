@@ -4074,7 +4074,7 @@ dependencies = [
  "parking_lot",
  "secp256k1 0.31.1",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
