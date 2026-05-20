@@ -219,7 +219,7 @@ pub async fn cmd_ls(
     if json {
         println!("{}", serde_json::to_string(&listings).unwrap_or_default());
     } else if listings.is_empty() {
-        eprintln!("(no memories)");
+        eprintln!("(no memories besides core)");
     } else {
         for l in &listings {
             println!("{}\t{}\t{}", l.slug, l.created_at, l.event_id);
