@@ -19,8 +19,12 @@ import {
   hasMentionClipboardHtml,
   normalizeMentionClipboardHtml,
 } from "@/features/messages/lib/normalizeMentionClipboard";
-import { useRichTextEditor } from "@/features/messages/lib/useRichTextEditor";
+import {
+  type AutocompleteEdit,
+  useRichTextEditor,
+} from "@/features/messages/lib/useRichTextEditor";
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
+import { getSproutCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
@@ -134,6 +138,15 @@ export function MessageComposer({
     emojiAutocomplete.isEmojiAutocompleteOpen;
 
   const submitMessageRef = React.useRef<() => void>(() => {});
+  const composerScrollRef = React.useRef<HTMLDivElement>(null);
+
+  const scrollComposerToBottom = React.useCallback(() => {
+    window.requestAnimationFrame(() => {
+      const scrollElement = composerScrollRef.current;
+      if (!scrollElement) return;
+      scrollElement.scrollTop = scrollElement.scrollHeight;
+    });
+  }, []);
 
   const computedPlaceholder = editTarget
     ? "Edit your message"
@@ -153,8 +166,10 @@ export function MessageComposer({
       setContent(markdown);
       contentRef.current = markdown;
 
-      // Bridge to existing mention/channel/emoji detection hooks.
-      const { cursor } = richText.getTextAndCursor();
+      // Bridge to mention/channel/emoji detection hooks. `text` and the
+      // cursor are both in plain-text-offset space (treating hardBreak
+      // and inter-block boundaries as `\n`).
+      const { cursor } = richText.getPlainTextAndCursor();
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
@@ -226,51 +241,53 @@ export function MessageComposer({
   // ── Autofocus on mount / channel switch ─────────────────────────────
   useComposerAutofocus(richText.focus, effectiveDraftKey, disabled);
 
-  // ── Mention / channel autocomplete insertion ────────────────────────
+  // ── Mention / channel / emoji autocomplete insertion ────────────────
+  // Hooks return a plain-text edit descriptor; `replacePlainTextRange`
+  // applies it as a single ProseMirror transaction (no markdown round-trip).
+  const applyAutocompleteEdit = React.useCallback(
+    (edit: AutocompleteEdit) => {
+      richText.replacePlainTextRange(
+        edit.replaceFromOffset,
+        edit.replaceToOffset,
+        edit.insertText,
+      );
+    },
+    [richText.replacePlainTextRange],
+  );
+
   const applyMentionInsert = React.useCallback(
     (suggestion: MentionSuggestion) => {
-      const { text, cursor } = richText.getTextAndCursor();
-      const result = mentions.insertMention(suggestion, text, cursor);
-      // setContentWithTrailingSpace re-injects a space after the markdown
-      // roundtrip so the cursor lands ready for the next word.
-      richText.setContentWithTrailingSpace(result.nextContent);
-      setContent(result.nextContent);
-      contentRef.current = result.nextContent;
+      const { cursor } = richText.getPlainTextAndCursor();
+      applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
     },
     [
+      applyAutocompleteEdit,
       mentions.insertMention,
-      richText.getTextAndCursor,
-      richText.setContentWithTrailingSpace,
+      richText.getPlainTextAndCursor,
     ],
   );
 
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
-      const { text, cursor } = richText.getTextAndCursor();
-      const result = channelLinks.insertChannel(suggestion, text, cursor);
-      richText.setContentWithTrailingSpace(result.nextContent);
-      setContent(result.nextContent);
-      contentRef.current = result.nextContent;
+      const { cursor } = richText.getPlainTextAndCursor();
+      applyAutocompleteEdit(channelLinks.insertChannel(suggestion, cursor));
     },
     [
+      applyAutocompleteEdit,
       channelLinks.insertChannel,
-      richText.getTextAndCursor,
-      richText.setContentWithTrailingSpace,
+      richText.getPlainTextAndCursor,
     ],
   );
 
   const applyEmojiInsert = React.useCallback(
     (suggestion: EmojiSuggestion) => {
-      const { text, cursor } = richText.getTextAndCursor();
-      const result = emojiAutocomplete.insertEmoji(suggestion, text, cursor);
-      richText.setContentWithTrailingSpace(result.nextContent);
-      setContent(result.nextContent);
-      contentRef.current = result.nextContent;
+      const { cursor } = richText.getPlainTextAndCursor();
+      applyAutocompleteEdit(emojiAutocomplete.insertEmoji(suggestion, cursor));
     },
     [
+      applyAutocompleteEdit,
       emojiAutocomplete.insertEmoji,
-      richText.getTextAndCursor,
-      richText.setContentWithTrailingSpace,
+      richText.getPlainTextAndCursor,
     ],
   );
 
@@ -288,7 +305,7 @@ export function MessageComposer({
   // ── @ mention picker (toolbar button) ───────────────────────────────
   const openMentionPicker = React.useCallback(() => {
     if (!richText.editor) return;
-    const { text, cursor } = richText.getTextAndCursor();
+    const { text, cursor } = richText.getPlainTextAndCursor();
 
     // Check if there's already an @-query in progress
     const beforeCursor = text.slice(0, cursor);
@@ -306,12 +323,12 @@ export function MessageComposer({
     setIsEmojiPickerOpen(false);
 
     // Trigger mention detection after inserting @
-    const updatedText = richText.editor.state.doc.textContent;
-    const { cursor: updatedCursor } = richText.getTextAndCursor();
+    const { text: updatedText, cursor: updatedCursor } =
+      richText.getPlainTextAndCursor();
     mentions.updateMentionQuery(updatedText, updatedCursor);
   }, [
     richText.editor,
-    richText.getTextAndCursor,
+    richText.getPlainTextAndCursor,
     richText.focus,
     mentions.updateMentionQuery,
   ]);
@@ -498,6 +515,33 @@ export function MessageComposer({
             return true;
           }
 
+          // --- Sprout code-block paste ---
+          // The code block copy button writes a small Sprout marker alongside
+          // plain text. Use it to paste back as a literal code block so Markdown
+          // parsing cannot reshape indentation, fence markers, or headings.
+          const codeBlockText = getSproutCodeBlockClipboardText(
+            event.clipboardData,
+          );
+          if (codeBlockText !== null) {
+            event.preventDefault();
+            richText.editor
+              ?.chain()
+              .focus()
+              .insertContent([
+                {
+                  type: "codeBlock",
+                  content:
+                    codeBlockText.length > 0
+                      ? [{ type: "text", text: codeBlockText }]
+                      : [],
+                },
+                { type: "paragraph" },
+              ])
+              .run();
+            scrollComposerToBottom();
+            return true;
+          }
+
           // --- Mention / channel-link normalization ---
           // When copying from the chat area the browser puts styled HTML
           // on the clipboard. TipTap's DOMParser doesn't understand our
@@ -524,11 +568,16 @@ export function MessageComposer({
             return true;
           }
 
+          const plainText = event.clipboardData?.getData("text/plain") ?? "";
+          if (plainText.includes("\n")) {
+            scrollComposerToBottom();
+          }
+
           return false;
         },
       },
     });
-  }, [richText.editor]);
+  }, [richText.editor, scrollComposerToBottom]);
 
   // ── Send button state ───────────────────────────────────────────────
   const sendDisabled = React.useMemo(
@@ -673,6 +722,8 @@ export function MessageComposer({
           {/* biome-ignore lint/a11y/noStaticElementInteractions: keydown handler bridges Tiptap editor to autocomplete and submit */}
           <div
             className="rich-text-composer max-h-32 overflow-y-auto"
+            data-testid="message-input-scroll"
+            ref={composerScrollRef}
             onKeyDown={handleEditorKeyDown}
           >
             <EditorContent editor={richText.editor} />

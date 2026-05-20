@@ -5225,7 +5225,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "sprout"
+name = "sprout-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "nostr 0.36.0",
+ "percent-encoding",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror 2.0.18",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "sprout-desktop"
 version = "0.1.0"
 dependencies = [
  "atomic-write-file",
@@ -5278,24 +5296,6 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeroize",
  "zip 2.4.2",
-]
-
-[[package]]
-name = "sprout-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hex",
- "nostr 0.36.0",
- "percent-encoding",
- "rand 0.10.1",
- "serde",
- "serde_json",
- "subtle",
- "thiserror 2.0.18",
- "url",
- "uuid",
- "zeroize",
 ]
 
 [[package]]

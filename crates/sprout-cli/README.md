@@ -31,6 +31,7 @@ export SPROUT_RELAY_URL="https://relay.example.com"
 # Messages
 sprout messages send --channel <uuid> --content "Hello"
 sprout messages send --channel <uuid> --content "Reply" --reply-to <event-id> --broadcast
+sprout messages send --channel <uuid> --content - < message.md   # read body from stdin
 sprout messages get --channel <uuid> --limit 20
 sprout messages thread --channel <uuid> --event <event-id>
 sprout messages search --query "architecture"

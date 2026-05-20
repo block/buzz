@@ -442,4 +442,20 @@ mod tests {
         assert!(super::validate_repo_id("foo/bar").is_err());
         assert!(super::validate_repo_id("a@b").is_err());
     }
+
+    // --- read_or_stdin ---
+
+    #[test]
+    fn read_or_stdin_passthrough_returns_value() {
+        // Anything other than "-" is returned verbatim — backticks, $vars,
+        // newlines must all survive untouched (no shell evaluation happens
+        // here; we're past argv parsing).
+        let raw = "literal `backticks` and $vars\nwith newline";
+        assert_eq!(super::read_or_stdin(raw).unwrap(), raw);
+    }
+
+    #[test]
+    fn read_or_stdin_passthrough_empty_string() {
+        assert_eq!(super::read_or_stdin("").unwrap(), "");
+    }
 }

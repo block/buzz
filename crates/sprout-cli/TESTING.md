@@ -190,6 +190,11 @@ REPLY_ID=$(echo "$REPLY" | jq -r '.id // .event_id')
 sprout messages send --channel "$CHANNEL_ID" --content "Hey @someone" \
   --mention "0000000000000000000000000000000000000000000000000000000000000001" | jq .
 
+# messages send from stdin — safe path for content with shell metacharacters
+# (backticks, $vars, code blocks) that would otherwise be expanded by the shell.
+echo 'Body with `backticks` and $vars stays literal.' \
+  | sprout messages send --channel "$CHANNEL_ID" --content - | jq .
+
 # messages get
 sprout messages get --channel "$CHANNEL_ID" | jq .
 sprout messages get --channel "$CHANNEL_ID" --limit 5 | jq .
@@ -473,7 +478,7 @@ sprout channels delete --channel "$FORUM_ID" | jq .
 
 | # | Command | Tested | Notes |
 |---|---------|:------:|-------|
-| 1 | `messages send` | ☐ | Basic, reply, broadcast, mentions |
+| 1 | `messages send` | ☐ | Basic, reply, broadcast, mentions, stdin |
 | 2 | `messages send-diff` | ☐ | Stdin, metadata, branch/PR |
 | 3 | `messages edit` | ☐ | |
 | 4 | `messages delete` | ☐ | |

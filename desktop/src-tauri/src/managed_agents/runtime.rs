@@ -536,8 +536,29 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| record.agent_command.clone());
 
-    // Augment PATH for DMG launches so child processes (e.g. #!/usr/bin/env node) can find their runtimes.
-    let augmented_path = login_shell_path();
+    // Augment PATH for DMG launches so child processes can find:
+    //   - sprout CLI via ~/.local/bin symlink
+    //   - bundled sidecars (sprout, sprout-acp, etc.) via exe parent (Contents/MacOS/)
+    //   - runtimes (node, python, etc.) via login shell PATH
+    let augmented_path = {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            parts.push(home.join(".local").join("bin").display().to_string());
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                parts.push(parent.display().to_string());
+            }
+        }
+        if let Some(shell_path) = login_shell_path() {
+            parts.push(shell_path);
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(":"))
+        }
+    };
 
     let mut command = std::process::Command::new(&resolved_acp_command);
     if let Some(home) = super::default_agent_workdir() {

@@ -1,6 +1,7 @@
 pub mod channels;
 pub mod dms;
 pub mod feed;
+pub mod mem;
 pub mod messages;
 pub mod pack;
 pub mod reactions;

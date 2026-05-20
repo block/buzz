@@ -393,6 +393,16 @@ pub fn run() {
                 eprintln!("sprout-desktop: failed to create nest: {error}");
             }
 
+            // Create/update ~/.local/bin/sprout symlink pointing to the
+            // bundled CLI binary. Non-fatal: agents find CLI via PATH.
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(parent) = exe.parent() {
+                    if let Err(error) = managed_agents::ensure_cli_symlink(parent) {
+                        eprintln!("sprout-desktop: failed to create CLI symlink: {error}");
+                    }
+                }
+            }
+
             // Pre-download voice models in the background so they're ready
             // when the user starts their first huddle. Idempotent — no-op if
             // already downloaded. ~289 MB total (~100 MB Parakeet STT + ~189 MB Pocket TTS).

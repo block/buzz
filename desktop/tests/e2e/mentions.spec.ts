@@ -74,6 +74,34 @@ test("mention button opens autocomplete and inserts a selected member", async ({
   await expect(input).toHaveText("Hey @alice ");
 });
 
+test("inserting a mention preserves Shift+Enter newlines (regression: bug #2)", async ({
+  page,
+}) => {
+  // Before PR #618, mention insertion round-tripped through
+  // `setContent(markdown)`, which collapsed every Shift+Enter hard
+  // break to a single space. After the fix, autocomplete uses a
+  // native ProseMirror `tr.insertText` transaction and the line
+  // breaks survive.
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type("line one");
+  await page.keyboard.press("Shift+Enter");
+  await page.keyboard.type("line two @ali");
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("alice")).toBeVisible();
+  await dropdown.getByText("alice").click();
+
+  // Both lines must still be present, separated by a real line break
+  // (rendered as a `<br>` by Tiptap; the projection sees `\n`).
+  await expect(input).toHaveText(/line one[\s\S]*line two @alice/);
+  await expect(input.locator("br")).toHaveCount(1);
+});
+
 test("keyboard navigation selects mention with Enter", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();

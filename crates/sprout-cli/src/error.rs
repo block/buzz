@@ -22,13 +22,24 @@ pub enum CliError {
     #[error("key error: {0}")]
     Key(String),
 
+    /// Relay accepted the event but reported it as superseded by a newer
+    /// head — used by `sprout mem` set/rm to surface NIP-33 LWW conflicts.
+    #[error("conflict: {0}")]
+    Conflict(String),
+
+    /// Requested resource was absent or tombstoned (e.g. `sprout mem get`
+    /// for a slug with no head).
+    #[error("{0}")]
+    NotFound(String),
+
     /// Catch-all for unexpected failures
     #[error("{0}")]
     Other(String),
 }
 
 /// Map CliError to process exit code.
-/// 0=success (not an error), 1=user, 2=network/relay, 3=auth, 4=other
+/// 0=success (not an error), 1=user/not-found, 2=network/relay, 3=auth,
+/// 4=other, 5=write conflict (NIP-33 dominated head).
 pub fn exit_code(e: &CliError) -> i32 {
     match e {
         CliError::Usage(_) => 1,
@@ -42,6 +53,8 @@ pub fn exit_code(e: &CliError) -> i32 {
         CliError::Network(_) => 2,
         CliError::Auth(_) => 3,
         CliError::Key(_) => 3,
+        CliError::Conflict(_) => 5,
+        CliError::NotFound(_) => 1,
         CliError::Other(_) => 4,
     }
 }
@@ -61,6 +74,8 @@ pub fn print_error(e: &CliError) {
         CliError::Network(_) => "network_error",
         CliError::Auth(_) => "auth_error",
         CliError::Key(_) => "key_error",
+        CliError::Conflict(_) => "conflict",
+        CliError::NotFound(_) => "not_found",
         CliError::Other(_) => "error",
     };
     let obj = serde_json::json!({

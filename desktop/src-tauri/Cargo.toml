@@ -1,7 +1,7 @@
 [workspace]
 
 [package]
-name = "sprout"
+name = "sprout-desktop"
 version = "0.1.0"
 description = "Sprout desktop app"
 authors = ["you"]

@@ -161,6 +161,17 @@ impl SproutClient {
         &self.relay_url
     }
 
+    /// Return the owner pubkey carried by the NIP-OA auth tag, if any.
+    ///
+    /// The auth tag is `["auth", owner_pubkey, conditions, sig]`; the
+    /// owner pubkey lives at index 1.
+    pub fn auth_tag_owner_hex(&self) -> Option<String> {
+        self.auth_tag
+            .as_ref()
+            .map(|t| t.as_slice())
+            .and_then(|slice| slice.get(1).cloned())
+    }
+
     /// Sign an event builder, injecting the NIP-OA auth tag if configured.
     ///
     /// All event creation should go through this method to ensure consistent

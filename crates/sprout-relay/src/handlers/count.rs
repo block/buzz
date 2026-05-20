@@ -54,6 +54,13 @@ pub async fn handle_count(
         ));
         return;
     }
+    if !super::req::engram_filters_authorized(&filters, &authed_pubkey_hex) {
+        conn.send(RelayMessage::closed(
+            &sub_id,
+            "restricted: agent-engram reads require authors=[self] or #p=[self]",
+        ));
+        return;
+    }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
     let accessible_channels = match state.get_accessible_channel_ids_cached(&pubkey_bytes).await {

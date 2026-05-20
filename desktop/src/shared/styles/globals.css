@@ -22,6 +22,20 @@
   height: 0;
 }
 
+.pulse-composer
+  .rich-text-composer
+  .tiptap
+  p.is-editor-empty:first-child::before {
+  color: hsl(var(--muted-foreground) / 0.65);
+}
+
+.pulse-composer:focus-within
+  .rich-text-composer
+  .tiptap
+  p.is-editor-empty:first-child::before {
+  color: hsl(var(--foreground));
+}
+
 .rich-text-composer .tiptap strong {
   font-weight: 600;
 }

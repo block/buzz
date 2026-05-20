@@ -1,21 +1,23 @@
 import * as React from "react";
 import {
-  ArrowRight,
-  FileText,
-  Hash,
   LoaderCircle,
   MessagesSquare,
   Search,
   type LucideIcon,
 } from "lucide-react";
 
-import {
-  resolveUserLabel,
-  resolveUserSecondaryLabel,
-} from "@/features/profile/lib/identity";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useSearchMessagesQuery } from "@/features/search/hooks";
 import type { Channel, SearchHit } from "@/shared/api/types";
+import {
+  ChannelResultBody,
+  MessageResultBody,
+  resultIcon,
+  resultKey,
+  resultTestId,
+  SearchResultShell,
+  type SearchResult,
+} from "@/features/search/ui/SearchResultItem";
 import {
   Dialog,
   DialogContent,
@@ -23,67 +25,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
-import { Badge } from "@/shared/ui/badge";
 import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const MIN_QUERY_LENGTH = 2;
-
-function describeSearchHit(hit: SearchHit) {
-  switch (hit.kind) {
-    case 1:
-      return "Note";
-    case 45001:
-      return "Forum post";
-    case 45003:
-      return "Forum reply";
-    case 43001:
-      return "Agent job";
-    case 43003:
-      return "Agent update";
-    case 46010:
-      return "Approval request";
-    default:
-      return "Message";
-  }
-}
-
-function truncateContent(content: string) {
-  const trimmed = content.trim();
-  if (trimmed.length === 0) {
-    return "No message body.";
-  }
-
-  if (trimmed.length <= 180) {
-    return trimmed;
-  }
-
-  return `${trimmed.slice(0, 177)}...`;
-}
-
-function formatRelativeTime(unixSeconds: number) {
-  const diff = Math.floor(Date.now() / 1_000) - unixSeconds;
-
-  if (diff < 60) {
-    return "just now";
-  }
-
-  if (diff < 60 * 60) {
-    return `${Math.floor(diff / 60)}m ago`;
-  }
-
-  if (diff < 60 * 60 * 24) {
-    return `${Math.floor(diff / (60 * 60))}h ago`;
-  }
-
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(unixSeconds * 1_000));
-}
 
 function SearchState({
   icon: Icon,
@@ -129,6 +74,7 @@ type SearchDialogProps = {
   currentPubkey?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onOpenChannel: (channelId: string) => void;
   onOpenResult: (hit: SearchHit) => void;
 };
 
@@ -137,6 +83,7 @@ export function SearchDialog({
   currentPubkey,
   open,
   onOpenChange,
+  onOpenChannel,
   onOpenResult,
 }: SearchDialogProps) {
   const [query, setQuery] = React.useState("");
@@ -153,21 +100,69 @@ export function SearchDialog({
     limit: 12,
   });
 
-  const results = searchQuery.data?.hits ?? [];
+  const messageResults = searchQuery.data?.hits ?? [];
+  const channelResults = React.useMemo(() => {
+    if (debouncedQuery.length < MIN_QUERY_LENGTH) {
+      return [];
+    }
+
+    const normalizedQuery = debouncedQuery.toLowerCase();
+
+    return channels
+      .filter(
+        (channel) =>
+          channel.channelType !== "dm" &&
+          (channel.archivedAt
+            ? channel.isMember
+            : channel.visibility === "open" || channel.isMember) &&
+          (channel.name.toLowerCase().includes(normalizedQuery) ||
+            channel.description.toLowerCase().includes(normalizedQuery)),
+      )
+      .sort((a, b) => {
+        const aNameMatches = a.name.toLowerCase().includes(normalizedQuery);
+        const bNameMatches = b.name.toLowerCase().includes(normalizedQuery);
+
+        if (aNameMatches !== bNameMatches) {
+          return aNameMatches ? -1 : 1;
+        }
+
+        return a.name.localeCompare(b.name);
+      })
+      .slice(0, 5);
+  }, [channels, debouncedQuery]);
+  const results = React.useMemo<SearchResult[]>(
+    () => [
+      ...channelResults.map((channel) => ({
+        kind: "channel" as const,
+        channel,
+      })),
+      ...messageResults.map((hit) => ({
+        kind: "message" as const,
+        hit,
+      })),
+    ],
+    [channelResults, messageResults],
+  );
   const resultProfilesQuery = useUsersBatchQuery(
-    results.map((hit) => hit.pubkey),
+    messageResults.map((hit) => hit.pubkey),
     {
-      enabled: open && results.length > 0,
+      enabled: open && messageResults.length > 0,
     },
   );
   const resultProfiles = resultProfilesQuery.data?.profiles;
 
   const openResult = React.useCallback(
-    (hit: SearchHit) => {
+    (result: SearchResult) => {
       onOpenChange(false);
-      onOpenResult(hit);
+
+      if (result.kind === "channel") {
+        onOpenChannel(result.channel.id);
+        return;
+      }
+
+      onOpenResult(result.hit);
     },
-    [onOpenChange, onOpenResult],
+    [onOpenChange, onOpenChannel, onOpenResult],
   );
 
   React.useEffect(() => {
@@ -204,7 +199,7 @@ export function SearchDialog({
     });
   }, [results]);
 
-  const selectedHit = results[selectedIndex];
+  const selectedResult = results[selectedIndex];
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -254,10 +249,10 @@ export function SearchDialog({
                 if (
                   event.key === "Enter" &&
                   !event.nativeEvent.isComposing &&
-                  selectedHit
+                  selectedResult
                 ) {
                   event.preventDefault();
-                  openResult(selectedHit);
+                  openResult(selectedResult);
                 }
               }}
               placeholder="Search messages, approvals, and forum posts"
@@ -277,9 +272,9 @@ export function SearchDialog({
               icon={MessagesSquare}
               title="Search message history"
             />
-          ) : searchQuery.isLoading ? (
+          ) : searchQuery.isLoading && results.length === 0 ? (
             <SearchLoadingState />
-          ) : searchQuery.error instanceof Error ? (
+          ) : searchQuery.error instanceof Error && results.length === 0 ? (
             <SearchState
               description={searchQuery.error.message}
               icon={LoaderCircle}
@@ -294,86 +289,35 @@ export function SearchDialog({
           ) : (
             <div className="p-3" data-testid="search-results">
               <div className="mb-3 flex items-center justify-between px-2 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                <span>{searchQuery.data?.found ?? results.length} results</span>
+                <span>
+                  {channelResults.length +
+                    (searchQuery.data?.found ?? messageResults.length)}{" "}
+                  results
+                </span>
                 <span>Enter to open</span>
               </div>
 
               <div className="space-y-2">
-                {results.map((hit, index) => {
-                  const channel = hit.channelId
-                    ? channelLookup.get(hit.channelId)
-                    : undefined;
-                  const authorLabel = resolveUserLabel({
-                    pubkey: hit.pubkey,
-                    currentPubkey,
-                    profiles: resultProfiles,
-                    preferResolvedSelfLabel: true,
-                  });
-                  const authorSecondaryLabel = resolveUserSecondaryLabel({
-                    pubkey: hit.pubkey,
-                    profiles: resultProfiles,
-                  });
-
-                  return (
-                    <button
-                      className={
-                        index === selectedIndex
-                          ? "w-full rounded-2xl border border-primary/30 bg-primary/10 px-4 py-4 text-left shadow-sm outline-none transition-colors"
-                          : "w-full rounded-2xl border border-border/80 bg-card/60 px-4 py-4 text-left shadow-sm outline-none transition-colors hover:border-primary/20 hover:bg-accent"
-                      }
-                      data-testid={`search-result-${hit.eventId}`}
-                      key={hit.eventId}
-                      onClick={() => openResult(hit)}
-                      onMouseEnter={() => setSelectedIndex(index)}
-                      type="button"
-                    >
-                      <div className="flex items-start gap-3">
-                        <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-secondary text-secondary-foreground">
-                          {channel?.channelType === "forum" ? (
-                            <FileText className="h-4 w-4" />
-                          ) : (
-                            <Hash className="h-4 w-4" />
-                          )}
-                        </div>
-
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <p className="text-sm font-semibold tracking-tight">
-                              {hit.channelName}
-                            </p>
-                            <Badge variant="secondary">
-                              {describeSearchHit(hit)}
-                            </Badge>
-                            <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                              <UserAvatar
-                                avatarUrl={
-                                  resultProfiles?.[hit.pubkey.toLowerCase()]
-                                    ?.avatarUrl ?? null
-                                }
-                                displayName={authorLabel}
-                                size="xs"
-                              />
-                              {authorLabel}
-                            </span>
-                            <p className="ml-auto whitespace-nowrap text-xs text-muted-foreground">
-                              {formatRelativeTime(hit.createdAt)}
-                            </p>
-                          </div>
-                          {authorSecondaryLabel ? (
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              {authorSecondaryLabel}
-                            </p>
-                          ) : null}
-                          <p className="mt-2 text-sm leading-6 text-foreground">
-                            {truncateContent(hit.content)}
-                          </p>
-                        </div>
-
-                        <ArrowRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground" />
-                      </div>
-                    </button>
-                  );
-                })}
+                {results.map((result, index) => (
+                  <SearchResultShell
+                    icon={resultIcon(result, channelLookup)}
+                    isSelected={index === selectedIndex}
+                    key={resultKey(result)}
+                    onClick={() => openResult(result)}
+                    onMouseEnter={() => setSelectedIndex(index)}
+                    testId={resultTestId(result)}
+                  >
+                    {result.kind === "channel" ? (
+                      <ChannelResultBody channel={result.channel} />
+                    ) : (
+                      <MessageResultBody
+                        currentPubkey={currentPubkey}
+                        hit={result.hit}
+                        resultProfiles={resultProfiles}
+                      />
+                    )}
+                  </SearchResultShell>
+                ))}
               </div>
             </div>
           )}

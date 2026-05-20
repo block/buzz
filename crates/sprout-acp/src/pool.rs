@@ -82,6 +82,9 @@ pub struct SessionState {
     pub turn_counts: HashMap<Uuid, u32>,
     /// Turn counter for the heartbeat session.
     pub heartbeat_turn_count: u32,
+    /// channel_id → rendered NIP-AE core prompt section, populated once at
+    /// session creation per Tyler's spec (no mid-session refresh).
+    pub core_sections: HashMap<Uuid, String>,
 }
 
 impl SessionState {
@@ -102,6 +105,7 @@ impl SessionState {
     /// Returns `true` if the channel had an active session.
     pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> bool {
         self.turn_counts.remove(channel_id);
+        self.core_sections.remove(channel_id);
         self.sessions.remove(channel_id).is_some()
     }
 
@@ -111,6 +115,7 @@ impl SessionState {
         self.turn_counts.clear();
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
+        self.core_sections.clear();
     }
 }
 
@@ -198,6 +203,18 @@ pub struct PromptContext {
     pub max_turns_per_session: u32,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    /// Agent identity — used to derive the NIP-AE conversation key at
+    /// session creation for core injection.
+    pub agent_keys: nostr::Keys,
+    /// Owner pubkey (hex), if resolved at startup. When unset, NIP-AE core
+    /// injection is skipped entirely (no owner = no `(agent, owner)` pair).
+    pub agent_owner_pubkey: Option<nostr::PublicKey>,
+    /// Whether NIP-AE agent core memory injection is enabled. When false,
+    /// the per-session core engram fetch is skipped and `core_sections`
+    /// remains empty for every channel, so `format_prompt` renders no
+    /// `[Agent Memory — core]` section. Driven by `--memory` /
+    /// `SPROUT_ACP_MEMORY`.
+    pub memory_enabled: bool,
 }
 
 // ── AgentPool impl ────────────────────────────────────────────────────────────
@@ -737,6 +754,67 @@ pub async fn run_prompt_task(
         }),
     );
 
+    // ── NIP-AE: fetch core engram on new channel sessions ────────────────
+    //
+    // Fire one synchronous fetch + decrypt + render right after the session
+    // is born; cache the rendered section in `state.core_sections` keyed by
+    // channel id. Subsequent turns in the same session reuse the cached
+    // section. `format_prompt` reads it from the per-channel cache.
+    //
+    // Failure modes (all fail open — no crash, no block):
+    //   * no owner configured → skip (no NIP-AE namespace exists)
+    //   * confirmed absence → cache the onboarding nudge so the agent
+    //     learns how to bootstrap itself.
+    //   * transport / decrypt / parse error → inject nothing. We never
+    //     mistake "relay slow or broken" for "no core" — that would invite
+    //     the agent to overwrite real, just-unreachable memory.
+    //   * fetch exceeds CORE_FETCH_TIMEOUT → inject nothing, same reason.
+    //
+    // Per Tyler's locked spec: NO mid-session refreshes. Re-fetch only
+    // happens when a session is invalidated and recreated (see
+    // `SessionState::invalidate_channel`).
+    //
+    // Operator opt-in: `--memory` / `SPROUT_ACP_MEMORY` enables the NIP-AE
+    // injection path. By default we skip the fetch outright and leave
+    // `state.core_sections` empty, so `format_prompt` renders no core
+    // section. The `sprout mem` CLI and the relay's acceptance of
+    // kind:30174 engrams are unaffected.
+    if is_new_session && ctx.memory_enabled {
+        if let (PromptSource::Channel(cid), Some(owner_pk)) =
+            (&source, ctx.agent_owner_pubkey.as_ref())
+        {
+            // Bounded — we'd rather start the session with no core hint
+            // than block prompt formatting on a stalled relay.
+            const CORE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+            let fetch = crate::engram_fetch::build_core_section(
+                &ctx.rest_client,
+                &ctx.agent_keys,
+                owner_pk,
+            );
+            let section = match tokio::time::timeout(CORE_FETCH_TIMEOUT, fetch).await {
+                Ok(s) => s,
+                Err(_) => {
+                    tracing::warn!(
+                        target: "engram::core",
+                        channel = %cid,
+                        timeout_ms = CORE_FETCH_TIMEOUT.as_millis() as u64,
+                        "core fetch timed out — emitting no section"
+                    );
+                    None
+                }
+            };
+            if let Some(rendered) = section {
+                tracing::info!(
+                    target: "engram::core",
+                    channel = %cid,
+                    section_len = rendered.len(),
+                    "injected NIP-AE core section"
+                );
+                agent.state.core_sections.insert(*cid, rendered);
+            }
+        }
+    }
+
     // ── Send initial_message on new channel sessions ──────────────────────
 
     if is_new_session {
@@ -871,9 +949,11 @@ pub async fn run_prompt_task(
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
 
+        let agent_core_section = agent.state.core_sections.get(&b.channel_id).cloned();
         crate::queue::format_prompt(
             b,
             ctx.system_prompt.as_deref(),
+            agent_core_section.as_deref(),
             channel_info.as_ref(),
             conversation_context.as_ref(),
             profile_lookup.as_ref(),

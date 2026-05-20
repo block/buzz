@@ -312,7 +312,15 @@ pub struct SendMessageParams {
     pub files: Vec<String>,
 }
 
-pub async fn cmd_send_message(client: &SproutClient, p: SendMessageParams) -> Result<(), CliError> {
+pub async fn cmd_send_message(
+    client: &SproutClient,
+    mut p: SendMessageParams,
+) -> Result<(), CliError> {
+    // Allow '-' to read content from stdin. This keeps callers from having to
+    // jam shell-metacharacter-heavy text (backticks, $vars, etc.) through argv
+    // quoting — the source of countless self-inflicted command-substitution
+    // bugs for agent and human users alike.
+    p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;

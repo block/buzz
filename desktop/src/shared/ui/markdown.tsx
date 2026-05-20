@@ -1,9 +1,9 @@
 import * as React from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { Copy } from "lucide-react";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
-
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -11,12 +11,15 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
 import type { Channel } from "@/shared/api/types";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
+import { copyCodeBlockToClipboard } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import rehypeImageGallery from "@/shared/lib/rehypeImageGallery";
 import rehypeSearchHighlight from "@/shared/lib/rehypeSearchHighlight";
 import remarkChannelLinks from "@/shared/lib/remarkChannelLinks";
 import remarkMentions from "@/shared/lib/remarkMentions";
+import { Button } from "@/shared/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 import {
   classifyChildren,
@@ -103,6 +106,75 @@ function ImageContextMenu({
   );
 }
 
+function getReactNodeText(node: React.ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") {
+    return String(node);
+  }
+
+  if (Array.isArray(node)) {
+    return node.map(getReactNodeText).join("");
+  }
+
+  if (React.isValidElement<{ children?: React.ReactNode }>(node)) {
+    return getReactNodeText(node.props.children);
+  }
+
+  return "";
+}
+
+function getCodeBlockText(children: React.ReactNode) {
+  return getReactNodeText(children).replace(/\n$/, "");
+}
+
+function MarkdownCodeBlock({ children }: { children?: React.ReactNode }) {
+  const [isCopying, setIsCopying] = React.useState(false);
+  const code = React.useMemo(() => getCodeBlockText(children), [children]);
+
+  const handleCopy = React.useCallback(
+    async (event: React.MouseEvent<HTMLButtonElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setIsCopying(true);
+
+      try {
+        await copyCodeBlockToClipboard(code);
+        toast.success("Copied code to clipboard");
+      } catch (error) {
+        console.error("Failed to copy code block", error);
+        toast.error("Failed to copy code");
+      } finally {
+        setIsCopying(false);
+      }
+    },
+    [code],
+  );
+
+  return (
+    <div className="group relative">
+      <pre className="overflow-x-auto rounded-xl border border-border/70 bg-muted/60 px-3 py-1.5 pr-12 shadow-sm">
+        {children}
+      </pre>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            aria-label="Copy code block"
+            className="absolute right-2 top-2 h-7 w-7 bg-background/80 text-muted-foreground opacity-0 shadow-sm ring-1 ring-border/60 backdrop-blur transition-opacity hover:bg-background hover:text-foreground hover:opacity-100 focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 disabled:opacity-60"
+            disabled={isCopying}
+            onClick={handleCopy}
+            size="icon"
+            type="button"
+            variant="ghost"
+          >
+            <Copy className="h-3.5 w-3.5" />
+            <span className="sr-only">Copy code block</span>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>Copy code</TooltipContent>
+      </Tooltip>
+    </div>
+  );
+}
+
 function createMarkdownComponents(
   variant: MarkdownVariant,
   channels: Channel[],
@@ -141,18 +213,12 @@ function createMarkdownComponents(
       </blockquote>
     ),
     br: () => <br />,
-    code: ({
-      children,
-      className,
-      ...props
-    }: React.ComponentProps<"code"> & { inline?: boolean }) => {
+    code: ({ children, className, ...props }: React.ComponentProps<"code">) => {
       const code = String(children).replace(/\n$/, "");
-      const isBlock =
-        typeof className === "string" && className.includes("language-")
-          ? true
-          : code.includes("\n");
+      const isFencedCodeBlock =
+        typeof className === "string" && className.includes("language-");
 
-      if (isBlock) {
+      if (isFencedCodeBlock || code.includes("\n")) {
         return (
           <code
             {...props}
@@ -297,11 +363,7 @@ function createMarkdownComponents(
 
       return <p className={paragraphClassName}>{children}</p>;
     },
-    pre: ({ children }) => (
-      <pre className="overflow-x-auto rounded-xl border border-border/70 bg-muted/60 px-3 py-1.5 shadow-sm">
-        {children}
-      </pre>
-    ),
+    pre: ({ children }) => <MarkdownCodeBlock>{children}</MarkdownCodeBlock>,
     strong: ({ children }) => (
       <strong className="font-semibold">{children}</strong>
     ),

@@ -63,7 +63,7 @@ Configuration (flags override env vars):
 
 The 'pack' subcommand runs locally and does not require a relay connection.
 
-Exit codes: 0=ok  1=bad input  2=relay/network error  3=auth error  4=other
+Exit codes: 0=ok  1=bad input  2=relay/network error  3=auth error  4=other  5=write conflict
 Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"}"
 )]
 struct Cli {
@@ -184,6 +184,9 @@ enum Cmd {
     /// Upload files to the relay's Blossom store
     #[command(subcommand)]
     Upload(UploadCmd),
+    /// Agent engram management — persistent memory per NIP-AE
+    #[command(subcommand)]
+    Mem(MemCmd),
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
@@ -197,13 +200,13 @@ enum Cmd {
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  sprout messages send --channel <UUID> --content \"hello\"\n  sprout messages send --channel <UUID> --content \"@alice check this\""
+        after_help = "Examples:\n  sprout messages send --channel <UUID> --content \"hello\"\n  sprout messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | sprout messages send --channel <UUID> --content -"
     )]
     Send {
         /// Channel UUID (from 'sprout channels list')
         #[arg(long)]
         channel: String,
-        /// Message text — supports @mentions and markdown
+        /// Message text — supports @mentions and markdown. Use '-' to read from stdin.
         #[arg(long)]
         content: String,
         /// Nostr event kind (default: channel default)
@@ -833,6 +836,43 @@ pub enum UploadCmd {
 }
 
 // ---------------------------------------------------------------------------
+// Mem subcommands (NIP-AE)
+// ---------------------------------------------------------------------------
+
+/// Subcommands for `sprout mem`.
+#[derive(Subcommand)]
+pub enum MemCmd {
+    /// List non-tombstoned memory entries
+    Ls {
+        /// Owner pubkey (hex). Overrides SPROUT_AUTH_TAG.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Emit JSON instead of tab-delimited lines.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Print the value of a slug to stdout (no trailing newline)
+    Get {
+        slug: String,
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Set a slug's value. Pass `-` to read the value from stdin.
+    Set {
+        slug: String,
+        value: String,
+        #[arg(long)]
+        owner: Option<String>,
+    },
+    /// Publish a tombstone for a slug (cannot be used on `core`).
+    Rm {
+        slug: String,
+        #[arg(long)]
+        owner: Option<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // Pack subcommands (local, no relay connection needed)
 // ---------------------------------------------------------------------------
 
@@ -904,6 +944,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
+        Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -930,6 +971,7 @@ mod tests {
             "channels",
             "dms",
             "feed",
+            "mem",
             "messages",
             "pack",
             "reactions",

@@ -246,6 +246,36 @@ test("opens relay-backed search from the sidebar and loads the exact result", as
   );
 });
 
+test("opens channel matches from search", async ({ page }) => {
+  await page.goto("/");
+
+  await openSearchDialogWithButton(page);
+
+  await page.getByTestId("search-input").fill("engineering");
+  const results = page.getByTestId("search-results");
+
+  await expect(results).toContainText("engineering");
+  await expect(results).toContainText("Engineering discussions");
+  await expect(results).toContainText(
+    "Design system and UX discussions with engineering partners",
+  );
+  await expect(
+    results.locator('[data-testid^="search-result-channel-"]').first(),
+  ).toHaveAttribute(
+    "data-testid",
+    "search-result-channel-1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9",
+  );
+
+  await results
+    .getByTestId("search-result-channel-1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9")
+    .click();
+
+  await expect(page).toHaveURL(
+    /#\/channels\/1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9$/,
+  );
+  await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+});
+
 test("search results use your resolved profile label instead of You", async ({
   page,
 }) => {

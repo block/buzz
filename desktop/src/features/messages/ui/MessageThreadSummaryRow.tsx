@@ -5,6 +5,9 @@ import type {
 import type { TimelineMessage } from "@/features/messages/types";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
+const MESSAGE_TEXT_OFFSET_PX = 54;
+const NESTED_REPLY_OFFSET_PX = 28;
+
 function formatRelativeTime(unixSeconds: number): string {
   const now = Date.now() / 1_000;
   const diff = now - unixSeconds;
@@ -45,24 +48,31 @@ function ParticipantAvatar({
 
 export function MessageThreadSummaryRow({
   depth = 0,
-  layoutVariant = "default",
   message,
   onOpenThread,
   summary,
 }: {
   depth?: number;
-  layoutVariant?: "default" | "thread-reply";
   message: TimelineMessage;
   onOpenThread: (message: TimelineMessage) => void;
   summary: TimelineThreadSummary;
 }) {
   const visibleDepth = Math.min(Math.max(depth, 0), 6);
-  const messageTextOffsetPx = layoutVariant === "thread-reply" ? 8 : 50;
-  const marginLeftPx = visibleDepth * 28 + messageTextOffsetPx;
-  const depthGuideOffsets = Array.from(
-    { length: visibleDepth },
-    (_, index) => 14 + index * 28,
-  );
+  const indentPx =
+    visibleDepth > 0
+      ? MESSAGE_TEXT_OFFSET_PX + (visibleDepth - 1) * NESTED_REPLY_OFFSET_PX
+      : 0;
+  const marginLeftPx = indentPx + MESSAGE_TEXT_OFFSET_PX;
+  const depthGuideOffsets =
+    visibleDepth === 0
+      ? []
+      : Array.from({ length: visibleDepth }, (_, index) =>
+          index === 0
+            ? MESSAGE_TEXT_OFFSET_PX / 2
+            : MESSAGE_TEXT_OFFSET_PX +
+              NESTED_REPLY_OFFSET_PX / 2 +
+              (index - 1) * NESTED_REPLY_OFFSET_PX,
+        );
 
   return (
     <div className="relative pb-1 pt-1">

@@ -90,6 +90,7 @@ export const MessageComposerToolbar = React.memo(
                         aria-pressed={isFormattingOpen}
                         disabled={composerDisabled}
                         onClick={() => onFormattingToggle(!isFormattingOpen)}
+                        onMouseDown={onCaptureSelection}
                         className={cn(
                           "inline-flex h-8 min-w-8 items-center justify-center rounded-md px-2 text-sm font-medium transition-colors",
                           "hover:bg-muted hover:text-foreground",
@@ -120,6 +121,7 @@ export const MessageComposerToolbar = React.memo(
                         aria-label="Close formatting"
                         disabled={composerDisabled}
                         onClick={() => onFormattingToggle(false)}
+                        onMouseDown={onCaptureSelection}
                         size="icon"
                         type="button"
                         variant="ghost"
@@ -180,6 +182,7 @@ export const MessageComposerToolbar = React.memo(
                       aria-label="Attach image"
                       disabled={composerDisabled || isUploading}
                       onClick={onPaperclip}
+                      onMouseDown={onCaptureSelection}
                       size="icon"
                       type="button"
                       variant="ghost"
@@ -214,6 +217,7 @@ export const MessageComposerToolbar = React.memo(
                         aria-pressed={isFormattingOpen}
                         disabled={composerDisabled}
                         onClick={() => onFormattingToggle(!isFormattingOpen)}
+                        onMouseDown={onCaptureSelection}
                         className={cn(
                           "inline-flex h-8 min-w-8 items-center justify-center rounded-md px-2 text-sm font-medium transition-colors",
                           "hover:bg-muted hover:text-foreground",

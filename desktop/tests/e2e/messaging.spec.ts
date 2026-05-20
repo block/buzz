@@ -49,6 +49,91 @@ test("send multiple messages in sequence", async ({ page }) => {
   }
 });
 
+test("copy a rendered code block and paste it back as code", async ({
+  page,
+}) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: "http://127.0.0.1:4173",
+  });
+
+  const code = "# not a heading\nconst answer = 42;\n  indented();";
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await page.evaluate(
+    (text) => navigator.clipboard.writeText(text),
+    `\`\`\`ts\n${code}\n\`\`\``,
+  );
+  await input.click();
+  await page.keyboard.press("ControlOrMeta+V");
+  await page.getByTestId("send-message").click();
+
+  const copiedCodeBlock = page.locator("pre", { hasText: code });
+  await expect(copiedCodeBlock).toHaveCount(1);
+
+  const copyButton = page.getByLabel("Copy code block");
+  await expect(copyButton).toHaveCSS("opacity", "0");
+  await copiedCodeBlock.hover();
+  await expect(copyButton).toHaveCSS("opacity", "1");
+  await copyButton.click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(code);
+
+  await input.click();
+  await page.keyboard.press("ControlOrMeta+V");
+  await input.press("Enter");
+
+  await expect(copiedCodeBlock).toHaveCount(2);
+});
+
+test("pasting a long copied code block scrolls composer to cursor", async ({
+  page,
+}) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: "http://127.0.0.1:4173",
+  });
+
+  const longCode = Array.from(
+    { length: 48 },
+    (_, index) => `const line${index} = ${index};`,
+  ).join("\n");
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await page.evaluate(
+    (text) => navigator.clipboard.writeText(text),
+    `\`\`\`ts\n${longCode}\n\`\`\``,
+  );
+  await input.click();
+  await page.keyboard.press("ControlOrMeta+V");
+  await page.getByTestId("send-message").click();
+
+  const copiedCodeBlock = page.locator("pre", { hasText: longCode });
+  await expect(copiedCodeBlock).toHaveCount(1);
+  await copiedCodeBlock.hover();
+  await page.getByLabel("Copy code block").click();
+
+  await input.fill("typed before paste");
+  await page.keyboard.press("ControlOrMeta+V");
+
+  const scrollContainer = page.getByTestId("message-input-scroll");
+  await expect
+    .poll(() =>
+      scrollContainer.evaluate(
+        (element) =>
+          element.scrollHeight - element.clientHeight - element.scrollTop,
+      ),
+    )
+    .toBeLessThanOrEqual(1);
+});
+
 test("message input clears after send", async ({ page }) => {
   const message = `Clear after send ${Date.now()}`;
   const input = page.getByTestId("message-input");
