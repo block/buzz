@@ -22,6 +22,10 @@ import {
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
+import {
+  shouldRefuseConnect,
+  shouldScheduleReconnect,
+} from "@/shared/api/relayReconnectPolicy";
 import { RelayStallWatchdog } from "@/shared/api/relayStallWatchdog";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
@@ -38,9 +42,10 @@ const RECONNECT_REPLAY_SKEW_SECS = 5,
  * "fully connected" to the WS layer indefinitely — no Close, no Error.
  *
  * We work around that by periodically sending a cheap NIP-01 `REQ` with
- * `limit: 0` and waiting for the matching `EOSE`. Two consecutive misses
- * (≈ STALL_PROBE_INTERVAL_MS + STALL_PROBE_TIMEOUT_MS) flips state to
- * `stalled` and force-resets the socket so the existing reconnect path runs.
+ * `limit: 0` and waiting for the matching `EOSE`. A single missed probe
+ * (no EOSE within `STALL_PROBE_TIMEOUT_MS`) — or a send-side failure on the
+ * probe itself — flips state to `stalled` and force-resets the socket so
+ * the existing reconnect path runs.
  *
  * The filter intentionally matches nothing real so the relay only ever
  * answers with EOSE.
@@ -70,6 +75,18 @@ export class RelayClient {
   private notifyReconnectListeners = false;
   private onMessageChannel: Channel<unknown> | null = null;
 
+  /**
+   * Sticky terminal flag. Set when `resetConnection` is called with
+   * `reconnect: false` (today: auth rejection). Acts as a hard guard against
+   * the reconnect-timer / retry-wrapper paths racing back to "reconnecting"
+   * after we've already declared the session dead.
+   *
+   * Cleared only on explicit user re-engagement: `disconnect()` (workspace
+   * switch — the singleton is being reused for a different workspace) and
+   * `preconnect()` (caller is asking us to come back up).
+   */
+  private terminal = false;
+
   private connectionStateEmitter = new RelayConnectionStateEmitter("idle");
   private stallWatchdog = new RelayStallWatchdog({
     intervalMs: STALL_PROBE_INTERVAL_MS,
@@ -98,6 +115,7 @@ export class RelayClient {
     this.relayUrl = null;
     this.hasConnectedOnce = false;
     this.notifyReconnectListeners = false;
+    this.terminal = false;
     this.connectionStateEmitter.set("idle");
 
     if (this.wsId !== null) {
@@ -369,6 +387,9 @@ export class RelayClient {
   }
 
   async preconnect() {
+    // Explicit re-engagement. If the session went terminal (auth rejection)
+    // the caller is asking us to try again, so clear the latch.
+    this.terminal = false;
     this.keepAliveRequested = true;
     await this.ensureConnected();
   }
@@ -396,6 +417,15 @@ export class RelayClient {
   }
 
   private async ensureConnected() {
+    if (shouldRefuseConnect({ terminal: this.terminal })) {
+      // Session is terminal (e.g. relay rejected auth). Refuse to connect
+      // until an explicit re-engagement (disconnect()/preconnect()) clears
+      // the flag. Without this, the reconnect timer's catch handler — and
+      // the retry wrappers in publishEvent / sendRawWithReconnectRetry —
+      // would race the terminal "disconnected" state back to "reconnecting".
+      throw new Error("Relay session is terminal; cannot reconnect.");
+    }
+
     if (this.connectPromise) {
       return this.connectPromise;
     }
@@ -888,9 +918,13 @@ export class RelayClient {
 
   private scheduleReconnect() {
     if (
-      this.reconnectTimeout ||
-      this.wsId !== null ||
-      (!this.keepAliveRequested && !this.hasLiveSubscriptions())
+      !shouldScheduleReconnect({
+        terminal: this.terminal,
+        hasPendingReconnect: this.reconnectTimeout !== null,
+        hasLiveSocket: this.wsId !== null,
+        keepAliveRequested: this.keepAliveRequested,
+        hasLiveSubscriptions: this.hasLiveSubscriptions(),
+      })
     ) {
       return;
     }
@@ -942,6 +976,7 @@ export class RelayClient {
     this.eventBuffer = [];
 
     if (options?.reconnect === false) {
+      this.terminal = true;
       this.connectionStateEmitter.set("disconnected");
     } else if (this.connectionStateEmitter.get() !== "stalled") {
       // Stall is a stronger signal than a generic drop; keep it until the
