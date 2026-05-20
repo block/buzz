@@ -1,4 +1,4 @@
-import { AlertTriangle, ChevronDown } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight } from "lucide-react";
 import * as React from "react";
 
 import {
@@ -43,6 +43,7 @@ import { getActivePersonas } from "@/features/agents/lib/catalog";
 import { getUsableTeams } from "@/features/agents/lib/teamPersonas";
 import { useLastRuntimeProvider } from "@/features/agents/lib/useLastRuntimeProvider";
 import { CreateAgentRespondToField } from "@/features/agents/ui/RespondToField";
+import { cn } from "@/shared/lib/cn";
 
 type AddChannelBotDialogProps = {
   backendProviders?: BackendProviderCandidate[];
@@ -91,6 +92,43 @@ function formatBatchFailureSummary(
     .map((failure) => `${failure.name}: ${failure.error}`)
     .join("; ");
 }
+
+// ── Collapsible section ─────────────────────────────────────────────────────
+
+function DisclosureSection({
+  children,
+  defaultOpen = false,
+  label,
+  testId,
+}: {
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+  label: string;
+  testId?: string;
+}) {
+  const [isOpen, setIsOpen] = React.useState(defaultOpen);
+
+  return (
+    <div data-testid={testId}>
+      <button
+        className="flex w-full items-center gap-1.5 py-1 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+        onClick={() => setIsOpen((prev) => !prev)}
+        type="button"
+      >
+        <ChevronRight
+          className={cn(
+            "h-3.5 w-3.5 transition-transform",
+            isOpen && "rotate-90",
+          )}
+        />
+        {label}
+      </button>
+      {isOpen ? <div className="mt-3 space-y-4">{children}</div> : null}
+    </div>
+  );
+}
+
+// ── Main dialog ─────────────────────────────────────────────────────────────
 
 export function AddChannelBotDialog({
   backendProviders,
@@ -418,9 +456,6 @@ export function AddChannelBotDialog({
     }
   }
 
-  // Allowlist mode requires at least one entry, mirroring the harness's own
-  // validation. If we let it through empty, the agent crash-loops at startup
-  // with a config error.
   const respondToValid =
     respondTo !== "allowlist" || respondToAllowlist.length > 0;
 
@@ -453,7 +488,7 @@ export function AddChannelBotDialog({
       <ChooserDialogContent
         className="max-w-3xl"
         data-testid="add-channel-bot-dialog"
-        description="Select any combination of saved personas, or turn on Generic for a one-off custom agent."
+        description="Choose who to bring into this channel. Expand sections below for more control."
         footer={
           <>
             <Button
@@ -481,52 +516,40 @@ export function AddChannelBotDialog({
         scrollAreaTestId="add-channel-bot-dialog-scroll-area"
         title="Add agents"
       >
-        {resolvedBackendProviders.length > 0 ? (
-          <div className="space-y-1.5">
-            <div className="text-sm font-medium">Run on</div>
-            <select
-              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm"
-              disabled={createBotsMutation.isPending}
-              onChange={(e) => handleRunOnChange(e.target.value)}
-              value={runOn}
-            >
-              <option value="local">This computer</option>
-              {resolvedBackendProviders.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.id}
-                </option>
-              ))}
-            </select>
-          </div>
-        ) : null}
+        {/* ─── Primary: Who ─────────────────────────────────────────────── */}
 
-        {isProviderMode && selectedBackendProvider ? (
-          <div className="flex gap-3 rounded-2xl border border-warning/30 bg-warning-bg px-4 py-3">
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-            <p className="text-sm text-warning">
-              This provider at{" "}
-              <span className="font-mono font-medium">
-                {selectedBackendProvider.binaryPath}
-              </span>{" "}
-              will receive your agent&apos;s private key. Only use providers
-              from trusted sources.
-            </p>
-          </div>
-        ) : null}
-
-        {probeError ? (
-          <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-            Could not probe provider: {probeError}
-          </p>
-        ) : null}
-
-        {isProviderMode && probedProvider?.config_schema ? (
-          <ProviderConfigFields
-            config={providerConfig}
-            onChange={setProviderConfig}
-            schema={probedProvider.config_schema}
+        {teams.length > 0 ? (
+          <AddChannelBotTeamsSection
+            canToggleSelections={canToggleSelections}
+            inChannelPersonaIds={inChannelPersonaIds}
+            isLoading={teamsQuery.isLoading}
+            onToggleTeam={handleToggleTeam}
+            personas={personas}
+            selectedPersonaIds={selectedPersonaIds}
+            teams={teams}
           />
         ) : null}
+
+        <AddChannelBotPersonasSection
+          canToggleSelections={canToggleSelections}
+          inChannelPersonaIds={inChannelPersonaIds}
+          includeGeneric={includeGeneric}
+          isLoading={personasQuery.isLoading}
+          onToggleGeneric={() => {
+            setIncludeGeneric((current) => !current);
+            setSubmissionNotice(null);
+            setSubmissionError(null);
+          }}
+          onTogglePersona={(personaId) => {
+            setSelectedPersonaIds((current) => toggleValue(current, personaId));
+            setSubmissionNotice(null);
+            setSubmissionError(null);
+          }}
+          personas={personas}
+          selectedPersonaIds={selectedPersonaIds}
+        />
+
+        {/* ─── Primary: Runtime ─────────────────────────────────────────── */}
 
         <div className="space-y-1.5">
           <div className="text-sm font-medium">Runtime</div>
@@ -565,50 +588,6 @@ export function AddChannelBotDialog({
           </DropdownMenu>
         </div>
 
-        {teams.length > 0 ? (
-          <AddChannelBotTeamsSection
-            canToggleSelections={canToggleSelections}
-            inChannelPersonaIds={inChannelPersonaIds}
-            isLoading={teamsQuery.isLoading}
-            onToggleTeam={handleToggleTeam}
-            personas={personas}
-            selectedPersonaIds={selectedPersonaIds}
-            teams={teams}
-          />
-        ) : null}
-
-        <AddChannelBotPersonasSection
-          canToggleSelections={canToggleSelections}
-          inChannelPersonaIds={inChannelPersonaIds}
-          includeGeneric={includeGeneric}
-          isLoading={personasQuery.isLoading}
-          onToggleGeneric={() => {
-            setIncludeGeneric((current) => !current);
-            setSubmissionNotice(null);
-            setSubmissionError(null);
-          }}
-          onTogglePersona={(personaId) => {
-            setSelectedPersonaIds((current) => toggleValue(current, personaId));
-            setSubmissionNotice(null);
-            setSubmissionError(null);
-          }}
-          personas={personas}
-          selectedPersonaIds={selectedPersonaIds}
-        />
-
-        {includeGeneric ? (
-          <AddChannelBotGenericSection
-            disabled={createBotsMutation.isPending}
-            name={customName}
-            onNameChange={(value) => {
-              setHasEditedCustomName(true);
-              setCustomName(value);
-            }}
-            onPromptChange={setCustomPrompt}
-            prompt={customPrompt}
-          />
-        ) : null}
-
         {reusableAgent ? (
           <div className="pt-2">
             <AddChannelBotReuseGuard
@@ -620,21 +599,95 @@ export function AddChannelBotDialog({
           </div>
         ) : null}
 
-        {selectedCount > 0 ? (
-          <CreateAgentRespondToField
-            allowlist={respondToAllowlist}
-            disabled={createBotsMutation.isPending}
-            mode={respondTo}
-            onAllowlistChange={setRespondToAllowlist}
-            onModeChange={setRespondTo}
-          />
-        ) : null}
-
         {selectedCount === 0 ? (
           <div className="rounded-2xl border border-dashed border-border/70 bg-muted/15 px-4 py-4 text-sm text-muted-foreground">
             Pick one or more personas, or enable Generic to add a custom agent.
           </div>
         ) : null}
+
+        {/* ─── Customize (collapsed by default) ─────────────────────────── */}
+
+        <DisclosureSection label="Customize" testId="add-bot-customize-section">
+          {includeGeneric ? (
+            <AddChannelBotGenericSection
+              disabled={createBotsMutation.isPending}
+              name={customName}
+              onNameChange={(value) => {
+                setHasEditedCustomName(true);
+                setCustomName(value);
+              }}
+              onPromptChange={setCustomPrompt}
+              prompt={customPrompt}
+            />
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Enable Generic above to set a custom name and system prompt.
+            </p>
+          )}
+
+          {selectedCount > 0 ? (
+            <CreateAgentRespondToField
+              allowlist={respondToAllowlist}
+              disabled={createBotsMutation.isPending}
+              mode={respondTo}
+              onAllowlistChange={setRespondToAllowlist}
+              onModeChange={setRespondTo}
+            />
+          ) : null}
+        </DisclosureSection>
+
+        {/* ─── Advanced (collapsed by default) ──────────────────────────── */}
+
+        <DisclosureSection label="Advanced" testId="add-bot-advanced-section">
+          {resolvedBackendProviders.length > 0 ? (
+            <div className="space-y-1.5">
+              <div className="text-sm font-medium">Run on</div>
+              <select
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm"
+                disabled={createBotsMutation.isPending}
+                onChange={(e) => handleRunOnChange(e.target.value)}
+                value={runOn}
+              >
+                <option value="local">This computer</option>
+                {resolvedBackendProviders.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.id}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+
+          {isProviderMode && selectedBackendProvider ? (
+            <div className="flex gap-3 rounded-2xl border border-warning/30 bg-warning-bg px-4 py-3">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+              <p className="text-sm text-warning">
+                This provider at{" "}
+                <span className="font-mono font-medium">
+                  {selectedBackendProvider.binaryPath}
+                </span>{" "}
+                will receive your agent&apos;s private key. Only use providers
+                from trusted sources.
+              </p>
+            </div>
+          ) : null}
+
+          {probeError ? (
+            <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              Could not probe provider: {probeError}
+            </p>
+          ) : null}
+
+          {isProviderMode && probedProvider?.config_schema ? (
+            <ProviderConfigFields
+              config={providerConfig}
+              onChange={setProviderConfig}
+              schema={probedProvider.config_schema}
+            />
+          ) : null}
+        </DisclosureSection>
+
+        {/* ─── Warnings & errors ────────────────────────────────────────── */}
 
         {providersErrorMessage ? (
           <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
