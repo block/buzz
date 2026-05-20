@@ -861,6 +861,37 @@ mod tests {
         verify_hunks_at_declared_position(current, &patch).unwrap();
     }
 
+    // Multi-hunk patches: each hunk's `@@ -N @@` references line numbers in
+    // the *original* file, not in the file as modified by previous hunks. So
+    // validating each hunk's preimage against the unmodified `current_lines`
+    // at the declared position is correct — no cumulative-delta tracking
+    // needed. This test pins that property.
+    #[test]
+    fn strict_position_accepts_multi_hunk_against_original() {
+        let current = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n";
+        let patch_text = "\
+--- a/x
++++ b/x
+@@ -1,3 +1,3 @@
+ a
+-b
++B
+ c
+@@ -10,3 +10,3 @@
+ j
+-k
++K
+ l
+";
+        let patch = diffy::Patch::from_str(patch_text).unwrap();
+        verify_hunks_at_declared_position(current, &patch).unwrap();
+        // And the actual apply produces the expected result.
+        assert_eq!(
+            diffy::apply(current, &patch).unwrap(),
+            "a\nB\nc\nd\ne\nf\ng\nh\ni\nj\nK\nl\n"
+        );
+    }
+
     // Value with no trailing newline must still round-trip. `split_inclusive`
     // produces a final segment without `\n`; diffy strips `\n` from the last
     // hunk line when the patch carries `\\ No newline at end of file`. Both
