@@ -10,7 +10,10 @@ import { cn } from "@/shared/lib/cn";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
-import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
+import {
+  resolveMentionNames,
+  resolveMentionPubkeysByName,
+} from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import { MessageActionBar } from "./MessageActionBar";
 import { MessageTimestamp } from "./MessageTimestamp";
@@ -18,6 +21,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
+
+const MESSAGE_TEXT_OFFSET_PX = 54;
+const NESTED_REPLY_OFFSET_PX = 28;
 
 export const MessageRow = React.memo(
   function MessageRow({
@@ -64,6 +70,10 @@ export const MessageRow = React.memo(
       () => resolveMentionNames(message.tags, profiles),
       [profiles, message.tags],
     );
+    const mentionPubkeysByName = React.useMemo(
+      () => resolveMentionPubkeysByName(message.tags, profiles),
+      [profiles, message.tags],
+    );
 
     const imetaByUrl = React.useMemo(
       () => (message.tags ? parseImetaTags(message.tags) : undefined),
@@ -77,11 +87,21 @@ export const MessageRow = React.memo(
     );
 
     const visibleDepth = Math.min(message.depth, 6);
-    const indentPx = visibleDepth * 28;
+    const indentPx =
+      visibleDepth > 0
+        ? MESSAGE_TEXT_OFFSET_PX + (visibleDepth - 1) * NESTED_REPLY_OFFSET_PX
+        : 0;
     const depthGuideOffsets = React.useMemo(() => {
-      return Array.from(
-        { length: visibleDepth },
-        (_, index) => 14 + index * 28,
+      if (visibleDepth === 0) {
+        return [];
+      }
+
+      return Array.from({ length: visibleDepth }, (_, index) =>
+        index === 0
+          ? MESSAGE_TEXT_OFFSET_PX / 2
+          : MESSAGE_TEXT_OFFSET_PX +
+            NESTED_REPLY_OFFSET_PX / 2 +
+            (index - 1) * NESTED_REPLY_OFFSET_PX,
       );
     }, [visibleDepth]);
     const getTag = (name: string) =>
@@ -119,6 +139,7 @@ export const MessageRow = React.memo(
               content={message.body}
               imetaByUrl={imetaByUrl}
               mentionNames={mentionNames}
+              mentionPubkeysByName={mentionPubkeysByName}
               searchQuery={searchQuery}
               tight
             />
@@ -128,12 +149,8 @@ export const MessageRow = React.memo(
 
     const isThreadReplyLayout = layoutVariant === "thread-reply";
     const guideBleedPx = isThreadReplyLayout ? 4 : 0;
-    const avatarSizeClass = isThreadReplyLayout
-      ? "!h-5 !w-5 !rounded-md"
-      : "!h-9 !w-9";
-    const avatarButtonRadiusClass = isThreadReplyLayout
-      ? "rounded-md"
-      : "rounded-xl";
+    const avatarSizeClass = "!h-9 !w-9";
+    const avatarButtonRadiusClass = "rounded-xl";
 
     const respondToDotColor =
       message.respondTo === "anyone"
@@ -283,7 +300,7 @@ export const MessageRow = React.memo(
         <article
           className={cn(
             "group/message relative rounded-2xl px-2 py-1 transition-colors",
-            isThreadReplyLayout ? "space-y-1" : "flex items-start gap-2.5",
+            "flex items-start gap-2.5",
             highlighted ? "bg-primary/10 ring-1 ring-primary/30" : "",
           )}
           data-message-id={message.id}
@@ -291,33 +308,43 @@ export const MessageRow = React.memo(
         >
           {isThreadReplyLayout ? (
             <>
-              <div className="flex min-w-0 items-baseline gap-1.5">
-                {message.pubkey ? (
-                  <UserProfilePopover
-                    pubkey={message.pubkey}
-                    role={message.role}
-                    botIdenticonValue={message.author}
+              {message.pubkey ? (
+                <UserProfilePopover
+                  pubkey={message.pubkey}
+                  role={message.role}
+                  botIdenticonValue={message.author}
+                >
+                  <button
+                    className={cn(
+                      "flex shrink-0 items-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      avatarButtonRadiusClass,
+                    )}
+                    type="button"
                   >
-                    <button
-                      className={cn(
-                        "flex shrink-0 items-start gap-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                        avatarButtonRadiusClass,
-                      )}
-                      type="button"
+                    {avatarNode}
+                  </button>
+                </UserProfilePopover>
+              ) : (
+                <div className="flex shrink-0 items-start">{avatarNode}</div>
+              )}
+              <div className="-mt-1 min-w-0 flex-1 space-y-0">
+                <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0">
+                  {message.pubkey ? (
+                    <UserProfilePopover
+                      pubkey={message.pubkey}
+                      role={message.role}
+                      botIdenticonValue={message.author}
                     >
-                      {avatarNode}
-                      {authorNode}
-                    </button>
-                  </UserProfilePopover>
-                ) : (
-                  <>
-                    <div className="flex shrink-0 items-start">
-                      {avatarNode}
-                    </div>
-                    {authorNode}
-                  </>
-                )}
-                <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                      <button
+                        className="truncate rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        type="button"
+                      >
+                        {authorNode}
+                      </button>
+                    </UserProfilePopover>
+                  ) : (
+                    authorNode
+                  )}
                   {inlineMetadataNode}
                   {message.personaDisplayName &&
                   message.personaDisplayName !== message.author ? (
@@ -326,8 +353,8 @@ export const MessageRow = React.memo(
                     </span>
                   ) : null}
                 </div>
+                <div className="-mt-0.5">{messageBodyNode}</div>
               </div>
-              <div className="min-w-0 space-y-0.5">{messageBodyNode}</div>
             </>
           ) : (
             <>

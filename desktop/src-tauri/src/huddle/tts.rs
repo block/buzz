@@ -5,7 +5,7 @@
 //! ```text
 //! caller: pipeline.speak("Hello world. How are you?")
 //!   → bounded sync_channel (TEXT_QUEUE_DEPTH = 8)
-//!   → tts_worker thread (owns 1 Kokoro engine)
+//!   → tts_worker thread (owns 1 Pocket TTS engine)
 //!       1. Preprocess text
 //!       2. Split into sentences
 //!       3. Synthesize each sentence individually → f32 PCM
@@ -35,7 +35,7 @@ use std::{
     time::Duration,
 };
 
-use super::kokoro::{load_text_to_speech, load_voice_style, SAMPLE_RATE};
+use super::pocket::{load_text_to_speech, load_voice_style, SAMPLE_RATE, VOICE_FILE_EXT};
 use super::preprocessing::{preprocess_for_tts, split_sentences};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -48,21 +48,62 @@ const TEXT_QUEUE_DEPTH: usize = 8;
 /// How long the worker waits on the text channel before checking the shutdown flag.
 const RECV_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// Kokoro ignores denoising steps (not a diffusion model). Kept for API compat.
+/// Pocket TTS is a one-step consistency model, not diffusion. Kept for API compat.
 const SYNTH_STEPS: usize = 1;
 
 /// Synthesis speed multiplier. Slightly faster than natural speech.
 const SYNTH_SPEED: f32 = 1.05;
 
-/// Volume boost applied after synthesis — Kokoro output is normalized.
-/// Start at 1.5 and tune empirically.
-const VOLUME_BOOST: f32 = 1.5;
+/// Upper bound on per-sentence loudness normalization, in linear scale.
+/// −3 dBFS = 10^(−3/20) ≈ 0.708. This is a *ceiling*, not a floor: any
+/// sentence whose computed gain would push its peak above this is held at
+/// the ceiling, and quieter utterances under the [`MAX_GAIN`] cap may land
+/// below it. The ceiling leaves 3 dB of headroom above the loudest sample
+/// so the subsequent fade-out and any system mixer gain don't soft-clip.
+///
+/// Tyler bumped this from the previous −6 dBFS (0.501) to give Pocket TTS
+/// output some perceived loudness — the model's reference voice is quieter
+/// than Kokoro's was, and the prior target landed normal utterances around
+/// −9 dBFS once interior dynamics are accounted for.
+const TARGET_PEAK: f32 = 0.707_945_8; // 10f32.powf(-3.0 / 20.0)
 
-/// Fade in/out length in samples (8ms at 24kHz ≈ 192 samples).
-/// Eliminates clicks/pops at sentence boundaries.
-const FADE_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.008) as usize;
+/// Maximum gain applied by `normalize_for_playback`. Caps amplification on
+/// near-silent buffers so a mid-utterance pause or a malformed synth doesn't
+/// get amplified to full scale (which would surface any quantization noise).
+///
+/// Pocket TTS reference-voice output measured ~7.6% peak on a 75-character
+/// utterance (`examples/pocket_bench`); a gain of 1/0.076 ≈ 6.6 lands that
+/// sample at −6 dBFS and ≈9.3 at −3 dBFS. `8.0` covers normal utterances at
+/// the new ceiling while still catching pathological near-silent buffers
+/// (which will land at peak ≤ 0.076 × 8 = 0.61 — below the ceiling, which
+/// is the intended behaviour).
+const MAX_GAIN: f32 = 8.0;
 
-/// Sentence-by-sentence synthesis for lower TTFA (≈200ms vs ≈600ms for 3-sentence batches).
+/// Fade-out length in samples (8 ms at 24 kHz ≈ 192 samples).
+///
+/// Applied only at the *end* of each synthesised sentence to eliminate the
+/// click that would otherwise occur when a non-zero waveform terminates
+/// abruptly. **No fade-in is applied** — see `apply_fade_out` for the
+/// rationale and `examples/pocket_onset_probe.rs` for the measurement that
+/// motivated removing the leading fade.
+const FADE_OUT_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.008) as usize;
+
+/// Length of the zero-sample cushion prepended before each synthesized
+/// sentence chunk, so the OS audio device / rodio mixer has a fully-quiet
+/// ramp-up window before the real onset hits.
+///
+/// This used to be applied only before the first sentence of a whole response.
+/// That still left later sentence chunks vulnerable to first-syllable clipping
+/// when their first phoneme was soft (notably `I'm` / `I've`) and rodio crossed
+/// from an explicit silence buffer straight into non-zero speech. 20 ms ≈ 480
+/// samples is enough to cover a CoreAudio buffer turnover without being audible
+/// as latency. At sentence boundaries this lead-in is budgeted out of the
+/// existing inter-sentence pause, so it does not lengthen multi-sentence gaps.
+const SENTENCE_LEAD_IN_SAMPLES: usize = (SAMPLE_RATE as f64 * 0.020) as usize;
+
+/// Sentence-by-sentence synthesis — keeps first-sentence latency low and lets
+/// playback of sentence N overlap with synthesis of sentence N+1 (see the
+/// lookahead pipelining note in the module doc-comment above).
 const BATCH_SIZE: usize = 1;
 
 /// Silence inserted between sentences by the TTS pipeline (seconds).
@@ -87,7 +128,7 @@ pub struct TtsPipeline {
     /// Kept alive here so the Arc isn't dropped — the worker holds a clone.
     #[allow(dead_code)]
     cancel: Arc<AtomicBool>,
-    /// Voice name (e.g. "af_heart"). Stored for future voice-switching support.
+    /// Voice name (e.g. "reference_sample"). Stored for future voice-switching support.
     #[allow(dead_code)]
     voice: String,
     /// Worker thread handle — taken on drop to join cleanly.
@@ -97,8 +138,8 @@ pub struct TtsPipeline {
 impl TtsPipeline {
     /// Spawn the TTS pipeline thread using the default voice.
     ///
-    /// `model_dir` must contain the Kokoro model files:
-    ///   `model_quantized.onnx`, `tokenizer.json`, `voices/<name>.bin`
+    /// `model_dir` must contain the Pocket TTS files declared by `huddle::models`
+    /// (the five ONNX sessions, the two JSON tables, and `<voice>.wav`).
     ///
     /// `tts_active` is set to `true` while audio is playing and `false` when idle.
     /// Pass the same `Arc` to the STT pipeline to gate microphone input.
@@ -112,11 +153,13 @@ impl TtsPipeline {
         cancel: Arc<AtomicBool>,
         output_device: Option<String>,
     ) -> Result<Self, String> {
-        use super::kokoro::DEFAULT_VOICE;
+        use super::pocket::DEFAULT_VOICE;
         Self::new_with_voice(model_dir, tts_active, cancel, DEFAULT_VOICE, output_device)
     }
 
-    /// Spawn the TTS pipeline thread with a specific voice name (e.g. `"af_heart"`, `"am_michael"`).
+    /// Spawn the TTS pipeline thread with a specific voice name. Today only the
+    /// bundled default voice (see `pocket::DEFAULT_VOICE`) is shipped; other
+    /// names will surface a clear error from `load_voice_style`.
     pub fn new_with_voice(
         model_dir: PathBuf,
         tts_active: Arc<AtomicBool>,
@@ -204,14 +247,14 @@ fn tts_worker(
     cancel: Arc<AtomicBool>,
     output_device: Option<String>,
 ) {
-    // ── 1. Initialise Kokoro engine ───────────────────────────────────────────
+    // ── 1. Initialise TTS engine ──────────────────────────────────────────────
     let model_dir_str = model_dir.to_string_lossy().to_string();
 
-    let mut engine = match load_text_to_speech(&model_dir_str) {
+    let engine = match load_text_to_speech(&model_dir_str) {
         Ok(e) => e,
         Err(e) => {
             eprintln!(
-                "sprout-desktop: TTS Kokoro init failed (model_dir={}): {e}. TTS disabled.",
+                "sprout-desktop: TTS engine init failed (model_dir={}): {e}. TTS disabled.",
                 model_dir.display()
             );
             drain_until_shutdown(text_rx, &shutdown);
@@ -220,7 +263,7 @@ fn tts_worker(
     };
 
     // ── 2. Load voice style ───────────────────────────────────────────────────
-    let voice_path = model_dir.join(format!("{voice_name}.bin"));
+    let voice_path = model_dir.join(format!("{voice_name}.{VOICE_FILE_EXT}"));
     let style = match load_voice_style(&voice_path) {
         Ok(s) => s,
         Err(e) => {
@@ -234,9 +277,9 @@ fn tts_worker(
 
     // ── 2b. Warmup inference ─────────────────────────────────────────────────
     // The first ONNX inference on any session is significantly slower than
-    // subsequent ones — it triggers JIT compilation, memory pool allocation,
-    // and (on CoreML) lazy model compilation. Run a short dummy synthesis and
-    // discard the output so the first real utterance runs at warm-session speed.
+    // subsequent ones — it can trigger native session initialization, memory
+    // pool allocation, and graph-specific caches. Run a short dummy synthesis
+    // and discard the output so the first real utterance runs at warm-session speed.
     {
         let t = std::time::Instant::now();
         match engine.synth_chunk("warmup", "en", &style, SYNTH_STEPS, SYNTH_SPEED) {
@@ -368,17 +411,23 @@ fn tts_worker(
 
             match engine.synth_chunk(text, "en", &style, SYNTH_STEPS, SYNTH_SPEED) {
                 Ok(samples) if !samples.is_empty() => {
-                    let mut boosted: Vec<f32> = samples
-                        .iter()
-                        .map(|&s| (s * VOLUME_BOOST).clamp(-1.0, 1.0))
-                        .collect();
-                    apply_fades(&mut boosted);
-                    player.append(SamplesBuffer::new(channels, rate, boosted));
-                    // Insert inter-sentence silence after each synthesized chunk.
-                    player.append(SamplesBuffer::new(channels, rate, silence_buf.clone()));
-                    if first_append {
+                    let mut boosted = normalize_for_playback(samples);
+                    // Fade-out only — fading-in would attenuate the consonant
+                    // onset (see `apply_fade_out` docstring + the
+                    // 2026-05-18 "first little sound is missing" regression).
+                    apply_fade_out(&mut boosted);
+
+                    // Build one contiguous buffer per synthesized sentence:
+                    // lead-in cushion + audio + trailing gap. Keeping this as
+                    // a single rodio source preserves the original queue/drain
+                    // semantics (one append per sentence) while still giving
+                    // every chunk a quiet device warm-up window.
+                    let was_first = first_append;
+                    let buf =
+                        build_sentence_append_buffer(&mut first_append, boosted, silence_buf.len());
+                    player.append(SamplesBuffer::new(channels, rate, buf));
+                    if was_first {
                         tts_active.store(true, Ordering::Release);
-                        first_append = false;
                     }
                 }
                 Ok(_) => {}
@@ -439,21 +488,94 @@ fn handle_cancel_or_shutdown(
     false
 }
 
-/// Apply a short linear fade-in at the start and fade-out at the end of `samples`.
+/// Per-sentence peak normalization. Scales the buffer so its loudest sample
+/// lands at `TARGET_PEAK` (−6 dBFS), capped at `MAX_GAIN` to avoid amplifying
+/// near-silent buffers into quantization noise. Returns the input unchanged on
+/// empty input or pure-silence input.
 ///
-/// Uses `FADE_SAMPLES` (8ms) or half the buffer length, whichever is smaller.
-/// Eliminates clicks/pops at sentence boundaries.
-fn apply_fades(samples: &mut Vec<f32>) {
-    let len = samples.len();
-    let fade = FADE_SAMPLES.min(len / 2);
-    // Fade in: ramp from 0 → 1 over `fade` samples.
-    for i in 0..fade {
-        samples[i] *= i as f32 / fade as f32;
+/// Why normalize per-sentence rather than apply a fixed boost: Pocket TTS
+/// reference-voice output measured ~7.6% peak on one utterance, but per-
+/// sentence peak distribution isn't known in advance and may vary with text
+/// and any future voice swap. A fixed multiplier either clips loud sentences
+/// or under-amplifies quiet ones; normalization adapts.
+fn normalize_for_playback(samples: Vec<f32>) -> Vec<f32> {
+    let peak = samples.iter().fold(0.0_f32, |acc, &s| acc.max(s.abs()));
+    if peak == 0.0 {
+        return samples;
     }
-    // Fade out: ramp from 1 → 0 over the last `fade` samples.
+    let gain = (TARGET_PEAK / peak).min(MAX_GAIN);
+    samples
+        .into_iter()
+        .map(|s| (s * gain).clamp(-1.0, 1.0))
+        .collect()
+}
+
+/// Apply a short linear fade-out at the *end* of `samples`.
+///
+/// Uses `FADE_OUT_SAMPLES` (8 ms) or half the buffer length, whichever is
+/// smaller. Eliminates the click that occurs when a non-zero waveform
+/// terminates abruptly at a sentence boundary.
+///
+/// # Why no fade-in
+///
+/// An earlier revision (pre 2026-05) symmetrically faded *in* over the same
+/// 8 ms window. That swallowed the leading consonant attack on every
+/// sentence — Pocket TTS produces real audio energy inside the first
+/// millisecond (RMS ≈ 0.02, peak ≈ 0.03 measured across four prompts in
+/// `examples/pocket_onset_probe.rs`), and a linear 0→1 ramp over 192 samples
+/// scales those onset samples by ≤50 % for the first ~4 ms. The result was
+/// the "first little sound or two is missing" regression heard on
+/// 2026-05-18.
+///
+/// The first sample of Pocket output measures ≈ 0.0018 (≈ −54 dBFS) — well
+/// below the threshold at which a DC-jump would be audible as a click — so
+/// no fade-in is needed. The OS audio device gets its quiet ramp-up window
+/// from `SENTENCE_LEAD_IN_SAMPLES` instead, inserted as pure silence before
+/// each sentence buffer.
+fn apply_fade_out(samples: &mut [f32]) {
+    let len = samples.len();
+    let fade = FADE_OUT_SAMPLES.min(len / 2);
     for i in 0..fade {
         samples[len - 1 - i] *= i as f32 / fade as f32;
     }
+}
+
+/// Build the single buffer appended to the rodio `Player` for one synthesised
+/// sentence.
+///
+/// Every sentence chunk gets a short lead-in pad immediately before its audio.
+/// This matters for chunks that start with soft first phonemes (`I'm`, `I've`):
+/// the sacrificial-prefix trim intentionally returns audio whose first sample is
+/// already speech, so the playback layer must provide the device/mixer cushion.
+/// To keep the audible gap unchanged, the trailing silence after this chunk is
+/// shortened by the same amount (`silence_buf_len - SENTENCE_LEAD_IN_SAMPLES`):
+/// sentence N contributes 80 ms of post-speech silence and sentence N+1
+/// contributes the remaining 20 ms of pre-speech cushion.
+///
+/// The lead-in, audio, and trailing silence are concatenated into one
+/// `SamplesBuffer` before appending. This keeps rodio's queue shape at one
+/// tracked source per synthesized sentence, avoiding source-boundary/drain
+/// regressions from enqueueing the lead-in, audio, and tail as separate sounds.
+///
+/// `first_append` is still accepted and flipped on the first call because the
+/// worker uses it to decide when actual playback has been queued and when it is
+/// safe to set `tts_active` for echo gating.
+fn build_sentence_append_buffer(
+    first_append: &mut bool,
+    boosted: Vec<f32>,
+    silence_buf_len: usize,
+) -> Vec<f32> {
+    if *first_append {
+        *first_append = false;
+    }
+
+    let trailing_silence_len = silence_buf_len.saturating_sub(SENTENCE_LEAD_IN_SAMPLES);
+    let mut buf =
+        Vec::with_capacity(SENTENCE_LEAD_IN_SAMPLES + boosted.len() + trailing_silence_len);
+    buf.extend(std::iter::repeat_n(0.0_f32, SENTENCE_LEAD_IN_SAMPLES));
+    buf.extend(boosted);
+    buf.extend(std::iter::repeat_n(0.0_f32, trailing_silence_len));
+    buf
 }
 
 // drain_until_shutdown lives in super (huddle/mod.rs) — shared with stt.rs.
@@ -1001,28 +1123,241 @@ mod tests {
         );
     }
 
-    // ── apply_fades tests ─────────────────────────────────────────────────────
+    // ── apply_fade_out tests ──────────────────────────────────────────────────
 
+    /// The fade-out half of the old `apply_fades`: last sample is silenced
+    /// and the ramp is monotonic. Mid-buffer must be untouched.
     #[test]
-    fn apply_fades_short_buffer() {
+    fn apply_fade_out_short_buffer() {
         let mut samples = vec![1.0f32; 10];
-        apply_fades(&mut samples);
-        assert_eq!(samples[0], 0.0);
-        assert_eq!(samples[9], 0.0);
-        assert!(samples[5] > 0.5);
+        apply_fade_out(&mut samples);
+        assert_eq!(samples[9], 0.0, "last sample should be silenced");
+        assert!(samples[5] > 0.5, "mid-buffer should be near-untouched");
+    }
+
+    /// REGRESSION (2026-05-18): the *first* samples must NOT be attenuated.
+    /// An earlier `apply_fades` symmetrically faded in over 8 ms which
+    /// swallowed the consonant onset of every sentence.
+    /// Lock in: samples[0..FADE_OUT_SAMPLES] are byte-equal to input.
+    #[test]
+    fn apply_fade_out_does_not_touch_leading_samples() {
+        // Input long enough that fade window doesn't overlap (≫ 2× fade).
+        let n = FADE_OUT_SAMPLES * 4;
+        let input: Vec<f32> = (0..n).map(|i| 0.5 + (i as f32) * 1e-4).collect();
+        let mut samples = input.clone();
+        apply_fade_out(&mut samples);
+        for i in 0..FADE_OUT_SAMPLES {
+            assert_eq!(
+                samples[i], input[i],
+                "leading sample {i} must not be attenuated (was {} → {})",
+                input[i], samples[i]
+            );
+        }
+        // And the trailing fade still works.
+        assert_eq!(samples[n - 1], 0.0);
     }
 
     #[test]
-    fn apply_fades_empty_buffer() {
+    fn apply_fade_out_empty_buffer() {
         let mut samples: Vec<f32> = vec![];
-        apply_fades(&mut samples);
+        apply_fade_out(&mut samples);
         assert!(samples.is_empty());
     }
 
     #[test]
-    fn apply_fades_single_sample() {
+    fn apply_fade_out_single_sample() {
+        // fade = min(FADE_OUT_SAMPLES, len/2) = 0, so nothing changes.
         let mut samples = vec![1.0f32];
-        apply_fades(&mut samples);
+        apply_fade_out(&mut samples);
         assert_eq!(samples[0], 1.0);
+    }
+
+    /// Sanity-check the per-sentence cushion length: 20 ms at 24 kHz must
+    /// land at exactly 480 samples. This is a const computation, so the
+    /// real value of this test is documenting *why* 20 ms was chosen — it
+    /// covers a typical CoreAudio buffer turnover (256–1024 samples)
+    /// without being audible as user-facing latency.
+    #[test]
+    fn sentence_lead_in_is_sane() {
+        assert_eq!(SENTENCE_LEAD_IN_SAMPLES, 480, "20 ms × 24 kHz");
+    }
+
+    // ── build_sentence_append_buffer tests ───────────────────────────────────
+
+    /// REGRESSION: every chunk needs an onset cushion; trimmed short chunks
+    /// can start with speech at sample 0.
+    #[test]
+    fn lead_in_pad_is_present_for_every_sentence_chunk() {
+        const SENTENCE_AUDIO_LEN: usize = 1000;
+        const SILENCE_BUF_LEN: usize = 2400; // 100 ms at 24 kHz, like production
+        const N_SENTENCES: usize = 5;
+
+        let mut first = true;
+
+        for _ in 0..N_SENTENCES {
+            let buf = build_sentence_append_buffer(
+                &mut first,
+                vec![0.5_f32; SENTENCE_AUDIO_LEN],
+                SILENCE_BUF_LEN,
+            );
+
+            assert_eq!(buf.len(), SENTENCE_AUDIO_LEN + SILENCE_BUF_LEN);
+            assert!(
+                buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0),
+                "lead-in pad must be pure silence"
+            );
+            assert!(
+                buf[SENTENCE_LEAD_IN_SAMPLES..SENTENCE_LEAD_IN_SAMPLES + SENTENCE_AUDIO_LEN]
+                    .iter()
+                    .all(|&s| s == 0.5),
+                "sentence audio must immediately follow the lead-in"
+            );
+            assert!(
+                buf[SENTENCE_LEAD_IN_SAMPLES + SENTENCE_AUDIO_LEN..]
+                    .iter()
+                    .all(|&s| s == 0.0),
+                "trailing gap must be pure silence"
+            );
+        }
+
+        assert!(!first, "first_append flag must be cleared after first call");
+    }
+
+    /// `first_append` still flips on the first call for `tts_active` gating.
+    #[test]
+    fn build_sentence_append_buffer_flips_first_append() {
+        let mut first = true;
+        let _ = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400);
+        assert!(!first, "first call must flip the flag");
+
+        // Subsequent call: still has a per-sentence lead-in, flag stays false.
+        let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400);
+        assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
+        assert!(!first);
+    }
+
+    /// Leading silence is exactly the lead-in; no pre-audio gap is double-counted.
+    #[test]
+    fn first_sentence_leading_silence_is_exactly_lead_in() {
+        let mut first = true;
+        let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400);
+        assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
+        assert_eq!(buf[SENTENCE_LEAD_IN_SAMPLES], 0.5);
+    }
+
+    /// Tail silence plus the next lead-in preserves the 100 ms sentence gap.
+    #[test]
+    fn sentence_gap_budget_is_preserved() {
+        let mut first = true;
+        let silence_buf_len = 2400;
+        let first_buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], silence_buf_len);
+        let second_buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], silence_buf_len);
+
+        let first_tail = &first_buf[SENTENCE_LEAD_IN_SAMPLES + 100..];
+        let second_lead = &second_buf[..SENTENCE_LEAD_IN_SAMPLES];
+        assert_eq!(first_tail.len(), silence_buf_len - SENTENCE_LEAD_IN_SAMPLES);
+        assert_eq!(second_lead.len(), SENTENCE_LEAD_IN_SAMPLES);
+        assert_eq!(first_tail.len() + second_lead.len(), silence_buf_len);
+    }
+
+    /// Regression guard: one contiguous rodio source per synthesized sentence.
+    #[test]
+    fn sentence_append_buffer_is_one_contiguous_source() {
+        let mut first = true;
+        let buf = build_sentence_append_buffer(&mut first, vec![0.5; 100], 2400);
+
+        assert_eq!(buf.len(), 2400 + 100);
+        assert!(buf[..SENTENCE_LEAD_IN_SAMPLES].iter().all(|&s| s == 0.0));
+        assert!(
+            buf[SENTENCE_LEAD_IN_SAMPLES..SENTENCE_LEAD_IN_SAMPLES + 100]
+                .iter()
+                .all(|&s| s == 0.5)
+        );
+    }
+
+    // ── normalize_for_playback tests ──────────────────────────────────────────
+
+    /// A moderately quiet buffer (peak comfortably under MAX_GAIN reach of
+    /// TARGET_PEAK) is scaled up to exactly TARGET_PEAK. With TARGET_PEAK at
+    /// −3 dBFS (0.708) and MAX_GAIN at 8.0, the gain saturation point is
+    /// peak = 0.708 / 8.0 ≈ 0.0885 — so a 0.1-peak buffer is in the linear
+    /// region and gets normalized cleanly.
+    #[test]
+    fn normalize_for_playback_hits_target_on_quiet_buffer() {
+        // peak 0.1 ⇒ ideal gain 7.08, under MAX_GAIN (8.0), so target hit.
+        let mut input: Vec<f32> = (0..100).map(|i| 0.1 * (i as f32 / 100.0)).collect();
+        input.push(0.1); // ensure exact peak
+        let out = normalize_for_playback(input);
+        let peak = out.iter().fold(0.0_f32, |a, &s| a.max(s.abs()));
+        assert!(
+            (peak - TARGET_PEAK).abs() < 1e-3,
+            "expected peak ~{TARGET_PEAK}, got {peak}"
+        );
+    }
+
+    /// A buffer whose ideal gain exceeds MAX_GAIN gets clamped — the peak
+    /// lands at input_peak × MAX_GAIN, below TARGET_PEAK. With the new
+    /// −3 dBFS target this captures the Pocket-bench-typical case
+    /// (input peak 0.076 → ideal gain ≈ 9.3 > MAX_GAIN, so we clamp).
+    #[test]
+    fn normalize_for_playback_clamps_at_max_gain_below_target() {
+        let mut input: Vec<f32> = (0..100).map(|i| 0.076 * (i as f32 / 100.0)).collect();
+        input.push(0.076);
+        let out = normalize_for_playback(input);
+        let peak = out.iter().fold(0.0_f32, |a, &s| a.max(s.abs()));
+        let expected = 0.076 * MAX_GAIN;
+        assert!(
+            (peak - expected).abs() < 1e-3,
+            "expected peak ~{expected}, got {peak}"
+        );
+        assert!(
+            peak < TARGET_PEAK,
+            "clamped peak {peak} should be below TARGET_PEAK {TARGET_PEAK}"
+        );
+    }
+
+    /// A near-silent buffer would need a huge gain to reach TARGET_PEAK;
+    /// `MAX_GAIN` caps the amplification so we don't bring quantization noise
+    /// up to full scale.
+    #[test]
+    fn normalize_for_playback_caps_gain_on_near_silent_buffer() {
+        // peak 0.001 ⇒ ideal gain 501; MAX_GAIN caps it at 8.0, so the
+        // resulting peak is 0.001 × 8.0 = 0.008, NOT TARGET_PEAK.
+        let input = vec![0.001_f32, -0.001, 0.001];
+        let out = normalize_for_playback(input);
+        let peak = out.iter().fold(0.0_f32, |a, &s| a.max(s.abs()));
+        assert!(
+            (peak - 0.008).abs() < 1e-6,
+            "expected peak 0.008 (gain-capped), got {peak}"
+        );
+        assert!(peak < TARGET_PEAK);
+    }
+
+    /// A pure-silence buffer is returned unchanged — no division by zero, no
+    /// amplification of nothing.
+    #[test]
+    fn normalize_for_playback_silence_is_unchanged() {
+        let input = vec![0.0_f32; 16];
+        let out = normalize_for_playback(input);
+        assert!(out.iter().all(|&s| s == 0.0));
+        assert_eq!(out.len(), 16);
+    }
+
+    /// Empty input round-trips to empty output. No panic on `peak == 0` path.
+    #[test]
+    fn normalize_for_playback_empty_buffer() {
+        let out = normalize_for_playback(Vec::new());
+        assert!(out.is_empty());
+    }
+
+    /// A buffer that would otherwise clip after gain is hard-clamped to ±1.0.
+    /// Belt-and-suspenders: `gain * peak` shouldn't exceed TARGET_PEAK by
+    /// construction, but the `.clamp(-1.0, 1.0)` is still asserted here in case
+    /// future changes loosen TARGET_PEAK or MAX_GAIN past full scale.
+    #[test]
+    fn normalize_for_playback_clamps_to_full_scale() {
+        let input = vec![10.0_f32, -10.0]; // already past full scale before gain
+        let out = normalize_for_playback(input);
+        assert!(out.iter().all(|&s| s.abs() <= 1.0));
     }
 }

@@ -2,6 +2,7 @@
 
 mod acp;
 mod config;
+mod engram_fetch;
 mod filter;
 mod observer;
 mod pool;
@@ -967,7 +968,7 @@ async fn tokio_main() -> Result<()> {
             _ => {} // anyone/nobody don't depend on owner
         }
     }
-    let owner_cache = OwnerCache::new(startup_owner);
+    let owner_cache = OwnerCache::new(startup_owner.clone());
 
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
@@ -1084,7 +1085,19 @@ async fn tokio_main() -> Result<()> {
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
+        agent_keys: config.keys.clone(),
+        agent_owner_pubkey: startup_owner
+            .as_deref()
+            .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
+        memory_enabled: config.memory_enabled,
     });
+
+    if !config.memory_enabled {
+        tracing::info!(
+            target: "engram::core",
+            "NIP-AE core memory injection disabled by default (enable with --memory / SPROUT_ACP_MEMORY)"
+        );
+    }
 
     // ── Step 6: Heartbeat timer ───────────────────────────────────────────────
     let mut heartbeat = if config.heartbeat_interval_secs > 0 {
@@ -2748,6 +2761,7 @@ mod build_mcp_servers_tests {
             max_turns_per_session: 0,
             presence_enabled: true,
             typing_enabled: true,
+            memory_enabled: false,
             model: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,

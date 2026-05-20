@@ -70,6 +70,7 @@ export function AppShellOverlays({
           <SearchDialog
             channels={channels}
             currentPubkey={currentPubkey}
+            onOpenChannel={onSelectChannel}
             onOpenResult={onOpenSearchResult}
             onOpenChange={onSearchOpenChange}
             open={true}

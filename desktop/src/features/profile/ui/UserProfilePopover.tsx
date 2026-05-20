@@ -19,6 +19,7 @@ import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 type UserProfilePopoverProps = {
   children: React.ReactNode;
   pubkey: string;
+  triggerElement?: "div" | "span";
   /** When set to "bot", a BotIdenticon badge renders next to the display name. */
   role?: string;
   /** Value used to generate the BotIdenticon glyph (typically the author name). */
@@ -58,6 +59,7 @@ function truncatePubkey(pubkey: string) {
 export function UserProfilePopover({
   children,
   pubkey,
+  triggerElement = "div",
   role,
   botIdenticonValue,
 }: UserProfilePopoverProps) {
@@ -130,11 +132,12 @@ export function UserProfilePopover({
     return () => clearHoverTimer();
   }, [clearHoverTimer]);
 
+  const TriggerElement = triggerElement;
+
   return (
     <Popover onOpenChange={setOpen} open={open}>
       <PopoverAnchor asChild>
-        {/* biome-ignore lint/a11y/useSemanticElements: wrapper div for hover/click behavior */}
-        <div
+        <TriggerElement
           role="button"
           tabIndex={0}
           onClick={handleTriggerClick}
@@ -152,7 +155,7 @@ export function UserProfilePopover({
           className="inline-flex"
         >
           {children}
-        </div>
+        </TriggerElement>
       </PopoverAnchor>
       <PopoverContent
         align="start"

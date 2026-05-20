@@ -1,10 +1,10 @@
-//! Model download manager for STT (Parakeet TDT-CTC 110M) and TTS (Kokoro) models.
+//! Model download manager for STT (Parakeet TDT-CTC 110M) and TTS (Pocket TTS) models.
 //!
 //! Mental model:
 //!   app launch → start_stt_download (background) → ~/.sprout/models/parakeet-tdt-ctc-110m-en/
-//!   app launch → start_kokoro_download (background) → ~/.sprout/models/kokoro/
+//!   app launch → start_tts_download (background) → ~/.sprout/models/pocket-tts/
 //!   STT pipeline → is_stt_ready() → stt_model_dir() → run inference
-//!   TTS pipeline → is_kokoro_ready() → kokoro_model_dir() → run synthesis
+//!   TTS pipeline → is_tts_ready() → tts_model_dir() → run synthesis
 //!
 //! Models are downloaded once and cached. A version manifest (`.sprout-model-manifest`)
 //! is written alongside model files — if the on-disk version doesn't match the
@@ -38,18 +38,38 @@ use sha2::{Digest, Sha256};
 /// Computed from a known-good download. Update when upgrading model versions.
 const STT_ARCHIVE_SHA256: &str = "17f945007b52ccd8b7200ffc7c5652e9e8e961dfdf479cefcabd06cf5703630b";
 
-/// SHA-256 hashes for individual Kokoro model files.
-/// Computed from known-good downloads. Update when upgrading model versions.
+/// HuggingFace base URL for the sherpa-onnx Pocket TTS int8 repackage.
 ///
-/// model.onnx (model_q8f16.onnx, 86 MB):
-///   curl -sL "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_q8f16.onnx" | shasum -a 256
+/// Pinned to commit e715955cf50d18d919d37231513c0e914b83661a
+/// (2026-02-10) for reproducible downloads.
+const POCKET_HF_BASE: &str =
+    "https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-int8-2026-01-26/resolve/e715955cf50d18d919d37231513c0e914b83661a";
+
+/// Reference voice WAV: "Mary (f, conversation)" from the Kyutai TTS demo
+/// voice set — VCTK speaker p333, ai-coustics-enhanced. Pinned to
+/// kyutai/tts-voices commit 323332d33f997de8394f24a193e1a76df720e01a.
+///
+/// Mapping comes from the speaker dropdown on <https://kyutai.org/tts>:
+/// the Pocket TTS preset "Mary (f, conversation)" maps to
+/// `vctk/p333_023_enhanced.wav`. We rename to `reference_sample.wav` on disk
+/// so the rest of the engine code stays voice-agnostic; the friendly label
+/// only matters for attribution and PR-body docs.
+const POCKET_REFERENCE_WAV_URL: &str =
+    "https://huggingface.co/kyutai/tts-voices/resolve/323332d33f997de8394f24a193e1a76df720e01a/vctk/p333_023_enhanced.wav";
+
+/// SHA-256 hashes for individual Pocket TTS model files.
+/// Computed from known-good pinned downloads. Update when upgrading model versions.
 #[rustfmt::skip]
-const KOKORO_FILE_HASHES: &[(&str, &str)] = &[
-    ("model.onnx",    "04c658aec1b6008857c2ad10f8c589d4180d0ec427e7e6118ceb487e215c3cd0"),
-    ("af_heart.bin",  "d583ccff3cdca2f7fae535cb998ac07e9fcb90f09737b9a41fa2734ec44a8f0b"),
-    ("us_gold.json",   "dc414872a49a28ae6c141463d502fd945f3b2fde040484fdc47d00cc4612686f"),
-    ("us_silver.json", "de8f67be911bb6c659187b4a65fd966b6a30e56350e0f790d763210b053ac475"),
-    ("cmudict.dict",   "81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22"),
+const TTS_FILE_HASHES: &[(&str, &str)] = &[
+    ("decoder.int8.onnx",     "12b0857402d31aead94df19d6783b4350d1f740e811f3a3202c70ad89ae11eea"),
+    ("encoder.onnx",          "e8f2f6d301ffb96e398b138a7dc6d3038622d236044636b73d920bab85890260"),
+    ("lm_flow.int8.onnx",     "8d627d235c44a597da908e1085ebe241cbbe358964c502c5a5063d18851a5529"),
+    ("lm_main.int8.onnx",     "bfc0c7e7e3d72864fa3bb2ee499f62f21ddc1474b885f5f3ca570f8be73e787e"),
+    ("text_conditioner.onnx", "0b84e837d7bfaf2c896627b03e3f080320309f37f4fc7df7698c644f7ba5e6b1"),
+    ("vocab.json",            "6fb646346cf931016f70c4921aab0900ce7a304b893cb02135c74e294abfea01"),
+    ("token_scores.json",     "5be2f278caf9b9800741f0fd82bff677f4943ec764c356f907213434b622d958"),
+    ("LICENSE",               "fe7b4ce83b8381cc5b216bbb4af73c570688d1b819c73bbaed8ca401f4677cd6"),
+    ("reference_sample.wav",  "a35b0468382218e9f37a9a7494d1e4b74deaf18d7ced22265b4e325bb55c183f"),
 ];
 
 // ── Model versioning ──────────────────────────────────────────────────────────
@@ -65,8 +85,13 @@ const KOKORO_FILE_HASHES: &[(&str, &str)] = &[
 /// honest (each version tag identifies one specific set of model bytes).
 const STT_MODEL_VERSION: &str = "2";
 
-/// Model manifest version for Kokoro. Increment when upgrading model files.
-const KOKORO_MODEL_VERSION: &str = "1";
+/// Model manifest version for Pocket TTS. Increment when upgrading model files.
+/// Bumped "1" → "2" when the bundled reference voice changed from KevinAHM's
+/// anonymous 16 kHz sample to Mary (VCTK p333, 32 kHz, ai-coustics-enhanced)
+/// from kyutai/tts-voices. The hash mismatch on `reference_sample.wav` would
+/// fail readiness on its own, but the manifest bump makes the re-download
+/// reason explicit and skips the failing-then-re-fetching transient state.
+const TTS_MODEL_VERSION: &str = "2";
 
 /// Filename for the version manifest written alongside model files.
 const MANIFEST_FILENAME: &str = ".sprout-model-manifest";
@@ -76,8 +101,8 @@ const MANIFEST_FILENAME: &str = ".sprout-model-manifest";
 /// Maximum expected STT archive size (200 MB — actual is ~100 MB).
 const MAX_STT_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
 
-/// Maximum expected Kokoro file size (200 MB per file — model is 86 MB).
-const MAX_KOKORO_FILE_BYTES: u64 = 200 * 1024 * 1024;
+/// Maximum expected Pocket TTS file size (200 MB per file — largest is ~73 MB).
+const MAX_TTS_FILE_BYTES: u64 = 200 * 1024 * 1024;
 
 /// NVIDIA Parakeet TDT-CTC 110M (English, int8) — packaged for sherpa-onnx by
 /// k2-fsa. Single ONNX file (CTC head) + tokens.txt. Avg WER ~7.5% across
@@ -125,35 +150,59 @@ Provided \"AS IS\", without warranty of any kind, express or implied. See the
 license text for full warranty disclaimer.
 ";
 
-// ── Kokoro TTS model ─────────────────────────────────────────────────────────
-
-/// HuggingFace base URL for Kokoro ONNX model files.
-const KOKORO_HF_BASE: &str =
-    "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main";
-
-/// Misaki G2P lexicons — pinned to commit fba1236 for reproducibility.
-/// Gold = curated pronunciations. Silver = broader coverage (93K words).
-/// Both are needed: gold is checked first, silver catches common words gold misses.
-const KOKORO_LEXICON_GOLD_URL: &str =
-    "https://raw.githubusercontent.com/hexgrad/misaki/fba1236/misaki/data/us_gold.json";
-const KOKORO_LEXICON_SILVER_URL: &str =
-    "https://raw.githubusercontent.com/hexgrad/misaki/fba1236/misaki/data/us_silver.json";
-
-/// CMU Pronouncing Dictionary — 135K entries including inflected forms.
-/// BSD 2-Clause license (Carnegie Mellon University). Compatible with Apache-2.0.
-const KOKORO_CMUDICT_URL: &str =
-    "https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict";
+// ── Pocket TTS model ──────────────────────────────────────────────────────────
 
 /// Final directory name under `~/.sprout/models/`.
-const KOKORO_MODEL_DIR_NAME: &str = "kokoro";
+const TTS_MODEL_DIR_NAME: &str = "pocket-tts";
 
-/// All files that must be present for Kokoro to be considered ready.
-const KOKORO_EXPECTED_FILES: &[&str] = &[
-    "model.onnx",
-    "af_heart.bin",
-    "us_gold.json",
-    "us_silver.json",
-    "cmudict.dict",
+/// Attribution sidecar written next to the Pocket TTS model files.
+const TTS_LICENSE_FILE_NAME: &str = "MODEL_LICENSE.txt";
+
+/// CC-BY-4.0 §3(a)(1) attribution block for Pocket TTS, its ONNX packaging,
+/// and the bundled reference voice WAV.
+const TTS_LICENSE_TEXT: &str = "\
+Pocket TTS
+© Kyutai.
+
+Licensed under the Creative Commons Attribution 4.0 International License
+(CC-BY-4.0). License text: https://creativecommons.org/licenses/by/4.0/
+
+Original model by Kyutai: https://huggingface.co/kyutai/pocket-tts
+Paper: Charles, Roebel, et al., Pocket TTS (arXiv:2509.06926).
+Mimi neural codec by Kyutai is bundled as part of the model.
+
+ONNX export by KevinAHM: https://huggingface.co/KevinAHM/pocket-tts-onnx
+Sherpa-onnx repackage by csukuangfj / k2-fsa:
+https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-int8-2026-01-26
+
+Bundled reference voice (reference_sample.wav):
+\"Mary (f, conversation)\" preset from the Kyutai TTS demo voice catalogue
+(https://kyutai.org/tts), distributed via
+https://huggingface.co/kyutai/tts-voices as `vctk/p333_023_enhanced.wav`.
+Original recording from the Voice Cloning Toolkit (VCTK) corpus, speaker p333:
+https://datashare.ed.ac.uk/handle/10283/3443 (CC-BY-4.0).
+Recording enhancement (denoise/dereverb) by ai-coustics:
+https://ai-coustics.com/
+
+Sprout ships all ONNX/model artifacts and the reference voice WAV unmodified,
+renamed only by placement in the local model directory.
+
+Provided \"AS IS\", without warranty of any kind, express or implied. See the
+license text for full warranty disclaimer.
+";
+
+/// All files that must be present for Pocket TTS to be considered ready.
+const TTS_EXPECTED_FILES: &[&str] = &[
+    "decoder.int8.onnx",
+    "encoder.onnx",
+    "lm_flow.int8.onnx",
+    "lm_main.int8.onnx",
+    "text_conditioner.onnx",
+    "vocab.json",
+    "token_scores.json",
+    "LICENSE",
+    "reference_sample.wav",
+    TTS_LICENSE_FILE_NAME,
 ];
 
 // ── Status types ──────────────────────────────────────────────────────────────
@@ -176,7 +225,7 @@ pub enum ModelStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceModelStatus {
     pub stt: ModelStatus,
-    pub kokoro: ModelStatus,
+    pub tts: ModelStatus,
 }
 
 // ── Safe archive extraction ───────────────────────────────────────────────────
@@ -339,7 +388,7 @@ where
 
 // ── ModelSlot ─────────────────────────────────────────────────────────────────
 
-/// Per-model state + config. `ModelManager` owns two of these (stt, kokoro).
+/// Per-model state + config. `ModelManager` owns two of these (stt, tts).
 #[derive(Clone)]
 struct ModelSlot {
     dir_name: &'static str,                  // subdir under ~/.sprout/models/
@@ -493,7 +542,7 @@ pub struct ModelManager {
     /// `~/.sprout/models/`
     models_dir: PathBuf,
     stt: ModelSlot,
-    kokoro: ModelSlot,
+    tts: ModelSlot,
 }
 
 impl ModelManager {
@@ -505,11 +554,7 @@ impl ModelManager {
         Some(Self {
             models_dir,
             stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),
-            kokoro: ModelSlot::new(
-                KOKORO_MODEL_DIR_NAME,
-                KOKORO_EXPECTED_FILES,
-                KOKORO_MODEL_VERSION,
-            ),
+            tts: ModelSlot::new(TTS_MODEL_DIR_NAME, TTS_EXPECTED_FILES, TTS_MODEL_VERSION),
         })
     }
 
@@ -532,23 +577,23 @@ impl ModelManager {
         self.stt.take_ready()
     }
 
-    // ── Kokoro accessors ──────────────────────────────────────────────────────
+    // ── TTS accessors ─────────────────────────────────────────────────────────
 
-    /// Path to the Kokoro model directory, or `None` if not ready.
-    pub fn kokoro_model_dir(&self) -> Option<PathBuf> {
-        self.kokoro.dir_if_ready(&self.models_dir)
+    /// Path to the TTS model directory, or `None` if not ready.
+    pub fn tts_model_dir(&self) -> Option<PathBuf> {
+        self.tts.dir_if_ready(&self.models_dir)
     }
-    /// `true` if all Kokoro files are present and the manifest version matches.
-    pub fn is_kokoro_ready(&self) -> bool {
-        self.kokoro.is_ready(&self.models_dir)
+    /// `true` if all TTS files are present and the manifest version matches.
+    pub fn is_tts_ready(&self) -> bool {
+        self.tts.is_ready(&self.models_dir)
     }
-    /// Current Kokoro download status.
-    pub fn kokoro_status(&self) -> ModelStatus {
-        self.kokoro.status()
+    /// Current TTS download status.
+    pub fn tts_status(&self) -> ModelStatus {
+        self.tts.status()
     }
-    /// Returns `true` once when Kokoro just became ready. Resets the flag.
-    pub fn take_kokoro_ready(&self) -> bool {
-        self.kokoro.take_ready()
+    /// Returns `true` once when TTS just became ready. Resets the flag.
+    pub fn take_tts_ready(&self) -> bool {
+        self.tts.take_ready()
     }
 
     // ── Download triggers ─────────────────────────────────────────────────────
@@ -583,14 +628,14 @@ impl ModelManager {
         }
     }
 
-    /// Start a background Kokoro download (~87 MB). No-op if already ready or downloading.
-    pub fn start_kokoro_download(&self, http_client: reqwest::Client) {
+    /// Start a background Pocket TTS download (~189 MB). No-op if already ready or downloading.
+    pub fn start_tts_download(&self, http_client: reqwest::Client) {
         let manager = self.clone();
-        self.kokoro.start_download(
+        self.tts.start_download(
             &self.models_dir,
             http_client,
-            "kokoro",
-            move |client| async move { manager.download_kokoro_model(client).await },
+            "tts",
+            move |client| async move { manager.download_tts_model(client).await },
         );
     }
 
@@ -697,40 +742,42 @@ impl ModelManager {
         Ok(())
     }
 
-    /// Download and verify the Kokoro TTS model files from HuggingFace and GitHub.
+    /// Download and verify the Pocket TTS model files from HuggingFace.
     ///
-    /// Downloads files into `~/.sprout/models/kokoro/`:
-    ///   - `model.onnx`   — Kokoro-82M mixed-precision ONNX (86 MB)
-    ///   - `af_heart.bin` — best-quality American English voice embedding (510 KB)
-    ///   - `us_gold.json` — Misaki G2P lexicon, pinned to commit fba1236 (3 MB)
+    /// Downloads files into `~/.sprout/models/pocket-tts/`:
+    ///   - five ONNX sessions (Pocket TTS + Mimi codec)
+    ///   - `vocab.json` / `token_scores.json` for sherpa-onnx text conditioning
+    ///   - upstream `LICENSE` plus Sprout's `MODEL_LICENSE.txt` attribution sidecar
+    ///   - `reference_sample.wav` as the bundled default voice
     ///
     /// Files are written to a temp directory first, then moved atomically.
-    async fn download_kokoro_model(&self, http_client: reqwest::Client) -> Result<(), String> {
+    async fn download_tts_model(&self, http_client: reqwest::Client) -> Result<(), String> {
         tokio::fs::create_dir_all(&self.models_dir)
             .await
             .map_err(|e| format!("create models dir: {e}"))?;
 
-        let temp_dir = self.models_dir.join("kokoro.tmp");
+        let temp_dir = self.models_dir.join("pocket-tts.tmp");
         fresh_temp_dir(&temp_dir).await?;
 
-        // (url, local_filename)
-        let downloads: &[(&str, &str)] = &[
-            (
-                &format!("{KOKORO_HF_BASE}/onnx/model_q8f16.onnx"),
-                "model.onnx",
-            ),
-            (
-                &format!("{KOKORO_HF_BASE}/voices/af_heart.bin"),
-                "af_heart.bin",
-            ),
-            (KOKORO_LEXICON_GOLD_URL, "us_gold.json"),
-            (KOKORO_LEXICON_SILVER_URL, "us_silver.json"),
-            (KOKORO_CMUDICT_URL, "cmudict.dict"),
+        let model_files = [
+            "decoder.int8.onnx",
+            "encoder.onnx",
+            "lm_flow.int8.onnx",
+            "lm_main.int8.onnx",
+            "text_conditioner.onnx",
+            "vocab.json",
+            "token_scores.json",
+            "LICENSE",
         ];
+        let mut downloads: Vec<(String, &'static str)> = model_files
+            .iter()
+            .map(|filename| (format!("{POCKET_HF_BASE}/{filename}"), *filename))
+            .collect();
+        downloads.push((POCKET_REFERENCE_WAV_URL.to_string(), "reference_sample.wav"));
         let total_files = downloads.len() as u32;
 
         for (i, (url, filename)) in downloads.iter().enumerate() {
-            eprintln!("sprout-desktop: downloading Kokoro {filename} from {url}");
+            eprintln!("sprout-desktop: downloading Pocket TTS {filename} from {url}");
 
             let response = fetch_url(&http_client, url, filename).await.map_err(|e| {
                 let _ = std::fs::remove_dir_all(&temp_dir);
@@ -738,12 +785,12 @@ impl ModelManager {
             })?;
 
             let dest = temp_dir.join(filename);
-            let slot = self.kokoro.clone();
+            let slot = self.tts.clone();
             let file_index = i as u32;
             let bytes = download_file(
                 response,
                 &dest,
-                MAX_KOKORO_FILE_BYTES,
+                MAX_TTS_FILE_BYTES,
                 filename,
                 |downloaded, content_length| {
                     if let Some(total) = content_length {
@@ -766,30 +813,36 @@ impl ModelManager {
             })?;
             eprintln!("sprout-desktop: downloaded {bytes} bytes ({filename}), wrote to disk");
 
-            // Verify file integrity against pinned hash.
-            if let Some(&(_, expected)) = KOKORO_FILE_HASHES.iter().find(|(n, _)| *n == *filename) {
-                let actual = sha256_file(&dest).await?;
-                if actual != expected {
-                    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
-                    return Err(format!(
-                        "Kokoro {filename} integrity check failed: expected {expected}, got {actual}"
-                    ));
-                }
+            let expected = TTS_FILE_HASHES
+                .iter()
+                .find(|(n, _)| *n == *filename)
+                .map(|(_, hash)| *hash)
+                .ok_or_else(|| format!("missing expected hash for Pocket TTS file: {filename}"))?;
+            let actual = sha256_file(&dest).await?;
+            if actual != expected {
+                let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+                return Err(format!(
+                    "Pocket TTS {filename} integrity check failed: expected {expected}, got {actual}"
+                ));
             }
 
             // Ensure progress reflects file completion even without content-length.
             let pct = (((i as u32 + 1) * 89) / total_files).min(89) as u8;
-            self.kokoro.set_status(ModelStatus::Downloading {
+            self.tts.set_status(ModelStatus::Downloading {
                 progress_percent: pct,
             });
         }
 
-        self.kokoro.set_status(ModelStatus::Downloading {
+        tokio::fs::write(temp_dir.join(TTS_LICENSE_FILE_NAME), TTS_LICENSE_TEXT)
+            .await
+            .map_err(|e| format!("write TTS model license sidecar: {e}"))?;
+
+        self.tts.set_status(ModelStatus::Downloading {
             progress_percent: 90,
         });
 
         if let Err(e) = self
-            .kokoro
+            .tts
             .verify_and_install(&self.models_dir, &temp_dir, None)
             .await
         {
@@ -798,8 +851,8 @@ impl ModelManager {
         }
 
         eprintln!(
-            "sprout-desktop: Kokoro model ready at {}",
-            self.kokoro.model_dir(&self.models_dir).display()
+            "sprout-desktop: Pocket TTS model ready at {}",
+            self.tts.model_dir(&self.models_dir).display()
         );
         Ok(())
     }
@@ -856,14 +909,37 @@ async fn cleanup_legacy_moonshine_dir(models_dir: &Path) {
     }
 }
 
-/// Path to the Kokoro model directory, or `None` if not ready.
-pub fn kokoro_model_dir() -> Option<PathBuf> {
-    global_model_manager()?.kokoro_model_dir()
+/// Path to the TTS model directory, or `None` if not ready.
+pub fn tts_model_dir() -> Option<PathBuf> {
+    global_model_manager()?.tts_model_dir()
 }
 
-/// `true` if all expected Kokoro model files are present on disk.
-pub fn is_kokoro_ready() -> bool {
+/// `true` if all expected TTS model files are present on disk.
+pub fn is_tts_ready() -> bool {
     global_model_manager()
-        .map(|m| m.is_kokoro_ready())
+        .map(|m| m.is_tts_ready())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tts_readiness_requires_license_sidecar() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let slot = ModelSlot::new(TTS_MODEL_DIR_NAME, TTS_EXPECTED_FILES, TTS_MODEL_VERSION);
+        let model_dir = temp.path().join(TTS_MODEL_DIR_NAME);
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+
+        for file in TTS_EXPECTED_FILES {
+            std::fs::write(model_dir.join(file), b"test").expect("write expected file");
+        }
+        std::fs::write(model_dir.join(MANIFEST_FILENAME), TTS_MODEL_VERSION).expect("manifest");
+
+        assert!(slot.is_ready(temp.path()));
+
+        std::fs::remove_file(model_dir.join(TTS_LICENSE_FILE_NAME)).expect("remove sidecar");
+        assert!(!slot.is_ready(temp.path()));
+    }
 }

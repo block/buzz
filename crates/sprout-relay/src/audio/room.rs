@@ -47,6 +47,24 @@ const CTRL_CHANNEL_CAPACITY: usize = 32;
 /// is reasonable. The 255 index space is the hard limit; this is the soft one.
 const MAX_PEERS_PER_ROOM: usize = 25;
 
+/// Reason a peer was refused entry to a room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionError {
+    /// The room has been ended (or is shutting down) and no longer admits peers.
+    Ended,
+    /// The room has hit the soft peer cap or exhausted the 255-index space.
+    Full,
+    /// The room is pinned to a different protocol version than the requested one.
+    /// The caller should reply to the WS client with an `upgrade_required` error
+    /// and the room's actual `pinned` version, then close the socket.
+    VersionMismatch {
+        /// Version the room is currently pinned to.
+        pinned: u8,
+        /// Version the joining client requested.
+        requested: u8,
+    },
+}
+
 /// Peer index allocator + room lifecycle gate.
 ///
 /// The `ended` flag and peer admission are synchronized under the same mutex.
@@ -58,6 +76,25 @@ struct AdmissionGuard {
     next_fresh: u8,
     free: Vec<u8>,
     ended: bool,
+    /// Pinned huddle audio protocol version for this room.
+    ///
+    /// `None` until the first peer admits. The first admission pins the room
+    /// to that version; subsequent peers MUST present the same version or
+    /// they're rejected with `AdmissionError::VersionMismatch`. The relay
+    /// forwards binary frames opaquely either way, so allowing a v1 client
+    /// into a v2 room would silently corrupt v2 peers' decode (they'd see
+    /// no header where one is expected, and vice versa).
+    ///
+    /// Pin is per-`Room`-instance and clears when the manager evicts the
+    /// Room via [`AudioRoomManager::cleanup_if_empty`] — the next
+    /// `get_or_create` for the same channel id then constructs a fresh
+    /// `Room` with a fresh `AdmissionGuard` (and therefore `None` pin),
+    /// so a new generation of joiners can negotiate a new version.
+    /// A momentarily-empty-but-not-yet-cleaned-up Room keeps its pin so
+    /// reconnecting peers don't accidentally renegotiate mid-call. See
+    /// `version_pin_persists_across_peer_churn` for the test that pins
+    /// this behavior.
+    pinned_version: Option<u8>,
 }
 
 impl AdmissionGuard {
@@ -66,6 +103,7 @@ impl AdmissionGuard {
             next_fresh: 0,
             free: Vec::new(),
             ended: false,
+            pinned_version: None,
         }
     }
 
@@ -126,26 +164,53 @@ impl Room {
         }
     }
 
-    /// Add a peer. Returns `(peer_id, peer_index, audio_rx, ctrl_rx)`, or
-    /// `None` if the room has ended, hit the peer cap, or exhausted the index space.
+    /// Add a peer. Returns `(peer_id, peer_index, audio_rx, ctrl_rx)` on
+    /// success, or an [`AdmissionError`] explaining why the peer was rejected.
     ///
-    /// The ended check, index allocation, and peer insert all happen under
-    /// the admission guard lock — mutually exclusive with `mark_ended`.
+    /// `requested_version` is the huddle audio protocol version the peer
+    /// negotiated in its WS auth message. The first successful admission
+    /// pins the room to that version; later admits must match the pin or
+    /// they receive [`AdmissionError::VersionMismatch`].
+    ///
+    /// The cap check, ended check, version pin, index allocation, and peer
+    /// insert all happen under the admission guard lock — mutually exclusive
+    /// with `mark_ended` and with any concurrent `add_peer` that might race
+    /// the version pin.
+    ///
+    /// Error precedence is deliberate: `Ended` > `Full` > `VersionMismatch`.
+    /// A "no seat available" error wins over version mismatch because a
+    /// client that couldn't join either way shouldn't learn the room's
+    /// pinned protocol version — that's a (mild) information leak. The cap
+    /// check lives inside the lock so two concurrent joiners can't both
+    /// pass it; the per-room index space (255) plus the soft cap
+    /// (`MAX_PEERS_PER_ROOM`) is then a single, race-free invariant.
     pub fn add_peer(
         &self,
         pubkey: String,
-    ) -> Option<(Uuid, u8, mpsc::Receiver<Bytes>, mpsc::Receiver<PeerCtrl>)> {
-        if self.peers.len() >= MAX_PEERS_PER_ROOM {
-            return None;
-        }
-        // Hold the guard across ended check + index alloc + peer insert.
-        // This makes add_peer mutually exclusive with mark_ended — the lock
-        // is the single synchronization point that closes the race.
-        let mut g = self.guard.lock().ok()?;
+        requested_version: u8,
+    ) -> Result<(Uuid, u8, mpsc::Receiver<Bytes>, mpsc::Receiver<PeerCtrl>), AdmissionError> {
+        let mut g = self.guard.lock().map_err(
+            |_| AdmissionError::Ended, /* poisoned ≈ shutting down */
+        )?;
         if g.ended {
-            return None;
+            return Err(AdmissionError::Ended);
         }
-        let peer_index = g.alloc()?;
+        if self.peers.len() >= MAX_PEERS_PER_ROOM {
+            return Err(AdmissionError::Full);
+        }
+        if let Some(pinned) = g.pinned_version {
+            if pinned != requested_version {
+                return Err(AdmissionError::VersionMismatch {
+                    pinned,
+                    requested: requested_version,
+                });
+            }
+        }
+        let peer_index = g.alloc().ok_or(AdmissionError::Full)?;
+        // Pin the room version on the first successful index allocation. We
+        // pin *after* alloc so a Full error doesn't accidentally set the
+        // version for a peer that didn't actually join.
+        g.pinned_version.get_or_insert(requested_version);
         let peer_id = Uuid::new_v4();
         let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
         let (ctrl_tx, ctrl_rx) = mpsc::channel(CTRL_CHANNEL_CAPACITY);
@@ -159,7 +224,7 @@ impl Room {
             },
         );
         drop(g); // Release lock after insert.
-        Some((peer_id, peer_index, audio_rx, ctrl_rx))
+        Ok((peer_id, peer_index, audio_rx, ctrl_rx))
     }
 
     /// Remove a peer and recycle its index.
@@ -286,5 +351,156 @@ impl AudioRoomManager {
 impl Default for AudioRoomManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_room() -> Room {
+        Room::new(Uuid::new_v4())
+    }
+
+    /// First peer's `requested_version` becomes the room's pin; later peers
+    /// requesting the same version are admitted normally.
+    #[test]
+    fn first_admit_pins_version_and_matching_admits_succeed() {
+        let room = fresh_room();
+
+        let first = room
+            .add_peer("alice".to_string(), 2)
+            .expect("first peer admits");
+        let second = room
+            .add_peer("bob".to_string(), 2)
+            .expect("matching version admits");
+
+        assert_eq!(room.peers.len(), 2);
+        // peer_index allocation is monotonic from 0 inside a fresh room.
+        assert_eq!(first.1, 0);
+        assert_eq!(second.1, 1);
+    }
+
+    /// A peer requesting a different protocol version than the pinned one
+    /// is refused with `VersionMismatch` and never appears in the peer map.
+    #[test]
+    fn admit_rejects_mismatched_version() {
+        let room = fresh_room();
+        let _ = room
+            .add_peer("alice".to_string(), 2)
+            .expect("first peer admits");
+
+        let err = room
+            .add_peer("bob".to_string(), 1)
+            .expect_err("mismatched version must be rejected");
+        match err {
+            AdmissionError::VersionMismatch { pinned, requested } => {
+                assert_eq!(pinned, 2);
+                assert_eq!(requested, 1);
+            }
+            other => panic!("expected VersionMismatch, got {other:?}"),
+        }
+
+        // The rejected peer must not appear in the peer map, and the index
+        // space must not have been consumed by the failed admit.
+        assert_eq!(room.peers.len(), 1);
+    }
+
+    /// `add_peer` rejects requests after the room is marked ended even if the
+    /// version matches.
+    #[test]
+    fn admit_after_mark_ended_returns_ended() {
+        let room = fresh_room();
+        assert!(room.mark_ended());
+        let err = room
+            .add_peer("alice".to_string(), 1)
+            .expect_err("ended room must refuse");
+        assert!(matches!(err, AdmissionError::Ended));
+    }
+
+    /// Per Max's review checklist: an empty-and-cleaned-up room (via the
+    /// manager's `cleanup_if_empty`) becomes a fresh room on the next
+    /// `get_or_create`, with no pin carried over.
+    #[test]
+    fn manager_cleanup_resets_version_pin() {
+        let manager = AudioRoomManager::new();
+        let channel_id = Uuid::new_v4();
+
+        let room1 = manager.get_or_create(channel_id);
+        let (peer_id, _, _, _) = room1
+            .add_peer("alice".to_string(), 2)
+            .expect("first peer admits");
+        // Last peer leaves and ends the room atomically.
+        let (_, ended) = room1
+            .remove_peer_and_check_ended(peer_id)
+            .expect("peer existed");
+        assert!(ended, "single-peer room should end on its last departure");
+        assert!(manager.cleanup_if_empty(channel_id));
+
+        // Next joiner with a different version on the same channel id gets a
+        // brand-new room (no v=2 pin carried over from the prior generation).
+        let room2 = manager.get_or_create(channel_id);
+        let _ = room2
+            .add_peer("bob".to_string(), 1)
+            .expect("fresh room must accept any version");
+    }
+
+    /// Peer-index reuse: after a peer leaves, their index is released; a new
+    /// peer joining the same (still-pinned) room reuses the freed index.
+    /// Version pin must persist across this reuse — the room generation
+    /// hasn't ended.
+    #[test]
+    fn version_pin_persists_across_peer_churn() {
+        let room = fresh_room();
+        let (alice_id, alice_idx, _, _) =
+            room.add_peer("alice".to_string(), 2).expect("alice admits");
+        room.remove_peer(alice_id);
+        // Room is non-empty thanks to nothing yet — wait, alice left and
+        // nobody else is here. Add bob with the same version: should work.
+        // Then add carol with a different version: should fail with the
+        // *original* pin, even though alice already left.
+        let (_, bob_idx, _, _) = room
+            .add_peer("bob".to_string(), 2)
+            .expect("bob admits at v=2");
+        assert_eq!(
+            bob_idx, alice_idx,
+            "freed peer index should be recycled by the next admit",
+        );
+        let err = room
+            .add_peer("carol".to_string(), 1)
+            .expect_err("v=1 must still be refused — room is pinned v=2");
+        assert!(matches!(
+            err,
+            AdmissionError::VersionMismatch {
+                pinned: 2,
+                requested: 1
+            }
+        ));
+    }
+
+    /// Per Sami/Perci's review: when a room is both at-capacity AND the
+    /// joiner's protocol version doesn't match the pin, the error must be
+    /// `Full` — not `VersionMismatch`. A client that couldn't get a seat
+    /// either way shouldn't learn the room's pinned protocol version.
+    /// This also pins the in-lock cap check (the old code's outside-lock
+    /// cap check meant the version error could win in a race).
+    #[test]
+    fn admit_full_wins_over_version_mismatch() {
+        let room = fresh_room();
+        // Fill the room with v=2 peers right up to the soft cap.
+        for i in 0..MAX_PEERS_PER_ROOM {
+            room.add_peer(format!("peer-{i}"), 2)
+                .expect("seed admit must succeed");
+        }
+        // Next joiner is BOTH over the cap AND requests the wrong version.
+        let err = room
+            .add_peer("over-cap-and-wrong-version".to_string(), 1)
+            .expect_err("over-cap + wrong-version joiner must be rejected");
+        assert!(
+            matches!(err, AdmissionError::Full),
+            "expected Full to win over VersionMismatch, got {err:?}",
+        );
+        // And the room state must be unchanged.
+        assert_eq!(room.peers.len(), MAX_PEERS_PER_ROOM);
     }
 }

@@ -8,6 +8,7 @@ import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
@@ -26,7 +27,7 @@ type SystemMessagePayload = {
 
 type SystemMessageDescription = {
   action: React.ReactNode;
-  title: string;
+  title: React.ReactNode;
 };
 
 function resolveLabel(
@@ -57,13 +58,104 @@ function resolveAvatarUrl(
   return profiles[pubkey.toLowerCase()]?.avatarUrl ?? null;
 }
 
-function labelWithSuffix(
+function resolveLabelWithSuffix(
   pubkey: string | undefined,
   currentPubkey: string | undefined,
   profiles: UserProfileLookup | undefined,
   suffix = "",
 ): string {
   return `${resolveLabel(pubkey, currentPubkey, profiles)}${suffix}`;
+}
+
+function ProfileName({
+  children,
+  highlight = false,
+  pubkey,
+}: {
+  children: React.ReactNode;
+  highlight?: boolean;
+  pubkey: string | undefined;
+}) {
+  const node = (
+    <span
+      className={cn(
+        "rounded-sm transition-colors hover:text-foreground",
+        pubkey && "cursor-pointer",
+        highlight &&
+          "rounded-md bg-primary/15 px-1 py-0.5 font-medium text-primary hover:bg-primary/25 hover:text-primary/90",
+      )}
+    >
+      {highlight ? "@" : null}
+      {children}
+    </span>
+  );
+
+  return pubkey ? (
+    <UserProfilePopover pubkey={pubkey} triggerElement="span">
+      {node}
+    </UserProfilePopover>
+  ) : (
+    node
+  );
+}
+
+function SystemMessageAvatar({
+  actorPubkey,
+  currentPubkey,
+  profiles,
+  targetPubkey,
+}: {
+  actorPubkey: string | undefined;
+  currentPubkey: string | undefined;
+  profiles: UserProfileLookup | undefined;
+  targetPubkey: string | undefined;
+}) {
+  const hasActorAndTarget =
+    actorPubkey && targetPubkey && actorPubkey !== targetPubkey;
+  const actorLabel = actorPubkey
+    ? resolveUserLabel({
+        pubkey: actorPubkey,
+        currentPubkey,
+        profiles,
+        preferResolvedSelfLabel: true,
+      })
+    : "Someone";
+
+  if (!hasActorAndTarget) {
+    return (
+      <UserAvatar
+        avatarUrl={resolveAvatarUrl(actorPubkey ?? targetPubkey, profiles)}
+        className="!h-9 !w-9 shrink-0 text-[10px]"
+        displayName={actorLabel}
+        testId="system-message-avatar"
+      />
+    );
+  }
+
+  const targetLabel = resolveUserLabel({
+    pubkey: targetPubkey,
+    currentPubkey,
+    profiles,
+    preferResolvedSelfLabel: true,
+  });
+
+  return (
+    <div
+      className="relative h-9 w-9 shrink-0"
+      data-testid="system-message-avatar"
+    >
+      <UserAvatar
+        avatarUrl={resolveAvatarUrl(actorPubkey, profiles)}
+        className="!h-7 !w-7 border-2 border-background text-[9px]"
+        displayName={actorLabel}
+      />
+      <UserAvatar
+        avatarUrl={resolveAvatarUrl(targetPubkey, profiles)}
+        className="!absolute !bottom-0 !right-0 !h-7 !w-7 border-2 border-background text-[9px]"
+        displayName={targetLabel}
+      />
+    </div>
+  );
 }
 
 function describeSystemEvent(
@@ -73,27 +165,39 @@ function describeSystemEvent(
   personaLookup?: Map<string, string>,
 ): SystemMessageDescription | null {
   const personaSuffix = resolvePersonaSuffix(payload.target, personaLookup);
-  const actorLabel = labelWithSuffix(payload.actor, currentPubkey, profiles);
-  const targetLabel = labelWithSuffix(
+  const actorLabel = resolveLabelWithSuffix(
+    payload.actor,
+    currentPubkey,
+    profiles,
+  );
+  const targetLabel = resolveLabelWithSuffix(
     payload.target,
     currentPubkey,
     profiles,
     personaSuffix,
+  );
+  const actorName = (
+    <ProfileName pubkey={payload.actor}>{actorLabel}</ProfileName>
+  );
+  const targetName = (
+    <ProfileName highlight pubkey={payload.target}>
+      {targetLabel}
+    </ProfileName>
   );
 
   switch (payload.type) {
     case "member_joined": {
       if (payload.actor === payload.target) {
         return {
-          title: targetLabel,
+          title: targetName,
           action: "joined the channel",
         };
       }
       return {
-        title: actorLabel,
+        title: actorName,
         action: (
           <>
-            added <span className="font-medium">{targetLabel}</span> to the
+            added <span className="font-medium">{targetName}</span> to the
             channel
           </>
         ),
@@ -101,42 +205,42 @@ function describeSystemEvent(
     }
     case "member_left":
       return {
-        title: actorLabel,
+        title: actorName,
         action: "left the channel",
       };
     case "member_removed":
       return {
-        title: actorLabel,
+        title: actorName,
         action: (
           <>
-            removed <span className="font-medium">{targetLabel}</span> from the
+            removed <span className="font-medium">{targetName}</span> from the
             channel
           </>
         ),
       };
     case "topic_changed":
       return {
-        title: actorLabel,
+        title: actorName,
         action: <>changed the topic to &ldquo;{payload.topic}&rdquo;</>,
       };
     case "purpose_changed":
       return {
-        title: actorLabel,
+        title: actorName,
         action: <>changed the purpose to &ldquo;{payload.purpose}&rdquo;</>,
       };
     case "channel_created":
       return {
-        title: actorLabel,
+        title: actorName,
         action: "created this channel",
       };
     case "channel_archived":
       return {
-        title: actorLabel,
+        title: actorName,
         action: "archived this channel",
       };
     case "channel_unarchived":
       return {
-        title: actorLabel,
+        title: actorName,
         action: "unarchived this channel",
       };
     default:
@@ -188,33 +292,23 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     return null;
   }
 
-  const avatarPubkey = payload.actor ?? payload.target;
-  const avatarLabel = avatarPubkey
-    ? resolveUserLabel({
-        pubkey: avatarPubkey,
-        currentPubkey,
-        profiles,
-        preferResolvedSelfLabel: true,
-      })
-    : "Someone";
-
   return (
     <div
       className="group/message relative rounded-2xl px-2 py-1 transition-colors"
       data-testid="system-message-row"
     >
       <div className="flex items-start gap-2.5">
-        <UserAvatar
-          avatarUrl={resolveAvatarUrl(avatarPubkey, profiles)}
-          className="!h-9 !w-9 shrink-0 text-[10px]"
-          displayName={avatarLabel}
-          testId="system-message-avatar"
+        <SystemMessageAvatar
+          actorPubkey={payload.actor}
+          currentPubkey={currentPubkey}
+          profiles={profiles}
+          targetPubkey={payload.target}
         />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <p className="truncate text-sm font-semibold leading-none tracking-tight text-foreground/90">
+            <div className="truncate text-sm font-semibold leading-none tracking-tight text-foreground/90">
               {description.title}
-            </p>
+            </div>
             <MessageTimestamp
               createdAt={message.createdAt}
               time={message.time}

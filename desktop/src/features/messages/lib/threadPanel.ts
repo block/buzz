@@ -16,6 +16,7 @@ export type TimelineThreadSummaryParticipant = {
 export type TimelineThreadSummary = {
   threadHeadId: string;
   replyCount: number;
+  lastReplyAt: number | null;
   participants: TimelineThreadSummaryParticipant[];
 };
 
@@ -26,6 +27,7 @@ export type MainTimelineEntry = {
 
 type ThreadDescendantStats = {
   descendantCount: number;
+  lastReplyAt: number | null;
   recentParticipantsNewestFirst: TimelineThreadSummaryParticipant[];
 };
 
@@ -80,6 +82,7 @@ function buildDescendantStatsByMessageId(
       message.id,
       {
         descendantCount: 0,
+        lastReplyAt: null,
         recentParticipantsNewestFirst: [],
       },
     ]),
@@ -115,6 +118,10 @@ function buildDescendantStatsByMessageId(
       }
 
       ancestorStats.descendantCount += 1;
+      ancestorStats.lastReplyAt = Math.max(
+        ancestorStats.lastReplyAt ?? 0,
+        message.createdAt,
+      );
 
       if (
         ancestorStats.recentParticipantsNewestFirst.length <
@@ -146,6 +153,7 @@ function buildSummaryForDirectReplies(
   return {
     threadHeadId: messageId,
     replyCount: descendantStats.descendantCount,
+    lastReplyAt: descendantStats.lastReplyAt,
     participants: [...descendantStats.recentParticipantsNewestFirst].reverse(),
   };
 }
@@ -207,7 +215,7 @@ function buildVisibleThreadReplies(params: {
   appendExpandedReplies({
     entries,
     parentId: openThreadHeadId,
-    depth: 1,
+    depth: 0,
     directChildrenByParentId,
     descendantStatsByMessageId,
     expandedReplyIds,

@@ -7,6 +7,7 @@ import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
 import type { Channel } from "@/shared/api/types";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
@@ -34,6 +35,7 @@ type MarkdownProps = {
   content: string;
   imetaByUrl?: ImetaLookup;
   mentionNames?: string[];
+  mentionPubkeysByName?: Record<string, string>;
   searchQuery?: string;
   tight?: boolean;
 };
@@ -106,6 +108,7 @@ function createMarkdownComponents(
   channels: Channel[],
   onOpenChannel: (channelId: string) => void,
   imetaByUrl?: ImetaLookup,
+  mentionPubkeysByName?: Record<string, string>,
 ): Components {
   const paragraphClassName =
     variant === "tight"
@@ -322,14 +325,27 @@ function createMarkdownComponents(
     ul: ({ children }) => (
       <ul className={cn("list-disc", listClassName)}>{children}</ul>
     ),
-    mention: ({ children }: { children?: React.ReactNode }) => (
-      <span
-        data-mention=""
-        className="rounded-md bg-primary/15 px-1 py-0.5 text-sm font-semibold text-primary"
-      >
-        {children}
-      </span>
-    ),
+    mention: ({ children }: { children?: React.ReactNode }) => {
+      const mentionText = String(children ?? "");
+      const mentionName = mentionText.replace(/^@/, "").trim().toLowerCase();
+      const pubkey = mentionPubkeysByName?.[mentionName];
+      const mentionNode = (
+        <span
+          data-mention=""
+          className="cursor-pointer rounded-md bg-primary/15 px-1 py-0.5 text-sm font-semibold text-primary transition-colors hover:bg-primary/25 hover:text-primary/90"
+        >
+          {children}
+        </span>
+      );
+
+      return pubkey ? (
+        <UserProfilePopover pubkey={pubkey} triggerElement="span">
+          {mentionNode}
+        </UserProfilePopover>
+      ) : (
+        mentionNode
+      );
+    },
     "channel-link": ({ children }: { children?: React.ReactNode }) => {
       const text = String(children ?? "");
       const channelName = text.startsWith("#") ? text.slice(1) : text;
@@ -374,6 +390,7 @@ function MarkdownInner({
   content,
   imetaByUrl,
   mentionNames,
+  mentionPubkeysByName,
   searchQuery,
   tight = false,
 }: MarkdownProps) {
@@ -394,8 +411,9 @@ function MarkdownInner({
           void goChannel(channelId);
         },
         imetaByUrl,
+        mentionPubkeysByName,
       ),
-    [goChannel, variant, channels, imetaByUrl],
+    [goChannel, variant, channels, imetaByUrl, mentionPubkeysByName],
   );
 
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
@@ -462,6 +480,7 @@ export const Markdown = React.memo(
     prev.className === next.className &&
     prev.compact === next.compact &&
     prev.tight === next.tight &&
+    prev.mentionPubkeysByName === next.mentionPubkeysByName &&
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&
     shallowArrayEqual(prev.channelNames, next.channelNames) &&
     prev.imetaByUrl === next.imetaByUrl &&

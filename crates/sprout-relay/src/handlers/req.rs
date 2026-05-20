@@ -9,7 +9,7 @@ use hex;
 use nostr::Filter;
 use sprout_core::filter::filters_match;
 use sprout_core::kind::{
-    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_AGENT_ENGRAM, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
 };
 use sprout_db::EventQuery;
@@ -90,11 +90,38 @@ pub async fn handle_req(
 
     let channel_id = extract_channel_id_from_filters(&filters);
 
-    // ── NIP-50 search: intercept BEFORE #p gating ────────────────────────────
-    // Search filters are one-shot (not registered as persistent subscriptions).
-    // They never deliver gift wraps (not indexed) or membership notifications
-    // (global, no channel_id), so the #p gate below is irrelevant for them.
-    // Intercepting here lets clients send `{"search":"foo"}` without `kinds`.
+    // ── #p / engram gating for globally-stored sensitive kinds ───────────────
+    // Applied BEFORE the NIP-50 search branch so that an authenticated member
+    // cannot use `{"search":"...","kinds":[30174]}` (or similar for p-gated
+    // kinds) to harvest indexed-but-globally-stored sensitive events. Search
+    // hits are looked up by event id and returned without the per-filter
+    // post-check the historical-delivery branch applies, so the gate must run
+    // here, up front. Only applies to GLOBAL subscriptions (channel_id = None):
+    // channel-scoped subs can never receive globally-stored events because of
+    // the fan_out() invariant in subscription.rs.
+    if channel_id.is_none() {
+        let authed_pubkey_hex = hex::encode(&pubkey_bytes);
+        if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: p-gated events require #p matching your pubkey",
+            ));
+            return;
+        }
+        if !engram_filters_authorized(&filters, &authed_pubkey_hex) {
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: agent-engram reads require authors=[self] or #p=[self]",
+            ));
+            return;
+        }
+    }
+
+    // ── NIP-50 search: one-shot, no persistent subscription ──────────────────
+    // Search filters hit Typesense and return historical hits, then EOSE.
+    // They are not registered for fan-out. The sensitive-kind gates above
+    // already ran, so an authed member cannot use search to bypass author/#p
+    // rules for kind:30174 or other globally-stored gated kinds.
     let has_search = filters.iter().any(|f| f.search.is_some());
     if has_search {
         if filters.iter().any(|f| f.search.is_none()) {
@@ -114,21 +141,6 @@ pub async fn handle_req(
         )
         .await;
         return;
-    }
-
-    // ── #p gating for globally-stored sensitive kinds ─────────────────────────
-    // Only applies to GLOBAL subscriptions (channel_id = None). Channel-scoped
-    // subscriptions can never receive globally-stored events — the fan_out()
-    // invariant in subscription.rs prevents it.
-    if channel_id.is_none() {
-        let authed_pubkey_hex = hex::encode(&pubkey_bytes);
-        if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
-            conn.send(RelayMessage::closed(
-                &sub_id,
-                "restricted: p-gated events require #p matching your pubkey",
-            ));
-            return;
-        }
     }
 
     // Check channel access BEFORE registering the subscription.
@@ -718,6 +730,59 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
     })
 }
 
+/// Authorize read access for filters that can match KIND_AGENT_ENGRAM events.
+///
+/// NIP-AE engrams are global (no channel scope) and have encrypted content,
+/// but their public `#p` (owner) and timestamps still leak who-pairs-with-whom
+/// plus write-activity patterns. Only the agent (the event's author) or the
+/// owner (the `#p` value) should be able to enumerate them.
+///
+/// A filter is authorized when at least one of:
+///   - `authors` is non-empty and every entry equals the authed pubkey
+///     (the agent reading its own engrams), OR
+///   - `#p` is non-empty and every entry equals the authed pubkey
+///     (the owner reading engrams addressed to them).
+///
+/// Filters with explicit `ids` are exempt — knowing the event id already
+/// implies authorization (the engram event id is itself derived from the
+/// signed envelope, which only the agent could have produced).
+///
+/// Mixed-kind filters (e.g. `{kinds:[30174, 9]}`) are evaluated under this
+/// gate when KIND_AGENT_ENGRAM is present; matching events of other kinds in
+/// the same filter is also restricted, but that is the conservative choice
+/// — clients should query engrams in a dedicated filter.
+pub(crate) fn engram_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
+    let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+    filters.iter().all(|filter| {
+        // Specific-event lookups don't fish.
+        if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+            return true;
+        }
+
+        let can_match_engram = filter
+            .kinds
+            .as_ref()
+            .is_none_or(|ks| ks.iter().any(|k| k.as_u16() as u32 == KIND_AGENT_ENGRAM));
+        if !can_match_engram {
+            return true;
+        }
+
+        let authors_ok = filter.authors.as_ref().is_some_and(|authors| {
+            !authors.is_empty()
+                && authors
+                    .iter()
+                    .all(|a| a.to_hex().eq_ignore_ascii_case(authed_pubkey_hex))
+        });
+        if authors_ok {
+            return true;
+        }
+
+        filter.generic_tags.get(&p_tag).is_some_and(|values| {
+            !values.is_empty() && values.iter().all(|v| v == authed_pubkey_hex)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -880,5 +945,164 @@ mod tests {
             build_search_channel_scope_filter(&[], false).is_none(),
             "restricted tokens must not fall back to global search results"
         );
+    }
+
+    // ── NIP-AE engram read gating ────────────────────────────────────────
+
+    /// Three real x-only pubkeys (valid for `PublicKey::from_hex`). Distinct,
+    /// so we can label them clearly in tests.
+    fn three_pubkeys() -> (String, String, String) {
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let owner = nostr::Keys::generate().public_key().to_hex();
+        let attacker = nostr::Keys::generate().public_key().to_hex();
+        (agent, owner, attacker)
+    }
+
+    #[test]
+    fn engram_gate_allows_agent_querying_own() {
+        let (agent, owner, _) = three_pubkeys();
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let f = Filter::new()
+            .kind(nostr::Kind::Custom(KIND_AGENT_ENGRAM as u16))
+            .author(nostr::PublicKey::from_hex(&agent).unwrap())
+            .custom_tag(p_tag, [&owner]);
+        assert!(engram_filters_authorized(&[f], &agent));
+    }
+
+    #[test]
+    fn engram_gate_allows_owner_querying() {
+        let (agent, owner, _) = three_pubkeys();
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        // Owner-side read: knows the agent's pubkey, queries with #p=self.
+        let f = Filter::new()
+            .kind(nostr::Kind::Custom(KIND_AGENT_ENGRAM as u16))
+            .author(nostr::PublicKey::from_hex(&agent).unwrap())
+            .custom_tag(p_tag, [&owner]);
+        assert!(engram_filters_authorized(&[f], &owner));
+    }
+
+    #[test]
+    fn engram_gate_allows_owner_with_no_authors_filter() {
+        // Owner doesn't necessarily know the agent's pubkey ahead of time.
+        let (_, owner, _) = three_pubkeys();
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let f = Filter::new()
+            .kind(nostr::Kind::Custom(KIND_AGENT_ENGRAM as u16))
+            .custom_tag(p_tag, [&owner]);
+        assert!(engram_filters_authorized(&[f], &owner));
+    }
+
+    #[test]
+    fn engram_gate_rejects_unrelated_reader() {
+        let (agent, owner, attacker) = three_pubkeys();
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        // Attacker tries to fish for engrams between agent and owner.
+        let f = Filter::new()
+            .kind(nostr::Kind::Custom(KIND_AGENT_ENGRAM as u16))
+            .author(nostr::PublicKey::from_hex(&agent).unwrap())
+            .custom_tag(p_tag, [&owner]);
+        assert!(!engram_filters_authorized(&[f], &attacker));
+    }
+
+    #[test]
+    fn engram_gate_rejects_bare_kind_filter() {
+        // {kinds:[30174]} with no authors and no #p — open fishing.
+        let (agent, _, _) = three_pubkeys();
+        let f = Filter::new().kind(nostr::Kind::Custom(KIND_AGENT_ENGRAM as u16));
+        assert!(!engram_filters_authorized(&[f], &agent));
+    }
+
+    #[test]
+    fn engram_gate_rejects_wildcard_kind_filter() {
+        // Filter with no kinds field at all — matches everything including
+        // engrams; must still be gated.
+        let (agent, _, _) = three_pubkeys();
+        let f = Filter::new();
+        assert!(!engram_filters_authorized(&[f], &agent));
+    }
+
+    #[test]
+    fn engram_gate_skips_non_engram_kinds() {
+        // Filter not targeting engrams — pass through; this gate is silent.
+        let (agent, _, _) = three_pubkeys();
+        let f = Filter::new().kind(nostr::Kind::Custom(9));
+        assert!(engram_filters_authorized(&[f], &agent));
+    }
+
+    #[test]
+    fn engram_gate_allows_ids_lookup() {
+        // Specific event ids — knowing the id implies prior authorization.
+        let (agent, _, _) = three_pubkeys();
+        let id = nostr::EventId::from_hex(
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        )
+        .unwrap();
+        let f = Filter::new()
+            .kind(nostr::Kind::Custom(KIND_AGENT_ENGRAM as u16))
+            .id(id);
+        assert!(engram_filters_authorized(&[f], &agent));
+    }
+
+    #[test]
+    fn engram_gate_rejects_mixed_authors_with_unauthed() {
+        // {authors:[self, attacker]} — must reject; an author-list with any
+        // non-self entry could let an attacker piggy-back on the agent's
+        // legitimate query path.
+        let (agent, other, _) = three_pubkeys();
+        let f = Filter::new()
+            .kind(nostr::Kind::Custom(KIND_AGENT_ENGRAM as u16))
+            .authors([
+                nostr::PublicKey::from_hex(&agent).unwrap(),
+                nostr::PublicKey::from_hex(&other).unwrap(),
+            ]);
+        assert!(!engram_filters_authorized(&[f], &agent));
+    }
+
+    // ── NIP-50 search bypass regressions ─────────────────────────────────
+    // These filters are the shape an authenticated relay member would send
+    // to try to harvest indexed engram envelopes via the search path. The
+    // gate must reject them regardless of the presence of `search`.
+
+    #[test]
+    fn engram_gate_rejects_bare_kind_search_filter() {
+        // {"search":"*", "kinds":[30174]} — exactly the bypass codex found.
+        let (agent, _, _) = three_pubkeys();
+        let f = Filter::new()
+            .kind(nostr::Kind::Custom(KIND_AGENT_ENGRAM as u16))
+            .search("*");
+        assert!(!engram_filters_authorized(&[f], &agent));
+    }
+
+    #[test]
+    fn engram_gate_rejects_wildcard_kind_search_filter() {
+        // {"search":"foo"} — no `kinds` field at all matches engrams too.
+        let (agent, _, _) = three_pubkeys();
+        let f = Filter::new().search("foo");
+        assert!(!engram_filters_authorized(&[f], &agent));
+    }
+
+    #[test]
+    fn engram_gate_allows_authored_engram_search() {
+        // Agent searching their own engrams by content keyword is legitimate.
+        let (agent, _, _) = three_pubkeys();
+        let f = Filter::new()
+            .kind(nostr::Kind::Custom(KIND_AGENT_ENGRAM as u16))
+            .author(nostr::PublicKey::from_hex(&agent).unwrap())
+            .search("foo");
+        assert!(engram_filters_authorized(&[f], &agent));
+    }
+
+    #[test]
+    fn p_gate_rejects_bare_kind_search_filter_for_gift_wrap() {
+        // P-gated kinds (observer frames, member notifications) are indexed
+        // too. Same bypass shape: {"search":"x","kinds":[<p-gated kind>]}.
+        // Use KIND_AGENT_OBSERVER_FRAME — globally stored, p-gated, indexed.
+        let (agent, _, _) = three_pubkeys();
+        let f = Filter::new()
+            .kind(nostr::Kind::Custom(
+                sprout_core::kind::KIND_AGENT_OBSERVER_FRAME as u16,
+            ))
+            .search("x");
+        assert!(!p_gated_filters_authorized(&[f], &agent));
     }
 }

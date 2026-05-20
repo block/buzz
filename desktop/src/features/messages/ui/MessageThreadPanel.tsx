@@ -228,10 +228,13 @@ export function MessageThreadPanel({
               data-testid="message-thread-replies"
             >
               {threadReplies.length > 0 ? (
-                <div className="space-y-2">
+                <div className="space-y-2.5">
                   {threadReplies.map((entry) => {
                     return (
-                      <div key={entry.message.id}>
+                      <div
+                        className="flex flex-col gap-1"
+                        key={entry.message.id}
+                      >
                         <MessageRow
                           activeReplyTargetId={replyTargetId}
                           channelId={channelId}
@@ -257,7 +260,6 @@ export function MessageThreadPanel({
                         {entry.summary ? (
                           <MessageThreadSummaryRow
                             depth={entry.message.depth}
-                            layoutVariant="thread-reply"
                             message={entry.message}
                             onOpenThread={onExpandReplies}
                             summary={entry.summary}

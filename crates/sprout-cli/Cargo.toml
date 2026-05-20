@@ -40,6 +40,7 @@ uuid = { workspace = true }
 
 # Typed event builders for all write operations
 sprout-sdk = { workspace = true }
+sprout-core = { workspace = true }
 
 # Base64 encoding — NIP-98 event serialization for Authorization header
 base64 = "0.22"

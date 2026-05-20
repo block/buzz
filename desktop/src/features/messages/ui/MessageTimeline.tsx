@@ -135,7 +135,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
           ref={scrollContainerRef}
         >
           <div
-            className="flex w-full flex-col gap-2 pb-10 pt-16"
+            className="flex w-full flex-col gap-2 pb-10 pt-12"
             ref={contentRef}
           >
             <div ref={topSentinelRef} aria-hidden className="h-px" />
@@ -152,7 +152,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                 data-testid="message-timeline-beginning"
               >
                 <Separator className="flex-1" />
-                <p className="text-xs font-semibold uppercase tracking-[0.22em] text-muted-foreground">
+                <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/75">
                   Beginning of conversation
                 </p>
                 <Separator className="flex-1" />

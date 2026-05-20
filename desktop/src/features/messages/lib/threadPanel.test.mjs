@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildMainTimelineEntries } from "./threadPanel.ts";
+import {
+  buildMainTimelineEntries,
+  buildThreadPanelData,
+} from "./threadPanel.ts";
 
 function message(overrides) {
   return {
@@ -54,5 +57,46 @@ test("buildMainTimelineEntries includes broadcast replies", () => {
       (entry) => entry.message.id,
     ),
     ["root", "broadcast-reply"],
+  );
+});
+
+test("buildThreadPanelData keeps direct comments unindented", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const directComment = message({
+    id: "direct-comment",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    tags: [["e", "root", "", "reply"]],
+  });
+  const nestedReply = message({
+    id: "nested-reply",
+    createdAt: 3,
+    parentId: "direct-comment",
+    rootId: "root",
+    depth: 2,
+    tags: [
+      ["e", "root", "", "root"],
+      ["e", "direct-comment", "", "reply"],
+    ],
+  });
+
+  const panelData = buildThreadPanelData(
+    [root, directComment, nestedReply],
+    "root",
+    "root",
+    new Set(["direct-comment"]),
+  );
+
+  assert.deepEqual(
+    panelData.visibleReplies.map((entry) => ({
+      id: entry.message.id,
+      depth: entry.message.depth,
+    })),
+    [
+      { id: "direct-comment", depth: 0 },
+      { id: "nested-reply", depth: 1 },
+    ],
   );
 });

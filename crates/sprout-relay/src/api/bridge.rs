@@ -200,6 +200,12 @@ pub async fn query_events(
             "restricted: p-gated kinds require #p tag matching your pubkey",
         ));
     }
+    if !crate::handlers::req::engram_filters_authorized(&filters, &authed_pubkey_hex) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: agent-engram reads require authors=[self] or #p=[self]",
+        ));
+    }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
     let accessible_channels = state
@@ -294,6 +300,12 @@ pub async fn count_events(
             "restricted: p-gated kinds require #p tag matching your pubkey",
         ));
     }
+    if !crate::handlers::req::engram_filters_authorized(&filters, &authed_pubkey_hex) {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "restricted: agent-engram reads require authors=[self] or #p=[self]",
+        ));
+    }
 
     // Get channels this user can access.
     let accessible_channels = state
@@ -379,6 +391,34 @@ pub async fn count_events(
 }
 
 // ── NIP-50 search via HTTP bridge ────────────────────────────────────────────
+
+/// Decide whether a search hit should be returned to the caller.
+///
+/// Mirrors the WS NIP-50 path's post-filter step in `handlers/req.rs`:
+/// Typesense receives only the kind/authors/time pushdown, so any other filter
+/// constraint (`#p`, `#h`, `#e`, `#d`, `ids`, …) must be enforced here against
+/// the full stored event. Without this, an authorized engram search such as
+/// `{"kinds":[30174],"#p":[self]}` would leak text-matching envelopes whose
+/// `#p` belongs to a different owner — the NIP-AE read gate at the filter
+/// layer would be bypassed for `/query`.
+///
+/// `accessible_channels` is the caller's channel scope; channel-scoped hits
+/// outside that set are rejected regardless of NIP-01 match.
+fn search_hit_accepted(
+    filter: &nostr::Filter,
+    stored: &sprout_core::StoredEvent,
+    accessible_channels: &[uuid::Uuid],
+) -> bool {
+    if !sprout_core::filter::filters_match(std::slice::from_ref(filter), stored) {
+        return false;
+    }
+    if let Some(ch_id) = stored.channel_id {
+        if !accessible_channels.contains(&ch_id) {
+            return false;
+        }
+    }
+    true
+}
 
 /// Handle search filters by routing to Typesense, then fetching full events from DB.
 /// Returns first page of results (no pagination for bridge MVP).
@@ -499,11 +539,8 @@ async fn handle_bridge_search(
                 Some(ev) => ev,
                 None => continue,
             };
-            // Channel access post-filter.
-            if let Some(ch_id) = stored.channel_id {
-                if !accessible_channels.contains(&ch_id) {
-                    continue;
-                }
+            if !search_hit_accepted(filter, stored, accessible_channels) {
+                continue;
             }
             // Dedup across filters.
             if !seen_ids.insert(id_array) {
@@ -734,4 +771,108 @@ async fn synthesize_presence(state: &AppState, filters: &[nostr::Filter]) -> Opt
     }
 
     Some(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
+
+    /// Build a kind:30174 engram envelope authored by `agent`, tagged with `owner`.
+    fn engram_envelope(agent: &Keys, owner_hex: &str) -> sprout_core::StoredEvent {
+        let d_tag = Tag::custom(
+            nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
+            ["abcd1234"],
+        );
+        let p_tag = Tag::custom(
+            nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P)),
+            [owner_hex],
+        );
+        let ev = EventBuilder::new(Kind::Custom(30174), "engram body", [d_tag, p_tag])
+            .sign_with_keys(agent)
+            .expect("sign engram");
+        sprout_core::StoredEvent::new(ev, None)
+    }
+
+    /// Regression test for the NIP-AE `/query` search leak (PR #593 review).
+    ///
+    /// Setup: two engram envelopes by different agents for different owners.
+    /// An authorized search for `{kinds:[30174], #p:[owner_a]}` would be
+    /// approved by the engram gate (owner_a is querying engrams addressed to
+    /// them). Typesense's pushdown only carries `kind:=[30174]`, so the
+    /// envelope for owner_b can come back as a text-match hit. The post-filter
+    /// in `search_hit_accepted` must reject it.
+    #[test]
+    fn search_hit_rejects_envelope_with_mismatched_p_tag() {
+        let agent_a = Keys::generate();
+        let agent_b = Keys::generate();
+        let owner_a = Keys::generate().public_key().to_hex();
+        let owner_b = Keys::generate().public_key().to_hex();
+
+        let env_for_a = engram_envelope(&agent_a, &owner_a);
+        let env_for_b = engram_envelope(&agent_b, &owner_b);
+
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let filter = nostr::Filter::new()
+            .kind(Kind::Custom(30174))
+            .custom_tag(p_tag, [&owner_a]);
+
+        assert!(
+            search_hit_accepted(&filter, &env_for_a, &[]),
+            "envelope addressed to owner_a must be returned"
+        );
+        assert!(
+            !search_hit_accepted(&filter, &env_for_b, &[]),
+            "envelope addressed to owner_b must NOT be returned for a #p=[owner_a] search"
+        );
+    }
+
+    /// `authors=[agent_a]` search must not return an envelope authored by agent_b,
+    /// even if Typesense's text match would otherwise surface it. (Typesense does
+    /// carry an `authors` pushdown today, so this is defence-in-depth; mirroring
+    /// the WS contract.)
+    #[test]
+    fn search_hit_rejects_event_with_mismatched_author() {
+        let agent_a = Keys::generate();
+        let agent_b = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+
+        let env_a = engram_envelope(&agent_a, &owner);
+        let env_b = engram_envelope(&agent_b, &owner);
+
+        let filter = nostr::Filter::new()
+            .kind(Kind::Custom(30174))
+            .author(agent_a.public_key());
+
+        assert!(search_hit_accepted(&filter, &env_a, &[]));
+        assert!(
+            !search_hit_accepted(&filter, &env_b, &[]),
+            "authors=[agent_a] search must not return events authored by agent_b"
+        );
+    }
+
+    /// Channel-scoped events outside the caller's accessible-channel set are
+    /// rejected by the post-filter regardless of NIP-01 match.
+    #[test]
+    fn search_hit_rejects_inaccessible_channel() {
+        let agent = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let mut stored = engram_envelope(&agent, &owner);
+        let scoped_channel = uuid::Uuid::new_v4();
+        stored.channel_id = Some(scoped_channel);
+
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let filter = nostr::Filter::new()
+            .kind(Kind::Custom(30174))
+            .custom_tag(p_tag, [&owner]);
+
+        assert!(
+            !search_hit_accepted(&filter, &stored, &[]),
+            "channel-scoped hit must be rejected when caller has no channel access"
+        );
+        assert!(
+            search_hit_accepted(&filter, &stored, &[scoped_channel]),
+            "channel-scoped hit must be accepted when caller has access to that channel"
+        );
+    }
 }

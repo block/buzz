@@ -883,7 +883,7 @@ const mockChannels: MockChannel[] = [
     name: "design",
     channel_type: "stream",
     visibility: "open",
-    description: "Design system and UX discussions",
+    description: "Design system and UX discussions with engineering partners",
     topic: null,
     purpose: null,
     last_message_at: isoMinutesAgo(120),

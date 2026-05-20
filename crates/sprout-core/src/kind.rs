@@ -45,6 +45,13 @@ pub const KIND_HTTP_AUTH: u32 = 27235;
 /// Agent metadata + owner reference (replaceable, agent-authored).
 pub const KIND_AGENT_PROFILE: u32 = 10100;
 
+/// NIP-AE: Agent Engram (parameterized replaceable, agent-authored).
+///
+/// Encrypted memory record for AI agents. Addressed by `(pubkey_a, kind, d_tag)`,
+/// where `d_tag` is an HMAC over the agent↔owner conversation key. See
+/// `docs/nips/NIP-AE.md` and [`crate::engram`].
+pub const KIND_AGENT_ENGRAM: u32 = 30174;
+
 // NIP-29 group admin events
 /// NIP-29: Add a user to a group.
 pub const KIND_NIP29_PUT_USER: u32 = 9000;
@@ -321,6 +328,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIFT_WRAP,
     KIND_FILE_METADATA,
     KIND_AGENT_PROFILE,
+    KIND_AGENT_ENGRAM,
     KIND_NIP29_PUT_USER,
     KIND_NIP29_REMOVE_USER,
     KIND_NIP29_EDIT_METADATA,

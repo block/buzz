@@ -33,3 +33,28 @@ export function resolveMentionNames(
 
   return names.size > 0 ? [...names] : undefined;
 }
+
+export function resolveMentionPubkeysByName(
+  tags: string[][] | undefined,
+  profiles: Record<string, UserProfileSummary> | undefined,
+): Record<string, string> | undefined {
+  if (!profiles || !tags) {
+    return undefined;
+  }
+
+  const pubkeysByName: Record<string, string> = {};
+
+  for (const tag of tags) {
+    if (tag[0] !== "p" || !tag[1]) {
+      continue;
+    }
+
+    const pubkey = tag[1].toLowerCase();
+    const displayName = profiles[pubkey]?.displayName?.trim();
+    if (displayName) {
+      pubkeysByName[displayName.toLowerCase()] = pubkey;
+    }
+  }
+
+  return Object.keys(pubkeysByName).length > 0 ? pubkeysByName : undefined;
+}

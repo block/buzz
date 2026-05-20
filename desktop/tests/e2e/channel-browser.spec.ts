@@ -20,9 +20,25 @@ test("keyboard shortcut opens the channel browser dialog", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 
-  await page.keyboard.press(
-    process.platform === "darwin" ? "Meta+Shift+O" : "Control+Shift+O",
+  const isMacBrowser = await page.evaluate(() =>
+    /mac|iphone|ipad|ipod/i.test(navigator.platform),
   );
+
+  if (isMacBrowser) {
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "O",
+          metaKey: true,
+          shiftKey: true,
+        }),
+      );
+    });
+  } else {
+    await page.keyboard.press("Control+Shift+O");
+  }
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
 });
 

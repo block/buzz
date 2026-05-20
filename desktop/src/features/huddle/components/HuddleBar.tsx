@@ -8,6 +8,7 @@ import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle } from "../HuddleContext";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
+import { HeadphonesNotice } from "./HeadphonesNotice";
 import { MicControls, SpeakerControls } from "./MicControls";
 import { ParticipantList } from "./ParticipantList";
 
@@ -60,13 +61,23 @@ export function HuddleBar({ className }: HuddleBarProps) {
   const isPttMode = voiceInputMode === "push_to_talk";
   const [state, setState] = React.useState<HuddleState | null>(null);
   const [isMuted, setIsMuted] = React.useState(false);
+  // Session-dismissable "use headphones" notice. The desktop client plays
+  // remote peer audio via native rodio, outside the WebView render graph,
+  // so the browser's echo canceller has no far-end reference to cancel
+  // against. Until the WebAudio AEC follow-up PR lands, two people on
+  // speakers in the same physical room will hear themselves echo. The
+  // banner stays visible across huddle start/stop within a single page
+  // load; it auto-removes when the AEC plumbing lands and the detection
+  // below flips to false.
+  const [headphonesNoticeDismissed, setHeadphonesNoticeDismissed] =
+    React.useState(false);
   const ttsEnabled = state?.tts_enabled ?? true;
   const [isLeaving, setIsLeaving] = React.useState(false);
   const [showAddAgent, setShowAddAgent] = React.useState(false);
   const [agentAddError, setAgentAddError] = React.useState<string | null>(null);
   const [modelStatus, setModelStatus] = React.useState<{
     stt: string;
-    kokoro: string;
+    tts: string;
   } | null>(null);
   // Huddle state: event-driven + 10s fallback poll.
   React.useEffect(() => {
@@ -133,13 +144,13 @@ export function HuddleBar({ className }: HuddleBarProps) {
       try {
         const status = await invoke<{
           stt: unknown;
-          kokoro: unknown;
+          tts: unknown;
         }>("get_model_status");
         if (cancelled) return;
 
         setModelStatus({
           stt: fmt(status.stt),
-          kokoro: fmt(status.kokoro),
+          tts: fmt(status.tts),
         });
       } catch {
         // best-effort
@@ -164,6 +175,12 @@ export function HuddleBar({ className }: HuddleBarProps) {
 
   if (!state || (state.phase !== "active" && state.phase !== "connected"))
     return null;
+
+  // Self-removing detection: remote-peer audio plays through native rodio
+  // today (outside the WebView render graph), so the browser's AEC has no
+  // far-end reference. The AEC follow-up PR flips this constant in the
+  // same diff that moves playout into WebAudio.
+  const aecMissing = true;
 
   async function handleLeave() {
     if (isLeaving) return;
@@ -226,16 +243,23 @@ export function HuddleBar({ className }: HuddleBarProps) {
         </div>
       )}
 
+      {/* Echo-cancellation pre-PR notice. Removed when AEC plumbing lands. */}
+      {aecMissing && !headphonesNoticeDismissed && (
+        <HeadphonesNotice
+          onDismiss={() => setHeadphonesNoticeDismissed(true)}
+        />
+      )}
+
       {/* Model download progress */}
       {modelStatus &&
-        (modelStatus.stt !== "ready" || modelStatus.kokoro !== "ready") && (
+        (modelStatus.stt !== "ready" || modelStatus.tts !== "ready") && (
           <output className="flex items-center gap-1 text-xs text-muted-foreground">
             <span className="animate-pulse">
-              {modelStatus.stt !== "ready" && modelStatus.kokoro !== "ready"
-                ? `Voice models: STT ${modelStatus.stt}, TTS ${modelStatus.kokoro}`
+              {modelStatus.stt !== "ready" && modelStatus.tts !== "ready"
+                ? `Voice models: STT ${modelStatus.stt}, TTS ${modelStatus.tts}`
                 : modelStatus.stt !== "ready"
                   ? `STT model: ${modelStatus.stt}`
-                  : `TTS model: ${modelStatus.kokoro}`}
+                  : `TTS model: ${modelStatus.tts}`}
             </span>
           </output>
         )}
@@ -464,8 +488,8 @@ export function HuddleBar({ className }: HuddleBarProps) {
           modelStatus.stt !== "ready" &&
           `, STT model ${modelStatus.stt}`}
         {modelStatus &&
-          modelStatus.kokoro !== "ready" &&
-          `, TTS model ${modelStatus.kokoro}`}
+          modelStatus.tts !== "ready" &&
+          `, TTS model ${modelStatus.tts}`}
       </output>
     </div>
   );

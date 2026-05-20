@@ -5,6 +5,24 @@ import type {
 import type { TimelineMessage } from "@/features/messages/types";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
+const MESSAGE_TEXT_OFFSET_PX = 54;
+const NESTED_REPLY_OFFSET_PX = 28;
+
+function formatRelativeTime(unixSeconds: number): string {
+  const now = Date.now() / 1_000;
+  const diff = now - unixSeconds;
+
+  if (diff < 60) return "just now";
+  if (diff < 3_600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86_400) return `${Math.floor(diff / 3_600)}h`;
+  if (diff < 604_800) return `${Math.floor(diff / 86_400)}d`;
+
+  return new Date(unixSeconds * 1_000).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 function ParticipantAvatar({
   participant,
   index,
@@ -30,24 +48,31 @@ function ParticipantAvatar({
 
 export function MessageThreadSummaryRow({
   depth = 0,
-  layoutVariant = "default",
   message,
   onOpenThread,
   summary,
 }: {
   depth?: number;
-  layoutVariant?: "default" | "thread-reply";
   message: TimelineMessage;
   onOpenThread: (message: TimelineMessage) => void;
   summary: TimelineThreadSummary;
 }) {
   const visibleDepth = Math.min(Math.max(depth, 0), 6);
-  const messageTextOffsetPx = layoutVariant === "thread-reply" ? 8 : 50;
-  const marginLeftPx = visibleDepth * 28 + messageTextOffsetPx;
-  const depthGuideOffsets = Array.from(
-    { length: visibleDepth },
-    (_, index) => 14 + index * 28,
-  );
+  const indentPx =
+    visibleDepth > 0
+      ? MESSAGE_TEXT_OFFSET_PX + (visibleDepth - 1) * NESTED_REPLY_OFFSET_PX
+      : 0;
+  const marginLeftPx = indentPx + MESSAGE_TEXT_OFFSET_PX;
+  const depthGuideOffsets =
+    visibleDepth === 0
+      ? []
+      : Array.from({ length: visibleDepth }, (_, index) =>
+          index === 0
+            ? MESSAGE_TEXT_OFFSET_PX / 2
+            : MESSAGE_TEXT_OFFSET_PX +
+              NESTED_REPLY_OFFSET_PX / 2 +
+              (index - 1) * NESTED_REPLY_OFFSET_PX,
+        );
 
   return (
     <div className="relative pb-1 pt-1">
@@ -71,7 +96,7 @@ export function MessageThreadSummaryRow({
       ) : null}
 
       <button
-        className="inline-flex w-fit max-w-full items-center gap-1 rounded-full border border-border/70 bg-muted/70 py-0.5 pl-0.5 pr-2 text-left text-xs font-medium text-foreground/90 transition-colors hover:bg-accent hover:text-accent-foreground"
+        className="group inline-flex w-fit max-w-full items-center gap-1 text-left text-xs font-medium text-muted-foreground"
         data-thread-head-id={message.id}
         data-testid="message-thread-summary"
         onClick={() => onOpenThread(message)}
@@ -89,10 +114,15 @@ export function MessageThreadSummaryRow({
         </div>
         <div className="min-w-0">
           <div className="font-medium">
-            <span>
+            <span className="transition-colors group-hover:text-foreground">
               {summary.replyCount}{" "}
               {summary.replyCount === 1 ? "reply" : "replies"}
             </span>
+            {summary.lastReplyAt ? (
+              <span className="ml-1 text-muted-foreground/70">
+                last {formatRelativeTime(summary.lastReplyAt)}
+              </span>
+            ) : null}
           </div>
         </div>
       </button>

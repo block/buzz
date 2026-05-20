@@ -5,6 +5,7 @@
 #   SPROUT_RELAY_PORT, SPROUT_RELAY_URL
 #   SPROUT_INSTANCE_SLUG, SPROUT_WORKTREE_LABEL, VITE_DEV_BRANCH (worktrees only)
 #   SPROUT_TAURI_CONFIG
+#   SPROUT_PRIVATE_KEY (worktrees only, when SPROUT_SHARE_IDENTITY=1)
 
 WORKTREE_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 
@@ -24,12 +25,30 @@ unset VITE_DEV_BRANCH
 
 # In worktrees, extract a label from the branch name and derive a unique app
 # identity and icon so multiple local desktop instances can run side by side.
+#
+# Worktree detection: compare --git-dir to --git-common-dir. In the main
+# working tree these are identical; in any worktree (whether under .worktrees/,
+# .claude/worktrees/, or elsewhere on disk) they differ.
 if git rev-parse --is-inside-work-tree &>/dev/null; then
     GIT_DIR=$(git rev-parse --git-dir)
-    if [[ "$GIT_DIR" == *".git/worktrees/"* ]]; then
+    GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
+    if [[ -n "$GIT_COMMON_DIR" && "$GIT_DIR" != "$GIT_COMMON_DIR" ]]; then
         BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
         export SPROUT_WORKTREE_LABEL="${BRANCH_NAME##*/}"
         export SPROUT_INSTANCE_SLUG=$(echo "$BRANCH_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//')
+
+        # SPROUT_SHARE_IDENTITY=1: reuse the main dev checkout's Nostr key so
+        # worktrees skip onboarding and share the same identity. The per-worktree
+        # identifier is kept so concurrent instances don't collide on
+        # tauri-plugin-single-instance or the app data directory.
+        if [[ "${SPROUT_SHARE_IDENTITY:-0}" == "1" ]]; then
+            CANONICAL_KEY="$HOME/Library/Application Support/xyz.block.sprout.app.dev/identity.key"
+            if [[ -f "$CANONICAL_KEY" ]]; then
+                export SPROUT_PRIVATE_KEY="$(cat "$CANONICAL_KEY")"
+            else
+                echo "⚠ SPROUT_SHARE_IDENTITY=1 but no identity found at $CANONICAL_KEY — run Sprout from repo root first" >&2
+            fi
+        fi
 
         ICON_DIR="$(pwd)/src-tauri/target/dev-icons"
         mkdir -p "$ICON_DIR"

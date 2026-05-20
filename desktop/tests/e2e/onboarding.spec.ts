@@ -9,6 +9,10 @@ const BLANK_TYLER_IDENTITY = {
   ...TEST_IDENTITIES.tyler,
   username: "",
 };
+const FIRST_RUN_ALICE = {
+  ...TEST_IDENTITIES.alice,
+  username: "",
+};
 
 type TestIdentity = {
   privateKey: string;
@@ -139,17 +143,16 @@ test("page 1 accepts an avatar URL as the secondary avatar path", async ({
 test("first-run onboarding keeps the shell hidden through both pages and only marks Home seen after finish", async ({
   page,
 }) => {
-  await seedActiveIdentity(page, TEST_IDENTITIES.alice);
+  await seedActiveIdentity(page, FIRST_RUN_ALICE);
   await installMockBridge(page, undefined, { skipOnboardingSeed: true });
   await page.goto("/");
 
   await expect(page.getByTestId("onboarding-gate")).toBeVisible();
   await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
-  await expect(page.getByTestId("onboarding-display-name")).toHaveValue(
-    "alice",
-  );
+  await expect(page.getByTestId("onboarding-display-name")).toHaveValue("");
   await expectNoHomeSeenEntries(page);
 
+  await page.getByTestId("onboarding-display-name").fill("Alice");
   await continueToSetupPage(page);
   await expectShellHidden(page);
   await expect(page.getByTestId("onboarding-provider-goose")).toBeVisible();
@@ -159,6 +162,17 @@ test("first-run onboarding keeps the shell hidden through both pages and only ma
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
   await expect(page.getByTestId("chat-title")).toHaveText("Home");
   await expectHomeSeenCount(page, 2);
+});
+
+test("existing relay profile auto-skips onboarding without localStorage completion", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, TEST_IDENTITIES.alice);
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await page.goto("/");
+
+  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
+  await expect(page.getByTestId("chat-title")).toHaveText("Home");
 });
 
 test("finishing onboarding auto-joins the #general channel for a new member", async ({
@@ -179,7 +193,7 @@ test("finishing onboarding auto-joins the #general channel for a new member", as
 test("page 2 falls back to Doctor guidance when ACP tools are not installed", async ({
   page,
 }) => {
-  await seedActiveIdentity(page, TEST_IDENTITIES.alice);
+  await seedActiveIdentity(page, FIRST_RUN_ALICE);
   await installMockBridge(
     page,
     {
@@ -189,6 +203,7 @@ test("page 2 falls back to Doctor guidance when ACP tools are not installed", as
   );
   await page.goto("/");
 
+  await page.getByTestId("onboarding-display-name").fill("Alice");
   await continueToSetupPage(page);
   await expect(page.getByTestId("onboarding-acp-empty")).toBeVisible();
   await expect(

@@ -33,6 +33,7 @@ type OnboardingGateStage = "blocking" | "onboarding" | "ready";
 
 type UseFirstRunOnboardingGateOptions = {
   currentPubkey: string | null;
+  hasExistingProfile: boolean;
   identityIsFetching: boolean;
   identityStatus: QueryStatus;
   profileStatus: QueryStatus;
@@ -125,6 +126,7 @@ function resolveOnboardingGateStage({
 
 export function useFirstRunOnboardingGate({
   currentPubkey,
+  hasExistingProfile,
   identityIsFetching,
   identityStatus,
   profileStatus,
@@ -166,14 +168,37 @@ export function useFirstRunOnboardingGate({
       return;
     }
 
+    // If the relay already has a real profile for this pubkey, the user has
+    // been onboarded elsewhere — skip the gate and persist the completion so
+    // future launches in this data dir don't re-check.
+    if (hasExistingProfile) {
+      if (typeof window !== "undefined" && currentPubkey) {
+        window.localStorage.setItem(
+          onboardingCompletionStorageKey(currentPubkey),
+          "true",
+        );
+      }
+    }
+
     setGateState((current) =>
-      updateActiveGateState(current, currentPubkey, (activeGateState) => ({
-        ...activeGateState,
-        hasSettledCurrentPubkey: true,
-        isOpen: !activeGateState.hasCompletedCurrentPubkey,
-      })),
+      updateActiveGateState(current, currentPubkey, (activeGateState) => {
+        const alreadyOnboarded =
+          activeGateState.hasCompletedCurrentPubkey || hasExistingProfile;
+        return {
+          ...activeGateState,
+          hasCompletedCurrentPubkey: alreadyOnboarded,
+          hasSettledCurrentPubkey: true,
+          isOpen: !alreadyOnboarded,
+        };
+      }),
     );
-  }, [currentPubkey, hasSettledCurrentPubkey, identityStatus, profileStatus]);
+  }, [
+    currentPubkey,
+    hasExistingProfile,
+    hasSettledCurrentPubkey,
+    identityStatus,
+    profileStatus,
+  ]);
 
   const skipForNow = React.useCallback(() => {
     setGateState((current) =>
@@ -213,6 +238,14 @@ export function useFirstRunOnboardingGate({
   };
 }
 
+function hasRealDisplayName(displayName?: string | null): boolean {
+  if (!displayName) return false;
+  const trimmed = displayName.trim();
+  if (trimmed.length === 0) return false;
+  const lower = trimmed.toLowerCase();
+  return !lower.startsWith("npub1") && !lower.startsWith("nostr:npub1");
+}
+
 export function useAppOnboardingState() {
   const queryClient = useQueryClient();
   const identityQuery = useIdentityQuery();
@@ -221,6 +254,7 @@ export function useAppOnboardingState() {
   const profileQuery = useProfileQuery();
   const onboardingGate = useFirstRunOnboardingGate({
     currentPubkey,
+    hasExistingProfile: hasRealDisplayName(profileQuery.data?.displayName),
     identityIsFetching: identityQuery.fetchStatus === "fetching",
     identityStatus: identityQuery.status,
     profileStatus: profileQuery.status,
