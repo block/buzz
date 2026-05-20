@@ -349,6 +349,7 @@ jobs:
           touch "desktop/src-tauri/binaries/sprout-agent-$TARGET"
           touch "desktop/src-tauri/binaries/sprout-dev-mcp-$TARGET"
           touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
+          touch "desktop/src-tauri/binaries/sprout-$TARGET"
       - name: Build Tauri app
         run: cd desktop && pnpm tauri build
         env:

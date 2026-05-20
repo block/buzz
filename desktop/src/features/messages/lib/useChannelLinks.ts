@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
+import type { AutocompleteEdit } from "./useRichTextEditor";
 
 export type ChannelSuggestion = {
   id: string;
@@ -74,27 +75,23 @@ export function useChannelLinks() {
   const isChannelOpen = channelQuery !== null && channelSuggestions.length > 0;
 
   const insertChannel = React.useCallback(
-    (
-      suggestion: ChannelSuggestion,
-      content: string,
-      selectionEnd: number,
-    ): { nextContent: string; nextCursor: number } => {
+    (suggestion: ChannelSuggestion, selectionEnd: number): AutocompleteEdit => {
       // Cancel any pending debounced detection — user already selected
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
       }
 
-      const before = content.slice(0, channelStartIndex);
-      const after = content.slice(selectionEnd);
-      const inserted = `#${suggestion.name} `;
-      const nextContent = `${before}${inserted}${after}`;
-      const nextCursor = before.length + inserted.length;
+      const insertText = `#${suggestion.name} `;
 
       setChannelQuery(null);
       setChannelSelectedIndex(0);
 
-      return { nextContent, nextCursor };
+      return {
+        replaceFromOffset: channelStartIndex,
+        replaceToOffset: selectionEnd,
+        insertText,
+      };
     },
     [channelStartIndex],
   );

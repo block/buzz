@@ -1,4 +1,10 @@
-import { Check, ChevronDown, MoreHorizontal, Plus } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  MoreHorizontal,
+  Plus,
+  WifiOff,
+} from "lucide-react";
 import * as React from "react";
 
 import type { Workspace } from "@/features/workspaces/types";
@@ -14,8 +20,23 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import type { ConnectionState } from "@/shared/api/relayClientShared";
+import {
+  isRelayConnectionDegraded,
+  useRelayConnection,
+} from "@/shared/api/useRelayConnection";
 
 import { EditWorkspaceDialog } from "./EditWorkspaceDialog";
+
+const CONNECTION_STATE_LABEL: Record<ConnectionState, string> = {
+  idle: "Not connected",
+  connecting: "Connecting…",
+  connected: "Connected",
+  reconnecting: "Reconnecting to relay…",
+  stalled: "Connection lost — relay is not responding",
+  disconnected: "Disconnected from relay",
+};
 
 type WorkspaceSwitcherProps = {
   activeWorkspace: Workspace | null;
@@ -40,6 +61,9 @@ export function WorkspaceSwitcher({
   const [editingWorkspace, setEditingWorkspace] =
     React.useState<Workspace | null>(null);
   const [dropdownOpen, setDropdownOpen] = React.useState(false);
+  const connectionState = useRelayConnection();
+  const degraded = isRelayConnectionDegraded(connectionState);
+  const connectionLabel = CONNECTION_STATE_LABEL[connectionState];
 
   return (
     <>
@@ -48,14 +72,43 @@ export function WorkspaceSwitcher({
           <DropdownMenu open={dropdownOpen} onOpenChange={setDropdownOpen}>
             <DropdownMenuTrigger asChild>
               <SidebarMenuButton
+                aria-label={
+                  degraded
+                    ? `${activeWorkspace?.name ?? "Workspace"} — ${connectionLabel}`
+                    : undefined
+                }
                 className="h-auto gap-2 rounded-xl px-2.5 py-2 data-[state=open]:bg-sidebar-accent"
                 data-testid="workspace-switcher"
                 type="button"
               >
-                <span className="flex h-5 w-5 shrink-0 items-center justify-center text-xs leading-none">
-                  🌱
-                </span>
-                <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                {degraded ? (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <span
+                        aria-hidden="false"
+                        className="flex h-5 w-5 shrink-0 animate-pulse items-center justify-center text-destructive"
+                        data-testid="relay-connection-warning"
+                        role="img"
+                      >
+                        <WifiOff className="h-4 w-4" />
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent side="bottom">
+                      {connectionLabel}
+                    </TooltipContent>
+                  </Tooltip>
+                ) : (
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center text-xs leading-none">
+                    🌱
+                  </span>
+                )}
+                <span
+                  className={
+                    degraded
+                      ? "min-w-0 flex-1 truncate text-sm font-medium text-destructive animate-pulse"
+                      : "min-w-0 flex-1 truncate text-sm font-medium"
+                  }
+                >
                   {activeWorkspace?.name ?? "No workspace"}
                 </span>
                 <ChevronDown className="h-3.5 w-3.5 shrink-0 text-sidebar-foreground/50" />

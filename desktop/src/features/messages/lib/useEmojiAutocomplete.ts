@@ -3,6 +3,8 @@ import * as React from "react";
 import { init, SearchIndex } from "emoji-mart";
 import data from "@emoji-mart/data";
 
+import type { AutocompleteEdit } from "./useRichTextEditor";
+
 export type EmojiSuggestion = {
   id: string;
   name: string;
@@ -101,26 +103,22 @@ export function useEmojiAutocomplete() {
   const isEmojiAutocompleteOpen = emojiQuery !== null && suggestions.length > 0;
 
   const insertEmoji = React.useCallback(
-    (
-      suggestion: EmojiSuggestion,
-      content: string,
-      selectionEnd: number,
-    ): { nextContent: string; nextCursor: number } => {
+    (suggestion: EmojiSuggestion, selectionEnd: number): AutocompleteEdit => {
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
       }
 
-      const before = content.slice(0, emojiStartIndex);
-      const after = content.slice(selectionEnd);
-      const inserted = `${suggestion.native} `;
-      const nextContent = `${before}${inserted}${after}`;
-      const nextCursor = before.length + inserted.length;
+      const insertText = `${suggestion.native} `;
 
       setEmojiQuery(null);
       setEmojiSelectedIndex(0);
 
-      return { nextContent, nextCursor };
+      return {
+        replaceFromOffset: emojiStartIndex,
+        replaceToOffset: selectionEnd,
+        insertText,
+      };
     },
     [emojiStartIndex],
   );

@@ -88,39 +88,47 @@ export function ForumComposer({
       setContent(markdown);
       contentRef.current = markdown;
 
-      const { cursor } = richText.getTextAndCursor();
+      const { cursor } = richText.getPlainTextAndCursor();
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
     },
   });
 
+  // ── Mention / channel autocomplete insertion ────────────────────────
+  // Native ProseMirror transactions — no markdown round-trip.
   const applyMentionInsert = React.useCallback(
     (suggestion: MentionSuggestion) => {
-      const { text, cursor } = richText.getTextAndCursor();
-      const result = mentions.insertMention(suggestion, text, cursor);
-      richText.setContentWithTrailingSpace(result.nextContent);
-      setContent(result.nextContent);
-      contentRef.current = result.nextContent;
+      const { cursor } = richText.getPlainTextAndCursor();
+      const { replaceFromOffset, replaceToOffset, insertText } =
+        mentions.insertMention(suggestion, cursor);
+      richText.replacePlainTextRange(
+        replaceFromOffset,
+        replaceToOffset,
+        insertText,
+      );
     },
     [
       mentions.insertMention,
-      richText.getTextAndCursor,
-      richText.setContentWithTrailingSpace,
+      richText.getPlainTextAndCursor,
+      richText.replacePlainTextRange,
     ],
   );
 
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
-      const { text, cursor } = richText.getTextAndCursor();
-      const result = channelLinks.insertChannel(suggestion, text, cursor);
-      richText.setContentWithTrailingSpace(result.nextContent);
-      setContent(result.nextContent);
-      contentRef.current = result.nextContent;
+      const { cursor } = richText.getPlainTextAndCursor();
+      const { replaceFromOffset, replaceToOffset, insertText } =
+        channelLinks.insertChannel(suggestion, cursor);
+      richText.replacePlainTextRange(
+        replaceFromOffset,
+        replaceToOffset,
+        insertText,
+      );
     },
     [
       channelLinks.insertChannel,
-      richText.getTextAndCursor,
-      richText.setContentWithTrailingSpace,
+      richText.getPlainTextAndCursor,
+      richText.replacePlainTextRange,
     ],
   );
 
@@ -137,7 +145,7 @@ export function ForumComposer({
   // ── @ mention picker (toolbar button) ───────────────────────────────
   const openMentionPicker = React.useCallback(() => {
     if (!richText.editor) return;
-    const { text, cursor } = richText.getTextAndCursor();
+    const { text, cursor } = richText.getPlainTextAndCursor();
 
     const beforeCursor = text.slice(0, cursor);
     if (/(?:^|[\s])@[^\s]*$/.test(beforeCursor)) {
@@ -152,12 +160,12 @@ export function ForumComposer({
     richText.editor.chain().focus().insertContent(prefix).run();
     setIsEmojiPickerOpen(false);
 
-    const updatedText = richText.editor.state.doc.textContent;
-    const { cursor: updatedCursor } = richText.getTextAndCursor();
+    const { text: updatedText, cursor: updatedCursor } =
+      richText.getPlainTextAndCursor();
     mentions.updateMentionQuery(updatedText, updatedCursor);
   }, [
     richText.editor,
-    richText.getTextAndCursor,
+    richText.getPlainTextAndCursor,
     richText.focus,
     mentions.updateMentionQuery,
   ]);

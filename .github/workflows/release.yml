@@ -52,7 +52,7 @@ jobs:
 
       - name: Build sidecars
         run: |
-          cargo build --release -p sprout-acp -p sprout-mcp -p sprout-agent -p sprout-dev-mcp -p git-credential-nostr
+          cargo build --release -p sprout-acp -p sprout-mcp -p sprout-agent -p sprout-dev-mcp -p git-credential-nostr -p sprout-cli
           ./scripts/bundle-sidecars.sh
 
       - name: Build unsigned Tauri app

@@ -200,13 +200,13 @@ enum Cmd {
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  sprout messages send --channel <UUID> --content \"hello\"\n  sprout messages send --channel <UUID> --content \"@alice check this\""
+        after_help = "Examples:\n  sprout messages send --channel <UUID> --content \"hello\"\n  sprout messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | sprout messages send --channel <UUID> --content -"
     )]
     Send {
         /// Channel UUID (from 'sprout channels list')
         #[arg(long)]
         channel: String,
-        /// Message text — supports @mentions and markdown
+        /// Message text — supports @mentions and markdown. Use '-' to read from stdin.
         #[arg(long)]
         content: String,
         /// Nostr event kind (default: channel default)

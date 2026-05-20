@@ -6,6 +6,7 @@ import {
 } from "@/features/agents/hooks";
 import { useChannelMembersQuery } from "@/features/channels/hooks";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
+import type { AutocompleteEdit } from "./useRichTextEditor";
 import type { ChannelMember } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
@@ -169,11 +170,7 @@ export function useMentions(
   const isMentionOpen = mentionQuery !== null && suggestions.length > 0;
 
   const insertMention = React.useCallback(
-    (
-      suggestion: MentionSuggestion,
-      content: string,
-      selectionEnd: number,
-    ): { nextContent: string; nextCursor: number } => {
+    (suggestion: MentionSuggestion, selectionEnd: number): AutocompleteEdit => {
       // Cancel any pending debounced detection — user already selected
       if (debounceTimerRef.current !== null) {
         clearTimeout(debounceTimerRef.current);
@@ -181,11 +178,7 @@ export function useMentions(
       }
 
       const displayName = suggestion.displayName;
-      const before = content.slice(0, mentionStartIndex);
-      const after = content.slice(selectionEnd);
-      const inserted = `@${displayName} `;
-      const nextContent = `${before}${inserted}${after}`;
-      const nextCursor = before.length + inserted.length;
+      const insertText = `@${displayName} `;
 
       const mentions = mentionMapRef.current;
       mentions.set(displayName, suggestion.pubkey);
@@ -193,7 +186,11 @@ export function useMentions(
       setMentionQuery(null);
       setMentionSelectedIndex(0);
 
-      return { nextContent, nextCursor };
+      return {
+        replaceFromOffset: mentionStartIndex,
+        replaceToOffset: selectionEnd,
+        insertText,
+      };
     },
     [mentionStartIndex],
   );
