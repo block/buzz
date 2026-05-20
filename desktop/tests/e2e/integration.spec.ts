@@ -275,9 +275,6 @@ test("live mentions refetch the home feed without waiting for polling", async ({
     await expect(targetPage.getByTestId("message-timeline")).toContainText(
       message,
     );
-    await expect(targetPage.getByTestId("sidebar-home-count")).toHaveText("1", {
-      timeout: relayDeliveryTimeoutMs,
-    });
 
     await expect
       .poll(() => getLoggedNotificationCount(targetPage), {
@@ -294,8 +291,17 @@ test("live mentions refetch the home feed without waiting for polling", async ({
       },
     ]);
 
+    // The home feed should have been refetched live (the original purpose
+    // of this test). The home badge stays at 0 while the user is actively
+    // reading #general — reading in-channel advances the NIP-RS marker past
+    // the new mention — so the assertion that the refetch happened is the
+    // inbox-list content, not the badge.
     await targetPage.getByRole("button", { name: "Home" }).click();
     await expect(targetPage.getByTestId("chat-title")).toHaveText("Home");
+    await expect(targetPage.getByTestId("home-inbox-list")).toContainText(
+      message,
+      { timeout: relayDeliveryTimeoutMs },
+    );
     await expect(targetPage.getByTestId("sidebar-home-count")).toHaveCount(0);
     await expect
       .poll(() => getLoggedNotificationCount(targetPage), {

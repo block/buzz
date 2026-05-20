@@ -324,13 +324,15 @@ export function useHomeFeedNotificationState(
     const seenFeedIdSet = new Set(seenFeedIds);
     return currentFeedItems.filter((item) => {
       if (item.channelId) {
-        // Channel-backed items: unread iff strictly newer than the NIP-RS
-        // read marker. No fallback to seenFeedIds — reading in-channel is
-        // the authoritative signal.
+        // Channel-backed items: trust the NIP-RS marker when we have one.
+        // If the channel has no marker yet (cold start, mock mode without a
+        // relay client), fall back to the local seen-set so a freshly-seen
+        // feed item doesn't keep tripping the badge forever.
         const readAt = getChannelReadAt(item.channelId);
-        return readAt === null || item.createdAt > readAt;
+        if (readAt !== null) {
+          return item.createdAt > readAt;
+        }
       }
-      // No channel context: fall back to the local seen-set.
       return !seenFeedIdSet.has(item.id);
     }).length;
   }, [
