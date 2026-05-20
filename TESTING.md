@@ -140,18 +140,8 @@ export SPROUT_PRIVATE_KEY=$(echo "$GEN" | awk '/Secret key:/ {print $3}')
 PUBKEY=$(echo "$GEN"           | awk '/Public key:/ {print $3}')
 echo "pubkey: $PUBKEY"
 
-# Create a channel (the CLI generates the UUID client-side and embeds it in
-# the kind:9007 event; it does NOT return the UUID in the response yet)
-sprout channels create --name "smoke-$$" --type stream --visibility open
-
-# Find your new channel's UUID. kind:39002 (channel metadata) lists you as
-# owner; the channel UUID is in the `d` tag.
-CHANNEL=$(sprout channels list --member \
-  | jq -r --arg pk "$PUBKEY" '
-      .[]
-      | select(any(.tags[]; .[0]=="p" and .[1]==$pk and .[3]=="owner"))
-      | (.tags[] | select(.[0]=="d") | .[1])' \
-  | head -1)
+# Create a channel — the UUID is returned in the response
+CHANNEL=$(sprout channels create --name "smoke-$$" --type stream --visibility open | jq -r '.channel_id')
 echo "channel: $CHANNEL"
 
 # Send a message and read it back

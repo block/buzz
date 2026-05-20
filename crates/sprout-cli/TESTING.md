@@ -120,43 +120,54 @@ earlier ones create resources that later ones need.
 sprout channels create --name "test-stream" --type stream --visibility open \
   --description "CLI test channel" | jq .
 # Save the channel ID:
-CHANNEL_ID=$(sprout channels create --name "test-cli" --type stream --visibility open | jq -r '.id')
+CHANNEL_ID=$(sprout channels create --name "test-cli" --type stream --visibility open | jq -r '.channel_id')
+# Expected: {"event_id":"...","accepted":true,"message":"...","channel_id":"<uuid>"}
 
 # channels create (forum) — needed for messages vote later
-FORUM_ID=$(sprout channels create --name "test-forum" --type forum --visibility open | jq -r '.id')
+FORUM_ID=$(sprout channels create --name "test-forum" --type forum --visibility open | jq -r '.channel_id')
 
 # channels list
 sprout channels list | jq .
+# Expected: [{"channel_id":"...","name":"...","description":"...","created_at":N}]
 sprout channels list --visibility open | jq .
 sprout channels list --member | jq .
 
 # channels get
 sprout channels get --channel "$CHANNEL_ID" | jq .
+# Expected: {"channel_id":"...","name":"...","description":"...","created_at":N,"pubkey":"..."} or null
 
 # channels update
 sprout channels update --channel "$CHANNEL_ID" --name "test-cli-updated" \
   --description "Updated" | jq .
+# Expected: {"event_id":"...","accepted":true,"message":"..."}
 
 # channels topic
 sprout channels topic --channel "$CHANNEL_ID" --topic "Test topic" | jq .
+# Expected: {"event_id":"...","accepted":true,"message":"..."}
 
 # channels purpose
 sprout channels purpose --channel "$CHANNEL_ID" --purpose "Testing" | jq .
+# Expected: {"event_id":"...","accepted":true,"message":"..."}
 
 # channels join (may already be a member from create)
 sprout channels join --channel "$CHANNEL_ID" | jq .
+# Expected: {"event_id":"...","accepted":true,"message":"..."}
 
 # channels leave
 sprout channels leave --channel "$CHANNEL_ID" | jq .
+# Expected: {"event_id":"...","accepted":true,"message":"..."}
 
 # Re-join so we can send messages
 sprout channels join --channel "$CHANNEL_ID" | jq .
+# Expected: {"event_id":"...","accepted":true,"message":"..."}
 
 # channels archive (requires admin:channels scope)
 sprout channels archive --channel "$CHANNEL_ID" | jq .
+# Expected: {"event_id":"...","accepted":true,"message":"..."}
 
 # channels unarchive
 sprout channels unarchive --channel "$CHANNEL_ID" | jq .
+# Expected: {"event_id":"...","accepted":true,"message":"..."}
 ```
 
 ### 6.2 Canvas
@@ -169,7 +180,8 @@ sprout canvas set --channel "$CHANNEL_ID" --content "# Test Canvas" | jq .
 echo "# Canvas from stdin" | sprout canvas set --channel "$CHANNEL_ID" --content - | jq .
 
 # canvas get
-sprout canvas get --channel "$CHANNEL_ID" | jq .
+sprout canvas get --channel "$CHANNEL_ID"
+# Expected: raw markdown string, or: null
 ```
 
 ### 6.3 Messages
@@ -178,13 +190,13 @@ sprout canvas get --channel "$CHANNEL_ID" | jq .
 # messages send
 MSG=$(sprout messages send --channel "$CHANNEL_ID" --content "Hello from CLI test" | jq .)
 echo "$MSG"
-EVENT_ID=$(echo "$MSG" | jq -r '.id // .event_id')
+EVENT_ID=$(echo "$MSG" | jq -r '.event_id')
 
 # messages send with reply + broadcast
 REPLY=$(sprout messages send --channel "$CHANNEL_ID" --content "Reply" \
   --reply-to "$EVENT_ID" --broadcast | jq .)
 echo "$REPLY"
-REPLY_ID=$(echo "$REPLY" | jq -r '.id // .event_id')
+REPLY_ID=$(echo "$REPLY" | jq -r '.event_id')
 
 # messages send with mentions
 sprout messages send --channel "$CHANNEL_ID" --content "Hey @someone" \
@@ -254,13 +266,14 @@ echo "diff content" | sprout messages send-diff \
 ```bash
 # Send a message to react to
 REACT_MSG=$(sprout messages send --channel "$CHANNEL_ID" --content "React to this")
-REACT_ID=$(echo "$REACT_MSG" | jq -r '.id // .event_id')
+REACT_ID=$(echo "$REACT_MSG" | jq -r '.event_id')
 
 # reactions add
 sprout reactions add --event "$REACT_ID" --emoji "👍" | jq .
 
 # reactions get
 sprout reactions get --event "$REACT_ID" | jq .
+# Expected: {"reactions":[{"emoji":"...","count":N,"pubkeys":["..."]}]}
 
 # reactions remove
 sprout reactions remove --event "$REACT_ID" --emoji "👍" | jq .
@@ -271,16 +284,18 @@ sprout reactions remove --event "$REACT_ID" --emoji "👍" | jq .
 ```bash
 # dms list
 sprout dms list | jq .
+# Expected: [{"dm_id":"...","participants":["..."],"created_at":N}]
 
 # dms open (needs a real pubkey — use your own or a test one)
 # Get your own pubkey first:
-MY_PUBKEY=$(sprout users get | jq -r '.pubkey // .[0].pubkey // empty')
+MY_PUBKEY=$(sprout users get | jq -r '.[0].pubkey // empty')
 echo "My pubkey: $MY_PUBKEY"
 
 # dms open with a synthetic pubkey (relay will create the user)
 DM_RESULT=$(sprout dms open --pubkey "0000000000000000000000000000000000000000000000000000000000000001")
 echo "$DM_RESULT" | jq .
-DM_ID=$(echo "$DM_RESULT" | jq -r '.channel_id // .id // empty')
+# Expected: {"event_id":"...","accepted":true,"message":"...","dm_id":"<uuid>"}
+DM_ID=$(echo "$DM_RESULT" | jq -r '.dm_id')
 
 # dms add-member (requires messages:write scope — NOT admin:channels)
 sprout dms add-member --channel "$DM_ID" \
@@ -292,6 +307,7 @@ sprout dms add-member --channel "$DM_ID" \
 ```bash
 # users get — own profile (0 pubkeys)
 sprout users get | jq .
+# Expected: [{...profile...}] — always returns an array, even for single results
 
 # users get — single pubkey
 sprout users get --pubkey "$MY_PUBKEY" | jq .
@@ -309,6 +325,7 @@ sprout users presence --pubkeys "$MY_PUBKEY" | jq .
 sprout users set-presence --status online | jq .
 sprout users set-presence --status away | jq .
 sprout users set-presence --status offline | jq .
+# Note: set-presence may fail — kind:20001 is ephemeral and rejected by the HTTP bridge
 ```
 
 ### 6.8 Channel Members (add/remove require admin:channels)
@@ -321,6 +338,7 @@ sprout channels add-member --channel "$CHANNEL_ID" \
 
 # channels members
 sprout channels members --channel "$CHANNEL_ID" | jq .
+# Expected: [{"pubkey":"...","role":"..."}]
 
 # channels remove-member
 sprout channels remove-member --channel "$CHANNEL_ID" \
@@ -343,13 +361,14 @@ steps:
     action: send_message
     text: "Hello from workflow"' | jq .)
 echo "$WF"
-WF_ID=$(echo "$WF" | jq -r '.id')
+WF_ID=$(echo "$WF" | jq -r '.workflow_id')
 
 # workflows list
 sprout workflows list --channel "$CHANNEL_ID" | jq .
 
 # workflows get
 sprout workflows get --workflow "$WF_ID" | jq .
+# Expected: {"workflow_id":"...","content":"<yaml>","created_at":N,"pubkey":"..."} or null
 
 # workflows update
 sprout workflows update --workflow "$WF_ID" \
@@ -366,6 +385,7 @@ sprout workflows trigger --workflow "$WF_ID" | jq .
 
 # workflows runs
 sprout workflows runs --workflow "$WF_ID" | jq .
+# Expected: [] — relay stores runs in DB, not as Nostr events; empty is normal
 
 # workflows approve — requires a workflow run waiting for approval
 # This is hard to test ad-hoc without a workflow that has an approval gate.
@@ -383,6 +403,7 @@ sprout workflows delete --workflow "$WF_ID" | jq .
 ```bash
 sprout feed get | jq .
 sprout feed get --limit 5 | jq .
+# Expected: [{id,pubkey,kind,content,created_at,tags}] — sig-stripped, sorted newest-first
 ```
 
 ### 6.11 Forum & Voting
@@ -392,7 +413,7 @@ sprout feed get --limit 5 | jq .
 FORUM_POST=$(sprout messages send --channel "$FORUM_ID" \
   --content "Forum post for vote testing" --kind 45001 | jq .)
 echo "$FORUM_POST"
-FORUM_EVENT_ID=$(echo "$FORUM_POST" | jq -r '.id // .event_id')
+FORUM_EVENT_ID=$(echo "$FORUM_POST" | jq -r '.event_id')
 
 # messages vote (up)
 sprout messages vote --event "$FORUM_EVENT_ID" --direction up | jq .
@@ -438,10 +459,10 @@ env -u SPROUT_PRIVATE_KEY \
 # stderr: {"error":"auth_error","message":"SPROUT_PRIVATE_KEY is required (use --private-key or set env var)"}
 # exit: 3
 
-# Exit 2: Non-existent channel (valid UUID)
-sprout channels get --channel "00000000-0000-0000-0000-000000000000" 2>&1; echo "exit: $?"
-# stderr: {"error":"relay_error","message":"..."}
-# exit: 2
+# Not-found returns null, not an error (exit 0)
+sprout channels get --channel "00000000-0000-0000-0000-000000000000"
+# stdout: null
+# exit: 0
 ```
 
 ---
