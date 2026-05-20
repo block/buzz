@@ -16,16 +16,37 @@ import {
 import {
   getTextPayload,
   sortEvents,
+  type ConnectionState,
   type PendingEvent,
   type RelaySubscription,
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
+import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
+import { RelayStallWatchdog } from "@/shared/api/relayStallWatchdog";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
 const RECONNECT_BASE_DELAY_MS = 1_000,
   RECONNECT_MAX_DELAY_MS = 30_000;
 const RECONNECT_REPLAY_SKEW_SECS = 5,
   EVENT_BATCH_MS = 16;
+
+/**
+ * Application-level liveness probe.
+ *
+ * Tungstenite auto-pongs and the OS keeps the TCP socket open, so a
+ * half-open WS (Warp's orange-icon state, an asleep VPN, etc.) presents as
+ * "fully connected" to the WS layer indefinitely — no Close, no Error.
+ *
+ * We work around that by periodically sending a cheap NIP-01 `REQ` with
+ * `limit: 0` and waiting for the matching `EOSE`. Two consecutive misses
+ * (≈ STALL_PROBE_INTERVAL_MS + STALL_PROBE_TIMEOUT_MS) flips state to
+ * `stalled` and force-resets the socket so the existing reconnect path runs.
+ *
+ * The filter intentionally matches nothing real so the relay only ever
+ * answers with EOSE.
+ */
+const STALL_PROBE_INTERVAL_MS = 20_000;
+const STALL_PROBE_TIMEOUT_MS = 10_000;
 
 export class RelayClient {
   private wsId: number | null = null;
@@ -49,6 +70,17 @@ export class RelayClient {
   private notifyReconnectListeners = false;
   private onMessageChannel: Channel<unknown> | null = null;
 
+  private connectionStateEmitter = new RelayConnectionStateEmitter("idle");
+  private stallWatchdog = new RelayStallWatchdog({
+    intervalMs: STALL_PROBE_INTERVAL_MS,
+    probeTimeoutMs: STALL_PROBE_TIMEOUT_MS,
+    sendRaw: (payload) => this.sendRaw(payload),
+    onStall: (error) => {
+      this.connectionStateEmitter.set("stalled");
+      this.resetConnection(error);
+    },
+  });
+
   /**
    * Cleanly tear down the connection without scheduling a reconnect.
    * Used during workspace switches to reset the singleton before the
@@ -61,10 +93,12 @@ export class RelayClient {
       window.clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
     }
+    this.stallWatchdog.stop();
     this.keepAliveRequested = false;
     this.relayUrl = null;
     this.hasConnectedOnce = false;
     this.notifyReconnectListeners = false;
+    this.connectionStateEmitter.set("idle");
 
     if (this.wsId !== null) {
       void invoke("plugin:websocket|disconnect", { id: this.wsId }).catch(
@@ -101,6 +135,7 @@ export class RelayClient {
     }
     this.eventBuffer = [];
     this.reconnectListeners.clear();
+    this.connectionStateEmitter.clear();
     this.onMessageChannel = null;
     this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
   }
@@ -346,6 +381,20 @@ export class RelayClient {
     };
   }
 
+  /** Current connection state — synchronous read. */
+  getConnectionState(): ConnectionState {
+    return this.connectionStateEmitter.get();
+  }
+
+  /**
+   * Subscribe to connection-state transitions. The listener is invoked
+   * immediately with the current state so callers don't need a separate
+   * `getConnectionState()` call to seed their UI.
+   */
+  subscribeToConnectionState(listener: (state: ConnectionState) => void) {
+    return this.connectionStateEmitter.subscribe(listener);
+  }
+
   private async ensureConnected() {
     if (this.connectPromise) {
       return this.connectPromise;
@@ -373,6 +422,10 @@ export class RelayClient {
   }
 
   private async connect() {
+    this.connectionStateEmitter.set(
+      this.hasConnectedOnce ? "reconnecting" : "connecting",
+    );
+
     if (!this.relayUrl) {
       this.relayUrl = await getRelayWsUrl();
     }
@@ -406,6 +459,8 @@ export class RelayClient {
 
     this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
     await this.replayLiveSubscriptions();
+    this.connectionStateEmitter.set("connected");
+    this.stallWatchdog.start();
     this.emitReconnectIfNeeded();
   }
 
@@ -724,6 +779,12 @@ export class RelayClient {
   }
 
   private handleEose(subId: string) {
+    if (this.stallWatchdog.handleEose(subId)) {
+      // Probe round-trip succeeded — silently CLOSE the sub.
+      void this.closeSubscription(subId).catch(() => {});
+      return;
+    }
+
     const subscription = this.subscriptions.get(subId);
     if (!subscription) {
       return;
@@ -875,9 +936,18 @@ export class RelayClient {
     },
   ) {
     this.onMessageChannel = null;
+    this.stallWatchdog.stop();
     if (this.flushTimeout !== null) window.clearTimeout(this.flushTimeout);
     this.flushTimeout = null;
     this.eventBuffer = [];
+
+    if (options?.reconnect === false) {
+      this.connectionStateEmitter.set("disconnected");
+    } else if (this.connectionStateEmitter.get() !== "stalled") {
+      // Stall is a stronger signal than a generic drop; keep it until the
+      // reconnect timer transitions us back to "reconnecting" in connect().
+      this.connectionStateEmitter.set("reconnecting");
+    }
 
     if (options?.reconnect !== false && this.hasConnectedOnce) {
       this.notifyReconnectListeners = true;
