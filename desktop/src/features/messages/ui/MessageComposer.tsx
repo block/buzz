@@ -122,11 +122,13 @@ export function MessageComposer({
 
   const disabledRef = React.useRef(disabled);
   const isSendingRef = React.useRef(isSending);
+  const isUploadingRef = React.useRef(media.isUploading);
   const onSendRef = React.useRef(onSend);
   const onEditSaveRef = React.useRef(onEditSave);
   const editTargetRef = React.useRef(editTarget);
   disabledRef.current = disabled;
   isSendingRef.current = isSending;
+  isUploadingRef.current = media.isUploading;
   onSendRef.current = onSend;
   onEditSaveRef.current = onEditSave;
   editTargetRef.current = editTarget;
@@ -366,7 +368,8 @@ export function MessageComposer({
     if (
       (!trimmed && !hasMedia) ||
       disabledRef.current ||
-      isSendingRef.current
+      isSendingRef.current ||
+      isUploadingRef.current
     ) {
       return;
     }
@@ -583,8 +586,9 @@ export function MessageComposer({
   const sendDisabled = React.useMemo(
     () =>
       disabled ||
+      media.isUploading ||
       (content.trim().length === 0 && media.pendingImeta.length === 0),
-    [disabled, content, media.pendingImeta.length],
+    [disabled, media.isUploading, content, media.pendingImeta.length],
   );
 
   const handleCaptureSelection = React.useCallback(() => {
