@@ -1,4 +1,6 @@
-use nostr::{nips::nip44, Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32};
+use nostr::{
+    nips::nip44, Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32,
+};
 use tauri::Manager;
 use tauri::State;
 
@@ -100,8 +102,7 @@ pub fn decrypt_observer_event(
             .map_err(|error| format!("encode nsec: {error}"))?
     };
     let keys = Keys::parse(&nsec).map_err(|error| format!("parse nsec: {error}"))?;
-    let event =
-        Event::from_json(event_json).map_err(|error| format!("invalid event: {error}"))?;
+    let event = Event::from_json(event_json).map_err(|error| format!("invalid event: {error}"))?;
 
     // Defense-in-depth: verify event ID and signature before decrypting.
     if !event.verify_id() {

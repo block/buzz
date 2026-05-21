@@ -363,21 +363,15 @@ where
         Err(_) => return Ok(()),
     };
 
-    let relay_url_parsed = nostr::RelayUrl::parse(relay_url)
-        .map_err(|e| format!("invalid relay URL: {e}"))?;
+    let relay_url_parsed =
+        nostr::RelayUrl::parse(relay_url).map_err(|e| format!("invalid relay URL: {e}"))?;
     let auth_json = {
         let guard = session.lock().await;
         let s = guard.as_ref().ok_or("session gone during auth")?;
         let auth_event = s
-            .sign_event(nostr::EventBuilder::auth(
-                challenge,
-                relay_url_parsed,
-            ))
+            .sign_event(nostr::EventBuilder::auth(challenge, relay_url_parsed))
             .map_err(|e| format!("sign auth event: {e}"))?;
-        format!(
-            "[\"AUTH\",{}]",
-            nostr::JsonUtil::as_json(&auth_event)
-        )
+        format!("[\"AUTH\",{}]", nostr::JsonUtil::as_json(&auth_event))
     };
 
     write

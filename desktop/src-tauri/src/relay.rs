@@ -7,7 +7,6 @@ use sha2::{Digest, Sha256};
 
 // nostr 0.36 alias — required for cross-version bridging with sprout-sdk.
 
-
 use crate::app_state::AppState;
 
 const DEFAULT_RELAY_WS_URL: &str = "ws://localhost:3000";
@@ -403,8 +402,8 @@ mod tests {
     fn make_valid_auth_tag(agent_keys: &nostr::Keys) -> String {
         let owner_keys = nostr::Keys::generate();
         let agent_pubkey_hex = agent_keys.public_key().to_hex();
-        let agent_compat_pubkey = nostr::PublicKey::from_hex(&agent_pubkey_hex)
-            .expect("valid hex pubkey should parse");
+        let agent_compat_pubkey =
+            nostr::PublicKey::from_hex(&agent_pubkey_hex).expect("valid hex pubkey should parse");
         sprout_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_compat_pubkey, "")
             .expect("compute_auth_tag should not fail with distinct keys")
     }
