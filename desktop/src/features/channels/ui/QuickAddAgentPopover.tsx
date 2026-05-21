@@ -495,20 +495,16 @@ export function QuickAddAgentPopover({
           <div className="relative flex min-h-10 items-center gap-2 border-b pl-3 pr-1.5 py-1.5">
             {/* Title — always visible */}
             <h3 className="shrink-0 text-sm font-semibold text-foreground">
-              Add agent
-              <AnimatePresence>
-                {selectMode ? (
-                  <motion.span
-                    initial={{ opacity: 0, width: 0 }}
-                    animate={{ opacity: 1, width: "auto" }}
-                    exit={{ opacity: 0, width: 0 }}
-                    transition={{ duration: 0.2 }}
-                    className="inline-block overflow-hidden"
-                  >
-                    s
-                  </motion.span>
-                ) : null}
-              </AnimatePresence>
+              Add agent{selectMode ? (
+                <motion.span
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.3 }}
+                >
+                  s
+                </motion.span>
+              ) : null}
             </h3>
 
             {/* Team toggles — appear to the right of title */}
