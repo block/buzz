@@ -145,14 +145,19 @@ impl PkceOAuthTokenSource {
         let auth = v
             .get("authorization_endpoint")
             .and_then(Value::as_str)
-            .ok_or_else(|| AgentError::Llm("oauth discovery: authorization_endpoint missing".into()))?
+            .ok_or_else(|| {
+                AgentError::Llm("oauth discovery: authorization_endpoint missing".into())
+            })?
             .to_string();
         let token = v
             .get("token_endpoint")
             .and_then(Value::as_str)
             .ok_or_else(|| AgentError::Llm("oauth discovery: token_endpoint missing".into()))?
             .to_string();
-        Ok(OidcEndpoints { authorization_endpoint: auth, token_endpoint: token })
+        Ok(OidcEndpoints {
+            authorization_endpoint: auth,
+            token_endpoint: token,
+        })
     }
 
     /// Persist a token to disk and the in-memory cell.
@@ -259,7 +264,9 @@ impl Drop for AbortOnDrop {
 }
 
 fn is_expired(t: &CachedToken) -> bool {
-    let Some(exp) = t.expires_at else { return false };
+    let Some(exp) = t.expires_at else {
+        return false;
+    };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -308,9 +315,7 @@ fn token_from_response(
         .get("access_token")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            AgentError::Llm("oauth: token response missing/empty access_token".into())
-        })?
+        .ok_or_else(|| AgentError::Llm("oauth: token response missing/empty access_token".into()))?
         .to_string();
     let refresh_token = v
         .get("refresh_token")
@@ -324,15 +329,18 @@ fn token_from_response(
             .unwrap_or(0)
             + secs
     });
-    Ok(CachedToken { access_token, refresh_token, expires_at })
+    Ok(CachedToken {
+        access_token,
+        refresh_token,
+        expires_at,
+    })
 }
 
 /// PKCE pieces: URL-safe random verifier (~64 chars) and its SHA-256
 /// challenge (RFC 7636 §4.2).
 fn pkce_pair() -> Result<(String, String), AgentError> {
     let mut bytes = [0u8; 48];
-    getrandom::getrandom(&mut bytes)
-        .map_err(|e| AgentError::Llm(format!("pkce rng: {e}")))?;
+    getrandom::getrandom(&mut bytes).map_err(|e| AgentError::Llm(format!("pkce rng: {e}")))?;
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(sha2::Sha256::digest(verifier.as_bytes()));
@@ -341,8 +349,7 @@ fn pkce_pair() -> Result<(String, String), AgentError> {
 
 fn random_state() -> Result<String, AgentError> {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes)
-        .map_err(|e| AgentError::Llm(format!("state rng: {e}")))?;
+    getrandom::getrandom(&mut bytes).map_err(|e| AgentError::Llm(format!("state rng: {e}")))?;
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
@@ -375,12 +382,10 @@ async fn browser_pkce_flow(
                 let result = match (params.get("code"), params.get("state")) {
                     (Some(code), Some(st)) if st == &expected => Ok(code.clone()),
                     (Some(_), Some(_)) => Err("state mismatch".to_string()),
-                    _ => Err(
-                        params
-                            .get("error")
-                            .cloned()
-                            .unwrap_or_else(|| "missing code".into()),
-                    ),
+                    _ => Err(params
+                        .get("error")
+                        .cloned()
+                        .unwrap_or_else(|| "missing code".into())),
                 };
                 if let Some(sender) = tx.lock().await.take() {
                     let _ = sender.send(result.clone());
@@ -471,7 +476,11 @@ mod tests {
 
     #[test]
     fn cached_token_no_expiry_is_not_expired() {
-        let t = CachedToken { access_token: "x".into(), refresh_token: None, expires_at: None };
+        let t = CachedToken {
+            access_token: "x".into(),
+            refresh_token: None,
+            expires_at: None,
+        };
         assert!(!is_expired(&t));
     }
 
@@ -522,8 +531,7 @@ mod tests {
 
     #[test]
     fn token_from_response_uses_fallback_refresh() {
-        let v: Value =
-            serde_json::from_str(r#"{"access_token":"abc","expires_in":3600}"#).unwrap();
+        let v: Value = serde_json::from_str(r#"{"access_token":"abc","expires_in":3600}"#).unwrap();
         let t = token_from_response(&v, Some("old-refresh")).unwrap();
         assert_eq!(t.access_token, "abc");
         assert_eq!(t.refresh_token.as_deref(), Some("old-refresh"));

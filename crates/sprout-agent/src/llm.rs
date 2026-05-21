@@ -767,7 +767,10 @@ fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> 
             let pkce = PkceOAuthConfig {
                 discovery_url,
                 client_id: DATABRICKS_CLIENT_ID.into(),
-                scopes: DATABRICKS_OAUTH_SCOPES.iter().map(|s| (*s).into()).collect(),
+                scopes: DATABRICKS_OAUTH_SCOPES
+                    .iter()
+                    .map(|s| (*s).into())
+                    .collect(),
                 cache_namespace: "databricks".into(),
                 cache_dir_override: None,
             };

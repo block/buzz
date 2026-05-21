@@ -85,7 +85,9 @@ async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             };
             let src = auth::PkceOAuthTokenSource::new(pkce)?;
             src.interactive_login().await?;
-            eprintln!("Authenticated. Token cached under ~/.config/sprout-agent/oauth/databricks/.");
+            eprintln!(
+                "Authenticated. Token cached under ~/.config/sprout-agent/oauth/databricks/."
+            );
             Ok(())
         }
         Some(other) => Err(format!("auth: unknown provider {other:?}").into()),

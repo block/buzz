@@ -133,7 +133,11 @@ async fn cache_hit_short_circuits_network() {
     let src = PkceOAuthTokenSource::new(cfg).unwrap();
     let bearer = src.bearer().await.unwrap();
     assert_eq!(bearer, "cached-token");
-    assert_eq!(refresh_counter.load(Ordering::SeqCst), 0, "no refresh should fire");
+    assert_eq!(
+        refresh_counter.load(Ordering::SeqCst),
+        0,
+        "no refresh should fire"
+    );
 }
 
 #[tokio::test]
@@ -270,7 +274,9 @@ async fn spawn_capturing_server(
                 let mut body_len = 0usize;
                 for line in rest.lines() {
                     // Split case-insensitively on the colon but keep the value's case intact.
-                    let Some((name, value)) = line.split_once(':') else { continue };
+                    let Some((name, value)) = line.split_once(':') else {
+                        continue;
+                    };
                     let value = value.trim().trim_end_matches('\r').to_string();
                     match name.trim().to_ascii_lowercase().as_str() {
                         "authorization" => authorization = Some(value),
@@ -343,7 +349,12 @@ impl AgentHarness {
         let mut child = cmd.spawn().expect("spawn sprout-agent");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
-        Self { child, stdin, stdout, next_id: 1 }
+        Self {
+            child,
+            stdin,
+            stdout,
+            next_id: 1,
+        }
     }
 
     async fn send(&mut self, method: &str, params: serde_json::Value) -> i64 {
@@ -398,11 +409,8 @@ async fn databricks_envelope_routes_through_serving_endpoints_and_strips_model()
     )
     .await;
     h.recv_for(1).await;
-    h.send(
-        "session/new",
-        json!({ "cwd": "/tmp", "mcpServers": [] }),
-    )
-    .await;
+    h.send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
+        .await;
     let r = h.recv_for(2).await;
     let sid = r["result"]["sessionId"].as_str().unwrap().to_string();
     h.send(
@@ -433,7 +441,10 @@ async fn databricks_envelope_routes_through_serving_endpoints_and_strips_model()
     );
     // Sanity: the rest of the chat envelope should still be there.
     assert!(
-        req.body.get("messages").and_then(|v| v.as_array()).is_some(),
+        req.body
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .is_some(),
         "request body should keep the chat `messages` field"
     );
 }
