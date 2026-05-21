@@ -195,7 +195,7 @@ impl PkceOAuthTokenSource {
             .json()
             .await
             .map_err(|e| AgentError::Llm(format!("oauth refresh json: {e}")))?;
-        Ok(token_from_response(&v, Some(refresh_token)))
+        token_from_response(&v, Some(refresh_token))
     }
 
     /// Run the full browser-mediated Authorization Code + PKCE flow.
@@ -248,6 +248,16 @@ impl TokenSource for PkceOAuthTokenSource {
 
 // ---- helpers -------------------------------------------------------------
 
+/// Aborts a spawned task when dropped. Used to guarantee the localhost
+/// callback server doesn't outlive a failed/abandoned PKCE attempt.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 fn is_expired(t: &CachedToken) -> bool {
     let Some(exp) = t.expires_at else { return false };
     let now = SystemTime::now()
@@ -286,11 +296,21 @@ fn read_cache(path: &PathBuf) -> Option<CachedToken> {
     serde_json::from_slice(&body).ok()
 }
 
-fn token_from_response(v: &Value, fallback_refresh: Option<&str>) -> CachedToken {
+/// Parse a token-endpoint JSON response. Fails loudly when `access_token`
+/// is missing or empty — without this, a malformed server response would
+/// be cached and `bearer()` would silently return `""` until the entry
+/// expires or is deleted by hand.
+fn token_from_response(
+    v: &Value,
+    fallback_refresh: Option<&str>,
+) -> Result<CachedToken, AgentError> {
     let access_token = v
         .get("access_token")
         .and_then(Value::as_str)
-        .unwrap_or("")
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            AgentError::Llm("oauth: token response missing/empty access_token".into())
+        })?
         .to_string();
     let refresh_token = v
         .get("refresh_token")
@@ -304,7 +324,7 @@ fn token_from_response(v: &Value, fallback_refresh: Option<&str>) -> CachedToken
             .unwrap_or(0)
             + secs
     });
-    CachedToken { access_token, refresh_token, expires_at }
+    Ok(CachedToken { access_token, refresh_token, expires_at })
 }
 
 /// PKCE pieces: URL-safe random verifier (~64 chars) and its SHA-256
@@ -384,9 +404,13 @@ async fn browser_pkce_flow(
         .port();
     let redirect_uri = format!("http://localhost:{port}");
 
-    let server = tokio::spawn(async move {
+    // `_server` is held until this function returns; the drop guard aborts
+    // the axum task on every exit path (timeout, callback error, token
+    // exchange failure, or success), so we never leak a listener bound to
+    // 127.0.0.1 past the auth attempt.
+    let _server = AbortOnDrop(tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
-    });
+    }));
 
     let auth_url = format!(
         "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
@@ -406,7 +430,6 @@ async fn browser_pkce_flow(
         .map_err(|_| AgentError::Llm("oauth: browser auth timed out".into()))?
         .map_err(|_| AgentError::Llm("oauth: callback sender dropped".into()))?
         .map_err(|e| AgentError::Llm(format!("oauth callback: {e}")))?;
-    server.abort();
 
     // Exchange code for token.
     let params = [
@@ -430,7 +453,7 @@ async fn browser_pkce_flow(
         .json()
         .await
         .map_err(|e| AgentError::Llm(format!("oauth exchange json: {e}")))?;
-    Ok(token_from_response(&v, None))
+    token_from_response(&v, None)
 }
 
 #[cfg(test)]
@@ -501,9 +524,21 @@ mod tests {
     fn token_from_response_uses_fallback_refresh() {
         let v: Value =
             serde_json::from_str(r#"{"access_token":"abc","expires_in":3600}"#).unwrap();
-        let t = token_from_response(&v, Some("old-refresh"));
+        let t = token_from_response(&v, Some("old-refresh")).unwrap();
         assert_eq!(t.access_token, "abc");
         assert_eq!(t.refresh_token.as_deref(), Some("old-refresh"));
         assert!(t.expires_at.is_some());
+    }
+
+    #[test]
+    fn token_from_response_rejects_missing_access_token() {
+        let v: Value = serde_json::from_str(r#"{"expires_in":3600}"#).unwrap();
+        assert!(token_from_response(&v, None).is_err());
+    }
+
+    #[test]
+    fn token_from_response_rejects_empty_access_token() {
+        let v: Value = serde_json::from_str(r#"{"access_token":""}"#).unwrap();
+        assert!(token_from_response(&v, None).is_err());
     }
 }

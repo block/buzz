@@ -49,11 +49,48 @@ fn die(msg: String) -> ! {
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    if matches!(args.get(1).map(String::as_str), Some("auth")) {
+        return tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(auth_subcommand(&args[2..]));
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
         .block_on(async_main());
     Ok(())
+}
+
+/// `sprout-agent auth <provider>` — run the interactive auth flow for a
+/// provider and persist the result, then exit. Today the only provider is
+/// `databricks` (OAuth 2.0 PKCE). Reads `DATABRICKS_HOST` from env; needs
+/// a browser on the machine.
+async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let provider = args.first().map(String::as_str);
+    match provider {
+        Some("databricks") => {
+            let host = std::env::var("DATABRICKS_HOST")
+                .map_err(|_| "auth databricks: DATABRICKS_HOST required")?;
+            let pkce = auth::PkceOAuthConfig {
+                discovery_url: format!(
+                    "{}/oidc/.well-known/oauth-authorization-server",
+                    host.trim_end_matches('/')
+                ),
+                client_id: "databricks-cli".into(),
+                scopes: vec!["all-apis".into(), "offline_access".into()],
+                cache_namespace: "databricks".into(),
+                cache_dir_override: None,
+            };
+            let src = auth::PkceOAuthTokenSource::new(pkce)?;
+            src.interactive_login().await?;
+            eprintln!("Authenticated. Token cached under ~/.config/sprout-agent/oauth/databricks/.");
+            Ok(())
+        }
+        Some(other) => Err(format!("auth: unknown provider {other:?}").into()),
+        None => Err("auth: provider required (try: sprout-agent auth databricks)".into()),
+    }
 }
 
 async fn async_main() {
