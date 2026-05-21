@@ -4,10 +4,7 @@ import { getIdentity } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 
-import {
-  initFirstWorkspace,
-  deriveWorkspaceName,
-} from "../workspaceStorage";
+import { initFirstWorkspace, deriveWorkspaceName } from "../workspaceStorage";
 
 const LOCAL_RELAY_URL = "ws://localhost:3000";
 

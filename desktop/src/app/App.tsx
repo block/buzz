@@ -101,7 +101,11 @@ export function App() {
   // Composite key: changes when workspace ID changes OR when
   // the active workspace's config is updated (relayUrl/token).
   const workspaceKey = `${activeWorkspace?.id ?? "none"}-${reinitKey}`;
-  const workspace = useWorkspaceInit(activeWorkspace, workspaceKey, sharedIdentity ?? false);
+  const workspace = useWorkspaceInit(
+    activeWorkspace,
+    workspaceKey,
+    sharedIdentity ?? false,
+  );
 
   const handleSetupComplete = useCallback(() => {
     // Force a full reload so useWorkspaces re-initializes from localStorage.
