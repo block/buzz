@@ -159,7 +159,12 @@ function editAffectsMentionBoundary(tr: Transaction): boolean {
       const clampedNewTo = Math.min(newTo, tr.doc.content.size);
       const clampedNewFrom = Math.min(newFrom, clampedNewTo);
       if (clampedNewFrom < clampedNewTo) {
-        const newText = tr.doc.textBetween(clampedNewFrom, clampedNewTo, "\n", "\0");
+        const newText = tr.doc.textBetween(
+          clampedNewFrom,
+          clampedNewTo,
+          "\n",
+          "\0",
+        );
         if (mentionChars.test(newText)) {
           found = true;
           return;
@@ -170,7 +175,12 @@ function editAffectsMentionBoundary(tr: Transaction): boolean {
       const clampedOldTo = Math.min(oldTo, tr.before.content.size);
       const clampedOldFrom = Math.min(oldFrom, clampedOldTo);
       if (clampedOldFrom < clampedOldTo) {
-        const oldText = tr.before.textBetween(clampedOldFrom, clampedOldTo, "\n", "\0");
+        const oldText = tr.before.textBetween(
+          clampedOldFrom,
+          clampedOldTo,
+          "\n",
+          "\0",
+        );
         if (mentionChars.test(oldText)) {
           found = true;
         }

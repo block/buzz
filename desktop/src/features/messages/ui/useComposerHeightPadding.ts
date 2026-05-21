@@ -29,7 +29,8 @@ export function useComposerHeightPadding(
     };
 
     const observer = new ResizeObserver(([entry]) => {
-      const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+      const height =
+        entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
       // Add a small buffer (8px) so the last message isn't flush against the composer
       const padding = Math.ceil(height) + 8;
       const wasAtBottom = isNearBottom();

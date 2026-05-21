@@ -7,7 +7,10 @@ export function escapeRegExp(str: string): string {
 
 /**
  * Build a regex that matches a given prefix followed by known multi-word names
- * (longest-first to avoid partial matches), then falling back to prefix + \S+.
+ * (longest-first to avoid partial matches). When known names are provided,
+ * only those names are matched — no generic fallback. When no names are
+ * available, falls back to prefix + \S+ for backwards compatibility (e.g.
+ * old messages without proper p-tags, or while profiles are loading).
  */
 export function buildPrefixPattern(
   prefix: string,
@@ -25,10 +28,7 @@ export function buildPrefixPattern(
 
   const nameAlternatives = sorted.map((name) => escapeRegExp(name)).join("|");
   const boundary = "(?=[\\s,;.!?:)\\]}]|$)";
-  return new RegExp(
-    `${escapedPrefix}(?:(?:${nameAlternatives})${boundary}|\\S+)`,
-    "gi",
-  );
+  return new RegExp(`${escapedPrefix}(?:${nameAlternatives})${boundary}`, "gi");
 }
 
 /**
