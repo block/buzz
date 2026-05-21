@@ -21,6 +21,7 @@ allow = [
     "CDLA-Permissive-2.0",
     "MITNFA",
     "MPL-2.0",
+    "BSL-1.0",
 ]
 confidence-threshold = 0.8
 
