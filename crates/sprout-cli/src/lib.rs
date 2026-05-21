@@ -359,6 +359,24 @@ pub enum ChannelsCmd {
         #[arg(long)]
         channel: String,
     },
+    /// Search channels by human-readable name
+    #[command(
+        after_help = "Examples:\n  sprout channels search --query composer\n  sprout channels search --query sprout-chat-composer --exact\n  sprout channels search --query design --include-archived"
+    )]
+    Search {
+        /// Search query (case-insensitive substring of channel name)
+        #[arg(long)]
+        query: String,
+        /// Require an exact case-insensitive match instead of substring
+        #[arg(long, default_value_t = false)]
+        exact: bool,
+        /// Include archived channels in results
+        #[arg(long, default_value_t = false)]
+        include_archived: bool,
+        /// Maximum number of channel-metadata events to fetch from the relay
+        #[arg(long, default_value_t = 1000)]
+        limit: u32,
+    },
     /// Create a new channel
     #[command(
         after_help = "Examples:\n  sprout channels create --name general --type stream --visibility open\n  sprout channels create --name design --type forum --visibility open --description \"Design discussions\""
