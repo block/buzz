@@ -126,7 +126,7 @@ fn sign_blossom_upload_auth(
     expiry_secs: u64,
     base_url: &str,
 ) -> Result<nostr::Event, String> {
-    let now = Timestamp::now().as_u64();
+    let now = Timestamp::now().as_secs();
     let mut tags = vec![
         Tag::parse(vec!["t", "upload"]).map_err(|e| e.to_string())?,
         Tag::parse(vec!["x", sha256]).map_err(|e| e.to_string())?,

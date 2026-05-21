@@ -72,7 +72,7 @@ pub async fn get_workflow_runs(
                 "event_id": ev.id.to_hex(),
                 "kind": ev.kind.as_u16(),
                 "pubkey": ev.pubkey.to_hex(),
-                "created_at": ev.created_at.as_u64(),
+                "created_at": ev.created_at.as_secs(),
                 "content": ev.content,
                 "tags": ev.tags.iter().map(|t| t.as_slice().to_vec()).collect::<Vec<_>>(),
             })
@@ -191,7 +191,7 @@ pub async fn get_run_approvals(
                 "event_id": ev.id.to_hex(),
                 "kind": ev.kind.as_u16(),
                 "pubkey": ev.pubkey.to_hex(),
-                "created_at": ev.created_at.as_u64(),
+                "created_at": ev.created_at.as_secs(),
                 "content": ev.content,
                 "tags": ev.tags.iter().map(|t| t.as_slice().to_vec()).collect::<Vec<_>>(),
             })
@@ -258,6 +258,6 @@ fn workflow_from_event(ev: &nostr::Event) -> Value {
         "yaml_definition": ev.content,
         "event_id": ev.id.to_hex(),
         "pubkey": ev.pubkey.to_hex(),
-        "created_at": ev.created_at.as_u64(),
+        "created_at": ev.created_at.as_secs(),
     })
 }

@@ -249,7 +249,7 @@ pub async fn get_presence(
                 }
             })
             .unwrap_or_else(|| ev.pubkey.to_hex());
-        let ts = ev.created_at.as_u64();
+        let ts = ev.created_at.as_secs();
         let status = match ev.content.trim() {
             "online" => PresenceStatus::Online,
             "away" => PresenceStatus::Away,

@@ -117,7 +117,7 @@ pub async fn get_notes_timeline(
         .map(|ev| UserNoteInfo {
             id: ev.id.to_hex(),
             pubkey: ev.pubkey.to_hex(),
-            created_at: ev.created_at.as_u64() as i64,
+            created_at: ev.created_at.as_secs() as i64,
             content: ev.content.clone(),
         })
         .collect();

@@ -112,7 +112,7 @@ pub fn channel_info_from_event(
     // so the frontend knows the channel is archived. The exact timestamp isn't available
     // from the tag alone, so we use the event's created_at as a proxy.
     let archived_at = if first_tag_value(event, "archived") == Some("true") {
-        Some(timestamp_to_iso(event.created_at.as_u64()))
+        Some(timestamp_to_iso(event.created_at.as_secs()))
     } else {
         None
     };
@@ -169,10 +169,10 @@ pub fn channel_detail_from_event(event: &Event) -> Result<ChannelDetailInfo, Str
         "open".to_string()
     };
 
-    let created_at_iso = timestamp_to_iso(event.created_at.as_u64());
+    let created_at_iso = timestamp_to_iso(event.created_at.as_secs());
 
     let archived_at = if first_tag_value(event, "archived") == Some("true") {
-        Some(timestamp_to_iso(event.created_at.as_u64()))
+        Some(timestamp_to_iso(event.created_at.as_secs()))
     } else {
         None
     };
@@ -462,7 +462,7 @@ pub fn user_notes_from_events(events: &[Event]) -> UserNotesResponse {
         .map(|ev| UserNoteInfo {
             id: ev.id.to_hex(),
             pubkey: ev.pubkey.to_hex(),
-            created_at: ev.created_at.as_u64() as i64,
+            created_at: ev.created_at.as_secs() as i64,
             content: ev.content.clone(),
         })
         .collect();
@@ -484,7 +484,7 @@ pub fn contact_list_from_event(event: &Event) -> Result<ContactListResponse, Str
     Ok(ContactListResponse {
         id: event.id.to_hex(),
         pubkey: event.pubkey.to_hex(),
-        created_at: event.created_at.as_u64() as i64,
+        created_at: event.created_at.as_secs() as i64,
         tags,
         content: event.content.clone(),
     })
@@ -516,7 +516,7 @@ pub fn search_response_from_events(events: &[Event]) -> SearchResponse {
                 pubkey: ev.pubkey.to_hex(),
                 channel_id,
                 channel_name: None,
-                created_at: ev.created_at.as_u64(),
+                created_at: ev.created_at.as_secs(),
                 score,
             }
         })
