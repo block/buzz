@@ -194,7 +194,7 @@ importers:
         version: 10.5.0(postcss@8.5.14)
       nostr-tools:
         specifier: ^2.23.3
-        version: 2.23.3(typescript@5.9.3)
+        version: 2.23.5(typescript@5.9.3)
       postcss:
         specifier: ^8.5.8
         version: 8.5.14
@@ -248,7 +248,7 @@ importers:
         version: 0.577.0(react@19.2.6)
       nostr-tools:
         specifier: ^2.23.3
-        version: 2.23.3(typescript@5.9.3)
+        version: 2.23.5(typescript@5.9.3)
       react:
         specifier: ^19.1.0
         version: 19.2.6
@@ -2470,8 +2470,8 @@ packages:
     resolution: {integrity: sha512-6eZs5Ls3WtCisHWp9S2GUy8dqkpGi4BVSz3GaqiE6ezub0512ESztXUwUB6C6IKbQkY2Pnb/mD4WYojCRwcwLA==}
     engines: {node: '>=0.10.0'}
 
-  nostr-tools@2.23.3:
-    resolution: {integrity: sha512-AALyt9k8xPdF4UV2mlLJ2mgCn4kpTB0DZ8t2r6wjdUh6anfx2cTVBsHUlo9U0EY/cKC5wcNyiMAmRJV5OVEalA==}
+  nostr-tools@2.23.5:
+    resolution: {integrity: sha512-Fa7ZlUdjfUW1P4E7H3yBexhOHYi18XNyvd2n7eNHkYR085xADX6Y8V8Vm7nT/XQajaFOBrptXmVIGkJ2E4vfVw==}
     peerDependencies:
       typescript: '>=5.0.0'
     peerDependenciesMeta:
@@ -5310,7 +5310,7 @@ snapshots:
 
   normalize-path@3.0.0: {}
 
-  nostr-tools@2.23.3(typescript@5.9.3):
+  nostr-tools@2.23.5(typescript@5.9.3):
     dependencies:
       '@noble/ciphers': 2.1.1
       '@noble/curves': 2.0.1
