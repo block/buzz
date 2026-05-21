@@ -317,3 +317,98 @@ async fn test_long_form_stale_write_rejected() {
 
     client.disconnect().await.expect("disconnect");
 }
+
+/// `notes set` re-publish preserves the original `published_at` while letting
+/// `created_at` advance. This is the contract that NIP-23 readers rely on to
+/// tell "when the author first wrote this" from "when they last updated it",
+/// and the carry-forward logic in `sprout-cli`'s `build_set_event` (unit-tested
+/// there) only works if the relay round-trips the tag faithfully.
+///
+/// The carry rule is duplicated inline here (rather than reaching into
+/// `sprout-cli`) so this e2e crate stays free of CLI deps; the rule's
+/// correctness is unit-tested in `commands::notes::tests`.
+#[tokio::test]
+#[ignore]
+async fn test_long_form_set_twice_preserves_published_at() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let mut client = SproutTestClient::connect(&url, &keys)
+        .await
+        .expect("connect");
+
+    let d_tag = format!("preserve-pat-{}", uuid::Uuid::new_v4().simple());
+    let original_published_at: u64 = 1_700_000_000;
+
+    // First publish: stamp `published_at` = original_published_at.
+    let v1 = build_long_form_event(
+        &keys,
+        &d_tag,
+        "First",
+        "v1 body",
+        vec![Tag::parse(&["published_at", &original_published_at.to_string()]).unwrap()],
+    );
+    let ok1 = client.send_event(v1).await.expect("send v1");
+    assert!(ok1.accepted, "v1 should be accepted: {}", ok1.message);
+
+    // Ensure created_at advances between writes.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Re-publish carrying the original `published_at` forward — what
+    // `notes set` does on update when `--title` (or nothing) changes.
+    let v2 = EventBuilder::new(
+        Kind::Custom(KIND_LONG_FORM),
+        "v2 body",
+        vec![
+            Tag::parse(&["d", &d_tag]).unwrap(),
+            Tag::parse(&["title", "First"]).unwrap(),
+            Tag::parse(&["published_at", &original_published_at.to_string()]).unwrap(),
+        ],
+    )
+    .custom_created_at(Timestamp::now())
+    .sign_with_keys(&keys)
+    .unwrap();
+    let v2_id = v2.id;
+    let v2_created_at = v2.created_at.as_u64();
+    let ok2 = client.send_event(v2).await.expect("send v2");
+    assert!(ok2.accepted, "v2 should be accepted: {}", ok2.message);
+
+    // Re-fetch: there should be exactly one live event for (kind, author, d-tag),
+    // and its `published_at` should still be the original — even though
+    // `created_at` advanced.
+    let sid = sub_id("preserve-pat");
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LONG_FORM))
+        .author(keys.public_key())
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [d_tag.as_str()]);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect");
+
+    assert_eq!(events.len(), 1, "exactly one live event after re-publish");
+    let live = &events[0];
+    assert_eq!(live.id, v2_id, "surviving event is v2");
+    assert_eq!(
+        live.created_at.as_u64(),
+        v2_created_at,
+        "created_at advanced to v2's timestamp"
+    );
+    let pa = live
+        .tags
+        .iter()
+        .find(|t| t.as_slice().first().map(String::as_str) == Some("published_at"))
+        .and_then(|t| t.as_slice().get(1).cloned())
+        .and_then(|v| v.parse::<u64>().ok());
+    assert_eq!(
+        pa,
+        Some(original_published_at),
+        "published_at must be preserved across re-publish"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
