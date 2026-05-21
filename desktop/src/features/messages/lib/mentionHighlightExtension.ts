@@ -62,6 +62,16 @@ export const MentionHighlightExtension = Extension.create({
               );
             }
 
+            // If an edit intersects an existing decoration, the mapped
+            // decoration may become stale (e.g. @Max → @Marx). Rebuild.
+            if (editIntersectsDecoration(tr, oldDecorations)) {
+              return buildDecorations(
+                tr.doc,
+                extension.storage.names,
+                extension.storage.channelNames,
+              );
+            }
+
             return oldDecorations.map(tr.mapping, tr.doc);
           },
         },
@@ -91,7 +101,7 @@ export function buildHighlightPatterns(
       n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
     );
     patterns.push(
-      new RegExp(`(?:^|(?<=\\s))@(${escapedNames.join("|")})`, "gi"),
+      new RegExp(`(?:^|(?<=\\s))@(${escapedNames.join("|")})(?=\\W|$)`, "gi"),
     );
   }
 
@@ -103,7 +113,10 @@ export function buildHighlightPatterns(
       n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
     );
     patterns.push(
-      new RegExp(`(?:^|(?<=\\s))#(${escapedChannels.join("|")})`, "gi"),
+      new RegExp(
+        `(?:^|(?<=\\s))#(${escapedChannels.join("|")})(?=\\W|$)`,
+        "gi",
+      ),
     );
   }
 
@@ -191,6 +204,27 @@ function editAffectsMentionBoundary(tr: Transaction): boolean {
   }
 
   return false;
+}
+
+/**
+ * Returns true if any changed range in the transaction overlaps an existing
+ * mention decoration. In that case the mapped decoration would be stale
+ * (e.g. @Max edited to @Marx) and we need a full rebuild.
+ */
+function editIntersectsDecoration(
+  tr: Transaction,
+  decorations: DecorationSet,
+): boolean {
+  let hit = false;
+  tr.mapping.maps.forEach((map) => {
+    map.forEach((oldFrom, oldTo) => {
+      if (hit) return;
+      if (decorations.find(oldFrom, oldTo).length > 0) {
+        hit = true;
+      }
+    });
+  });
+  return hit;
 }
 
 function buildDecorations(
