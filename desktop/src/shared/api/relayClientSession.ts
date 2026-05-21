@@ -30,8 +30,8 @@ import { RelayStallWatchdog } from "@/shared/api/relayStallWatchdog";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
 const RECONNECT_BASE_DELAY_MS = 1_000,
-  RECONNECT_MAX_DELAY_MS = 30_000;
-const RECONNECT_REPLAY_SKEW_SECS = 5,
+  RECONNECT_MAX_DELAY_MS = 30_000,
+  RECONNECT_REPLAY_SKEW_SECS = 5,
   EVENT_BATCH_MS = 16;
 
 /**
@@ -74,6 +74,7 @@ export class RelayClient {
   private hasConnectedOnce = false;
   private notifyReconnectListeners = false;
   private onMessageChannel: Channel<unknown> | null = null;
+  private connectionGeneration = 0;
 
   /**
    * Sticky terminal flag. Set when `resetConnection` is called with
@@ -111,6 +112,7 @@ export class RelayClient {
       this.reconnectTimeout = null;
     }
     this.stallWatchdog.stop();
+    this.connectionGeneration++;
     this.keepAliveRequested = false;
     this.relayUrl = null;
     this.hasConnectedOnce = false;
@@ -460,8 +462,9 @@ export class RelayClient {
       this.relayUrl = await getRelayWsUrl();
     }
 
+    const generation = ++this.connectionGeneration;
     this.onMessageChannel = new Channel<unknown>((message) => {
-      void this.handleWsMessage(message);
+      void this.handleWsMessage(message, generation);
     });
 
     this.wsId = await invoke<number>("plugin:websocket|connect", {
@@ -687,7 +690,9 @@ export class RelayClient {
     });
   }
 
-  private async handleWsMessage(message: unknown) {
+  private async handleWsMessage(message: unknown, generation: number) {
+    if (generation !== this.connectionGeneration) return;
+
     if (
       typeof message === "object" &&
       message !== null &&
@@ -726,10 +731,9 @@ export class RelayClient {
 
     const [type, ...rest] = data;
     if (type === "AUTH" && typeof rest[0] === "string") {
-      await this.handleAuthChallenge(rest[0]);
+      await this.handleAuthChallenge(rest[0], generation);
       return;
     }
-
     if (type === "EVENT" && typeof rest[0] === "string" && rest[1]) {
       this.handleEvent(rest[0], rest[1] as RelayEvent);
       return;
@@ -753,7 +757,7 @@ export class RelayClient {
     }
   }
 
-  private async handleAuthChallenge(challenge: string) {
+  private async handleAuthChallenge(challenge: string, generation: number) {
     if (!this.relayUrl) {
       this.relayUrl = await getRelayWsUrl();
     }
@@ -763,7 +767,7 @@ export class RelayClient {
       relayUrl: this.relayUrl,
     });
 
-    if (!this.authRequest) {
+    if (generation !== this.connectionGeneration || !this.authRequest) {
       return;
     }
 
@@ -971,6 +975,7 @@ export class RelayClient {
   ) {
     this.onMessageChannel = null;
     this.stallWatchdog.stop();
+    this.connectionGeneration++;
     if (this.flushTimeout !== null) window.clearTimeout(this.flushTimeout);
     this.flushTimeout = null;
     this.eventBuffer = [];
