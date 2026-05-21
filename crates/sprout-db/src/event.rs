@@ -988,7 +988,8 @@ mod tests {
 
     fn make_event_with_kind_and_tags(kind: u16, tags: Vec<Tag>) -> nostr::Event {
         let keys = Keys::generate();
-        EventBuilder::new(Kind::Custom(kind), "test").tags( tags)
+        EventBuilder::new(Kind::Custom(kind), "test")
+            .tags(tags)
             .sign_with_keys(&keys)
             .expect("sign")
     }
@@ -1031,10 +1032,8 @@ mod tests {
     #[test]
     fn extract_d_tag_non_nip33_returns_none() {
         // kind:1 (text note) — not parameterized replaceable
-        let event = make_event_with_kind_and_tags(
-            1,
-            vec![Tag::parse(["d", "should-be-ignored"]).unwrap()],
-        );
+        let event =
+            make_event_with_kind_and_tags(1, vec![Tag::parse(["d", "should-be-ignored"]).unwrap()]);
         assert_eq!(extract_d_tag(&event), None);
     }
 

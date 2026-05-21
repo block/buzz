@@ -741,7 +741,10 @@ async fn emit_participant_event(
     };
     let tags = vec![h_tag, p_tag];
 
-    let event = match EventBuilder::new(kind, content).tags( tags).sign_with_keys(&state.relay_keypair) {
+    let event = match EventBuilder::new(kind, content)
+        .tags(tags)
+        .sign_with_keys(&state.relay_keypair)
+    {
         Ok(e) => e,
         Err(e) => {
             warn!("audio: failed to sign lifecycle event: {e}");

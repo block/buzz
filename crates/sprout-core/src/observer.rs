@@ -126,8 +126,9 @@ mod tests {
 
         let event = EventBuilder::new(
             Kind::Custom(crate::kind::KIND_AGENT_OBSERVER_FRAME as u16),
-            encrypted).tags(
-            [Tag::public_key(recipient.public_key())])
+            encrypted,
+        )
+        .tags([Tag::public_key(recipient.public_key())])
         .sign_with_keys(&sender)
         .expect("sign event");
         let decrypted: serde_json::Value =
@@ -141,8 +142,9 @@ mod tests {
         let recipient = Keys::generate();
         let event = EventBuilder::new(
             Kind::Custom(crate::kind::KIND_AGENT_OBSERVER_FRAME as u16),
-            "not encrypted").tags(
-            [Tag::public_key(recipient.public_key())])
+            "not encrypted",
+        )
+        .tags([Tag::public_key(recipient.public_key())])
         .sign_with_keys(&sender)
         .expect("sign event");
 

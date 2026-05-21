@@ -116,7 +116,8 @@ async fn create_channel_via_event(
     if let Some(desc) = description {
         tags.push(Tag::parse(["about", desc]).unwrap());
     }
-    let event = EventBuilder::new(Kind::Custom(9007), "").tags( tags)
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags(tags)
         .sign_with_keys(keys)
         .unwrap();
     let resp = client
@@ -160,7 +161,8 @@ async fn set_profile_via_event(
         content_obj.insert("nip05".to_string(), serde_json::json!(n));
     }
     let content = serde_json::to_string(&serde_json::Value::Object(content_obj)).unwrap();
-    let event = EventBuilder::new(Kind::Custom(0), &content).tags( vec![])
+    let event = EventBuilder::new(Kind::Custom(0), &content)
+        .tags(vec![])
         .sign_with_keys(keys)
         .unwrap();
     let resp = client
@@ -396,7 +398,8 @@ async fn test_search_returns_indexed_event() {
         .expect("WebSocket connect failed");
 
     let h_tag = Tag::parse(["h", &channel_id]).expect("tag parse failed");
-    let event = nostr::EventBuilder::new(Kind::Custom(9), &content).tags( [h_tag])
+    let event = nostr::EventBuilder::new(Kind::Custom(9), &content)
+        .tags([h_tag])
         .sign_with_keys(&keys)
         .expect("event sign failed");
 
@@ -484,7 +487,8 @@ async fn test_presence_set_and_query() {
         .await
         .expect("WebSocket connect failed");
 
-    let presence_event = nostr::EventBuilder::new(Kind::Custom(20001), "online").tags( [])
+    let presence_event = nostr::EventBuilder::new(Kind::Custom(20001), "online")
+        .tags([])
         .sign_with_keys(&keys)
         .expect("event sign failed");
 
@@ -509,7 +513,8 @@ async fn test_presence_set_and_query() {
         "expected 'online' after sending presence event"
     );
 
-    let offline_event = nostr::EventBuilder::new(Kind::Custom(20001), "offline").tags( [])
+    let offline_event = nostr::EventBuilder::new(Kind::Custom(20001), "offline")
+        .tags([])
         .sign_with_keys(&keys)
         .expect("event sign failed");
     ws_client.send_event(offline_event).await.ok();
@@ -889,7 +894,8 @@ async fn test_feed_returns_activity() {
         .expect("WebSocket connect failed");
 
     let h_tag = Tag::parse(["h", &channel_id]).expect("tag parse failed");
-    let event = nostr::EventBuilder::new(Kind::Custom(9), &content).tags( [h_tag])
+    let event = nostr::EventBuilder::new(Kind::Custom(9), &content)
+        .tags([h_tag])
         .sign_with_keys(&keys)
         .expect("event sign failed");
 
@@ -1532,7 +1538,8 @@ async fn test_get_event_returns_text_note() {
     let pubkey_hex = keys.public_key().to_hex();
 
     let content = format!("e2e-note-{}", uuid::Uuid::new_v4().simple());
-    let event = EventBuilder::new(Kind::Custom(1), &content).tags( vec![])
+    let event = EventBuilder::new(Kind::Custom(1), &content)
+        .tags(vec![])
         .sign_with_keys(&keys)
         .unwrap();
     let event_id = event.id.to_hex();
@@ -1596,7 +1603,8 @@ async fn test_get_user_notes_returns_paginated_notes() {
     // (created_at, event_id) correctly handles same-second events without skipping.
     for i in 0..3u8 {
         let content = format!("e2e-paginated-note-{}-{}", i, uuid::Uuid::new_v4().simple());
-        let event = EventBuilder::new(Kind::Custom(1), &content).tags( vec![])
+        let event = EventBuilder::new(Kind::Custom(1), &content)
+            .tags(vec![])
             .sign_with_keys(&keys)
             .unwrap();
         let resp = client
@@ -1696,7 +1704,8 @@ async fn test_get_contact_list_returns_latest() {
         Tag::parse(["p", &contact1]).unwrap(),
         Tag::parse(["p", &contact2]).unwrap(),
     ];
-    let event_v1 = EventBuilder::new(Kind::Custom(3), "").tags( tags_v1)
+    let event_v1 = EventBuilder::new(Kind::Custom(3), "")
+        .tags(tags_v1)
         .sign_with_keys(&keys)
         .unwrap();
 
@@ -1720,7 +1729,8 @@ async fn test_get_contact_list_returns_latest() {
     // ── Second contact list: 1 different contact ──────────────────────────────
     let contact3 = Keys::generate().public_key().to_hex();
     let tags_v2 = vec![Tag::parse(["p", &contact3]).unwrap()];
-    let event_v2 = EventBuilder::new(Kind::Custom(3), "").tags( tags_v2)
+    let event_v2 = EventBuilder::new(Kind::Custom(3), "")
+        .tags(tags_v2)
         .sign_with_keys(&keys)
         .unwrap();
 
@@ -1812,7 +1822,8 @@ async fn test_get_user_notes_invalid_before_returns_400() {
 
     // Publish one note so the user has something to return.
     let content = format!("e2e-overflow-note-{}", uuid::Uuid::new_v4().simple());
-    let event = EventBuilder::new(Kind::Custom(1), &content).tags( vec![])
+    let event = EventBuilder::new(Kind::Custom(1), &content)
+        .tags(vec![])
         .sign_with_keys(&keys)
         .unwrap();
     let resp = client

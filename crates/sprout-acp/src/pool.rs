@@ -2329,7 +2329,8 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         ])
         .unwrap();
-        let event = EventBuilder::new(Kind::Custom(9), "hello").tags( [p_tag])
+        let event = EventBuilder::new(Kind::Custom(9), "hello")
+            .tags([p_tag])
             .sign_with_keys(&keys)
             .unwrap();
         let author_hex = event.pubkey.to_hex();

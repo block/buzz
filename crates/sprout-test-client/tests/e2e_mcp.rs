@@ -68,7 +68,8 @@ async fn create_channel_for_test(keys: &Keys, name: &str) -> String {
         Tag::parse(["channel_type", "stream"]).unwrap(),
         Tag::parse(["visibility", "open"]).unwrap(),
     ];
-    let event = EventBuilder::new(Kind::Custom(9007), "").tags( tags)
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags(tags)
         .sign_with_keys(keys)
         .unwrap();
     let resp = client
@@ -103,7 +104,8 @@ async fn set_profile_via_event(
         map.insert("about".into(), serde_json::Value::String(a.into()));
     }
     let content = serde_json::Value::Object(map).to_string();
-    let event = EventBuilder::new(Kind::Custom(0), &content).tags( [])
+    let event = EventBuilder::new(Kind::Custom(0), &content)
+        .tags([])
         .sign_with_keys(keys)
         .unwrap();
     let resp = client

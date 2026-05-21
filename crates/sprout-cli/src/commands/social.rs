@@ -141,7 +141,8 @@ fn parse_tags_json(tags_json: &str) -> Result<Vec<Tag>, CliError> {
     raw_tags
         .iter()
         .map(|parts| {
-            Tag::parse(parts.iter().map(String::as_str)).map_err(|e| CliError::Usage(format!("invalid tag {parts:?}: {e}")))
+            Tag::parse(parts.iter().map(String::as_str))
+                .map_err(|e| CliError::Usage(format!("invalid tag {parts:?}: {e}")))
         })
         .collect::<Result<_, _>>()
 }
@@ -166,7 +167,7 @@ pub async fn cmd_set_list(
         )));
     }
 
-    let builder = EventBuilder::new(Kind::Custom(kind), content).tags( tags);
+    let builder = EventBuilder::new(Kind::Custom(kind), content).tags(tags);
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");

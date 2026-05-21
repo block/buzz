@@ -125,8 +125,8 @@ impl SproutTestClient {
     pub async fn authenticate(&mut self, keys: &Keys) -> Result<(), TestClientError> {
         let challenge = self.wait_for_auth_challenge(Duration::from_secs(5)).await?;
 
-        let relay_url = RelayUrl::parse(&self.relay_url)
-            .map_err(|e| TestClientError::Url(e.to_string()))?;
+        let relay_url =
+            RelayUrl::parse(&self.relay_url).map_err(|e| TestClientError::Url(e.to_string()))?;
 
         let auth_event = EventBuilder::auth(&challenge, relay_url).sign_with_keys(keys)?;
         let event_id = auth_event.id.to_hex();
@@ -159,7 +159,9 @@ impl SproutTestClient {
     ) -> Result<OkResponse, TestClientError> {
         let h_tag = Tag::parse(["h", channel_id])
             .map_err(|e| TestClientError::EventBuilder(e.to_string()))?;
-        let event = EventBuilder::new(Kind::Custom(kind), content).tags( [h_tag]).sign_with_keys(keys)?;
+        let event = EventBuilder::new(Kind::Custom(kind), content)
+            .tags([h_tag])
+            .sign_with_keys(keys)?;
         self.send_event(event).await
     }
 
@@ -536,7 +538,8 @@ mod tests {
         let keys = Keys::generate();
         let channel_id = "my-channel-123";
         let h_tag = Tag::parse(["h", channel_id]).unwrap();
-        let event = EventBuilder::new(Kind::Custom(9), "hello").tags( [h_tag])
+        let event = EventBuilder::new(Kind::Custom(9), "hello")
+            .tags([h_tag])
             .sign_with_keys(&keys)
             .unwrap();
 

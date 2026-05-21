@@ -590,13 +590,11 @@ impl PairingSession {
         let jitter = rand::random::<u64>() % 31; // 0-30s jitter per NIP-AB §Metadata Privacy
         let ts = nostr::Timestamp::from(now.saturating_sub(jitter));
 
-        EventBuilder::new(
-            Kind::Custom(PAIRING_KIND),
-            &encrypted).tags(
-            [Tag::public_key(peer)])
-        .custom_created_at(ts)
-        .sign_with_keys(&self.keys)
-        .map_err(|e| PairingError::SigningError(e.to_string()))
+        EventBuilder::new(Kind::Custom(PAIRING_KIND), &encrypted)
+            .tags([Tag::public_key(peer)])
+            .custom_created_at(ts)
+            .sign_with_keys(&self.keys)
+            .map_err(|e| PairingError::SigningError(e.to_string()))
     }
 
     /// Decrypt and parse a NIP-44 encrypted pairing message from an event.
@@ -928,12 +926,11 @@ mod tests {
             nip44::Version::V2,
         )
         .unwrap();
-        let fake_abort = EventBuilder::new(
-            Kind::Custom(crate::kind::KIND_PAIRING as u16),
-            &encrypted).tags(
-            [Tag::public_key(source.pubkey())])
-        .sign_with_keys(&rogue)
-        .unwrap();
+        let fake_abort =
+            EventBuilder::new(Kind::Custom(crate::kind::KIND_PAIRING as u16), &encrypted)
+                .tags([Tag::public_key(source.pubkey())])
+                .sign_with_keys(&rogue)
+                .unwrap();
 
         // Source has no peer yet — must reject.
         let result = source.handle_abort(&fake_abort);
@@ -982,12 +979,10 @@ mod tests {
                 nip44::Version::V2,
             )
             .unwrap();
-            EventBuilder::new(
-                Kind::Custom(crate::kind::KIND_PAIRING as u16),
-                &encrypted).tags(
-                [Tag::public_key(source.pubkey())])
-            .sign_with_keys(&keys)
-            .unwrap()
+            EventBuilder::new(Kind::Custom(crate::kind::KIND_PAIRING as u16), &encrypted)
+                .tags([Tag::public_key(source.pubkey())])
+                .sign_with_keys(&keys)
+                .unwrap()
         };
 
         // Source should reject the late abort.
@@ -1041,12 +1036,10 @@ mod tests {
             nip44::Version::V2,
         )
         .unwrap();
-        let fake_event = EventBuilder::new(
-            Kind::Custom(PAIRING_KIND),
-            &encrypted).tags(
-            [Tag::public_key(target.pubkey())])
-        .sign_with_keys(&rogue_keys)
-        .unwrap();
+        let fake_event = EventBuilder::new(Kind::Custom(PAIRING_KIND), &encrypted)
+            .tags([Tag::public_key(target.pubkey())])
+            .sign_with_keys(&rogue_keys)
+            .unwrap();
 
         // Target should reject (wrong author).
         let result = target.handle_sas_confirm(&fake_event);
@@ -1261,12 +1254,10 @@ mod tests {
             nip44::Version::V2,
         )
         .unwrap();
-        let wrong_event = EventBuilder::new(
-            Kind::Custom(PAIRING_KIND),
-            &wrong_encrypted).tags(
-            [Tag::public_key(target.pubkey())])
-        .sign_with_keys(&source.keys)
-        .unwrap();
+        let wrong_event = EventBuilder::new(Kind::Custom(PAIRING_KIND), &wrong_encrypted)
+            .tags([Tag::public_key(target.pubkey())])
+            .sign_with_keys(&source.keys)
+            .unwrap();
 
         // Target tries to handle as payload — fails (wrong type).
         let result = target.handle_payload(&wrong_event);
@@ -1315,12 +1306,10 @@ mod tests {
             nip44::Version::V2,
         )
         .unwrap();
-        let fail_event = EventBuilder::new(
-            Kind::Custom(PAIRING_KIND),
-            &fail_encrypted).tags(
-            [Tag::public_key(source.pubkey())])
-        .sign_with_keys(&target.keys)
-        .unwrap();
+        let fail_event = EventBuilder::new(Kind::Custom(PAIRING_KIND), &fail_encrypted)
+            .tags([Tag::public_key(source.pubkey())])
+            .sign_with_keys(&target.keys)
+            .unwrap();
 
         // Source handles complete(false) — should error and abort.
         let result = source.handle_complete(&fail_event);

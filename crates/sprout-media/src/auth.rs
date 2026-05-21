@@ -147,7 +147,8 @@ mod tests {
             Tag::parse(["x", sha256]).unwrap(),
             Tag::parse(["expiration", &exp_str]).unwrap(),
         ];
-        EventBuilder::new(Kind::from(24242), "Upload sprout-media").tags( tags)
+        EventBuilder::new(Kind::from(24242), "Upload sprout-media")
+            .tags(tags)
             .sign_with_keys(keys)
             .unwrap()
     }
@@ -191,7 +192,8 @@ mod tests {
             Tag::parse(["x", &sha256]).unwrap(),
             Tag::parse(["expiration", &exp_str]).unwrap(),
         ];
-        let event = EventBuilder::new(Kind::from(27235), "wrong kind").tags( tags)
+        let event = EventBuilder::new(Kind::from(27235), "wrong kind")
+            .tags(tags)
             .sign_with_keys(&keys)
             .unwrap();
         assert!(matches!(
@@ -213,7 +215,8 @@ mod tests {
             Tag::parse(["x", &sha256]).unwrap(),
             Tag::parse(["expiration", &exp_str]).unwrap(),
         ];
-        let event = EventBuilder::new(Kind::from(24242), "Upload multi-x").tags( tags)
+        let event = EventBuilder::new(Kind::from(24242), "Upload multi-x")
+            .tags(tags)
             .sign_with_keys(&keys)
             .unwrap();
         // Should pass because at least one x tag matches
@@ -232,7 +235,8 @@ mod tests {
             Tag::parse(["expiration", &exp_str]).unwrap(),
             Tag::parse(["server", "other.example.com"]).unwrap(),
         ];
-        let event = EventBuilder::new(Kind::from(24242), "Upload scoped").tags( tags)
+        let event = EventBuilder::new(Kind::from(24242), "Upload scoped")
+            .tags(tags)
             .sign_with_keys(&keys)
             .unwrap();
         // Should fail — server tag present but doesn't match our domain
@@ -272,7 +276,8 @@ mod tests {
             Tag::parse(["expiration", &exp_str]).unwrap(),
         ];
         // Empty content — BUD-11 requires a human-readable string
-        let event = EventBuilder::new(Kind::from(24242), "").tags( tags)
+        let event = EventBuilder::new(Kind::from(24242), "")
+            .tags(tags)
             .sign_with_keys(&keys)
             .unwrap();
         assert!(matches!(

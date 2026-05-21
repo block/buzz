@@ -56,7 +56,8 @@ mod tests {
 
     fn make_event() -> nostr::Event {
         let keys = Keys::generate();
-        EventBuilder::new(Kind::TextNote, "hello sprout").tags( [])
+        EventBuilder::new(Kind::TextNote, "hello sprout")
+            .tags([])
             .sign_with_keys(&keys)
             .expect("sign")
     }

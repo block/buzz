@@ -207,7 +207,8 @@ pub async fn upload_file(
         );
     }
 
-    let auth_event = EventBuilder::new(Kind::from(24242), "Upload file").tags( tags)
+    let auth_event = EventBuilder::new(Kind::from(24242), "Upload file")
+        .tags(tags)
         .sign_with_keys(keys)
         .map_err(|e| UploadError::SigningFailed(e.to_string()))?;
 

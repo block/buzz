@@ -47,14 +47,16 @@ pub mod test_helpers {
     /// Create a signed test event with the given kind and random keys.
     pub fn make_event(kind: Kind) -> nostr::Event {
         let keys = Keys::generate();
-        EventBuilder::new(kind, "test").tags( [])
+        EventBuilder::new(kind, "test")
+            .tags([])
             .sign_with_keys(&keys)
             .expect("sign")
     }
 
     /// Create a signed test event with the given keys and kind.
     pub fn make_event_with_keys(keys: &Keys, kind: Kind) -> nostr::Event {
-        EventBuilder::new(kind, "test").tags( [])
+        EventBuilder::new(kind, "test")
+            .tags([])
             .sign_with_keys(keys)
             .expect("sign")
     }

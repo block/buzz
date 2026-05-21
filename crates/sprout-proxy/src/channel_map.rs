@@ -86,7 +86,8 @@ impl ChannelMap {
 
         // nostr 0.36: EventBuilder::new(kind, content).tags( tags)
         // SAFETY: signing with a pre-validated Keys instance cannot fail
-        EventBuilder::new(Kind::ChannelCreation, content).tags( [])
+        EventBuilder::new(Kind::ChannelCreation, content)
+            .tags([])
             .custom_created_at(Timestamp::from(created_at_unix))
             .sign_with_keys(&self.server_keys)
             .expect("SAFETY: signing with valid keys cannot fail")
@@ -109,7 +110,8 @@ impl ChannelMap {
         );
 
         // SAFETY: signing with a pre-validated Keys instance cannot fail
-        EventBuilder::new(Kind::ChannelMetadata, content).tags( [e_tag])
+        EventBuilder::new(Kind::ChannelMetadata, content)
+            .tags([e_tag])
             .custom_created_at(Timestamp::from(info.created_at_unix))
             .sign_with_keys(&self.server_keys)
             .expect("SAFETY: signing with valid keys cannot fail")

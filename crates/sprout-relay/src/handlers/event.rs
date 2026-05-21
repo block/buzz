@@ -778,16 +778,14 @@ mod tests {
             &serde_json::json!({"type": "acp_read"}),
         )
         .expect("encrypt observer payload");
-        let event = EventBuilder::new(
-            Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16),
-            encrypted).tags(
-            [
+        let event = EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+            .tags([
                 Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag"),
                 Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
                 Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
             ])
-        .sign_with_keys(&agent)
-        .expect("sign event");
+            .sign_with_keys(&agent)
+            .expect("sign event");
 
         let route = super::agent_observer_route(&event)
             .expect("observer route")
@@ -807,16 +805,14 @@ mod tests {
             &serde_json::json!({"type": "cancel_turn"}),
         )
         .expect("encrypt observer payload");
-        let event = EventBuilder::new(
-            Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16),
-            encrypted).tags(
-            [
+        let event = EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+            .tags([
                 Tag::parse(["p", &agent.public_key().to_hex()]).expect("p tag"),
                 Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
                 Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_CONTROL]).expect("frame tag"),
             ])
-        .sign_with_keys(&owner)
-        .expect("sign event");
+            .sign_with_keys(&owner)
+            .expect("sign event");
 
         let route = super::agent_observer_route(&event)
             .expect("observer route")
@@ -832,12 +828,13 @@ mod tests {
         let owner = Keys::generate();
         let event = EventBuilder::new(
             Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16),
-            "not encrypted").tags(
-            [
-                Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag"),
-                Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
-                Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
-            ])
+            "not encrypted",
+        )
+        .tags([
+            Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag"),
+            Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
+            Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
+        ])
         .sign_with_keys(&agent)
         .expect("sign event");
 

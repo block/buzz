@@ -161,10 +161,10 @@ pub fn derive_pubkey_from_username(username: &str) -> Result<nostr::PublicKey, A
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind, Url};
+    use nostr::{EventBuilder, Keys, Kind, RelayUrl};
 
     fn make_auth_event(keys: &Keys, challenge: &str, relay_url: &str) -> nostr::Event {
-        let url: Url = relay_url.parse().expect("valid url");
+        let url = RelayUrl::parse(relay_url).expect("valid url");
         EventBuilder::auth(challenge, url)
             .sign_with_keys(keys)
             .expect("signing failed")
@@ -222,7 +222,8 @@ mod tests {
     #[tokio::test]
     async fn wrong_kind_rejected() {
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::TextNote, "not auth").tags( [])
+        let event = EventBuilder::new(Kind::TextNote, "not auth")
+            .tags([])
             .sign_with_keys(&keys)
             .expect("sign");
 

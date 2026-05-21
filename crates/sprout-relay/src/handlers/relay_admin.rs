@@ -296,7 +296,8 @@ mod tests {
             .into_iter()
             .map(|parts| Tag::parse(&parts).expect("valid tag"))
             .collect();
-        EventBuilder::new(Kind::from(kind), "").tags( nostr_tags)
+        EventBuilder::new(Kind::from(kind), "")
+            .tags(nostr_tags)
             .sign_with_keys(&keys)
             .expect("signing failed")
     }

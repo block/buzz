@@ -1,8 +1,4 @@
-use nostr::{nips::nip44, EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp, ToBech32};
-use nostr::{
-    Event as CompatEvent, JsonUtil as CompatJsonUtil, Keys as CompatKeys,
-    PublicKey as CompatPublicKey,
-};
+use nostr::{nips::nip44, Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32};
 use tauri::Manager;
 use tauri::State;
 
@@ -103,9 +99,9 @@ pub fn decrypt_observer_event(
             .to_bech32()
             .map_err(|error| format!("encode nsec: {error}"))?
     };
-    let keys = CompatKeys::parse(&nsec).map_err(|error| format!("parse nsec: {error}"))?;
+    let keys = Keys::parse(&nsec).map_err(|error| format!("parse nsec: {error}"))?;
     let event =
-        CompatEvent::from_json(event_json).map_err(|error| format!("invalid event: {error}"))?;
+        Event::from_json(event_json).map_err(|error| format!("invalid event: {error}"))?;
 
     // Defense-in-depth: verify event ID and signature before decrypting.
     if !event.verify_id() {
@@ -131,8 +127,8 @@ pub fn build_observer_control_event(
             .to_bech32()
             .map_err(|error| format!("encode nsec: {error}"))?
     };
-    let keys = CompatKeys::parse(&nsec).map_err(|error| format!("parse nsec: {error}"))?;
-    let agent_pubkey = CompatPublicKey::from_hex(agent_pubkey.trim())
+    let keys = Keys::parse(&nsec).map_err(|error| format!("parse nsec: {error}"))?;
+    let agent_pubkey = PublicKey::from_hex(agent_pubkey.trim())
         .map_err(|error| format!("invalid agent pubkey: {error}"))?;
     let agent_pubkey_hex = agent_pubkey.to_hex();
     let encrypted = sprout_core::observer::encrypt_observer_payload(&keys, &agent_pubkey, &payload)

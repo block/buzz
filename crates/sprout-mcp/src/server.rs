@@ -1579,7 +1579,7 @@ are not returned — use `get_thread` to fetch the full reply tree for a specifi
             Tag::parse(["d", &workflow_id]).unwrap(),
             Tag::parse(["h", &p.channel_id]).unwrap(),
         ];
-        let builder = EventBuilder::new(k(kind::KIND_WORKFLOW_DEF), &p.yaml_definition).tags( tags);
+        let builder = EventBuilder::new(k(kind::KIND_WORKFLOW_DEF), &p.yaml_definition).tags(tags);
         let event = match self.client.sign_event(builder) {
             Ok(e) => e,
             Err(e) => return format!("Error: failed to sign workflow event: {e}"),
@@ -1607,7 +1607,7 @@ are not returned — use `get_thread` to fetch the full reply tree for a specifi
         }
         // Publish a new kind:30620 event with the same d-tag to replace the existing one.
         let tags = vec![Tag::parse(["d", &p.workflow_id]).unwrap()];
-        let builder = EventBuilder::new(k(kind::KIND_WORKFLOW_DEF), &p.yaml_definition).tags( tags);
+        let builder = EventBuilder::new(k(kind::KIND_WORKFLOW_DEF), &p.yaml_definition).tags(tags);
         let event = match self.client.sign_event(builder) {
             Ok(e) => e,
             Err(e) => return format!("Error: failed to sign workflow event: {e}"),
@@ -1637,7 +1637,7 @@ are not returned — use `get_thread` to fetch the full reply tree for a specifi
             p.workflow_id
         );
         let tags = vec![Tag::parse(["a", &coordinate]).unwrap()];
-        let builder = EventBuilder::new(k(kind::KIND_DELETION), "").tags( tags);
+        let builder = EventBuilder::new(k(kind::KIND_DELETION), "").tags(tags);
         let event = match self.client.sign_event(builder) {
             Ok(e) => e,
             Err(e) => return format!("Error: failed to sign deletion event: {e}"),
@@ -1666,7 +1666,7 @@ are not returned — use `get_thread` to fetch the full reply tree for a specifi
             .unwrap_or(serde_json::Value::Object(Default::default()));
         let content = serde_json::to_string(&inputs).unwrap_or_default();
         let tags = vec![Tag::parse(["d", &p.workflow_id]).unwrap()];
-        let builder = EventBuilder::new(k(kind::KIND_WORKFLOW_TRIGGER), &content).tags( tags);
+        let builder = EventBuilder::new(k(kind::KIND_WORKFLOW_TRIGGER), &content).tags(tags);
         let event = match self.client.sign_event(builder) {
             Ok(e) => e,
             Err(e) => return format!("Error: failed to sign trigger event: {e}"),
@@ -1746,7 +1746,7 @@ are not returned — use `get_thread` to fetch the full reply tree for a specifi
         // The relay expects d-tag = hex(SHA256(token)), not the raw token UUID.
         let token_hash = hex::encode(Sha256::digest(p.approval_token.as_bytes()));
         let tags = vec![Tag::parse(["d", &token_hash]).unwrap()];
-        let builder = EventBuilder::new(k(kind_num), content).tags( tags);
+        let builder = EventBuilder::new(k(kind_num), content).tags(tags);
         let event = match self.client.sign_event(builder) {
             Ok(e) => e,
             Err(e) => return format!("Error: failed to sign approval event: {e}"),
@@ -1780,7 +1780,9 @@ are not returned — use `get_thread` to fetch the full reply tree for a specifi
 
         // Query events that mention this agent (p-tag) or are in channels we're in.
         let my_pubkey = self.client.pubkey_hex();
-        let mut filter = Filter::new().custom_tags(tag_p(), [&my_pubkey]).limit(limit);
+        let mut filter = Filter::new()
+            .custom_tags(tag_p(), [&my_pubkey])
+            .limit(limit);
 
         if let Some(since) = p.since {
             filter = filter.since(nostr::Timestamp::from(since as u64));
@@ -2288,7 +2290,7 @@ with kind:45003 comments)."
         let dm_id = uuid::Uuid::new_v4().to_string();
         tags.push(Tag::parse(["d", &dm_id]).unwrap());
 
-        let builder = EventBuilder::new(k(kind::KIND_DM_OPEN), "").tags( tags);
+        let builder = EventBuilder::new(k(kind::KIND_DM_OPEN), "").tags(tags);
         let event = match self.client.sign_event(builder) {
             Ok(e) => e,
             Err(e) => return format!("Error: failed to sign open_dm event: {e}"),
@@ -2319,7 +2321,7 @@ with kind:45003 comments)."
             Tag::parse(["h", &p.channel_id]).unwrap(),
             Tag::parse(["p", &p.pubkey]).unwrap(),
         ];
-        let builder = EventBuilder::new(k(kind::KIND_DM_ADD_MEMBER), "").tags( tags);
+        let builder = EventBuilder::new(k(kind::KIND_DM_ADD_MEMBER), "").tags(tags);
         let event = match self.client.sign_event(builder) {
             Ok(e) => e,
             Err(e) => return format!("Error: failed to sign add_dm_member event: {e}"),
@@ -2390,7 +2392,7 @@ with kind:45003 comments)."
         }
         // Command event kind:41012 with h-tag = DM channel.
         let tags = vec![Tag::parse(["h", &p.channel_id]).unwrap()];
-        let builder = EventBuilder::new(k(kind::KIND_DM_HIDE), "").tags( tags);
+        let builder = EventBuilder::new(k(kind::KIND_DM_HIDE), "").tags(tags);
         let event = match self.client.sign_event(builder) {
             Ok(e) => e,
             Err(e) => return format!("Error: failed to sign hide_dm event: {e}"),
@@ -2730,7 +2732,7 @@ with kind:45003 comments)."
     pub async fn set_presence(&self, Parameters(p): Parameters<SetPresenceParams>) -> String {
         // Validate status value.
         // Publish ephemeral presence event (kind:20001).
-        let builder = EventBuilder::new(k(kind::KIND_PRESENCE_UPDATE), p.status.as_str()).tags( []);
+        let builder = EventBuilder::new(k(kind::KIND_PRESENCE_UPDATE), p.status.as_str()).tags([]);
         let event = match self.client.sign_event(builder) {
             Ok(e) => e,
             Err(e) => return format!("Error: failed to sign presence event: {e}"),
@@ -2762,7 +2764,7 @@ with kind:45003 comments)."
         }
         // Store as a kind:10100 (agent profile) replaceable event with the policy in content.
         let content = serde_json::json!({ "channel_add_policy": p.policy }).to_string();
-        let builder = EventBuilder::new(k(kind::KIND_AGENT_PROFILE), &content).tags( []);
+        let builder = EventBuilder::new(k(kind::KIND_AGENT_PROFILE), &content).tags([]);
         let event = match self.client.sign_event(builder) {
             Ok(e) => e,
             Err(e) => return format!("Error: failed to sign agent profile event: {e}"),

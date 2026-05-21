@@ -421,7 +421,8 @@ pub async fn emit_system_message(
 ) -> anyhow::Result<()> {
     let channel_tag = Tag::parse(["h", &channel_id.to_string()])?;
 
-    let event = EventBuilder::new(Kind::Custom(40099), content.to_string()).tags( [channel_tag])
+    let event = EventBuilder::new(Kind::Custom(40099), content.to_string())
+        .tags([channel_tag])
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign system message: {e}"))?;
 
@@ -475,12 +476,10 @@ pub async fn emit_membership_notification(
     })
     .to_string();
 
-    let event = EventBuilder::new(
-        Kind::Custom(notification_kind as u16),
-        content).tags(
-        [p_tag, h_tag])
-    .sign_with_keys(&state.relay_keypair)
-    .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
+    let event = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
+        .tags([p_tag, h_tag])
+        .sign_with_keys(&state.relay_keypair)
+        .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
 
     // Store with channel_id = None → globally scoped, reachable by global subscribers.
     let (stored, was_inserted) = state.db.insert_event(&event, None).await?;
@@ -548,7 +547,8 @@ async fn emit_addressable_discovery_event(
     };
     let ts = now.max(min_ts);
 
-    let event = EventBuilder::new(Kind::Custom(kind as u16), "").tags( tags)
+    let event = EventBuilder::new(Kind::Custom(kind as u16), "")
+        .tags(tags)
         .custom_created_at(nostr::Timestamp::from(ts))
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{kind}: {e}"))?;
@@ -1943,7 +1943,8 @@ pub async fn publish_nip43_membership_list(state: &Arc<AppState>) -> anyhow::Res
         );
     }
 
-    let event = EventBuilder::new(Kind::Custom(KIND_NIP43_MEMBERSHIP_LIST as u16), "").tags( tags)
+    let event = EventBuilder::new(Kind::Custom(KIND_NIP43_MEMBERSHIP_LIST as u16), "")
+        .tags(tags)
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:13534: {e}"))?;
 
@@ -1988,7 +1989,8 @@ async fn publish_nip43_delta(
             .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
     ];
 
-    let event = EventBuilder::new(Kind::Custom(kind), "").tags( tags)
+    let event = EventBuilder::new(Kind::Custom(kind), "")
+        .tags(tags)
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{kind}: {e}"))?;
 

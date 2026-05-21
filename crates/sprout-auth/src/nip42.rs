@@ -75,8 +75,8 @@ pub fn verify_nip42_event(
         return Err(AuthError::RelayUrlMismatch);
     }
 
-    let now = Timestamp::now().as_u64();
-    let event_ts = event.created_at.as_u64();
+    let now = Timestamp::now().as_secs();
+    let event_ts = event.created_at.as_secs();
     let delta = now.abs_diff(event_ts);
     if delta > TIMESTAMP_TOLERANCE_SECS {
         return Err(AuthError::EventExpired);
@@ -88,12 +88,12 @@ pub fn verify_nip42_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind, Timestamp, Url as NostrUrl};
+    use nostr::{EventBuilder, Keys, Kind, RelayUrl, Timestamp};
 
     const TEST_RELAY: &str = "wss://relay.example.com";
 
     fn make_auth_event(keys: &Keys, challenge: &str, relay_url: &str) -> Event {
-        let url: NostrUrl = relay_url.parse().expect("valid relay url");
+        let url = RelayUrl::parse(relay_url).expect("valid relay url");
         EventBuilder::auth(challenge, url)
             .sign_with_keys(keys)
             .expect("signing failed")
@@ -130,7 +130,8 @@ mod tests {
     #[test]
     fn wrong_kind_rejected() {
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::TextNote, "not auth").tags( [])
+        let event = EventBuilder::new(Kind::TextNote, "not auth")
+            .tags([])
             .sign_with_keys(&keys)
             .expect("sign");
         assert!(matches!(
@@ -143,8 +144,8 @@ mod tests {
     fn expired_event_rejected() {
         let keys = Keys::generate();
         let challenge = generate_challenge();
-        let url: NostrUrl = TEST_RELAY.parse().unwrap();
-        let old_ts = Timestamp::from(Timestamp::now().as_u64().saturating_sub(120));
+        let url = RelayUrl::parse(TEST_RELAY).unwrap();
+        let old_ts = Timestamp::from(Timestamp::now().as_secs().saturating_sub(120));
         let event = EventBuilder::auth(&challenge, url)
             .custom_created_at(old_ts)
             .sign_with_keys(&keys)

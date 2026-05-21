@@ -150,7 +150,9 @@ fn build_auth_event(config: &Config, challenge: &str) -> Result<Event> {
             Tag::parse(["challenge", challenge])?,
             auth_tag.clone(),
         ];
-        Ok(EventBuilder::new(Kind::Authentication, "").tags( tags).sign_with_keys(&config.bot_keys)?)
+        Ok(EventBuilder::new(Kind::Authentication, "")
+            .tags(tags)
+            .sign_with_keys(&config.bot_keys)?)
     } else {
         Ok(EventBuilder::auth(challenge, relay_url).sign_with_keys(&config.bot_keys)?)
     }
@@ -174,14 +176,11 @@ async fn publish_profile(ws: &mut Ws, config: &Config) -> Result<()> {
 }
 
 async fn announce_channel_membership(ws: &mut Ws, config: &Config) -> Result<()> {
-    let builder = EventBuilder::new(
-        Kind::Custom(9000),
-        "").tags(
-        [
-            Tag::parse(["h", config.channel_id.as_str()])?,
-            Tag::parse(["p", &config.bot_keys.public_key().to_hex()])?,
-            Tag::parse(["role", "bot"])?,
-        ]);
+    let builder = EventBuilder::new(Kind::Custom(9000), "").tags([
+        Tag::parse(["h", config.channel_id.as_str()])?,
+        Tag::parse(["p", &config.bot_keys.public_key().to_hex()])?,
+        Tag::parse(["role", "bot"])?,
+    ]);
     let event = builder.sign_with_keys(&config.bot_keys)?;
     let event_id = event.id.to_hex();
 

@@ -1082,7 +1082,8 @@ mod tests {
     /// Build a test event with the given content and kind.
     fn make_event(content: &str) -> Event {
         let keys = Keys::generate();
-        EventBuilder::new(Kind::Custom(9), content).tags( [])
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags([])
             .sign_with_keys(&keys)
             .unwrap()
     }
@@ -1870,7 +1871,8 @@ mod tests {
                 nostr::Tag::parse(&strs).unwrap()
             })
             .collect();
-        EventBuilder::new(Kind::Custom(9), content).tags( nostr_tags)
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags(nostr_tags)
             .sign_with_keys(&keys)
             .unwrap()
     }

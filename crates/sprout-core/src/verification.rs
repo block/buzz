@@ -38,7 +38,8 @@ mod tests {
 
     fn make_valid_event() -> Event {
         let keys = Keys::generate();
-        EventBuilder::new(Kind::TextNote, "test content").tags( [])
+        EventBuilder::new(Kind::TextNote, "test content")
+            .tags([])
             .sign_with_keys(&keys)
             .expect("sign")
     }
@@ -46,7 +47,8 @@ mod tests {
     #[test]
     fn rejects_tampered_id() {
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::TextNote, "original").tags( [])
+        let event = EventBuilder::new(Kind::TextNote, "original")
+            .tags([])
             .sign_with_keys(&keys)
             .expect("sign");
         let mut json: serde_json::Value = serde_json::from_str(&event.as_json()).expect("parse");

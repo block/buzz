@@ -184,7 +184,8 @@ mod tests {
 
         let channel_id = Uuid::new_v4();
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::TextNote, "hello pubsub").tags( [])
+        let event = EventBuilder::new(Kind::TextNote, "hello pubsub")
+            .tags([])
             .sign_with_keys(&keys)
             .expect("signing failed");
         let event_id = event.id;

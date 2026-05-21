@@ -181,7 +181,8 @@ mod integration_tests {
 
     fn make_stored_event(content: &str, kind: Kind) -> StoredEvent {
         let keys = Keys::generate();
-        let event = EventBuilder::new(kind, content).tags( [])
+        let event = EventBuilder::new(kind, content)
+            .tags([])
             .sign_with_keys(&keys)
             .expect("signing failed");
         StoredEvent::new(event, None)

@@ -72,7 +72,8 @@ async fn publish_presence(
     use nostr::{EventBuilder, Kind};
     use sprout_core::kind::KIND_PRESENCE_UPDATE;
 
-    let event = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status).tags( [])
+    let event = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
+        .tags([])
         .sign_with_keys(keys)
         .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
     publisher.publish_event(event).await?;

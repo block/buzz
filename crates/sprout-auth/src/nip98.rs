@@ -75,8 +75,8 @@ pub fn verify_nip98_event(
         .map_err(|_| AuthError::Nip98Invalid("invalid Schnorr signature".to_string()))?;
 
     // 4. Verify created_at within ±60 seconds of now.
-    let now = Timestamp::now().as_u64();
-    let event_ts = event.created_at.as_u64();
+    let now = Timestamp::now().as_secs();
+    let event_ts = event.created_at.as_secs();
     let delta = now.abs_diff(event_ts);
     if delta > TIMESTAMP_TOLERANCE_SECS {
         return Err(AuthError::Nip98Invalid(format!(
@@ -175,7 +175,7 @@ mod tests {
             tags.push(Tag::parse(["payload", hex]).unwrap());
         }
 
-        let mut builder = EventBuilder::new(Kind::HttpAuth, "").tags( tags);
+        let mut builder = EventBuilder::new(Kind::HttpAuth, "").tags(tags);
         if let Some(ts) = created_at {
             builder = builder.custom_created_at(ts);
         }
@@ -195,7 +195,8 @@ mod tests {
     #[test]
     fn wrong_kind_rejected() {
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::TextNote, "").tags( [])
+        let event = EventBuilder::new(Kind::TextNote, "")
+            .tags([])
             .sign_with_keys(&keys)
             .expect("sign");
         let json = serde_json::to_string(&event).unwrap();
@@ -206,7 +207,7 @@ mod tests {
     #[test]
     fn expired_timestamp_rejected() {
         let keys = Keys::generate();
-        let old_ts = Timestamp::from(Timestamp::now().as_u64().saturating_sub(120));
+        let old_ts = Timestamp::from(Timestamp::now().as_secs().saturating_sub(120));
         let json = make_nip98_event(&keys, TEST_URL, TEST_METHOD, None, Some(old_ts));
         let result = verify_nip98_event(&json, TEST_URL, TEST_METHOD, None);
         assert!(matches!(result, Err(AuthError::Nip98Invalid(_))));

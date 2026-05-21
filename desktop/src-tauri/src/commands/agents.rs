@@ -1,5 +1,4 @@
 use nostr::{Keys, ToBech32};
-use nostr;
 use tauri::{AppHandle, State};
 
 use crate::{

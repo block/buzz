@@ -229,9 +229,9 @@ pub fn verify_auth_tag(
     let preimage = build_preimage(agent_pubkey, conditions);
     let message = hash_preimage(&preimage);
 
-    let xonly = owner_pubkey
-        .xonly()
-        .map_err(|e| SdkError::InvalidInput(format!("owner pubkey xonly conversion failed: {e}")))?;
+    let xonly = owner_pubkey.xonly().map_err(|e| {
+        SdkError::InvalidInput(format!("owner pubkey xonly conversion failed: {e}"))
+    })?;
     SECP256K1
         .verify_schnorr(&sig, &message, &xonly)
         .map_err(|e| SdkError::InvalidInput(format!("signature verification failed: {e}")))?;

@@ -146,7 +146,8 @@ impl RestClient {
             tags.push(payload_tag);
         }
 
-        let event = EventBuilder::new(Kind::HttpAuth, "").tags( tags)
+        let event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags(tags)
             .sign_with_keys(&self.keys)
             .map_err(|e| RelayError::Http(format!("NIP-98 sign error: {e}")))?;
         let event_json = serde_json::to_string(&event)
@@ -748,7 +749,8 @@ impl HarnessRelay {
                     .map_err(|e| RelayError::AuthFailed(e.to_string()))?,
             );
         }
-        let event = EventBuilder::new(Kind::Custom(KIND_TYPING_INDICATOR as u16), "").tags( tags)
+        let event = EventBuilder::new(Kind::Custom(KIND_TYPING_INDICATOR as u16), "")
+            .tags(tags)
             .sign_with_keys(&self.keys)?;
         Ok(event)
     }
@@ -2495,7 +2497,9 @@ async fn send_auth_response(
                 .map_err(|e| RelayError::Http(format!("tag parse error: {e}")))?,
             tag.clone(),
         ];
-        EventBuilder::new(nostr::Kind::Authentication, "").tags( tags).sign_with_keys(keys)?
+        EventBuilder::new(nostr::Kind::Authentication, "")
+            .tags(tags)
+            .sign_with_keys(keys)?
     } else {
         EventBuilder::auth(challenge, relay_nostr_url).sign_with_keys(keys)?
     };
@@ -3075,7 +3079,8 @@ mod tests {
     /// control it, but we return it so callers can use it for dedup tests.
     fn make_test_event(keys: &nostr::Keys, created_at_secs: u64) -> Event {
         let ts = nostr::Timestamp::from(created_at_secs);
-        EventBuilder::new(nostr::Kind::TextNote, "test").tags( [])
+        EventBuilder::new(nostr::Kind::TextNote, "test")
+            .tags([])
             .custom_created_at(ts)
             .sign_with_keys(keys)
             .expect("signing should succeed")

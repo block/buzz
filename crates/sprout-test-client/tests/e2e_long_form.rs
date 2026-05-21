@@ -46,7 +46,8 @@ fn build_long_form_event(
         Tag::parse(["title", title]).unwrap(),
     ];
     tags.extend(extra_tags);
-    EventBuilder::new(Kind::Custom(KIND_LONG_FORM), content).tags( tags)
+    EventBuilder::new(Kind::Custom(KIND_LONG_FORM), content)
+        .tags(tags)
         .sign_with_keys(keys)
         .unwrap()
 }
@@ -265,7 +266,8 @@ async fn test_long_form_stale_write_rejected() {
             Tag::parse(["d", &d_tag]).unwrap(),
             Tag::parse(["title", "Newer Article"]).unwrap(),
         ];
-        EventBuilder::new(Kind::Custom(KIND_LONG_FORM), "Newer content.").tags( tags)
+        EventBuilder::new(Kind::Custom(KIND_LONG_FORM), "Newer content.")
+            .tags(tags)
             .custom_created_at(Timestamp::from(nostr::Timestamp::now().as_u64() + 100))
             .sign_with_keys(&keys)
             .unwrap()
@@ -280,7 +282,8 @@ async fn test_long_form_stale_write_rejected() {
             Tag::parse(["d", &d_tag]).unwrap(),
             Tag::parse(["title", "Older Article"]).unwrap(),
         ];
-        EventBuilder::new(Kind::Custom(KIND_LONG_FORM), "Older content.").tags( tags)
+        EventBuilder::new(Kind::Custom(KIND_LONG_FORM), "Older content.")
+            .tags(tags)
             .custom_created_at(Timestamp::from(nostr::Timestamp::now().as_u64() - 100))
             .sign_with_keys(&keys)
             .unwrap()

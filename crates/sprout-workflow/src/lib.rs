@@ -1056,7 +1056,8 @@ steps:
         use nostr::{EventBuilder, Keys, Kind};
         use uuid::Uuid;
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::Custom(9), "hello world").tags( [])
+        let event = EventBuilder::new(Kind::Custom(9), "hello world")
+            .tags([])
             .sign_with_keys(&keys)
             .expect("sign");
         sprout_core::StoredEvent::new(event, Some(Uuid::new_v4()))
@@ -1069,13 +1070,15 @@ steps:
         let keys = Keys::generate();
         // Create a dummy target message ID (64-char hex).
         let target_keys = Keys::generate();
-        let target_event = EventBuilder::new(Kind::Custom(9), "target msg").tags( [])
+        let target_event = EventBuilder::new(Kind::Custom(9), "target msg")
+            .tags([])
             .sign_with_keys(&target_keys)
             .expect("sign target");
         let target_id_hex = target_event.id.to_hex();
         // NIP-25: reaction references the target via an `e` tag.
         let e_tag = Tag::parse(["e", &target_id_hex]).expect("tag parse");
-        let event = EventBuilder::new(Kind::Reaction, "👍").tags( [e_tag])
+        let event = EventBuilder::new(Kind::Reaction, "👍")
+            .tags([e_tag])
             .sign_with_keys(&keys)
             .expect("sign");
         (
@@ -1118,7 +1121,8 @@ steps:
     fn build_trigger_context_no_channel_id() {
         use nostr::{EventBuilder, Keys, Kind};
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::Custom(9), "msg").tags( [])
+        let event = EventBuilder::new(Kind::Custom(9), "msg")
+            .tags([])
             .sign_with_keys(&keys)
             .expect("sign");
         // channel_id = None (global/DM event)
@@ -1167,15 +1171,13 @@ steps:
         let thread_root_id = EventId::all_zeros();
         let direct_target_id = EventId::from_byte_array([0x42; 32]);
 
-        let event = EventBuilder::new(
-            Kind::Reaction,
-            "👍").tags(
-            [
+        let event = EventBuilder::new(Kind::Reaction, "👍")
+            .tags([
                 Tag::parse(["e", &thread_root_id.to_hex()]).unwrap(),
                 Tag::parse(["e", &direct_target_id.to_hex()]).unwrap(),
             ])
-        .sign_with_keys(&keys)
-        .expect("sign");
+            .sign_with_keys(&keys)
+            .expect("sign");
 
         let stored = sprout_core::StoredEvent::new(event, Some(Uuid::new_v4()));
         let ctx = build_trigger_context(&stored);

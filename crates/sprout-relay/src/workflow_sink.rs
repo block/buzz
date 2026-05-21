@@ -114,7 +114,8 @@ impl ActionSink for RelayActionSink {
             ];
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
-            let event = EventBuilder::new(kind, &text).tags( tags)
+            let event = EventBuilder::new(kind, &text)
+                .tags(tags)
                 .sign_with_keys(&state.relay_keypair)
                 .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
 

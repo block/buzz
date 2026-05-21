@@ -46,7 +46,8 @@ fn sign_blossom_auth(keys: &Keys, sha256: &str) -> nostr::Event {
         Tag::parse(["x", sha256]).expect("x tag"),
         Tag::parse(["expiration", &exp_str]).expect("expiration tag"),
     ];
-    EventBuilder::new(Kind::from(24242), "Upload test").tags( tags)
+    EventBuilder::new(Kind::from(24242), "Upload test")
+        .tags(tags)
         .sign_with_keys(keys)
         .expect("sign blossom auth")
 }

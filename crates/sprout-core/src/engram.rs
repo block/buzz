@@ -408,7 +408,8 @@ pub fn build_event(
             .map_err(|e| EngramError::Encrypt(e.to_string()))?,
     ];
 
-    EventBuilder::new(Kind::Custom(KIND_AGENT_ENGRAM as u16), ciphertext).tags( tags)
+    EventBuilder::new(Kind::Custom(KIND_AGENT_ENGRAM as u16), ciphertext)
+        .tags(tags)
         .custom_created_at(nostr::Timestamp::from(created_at))
         .sign_with_keys(agent_keys)
         .map_err(|e| EngramError::Sign(e.to_string()))
@@ -800,13 +801,12 @@ mod tests {
             Tag::parse(["d", &upper_d]).unwrap(),
             Tag::parse(["p", &owner.public_key().to_hex()]).unwrap(),
         ];
-        let tampered = EventBuilder::new(
-            Kind::Custom(KIND_AGENT_ENGRAM as u16),
-            ev.content.clone()).tags(
-            tags)
-        .custom_created_at(ev.created_at)
-        .sign_with_keys(&agent)
-        .unwrap();
+        let tampered =
+            EventBuilder::new(Kind::Custom(KIND_AGENT_ENGRAM as u16), ev.content.clone())
+                .tags(tags)
+                .custom_created_at(ev.created_at)
+                .sign_with_keys(&agent)
+                .unwrap();
         let err = validate_and_decrypt(
             &tampered,
             &agent.public_key(),

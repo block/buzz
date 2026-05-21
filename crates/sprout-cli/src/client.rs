@@ -108,7 +108,8 @@ fn sign_nip98(
                 .map_err(|e| CliError::Other(format!("tag error: {e}")))?,
         );
     }
-    let event = EventBuilder::new(Kind::Custom(27235), "").tags( tags)
+    let event = EventBuilder::new(Kind::Custom(27235), "")
+        .tags(tags)
         .sign_with_keys(keys)
         .map_err(|e| CliError::Other(format!("NIP-98 signing failed: {e}")))?;
     let json = event.as_json();
@@ -353,7 +354,8 @@ impl SproutClient {
             }
         }
 
-        let auth_event = EventBuilder::new(Kind::from(24242), "Upload file").tags( blossom_tags)
+        let auth_event = EventBuilder::new(Kind::from(24242), "Upload file")
+            .tags(blossom_tags)
             .sign_with_keys(&self.keys)
             .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
 

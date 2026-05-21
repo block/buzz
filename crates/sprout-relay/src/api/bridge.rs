@@ -756,13 +756,12 @@ async fn synthesize_presence(state: &AppState, filters: &[nostr::Filter]) -> Opt
     for (pubkey_hex, status) in &presence_map {
         // Build a synthetic event: relay-signed, content = status, p-tag = subject.
         let tags = vec![nostr::Tag::parse(["p", pubkey_hex]).ok()?];
-        let event = nostr::EventBuilder::new(
-            nostr::Kind::Custom(KIND_PRESENCE_UPDATE as u16),
-            status).tags(
-            tags)
-        .custom_created_at(nostr::Timestamp::from(now))
-        .sign_with_keys(&state.relay_keypair)
-        .ok()?;
+        let event =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
+                .tags(tags)
+                .custom_created_at(nostr::Timestamp::from(now))
+                .sign_with_keys(&state.relay_keypair)
+                .ok()?;
 
         if let Ok(v) = serde_json::to_value(&event) {
             events.push(v);
@@ -787,7 +786,8 @@ mod tests {
             nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P)),
             [owner_hex],
         );
-        let ev = EventBuilder::new(Kind::Custom(30174), "engram body").tags( [d_tag, p_tag])
+        let ev = EventBuilder::new(Kind::Custom(30174), "engram body")
+            .tags([d_tag, p_tag])
             .sign_with_keys(agent)
             .expect("sign engram");
         sprout_core::StoredEvent::new(ev, None)

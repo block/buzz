@@ -241,10 +241,12 @@ mod tests {
 
         // ECDH: source computes shared key with target's pubkey
         let ecdh_from_src =
-            nostr::util::generate_shared_key(src_keys.secret_key(), &tgt_keys.public_key()).unwrap();
+            nostr::util::generate_shared_key(src_keys.secret_key(), &tgt_keys.public_key())
+                .unwrap();
         // ECDH: target computes shared key with source's pubkey (must match)
         let ecdh_from_tgt =
-            nostr::util::generate_shared_key(tgt_keys.secret_key(), &src_keys.public_key()).unwrap();
+            nostr::util::generate_shared_key(tgt_keys.secret_key(), &src_keys.public_key())
+                .unwrap();
 
         assert_eq!(ecdh_from_src, ecdh_from_tgt, "ECDH must be symmetric");
 
@@ -267,7 +269,8 @@ mod tests {
         let tgt_keys = Keys::new(tgt_sk);
 
         let session_id = derive_session_id(&session_secret());
-        let ecdh = nostr::util::generate_shared_key(src_keys.secret_key(), &tgt_keys.public_key()).unwrap();
+        let ecdh = nostr::util::generate_shared_key(src_keys.secret_key(), &tgt_keys.public_key())
+            .unwrap();
         let (_, sas_input) = derive_sas(&ecdh, &session_secret());
 
         let src_pk: [u8; 32] = src_keys.public_key().to_bytes();
@@ -301,7 +304,8 @@ mod tests {
         );
 
         // ECDH
-        let ecdh = nostr::util::generate_shared_key(src_keys.secret_key(), &tgt_keys.public_key()).unwrap();
+        let ecdh = nostr::util::generate_shared_key(src_keys.secret_key(), &tgt_keys.public_key())
+            .unwrap();
         assert_eq!(
             bytes_to_hex(&ecdh),
             "9b4b6d6990713d89d6d9982e506ee1bbcde6f05c54d9d2978696e8a7274d4408"
@@ -343,7 +347,8 @@ mod tests {
         let tgt_keys = Keys::new(tgt_sk);
 
         let session_id = derive_session_id(&session_secret());
-        let ecdh = nostr::util::generate_shared_key(src_keys.secret_key(), &tgt_keys.public_key()).unwrap();
+        let ecdh = nostr::util::generate_shared_key(src_keys.secret_key(), &tgt_keys.public_key())
+            .unwrap();
         let (_, sas_input) = derive_sas(&ecdh, &session_secret());
 
         let src_pk: [u8; 32] = src_keys.public_key().to_bytes();
@@ -398,9 +403,11 @@ mod tests {
 
         // Both sides compute ECDH (symmetric).
         let ecdh_src =
-            nostr::util::generate_shared_key(src_keys.secret_key(), &tgt_keys.public_key()).unwrap();
+            nostr::util::generate_shared_key(src_keys.secret_key(), &tgt_keys.public_key())
+                .unwrap();
         let ecdh_tgt =
-            nostr::util::generate_shared_key(tgt_keys.secret_key(), &src_keys.public_key()).unwrap();
+            nostr::util::generate_shared_key(tgt_keys.secret_key(), &src_keys.public_key())
+                .unwrap();
         assert_eq!(ecdh_src, ecdh_tgt, "ECDH must be symmetric");
 
         // Both sides derive the same SAS.

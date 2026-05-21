@@ -440,8 +440,9 @@ async fn respond_to_auth_challenge(
 
     let auth_event = EventBuilder::new(
         Kind::Authentication, // kind:22242
-        "").tags(
-        [relay_tag, challenge_tag, token_tag])
+        "",
+    )
+    .tags([relay_tag, challenge_tag, token_tag])
     .sign_with_keys(&inner.auth_keys)
     .map_err(|e| crate::ProxyError::Auth(format!("sign auth event: {e}")))?;
 
@@ -478,7 +479,8 @@ mod tests {
 
             // Queue an EVENT message.
             let keys = Keys::generate();
-            let event = EventBuilder::new(Kind::TextNote, "hello").tags( [])
+            let event = EventBuilder::new(Kind::TextNote, "hello")
+                .tags([])
                 .sign_with_keys(&keys)
                 .unwrap();
             let event_id = event.id;

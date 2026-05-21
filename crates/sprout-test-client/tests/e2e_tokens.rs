@@ -62,7 +62,8 @@ fn build_nip98_header(keys: &Keys, url: &str, method: &str, body: &[u8]) -> Stri
         Tag::parse(["payload", &payload_hash]).expect("payload tag"),
     ];
 
-    let event = EventBuilder::new(Kind::HttpAuth, "").tags( tags)
+    let event = EventBuilder::new(Kind::HttpAuth, "")
+        .tags(tags)
         .sign_with_keys(keys)
         .expect("signing must succeed");
 
@@ -82,7 +83,8 @@ fn build_nip98_header_no_payload(keys: &Keys, url: &str, method: &str) -> String
         Tag::parse(["method", method]).expect("method tag"),
         // Deliberately omit payload tag
     ];
-    let event = EventBuilder::new(Kind::HttpAuth, "").tags( tags)
+    let event = EventBuilder::new(Kind::HttpAuth, "")
+        .tags(tags)
         .sign_with_keys(keys)
         .expect("signing must succeed");
     let json = event.as_json();
