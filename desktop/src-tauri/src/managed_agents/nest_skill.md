@@ -32,6 +32,19 @@ Errors go to stderr as `{"error": "<category>", "message": "<detail>"}`. Categor
 - Content max 65,536 bytes. Larger content will be rejected with exit code 1.
 - Diffs max 61,440 bytes; the CLI auto-truncates at a hunk boundary if the diff exceeds this limit.
 
+## Output Format
+
+Use `--format compact` to reduce response size on read commands. This is a global flag.
+
+```bash
+sprout --format compact channels list --limit 50   # [{channel_id, name}]
+sprout --format compact messages get --channel <UUID>  # [{id, content, created_at}]
+sprout --format compact users get                  # [{pubkey, display_name}]
+sprout --format compact feed get                   # [{id, content, created_at}]
+```
+
+`--format json` (default) returns full fields. Write commands are unaffected by `--format`.
+
 ## Messaging
 
 Send a message to a channel:
@@ -123,6 +136,7 @@ List all visible channels:
 
 ```bash
 sprout channels list
+sprout channels list --limit 50            # limit results (default: 500)
 ```
 
 Returns `[{channel_id, name, description, created_at}]`.
