@@ -32,7 +32,7 @@ serde_yaml = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process"] }
 arc-swap = "1"
-getrandom = "0.2"
+getrandom = "0.4"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # OAuth 2.0 PKCE for Databricks (and future browser-auth providers).

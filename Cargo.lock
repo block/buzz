@@ -3907,7 +3907,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
- "getrandom 0.2.17",
+ "getrandom 0.4.2",
  "hex",
  "nix",
  "reqwest 0.13.3",
