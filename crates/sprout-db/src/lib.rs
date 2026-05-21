@@ -267,6 +267,17 @@ impl Db {
         event::soft_delete_event(&self.pool, event_id).await
     }
 
+    /// Soft-delete the live row for an addressable coordinate `(kind, pubkey, d_tag)`.
+    /// Used by NIP-09 a-tag deletion for parameterized-replaceable kinds.
+    pub async fn soft_delete_by_coordinate(
+        &self,
+        kind: i32,
+        pubkey: &[u8],
+        d_tag: &str,
+    ) -> Result<bool> {
+        event::soft_delete_by_coordinate(&self.pool, kind, pubkey, d_tag).await
+    }
+
     /// Atomically soft-delete an event and decrement thread reply counters.
     pub async fn soft_delete_event_and_update_thread(
         &self,

@@ -3,6 +3,7 @@ pub mod dms;
 pub mod feed;
 pub mod mem;
 pub mod messages;
+pub mod notes;
 pub mod pack;
 pub mod reactions;
 pub mod repos;

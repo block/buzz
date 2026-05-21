@@ -401,6 +401,44 @@ sprout messages vote --event "$FORUM_EVENT_ID" --direction up | jq .
 sprout messages vote --event "$FORUM_EVENT_ID" --direction down | jq .
 ```
 
+### 6.12 Notes (NIP-23 long-form, kind:30023)
+
+Editable team-knowledge notes keyed by `(kind:30023, you, d=slug)`. `set` is an
+idempotent upsert; `rm` is a NIP-09 a-tag deletion. Output is plain text (refs),
+not JSON — except `get`/`ls`, which emit JSON.
+
+```bash
+# set (first publish — --title required, body from stdin)
+cat <<'EOF' | sprout notes set --name dco-check --title "DCO Check" \
+  --summary "How we verify DCO" --tag dco --tag ci --content -
+Run `git log --format='%(trailers:key=Signed-off-by)'` ...
+EOF
+# → prints event_id / naddr / coordinate / slug / title
+
+# set (edit — omit --title to carry it forward; published_at preserved)
+echo "Updated body." | sprout notes set --name dco-check --content -
+
+# get by name (own author resolves directly; cross-author #d query otherwise)
+sprout notes get --name dco-check | jq .
+sprout notes get --name dco-check --content-only
+
+# get by naddr (exact coordinate; paste the naddr from a set/get above)
+sprout notes get --naddr "$NADDR" | jq .
+
+# ls (own by default; --author all across the team; --tag filters)
+sprout notes ls | jq .
+sprout notes ls --tag dco | jq .
+sprout notes ls --author all --limit 10 | jq .
+
+# rm (NIP-09 a-tag deletion; subsequent get must 404)
+sprout notes rm --name dco-check
+# → prints deleted <coordinate> / deletion <event-id>
+sprout notes get --name dco-check   # exits non-zero: not found
+
+# rm of a slug you never published → NotFound, no kind:5 emitted
+sprout notes rm --name does-not-exist   # exits non-zero
+```
+
 ---
 
 ## 7. Error Path Testing
@@ -532,3 +570,7 @@ sprout channels delete --channel "$FORUM_ID" | jq .
 | 52 | `upload file` | ☐ | |
 | 53 | `pack validate` | ☐ | Local, no relay |
 | 54 | `pack inspect` | ☐ | Local, no relay |
+| 55 | `notes set` | ☐ | First publish, edit/carry, --clear-tags, ambiguity, empty-stdin guard |
+| 56 | `notes get` | ☐ | By name, by naddr, --content-only, cross-author, ambiguous → exit 1 |
+| 57 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
+| 58 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |

@@ -317,3 +317,246 @@ async fn test_long_form_stale_write_rejected() {
 
     client.disconnect().await.expect("disconnect");
 }
+
+/// NIP-09 a-tag deletion: a kind:5 deletion targeting the addressable
+/// coordinate `30023:<pubkey>:<d-tag>` causes the live event row for that
+/// coordinate to be soft-deleted, so subsequent REQs no longer return it.
+///
+/// Regression test for issue #714 — before the fix,
+/// `handle_a_tag_deletion` only handled the workflow kind and silently
+/// no-op'd for kind:30023.
+#[tokio::test]
+#[ignore]
+async fn test_long_form_a_tag_deletion() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let mut client = SproutTestClient::connect(&url, &keys)
+        .await
+        .expect("connect");
+
+    // Publish a note.
+    let d_tag = format!("a-del-{}", uuid::Uuid::new_v4().simple());
+    let note = build_long_form_event(&keys, &d_tag, "Doomed Article", "Body.", vec![]);
+    let note_id = note.id;
+    let ok = client.send_event(note).await.expect("send note");
+    assert!(ok.accepted, "note should be accepted: {}", ok.message);
+
+    // Sanity check it's queryable before deletion.
+    let sid_pre = sub_id("a-del-pre");
+    let filter_pre = Filter::new()
+        .kind(Kind::Custom(KIND_LONG_FORM))
+        .author(keys.public_key())
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [d_tag.as_str()]);
+    client
+        .subscribe(&sid_pre, vec![filter_pre])
+        .await
+        .expect("subscribe pre");
+    let pre = client
+        .collect_until_eose(&sid_pre, Duration::from_secs(5))
+        .await
+        .expect("collect pre");
+    assert!(
+        pre.iter().any(|e| e.id == note_id),
+        "note should be queryable before deletion"
+    );
+
+    // Build the addressable coordinate and emit a kind:5 deletion targeting it.
+    let a_coord = format!(
+        "{}:{}:{}",
+        KIND_LONG_FORM,
+        keys.public_key().to_hex(),
+        d_tag
+    );
+    let del = EventBuilder::new(
+        Kind::EventDeletion,
+        "",
+        vec![Tag::parse(&["a", &a_coord]).unwrap()],
+    )
+    .sign_with_keys(&keys)
+    .unwrap();
+    let ok_del = client.send_event(del).await.expect("send deletion");
+    assert!(
+        ok_del.accepted,
+        "a-tag deletion should be accepted: {}",
+        ok_del.message
+    );
+
+    // Query — should now be empty.
+    let sid_post = sub_id("a-del-post");
+    let filter_post = Filter::new()
+        .kind(Kind::Custom(KIND_LONG_FORM))
+        .author(keys.public_key())
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [d_tag.as_str()]);
+    client
+        .subscribe(&sid_post, vec![filter_post])
+        .await
+        .expect("subscribe post");
+    let post = client
+        .collect_until_eose(&sid_post, Duration::from_secs(5))
+        .await
+        .expect("collect post");
+    assert!(
+        post.is_empty(),
+        "a-tag deletion should remove the note from REQ results (got {} events)",
+        post.len()
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// A kind:5 carrying a malformed `e` tag alongside a valid `a` coordinate must
+/// NOT be routed as an addressable deletion — a malformed `e` makes the
+/// deletion ambiguous, not addressable-only. Regression guard for relay
+/// routing keyed on "no e tags present" rather than "no valid e-ids decoded":
+/// the note must survive.
+#[tokio::test]
+#[ignore]
+async fn test_long_form_malformed_e_plus_a_does_not_delete() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let mut client = SproutTestClient::connect(&url, &keys)
+        .await
+        .expect("connect");
+
+    let d_tag = format!("mixed-del-{}", uuid::Uuid::new_v4().simple());
+    let note = build_long_form_event(&keys, &d_tag, "Survivor", "Body.", vec![]);
+    let note_id = note.id;
+    let ok = client.send_event(note).await.expect("send note");
+    assert!(ok.accepted, "note should be accepted: {}", ok.message);
+
+    // kind:5 with a *malformed* e tag (not 64 hex chars) plus a valid a coord.
+    let a_coord = format!(
+        "{}:{}:{}",
+        KIND_LONG_FORM,
+        keys.public_key().to_hex(),
+        d_tag
+    );
+    let del = EventBuilder::new(
+        Kind::EventDeletion,
+        "",
+        vec![
+            Tag::parse(&["e", "not-a-valid-event-id"]).unwrap(),
+            Tag::parse(&["a", &a_coord]).unwrap(),
+        ],
+    )
+    .sign_with_keys(&keys)
+    .unwrap();
+    // Relay may accept-and-noop or reject; either is fine. The contract under
+    // test is that the coordinate is NOT soft-deleted.
+    let _ = client.send_event(del).await.expect("send mixed deletion");
+
+    let sid = sub_id("mixed-del-post");
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LONG_FORM))
+        .author(keys.public_key())
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [d_tag.as_str()]);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    let post = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect");
+    assert!(
+        post.iter().any(|e| e.id == note_id),
+        "malformed-e + a must NOT soft-delete the coordinate; note should survive"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+/// `notes set` re-publish preserves the original `published_at` while letting
+/// `created_at` advance. This is the contract that NIP-23 readers rely on to
+/// tell "when the author first wrote this" from "when they last updated it",
+/// and the carry-forward logic in `sprout-cli`'s `build_set_event` (unit-tested
+/// there) only works if the relay round-trips the tag faithfully.
+///
+/// The carry rule is duplicated inline here (rather than reaching into
+/// `sprout-cli`) so this e2e crate stays free of CLI deps; the rule's
+/// correctness is unit-tested in `commands::notes::tests`.
+#[tokio::test]
+#[ignore]
+async fn test_long_form_set_twice_preserves_published_at() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let mut client = SproutTestClient::connect(&url, &keys)
+        .await
+        .expect("connect");
+
+    let d_tag = format!("preserve-pat-{}", uuid::Uuid::new_v4().simple());
+    let original_published_at: u64 = 1_700_000_000;
+
+    // First publish: stamp `published_at` = original_published_at.
+    let v1 = build_long_form_event(
+        &keys,
+        &d_tag,
+        "First",
+        "v1 body",
+        vec![Tag::parse(&["published_at", &original_published_at.to_string()]).unwrap()],
+    );
+    let ok1 = client.send_event(v1).await.expect("send v1");
+    assert!(ok1.accepted, "v1 should be accepted: {}", ok1.message);
+
+    // Ensure created_at advances between writes.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Re-publish carrying the original `published_at` forward — what
+    // `notes set` does on update when `--title` (or nothing) changes.
+    let v2 = EventBuilder::new(
+        Kind::Custom(KIND_LONG_FORM),
+        "v2 body",
+        vec![
+            Tag::parse(&["d", &d_tag]).unwrap(),
+            Tag::parse(&["title", "First"]).unwrap(),
+            Tag::parse(&["published_at", &original_published_at.to_string()]).unwrap(),
+        ],
+    )
+    .custom_created_at(Timestamp::now())
+    .sign_with_keys(&keys)
+    .unwrap();
+    let v2_id = v2.id;
+    let v2_created_at = v2.created_at.as_u64();
+    let ok2 = client.send_event(v2).await.expect("send v2");
+    assert!(ok2.accepted, "v2 should be accepted: {}", ok2.message);
+
+    // Re-fetch: there should be exactly one live event for (kind, author, d-tag),
+    // and its `published_at` should still be the original — even though
+    // `created_at` advanced.
+    let sid = sub_id("preserve-pat");
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_LONG_FORM))
+        .author(keys.public_key())
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [d_tag.as_str()]);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect");
+
+    assert_eq!(events.len(), 1, "exactly one live event after re-publish");
+    let live = &events[0];
+    assert_eq!(live.id, v2_id, "surviving event is v2");
+    assert_eq!(
+        live.created_at.as_u64(),
+        v2_created_at,
+        "created_at advanced to v2's timestamp"
+    );
+    let pa = live
+        .tags
+        .iter()
+        .find(|t| t.as_slice().first().map(String::as_str) == Some("published_at"))
+        .and_then(|t| t.as_slice().get(1).cloned())
+        .and_then(|v| v.parse::<u64>().ok());
+    assert_eq!(
+        pa,
+        Some(original_published_at),
+        "published_at must be preserved across re-publish"
+    );
+
+    client.disconnect().await.expect("disconnect");
+}

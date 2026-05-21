@@ -7,9 +7,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use sprout_core::kind::{
-    event_kind_u32, KIND_GIT_REPO_ANNOUNCEMENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS,
-    KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
+    event_kind_u32, is_parameterized_replaceable, KIND_GIT_REPO_ANNOUNCEMENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
+    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
 };
 use sprout_db::channel::MemberRole;
 
@@ -104,7 +104,7 @@ pub async fn validate_standard_deletion_event(
     let actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
     let target_ids = extract_target_event_ids(event);
 
-    if target_ids.is_empty() {
+    if !has_e_tag(event) {
         // a-tag deletion: verify author owns the addressable event
         let a_tag = event
             .tags
@@ -1380,11 +1380,53 @@ async fn handle_a_tag_deletion(event: &Event, state: &Arc<AppState>) -> anyhow::
                 }
             }
         }
+        // Generic NIP-33 (parameterized-replaceable) soft-delete by coordinate.
+        //
+        // Listed after the workflow branch so workflow's bespoke deletion
+        // (which doesn't soft-delete the `events` row by design — that's a
+        // separate concern) takes precedence. For every other addressable
+        // kind, including kind:30023 (NIP-23 long-form), we soft-delete the
+        // live row matching `(kind, pubkey, d_tag)` so REQs stop returning it.
+        // See https://github.com/block/sprout/issues/714.
+        k if is_parameterized_replaceable(k) => {
+            let pubkey_bytes = match hex::decode(pubkey_hex) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "invalid pubkey hex in a-tag {pubkey_hex}: {e}"
+                    ));
+                }
+            };
+            // Safe cast: NIP-33 kinds are 30000–39999, well within i32.
+            let kind_i32 = k as i32;
+            let deleted = state
+                .db
+                .soft_delete_by_coordinate(kind_i32, &pubkey_bytes, d_tag)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to soft-delete by coordinate {kind_i32}:{pubkey_hex}:{d_tag}: {e}"
+                    )
+                })?;
+            if deleted {
+                tracing::info!(
+                    kind = k,
+                    d_tag = d_tag,
+                    "NIP-09 a-tag deletion: soft-deleted addressable event by coordinate"
+                );
+            } else {
+                tracing::debug!(
+                    kind = k,
+                    d_tag = d_tag,
+                    "NIP-09 a-tag deletion: no live row matched coordinate"
+                );
+            }
+        }
         _ => {
             tracing::debug!(
                 kind = kind_num,
                 d_tag = d_tag,
-                "NIP-09 a-tag deletion for unhandled kind — no side effect"
+                "NIP-09 a-tag deletion for non-NIP-33 kind — no side effect"
             );
         }
     }
@@ -1397,8 +1439,10 @@ async fn handle_standard_deletion_event(
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
     let target_ids = extract_target_event_ids(event);
-    if target_ids.is_empty() {
-        // NIP-09 a-tag deletion path for addressable events
+    if !has_e_tag(event) {
+        // NIP-09 a-tag deletion path for addressable events. Keyed on the
+        // absence of *any* e tag (not just valid e-ids): a malformed e + a must
+        // not route here and silently soft-delete the coordinate.
         return handle_a_tag_deletion(event, state).await;
     }
 
@@ -1551,6 +1595,15 @@ fn effective_message_author(event: &Event, relay_pubkey: &nostr::PublicKey) -> V
         }
     }
     event.pubkey.serialize().to_vec()
+}
+
+/// True if the event carries any `e` tag at all, regardless of whether its
+/// value decodes to a valid 32-byte id. NIP-09 treats `e`/`a` as target
+/// classes: a malformed `e` makes the deletion ambiguous, not addressable-only.
+/// Routing keys on this rather than on decoded-target count so a malformed `e`
+/// alongside an `a` never silently soft-deletes a coordinate.
+fn has_e_tag(event: &Event) -> bool {
+    event.tags.iter().any(|t| t.kind().to_string() == "e")
 }
 
 fn extract_target_event_ids(event: &Event) -> Vec<Vec<u8>> {

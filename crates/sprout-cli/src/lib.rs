@@ -178,6 +178,9 @@ enum Cmd {
     /// Publish notes and manage the social graph (NIP-01/02)
     #[command(subcommand)]
     Social(SocialCmd),
+    /// Publish and edit long-form NIP-23 notes — team knowledge base
+    #[command(subcommand)]
+    Notes(NotesCmd),
     /// Announce and discover git repositories (NIP-34)
     #[command(subcommand)]
     Repos(ReposCmd),
@@ -775,6 +778,85 @@ pub enum SocialCmd {
 }
 
 // ---------------------------------------------------------------------------
+// Notes subcommands (NIP-23 long-form)
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum NotesCmd {
+    /// Create or update a note. Idempotent upsert keyed by `(me, --name)`.
+    ///
+    /// `published_at` is preserved on edits (only set on first create).
+    /// `--title` is required on first create; on subsequent edits the existing
+    /// title is carried forward when `--title` is omitted, and `--title ""`
+    /// explicitly clears it.
+    #[command(
+        after_help = "Examples:\n  echo '# Hello' | sprout notes set --name hello --title 'Hello' --content -\n  sprout notes set --name hello --tag onboarding --content - < draft.md"
+    )]
+    Set {
+        /// Slug — becomes the `d` tag. `[a-z0-9._-]{1,80}`.
+        #[arg(long)]
+        name: String,
+        /// Note title (NIP-23 `title` tag). Required on first create; omit to carry; `""` to clear.
+        #[arg(long)]
+        title: Option<String>,
+        /// Short summary (NIP-23 `summary` tag). Omit to carry; `""` to clear.
+        #[arg(long)]
+        summary: Option<String>,
+        /// Topic tag (NIP-23 `t` tag). May be repeated. Replaces (not merges) existing tags on edit; omit to carry forward.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Clear all `t` tags on update. Mutually exclusive with `--tag`.
+        /// Without this and without `--tag`, existing tags are carried forward.
+        #[arg(long, default_value_t = false)]
+        clear_tags: bool,
+        /// Markdown body. Use `-` to read from stdin.
+        #[arg(long)]
+        content: String,
+        /// Allow committing an empty body (refused by default to catch upstream pipeline failures).
+        #[arg(long, default_value_t = false)]
+        allow_empty: bool,
+    },
+    /// Read a note by `--naddr` (exact) or `--name <slug>` (cross-author lookup).
+    Get {
+        /// NIP-19 `naddr1…` or `30023:<pubkey>:<slug>` coordinate. Mutually exclusive with `--name`.
+        #[arg(long)]
+        naddr: Option<String>,
+        /// Slug to look up across authors. Mutually exclusive with `--naddr`.
+        #[arg(long)]
+        name: Option<String>,
+        /// Disambiguate `--name` to a specific author (hex pubkey, display name, or `me`).
+        #[arg(long)]
+        author: Option<String>,
+        /// Print only the markdown body, not the full event JSON.
+        #[arg(long, default_value_t = false)]
+        content_only: bool,
+    },
+    /// List notes. Defaults to your own.
+    Ls {
+        /// Hex pubkey, display name, `me`, or `all`.
+        #[arg(long, default_value = "me")]
+        author: Option<String>,
+        /// Filter by NIP-23 `t` tag.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Max results (default 50, hard cap 200).
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Delete one of your own notes via NIP-09 (kind:5).
+    ///
+    /// Emits an a-tag-only deletion targeting the addressable coordinate
+    /// `30023:<pubkey>:<slug>` (no `e` tag — an `e` tag would route around the
+    /// relay's coordinate soft-delete and leave the note alive). Read-before-
+    /// write gives a clean NotFound when there's nothing to delete.
+    Rm {
+        /// Slug of the note to delete. Only your own notes can be removed.
+        #[arg(long)]
+        name: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // Repos subcommands
 // ---------------------------------------------------------------------------
 
@@ -983,6 +1065,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client).await,
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
+        Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
@@ -1014,6 +1097,7 @@ mod tests {
             "feed",
             "mem",
             "messages",
+            "notes",
             "pack",
             "reactions",
             "repos",

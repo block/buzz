@@ -550,6 +550,36 @@ pub async fn soft_delete_event(pool: &PgPool, event_id: &[u8]) -> Result<bool> {
     Ok(result.rows_affected() > 0)
 }
 
+/// Soft-delete the live row for an addressable coordinate
+/// `(kind, pubkey, d_tag)` — the NIP-33 replacement key.
+///
+/// Used by `handle_a_tag_deletion` to honour NIP-09 a-tag deletions for any
+/// parameterized-replaceable kind. The WHERE clause mirrors
+/// `replace_parameterized_event` so the coordinate semantics stay consistent:
+/// `channel_id` is intentionally NOT in the key (NIP-33 replacement is global
+/// per the spec — `channel_id` is stored for query scoping, not identity).
+///
+/// Returns `Ok(true)` if a row was deleted, `Ok(false)` if no live row matched
+/// (already deleted, or never existed).
+pub async fn soft_delete_by_coordinate(
+    pool: &PgPool,
+    kind: i32,
+    pubkey: &[u8],
+    d_tag: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE events SET deleted_at = NOW() \
+         WHERE kind = $1 AND pubkey = $2 AND d_tag = $3 AND deleted_at IS NULL",
+    )
+    .bind(kind)
+    .bind(pubkey)
+    .bind(d_tag)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
 /// Atomically soft-delete an event and decrement thread reply counters.
 ///
 /// Wraps the delete + counter update in a single transaction so a crash between
