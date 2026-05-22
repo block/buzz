@@ -8,11 +8,14 @@ const TERMINAL_MAX_HEIGHT_PX = 600;
 const TERMINAL_DEFAULT_HEIGHT_PX = 280;
 const TERMINAL_HEIGHT_SESSION_KEY = "sprout.desktop.terminal-panel-height";
 
+function getMaxHeight(): number {
+  if (typeof window === "undefined") return TERMINAL_MAX_HEIGHT_PX;
+  // Never exceed 50% of viewport — leaves room for header, composer, and chat
+  return Math.min(TERMINAL_MAX_HEIGHT_PX, Math.floor(window.innerHeight * 0.5));
+}
+
 function clampTerminalHeight(height: number): number {
-  return Math.max(
-    TERMINAL_MIN_HEIGHT_PX,
-    Math.min(TERMINAL_MAX_HEIGHT_PX, height),
-  );
+  return Math.max(TERMINAL_MIN_HEIGHT_PX, Math.min(getMaxHeight(), height));
 }
 
 function getInitialTerminalHeight(): number {
