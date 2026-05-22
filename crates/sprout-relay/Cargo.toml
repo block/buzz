@@ -46,6 +46,7 @@ base64 = "0.22"
 sprout-sdk = { workspace = true }
 sprout-workflow = { workspace = true, features = ["reqwest"] }
 sprout-media = { workspace = true }
+s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
 bytes = "1"
 infer = "0.19"
 serde_yaml      = { workspace = true }

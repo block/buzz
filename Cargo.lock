@@ -4225,6 +4225,7 @@ dependencies = [
  "nostr",
  "rand 0.10.1",
  "redis",
+ "rust-s3",
  "serde",
  "serde_json",
  "serde_yaml",

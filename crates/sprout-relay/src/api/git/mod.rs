@@ -24,6 +24,7 @@ use crate::state::AppState;
 
 pub mod hook;
 pub mod policy;
+pub mod store;
 pub mod transport;
 
 pub use transport::git_router;
