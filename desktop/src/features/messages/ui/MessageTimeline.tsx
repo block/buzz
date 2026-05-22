@@ -78,6 +78,9 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   const internalScrollRef = React.useRef<HTMLDivElement>(null);
   const scrollContainerRef = externalScrollRef ?? internalScrollRef;
   const topSentinelRef = React.useRef<HTMLDivElement>(null);
+  const scrollRestorationId = targetMessageId
+    ? `message-timeline:${channelId ?? "none"}:target:${targetMessageId}`
+    : `message-timeline:${channelId ?? "none"}`;
 
   const {
     bottomAnchorRef,
@@ -135,7 +138,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <div
           className="absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-24 pt-1 [overflow-anchor:none] sm:px-6"
-          data-scroll-restoration-id="message-timeline"
+          data-scroll-restoration-id={scrollRestorationId}
           data-testid="message-timeline"
           onScroll={syncScrollState}
           ref={scrollContainerRef}

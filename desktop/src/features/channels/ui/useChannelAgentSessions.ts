@@ -30,8 +30,6 @@ type UseChannelAgentSessionsOptions = {
   setProfilePanelPubkey: (value: string | null) => void;
   setThreadReplyTargetId: (value: string | null) => void;
   setThreadScrollTargetId: (value: string | null) => void;
-  targetMessageId: string | null;
-  timelineMessages: TimelineMessage[];
 };
 
 function relayStatusToManagedStatus(
@@ -160,13 +158,10 @@ export function useChannelAgentSessions({
   setProfilePanelPubkey,
   setThreadReplyTargetId,
   setThreadScrollTargetId,
-  targetMessageId,
-  timelineMessages,
 }: UseChannelAgentSessionsOptions) {
   const [openAgentSessionPubkey, setOpenAgentSessionPubkey] = React.useState<
     string | null
   >(null);
-  const handledThreadTargetIdRef = React.useRef<string | null>(null);
 
   const channelAgentSessionAgents = React.useMemo(
     () =>
@@ -213,78 +208,6 @@ export function useChannelAgentSessions({
     },
     [handleOpenThread, setProfilePanelPubkey],
   );
-
-  React.useEffect(() => {
-    if (!targetMessageId) {
-      handledThreadTargetIdRef.current = null;
-      return;
-    }
-
-    const targetKey = `${activeChannelId ?? "none"}:${targetMessageId}`;
-    if (
-      handledThreadTargetIdRef.current !== null &&
-      handledThreadTargetIdRef.current !== targetKey
-    ) {
-      handledThreadTargetIdRef.current = null;
-    }
-
-    if (
-      handledThreadTargetIdRef.current === targetKey ||
-      !activeChannel ||
-      activeChannel.channelType === "forum"
-    ) {
-      return;
-    }
-
-    const targetMessage =
-      timelineMessages.find((message) => message.id === targetMessageId) ??
-      null;
-
-    if (!targetMessage?.parentId) {
-      return;
-    }
-
-    const threadHeadId = targetMessage.rootId ?? targetMessage.parentId;
-    const messageById = new Map(
-      timelineMessages.map((message) => [message.id, message]),
-    );
-
-    if (!messageById.has(threadHeadId)) {
-      return;
-    }
-
-    const expandedReplyIds = new Set<string>();
-    let ancestorId: string | null = targetMessage.parentId;
-    let guard = 0;
-
-    while (
-      ancestorId &&
-      ancestorId !== threadHeadId &&
-      guard < timelineMessages.length
-    ) {
-      expandedReplyIds.add(ancestorId);
-      ancestorId = messageById.get(ancestorId)?.parentId ?? null;
-      guard += 1;
-    }
-
-    setOpenAgentSessionPubkey(null);
-    setProfilePanelPubkey(null);
-    setOpenThreadHeadId(threadHeadId);
-    setThreadReplyTargetId(threadHeadId);
-    setThreadScrollTargetId(targetMessageId);
-    setExpandedThreadReplyIds(expandedReplyIds);
-    handledThreadTargetIdRef.current = targetKey;
-  }, [
-    activeChannel,
-    activeChannelId,
-    setExpandedThreadReplyIds,
-    setOpenThreadHeadId,
-    setProfilePanelPubkey,
-    setThreadReplyTargetId,
-    setThreadScrollTargetId,
-    targetMessageId,
-    timelineMessages,
-  ]);
 
   React.useEffect(() => {
     if (

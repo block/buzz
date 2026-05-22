@@ -147,7 +147,7 @@ export function useAppNavigation() {
         },
         {
           replace: options?.replace,
-          resetScroll: options?.messageId ? false : undefined,
+          resetScroll: options?.messageId ? true : undefined,
         },
       ),
     [commitNavigation],

@@ -56,6 +56,7 @@ import {
 } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
+import { useChannelRouteTarget } from "./useChannelRouteTarget";
 type ChannelScreenProps = {
   activeChannel: Channel | null;
   currentIdentity?: Identity;
@@ -359,8 +360,6 @@ export function ChannelScreen({
     setProfilePanelPubkey,
     setThreadReplyTargetId,
     setThreadScrollTargetId,
-    targetMessageId,
-    timelineMessages,
   });
 
   const { handleOpenProfilePanel, handleCloseProfilePanel, handleOpenDm } =
@@ -393,10 +392,22 @@ export function ChannelScreen({
   const handleThreadScrollTargetResolved = React.useCallback(() => {
     setThreadScrollTargetId(null);
   }, []);
-
   React.useEffect(() => {
     resetComposerTargets(activeChannelId);
   }, [activeChannelId, resetComposerTargets]);
+  const mainTimelineTargetMessageId = useChannelRouteTarget({
+    activeChannel,
+    activeChannelId,
+    closeAgentSession: handleCloseAgentSession,
+    setEditTargetId,
+    setExpandedThreadReplyIds,
+    setOpenThreadHeadId,
+    setProfilePanelPubkey,
+    setThreadReplyTargetId,
+    setThreadScrollTargetId,
+    targetMessageId,
+    timelineMessages,
+  });
   React.useEffect(() => {
     if (openThreadHeadId && !openThreadHeadMessage) {
       setOpenThreadHeadId(null);
@@ -507,7 +518,7 @@ export function ChannelScreen({
                   profilePanelPubkey={profilePanelPubkey}
                   personaLookup={personaLookup}
                   profiles={messageProfiles}
-                  targetMessageId={targetMessageId}
+                  targetMessageId={mainTimelineTargetMessageId}
                   threadHeadMessage={openThreadHeadMessage}
                   threadMessages={threadMessages}
                   threadTypingPubkeys={threadTypingPubkeys}

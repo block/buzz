@@ -8,6 +8,7 @@ import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
+import { cn } from "@/shared/lib/cn";
 import { DayDivider } from "./DayDivider";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
@@ -98,12 +99,20 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       );
     } else if (summary && onReply) {
       const footer = messageFooters?.[message.id] ?? null;
+      const isHighlighted = message.id === highlightedMessageId;
       currentDayGroup?.elements.push(
-        <div key={message.id} className="flex flex-col gap-0">
+        <div
+          key={message.id}
+          className={cn(
+            "relative flex flex-col gap-0",
+            isHighlighted &&
+              "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
+          )}
+        >
           <MessageRow
             activeReplyTargetId={activeReplyTargetId}
             channelId={channelId}
-            highlighted={message.id === highlightedMessageId}
+            highlighted={false}
             message={message}
             onDelete={
               onDelete && currentPubkey && message.pubkey === currentPubkey

@@ -60,7 +60,18 @@ export function InboxMessageRow({
   } = useReactionHandler(timelineMessage, onToggleReaction);
 
   return (
-    <div className="px-6 py-2">
+    <div className="relative px-6 py-2">
+      {message.isSelected ? (
+        <div
+          aria-hidden="true"
+          className={cn(
+            "pointer-events-none absolute inset-x-0 inset-y-1 transition-opacity duration-1000",
+            isFocusHighlightVisible
+              ? "bg-primary/[0.07] opacity-100"
+              : "bg-primary/[0.07] opacity-0",
+          )}
+        />
+      ) : null}
       <article
         className={cn(
           "group/message relative flex items-start gap-2.5 px-2 py-1",
@@ -72,18 +83,6 @@ export function InboxMessageRow({
             : "home-inbox-context-message"
         }
       >
-        {message.isSelected ? (
-          <div
-            aria-hidden="true"
-            className={cn(
-              "pointer-events-none absolute -inset-x-2 -inset-y-1 rounded-xl transition-opacity duration-1000",
-              isFocusHighlightVisible
-                ? "bg-primary/[0.07] opacity-100"
-                : "bg-primary/[0.07] opacity-0",
-            )}
-          />
-        ) : null}
-
         {canReply || canToggleReactions ? (
           <div className="absolute right-2 top-1 z-10">
             <MessageActionBar

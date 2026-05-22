@@ -154,6 +154,17 @@
   }
 }
 
+@keyframes route-target-highlight-fade {
+  0%,
+  60% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .agent-activity-shimmer {
     color: hsl(var(--muted-foreground));

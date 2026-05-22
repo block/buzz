@@ -287,7 +287,12 @@ export function useTimelineScrollManager({
         return;
       }
 
-      scrollToBottom("auto");
+      if (targetMessageId) {
+        const timeline = timelineRef.current;
+        unpinFromBottom(timeline?.scrollTop ?? 0);
+      } else {
+        scrollToBottom("auto");
+      }
       hasInitializedRef.current = true;
       previousLastMessageIdRef.current = latestMessage?.id;
       previousMessageCountRef.current = messages.length;
@@ -306,9 +311,10 @@ export function useTimelineScrollManager({
     }
 
     if (
-      shouldStickToBottomRef.current ||
-      isAtBottomRef.current ||
-      latestMessage.accent
+      !targetMessageId &&
+      (shouldStickToBottomRef.current ||
+        isAtBottomRef.current ||
+        latestMessage.accent)
     ) {
       scrollToBottom(latestMessage.accent ? "smooth" : "auto");
     } else {
@@ -323,7 +329,15 @@ export function useTimelineScrollManager({
 
     previousLastMessageIdRef.current = latestMessage.id;
     previousMessageCountRef.current = messages.length;
-  }, [isLoading, latestMessage, messages.length, scrollToBottom]);
+  }, [
+    isLoading,
+    latestMessage,
+    messages.length,
+    scrollToBottom,
+    targetMessageId,
+    timelineRef,
+    unpinFromBottom,
+  ]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: timelineRef is a stable React ref — its identity never changes
   React.useEffect(() => {
@@ -342,14 +356,6 @@ export function useTimelineScrollManager({
       return;
     }
 
-    const settleOnTarget = () => {
-      handledTargetMessageIdRef.current = targetMessageId;
-      unpinFromBottom(timeline.scrollTop);
-      setHighlightedMessageId(targetMessageId);
-      setNewMessageCount(0);
-      onTargetReached?.(targetMessageId);
-    };
-
     const targetElement = timeline.querySelector<HTMLElement>(
       `[data-message-id="${targetMessageId}"]`,
     );
@@ -357,11 +363,29 @@ export function useTimelineScrollManager({
       return;
     }
 
-    targetElement.scrollIntoView({
-      block: "center",
-      behavior: "smooth",
-    });
-    settleOnTarget();
+    handledTargetMessageIdRef.current = targetMessageId;
+    unpinFromBottom(timeline.scrollTop);
+    setHighlightedMessageId(targetMessageId);
+    setNewMessageCount(0);
+
+    const alignToTarget = (remainingFrames: number) => {
+      targetElement.scrollIntoView({
+        block: "center",
+        behavior: "auto",
+      });
+      previousScrollTopRef.current = timeline.scrollTop;
+
+      if (remainingFrames > 0) {
+        requestAnimationFrame(() => {
+          alignToTarget(remainingFrames - 1);
+        });
+        return;
+      }
+
+      onTargetReached?.(targetMessageId);
+    };
+
+    alignToTarget(2);
 
     const timeout = window.setTimeout(() => {
       setHighlightedMessageId((current) =>
