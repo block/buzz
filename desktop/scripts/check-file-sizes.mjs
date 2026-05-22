@@ -30,6 +30,7 @@ const rules = [
 
 // Exceptions should stay rare and temporary. Prefer splitting files instead.
 const overrides = new Map([
+  ["src-tauri/src/managed_agents/nest.rs", 1300], // version-gated AGENTS.md + SKILL.md refresh + .agents/.claude symlink migration + managed section upsert + dynamic agent context + tests
   ["src-tauri/src/managed_agents/personas.rs", 950], // built-in persona system prompts (Solo + Kit + Scout) + merge_personas inequality checks + persona pack import/uninstall/list + uninstall safety check
   ["src-tauri/src/managed_agents/teams.rs", 580], // built-in team registry (Kit & Scout) + merge_teams + validate_team_deletion + JSON export/import + tests
   ["src-tauri/src/managed_agents/persona_card.rs", 970], // PNG/ZIP/MD persona card codec + pack-zip detection + nested root finder + provider/model/namePool fields + 27 unit tests
@@ -52,7 +53,6 @@ const overrides = new Map([
   ["src-tauri/src/managed_agents/runtime.rs", 1110], // ... + respond-to gate env (SPROUT_ACP_RESPOND_TO[_ALLOWLIST]) + per-mode env builder + tests + persona/agent env_vars spawn merge (helper + tests now in env_vars.rs)
   ["src-tauri/src/managed_agents/discovery.rs", 680], // KNOWN_ACP_PROVIDERS catalog + resolve_command cache + login_shell_path + classify_provider (four-state: Available/AdapterMissing/CliMissing/NotInstalled) + discover_acp_providers with dynamic install_hint + known_acp_provider/known_acp_provider_exact + normalize_agent_args + 15 unit tests
   ["src-tauri/src/managed_agents/types.rs", 745], // ManagedAgentRecord/Summary + Create/Update request structs + AcpProviderCatalogEntry + InstallRuntimeResult + RespondTo enum + validate_respond_to_allowlist + tests + persona/agent env_vars field
-  ["src-tauri/src/managed_agents/nest.rs", 1160], // ensure_nest_at (AGENTS.md + SKILL.md + permissions) + ensure_cli_symlink + regenerate_nest_context + render_dynamic_section + upsert_managed_section + marker helpers + version-gated refresh (refresh_agents_md_if_stale + refresh_skill_md_if_stale) + 25 unit tests
   ["src-tauri/src/managed_agents/backend.rs", 700], // provider IPC, validation, discovery, binary resolution + tests + redact_secrets_with for user env values + env_secrets_from_request + redact_env_values_in (shared with model discovery)
   ["src/features/huddle/HuddleContext.tsx", 650], // huddle lifecycle context + joinHuddle + connectAndSetupMedia shared helper + activeSpeakers/isReconnecting state + PTT (reusable AudioContext) + TTS subscription + mic level analyser (10fps throttle) + agent pubkey refresh
   ["src/features/agents/hooks.ts", 550], // agent query/mutation surface + useAvailableAcpProviders (type-narrowing filter hook) + useInstallAcpRuntimeMutation + built-in persona library activation

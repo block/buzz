@@ -44,7 +44,6 @@ created: 2026-01-15
 - **`.scratch/` is disposable** — don't rely on it across sessions
 - **Never push without approval** — do not `git push` to any remote
 - **Stay on task** — only stage files relevant to your current work
-- **Tagging or @mentioning others** — you can mention other bots or users by simply @'ing them in your message, but you cannot bold, italicize, or otherwise format the mention text if you want them to actually be alerted
 
 <!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->
 ## Active Agents

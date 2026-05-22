@@ -33,17 +33,17 @@ const NEST_DIRS: &[&str] = &[
 const AGENTS_MD: &str = include_str!("nest_agents.md");
 
 /// Default SKILL.md content for the sprout-cli Claude Code skill.
-/// Written to ~/.sprout/.claude/skills/sprout-cli/SKILL.md on first init.
+/// Written to ~/.sprout/.agents/skills/sprout-cli/SKILL.md on first init.
 const SPROUT_CLI_SKILL_MD: &str = include_str!("nest_skill.md");
 
 /// Template content version for AGENTS.md static content (above managed markers).
 /// Bump this when changing `nest_agents.md` to trigger refresh on existing installs.
 /// Version 1 is implicitly "before this mechanism existed" (no version file).
-const NEST_AGENTS_VERSION: u32 = 2;
+const NEST_AGENTS_VERSION: u32 = 3;
 
 /// Template content version for SKILL.md.
 /// Bump this when changing `nest_skill.md` to trigger refresh on existing installs.
-const NEST_SKILL_VERSION: u32 = 2;
+const NEST_SKILL_VERSION: u32 = 3;
 
 const BEGIN_MARKER: &str = "<!-- BEGIN SPROUT MANAGED";
 const END_MARKER: &str = "<!-- END SPROUT MANAGED -->";
@@ -66,7 +66,8 @@ pub fn ensure_nest() -> Result<(), String> {
 ///
 /// - Creates the root directory and all subdirectories.
 /// - Writes `AGENTS.md` only if it doesn't already exist.
-/// - Writes `.claude/skills/sprout-cli/SKILL.md` only if it doesn't already exist.
+/// - Writes `.agents/skills/sprout-cli/SKILL.md` only if it doesn't already exist.
+/// - Creates a `.claude/skills/sprout-cli` symlink to the `.agents` location.
 /// - Sets 700 permissions on the root, all subdirectories, and the skill
 ///   directory tree (Unix).
 ///
@@ -125,11 +126,14 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
         }
     }
 
-    // Write sprout-cli skill alongside AGENTS.md (same idempotent pattern).
-    let skill_dir = root.join(".claude/skills/sprout-cli");
-    fs::create_dir_all(&skill_dir).map_err(|e| format!("create {}: {e}", skill_dir.display()))?;
+    // Write sprout-cli skill to the harness-agnostic .agents path.
+    // The first-init write uses the new canonical path; migration from
+    // the old .claude path is handled in refresh_skill_md_if_stale.
+    let agents_skill_dir = root.join(".agents/skills/sprout-cli");
+    fs::create_dir_all(&agents_skill_dir)
+        .map_err(|e| format!("create {}: {e}", agents_skill_dir.display()))?;
 
-    let skill_md = root.join(".claude/skills/sprout-cli/SKILL.md");
+    let skill_md = agents_skill_dir.join("SKILL.md");
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -143,6 +147,25 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(e) => {
             return Err(format!("create {}: {e}", skill_md.display()));
+        }
+    }
+
+    // Create .claude/skills/sprout-cli symlink for Claude Code compatibility.
+    #[cfg(unix)]
+    {
+        let claude_skills_dir = root.join(".claude/skills");
+        fs::create_dir_all(&claude_skills_dir)
+            .map_err(|e| format!("create {}: {e}", claude_skills_dir.display()))?;
+        let symlink_path = root.join(".claude/skills/sprout-cli");
+        // Only create symlink if it doesn't already exist as a symlink.
+        // If it's a real directory (pre-migration), refresh_skill_md_if_stale handles migration.
+        let is_symlink = symlink_path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_symlink && !symlink_path.exists() {
+            std::os::unix::fs::symlink("../../.agents/skills/sprout-cli", &symlink_path)
+                .map_err(|e| format!("symlink {}: {e}", symlink_path.display()))?;
         }
     }
 
@@ -169,13 +192,15 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
                     .map_err(|e| format!("set permissions on {}: {e}", path.display()))?;
             }
         }
-        // Skill directory and its intermediate parents inside root get 700.
-        // create_dir_all creates .claude/ and .claude/skills/ with umask
-        // defaults — lock them down the same way we do NEST_DIRS.
+        // .agents skill dir tree and .claude parents inside root get 700.
+        // create_dir_all creates them with umask defaults — lock them down
+        // the same way we do NEST_DIRS. Skip symlinks (chmod affects target).
         for dir in [
+            root.join(".agents"),
+            root.join(".agents/skills"),
+            agents_skill_dir.clone(),
             root.join(".claude"),
             root.join(".claude/skills"),
-            skill_dir.clone(),
         ] {
             let is_symlink = dir
                 .symlink_metadata()
@@ -318,23 +343,70 @@ fn refresh_agents_md_if_stale(root: &Path) -> Result<(), String> {
 ///
 /// SKILL.md has no user-editable sections — it is fully overwritten on version bump.
 fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
-    let version_path = root.join(".claude/skills/sprout-cli/.skill-version");
+    let agents_skill_dir = root.join(".agents/skills/sprout-cli");
+    let version_path = agents_skill_dir.join(".skill-version");
     if read_version_file(&version_path) >= NEST_SKILL_VERSION {
         return Ok(());
     }
 
-    let skill_md = root.join(".claude/skills/sprout-cli/SKILL.md");
+    // Migration: if .claude/skills/sprout-cli exists as a real directory
+    // (pre-migration install), copy user's SKILL.md to the new location
+    // then remove the old directory so we can replace it with a symlink.
+    let old_skill_dir = root.join(".claude/skills/sprout-cli");
+    let old_is_real_dir = old_skill_dir
+        .symlink_metadata()
+        .map(|m| m.file_type().is_dir())
+        .unwrap_or(false);
+
+    let skill_content = if old_is_real_dir {
+        // Preserve user-edited content during migration.
+        fs::read_to_string(old_skill_dir.join("SKILL.md"))
+            .unwrap_or_else(|_| SPROUT_CLI_SKILL_MD.to_string())
+    } else {
+        SPROUT_CLI_SKILL_MD.to_string()
+    };
+
+    // Ensure the canonical .agents skill directory exists.
+    fs::create_dir_all(&agents_skill_dir)
+        .map_err(|e| format!("create {}: {e}", agents_skill_dir.display()))?;
+
     // Atomic write via temp file.
-    let parent = skill_md.parent().ok_or("SKILL.md has no parent dir")?;
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|e| format!("tempfile in {}: {e}", parent.display()))?;
+    let skill_md = agents_skill_dir.join("SKILL.md");
+    let mut tmp = tempfile::NamedTempFile::new_in(&agents_skill_dir)
+        .map_err(|e| format!("tempfile in {}: {e}", agents_skill_dir.display()))?;
     {
         use std::io::Write;
-        tmp.write_all(SPROUT_CLI_SKILL_MD.as_bytes())
+        tmp.write_all(skill_content.as_bytes())
             .map_err(|e| format!("write tempfile: {e}"))?;
     }
     tmp.persist(&skill_md)
         .map_err(|e| format!("persist {}: {e}", skill_md.display()))?;
+
+    // Replace old real directory with a symlink.
+    if old_is_real_dir {
+        fs::remove_dir_all(&old_skill_dir)
+            .map_err(|e| format!("remove {}: {e}", old_skill_dir.display()))?;
+    }
+
+    // Create/replace the .claude/skills/sprout-cli symlink.
+    #[cfg(unix)]
+    {
+        let claude_skills_dir = root.join(".claude/skills");
+        fs::create_dir_all(&claude_skills_dir)
+            .map_err(|e| format!("create {}: {e}", claude_skills_dir.display()))?;
+        let symlink_path = root.join(".claude/skills/sprout-cli");
+        // Remove any stale symlink before (re)creating.
+        let symlink_exists = symlink_path
+            .symlink_metadata()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if symlink_exists {
+            fs::remove_file(&symlink_path)
+                .map_err(|e| format!("remove symlink {}: {e}", symlink_path.display()))?;
+        }
+        std::os::unix::fs::symlink("../../.agents/skills/sprout-cli", &symlink_path)
+            .map_err(|e| format!("symlink {}: {e}", symlink_path.display()))?;
+    }
 
     fs::write(&version_path, format!("{NEST_SKILL_VERSION}\n"))
         .map_err(|e| format!("write {}: {e}", version_path.display()))?;
@@ -582,10 +654,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join(".sprout");
         ensure_nest_at(&root).unwrap();
-        let skill = root.join(".claude/skills/sprout-cli/SKILL.md");
-        assert!(skill.exists(), "SKILL.md should exist");
+
+        // Canonical location under .agents.
+        let skill = root.join(".agents/skills/sprout-cli/SKILL.md");
+        assert!(skill.exists(), "SKILL.md should exist at .agents path");
         let content = fs::read_to_string(&skill).unwrap();
         assert_eq!(content, SPROUT_CLI_SKILL_MD);
+
+        // .claude/skills/sprout-cli is a symlink on Unix.
+        #[cfg(unix)]
+        {
+            let symlink = root.join(".claude/skills/sprout-cli");
+            assert!(
+                symlink.symlink_metadata().unwrap().file_type().is_symlink(),
+                ".claude/skills/sprout-cli should be a symlink"
+            );
+        }
     }
 
     #[test]
@@ -593,8 +677,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join(".sprout");
         ensure_nest_at(&root).unwrap();
-        let skill = root.join(".claude/skills/sprout-cli/SKILL.md");
+
+        let skill = root.join(".agents/skills/sprout-cli/SKILL.md");
         fs::write(&skill, "custom skill content").unwrap();
+
         ensure_nest_at(&root).unwrap();
         assert_eq!(fs::read_to_string(&skill).unwrap(), "custom skill content");
     }
@@ -606,8 +692,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join(".sprout");
         ensure_nest_at(&root).unwrap();
-        // All three dirs in the skill path should be locked down.
-        for dir in [".claude", ".claude/skills", ".claude/skills/sprout-cli"] {
+        // Real dirs in .agents tree and .claude parents should be 700.
+        // .claude/skills/sprout-cli is a symlink — excluded from chmod check.
+        for dir in [
+            ".agents",
+            ".agents/skills",
+            ".agents/skills/sprout-cli",
+            ".claude",
+            ".claude/skills",
+        ] {
             let path = root.join(dir);
             let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o700, "{dir} should be 700");
@@ -640,6 +733,46 @@ mod tests {
         assert_eq!(
             mode, 0o755,
             "symlinked child's target should not be chmod'd"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_nest_migrates_old_skill_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".sprout");
+
+        // Simulate a pre-migration install: real directory at old path.
+        // Create the nest first to get all dirs, then simulate old layout.
+        ensure_nest_at(&root).unwrap();
+
+        // Remove the symlink and new skill dir, recreate old real dir.
+        let _ = fs::remove_file(root.join(".claude/skills/sprout-cli"));
+        let _ = fs::remove_dir_all(root.join(".agents/skills/sprout-cli"));
+        let old_skill_dir = root.join(".claude/skills/sprout-cli");
+        fs::create_dir_all(&old_skill_dir).unwrap();
+        fs::write(old_skill_dir.join("SKILL.md"), "user edited skill").unwrap();
+
+        // Delete version file to force refresh.
+        let _ = fs::remove_file(root.join(".agents/skills/sprout-cli/.skill-version"));
+
+        // Re-run ensure_nest_at — should trigger migration in refresh_skill_md_if_stale.
+        ensure_nest_at(&root).unwrap();
+
+        // New canonical location exists with user's content preserved.
+        let new_skill = root.join(".agents/skills/sprout-cli/SKILL.md");
+        assert!(new_skill.exists(), "SKILL.md should exist at new path");
+        assert_eq!(fs::read_to_string(&new_skill).unwrap(), "user edited skill");
+
+        // Old path is now a symlink, not a real directory.
+        let old_path = root.join(".claude/skills/sprout-cli");
+        assert!(
+            old_path
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "old path should now be a symlink"
         );
     }
 
@@ -1077,7 +1210,7 @@ mod tests {
         let root = tmp.path().join(".sprout");
         ensure_nest_at(&root).unwrap();
         let version =
-            fs::read_to_string(root.join(".claude/skills/sprout-cli/.skill-version")).unwrap();
+            fs::read_to_string(root.join(".agents/skills/sprout-cli/.skill-version")).unwrap();
         assert_eq!(version.trim(), NEST_SKILL_VERSION.to_string());
     }
 
@@ -1142,11 +1275,11 @@ mod tests {
         let root = tmp.path().join(".sprout");
         ensure_nest_at(&root).unwrap();
 
-        let skill_md = root.join(".claude/skills/sprout-cli/SKILL.md");
+        let skill_md = root.join(".agents/skills/sprout-cli/SKILL.md");
         fs::write(&skill_md, "stale skill content").unwrap();
 
         // Remove version file to simulate upgrade.
-        let _ = fs::remove_file(root.join(".claude/skills/sprout-cli/.skill-version"));
+        let _ = fs::remove_file(root.join(".agents/skills/sprout-cli/.skill-version"));
 
         ensure_nest_at(&root).unwrap();
 

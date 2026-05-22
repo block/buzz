@@ -2611,6 +2611,9 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+    if config.mcp_command.is_empty() {
+        return vec![];
+    }
     vec![McpServer {
         name: "sprout-mcp".to_string(),
         command: config.mcp_command.clone(),
@@ -2875,6 +2878,17 @@ mod build_mcp_servers_tests {
         assert!(
             !has_auth_tag,
             "empty SPROUT_AUTH_TAG should not be forwarded"
+        );
+    }
+
+    #[test]
+    fn empty_mcp_command_returns_no_servers() {
+        let mut config = test_config();
+        config.mcp_command = "".into();
+        let servers = build_mcp_servers(&config);
+        assert!(
+            servers.is_empty(),
+            "empty mcp_command should produce no MCP servers"
         );
     }
 }

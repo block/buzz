@@ -335,6 +335,19 @@ pub async fn create_managed_agent(
                 .collect::<Vec<_>>(),
         );
 
+        let mcp_command = input
+            .mcp_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(
+                || match crate::managed_agents::known_acp_provider(&agent_command) {
+                    Some(p) => p.mcp_command.unwrap_or("").to_string(),
+                    None => DEFAULT_MCP_COMMAND.to_string(),
+                },
+            );
+
         // For pack-backed personas, resolve the installed pack path and the
         // persona's internal name (slug). ACP's resolve_persona_by_name()
         // matches on this internal name, NOT display_name.
@@ -367,13 +380,7 @@ pub async fn create_managed_agent(
                 .to_string(),
             agent_command,
             agent_args,
-            mcp_command: input
-                .mcp_command
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(DEFAULT_MCP_COMMAND)
-                .to_string(),
+            mcp_command,
             turn_timeout_seconds: input
                 .turn_timeout_seconds
                 .filter(|seconds| *seconds > 0)
