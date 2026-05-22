@@ -33,8 +33,9 @@ use futures_util::future::try_join_all;
 use tempfile::TempDir;
 use tokio::process::Command;
 
+use super::cas_publish::ParentState;
 use super::manifest::{is_hex_oid, is_safe_refname, pointer_key, Manifest, ManifestError};
-use super::store::{GitStore, StoreError};
+use super::store::{ETag, GitStore, StoreError};
 
 /// A bare repo hydrated to a temporary directory.
 ///
@@ -88,26 +89,101 @@ pub async fn hydrate_for_read(
     owner: &str,
     repo: &str,
 ) -> Result<Option<HydratedRepo>, HydrateError> {
-    let pkey = pointer_key(owner, repo);
+    let Some((_etag, _digest, manifest)) = load_pointer(store, owner, repo).await? else {
+        return Ok(None);
+    };
+    Ok(Some(materialize_manifest(store, &manifest).await?))
+}
 
-    // Step 1: pointer → manifest digest.
-    let (_etag, pointer_bytes) = match store.get_pointer(&pkey).await? {
+/// Hydrate a bare repo for write (`receive-pack`) and return the
+/// `ParentState` the workspace was hydrated from.
+///
+/// The returned `ParentState` *must* be passed into
+/// [`crate::api::git::cas_publish::cas_publish`] without re-reading the
+/// pointer. The CAS predicate is `parent_state.if_match`, so a concurrent
+/// writer that advances the pointer between this call and the CAS surfaces
+/// reliably as `Conflict`/HTTP 409 — `Inv_RefDerivedFromParent` holds
+/// because `m_after.parent` is *literally* the digest of the manifest the
+/// workspace was hydrated from.
+///
+/// First-push case (pointer absent): returns `(empty bare repo,
+/// ParentState::fresh())`. The empty bare repo is a fresh `git init --bare`
+/// with no refs and no objects; `receive-pack` will accept the first push
+/// and create whatever refs the client sends, and `cas_publish` will CAS
+/// the pointer with `If-None-Match: *`.
+///
+/// Any below-pointer failure (manifest 404 under non-empty pointer, digest
+/// mismatch, malformed pointer body) is a hard error — never silently
+/// treated as "fresh repo," because that would let a corrupt pointer
+/// install a brand-new history alongside the broken one.
+pub async fn hydrate_for_write(
+    store: &GitStore,
+    owner: &str,
+    repo: &str,
+) -> Result<(HydratedRepo, ParentState), HydrateError> {
+    match load_pointer(store, owner, repo).await? {
+        Some((etag, digest, manifest)) => {
+            let repo = materialize_manifest(store, &manifest).await?;
+            let parent = ParentState::from_loaded(etag, digest, manifest);
+            Ok((repo, parent))
+        }
+        None => {
+            // First push: empty bare repo. No packs to fetch, no refs to
+            // install. `receive-pack` will accept whatever the client
+            // sends; `cas_publish` will use `If-None-Match: *`.
+            let tempdir =
+                TempDir::new().map_err(|e| HydrateError::Hydrate(format!("tempdir: {e}")))?;
+            let path = tempdir.path().to_path_buf();
+            run_git(&path, &["init", "--bare", "--quiet"]).await?;
+            Ok((
+                HydratedRepo {
+                    _tempdir: tempdir,
+                    path,
+                },
+                ParentState::fresh(),
+            ))
+        }
+    }
+}
+
+/// Resolve the pointer to its `(ETag, digest, verified Manifest)` triple.
+///
+/// `Ok(None)` if the pointer is absent (caller decides 404 vs first-push
+/// per call site). `Err(_)` on any below-pointer failure.
+async fn load_pointer(
+    store: &GitStore,
+    owner: &str,
+    repo: &str,
+) -> Result<Option<(ETag, String, Manifest)>, HydrateError> {
+    let pkey = pointer_key(owner, repo);
+    let (etag, pointer_bytes) = match store.get_pointer(&pkey).await? {
         Some(p) => p,
         None => return Ok(None),
     };
     let digest = std::str::from_utf8(&pointer_bytes)
         .map_err(|_| HydrateError::InvalidPointer)?
-        .trim();
+        .trim()
+        .to_string();
     if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(HydrateError::InvalidPointer);
     }
-
-    // Step 2: manifest (digest-verified).
     let manifest_key = format!("manifests/{digest}");
-    let manifest_bytes = store.get_verified(&manifest_key, digest).await?;
+    let manifest_bytes = store.get_verified(&manifest_key, &digest).await?;
     let manifest = Manifest::from_bytes(&manifest_bytes)?;
+    Ok(Some((etag, digest, manifest)))
+}
 
-    // Step 3: fetch all packs in parallel, each digest-verified by its key.
+/// Materialize a manifest into a fresh tempdir bare repo.
+///
+/// Shared by `hydrate_for_read` and `hydrate_for_write`. Phase-ordered
+/// (packs first + verified + indexed, refs/HEAD only after) so a failed
+/// hydrate leaves no advertised refs — failure mode is "empty/no refs,"
+/// never "refs point at missing objects."
+async fn materialize_manifest(
+    store: &GitStore,
+    manifest: &Manifest,
+) -> Result<HydratedRepo, HydrateError> {
+    // Fetch all packs in parallel, each digest-verified by its key.
     let pack_fetches = manifest.packs.iter().map(|key| async move {
         let digest = key
             .strip_prefix("packs/")
@@ -176,10 +252,10 @@ pub async fn hydrate_for_read(
         .await
         .map_err(|e| HydrateError::Hydrate(format!("write HEAD: {e}")))?;
 
-    Ok(Some(HydratedRepo {
+    Ok(HydratedRepo {
         _tempdir: tempdir,
         path,
-    }))
+    })
 }
 
 /// Run `git <args>` in `cwd`, fail on non-zero exit.

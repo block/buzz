@@ -132,23 +132,39 @@ pub struct CasSuccess {
 }
 
 /// Resolved view of the pre-push pointer (§Push step 3 output).
-struct ParentState {
+///
+/// **The CAS write is predicated on `if_match`** — the caller must load
+/// this *before* running receive-pack against the hydrated workspace, and
+/// pass the same value into [`cas_publish`]. If the pointer advances
+/// between load and CAS (a concurrent push wins), the CAS fails with
+/// `LostRace`/`Conflict` and the loser re-pushes — that is the only safe
+/// retry path (the loser's receive-pack output is derived against the
+/// superseded parent, so reusing it would violate
+/// `Inv_RefDerivedFromParent`).
+///
+/// The structural seam this `ParentState` argument creates is what makes
+/// `Inv_RefDerivedFromParent` mechanical: `m_after.parent` is *literally*
+/// the digest of the manifest receive-pack ran against, not whatever
+/// pointer happens to be live at CAS time.
+#[derive(Debug, Clone)]
+pub struct ParentState {
     /// ETag predicating the next CAS write. `None` only when the pointer
-    /// does not yet exist (first push to an empty repo).
-    if_match: Option<ETag>,
+    /// does not yet exist (first push to an empty repo) — then the CAS
+    /// uses `If-None-Match: *`.
+    pub if_match: Option<ETag>,
     /// The parent manifest's content-addressed *digest* (64-hex), not the
     /// full `manifests/<digest>` key. This lands in `Manifest.parent` and
     /// is what `Inv_RefDerivedFromParent` reasons over (parent =
     /// pointer.digest). Full key is a local fetch detail, derived as
     /// `format!("manifests/{}", digest)`. `None` only on first push.
-    parent_digest: Option<String>,
+    pub parent_digest: Option<String>,
     /// The parsed parent manifest. On first push, an empty manifest.
-    parent: Manifest,
+    pub parent: Manifest,
 }
 
 impl ParentState {
     /// State for a brand-new repo with no published manifest yet.
-    fn fresh() -> Self {
+    pub fn fresh() -> Self {
         Self {
             if_match: None,
             parent_digest: None,
@@ -161,51 +177,22 @@ impl ParentState {
             },
         }
     }
-}
 
-/// Read the current pointer, parse the manifest digest, fetch the manifest,
-/// verify its digest — fail closed at every step.
-async fn read_parent(store: &GitStore, pkey: &str) -> Result<ParentState, CasError> {
-    let pointer = store.get_pointer(pkey).await?;
-    let Some((etag, body)) = pointer else {
-        return Ok(ParentState::fresh());
-    };
-
-    // Pointer body is the raw hex digest of the parent manifest. No JSON,
-    // no envelope — the pointer key already identifies the repo, the ETag
-    // carries the version, and the body just names the manifest. Trimmed
-    // because some S3 implementations have added newline noise historically.
-    let digest = std::str::from_utf8(&body)
-        .map_err(|e| CasError::ManifestReadFailed(format!("pointer body not utf-8: {e}")))?
-        .trim()
-        .to_string();
-    if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(CasError::ManifestReadFailed(format!(
-            "pointer body is not a 64-char hex digest (got {} chars)",
-            digest.len()
-        )));
+    /// Build a `ParentState` from already-loaded pointer state.
+    ///
+    /// The hydrate layer reads the pointer + verified manifest as part of
+    /// materializing the workspace, then hands the same `(etag, digest,
+    /// manifest)` tuple back here. Centralizing the constructor in
+    /// `cas_publish` means there's one place where `ParentState`
+    /// invariants live; centralizing the I/O in `hydrate` means we read
+    /// the pointer once per push, not twice.
+    pub fn from_loaded(etag: ETag, digest: String, parent: Manifest) -> Self {
+        Self {
+            if_match: Some(etag),
+            parent_digest: Some(digest),
+            parent,
+        }
     }
-    let manifest_key = format!("manifests/{digest}");
-    let bytes = store
-        .get_verified(&manifest_key, &digest)
-        .await
-        .map_err(|e| match e {
-            StoreError::DigestMismatch { .. } => {
-                CasError::ManifestReadFailed(format!("manifest digest mismatch: {e}"))
-            }
-            StoreError::NotFound(_) => {
-                CasError::ManifestReadFailed(format!("pointer names missing manifest: {e}"))
-            }
-            other => CasError::Backend(other),
-        })?;
-    let parent = Manifest::from_bytes(&bytes)
-        .map_err(|e| CasError::ManifestReadFailed(format!("parse manifest: {e}")))?;
-
-    Ok(ParentState {
-        if_match: Some(etag),
-        parent_digest: Some(digest),
-        parent,
-    })
 }
 
 /// Read `refs/*` + symbolic-HEAD from the workspace.
@@ -401,6 +388,17 @@ fn digest_from_manifest_key(key: &str) -> Result<String, CasError> {
 
 /// The function the §Push step 2–7 protocol distills to.
 ///
+/// **Caller contract — `Inv_RefDerivedFromParent` is structural.** The
+/// `parent_state` you pass in must be the same one the workspace was
+/// hydrated from. Concretely: load `ParentState::load_or_fresh(store,
+/// owner, repo)` → hydrate the workspace from `parent_state.parent` →
+/// `install_hook` → run `receive-pack` against the workspace → call this
+/// with the **same `parent_state`**. The CAS predicate is
+/// `parent_state.if_match`, so a concurrent writer that advanced the
+/// pointer between hydrate and CAS reliably surfaces as
+/// `CasError::Conflict { winner_manifest, .. }` (412 → HTTP 409). The
+/// loser re-pushes; the new push re-hydrates against the advanced state.
+///
 /// Concurrency: callable in parallel for the same `(owner, repo)`. The CAS
 /// at step 7 is the *only* writer serialization (`Inv_NoFork`). No
 /// advisory lock — adding one would hide exactly the interleavings the
@@ -410,14 +408,13 @@ pub async fn cas_publish(
     repo_path: &Path,
     owner: &str,
     repo: &str,
-    refs_before: &BTreeMap<String, String>,
+    parent_state: &ParentState,
 ) -> Result<CasSuccess, CasError> {
     let pkey = pointer_key(owner, repo);
 
-    // Step 3: read pointer + parent manifest.
-    let parent_state = read_parent(store, &pkey).await?;
-
-    // Snapshot post-receive-pack state from disk.
+    // Snapshot post-receive-pack state from disk. `parent_state.parent.refs`
+    // are the refs the workspace was hydrated from — `pack-objects --revs`
+    // below uses them as the "negative" set to produce the delta pack.
     let (refs_after, head_observed) = snapshot_workspace_state(repo_path).await?;
 
     // HEAD fallback: a bare repo serving pushes shouldn't have detached
@@ -431,8 +428,11 @@ pub async fn cas_publish(
         head_observed
     };
 
-    // Capture new objects as a pack (steps 1–2).
-    let pack_bytes = capture_pack(repo_path, refs_before, &refs_after).await?;
+    // Capture new objects as a pack (steps 1–2). The "not" set is the
+    // parent manifest's refs — i.e. the set the workspace was hydrated
+    // against — so the delta covers exactly the objects this push
+    // introduced.
+    let pack_bytes = capture_pack(repo_path, &parent_state.parent.refs, &refs_after).await?;
     let new_pack_key = if let Some(bytes) = pack_bytes {
         debug!(bytes = bytes.len(), "captured push pack");
         Some(store.put_pack(&bytes).await?)
