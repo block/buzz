@@ -8,7 +8,7 @@
 //! Auth: NIP-98 on all routes (clone + push). No public repos for v1.
 //! Transport: shells out to `git --stateless-rpc` with `env_clear()`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
@@ -26,6 +26,10 @@ use tokio::process::Command;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{error, info, warn};
 
+use super::cas_publish::{cas_publish, CasError, ParentState};
+use super::hook::install_hook;
+use super::hydrate::{hydrate_for_read, hydrate_for_write, HydrateError, HydratedRepo};
+use super::manifest_event::{build_ref_state_event, RefStateInputs};
 use crate::state::AppState;
 
 // ── Timeouts ─────────────────────────────────────────────────────────────────
@@ -187,21 +191,20 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
     }
 }
 
-// ── Path Validation ──────────────────────────────────────────────────────────
+// ── Repo Id Validation ───────────────────────────────────────────────────────
 
-struct ValidatedRepoPath {
-    repo_path: PathBuf,
-}
-
-/// Validate and resolve a git repo path from URL parameters.
+/// Validate URL `(owner, repo)` parameters and return the canonical repo
+/// id (= `repo` with any `.git` suffix stripped).
 ///
-/// Security: allowlist characters, canonicalize, verify under repo root.
+/// Security: allowlist characters on both owner (64 lower-hex pubkey) and
+/// repo name (`[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`). The
+/// filesystem-path canonicalization that the old persistent-repo
+/// implementation needed is no longer relevant — git workspaces are
+/// ephemeral tempdirs from `hydrate_for_{read,write}`, not paths under a
+/// repo root — but the *name* validation stays because owner/repo are
+/// still used as object-store key components via `manifest::pointer_key`.
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
-fn validate_repo_path(
-    owner: &str,
-    repo: &str,
-    git_repo_root: &Path,
-) -> Result<ValidatedRepoPath, Response> {
+fn validate_repo_id<'a>(owner: &str, repo: &'a str) -> Result<&'a str, Response> {
     // Owner must be exactly 64 lowercase hex chars.
     if owner.len() != 64
         || !owner
@@ -226,26 +229,7 @@ fn validate_repo_path(
         return Err((StatusCode::BAD_REQUEST, "invalid repo name").into_response());
     }
 
-    let repo_path = git_repo_root.join(owner).join(format!("{repo_name}.git"));
-
-    // Path canonicalization: verify resolved path is under repo root.
-    // Fail closed: if the repo root doesn't exist, reject — the service can't operate safely.
-    let canonical_root = git_repo_root.canonicalize().map_err(|_| {
-        error!("git_repo_path does not exist or cannot be canonicalized");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "git service misconfigured",
-        )
-            .into_response()
-    })?;
-    // Repo may not exist yet (404 handled later), but if it does, verify containment.
-    if let Ok(canonical_repo) = repo_path.canonicalize() {
-        if !canonical_repo.starts_with(&canonical_root) {
-            return Err((StatusCode::BAD_REQUEST, "path traversal detected").into_response());
-        }
-    }
-
-    Ok(ValidatedRepoPath { repo_path })
+    Ok(repo_name)
 }
 
 /// Apply hardened environment to a git subprocess command.
@@ -263,6 +247,38 @@ pub(crate) fn harden_git_env(cmd: &mut Command) {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("HOME", "/dev/null");
+}
+
+/// Acquire the global git-subprocess semaphore permit, or respond 503.
+///
+/// Bounds total in-flight git subprocesses across all routes. Returned
+/// `OwnedSemaphorePermit` releases automatically on drop, so the caller
+/// just binds it for the function scope.
+#[allow(clippy::result_large_err)]
+fn acquire_git_permit(
+    state: &Arc<AppState>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, Response> {
+    Arc::clone(&state.git_semaphore)
+        .try_acquire_owned()
+        .map_err(|_| {
+            Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header("Retry-After", "5")
+                .body(Body::from("git service busy"))
+                .unwrap()
+        })
+}
+
+/// Convert a [`HydrateError`] to the HTTP response shape the read+write
+/// paths share. Below-pointer failure ⇒ 5xx; pointer-absent is signalled
+/// via `Ok(None)` from [`hydrate_for_read`] and never reaches this fn.
+fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Response {
+    error!(error = %err, owner = %owner, repo = %repo, "hydrate failed");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "git backend hydration failed",
+    )
+        .into_response()
 }
 
 // ── Route Handlers ───────────────────────────────────────────────────────────
@@ -283,6 +299,13 @@ pub struct GitRepoParams {
 /// `GET /git/{owner}/{repo}/info/refs?service={service}`
 ///
 /// Advertises refs for clone (git-upload-pack) or push (git-receive-pack).
+///
+/// **Read fail-closed (Max's blocker):** pointer-absent → 404 (repo
+/// never existed). *Any* below-pointer failure (manifest 404 under a
+/// non-empty pointer, digest mismatch, pack 404, `index-pack` failure)
+/// → 5xx via `HydrateError`. The legacy "leave disk as-is on hydrate
+/// error" behavior is gone — A1 detectability now holds end-to-end on
+/// the read side too.
 pub async fn info_refs(
     State(state): State<Arc<AppState>>,
     _auth: GitAuth,
@@ -294,29 +317,29 @@ pub async fn info_refs(
         "git-upload-pack" | "git-receive-pack" => &query.service,
         _ => return Err((StatusCode::BAD_REQUEST, "invalid service").into_response()),
     };
+    let _repo_name = validate_repo_id(&params.owner, &params.repo)?;
 
-    let validated = validate_repo_path(&params.owner, &params.repo, &state.config.git_repo_path)?;
-    if !validated.repo_path.exists() {
-        return Err((StatusCode::NOT_FOUND, "repository not found").into_response());
-    }
+    let _permit = acquire_git_permit(&state)?;
 
-    let _permit = state.git_semaphore.try_acquire().map_err(|_| {
-        Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .header("Retry-After", "5")
-            .body(Body::from("git service busy"))
-            .unwrap()
-    })?;
+    // Hydrate the published state into an ephemeral bare repo. `Ok(None)`
+    // = pointer absent = repo never existed → 404. `Err(_)` = below-pointer
+    // failure → 5xx.
+    let repo = match hydrate_for_read(&state.git_store, &params.owner, &params.repo).await {
+        Ok(Some(repo)) => repo,
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
+        Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
+    };
 
-    let mut cmd = Command::new("git");
     // Git's smart HTTP protocol uses service names like "git-upload-pack" and
     // "git-receive-pack", but the actual git subcommands are "upload-pack" and
     // "receive-pack" (without the "git-" prefix).
     let git_subcmd = service.strip_prefix("git-").unwrap_or(service.as_str());
+
+    let mut cmd = Command::new("git");
     cmd.arg(git_subcmd)
         .arg("--stateless-rpc")
         .arg("--advertise-refs")
-        .arg(&validated.repo_path)
+        .arg(repo.path())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
@@ -328,8 +351,6 @@ pub async fn info_refs(
     })?;
 
     // kill_on_drop requires a Child handle — .output() doesn't expose one.
-    // Spawn first, then wait under a timeout; on timeout the Child is dropped
-    // and kill_on_drop terminates the subprocess.
     let output = tokio::time::timeout(INFO_REFS_TIMEOUT, child.wait_with_output())
         .await
         .map_err(|_| {
@@ -349,6 +370,10 @@ pub async fn info_refs(
         error!(stderr = %stderr, "git --advertise-refs failed");
         return Err((StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response());
     }
+    // `repo` (the tempdir) must live until *after* the subprocess has read
+    // its objects. Holding it until here is the structural lifetime that
+    // guarantees that.
+    drop(repo);
 
     // Build pkt-line response: service header + flush + git output.
     let svc_line = format!("# service={service}\n");
@@ -370,89 +395,102 @@ pub async fn info_refs(
 /// `POST /git/{owner}/{repo}/git-upload-pack`
 ///
 /// Handles clone/fetch — client sends wants/haves, server sends pack data.
+///
+/// Reads from a tempdir bare repo hydrated from the published manifest;
+/// the tempdir lives only for the duration of this request.
 pub async fn upload_pack(
     State(state): State<Arc<AppState>>,
     _auth: GitAuth,
     AxumPath(params): AxumPath<GitRepoParams>,
     body: Body,
 ) -> Result<Response, Response> {
-    run_git_service(&state, &params.owner, &params.repo, "upload-pack", body).await
+    let _ = validate_repo_id(&params.owner, &params.repo)?;
+    let _permit = acquire_git_permit(&state)?;
+
+    let repo = match hydrate_for_read(&state.git_store, &params.owner, &params.repo).await {
+        Ok(Some(repo)) => repo,
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "repository not found").into_response()),
+        Err(e) => return Err(hydrate_error_to_response(&params.owner, &params.repo, e)),
+    };
+
+    let output = run_git_at(repo.path(), "upload-pack", body, &[]).await?;
+    drop(repo);
+    Ok(build_git_response("upload-pack", output))
 }
 
 /// `POST /git/{owner}/{repo}/git-receive-pack`
 ///
 /// Handles push — client sends ref updates + pack data.
+///
 /// Authorization: NIP-98 authenticates the pusher. The pre-receive hook
-/// calls back to the internal policy endpoint for ref-level authorization
-/// (channel role + protection rules). Any authenticated user can attempt a push;
-/// the hook enforces the actual permissions.
+/// installed into the hydrated tempdir calls back to the internal policy
+/// endpoint for ref-level authorization (channel role + protection rules
+/// from kind:30617).
+///
+/// **Push flow (spec §Push steps 1–8):**
+/// 1. Validate ids; acquire global git permit (bounds concurrent
+///    subprocesses; **no per-repo lock** — writer serialization is the
+///    pointer CAS, per spec).
+/// 2. `hydrate_for_write` → `(HydratedRepo, ParentState)`. The
+///    `ParentState` is the *same* observed pointer state the workspace
+///    was hydrated from; it's the CAS predicate at step 7 below, which
+///    is what makes `Inv_RefDerivedFromParent` structural rather than a
+///    code-review property.
+/// 3. `install_hook(repo.path())` — drop the pre-receive script + chmod.
+///    Same script, same env contract, same policy callback as today;
+///    only the on-disk path is ephemeral.
+/// 4. Run `receive-pack --stateless-rpc` against the tempdir. The hook
+///    enforces fast-forward + branch protection in-process.
+/// 5. `finalize_push(PushContext { pack, parent_state, repo, ... })` is
+///    the only path that builds a push `Response`. It calls
+///    `cas_publish` (§Push steps 2–7) and emits kind:30618 on `Won`,
+///    *only then* builds the 2xx.
 pub async fn receive_pack(
     State(state): State<Arc<AppState>>,
     auth: GitAuth,
     AxumPath(params): AxumPath<GitRepoParams>,
     body: Body,
 ) -> Result<Response, Response> {
+    let repo_name = validate_repo_id(&params.owner, &params.repo)?;
     let pusher_hex = hex::encode(auth.pubkey.serialize());
+    let _permit = acquire_git_permit(&state)?;
 
-    // Per-repo lock: prevent concurrent pushes to the same bare repo.
-    // git receive-pack is not safe for concurrent access.
-    let validated = validate_repo_path(&params.owner, &params.repo, &state.config.git_repo_path)?;
-    let repo_lock = state
-        .git_repo_locks
-        .entry(validated.repo_path.clone())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-    let _repo_guard = repo_lock.lock().await;
+    // **No per-repo advisory lock — by design.** Writer serialization is
+    // the pointer CAS at `cas_publish` step 7 (`Inv_NoFork` proves this
+    // sufficient). The previous code held a per-repo `tokio::Mutex`, but
+    // that only spanned one process; once we run >1 relay instance
+    // (which is the point of "no local stateful disk"), it spans nothing
+    // and CAS is the only serialization that holds. The named tradeoff:
+    // two concurrent same-repo pushes each hydrate + run receive-pack,
+    // and the loser's CPU/IO is thrown away on `Conflict`. **Accepted
+    // for v1** — same-ref contention is rare, and a cross-instance lock
+    // would be a distributed-lock service we explicitly don't want.
+    // If contention shows up in metrics, the fix is a short local
+    // best-effort lock as a *latency optimization*, never a correctness
+    // dependency. (Eva's call, on record in #proj-git-on-s3 with the
+    // ParentState seam review.)
 
-    // SECURITY: Verify pre-receive hook is a regular file, executable, and not a symlink.
-    // If the hook is missing, non-executable, or a symlink (potential tampering),
-    // deny the push rather than allowing it without permission checks.
-    let hook_path = validated.repo_path.join("hooks").join("pre-receive");
-    {
-        let hook_ok = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                // Use symlink_metadata to detect symlinks (doesn't follow them).
-                std::fs::symlink_metadata(&hook_path)
-                    .map(|m| {
-                        m.file_type().is_file() // Regular file, not symlink
-                            && m.permissions().mode() & 0o111 != 0 // Executable
-                    })
-                    .unwrap_or(false)
-            }
-            #[cfg(not(unix))]
-            {
-                hook_path.is_file()
-            }
-        };
-        if !hook_ok {
-            warn!(
-                repo = %params.repo,
-                hook = %hook_path.display(),
-                "push denied: pre-receive hook missing, not executable, or symlink"
-            );
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "push denied: repository permission hook not installed",
-            )
-                .into_response());
-        }
-    }
+    // Hydrate parent state + workspace in one round-trip. ParentState
+    // travels with the workspace into finalize_push so the CAS predicates
+    // on the same pointer ETag the workspace was hydrated from.
+    let (repo, parent_state) = hydrate_for_write(&state.git_store, &params.owner, &params.repo)
+        .await
+        .map_err(|e| hydrate_error_to_response(&params.owner, &params.repo, e))?;
 
-    // Resolve repo name (strip .git suffix if present).
-    let repo_name = params.repo.strip_suffix(".git").unwrap_or(&params.repo);
+    // Install the pre-receive hook into the ephemeral workspace. The
+    // hook script is fixed per-deployment; per-push state (callback URL,
+    // HMAC secret, pusher pubkey) rides in env at exec time.
+    install_hook(repo.path()).await.map_err(|e| {
+        error!(error = %e, "install pre-receive hook into hydrated workspace");
+        (StatusCode::INTERNAL_SERVER_ERROR, "git hook install failed").into_response()
+    })?;
 
     // Build hook env vars for the pre-receive hook.
-    // The hook uses these to call back to the internal policy endpoint.
     let hook_url = format!(
         "http://127.0.0.1:{}/internal/git/policy",
         state.config.bind_addr.port()
     );
-    // SECURITY: Force core.hooksPath via env to prevent repo-local config from
-    // overriding the hook directory. Without this, a malicious repo config could
-    // set core.hooksPath=/dev/null to bypass the pre-receive hook entirely.
-    let hooks_dir = validated.repo_path.join("hooks").display().to_string();
+    let hooks_dir = repo.path().join("hooks").display().to_string();
     let hook_env = vec![
         ("SPROUT_HOOK_URL", hook_url),
         (
@@ -462,114 +500,71 @@ pub async fn receive_pack(
         ("SPROUT_REPO_ID", repo_name.to_string()),
         ("SPROUT_REPO_OWNER", params.owner.clone()),
         ("SPROUT_PUSHER_PUBKEY", pusher_hex.clone()),
-        // Override any repo-local core.hooksPath setting.
+        // Override any repo-local core.hooksPath setting; defense in
+        // depth even though the hydrated workspace has no inherited
+        // config.
         ("GIT_CONFIG_COUNT", "1".to_string()),
         ("GIT_CONFIG_KEY_0", "core.hooksPath".to_string()),
         ("GIT_CONFIG_VALUE_0", hooks_dir),
     ];
 
-    // Snapshot refs before push — used by the post-push fence to detect
-    // whether anything actually changed.
-    let refs_before = snapshot_refs(&validated.repo_path).await;
-
-    // Run receive-pack and obtain the *owned* subprocess output. Crucially we
-    // do NOT build a `Response` here — that work is delegated to
-    // `finalize_push`, which is the sole site that converts a push's
-    // `PackOutput` into a 2xx response (see the type docs on `PackOutput`).
-    let pack = run_git_subprocess(
-        &state,
-        &params.owner,
-        &params.repo,
-        "receive-pack",
-        body,
-        &hook_env,
-    )
-    .await?;
+    // Run receive-pack against the tempdir. Returns the *owned* subprocess
+    // output (PackOutput) — crucially NOT a Response, so the post-push
+    // fence in finalize_push can sequence the CAS before any 2xx exists.
+    let pack = run_git_at(repo.path(), "receive-pack", body, &hook_env).await?;
 
     let ctx = PushContext {
         pack,
-        refs_before,
+        parent_state,
         owner: params.owner.clone(),
         repo: params.repo.clone(),
+        repo_id: repo_name.to_string(),
         pusher: auth.pubkey,
-        repo_path: validated.repo_path.clone(),
+        repo_handle: repo,
     };
-    Ok(finalize_push(state, ctx).await)
+    Ok(finalize_push(&state, ctx).await)
 }
+
+// ── Subprocess Runner ────────────────────────────────────────────────────────
 
 /// Buffered output of a `git --stateless-rpc` subprocess.
 ///
-/// The handler holds this as an owned value between subprocess completion and
-/// response construction — this is the *structural seam* the post-push fence
-/// relies on (see §Implementation Correspondence in
-/// `docs/git-on-object-storage.md`): nothing reaches the client until the
-/// handler has decided to build a `Response` from these bytes.
+/// The handler holds this as an owned value between subprocess completion
+/// and response construction — this is the *structural seam* the post-push
+/// fence relies on (see §Implementation Correspondence in
+/// `docs/git-on-object-storage.md`): nothing reaches the client until
+/// [`finalize_push`] has decided to build a `Response` from these bytes.
 pub(crate) struct PackOutput {
     pub stdout: Vec<u8>,
 }
 
-/// Shared git service runner — spawns subprocess and builds the canonical
-/// `application/x-git-{service}-result` response. Used for `info/refs` and
-/// `upload-pack` (read paths, no post-publish fence).
+/// Spawn a `git --stateless-rpc <service>` subprocess against the given
+/// path, stream the request body to stdin, and return the buffered
+/// stdout/stderr/exit status as a [`PackOutput`].
 ///
-/// Push (`receive-pack`) does **not** use this: it calls
-/// [`run_git_subprocess`] directly to obtain a [`PackOutput`], then dispatches
-/// to [`finalize_push`] which is the sole site that constructs a 2xx push
-/// response from that buffer.
-async fn run_git_service(
-    state: &Arc<AppState>,
-    owner: &str,
-    repo: &str,
-    service: &str,
-    body: Body,
-) -> Result<Response, Response> {
-    let output = run_git_subprocess(state, owner, repo, service, body, &[]).await?;
-    Ok(build_git_response(service, output))
-}
-
-/// Spawn a `git --stateless-rpc <service>` subprocess, stream the request body
-/// to stdin, and return the buffered stdout/stderr/exit status as a
-/// [`PackOutput`].
-///
-/// Critically returns the **owned** subprocess output rather than a `Response`,
-/// so callers can sequence post-subprocess work (e.g. the push fence) before
-/// any byte reaches the client.
-async fn run_git_subprocess(
-    state: &Arc<AppState>,
-    owner: &str,
-    repo: &str,
+/// Critically returns the **owned** subprocess output rather than a
+/// `Response`, so callers can sequence post-subprocess work (the push
+/// fence) before any byte reaches the client.
+async fn run_git_at(
+    repo_path: &Path,
     service: &str,
     body: Body,
     extra_env: &[(&str, String)],
 ) -> Result<PackOutput, Response> {
-    let validated = validate_repo_path(owner, repo, &state.config.git_repo_path)?;
-    if !validated.repo_path.exists() {
-        return Err((StatusCode::NOT_FOUND, "repository not found").into_response());
-    }
-
-    let _permit = state.git_semaphore.try_acquire().map_err(|_| {
-        Response::builder()
-            .status(StatusCode::SERVICE_UNAVAILABLE)
-            .header("Retry-After", "5")
-            .body(Body::from("git service busy"))
-            .unwrap()
-    })?;
-
     let mut cmd = Command::new("git");
     cmd.arg(service)
         .arg("--stateless-rpc")
-        .arg(&validated.repo_path)
+        .arg(repo_path)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     harden_git_env(&mut cmd);
-    // Pass extra env vars (e.g., hook callback URL and HMAC secret).
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
     let mut child = cmd.spawn().map_err(|e| {
-        error!(error = %e, "git subprocess failed to spawn");
+        error!(error = %e, service = %service, "git subprocess failed to spawn");
         (StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response()
     })?;
 
@@ -591,16 +586,10 @@ async fn run_git_subprocess(
                 Err(_) => break,
             }
         }
-        drop(stdin); // Close stdin → EOF for git.
+        drop(stdin); // close stdin → EOF for git
     });
-    // Grab an abort handle before moving body_task into the timeout block.
-    // On timeout, we abort it explicitly — dropping a JoinHandle only detaches
-    // the task (it keeps running). A stalled client could otherwise keep the
-    // spawned task alive indefinitely waiting on stream.next().await.
     let body_abort = body_task.abort_handle();
 
-    // Timeout covers both body streaming and subprocess completion.
-    // On timeout: child is killed via kill_on_drop, body_task via abort_handle.
     let timeout_result = tokio::time::timeout(PACK_OPS_TIMEOUT, async {
         let _ = body_task.await;
         child.wait_with_output().await
@@ -614,7 +603,7 @@ async fn run_git_subprocess(
             return Err((StatusCode::GATEWAY_TIMEOUT, "git operation timed out").into_response());
         }
         Ok(Err(e)) => {
-            error!(error = %e, "git subprocess failed");
+            error!(error = %e, service = %service, "git subprocess failed");
             return Err((StatusCode::INTERNAL_SERVER_ERROR, "git error").into_response());
         }
         Ok(Ok(out)) => out,
@@ -631,9 +620,10 @@ async fn run_git_subprocess(
     })
 }
 
-/// Build the canonical `application/x-git-{service}-result` response from a
-/// completed subprocess. For the push path this is **only** reached via
-/// [`finalize_push`]; for read paths it is reached via [`run_git_service`].
+/// Build the canonical `application/x-git-{service}-result` response from
+/// a completed subprocess. For the push path this is **only** reached via
+/// [`finalize_push`], which is the unique constructor of a push 2xx — the
+/// structural fence.
 fn build_git_response(service: &str, output: PackOutput) -> Response {
     let content_type = format!("application/x-git-{service}-result");
     Response::builder()
@@ -644,218 +634,187 @@ fn build_git_response(service: &str, output: PackOutput) -> Response {
         .unwrap()
 }
 
-// ── Post-Push Event Publishing ───────────────────────────────────────────────
-
-/// Failure mode for a refs snapshot.
-///
-/// Both variants are treated identically by [`finalize_push`]: any `Err`
-/// collapses to the publish branch. Distinguished only for observability.
-#[derive(Debug)]
-pub(crate) enum SnapshotError {
-    /// `git for-each-ref` failed to spawn or exited non-zero.
-    CommandFailed,
-}
-
-/// Quick snapshot of current refs — used to detect whether a push changed anything.
-///
-/// Returns the raw `git for-each-ref` output as a string. Comparison is by
-/// string equality — cheap and sufficient (same refs + same SHAs = same string).
-///
-/// **Fallible by design.** An earlier version returned `""` on error, which
-/// hid a silent-skip bug: if *both* the pre- and post-push snapshots failed,
-/// the two empty strings compared equal and the handler skipped publish on
-/// a push that did change refs. [`finalize_push`] now matches on
-/// `Result<String, SnapshotError>` and treats any `Err` as "assume changed →
-/// publish fires," closing the double-failure hole. See
-/// `docs/git-on-object-storage.md` §Implementation Correspondence.
-async fn snapshot_refs(repo_path: &std::path::Path) -> Result<String, SnapshotError> {
-    let mut cmd = Command::new("git");
-    cmd.args(["for-each-ref", "--format=%(refname) %(objectname)"])
-        .current_dir(repo_path);
-    harden_git_env(&mut cmd);
-    match cmd.output().await {
-        Ok(output) if output.status.success() => {
-            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-        }
-        _ => Err(SnapshotError::CommandFailed),
-    }
-}
+// ── Post-Push Fence ──────────────────────────────────────────────────────────
 
 /// Per-push state captured between subprocess completion and response
-/// construction. This is the single argument shape `finalize_push` consumes —
-/// constructing a `PushContext` is the only path from a push subprocess to a
-/// 2xx push response.
+/// construction. Constructing a `PushContext` is the only path from a
+/// push subprocess to a 2xx push response (see [`finalize_push`]) — the
+/// structural fence (spec Theorem 1).
 pub(crate) struct PushContext {
     pub pack: PackOutput,
-    pub refs_before: Result<String, SnapshotError>,
+    /// Parent pointer state observed at hydrate time. The CAS in
+    /// `cas_publish` predicates on `parent_state.if_match`, so a
+    /// concurrent writer that advanced the pointer between hydrate and
+    /// CAS surfaces as `Conflict`/HTTP 409 — `Inv_RefDerivedFromParent`
+    /// is structural, not a code-review property.
+    pub parent_state: ParentState,
     pub owner: String,
+    /// Raw URL repo segment (may include `.git`).
     pub repo: String,
+    /// Stripped repo id (= `repo` with any `.git` suffix removed). Used
+    /// as the `d` tag on kind:30618 — must match the kind:30617 author's
+    /// `d` exactly.
+    pub repo_id: String,
     pub pusher: nostr::PublicKey,
-    pub repo_path: PathBuf,
+    /// The hydrated workspace handle. Held until response construction
+    /// (which happens *after* `cas_publish` returns) so the tempdir
+    /// outlives the receive-pack subprocess and the CAS publish.
+    pub repo_handle: HydratedRepo,
 }
 
-/// Decide whether the post-push fence should publish based on the pre- and
-/// post-push ref snapshots.
+/// Finalize a push request: CAS-commit the new state into the object
+/// store, derive kind:30618 from the committed manifest, and only then
+/// build the success response.
 ///
-/// Deny-by-default: publish unless we have **both** successful snapshots that
-/// compare equal (i.e. a true no-op push). Any `Err` on either side — or any
-/// difference between the two — falls through to publish.
-///
-/// This is the function whose previous string-based predecessor had the
-/// silent-skip bug: when both snapshots failed, both became `""`, they
-/// "matched," and publish was skipped on a real push. Now both-`Err` is
-/// structurally outside the skip arm.
-pub(crate) fn should_publish(
-    before: &Result<String, SnapshotError>,
-    after: &Result<String, SnapshotError>,
-) -> bool {
-    !matches!((before, after), (Ok(b), Ok(a)) if b == a)
-}
-
-/// Finalize a push request: take a snapshot of the post-push ref state, decide
-/// whether anything changed, conditionally publish kind:30618 inline, and only
-/// then construct the success response.
-///
-/// **The fence (Theorem 1 in `docs/git-on-object-storage.md`):** for a push
-/// that changed refs (or where either ref snapshot failed), the `Response` is
-/// not constructed until `publish_ref_state` has been awaited. No-op pushes —
-/// where the before/after snapshots both succeed and compare equal — short-
-/// circuit at the `(Ok(b), Ok(a)) if b == a` arm and skip publish entirely,
-/// paying zero fence latency.
-///
-/// The match below is written deny-by-default: only the `(Ok, Ok)`-and-equal
-/// arm skips publish; every other state — including the previously load-
-/// bearing **double-failure case** where two failed `snapshot_refs` calls
-/// collide on the same value — falls through to the publish branch.
-async fn finalize_push(state: Arc<AppState>, ctx: PushContext) -> Response {
-    let refs_after = snapshot_refs(&ctx.repo_path).await;
-
-    if should_publish(&ctx.refs_before, &refs_after) {
-        if let Err(e) = publish_ref_state(&state, &ctx.owner, &ctx.repo, &ctx.pusher).await {
-            // Today publish failure (relay DB insert) is non-fatal — the pack
-            // is durable on disk and the client sees success. The S3 manifest-
-            // CAS evolution of this seam will instead map a precondition
-            // failure (412) to HTTP 409 here; see
-            // `docs/git-on-object-storage.md` §Implementation Correspondence.
+/// **The fence (Theorem 1):** the success response is constructed only
+/// after `cas_publish` returns `Ok(CasSuccess)`. Lost-race / conflict /
+/// backend failure all return *without* a 2xx. This is the unique
+/// constructor of a push 2xx, so the seam is structural (not by
+/// convention).
+async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
+    // Step 7 (CAS). The PushContext binds `parent_state` (observed at
+    // hydrate) to the CAS predicate here — no re-reading of the pointer
+    // between hydrate and CAS.
+    let success = match cas_publish(
+        &state.git_store,
+        ctx.repo_handle.path(),
+        &ctx.owner,
+        &ctx.repo,
+        &ctx.parent_state,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(CasError::Conflict {
+            winner_manifest_key,
+            ..
+        }) => {
             warn!(
-                error = %e,
                 owner = %ctx.owner,
                 repo = %ctx.repo,
-                "failed to publish kind:30618"
+                winner = %winner_manifest_key,
+                "push lost CAS race; tempdir dropped, returning 409"
             );
+            return (
+                StatusCode::CONFLICT,
+                "push superseded by a concurrent writer; pull and retry",
+            )
+                .into_response();
         }
-    }
-
-    build_git_response("receive-pack", ctx.pack)
-}
-
-/// Publish kind:30618 (repo state) after a successful push.
-///
-/// Reads current refs from the repo and publishes a relay-signed event
-/// with the pusher's pubkey in a `p` tag. This makes pushes subscribable.
-async fn publish_ref_state(
-    state: &Arc<AppState>,
-    owner: &str,
-    repo: &str,
-    pusher: &nostr::PublicKey,
-) -> anyhow::Result<()> {
-    let validated = validate_repo_path(owner, repo, &state.config.git_repo_path)
-        .map_err(|_| anyhow::anyhow!("invalid repo path"))?;
-
-    // Read current refs.
-    let mut cmd = Command::new("git");
-    cmd.args(["for-each-ref", "--format=%(refname) %(objectname)"])
-        .current_dir(&validated.repo_path);
-    harden_git_env(&mut cmd);
-    let output = cmd.output().await?;
-
-    if !output.status.success() {
-        return Err(anyhow::anyhow!("git for-each-ref failed"));
-    }
-
-    let refs_output = String::from_utf8_lossy(&output.stdout);
-
-    // Get HEAD symbolic ref.
-    let mut head_cmd = Command::new("git");
-    head_cmd
-        .args(["symbolic-ref", "HEAD"])
-        .current_dir(&validated.repo_path);
-    harden_git_env(&mut head_cmd);
-    let head_output = head_cmd.output().await.ok();
-
-    let repo_name = repo.strip_suffix(".git").unwrap_or(repo);
-
-    // Build NIP-34 kind:30618 tags.
-    let mut tags = vec![nostr::Tag::custom(nostr::TagKind::custom("d"), [repo_name])];
-
-    for line in refs_output.lines() {
-        let parts: Vec<&str> = line.splitn(2, ' ').collect();
-        if parts.len() != 2 {
-            continue;
+        Err(CasError::ManifestInvalid(e)) => {
+            // 4xx-class: the workspace produced refs/HEAD/oids the
+            // manifest validator rejects (unsafe refname, malformed oid,
+            // empty head, malformed parent). Pre-CAS — no pointer was
+            // written.
+            warn!(
+                owner = %ctx.owner,
+                repo = %ctx.repo,
+                error = %e,
+                "push rejected: manifest validation failed"
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                "push produced invalid manifest state",
+            )
+                .into_response();
         }
-        let (ref_name, sha) = (parts[0], parts[1]);
-
-        // NIP-34 kind:30618 only includes heads and tags — skip stash, notes, remotes.
-        if !ref_name.starts_with("refs/heads/") && !ref_name.starts_with("refs/tags/") {
-            continue;
+        Err(e) => {
+            // 5xx-class: ManifestReadFailed (parent corruption),
+            // Backend, PackCapture. The tempdir drops on scope exit; no
+            // pointer was written (or, on rare ManifestReadFailed during
+            // winner-fetch, the winner is already installed and the
+            // loser's data is unrelated).
+            error!(
+                owner = %ctx.owner,
+                repo = %ctx.repo,
+                error = %e,
+                "push failed pre-response"
+            );
+            return (StatusCode::INTERNAL_SERVER_ERROR, "git backend error").into_response();
         }
-        // Validate ref name and SHA.
-        if ref_name.starts_with('/')
-            || ref_name.contains("//")
-            || !ref_name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "/_.-".contains(c))
-        {
-            continue;
-        }
-        if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
-            continue;
-        }
+    };
 
-        tags.push(nostr::Tag::custom(nostr::TagKind::custom(ref_name), [sha]));
-    }
-
-    // HEAD tag.
-    if let Some(head) = head_output {
-        if head.status.success() {
-            let head_ref = String::from_utf8_lossy(&head.stdout).trim().to_string();
-            if !head_ref.is_empty() {
-                tags.push(nostr::Tag::custom(
-                    nostr::TagKind::custom("HEAD"),
-                    [format!("ref: {head_ref}")],
-                ));
+    // Derived after CAS: kind:30618 ref-state event over the *committed*
+    // manifest's refs/head. Spec §Implementation Correspondence:
+    // "kind:30618 is derived after CAS, never the commit." We emit only
+    // when the committed manifest differs from the parent — a true no-op
+    // push pays no 30618 cost.
+    //
+    // **Strict no-op detection.** We emit unless the canonical manifest
+    // is byte-identical to the parent (Dawn's `canonical_bytes` is
+    // deterministic, so equal published state ⇒ equal digest by
+    // construction). The cases this differs from "refs+head equality":
+    // pack-only changes (rare; internal recompaction, or a push that
+    // produces a new pack covering existing tips with different deltas)
+    // would emit a 30618 with identical `(refs, head)`. The relay DB's
+    // `Ok((_, false))` arm below dedups it for free — one extra DB
+    // round-trip per pack-only push, which clients don't normally
+    // generate. Tightening to refs+head equality is a future
+    // micro-optimization only if that dedup cost becomes visible.
+    let parent_digest_str: Option<&str> = ctx.parent_state.parent_digest.as_deref();
+    let after_digest = success.manifest_key.strip_prefix("manifests/");
+    let manifest_changed = match (parent_digest_str, after_digest) {
+        (Some(before), Some(after)) => before != after,
+        _ => true, // first push (parent None) or impossible-shape after key → publish
+    };
+    if manifest_changed {
+        let inputs = RefStateInputs {
+            repo_id: &ctx.repo_id,
+            head: &success.manifest.head,
+            refs: &success.manifest.refs,
+            actor_pubkey_hex: &hex::encode(ctx.pusher.serialize()),
+        };
+        match build_ref_state_event(&inputs, &state.relay_keypair) {
+            Ok(event) => match state.db.insert_event(&event, None).await {
+                Ok((stored, true)) => {
+                    let matches = state.sub_registry.fan_out(&stored);
+                    for (conn_id, sub_id) in matches {
+                        let _ = state.conn_manager.send_to(
+                            conn_id,
+                            crate::protocol::RelayMessage::event(&sub_id, &stored.event),
+                        );
+                    }
+                    info!(
+                        owner = %ctx.owner,
+                        repo = %ctx.repo_id,
+                        manifest = %success.manifest_key,
+                        "kind:30618 published (derived after CAS)"
+                    );
+                }
+                Ok((_, false)) => {
+                    info!(
+                        owner = %ctx.owner,
+                        repo = %ctx.repo_id,
+                        "kind:30618 deduplicated by relay db"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        owner = %ctx.owner,
+                        repo = %ctx.repo_id,
+                        error = %e,
+                        "kind:30618 insert failed; push remains durable in object store"
+                    );
+                }
+            },
+            Err(e) => {
+                warn!(
+                    owner = %ctx.owner,
+                    repo = %ctx.repo_id,
+                    error = %e,
+                    "kind:30618 build failed; push remains durable in object store"
+                );
             }
         }
     }
 
-    // Pusher pubkey in p tag.
-    tags.push(nostr::Tag::public_key(*pusher));
-
-    info!(
-        repo = %repo_name,
-        owner = %owner,
-        ref_count = tags.len().saturating_sub(2),
-        "publishing kind:30618 ref state"
-    );
-
-    // Sign with relay keypair — the relay is the authoritative source of ref state.
-    let event = nostr::EventBuilder::new(nostr::Kind::Custom(30618), "", tags)
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:30618: {e}"))?;
-
-    // Store globally (channel_id = None) and fan out to subscribers.
-    let (stored, was_inserted) = state.db.insert_event(&event, None).await?;
-    if was_inserted {
-        let matches = state.sub_registry.fan_out(&stored);
-        for (conn_id, sub_id) in matches {
-            let _ = state.conn_manager.send_to(
-                conn_id,
-                crate::protocol::RelayMessage::event(&sub_id, &stored.event),
-            );
-        }
-    }
-
-    Ok(())
+    // Only now — after CAS commit and (optional) 30618 emission — build
+    // the 2xx. The tempdir's lifetime is tied to `ctx.repo_handle`, which
+    // we drop after building the response so the subprocess output bytes
+    // are fully consumed before the on-disk objects vanish.
+    let response = build_git_response("receive-pack", ctx.pack);
+    drop(ctx.repo_handle);
+    response
 }
 
 // ── Router Builder ───────────────────────────────────────────────────────────
@@ -872,72 +831,4 @@ pub fn git_router(state: Arc<AppState>) -> Router {
         .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
         .layer(RequestBodyLimitLayer::new(body_limit))
         .with_state(state)
-}
-
-// ── Tests ────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn ok(s: &str) -> Result<String, SnapshotError> {
-        Ok(s.to_string())
-    }
-    fn err() -> Result<String, SnapshotError> {
-        Err(SnapshotError::CommandFailed)
-    }
-
-    /// True no-op push: both snapshots succeed and are equal → publish skipped.
-    /// This is the fast path; the fence pays zero latency.
-    #[test]
-    fn should_publish_skips_on_noop() {
-        let before = ok("refs/heads/main abc123\n");
-        let after = ok("refs/heads/main abc123\n");
-        assert!(!should_publish(&before, &after));
-    }
-
-    /// Refs changed → publish fires. The fence engages and the response
-    /// must wait for `publish_ref_state` to complete before being built.
-    #[test]
-    fn should_publish_fires_on_changed_refs() {
-        let before = ok("refs/heads/main abc123\n");
-        let after = ok("refs/heads/main def456\n");
-        assert!(should_publish(&before, &after));
-    }
-
-    /// First push to an empty repo: before is `Ok("")`, after has real refs.
-    /// They differ; publish fires. Closes "what if the empty-repo case is
-    /// modeled by `Ok("")` instead of `Err`."
-    #[test]
-    fn should_publish_fires_on_first_push_to_empty_repo() {
-        let before = ok("");
-        let after = ok("refs/heads/main abc123\n");
-        assert!(should_publish(&before, &after));
-    }
-
-    /// Snapshot fails *before* the push: assume changed → publish fires.
-    /// Anything else would risk dropping a publish on a real ref change.
-    #[test]
-    fn should_publish_fires_when_before_errors() {
-        assert!(should_publish(&err(), &ok("refs/heads/main abc123\n")));
-    }
-
-    /// Snapshot fails *after* the push: assume changed → publish fires.
-    #[test]
-    fn should_publish_fires_when_after_errors() {
-        assert!(should_publish(&ok("refs/heads/main abc123\n"), &err()));
-    }
-
-    /// The bug this whole fix exists to close: both snapshots fail.
-    ///
-    /// The pre-refactor implementation returned `""` on error from
-    /// `snapshot_refs`, so two failed scans both produced `""`, compared
-    /// equal, and the handler silently skipped publish on a ref-changing
-    /// push. Under `Result<_, _>` this case is structurally outside the
-    /// skip arm: `(Err, Err)` does not match `(Ok(b), Ok(a)) if b == a`.
-    /// Publish fires.
-    #[test]
-    fn should_publish_fires_when_both_snapshots_error() {
-        assert!(should_publish(&err(), &err()));
-    }
 }

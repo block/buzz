@@ -24,9 +24,13 @@
 //!      then derives kind:30618 against `m_after` (Sami's
 //!      `manifest_event::build_ref_state_event`) and constructs the
 //!      success response — the *fence* in §Push step 8.
-//!    - `LostRace` → return `CasError::Conflict` (→ HTTP 409). **No
-//!      retry.** The losing push's receive-pack output was derived against
-//!      the now-superseded parent; reusing it would violate
+//!    - `LostRace` → re-read the pointer to fetch the winner's manifest,
+//!      then return `CasError::Conflict { winner_manifest,
+//!      winner_manifest_key }` (→ HTTP 409). The winner payload is for
+//!      the caller's diagnostic + future cache; the loser's ephemeral
+//!      tempdir dies on scope exit, so there's no disk to reconcile.
+//!      **No retry.** The losing push's receive-pack output was derived
+//!      against the now-superseded parent; reusing it would violate
 //!      `Inv_RefDerivedFromParent` (§Mechanized Verification). The client
 //!      re-runs `git push`, which re-hydrates and re-runs receive-pack
 //!      against the advanced state — that is the only safe retry, and
@@ -390,13 +394,13 @@ fn digest_from_manifest_key(key: &str) -> Result<String, CasError> {
 ///
 /// **Caller contract — `Inv_RefDerivedFromParent` is structural.** The
 /// `parent_state` you pass in must be the same one the workspace was
-/// hydrated from. Concretely: load `ParentState::load_or_fresh(store,
-/// owner, repo)` → hydrate the workspace from `parent_state.parent` →
-/// `install_hook` → run `receive-pack` against the workspace → call this
-/// with the **same `parent_state`**. The CAS predicate is
-/// `parent_state.if_match`, so a concurrent writer that advanced the
-/// pointer between hydrate and CAS reliably surfaces as
-/// `CasError::Conflict { winner_manifest, .. }` (412 → HTTP 409). The
+/// hydrated from. Concretely: `hydrate::hydrate_for_write(store, owner,
+/// repo)` returns `(HydratedRepo, ParentState)` from a single pointer
+/// observation → `install_hook(repo.path())` → run `receive-pack`
+/// against the workspace → call this with the **same `parent_state`**.
+/// The CAS predicate is `parent_state.if_match`, so a concurrent writer
+/// that advanced the pointer between hydrate and CAS reliably surfaces
+/// as `CasError::Conflict { winner_manifest, .. }` (412 → HTTP 409). The
 /// loser re-pushes; the new push re-hydrates against the advanced state.
 ///
 /// Concurrency: callable in parallel for the same `(owner, repo)`. The CAS
