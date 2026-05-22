@@ -90,7 +90,7 @@ export function TerminalPanel({ channelId, isOpen }: TerminalPanelProps) {
         onPointerDown={handleResizeStart}
       >
         {/* Terminal content */}
-        <div className="min-h-0 flex-1 bg-[#1a1b26] p-2">
+        <div className="min-h-0 flex-1 bg-terminal p-2">
           <TerminalInstance channelId={channelId} isVisible={isOpen} />
         </div>
       </div>

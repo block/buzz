@@ -258,6 +258,10 @@ export function createThemeVars(
       "--status-deleted": accentRed,
       "--status-modified": accentOrange,
 
+      // Terminal
+      "--terminal-background": hexToHsl(syntaxBg),
+      "--terminal-foreground": hexToHsl(syntaxFg),
+
       // Warning
       "--ui-warning": accentOrange,
       "--ui-warning-bg": overlay(accentOrange, isDark ? 0.1 : 0.08),

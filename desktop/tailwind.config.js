@@ -45,6 +45,10 @@ export default {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
+        terminal: {
+          DEFAULT: "hsl(var(--terminal-background))",
+          foreground: "hsl(var(--terminal-foreground))",
+        },
         sidebar: {
           DEFAULT: "hsl(var(--sidebar-background))",
           foreground: "hsl(var(--sidebar-foreground))",

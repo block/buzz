@@ -8,59 +8,62 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import "@xterm/xterm/css/xterm.css";
 
-// Tokyo Night — high-contrast dark terminal surface.
-const DARK_THEME: ITheme = {
-  background: "#1a1b26",
-  foreground: "#c0caf5",
-  cursor: "#c0caf5",
-  selectionBackground: "#33467c",
-  black: "#15161e",
-  red: "#f7768e",
-  green: "#9ece6a",
-  yellow: "#e0af68",
-  blue: "#7aa2f7",
-  magenta: "#bb9af7",
-  cyan: "#7dcfff",
-  white: "#a9b1d6",
-  brightBlack: "#414868",
-  brightRed: "#f7768e",
-  brightGreen: "#9ece6a",
-  brightYellow: "#e0af68",
-  brightBlue: "#7aa2f7",
-  brightMagenta: "#bb9af7",
-  brightCyan: "#7dcfff",
-  brightWhite: "#c0caf5",
-};
-
-// Light mode: terminal stays dark (high contrast against light app chrome).
-// Uses the same Tokyo Night bg with slightly warmer foreground for readability.
-const LIGHT_THEME: ITheme = {
-  background: "#1a1b26",
-  foreground: "#c8d3f5",
-  cursor: "#c8d3f5",
-  selectionBackground: "#2f3549",
-  black: "#1a1b26",
-  red: "#ff757f",
-  green: "#c3e88d",
-  yellow: "#ffc777",
-  blue: "#82aaff",
-  magenta: "#c099ff",
-  cyan: "#86e1fc",
-  white: "#c8d3f5",
-  brightBlack: "#545c7e",
-  brightRed: "#ff757f",
-  brightGreen: "#c3e88d",
-  brightYellow: "#ffc777",
-  brightBlue: "#82aaff",
-  brightMagenta: "#c099ff",
-  brightCyan: "#86e1fc",
-  brightWhite: "#e4f0fb",
-};
-
+/**
+ * Read the semantic terminal CSS vars and build an xterm.js ITheme.
+ * Falls back to a neutral dark palette if vars are not yet applied.
+ */
 function getTerminalTheme(): ITheme {
-  return document.documentElement.classList.contains("dark")
-    ? DARK_THEME
-    : LIGHT_THEME;
+  const style = getComputedStyle(document.documentElement);
+
+  const hslToHex = (hslValue: string): string | undefined => {
+    if (!hslValue?.trim()) return undefined;
+    // Parse "H S% L%" format from CSS var
+    const parts = hslValue.trim().split(/\s+/);
+    if (parts.length < 3) return undefined;
+    const h = Number.parseFloat(parts[0]);
+    const s = Number.parseFloat(parts[1]) / 100;
+    const l = Number.parseFloat(parts[2]) / 100;
+
+    const a = s * Math.min(l, 1 - l);
+    const f = (n: number) => {
+      const k = (n + h / 30) % 12;
+      const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+      return Math.round(255 * color)
+        .toString(16)
+        .padStart(2, "0");
+    };
+    return `#${f(0)}${f(8)}${f(4)}`;
+  };
+
+  const bg =
+    hslToHex(style.getPropertyValue("--terminal-background")) ?? "#1a1b26";
+  const fg =
+    hslToHex(style.getPropertyValue("--terminal-foreground")) ?? "#c0caf5";
+
+  const isDark = document.documentElement.classList.contains("dark");
+
+  return {
+    background: bg,
+    foreground: fg,
+    cursor: fg,
+    selectionBackground: isDark ? "#33467c" : "#2f3549",
+    black: bg,
+    red: isDark ? "#f7768e" : "#ff757f",
+    green: isDark ? "#9ece6a" : "#c3e88d",
+    yellow: isDark ? "#e0af68" : "#ffc777",
+    blue: isDark ? "#7aa2f7" : "#82aaff",
+    magenta: isDark ? "#bb9af7" : "#c099ff",
+    cyan: isDark ? "#7dcfff" : "#86e1fc",
+    white: fg,
+    brightBlack: isDark ? "#414868" : "#545c7e",
+    brightRed: isDark ? "#f7768e" : "#ff757f",
+    brightGreen: isDark ? "#9ece6a" : "#c3e88d",
+    brightYellow: isDark ? "#e0af68" : "#ffc777",
+    brightBlue: isDark ? "#7aa2f7" : "#82aaff",
+    brightMagenta: isDark ? "#bb9af7" : "#c099ff",
+    brightCyan: isDark ? "#7dcfff" : "#86e1fc",
+    brightWhite: fg,
+  };
 }
 
 type TerminalDataPayload = {
