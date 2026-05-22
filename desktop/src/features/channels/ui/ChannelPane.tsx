@@ -438,16 +438,18 @@ export const ChannelPane = React.memo(function ChannelPane({
                   ) : null}
                 </div>
               </div>
+              {activeChannel && isTerminalOpen ? (
+                <div className="p-4 pt-2">
+                  <TerminalPanel
+                    channelId={activeChannel.id}
+                    isOpen={isTerminalOpen}
+                    onClose={closeTerminal}
+                  />
+                </div>
+              ) : null}
             </div>
           </div>
         )}
-        {activeChannel && isTerminalOpen ? (
-          <TerminalPanel
-            channelId={activeChannel.id}
-            isOpen={isTerminalOpen}
-            onClose={closeTerminal}
-          />
-        ) : null}
       </div>
 
       {threadHeadMessage ? (

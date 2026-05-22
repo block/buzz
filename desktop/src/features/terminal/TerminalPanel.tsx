@@ -85,46 +85,48 @@ export function TerminalPanel({
   if (!isOpen) return null;
 
   return (
-    <div
-      className="relative flex flex-col border-t border-border/60"
-      style={{ height: `${heightPx}px` }}
-    >
-      {/* Resize handle */}
-      <button
-        type="button"
-        className="group absolute inset-x-0 -top-1 z-20 flex h-3 cursor-row-resize items-center justify-center"
-        onPointerDown={handleResizeStart}
-        aria-label="Resize terminal"
+    <div className="px-3 pb-3 pt-1 sm:px-4">
+      <div
+        className="pointer-events-auto relative flex flex-col overflow-hidden rounded-2xl border border-border/50 shadow-[0_4px_24px_rgba(0,0,0,0.08)] dark:shadow-[0_4px_24px_rgba(0,0,0,0.35)]"
+        style={{ height: `${heightPx}px` }}
       >
-        <GripHorizontal className="h-3 w-3 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
-      </button>
+        {/* Resize handle */}
+        <button
+          type="button"
+          className="group absolute inset-x-0 -top-1 z-20 flex h-3 cursor-row-resize items-center justify-center"
+          onPointerDown={handleResizeStart}
+          aria-label="Resize terminal"
+        >
+          <GripHorizontal className="h-3 w-3 text-muted-foreground/40 transition-colors group-hover:text-muted-foreground" />
+        </button>
 
-      {/* Header bar */}
-      <div className="flex h-8 shrink-0 items-center justify-between border-b border-white/5 bg-[#1a1b26] px-3">
-        <span className="text-xs font-medium text-[#7aa2f7]">Terminal</span>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            className="rounded p-0.5 text-[#565f89] hover:text-[#c0caf5] transition-colors"
-            onClick={onClose}
-            aria-label="Minimize terminal"
-          >
-            <Minus className="h-3.5 w-3.5" />
-          </button>
-          <button
-            type="button"
-            className="rounded p-0.5 text-[#565f89] hover:text-[#c0caf5] transition-colors"
-            onClick={onClose}
-            aria-label="Close terminal"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
+        {/* Header bar */}
+        <div className="flex h-8 shrink-0 items-center justify-between border-b border-white/5 bg-[#1a1b26] px-3">
+          <span className="text-xs font-medium text-[#7aa2f7]">Terminal</span>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              className="rounded p-0.5 text-[#565f89] hover:text-[#c0caf5] transition-colors"
+              onClick={onClose}
+              aria-label="Minimize terminal"
+            >
+              <Minus className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              className="rounded p-0.5 text-[#565f89] hover:text-[#c0caf5] transition-colors"
+              onClick={onClose}
+              aria-label="Close terminal"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
-      </div>
 
-      {/* Terminal content */}
-      <div className="min-h-0 flex-1 bg-[#1a1b26]">
-        <TerminalInstance channelId={channelId} isVisible={isOpen} />
+        {/* Terminal content */}
+        <div className="min-h-0 flex-1 bg-[#1a1b26]">
+          <TerminalInstance channelId={channelId} isVisible={isOpen} />
+        </div>
       </div>
     </div>
   );
