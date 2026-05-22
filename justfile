@@ -148,7 +148,12 @@ test:
 
 # Run unit tests only (no infra needed)
 test-unit:
-    ./scripts/run-tests.sh unit
+    #!/usr/bin/env bash
+    if command -v cargo-nextest &>/dev/null; then
+        cargo nextest run -p sprout-core -p sprout-auth --lib
+    else
+        ./scripts/run-tests.sh unit
+    fi
 
 # Run integration tests only (starts services if needed)
 test-integration:

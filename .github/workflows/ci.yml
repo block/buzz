@@ -9,10 +9,48 @@ env:
   PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
 
 jobs:
+  changes:
+    name: Detect Changed Paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      desktop: ${{ steps.filter.outputs.desktop }}
+      desktop-rust: ${{ steps.filter.outputs.desktop-rust }}
+      web: ${{ steps.filter.outputs.web }}
+      mobile: ${{ steps.filter.outputs.mobile }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'scripts/run-tests.sh'
+              - 'Justfile'
+            desktop:
+              - 'desktop/**'
+              - '!desktop/src-tauri/**'
+            desktop-rust:
+              - 'desktop/src-tauri/**'
+            web:
+              - 'web/**'
+              - 'pnpm-lock.yaml'
+            mobile:
+              - 'mobile/**'
+
   rust-lint:
     name: Rust Lint
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true'
     permissions:
       contents: read
     steps:
@@ -30,19 +68,27 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2
+        with:
+          tool: cargo-nextest
       - name: Unit tests
-        run: just test-unit
+        run: cargo nextest run -p sprout-core -p sprout-auth --lib
 
   desktop:
     name: Desktop
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
     permissions:
       contents: read
     steps:
@@ -76,6 +122,12 @@ jobs:
             libxdo-dev \
             patchelf \
             wget
+      - name: Cache pnpm store
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.local/share/pnpm/store/v3
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
       - name: Install desktop dependencies
         run: just desktop-install-ci
       - name: Get Playwright version
@@ -122,6 +174,8 @@ jobs:
     name: Desktop E2E Integration
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.rust == 'true'
     permissions:
       contents: read
     steps:
@@ -132,6 +186,27 @@ jobs:
           workspaces: |
             .
             desktop/src-tauri
+      - name: Restore Docker image cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /tmp/docker-cache
+          key: docker-${{ hashFiles('docker-compose.yml') }}
+          restore-keys: docker-
+      - name: Load cached Docker images
+        run: |
+          if [ -d /tmp/docker-cache ]; then
+            for img in /tmp/docker-cache/*.tar; do
+              docker load < "$img" 2>/dev/null || true
+            done
+          fi
+      - name: Start integration services
+        run: docker compose up -d
+      - name: Cache pnpm store
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.local/share/pnpm/store/v3
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
       - name: Install desktop dependencies
         run: just desktop-install-ci
       - name: Get Playwright version
@@ -156,8 +231,6 @@ jobs:
           key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
       - name: Desktop build
         run: just desktop-build
-      - name: Start integration services
-        run: docker compose up -d
       - name: Wait for integration services
         run: |
           wait_healthy() {
@@ -228,16 +301,37 @@ jobs:
             desktop/test-results
             /tmp/sprout-relay.log
           if-no-files-found: ignore
+      - name: Save Docker image cache
+        if: github.event_name == 'push'
+        run: |
+          mkdir -p /tmp/docker-cache
+          docker save postgres:17-alpine > /tmp/docker-cache/postgres.tar
+          docker save redis:7-alpine > /tmp/docker-cache/redis.tar
+          docker save typesense/typesense:27.1 > /tmp/docker-cache/typesense.tar
+      - name: Upload Docker image cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: /tmp/docker-cache
+          key: docker-${{ hashFiles('docker-compose.yml') }}
 
   web:
     name: Web
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.web == 'true'
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - name: Cache pnpm store
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.local/share/pnpm/store/v3
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Web lint and format
@@ -249,6 +343,8 @@ jobs:
     name: Mobile
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.mobile == 'true'
     permissions:
       contents: read
     steps:
@@ -269,6 +365,8 @@ jobs:
     name: Security
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     permissions:
       contents: read
     steps:
@@ -302,6 +400,8 @@ jobs:
     name: Server Cross-Compile
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true'
     permissions:
       contents: read
     strategy:
@@ -313,6 +413,9 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: cross-${{ matrix.target }}
       - name: Install cross
         uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2
         with:
@@ -334,11 +437,16 @@ jobs:
     name: Desktop Build (macOS)
     runs-on: macos-latest
     timeout-minutes: 45
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: desktop/src-tauri
       - name: Install desktop dependencies
         run: just desktop-install-ci
       - name: Create sidecar placeholders
