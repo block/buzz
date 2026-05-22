@@ -83,7 +83,7 @@ export function TerminalPanel({ channelId, isOpen }: TerminalPanelProps) {
   if (!isOpen) return null;
 
   return (
-    <div className="px-4 pb-2 pt-1">
+    <div className="px-4 pb-4 pt-0">
       <div
         className="pointer-events-auto relative flex flex-col overflow-hidden rounded-2xl border border-border/50 shadow-[0_4px_24px_rgba(0,0,0,0.08)] dark:shadow-[0_4px_24px_rgba(0,0,0,0.35)]"
         style={{ height: `${heightPx}px` }}
