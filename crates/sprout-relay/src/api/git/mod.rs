@@ -23,6 +23,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use crate::state::AppState;
 
 pub mod hook;
+pub mod manifest;
 pub mod policy;
 pub mod store;
 pub mod transport;
