@@ -457,4 +457,92 @@ mod tests {
         let result = hydrate_for_read(&st, &owner, "ghost").await.expect("ok");
         assert!(result.is_none(), "missing pointer must surface as None");
     }
+
+    /// Empty repo: pointer present, manifest carries an empty refs map. A
+    /// `git clone` of the hydrated repo must succeed and produce the same
+    /// behavior as a `git clone` of a freshly `git init --bare`'d repo —
+    /// no objects, no refs, HEAD pointing at the configured default branch.
+    #[tokio::test]
+    async fn live_hydrate_empty_repo() {
+        if !probe_enabled() {
+            return;
+        }
+        let st = store();
+
+        let manifest = Manifest {
+            version: 1,
+            head: "refs/heads/main".into(),
+            refs: BTreeMap::new(),
+            packs: vec![],
+            parent: None,
+        };
+        let manifest_bytes = manifest.canonical_bytes().expect("serialize");
+        let manifest_key = st
+            .put_manifest(&manifest_bytes)
+            .await
+            .expect("put_manifest");
+        let manifest_digest = manifest_key.strip_prefix("manifests/").unwrap();
+
+        let owner = format!("empty-{}", uuid::Uuid::new_v4());
+        let pkey = pointer_key(&owner, "void");
+        match st
+            .put_pointer(
+                &pkey,
+                manifest_digest.as_bytes(),
+                super::super::store::Precond::IfNoneMatchStar,
+            )
+            .await
+            .expect("put_pointer")
+        {
+            super::super::store::CasOutcome::Won(_) => {}
+            super::super::store::CasOutcome::LostRace => panic!("first INM* must win"),
+        }
+
+        let hydrated = hydrate_for_read(&st, &owner, "void")
+            .await
+            .expect("hydrate")
+            .expect("hydrate Some");
+
+        // HEAD points where the manifest said.
+        let head_file = tokio::fs::read_to_string(hydrated.path().join("HEAD"))
+            .await
+            .unwrap();
+        assert_eq!(head_file.trim(), "ref: refs/heads/main");
+
+        // No refs.
+        let mut cmd = Command::new("git");
+        cmd.current_dir(hydrated.path())
+            .args(["for-each-ref"])
+            .kill_on_drop(true);
+        let out = cmd.output().await.unwrap();
+        assert!(
+            out.stdout.is_empty(),
+            "expected no refs, got: {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+
+        // git clone must succeed against an empty repo and produce an empty
+        // working tree at the configured default branch.
+        let clone_target = TempDir::new().unwrap();
+        let mut clone = Command::new("git");
+        clone
+            .args([
+                "clone",
+                "--quiet",
+                hydrated.path().to_str().unwrap(),
+                clone_target.path().to_str().unwrap(),
+            ])
+            .kill_on_drop(true);
+        let cl_out = clone.output().await.unwrap();
+        let stderr = String::from_utf8_lossy(&cl_out.stderr);
+        // git emits "warning: You appear to have cloned an empty repository."
+        // on stderr but exits 0. The exit code is the protocol-level signal.
+        assert!(
+            cl_out.status.success(),
+            "empty clone failed (exit={:?}): {stderr}",
+            cl_out.status.code()
+        );
+        eprintln!("✓ empty-repo clone succeeded; stderr: {stderr}");
+        let _ = &pkey;
+    }
 }
