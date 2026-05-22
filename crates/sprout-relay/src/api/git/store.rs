@@ -80,6 +80,60 @@ pub enum StoreError {
     /// Any other backend / transport error.
     #[error("s3 backend error: {0}")]
     Backend(#[from] S3Error),
+    /// Conformance probe failed — backend does not satisfy A1/A2/A3.
+    #[error(transparent)]
+    Probe(ProbeFailure),
+}
+
+/// Configuration for `GitStore::run_conformance_probe`.
+///
+/// Defaults: 32-way concurrency, 3 rounds. The probe is a deployment gate —
+/// run at startup, fail-closed. See `docs/git-on-object-storage.md` §Conformance.
+#[derive(Debug, Clone)]
+pub struct ProbeConfig {
+    /// How many tasks race per round. Must be ≥ 2.
+    pub race_width: usize,
+    /// How many rounds to run each race phase.
+    pub race_rounds: usize,
+}
+
+impl Default for ProbeConfig {
+    fn default() -> Self {
+        Self {
+            race_width: 32,
+            race_rounds: 3,
+        }
+    }
+}
+
+/// Returned on a successful probe run. Kept intentionally thin — failure
+/// detail lives in `ProbeFailure` (the error variant).
+#[derive(Debug, Clone)]
+pub struct ProbeReport {
+    /// Concurrency used.
+    pub race_width: usize,
+    /// Rounds executed per race phase.
+    pub race_rounds: usize,
+}
+
+/// Failure carrying the phase that failed plus enough context to diagnose.
+#[derive(Debug, thiserror::Error)]
+#[error("conformance probe failed in phase '{phase}' (round {round}, key {key}): {reason}")]
+pub struct ProbeFailure {
+    /// One of `sequential`, `if_match_race`, `if_none_match_race`, `etag_consistency`.
+    pub phase: &'static str,
+    /// Round index (0-based) when this phase ran multiple rounds.
+    pub round: usize,
+    /// Object key the failure concerns (or `""` if not key-specific).
+    pub key: String,
+    /// Human-readable detail.
+    pub reason: String,
+}
+
+impl From<ProbeFailure> for StoreError {
+    fn from(f: ProbeFailure) -> Self {
+        StoreError::Probe(f)
+    }
 }
 
 /// Object-store client for git refs.
@@ -109,28 +163,43 @@ impl GitStore {
         Ok(Self { bucket })
     }
 
+    /// Compute the hex SHA-256 of `bytes`. The content-addressed key.
+    pub fn content_key(prefix: &str, bytes: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(bytes);
+        format!("{prefix}/{}", hex::encode(h.finalize()))
+    }
+
     /// Create-only write of a content-addressed object (pack or manifest).
     ///
-    /// Idempotent: a collision on the same content-addressed key is treated as
-    /// success, because the bytes are guaranteed to match (the key is their
-    /// digest). This is the §Push step 2 / step 6 primitive.
-    pub async fn put_immutable(
+    /// **The caller does not choose the key.** It is derived as
+    /// `<prefix>/<hex sha256(bytes)>` inside this method. This makes the
+    /// idempotency claim *constructive*: a 412 collision means the key already
+    /// holds bytes whose digest equals `sha256(these bytes)`, so by A1
+    /// (content-addressing) the stored bytes equal these bytes. Without this
+    /// enforcement, a buggy caller passing the wrong key would silently break
+    /// A1 detectability on read.
+    ///
+    /// Returns the key under which the object was written.
+    async fn put_immutable(
         &self,
-        key: &str,
+        prefix: &str,
         bytes: &[u8],
         content_type: &str,
-    ) -> Result<(), StoreError> {
+    ) -> Result<String, StoreError> {
+        let key = Self::content_key(prefix, bytes);
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
         match self
             .bucket
-            .put_object_with_content_type_and_headers(key, bytes, content_type, Some(headers))
+            .put_object_with_content_type_and_headers(&key, bytes, content_type, Some(headers))
             .await
         {
-            Ok(resp) if (200..300).contains(&resp.status_code()) => Ok(()),
-            // 412 on a content-addressed key means the key already holds the same
-            // bytes (by construction). Treat as success — A1 is preserved.
-            Err(S3Error::HttpFailWithBody(412, _)) => Ok(()),
+            Ok(resp) if (200..300).contains(&resp.status_code()) => Ok(key),
+            // 412 on a content-addressed key means the key already holds the
+            // same bytes (by construction — the key is the digest). A1 is
+            // preserved without a defensive GET.
+            Err(S3Error::HttpFailWithBody(412, _)) => Ok(key),
             Ok(resp) => Err(StoreError::Backend(S3Error::HttpFailWithBody(
                 resp.status_code(),
                 "unexpected status".into(),
@@ -139,15 +208,16 @@ impl GitStore {
         }
     }
 
-    /// `put_immutable` for a pack object (content-type `application/x-git-pack`).
-    pub async fn put_pack(&self, key: &str, bytes: &[u8]) -> Result<(), StoreError> {
-        self.put_immutable(key, bytes, "application/x-git-pack")
+    /// Write a pack object. Returns the content-addressed key (`packs/<hex>`).
+    pub async fn put_pack(&self, bytes: &[u8]) -> Result<String, StoreError> {
+        self.put_immutable("packs", bytes, "application/x-git-pack")
             .await
     }
 
-    /// `put_immutable` for a manifest object (JSON).
-    pub async fn put_manifest(&self, key: &str, bytes: &[u8]) -> Result<(), StoreError> {
-        self.put_immutable(key, bytes, "application/json").await
+    /// Write a manifest object. Returns the content-addressed key (`manifests/<hex>`).
+    pub async fn put_manifest(&self, bytes: &[u8]) -> Result<String, StoreError> {
+        self.put_immutable("manifests", bytes, "application/json")
+            .await
     }
 
     /// GET an object without digest verification.
@@ -187,32 +257,37 @@ impl GitStore {
         Ok(bytes)
     }
 
-    /// GET the pointer object, returning its ETag and bytes.
+    /// GET the pointer object, returning its ETag and bytes *from the same
+    /// response* — atomic snapshot.
     ///
     /// Returns `Ok(None)` if the pointer does not exist (first-push case).
+    ///
+    /// **Why one GET, not HEAD-then-GET.** A separate HEAD followed by GET
+    /// can straddle a concurrent writer: the HEAD's ETag and the GET's body
+    /// would describe different pointer versions, and a caller that later
+    /// did `IfMatch(etag_from_head)` would be predicating on a version it
+    /// never actually read. Reading both fields from the GET response keeps
+    /// the snapshot consistent (A2: a single GET observes a single committed
+    /// object). Verified empirically in `probe::probe_get_exposes_etag`.
     pub async fn get_pointer(&self, key: &str) -> Result<Option<(ETag, Bytes)>, StoreError> {
-        // `get_object` does not surface the response ETag in 0.37; do a HEAD first
-        // to capture the ETag, then GET. We accept the extra round-trip — pointer
-        // objects are tiny and the read path already pays one network hop for the
-        // manifest after this. Alternative would be `request_with_url`-level access,
-        // which entangles us with rust-s3 internals.
-        let head = match self.bucket.head_object(key).await {
-            Ok((info, status)) if (200..300).contains(&status) => info,
-            Ok((_, 404)) => return Ok(None),
-            Err(S3Error::HttpFailWithBody(404, _)) => return Ok(None),
-            Ok((_, status)) => {
-                return Err(StoreError::Backend(S3Error::HttpFailWithBody(
-                    status,
-                    "unexpected head status".into(),
-                )))
+        match self.bucket.get_object(key).await {
+            Ok(resp) => {
+                let headers = resp.headers();
+                let etag = headers
+                    .get("etag")
+                    .or_else(|| headers.get("ETag"))
+                    .cloned()
+                    .ok_or_else(|| {
+                        StoreError::Backend(S3Error::HttpFailWithBody(
+                            500,
+                            "GET pointer: response missing ETag".into(),
+                        ))
+                    })?;
+                Ok(Some((ETag(etag), Bytes::from(resp.to_vec()))))
             }
-            Err(e) => return Err(StoreError::Backend(e)),
-        };
-        let etag = head
-            .e_tag
-            .ok_or_else(|| StoreError::Backend(S3Error::HttpFail))?;
-        let bytes = self.get(key).await?;
-        Ok(Some((ETag(etag), bytes)))
+            Err(S3Error::HttpFailWithBody(404, _)) => Ok(None),
+            Err(e) => Err(StoreError::Backend(e)),
+        }
     }
 
     /// Write the pointer under a precondition (§Push step 7 — the CAS).
@@ -273,6 +348,277 @@ impl GitStore {
                 resp.status_code(),
                 "unexpected status".into(),
             ))),
+            Err(e) => Err(StoreError::Backend(e)),
+        }
+    }
+
+    /// Conformance probe — deployment gate per `docs/git-on-object-storage.md`
+    /// §Conformance. Fail-closed: any phase failure returns
+    /// `StoreError::Probe(ProbeFailure)` and the caller (relay startup) MUST
+    /// refuse to come up.
+    ///
+    /// Four phases:
+    ///
+    /// 1. **`sequential`** — write a content-addressed object, read it back,
+    ///    verify bytes. Tests A1 (content-addressed write) + A2
+    ///    (read-after-write).
+    /// 2. **`if_match_race`** — `race_width` parallel `put_pointer` calls
+    ///    predicated on the same ETag. Exactly one must `Won`; the rest must
+    ///    `LostRace`. Tests A3.
+    /// 3. **`if_none_match_race`** — `race_width` parallel create-only writes
+    ///    against the same digest-shaped key (the same `put_immutable` path
+    ///    `put_pack`/`put_manifest` use). Tests A1 + A3 on the create-only
+    ///    primitive. Counts raw HTTP outcomes (exactly one 2xx, rest 412) and
+    ///    asserts final stored bytes equal the racers' bytes.
+    /// 4. **`etag_consistency`** — round-trip an ETag from `get_pointer` into
+    ///    `put_pointer(IfMatch(...))` and assert `Won`. Tests that the token
+    ///    is opaque and stable between read and CAS.
+    pub async fn run_conformance_probe(&self, cfg: ProbeConfig) -> Result<ProbeReport, StoreError> {
+        use std::sync::Arc;
+        if cfg.race_width < 2 || cfg.race_rounds == 0 {
+            return Err(ProbeFailure {
+                phase: "config",
+                round: 0,
+                key: String::new(),
+                reason: format!(
+                    "race_width must be ≥ 2 and race_rounds ≥ 1, got {}/{}",
+                    cfg.race_width, cfg.race_rounds
+                ),
+            }
+            .into());
+        }
+        let nonce = uuid::Uuid::new_v4();
+        let pointer_key = format!("probe/pointer-{nonce}");
+
+        // -- Phase 1: sequential --------------------------------------------------
+        for round in 0..cfg.race_rounds {
+            let body = format!("probe-sequential-{nonce}-{round}").into_bytes();
+            let key = self.put_pack(&body).await?;
+            let got = self
+                .get_verified(&key, &Self::digest_hex(&body))
+                .await
+                .map_err(|e| ProbeFailure {
+                    phase: "sequential",
+                    round,
+                    key: key.clone(),
+                    reason: format!("read-after-write failed: {e}"),
+                })?;
+            if got[..] != body[..] {
+                return Err(ProbeFailure {
+                    phase: "sequential",
+                    round,
+                    key,
+                    reason: "read-after-write bytes mismatch".into(),
+                }
+                .into());
+            }
+        }
+
+        // -- Phase 2: if_match_race -----------------------------------------------
+        // Seed the pointer with a known value, then race N IfMatch updates.
+        let seed = b"probe-pointer-seed".to_vec();
+        let _ = self.bucket.delete_object(&pointer_key).await; // ignore 404
+        let seed_outcome = self
+            .put_pointer(&pointer_key, &seed, Precond::IfNoneMatchStar)
+            .await?;
+        let mut etag = match seed_outcome {
+            CasOutcome::Won(e) => e,
+            CasOutcome::LostRace => {
+                return Err(ProbeFailure {
+                    phase: "if_match_race",
+                    round: 0,
+                    key: pointer_key,
+                    reason: "could not seed pointer (lost race against self)".into(),
+                }
+                .into())
+            }
+        };
+        for round in 0..cfg.race_rounds {
+            let arc_self: Arc<&Self> = Arc::new(self);
+            let mut tasks = Vec::with_capacity(cfg.race_width);
+            for i in 0..cfg.race_width {
+                let me = Arc::clone(&arc_self);
+                let pkey = pointer_key.clone();
+                let et = etag.clone();
+                let body = format!("round={round},racer={i},nonce={nonce}").into_bytes();
+                tasks.push(async move { me.put_pointer(&pkey, &body, Precond::IfMatch(et)).await });
+            }
+            let outcomes = futures_util::future::join_all(tasks).await;
+            let mut winners = 0usize;
+            let mut new_etag: Option<ETag> = None;
+            for (i, outcome) in outcomes.into_iter().enumerate() {
+                match outcome {
+                    Ok(CasOutcome::Won(e)) => {
+                        winners += 1;
+                        new_etag = Some(e);
+                    }
+                    Ok(CasOutcome::LostRace) => {}
+                    Err(e) => {
+                        return Err(ProbeFailure {
+                            phase: "if_match_race",
+                            round,
+                            key: pointer_key,
+                            reason: format!("racer {i}: {e}"),
+                        }
+                        .into())
+                    }
+                }
+            }
+            if winners != 1 {
+                return Err(ProbeFailure {
+                    phase: "if_match_race",
+                    round,
+                    key: pointer_key,
+                    reason: format!("expected exactly 1 winner, got {winners}"),
+                }
+                .into());
+            }
+            etag = new_etag.expect("winner exists");
+        }
+
+        // -- Phase 3: if_none_match_race ------------------------------------------
+        // N parallel create-only writes targeting the same digest-shaped key.
+        // Bypass `put_immutable`'s 412-swallow to count raw outcomes.
+        for round in 0..cfg.race_rounds {
+            let body = format!("probe-inm-race-{nonce}-{round}").into_bytes();
+            let key = Self::content_key("probe/inm-race", &body);
+            // Clean slate.
+            let _ = self.bucket.delete_object(&key).await;
+            let arc_self: Arc<&Self> = Arc::new(self);
+            let mut tasks = Vec::with_capacity(cfg.race_width);
+            for _ in 0..cfg.race_width {
+                let me = Arc::clone(&arc_self);
+                let k = key.clone();
+                let b = body.clone();
+                tasks.push(async move { me.put_immutable_raw(&k, &b).await });
+            }
+            let results = futures_util::future::join_all(tasks).await;
+            let mut twos = 0usize;
+            let mut twelves = 0usize;
+            for (i, r) in results.into_iter().enumerate() {
+                match r {
+                    Ok(200..=299) => twos += 1,
+                    Ok(412) => twelves += 1,
+                    Ok(code) => {
+                        return Err(ProbeFailure {
+                            phase: "if_none_match_race",
+                            round,
+                            key,
+                            reason: format!("racer {i}: unexpected status {code}"),
+                        }
+                        .into())
+                    }
+                    Err(e) => {
+                        return Err(ProbeFailure {
+                            phase: "if_none_match_race",
+                            round,
+                            key,
+                            reason: format!("racer {i}: {e}"),
+                        }
+                        .into())
+                    }
+                }
+            }
+            if twos != 1 || twelves != cfg.race_width - 1 {
+                return Err(ProbeFailure {
+                    phase: "if_none_match_race",
+                    round,
+                    key,
+                    reason: format!(
+                        "expected 1×2xx + {}×412, got {twos}×2xx + {twelves}×412",
+                        cfg.race_width - 1
+                    ),
+                }
+                .into());
+            }
+            // Final bytes must equal the racers' bytes (content-addressed: any
+            // winner stored the same bytes by construction).
+            let read = self
+                .get_verified(&key, &Self::digest_hex(&body))
+                .await
+                .map_err(|e| ProbeFailure {
+                    phase: "if_none_match_race",
+                    round,
+                    key: key.clone(),
+                    reason: format!("post-race verified read failed: {e}"),
+                })?;
+            if read[..] != body[..] {
+                return Err(ProbeFailure {
+                    phase: "if_none_match_race",
+                    round,
+                    key,
+                    reason: "post-race bytes mismatch".into(),
+                }
+                .into());
+            }
+        }
+
+        // -- Phase 4: etag_consistency --------------------------------------------
+        // GET pointer, take its ETag, CAS-update with that ETag, expect Won.
+        // Proves the token round-trips opaquely between read and write.
+        for round in 0..cfg.race_rounds {
+            let (et, _bytes) =
+                self.get_pointer(&pointer_key)
+                    .await?
+                    .ok_or_else(|| ProbeFailure {
+                        phase: "etag_consistency",
+                        round,
+                        key: pointer_key.clone(),
+                        reason: "pointer vanished mid-probe".into(),
+                    })?;
+            let body = format!("probe-etag-{round}-{nonce}").into_bytes();
+            match self
+                .put_pointer(&pointer_key, &body, Precond::IfMatch(et))
+                .await?
+            {
+                CasOutcome::Won(_) => {}
+                CasOutcome::LostRace => {
+                    return Err(ProbeFailure {
+                        phase: "etag_consistency",
+                        round,
+                        key: pointer_key,
+                        reason: "GET-ETag → IfMatch chain lost race in a quiescent probe".into(),
+                    }
+                    .into())
+                }
+            }
+        }
+
+        // Cleanup pointer (immutable probe writes accumulate by design; the
+        // bucket's retention policy handles them, not the probe).
+        let _ = self.bucket.delete_object(&pointer_key).await;
+
+        Ok(ProbeReport {
+            race_width: cfg.race_width,
+            race_rounds: cfg.race_rounds,
+        })
+    }
+
+    /// Helper: hex SHA-256 of bytes.
+    fn digest_hex(bytes: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(bytes);
+        hex::encode(h.finalize())
+    }
+
+    /// Raw create-only PUT exposed for the probe's race-counting phase, where
+    /// we need to *see* 412 outcomes rather than swallow them as idempotent.
+    /// Returns the HTTP status code on success-or-412; bubbles other errors.
+    async fn put_immutable_raw(&self, key: &str, bytes: &[u8]) -> Result<u16, StoreError> {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
+        match self
+            .bucket
+            .put_object_with_content_type_and_headers(
+                key,
+                bytes,
+                "application/octet-stream",
+                Some(headers),
+            )
+            .await
+        {
+            Ok(resp) => Ok(resp.status_code()),
+            Err(S3Error::HttpFailWithBody(412, _)) => Ok(412),
             Err(e) => Err(StoreError::Backend(e)),
         }
     }
@@ -365,18 +711,19 @@ mod probe {
         }
         let st = store();
 
-        // 1. put_immutable + get_verified happy path.
+        // 1. put_pack returns the content-addressed key; get_verified happy path.
         let bytes = b"hello, git on object store".to_vec();
-        let key = format!("packs/{}", sha256_hex(&bytes));
-        st.put_pack(&key, &bytes).await.expect("put_pack");
+        let key = st.put_pack(&bytes).await.expect("put_pack");
+        assert_eq!(key, format!("packs/{}", sha256_hex(&bytes)));
         let got = st
             .get_verified(&key, &sha256_hex(&bytes))
             .await
             .expect("verified read");
         assert_eq!(&got[..], &bytes[..]);
 
-        // 2. put_immutable is idempotent (no error on second call).
-        st.put_pack(&key, &bytes).await.expect("idempotent");
+        // 2. put_pack is idempotent — second call returns the same key.
+        let key2 = st.put_pack(&bytes).await.expect("idempotent");
+        assert_eq!(key, key2);
 
         // 3. get_verified detects corruption — wrong expected digest fails.
         let bogus = "0".repeat(64);
@@ -433,6 +780,47 @@ mod probe {
 
         // Cleanup.
         let _ = st.bucket.delete_object(&pkey).await;
+        let _ = st.bucket.delete_object(&key).await;
+    }
+
+    /// End-to-end conformance probe against MinIO. This is the same code path
+    /// that will run at relay startup as a deployment gate.
+    #[tokio::test]
+    async fn probe_conformance() {
+        if !probe_enabled() {
+            return;
+        }
+        let st = store();
+        let report = st
+            .run_conformance_probe(ProbeConfig {
+                race_width: 8,
+                race_rounds: 2,
+            })
+            .await
+            .expect("conformance probe");
+        eprintln!("✓ probe report: {report:?}");
+        assert_eq!(report.race_width, 8);
+        assert_eq!(report.race_rounds, 2);
+    }
+
+    /// Quick probe: confirm rust-s3's `get_object` exposes ETag on the response.
+    #[tokio::test]
+    async fn probe_get_exposes_etag() {
+        if !probe_enabled() {
+            return;
+        }
+        let st = store();
+        let key = format!("probe/etag-{}.txt", uuid::Uuid::new_v4());
+        st.bucket
+            .put_object_with_content_type(&key, b"hi", "text/plain")
+            .await
+            .expect("put");
+        let resp = st.bucket.get_object(&key).await.expect("get");
+        let headers = resp.headers();
+        eprintln!("GET headers: {headers:?}");
+        let etag = headers.get("etag").or_else(|| headers.get("ETag")).cloned();
+        assert!(etag.is_some(), "GET response must carry ETag header");
+        eprintln!("ETag from GET: {etag:?}");
         let _ = st.bucket.delete_object(&key).await;
     }
 }
