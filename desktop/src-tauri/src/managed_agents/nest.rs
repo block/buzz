@@ -34,7 +34,7 @@ const NEST_DIRS: &[&str] = &[
 /// Fully static — no runtime interpolation, no secrets, no user paths.
 const AGENTS_MD: &str = include_str!("nest_agents.md");
 
-/// Default SKILL.md content for the sprout-cli Claude Code skill.
+/// Default SKILL.md content for the sprout-cli skill.
 /// Written to ~/.sprout/.agents/skills/sprout-cli/SKILL.md on first init.
 const SPROUT_CLI_SKILL_MD: &str = include_str!("nest_skill.md");
 
@@ -72,8 +72,8 @@ pub fn ensure_nest() -> Result<(), String> {
 /// - Creates the root directory and all subdirectories.
 /// - Writes `AGENTS.md` only if it doesn't already exist.
 /// - Writes `.agents/skills/sprout-cli/SKILL.md` only if it doesn't already exist.
-/// - Creates harness-specific symlinks (e.g. `.claude/skills/sprout-cli`) pointing
-///   to the canonical `.agents/skills/sprout-cli` directory.
+/// - Creates harness-specific symlinks pointing to the canonical
+///   `.agents/skills/sprout-cli` directory for each known provider.
 /// - Sets 700 permissions on the root, all subdirectories, and the skill
 ///   directory tree (Unix).
 ///
