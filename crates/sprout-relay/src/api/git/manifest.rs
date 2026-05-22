@@ -47,8 +47,12 @@ pub struct Manifest {
     /// Store keys of every pack covering `refs`. Sorted ascending —
     /// `canonical_bytes` enforces this on serialize.
     pub packs: Vec<String>,
-    /// Digest of the manifest this one supersedes, or `None` for the first
-    /// push to a fresh repo.
+    /// **Bare hex digest** of the manifest this one supersedes (64 chars,
+    /// SHA-256), or `None` for the first push to a fresh repo. Contrast with
+    /// `packs` which carries full store keys (`packs/<hex>`); `parent` is the
+    /// digest alone, matching the pointer-body shape so `Inv_RefDerivedFromParent`
+    /// reads literally as `parent = pointer.digest`. Writers must strip any
+    /// `manifests/` prefix before assigning. Enforced by `validate()`.
     pub parent: Option<String>,
 }
 
@@ -84,6 +88,12 @@ pub enum ManifestError {
     /// returns false).
     #[error("manifest head is empty")]
     EmptyHead,
+    /// `parent` is not a bare 64-char hex digest. Common mistake: storing the
+    /// full store key (`manifests/<hex>`) instead of stripping the prefix.
+    /// Breaks the "manifest.parent == pointer.digest" model invariant
+    /// (`Inv_RefDerivedFromParent`).
+    #[error("manifest parent is not a bare 64-char hex digest: {0:?}")]
+    MalformedParent(String),
 }
 
 /// Conservative refname validation, used symmetrically on both the write side
@@ -114,6 +124,26 @@ pub fn is_hex_oid(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Bare manifest-digest predicate (64-char hex SHA-256).
+///
+/// Distinct from `is_hex_oid` (which also accepts 40-char SHA-1 for ref OIDs):
+/// manifest digests are *always* SHA-256, so this is the tighter predicate
+/// for the `Manifest::parent` field.
+fn is_manifest_digest(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The canonical pointer key for a repo: `repos/<owner>/<repo>/pointer`.
+///
+/// Single source of truth shared by `cas_publish` (write side) and `hydrate`
+/// (read side). Strips a trailing `.git` if the caller passed it. The
+/// `repos/<owner>/<repo>/` namespace leaves room for future sibling keys
+/// (archive flag, gc state, etc.) co-located under each repo.
+pub fn pointer_key(owner: &str, repo: &str) -> String {
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    format!("repos/{owner}/{repo}/pointer")
+}
+
 impl Manifest {
     /// Validate pre-commit invariants.
     ///
@@ -127,6 +157,7 @@ impl Manifest {
     /// - `head` is non-empty and passes `is_safe_refname`.
     /// - Every key in `refs` passes `is_safe_refname`.
     /// - Every value in `refs` is a hex OID per `is_hex_oid`.
+    /// - `parent`, if `Some`, is a bare 64-char hex digest (not a store key).
     ///
     /// Read-side `hydrate` runs the same predicates as defense-in-depth.
     pub fn validate(&self) -> Result<(), ManifestError> {
@@ -145,6 +176,11 @@ impl Manifest {
                     refname: refname.clone(),
                     oid: oid.clone(),
                 });
+            }
+        }
+        if let Some(p) = &self.parent {
+            if !is_manifest_digest(p) {
+                return Err(ManifestError::MalformedParent(p.clone()));
             }
         }
         Ok(())
@@ -298,6 +334,45 @@ mod tests {
             m.validate(),
             Err(ManifestError::MalformedOid { .. })
         ));
+    }
+
+    #[test]
+    fn validate_rejects_parent_with_store_prefix() {
+        // The common bug Perci named: storing the full key in `parent` instead
+        // of the bare digest. `Inv_RefDerivedFromParent` reads `parent =
+        // pointer.digest`; carrying the prefix breaks the model literal.
+        let mut m = sample();
+        m.parent = Some(format!("manifests/{}", "a".repeat(64)));
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::MalformedParent(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_short_parent() {
+        let mut m = sample();
+        m.parent = Some("abc".into());
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::MalformedParent(_))
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_no_parent() {
+        let mut m = sample();
+        m.parent = None;
+        m.validate().expect("no parent is fine (first push)");
+    }
+
+    #[test]
+    fn pointer_key_strips_dot_git() {
+        assert_eq!(pointer_key("alice", "myrepo"), "repos/alice/myrepo/pointer");
+        assert_eq!(
+            pointer_key("alice", "myrepo.git"),
+            "repos/alice/myrepo/pointer"
+        );
     }
 
     #[test]
