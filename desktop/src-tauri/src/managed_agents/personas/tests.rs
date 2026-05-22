@@ -1,6 +1,7 @@
 use super::{
-    ensure_persona_ids_are_active, ensure_persona_is_active, merge_personas, validate_pack_id,
-    validate_persona_activation_change, validate_persona_deletion, BUILT_IN_PERSONAS,
+    ensure_persona_ids_are_active, ensure_persona_is_active, merge_personas,
+    migrate_retired_personas, validate_pack_id, validate_persona_activation_change,
+    validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
 };
 use crate::managed_agents::PersonaRecord;
 
@@ -161,6 +162,9 @@ fn merge_personas_backfills_new_builtins_for_existing_store() {
 
 #[test]
 fn merge_personas_demotes_retired_builtins() {
+    // custom_persona uses "Custom prompt", which doesn't match the original
+    // retired system prompt, so the migration pass soft-deprecates rather
+    // than removes the record.
     let mut retired = custom_persona("builtin:reviewer", "Reviewer");
     retired.is_builtin = true;
     retired.is_active = true;
@@ -172,9 +176,11 @@ fn merge_personas_demotes_retired_builtins() {
     let demoted = records
         .iter()
         .find(|record| record.id == "builtin:reviewer")
-        .expect("retired built-in should be retained as a custom persona");
+        .expect("retired built-in should be retained as a soft-deprecated custom persona");
     assert!(!demoted.is_builtin);
-    assert!(demoted.is_active);
+    // migrate_retired_personas deactivates customized retired personas.
+    assert!(!demoted.is_active);
+    assert_eq!(demoted.display_name, "Reviewer (retired)");
     assert_eq!(demoted.created_at, original_created_at);
     assert_eq!(demoted.updated_at, "2026-04-01T00:00:00Z");
 }
@@ -343,4 +349,84 @@ fn pack_id_rejects_too_long() {
     // 128 chars is fine
     let max_id = "a".repeat(128);
     assert!(validate_pack_id(&max_id).is_ok());
+}
+
+// ── migrate_retired_personas ──────────────────────────────────────────────────
+
+#[test]
+fn migrate_retires_unmodified_personas() {
+    // Simulate a store from before the Solo/Kit/Scout transition: all 6
+    // retired personas with original system prompts.
+    let mut stored: Vec<PersonaRecord> = RETIRED_PERSONAS
+        .iter()
+        .map(|(id, name, prompt)| PersonaRecord {
+            id: id.to_string(),
+            display_name: name.to_string(),
+            system_prompt: prompt.to_string(),
+            is_builtin: false, // already demoted by merge_personas
+            ..custom_persona(id, name)
+        })
+        .collect();
+
+    let changed = migrate_retired_personas(&mut stored);
+
+    assert!(changed);
+    assert!(
+        stored.is_empty(),
+        "all unmodified retired personas should be removed, got: {:?}",
+        stored.iter().map(|r| &r.id).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn migrate_preserves_customized_personas() {
+    let mut stored = vec![PersonaRecord {
+        id: "builtin:researcher".to_string(),
+        display_name: "Researcher".to_string(),
+        system_prompt: "My custom research workflow with special instructions".to_string(),
+        is_builtin: false,
+        is_active: true,
+        ..custom_persona("builtin:researcher", "Researcher")
+    }];
+
+    let changed = migrate_retired_personas(&mut stored);
+
+    assert!(changed);
+    assert_eq!(stored.len(), 1);
+    let record = &stored[0];
+    assert_eq!(record.display_name, "Researcher (retired)");
+    assert!(!record.is_active);
+    assert_eq!(
+        record.system_prompt,
+        "My custom research workflow with special instructions"
+    );
+}
+
+#[test]
+fn migrate_is_idempotent() {
+    // No retired personas present — should be a no-op.
+    let mut stored = vec![custom_persona("custom:test", "Custom")];
+    let original_len = stored.len();
+
+    let changed = migrate_retired_personas(&mut stored);
+
+    assert!(!changed);
+    assert_eq!(stored.len(), original_len);
+
+    // Second run with already-retired (renamed) persona — also a no-op.
+    let mut stored_with_retired = vec![PersonaRecord {
+        id: "builtin:researcher".to_string(),
+        display_name: "Researcher (retired)".to_string(),
+        system_prompt: "My custom prompt".to_string(),
+        is_builtin: false,
+        is_active: false,
+        ..custom_persona("builtin:researcher", "Researcher (retired)")
+    }];
+
+    let changed = migrate_retired_personas(&mut stored_with_retired);
+    assert!(
+        !changed,
+        "already-retired persona should not trigger another change"
+    );
+    assert_eq!(stored_with_retired[0].display_name, "Researcher (retired)");
 }

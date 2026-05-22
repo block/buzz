@@ -461,6 +461,39 @@ Your name is Scout. You are friendly and helpful. You are understated, but have 
     },
 ];
 
+const RETIRED_PERSONAS: &[(&str, &str, &str)] = &[
+    (
+        "builtin:orchestrator",
+        "Orchestrator",
+        "You are an orchestration agent. Coordinate multi-step work across specialized agents, keep the overall plan moving, and synthesize results into a clear final outcome. When another agent should take a task, @mention them explicitly with the assignment, expected deliverable, and any relevant constraints or deadlines.",
+    ),
+    (
+        "builtin:researcher",
+        "Researcher",
+        "You are a research agent. Gather relevant information, compare sources, call out uncertainty, and return concise findings with evidence.",
+    ),
+    (
+        "builtin:planner",
+        "Planner",
+        "You are a planning agent. Turn ambiguous requests into structured plans with milestones, dependencies, risks, and clear next actions. Do not implement the work yourself unless asked.",
+    ),
+    (
+        "builtin:implementer",
+        "Builder",
+        "You are a builder agent. Execute tasks directly, make code and configuration changes carefully, validate the result, and explain important decisions and follow-up items.",
+    ),
+    (
+        "builtin:refactor",
+        "Refactor",
+        "You are a refactoring agent. Improve structure, naming, duplication, and module boundaries without changing externally observable behavior. Keep changes incremental, preserve compatibility, and add or update validation when behavior could drift.",
+    ),
+    (
+        "builtin:reviewer",
+        "Reviewer",
+        "You are a review agent. Inspect plans, code, and outputs for bugs, regressions, edge cases, security issues, and missing tests. Prioritize findings by severity, cite concrete evidence, and keep summaries secondary to the actual review.",
+    ),
+];
+
 fn personas_store_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(managed_agents_base_dir(app)?.join("personas.json"))
 }
@@ -562,8 +595,60 @@ fn merge_personas(mut stored: Vec<PersonaRecord>, now: &str) -> (Vec<PersonaReco
         }
     }
 
+    // Remove or soft-deprecate retired built-in personas that were replaced
+    // by Solo/Kit/Scout. Runs after demotion so the records are already
+    // marked as non-builtin.
+    if migrate_retired_personas(&mut stored) {
+        changed = true;
+    }
+
     sort_personas(&mut stored);
     (stored, changed)
+}
+
+/// Remove or soft-deprecate retired built-in personas.
+///
+/// - If the system prompt matches the original unmodified content, the record
+///   is removed entirely (safe — the user never customized it).
+/// - If the system prompt was customized, the record is kept with a renamed
+///   display name and `is_active = false` so it stays in the catalog but
+///   doesn't clutter the active agent list.
+///
+/// Always-on idempotent check — no migration version flag needed.
+fn migrate_retired_personas(stored: &mut Vec<PersonaRecord>) -> bool {
+    let mut changed = false;
+
+    stored.retain_mut(|record| {
+        if let Some((_, original_name, original_prompt)) = RETIRED_PERSONAS
+            .iter()
+            .find(|(id, _, _)| *id == record.id)
+        {
+            if record.system_prompt == *original_prompt {
+                // Unmodified — safe to remove entirely.
+                eprintln!(
+                    "sprout-desktop: persona-migration: removing unmodified retired persona '{}'",
+                    record.display_name
+                );
+                changed = true;
+                return false; // remove from vec
+            }
+
+            // Customized — soft-deprecate.
+            let retired_suffix = " (retired)";
+            if !record.display_name.ends_with(retired_suffix) {
+                eprintln!(
+                    "sprout-desktop: persona-migration: retiring customized persona '{}' → '{} (retired)'",
+                    record.display_name, record.display_name
+                );
+                record.display_name = format!("{}{}", original_name, retired_suffix);
+                record.is_active = false;
+                changed = true;
+            }
+        }
+        true // keep non-retired records
+    });
+
+    changed
 }
 
 pub fn ensure_persona_is_active(

@@ -4,6 +4,7 @@ mod events;
 mod huddle;
 mod managed_agents;
 mod media_proxy;
+mod migration;
 mod models;
 pub mod nostr_convert;
 mod prevent_sleep;
@@ -397,6 +398,8 @@ pub fn run() {
         .setup(move |app| {
             let app_handle = app.handle().clone();
             let shutdown_started = Arc::clone(&restore_shutdown_started);
+
+            migration::sync_shared_agent_data(&app_handle);
 
             // Resolve persisted identity key (env var → file → generate+save).
             // This is fatal — the app should not start with an ephemeral identity
