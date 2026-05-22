@@ -33,7 +33,7 @@ use futures_util::future::try_join_all;
 use tempfile::TempDir;
 use tokio::process::Command;
 
-use super::manifest::{Manifest, ManifestError};
+use super::manifest::{is_hex_oid, is_safe_refname, Manifest, ManifestError};
 use super::store::{GitStore, StoreError};
 
 /// A bare repo hydrated to a temporary directory.
@@ -218,25 +218,9 @@ async fn run_git(cwd: &Path, args: &[&str]) -> Result<(), HydrateError> {
     Ok(())
 }
 
-/// Conservative refname validation — refuses traversal, control chars, and
-/// non-`refs/` prefixes. The writer should already enforce this; we re-check
-/// because we're about to use it as a file path.
-fn is_safe_refname(s: &str) -> bool {
-    if !s.starts_with("refs/") {
-        return false;
-    }
-    if s.contains("..") || s.contains("//") || s.starts_with('/') || s.ends_with('/') {
-        return false;
-    }
-    s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
-}
-
-fn is_hex_oid(s: &str) -> bool {
-    // Accept both SHA-1 (40) and SHA-256 (64) oids — sprout pins SHA-1 today
-    // but future-proof for the algorithm transition.
-    (s.len() == 40 || s.len() == 64) && s.chars().all(|c| c.is_ascii_hexdigit())
-}
+// `is_safe_refname` and `is_hex_oid` live in `super::manifest` — symmetric
+// write-side (Manifest::validate) and read-side (here) protection, single
+// source of truth. See `manifest.rs` for the predicates + tests.
 
 #[cfg(test)]
 mod tests {
