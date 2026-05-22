@@ -48,7 +48,7 @@ neteq = { version = "0.8", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 nostr = { version = "0.37", features = ["nip44"] }
-nostr-compat = { package = "nostr", version = "0.36" }
+nostr-compat = { package = "nostr", version = "0.44" }
 zeroize = "1"
 reqwest = { version = "0.13", features = ["json", "query", "stream"] }
 url = "2"
