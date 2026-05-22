@@ -52,7 +52,7 @@ pub struct Manifest {
     pub parent: Option<String>,
 }
 
-/// Errors from manifest (de)serialization.
+/// Errors from manifest (de)serialization or validation.
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
     /// `serde_json` failed to encode or decode.
@@ -66,13 +66,98 @@ pub enum ManifestError {
         /// The version we support.
         expected: u32,
     },
+    /// A refname in `refs` (or `head`) violates `is_safe_refname` — must start
+    /// with `refs/`, no traversal, no control chars. Symmetric write-side check
+    /// for the reader-side validation in `api::git::hydrate`.
+    #[error("manifest contains unsafe ref name {0:?}")]
+    UnsafeRefName(String),
+    /// An object id in `refs` is not a valid hex SHA-1 (40) or SHA-256 (64).
+    #[error("manifest ref {refname:?} has malformed oid {oid:?}")]
+    MalformedOid {
+        /// The ref carrying the bad oid.
+        refname: String,
+        /// The oid that failed validation.
+        oid: String,
+    },
+    /// Manifest `head` is empty — pre-CAS validation must reject this so we
+    /// never commit an un-clone-able manifest (read side `is_safe_refname("")`
+    /// returns false).
+    #[error("manifest head is empty")]
+    EmptyHead,
+}
+
+/// Conservative refname validation, used symmetrically on both the write side
+/// (in `Manifest::validate`, before `put_manifest`) and the read side (in
+/// `api::git::hydrate`, before writing the ref to disk).
+///
+/// Refuses traversal (`..`), null/newline/control chars, non-`refs/` prefixes,
+/// and leading/trailing/double slashes. Allowed alphabet:
+/// `[a-zA-Z0-9_./-]`.
+///
+/// Sharing one predicate is load-bearing: any divergence creates the
+/// "valid CAS, un-clone-able output" hazard.
+pub fn is_safe_refname(s: &str) -> bool {
+    if !s.starts_with("refs/") {
+        return false;
+    }
+    if s.contains("..") || s.contains("//") || s.starts_with('/') || s.ends_with('/') {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
+}
+
+/// Hex-OID predicate. Accepts both SHA-1 (40 chars) and SHA-256 (64 chars) —
+/// sprout pins SHA-1 today but the predicate is forward-looking. Used
+/// symmetrically by write-side validation and read-side hydration.
+pub fn is_hex_oid(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 impl Manifest {
+    /// Validate pre-commit invariants.
+    ///
+    /// **Writers must call this before `canonical_bytes` → `put_manifest`.**
+    /// A manifest that hydrators reject (unsafe refname, malformed oid, empty
+    /// HEAD) MUST NOT be written: it would CAS successfully and then 5xx every
+    /// subsequent clone — "valid CAS, un-clone-able output". Pre-CAS rejection
+    /// turns those into push-time 4xx, which is the right surface for the bug.
+    ///
+    /// Checks:
+    /// - `head` is non-empty and passes `is_safe_refname`.
+    /// - Every key in `refs` passes `is_safe_refname`.
+    /// - Every value in `refs` is a hex OID per `is_hex_oid`.
+    ///
+    /// Read-side `hydrate` runs the same predicates as defense-in-depth.
+    pub fn validate(&self) -> Result<(), ManifestError> {
+        if self.head.is_empty() {
+            return Err(ManifestError::EmptyHead);
+        }
+        if !is_safe_refname(&self.head) {
+            return Err(ManifestError::UnsafeRefName(self.head.clone()));
+        }
+        for (refname, oid) in &self.refs {
+            if !is_safe_refname(refname) {
+                return Err(ManifestError::UnsafeRefName(refname.clone()));
+            }
+            if !is_hex_oid(oid) {
+                return Err(ManifestError::MalformedOid {
+                    refname: refname.clone(),
+                    oid: oid.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Serialize to canonical bytes suitable for `put_manifest`.
     ///
     /// Sorts `packs` defensively (writer is responsible for keeping them
     /// sorted, but a misuse should not silently break content-addressing).
+    ///
+    /// Does NOT call `validate()` — callers must invoke it explicitly so a
+    /// validation failure is visible at the write seam, not buried inside
+    /// serialization.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, ManifestError> {
         let mut owned = self.clone();
         owned.packs.sort();
@@ -146,6 +231,73 @@ mod tests {
         let bytes = m.canonical_bytes().unwrap();
         let back = Manifest::from_bytes(&bytes).unwrap();
         assert_eq!(back.packs, vec!["packs/cc", "packs/dd"]);
+    }
+
+    #[test]
+    fn safe_refnames_predicate() {
+        assert!(is_safe_refname("refs/heads/main"));
+        assert!(is_safe_refname("refs/tags/v1.0.0"));
+        assert!(is_safe_refname("refs/heads/feat/cas-publish"));
+        assert!(!is_safe_refname("refs/heads/../escape"));
+        assert!(!is_safe_refname("HEAD"));
+        assert!(!is_safe_refname(""));
+        assert!(!is_safe_refname("refs/heads/"));
+        assert!(!is_safe_refname("/refs/heads/main"));
+        assert!(!is_safe_refname("refs/heads/main\nrefs/heads/evil"));
+        assert!(!is_safe_refname("refs/heads/main\0"));
+    }
+
+    #[test]
+    fn hex_oid_predicate() {
+        assert!(is_hex_oid(&"a".repeat(40)));
+        assert!(is_hex_oid(&"a".repeat(64)));
+        assert!(!is_hex_oid(&"a".repeat(39)));
+        assert!(!is_hex_oid(&"g".repeat(40)));
+        assert!(!is_hex_oid(""));
+    }
+
+    #[test]
+    fn validate_happy_path() {
+        sample().validate().expect("sample manifest must validate");
+    }
+
+    #[test]
+    fn validate_rejects_empty_head() {
+        let mut m = sample();
+        m.head = String::new();
+        assert!(matches!(m.validate(), Err(ManifestError::EmptyHead)));
+    }
+
+    #[test]
+    fn validate_rejects_unsafe_head() {
+        let mut m = sample();
+        m.head = "refs/heads/..".into();
+        assert!(matches!(m.validate(), Err(ManifestError::UnsafeRefName(_))));
+    }
+
+    #[test]
+    fn validate_rejects_non_refs_head() {
+        let mut m = sample();
+        m.head = "HEAD".into();
+        assert!(matches!(m.validate(), Err(ManifestError::UnsafeRefName(_))));
+    }
+
+    #[test]
+    fn validate_rejects_unsafe_ref_name() {
+        let mut m = sample();
+        m.refs.insert("refs/heads/bad\nname".into(), "a".repeat(40));
+        assert!(matches!(m.validate(), Err(ManifestError::UnsafeRefName(_))));
+    }
+
+    #[test]
+    fn validate_rejects_malformed_oid() {
+        let mut m = sample();
+        m.refs
+            .insert("refs/heads/ok".into(), "not-a-hex-oid".into());
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::MalformedOid { .. })
+        ));
     }
 
     #[test]
