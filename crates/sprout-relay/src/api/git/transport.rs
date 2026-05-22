@@ -762,7 +762,7 @@ async fn finalize_push(state: &Arc<AppState>, ctx: PushContext) -> Response {
             repo_id: &ctx.repo_id,
             head: &success.manifest.head,
             refs: &success.manifest.refs,
-            actor_pubkey_hex: &hex::encode(ctx.pusher.serialize()),
+            actor_pubkey_hex: &hex::encode(ctx.pusher.to_bytes()),
         };
         match build_ref_state_event(&inputs, &state.relay_keypair) {
             Ok(event) => match state.db.insert_event(&event, None).await {

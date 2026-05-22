@@ -201,16 +201,13 @@ async fn git_clone_push_fetch_force_roundtrip() {
     let s3 = GitS3Probe::from_env();
 
     // Announce the repo (kind:30617) so the relay creates the bare repo + hook.
-    let announce = EventBuilder::new(
-        Kind::from(30617),
-        "",
-        vec![
-            Tag::parse(&["d", &repo]).unwrap(),
-            Tag::parse(&["name", "e2e git repo"]).unwrap(),
-        ],
-    )
-    .sign_with_keys(&owner)
-    .unwrap();
+    let announce = EventBuilder::new(Kind::from(30617), "")
+        .tags(vec![
+            Tag::parse(["d", &repo]).unwrap(),
+            Tag::parse(["name", "e2e git repo"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
     post_event(&announce).await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
@@ -341,16 +338,13 @@ async fn git_concurrent_push_one_wins_and_repo_recovers() {
     let repo = format!("e2e-git-concurrent-{}", std::process::id());
     let s3 = GitS3Probe::from_env();
 
-    let announce = EventBuilder::new(
-        Kind::from(30617),
-        "",
-        vec![
-            Tag::parse(&["d", &repo]).unwrap(),
-            Tag::parse(&["name", "e2e concurrent git repo"]).unwrap(),
-        ],
-    )
-    .sign_with_keys(&owner)
-    .unwrap();
+    let announce = EventBuilder::new(Kind::from(30617), "")
+        .tags(vec![
+            Tag::parse(["d", &repo]).unwrap(),
+            Tag::parse(["name", "e2e concurrent git repo"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
     post_event(&announce).await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 

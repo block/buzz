@@ -109,7 +109,7 @@ pub fn build_ref_state_event(
     // p-tag: sprout extension (pusher or owner pubkey).
     tags.push(Tag::public_key(actor));
 
-    let event = EventBuilder::new(Kind::Custom(30618), "", tags)
+    let event = EventBuilder::new(Kind::Custom(30618), "").tags(tags)
         .sign_with_keys(relay_keys)
         .map_err(|e| BuildError::Sign(e.to_string()))?;
 
