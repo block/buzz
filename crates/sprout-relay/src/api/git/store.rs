@@ -49,10 +49,9 @@ pub enum Precond {
 /// and must be classified here so callers can decide retry vs. non-ff. On
 /// `Won`, the returned `ETag` is the PUT response's ETag and can be fed
 /// directly into the next `IfMatch` round (verified empirically against MinIO
-/// in `probe::probe_full_roundtrip`). If a backend ever omits the response
-/// ETag, the value will be empty and the next `IfMatch(empty)` will be
-/// rejected as a normal `LostRace` — no silent corruption, only a forced
-/// retry via `get_pointer`.
+/// in `probe::probe_full_roundtrip`). A backend that succeeds on the CAS PUT
+/// but omits the response ETag is treated as non-conforming and fails the
+/// operation with `StoreError::Backend` — see `classify_cas`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CasOutcome {
     /// CAS succeeded; the new pointer ETag (suitable for the next `IfMatch`).
@@ -340,7 +339,19 @@ impl GitStore {
                     .get("etag")
                     .or_else(|| headers.get("ETag"))
                     .cloned()
-                    .unwrap_or_default();
+                    .ok_or_else(|| {
+                        // Fail closed: a CAS that we can't chain (because the
+                        // backend didn't return an ETag) is not a `Won` — it's
+                        // a non-conforming backend. The conformance probe will
+                        // catch this; in production we'd rather refuse than
+                        // hand the caller `ETag("")` and force-fail the next CAS.
+                        StoreError::Backend(S3Error::HttpFailWithBody(
+                            resp.status_code(),
+                            "CAS succeeded but response missing ETag header \
+                             (backend does not satisfy ETag-token consistency)"
+                                .into(),
+                        ))
+                    })?;
                 Ok(CasOutcome::Won(ETag(etag)))
             }
             Err(S3Error::HttpFailWithBody(412, _)) => Ok(CasOutcome::LostRace),
