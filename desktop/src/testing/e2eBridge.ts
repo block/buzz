@@ -34,6 +34,15 @@ type E2eConfig = {
     profileReadError?: string;
     profileUpdateError?: string;
     stallWebsocketSends?: boolean;
+    // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
+    // semantics. These three drive the archive-button gate matrix in
+    // tests/e2e/identity-archive.spec.ts; they're plumbed into:
+    // - `list_archived_identities` (archivedIdentities)
+    // - `resolve_oa_owner` (oaOwnerIsMe)
+    // - `resetMockRelayMembers` (relayRole)
+    archivedIdentities?: string[];
+    oaOwnerIsMe?: boolean;
+    relayRole?: "owner" | "admin" | "member" | null;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -682,13 +691,21 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
 
 function resetMockRelayMembers(config: E2eConfig | undefined) {
   const pubkey = getMockMemberPubkey(config);
+  // Drive the active identity's role from `mock.relayRole` so the e2e harness
+  // can exercise the NIP-IA admin gate (owner/admin → true, member/null →
+  // false). Default stays `owner` to preserve existing test behavior.
+  const role = config?.mock?.relayRole;
+  const activeRoleMember =
+    role === null
+      ? null
+      : {
+          pubkey,
+          role: role ?? "owner",
+          added_by: null,
+          created_at: isoMinutesAgo(120),
+        };
   mockRelayMembers = [
-    {
-      pubkey,
-      role: "owner",
-      added_by: null,
-      created_at: isoMinutesAgo(120),
-    },
+    ...(activeRoleMember ? [activeRoleMember] : []),
     {
       pubkey: ALICE_PUBKEY,
       role: "admin",
@@ -1621,10 +1638,26 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
           {
             id: "mock-general-welcome",
             pubkey: DEFAULT_MOCK_IDENTITY.pubkey,
-            created_at: Math.floor(Date.now() / 1000),
+            created_at: Math.floor(Date.now() / 1000) - 120,
             kind: 9,
             tags: [["h", channelId]],
             content: "Welcome to #general",
+            sig: "mocksig".repeat(20).slice(0, 128),
+          },
+          // Alice authored — gives e2e specs a non-self profile pane to open
+          // by clicking the second message-row's author button. Used by
+          // tests/e2e/identity-archive.spec.ts to exercise the admin / OA /
+          // none-of-the-above branches of the NIP-IA gate. Both seeds are
+          // backdated (welcome at -120s, Alice at -60s) so user-sent messages
+          // in other specs always land after both — preserving
+          // `message-row.first()` = welcome and `.last()` = sent.
+          {
+            id: "mock-general-alice",
+            pubkey: ALICE_PUBKEY,
+            created_at: Math.floor(Date.now() / 1000) - 60,
+            kind: 9,
+            tags: [["h", channelId]],
+            content: "Hey team — checking in.",
             sig: "mocksig".repeat(20).slice(0, 128),
           },
         ]
@@ -5037,6 +5070,26 @@ export function maybeInstallE2eTauriMocks() {
       case "plugin:event|listen":
         // Tauri event system (pairing, huddle) — no-op in e2e, return unlisten fn ID
         return Math.floor(Math.random() * 1_000_000);
+      // ── NIP-IA identity archival ────────────────────────────────────────
+      // These mocks drive the archive-button gate matrix in
+      // tests/e2e/identity-archive.spec.ts. Defaults keep the button hidden
+      // for non-self viewees so the negative case is the unsurprising one.
+      case "resolve_oa_owner": {
+        const isMe = activeConfig?.mock?.oaOwnerIsMe ?? false;
+        const owner = isMe
+          ? (identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey)
+          : "ff".repeat(32);
+        return { owner, is_me: isMe };
+      }
+      case "list_archived_identities": {
+        const archived = activeConfig?.mock?.archivedIdentities ?? [];
+        return { archived };
+      }
+      case "archive_identity":
+      case "unarchive_identity":
+        // The spec only verifies UI state, not the submitted request shape;
+        // returning null mirrors the Rust submit_event success path.
+        return null;
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }

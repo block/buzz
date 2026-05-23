@@ -51,6 +51,25 @@ type MockBridgeOptions = {
   profileReadError?: string;
   profileUpdateError?: string;
   stallWebsocketSends?: boolean;
+  // NIP-IA gate inputs — drive the archive-button gate matrix in
+  // tests/e2e/identity-archive.spec.ts.
+  /**
+   * Lowercase-hex pubkeys returned by `list_archived_identities`. Drives the
+   * "Archived on this relay" flair + Unarchive button.
+   */
+  archivedIdentities?: string[];
+  /**
+   * Drives the `is_me` field of `resolve_oa_owner`. When true, the harness
+   * reports the active identity as the verified NIP-OA owner of the viewee
+   * (owner-path branch of the gate).
+   */
+  oaOwnerIsMe?: boolean;
+  /**
+   * Active identity's role in the seeded `mockRelayMembers`. `null` removes
+   * the active identity from the membership list entirely (admin-path branch
+   * evaluates false).
+   */
+  relayRole?: "owner" | "admin" | "member" | null;
 };
 
 type BridgeOptions = {
