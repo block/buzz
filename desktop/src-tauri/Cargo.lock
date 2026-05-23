@@ -4418,9 +4418,9 @@ checksum = "7204ed6420f698836b76d4d5c2ec5dec7585fd5c3a788fd1cde855d1de598239"
 
 [[package]]
 name = "rubato"
-version = "2.0.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce96ead1a91f7895704a9f08ea5947dfc8bd7c1f2936a22295b655ec67e5c6ef"
+checksum = "d4be9c88e3d722d3d36939e41941f6b6f52810c1235bf19998a7d4535b402892"
 dependencies = [
  "audioadapter",
  "audioadapter-buffers",

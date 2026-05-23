@@ -69,7 +69,7 @@ regex = "1"
 axum = "0.8"
 rodio = "0.22"
 earshot = "1.0"
-rubato = "2.0"
+rubato = "3.0"
 audioadapter-buffers = "3.0"
 tempfile = "3"
 
