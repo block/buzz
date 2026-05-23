@@ -26,7 +26,7 @@ dependencies:
   uuid: ^4.5.1
   image_picker: ^1.1.2
   video_player: ^2.10.1
-  package_info_plus: ^8.3.0
+  package_info_plus: ^10.0.0
 
 dev_dependencies:
   flutter_test:
