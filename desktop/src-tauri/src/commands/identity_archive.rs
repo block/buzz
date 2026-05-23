@@ -112,6 +112,7 @@ pub async fn resolve_oa_owner(
 // ── Archive / unarchive requests ────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArchiveRequest {
     pub target_pubkey: String,
     #[serde(default)]
@@ -123,6 +124,7 @@ pub struct ArchiveRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UnarchiveRequest {
     pub target_pubkey: String,
     #[serde(default)]
@@ -345,5 +347,29 @@ mod tests {
         assert_eq!(raw[1], OWNER_HEX);
         assert_eq!(raw[2], CONDITIONS);
         assert_eq!(raw[3], SIG);
+    }
+
+    /// Regression: the frontend sends the request payload in camelCase
+    /// (`targetPubkey`, `replacedBy`); these structs MUST deserialize it.
+    /// Without `#[serde(rename_all = "camelCase")]` the archive/unarchive
+    /// commands fail to deserialize at runtime — a failure the e2e mock hides
+    /// because it returns before parsing the payload. Red-if-broken guard.
+    #[test]
+    fn archive_request_deserializes_camel_case_payload() {
+        let req: ArchiveRequest = serde_json::from_str(
+            r#"{"targetPubkey":"abc","content":"bye","reason":"bot-rebuilt","replacedBy":"def"}"#,
+        )
+        .expect("camelCase archive payload must deserialize");
+        assert_eq!(req.target_pubkey, "abc");
+        assert_eq!(req.content, "bye");
+        assert_eq!(req.reason.as_deref(), Some("bot-rebuilt"));
+        assert_eq!(req.replaced_by.as_deref(), Some("def"));
+
+        // Minimal payload (only the required field) still deserializes.
+        let minimal: UnarchiveRequest =
+            serde_json::from_str(r#"{"targetPubkey":"abc"}"#).expect("minimal payload");
+        assert_eq!(minimal.target_pubkey, "abc");
+        assert_eq!(minimal.content, "");
+        assert!(minimal.reason.is_none());
     }
 }

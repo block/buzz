@@ -350,6 +350,11 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | RELAY_ADMIN_REMOVE_MEMBER
             | RELAY_ADMIN_CHANGE_ROLE
             | KIND_NIP43_LEAVE_REQUEST
+            // NIP-IA: identity archive/unarchive requests drive relay-global
+            // archive state (8002/8003/13535) and are audited as global request
+            // events. A stray `h` tag must not channel-scope them.
+            | KIND_IA_ARCHIVE_REQUEST
+            | KIND_IA_UNARCHIVE_REQUEST
     )
 }
 
@@ -1736,6 +1741,19 @@ mod tests {
         KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_LONG_FORM,
         KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF, KIND_USER_STATUS,
     };
+
+    #[test]
+    fn nip_ia_requests_are_global_only() {
+        // NIP-IA requests drive relay-global archive state; a stray `h` tag
+        // must not channel-scope them, or the global audit trail breaks.
+        for kind in [KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST] {
+            assert!(is_global_only_kind(kind), "kind {kind} must be global-only");
+            assert!(
+                !requires_h_channel_scope(kind),
+                "kind {kind} must not require an h tag"
+            );
+        }
+    }
 
     #[test]
     fn channel_scoped_content_kinds_require_h_tags() {
