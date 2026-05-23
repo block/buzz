@@ -7,7 +7,7 @@ RUN cargo build --release -p sprout-relay \
     && strip target/release/sprout-relay
 
 # ── Web build stage (Node/pnpm) ────────────────────────────
-FROM --platform=linux/amd64 node:22-bookworm-slim AS web-builder
+FROM --platform=linux/amd64 node:24-bookworm-slim AS web-builder
 WORKDIR /build
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY web/ web/
