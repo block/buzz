@@ -219,9 +219,16 @@ pub struct ArchivedIdentitiesSnapshot {
 /// this and tests membership client-side to drive the "Archived" flair.
 ///
 /// Per spec §Snapshot and Delta Consistency: the latest valid `kind:13535`
-/// signed by the relay identity is authoritative. The HTTP `/query` bridge
-/// already returns events the relay accepted, so signature checking is the
-/// relay's responsibility on the read path.
+/// signed by the relay identity is authoritative.
+///
+/// NIP-IA §Client Behavior says clients MUST verify the snapshot is signed by
+/// the relay's NIP-11 `self` key. We do not yet filter by that key here: the
+/// desktop only ever talks to its own configured relay, where server-side
+/// enforcement makes archive state trustworthy, and we have no NIP-11 `self`
+/// fetch wired up (the sibling relay-signed kind:13534 membership list is
+/// consumed the same way). Author-filtering against NIP-11 `self` is the
+/// correct hardening for an untrusted/multi-relay client and is tracked as a
+/// follow-up — not a runtime gap on Sprout's relay.
 #[tauri::command]
 pub async fn list_archived_identities(
     state: State<'_, AppState>,
