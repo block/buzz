@@ -129,6 +129,7 @@ fn run_install_command(step: &str, command: &str) -> InstallStepResult {
     }
 
     let mut child = match cmd
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
