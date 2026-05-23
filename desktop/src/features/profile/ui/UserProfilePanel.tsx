@@ -1,5 +1,12 @@
 import * as React from "react";
-import { Activity, Copy, MessageSquare, X } from "lucide-react";
+import {
+  Activity,
+  Archive,
+  ArchiveRestore,
+  Copy,
+  MessageSquare,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { useUserProfileQuery } from "@/features/profile/hooks";
@@ -7,7 +14,14 @@ import {
   useRelayAgentsQuery,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
+import {
+  useArchiveIdentityMutation,
+  useIsIdentityArchived,
+  useOaOwnerQuery,
+  useUnarchiveIdentityMutation,
+} from "@/features/identity-archive/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
+import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { PresenceBadge } from "@/features/presence/ui/PresenceBadge";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
@@ -79,6 +93,17 @@ export function UserProfilePanel({
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
   const presenceQuery = usePresenceQuery([pubkey]);
   const userStatusQuery = useUserStatusQuery([pubkey]);
+  const myMembershipQuery = useMyRelayMembershipQuery();
+  const oaOwnerQuery = useOaOwnerQuery(
+    pubkey,
+    // Skip the kind:0 lookup when viewing yourself — the OA gate is for
+    // archiving *other* identities you own.
+    currentPubkey !== undefined &&
+      pubkey.toLowerCase() !== currentPubkey.toLowerCase(),
+  );
+  const isArchived = useIsIdentityArchived(pubkey);
+  const archiveMutation = useArchiveIdentityMutation();
+  const unarchiveMutation = useUnarchiveIdentityMutation();
   const { onOpenAgentSession } = useAgentSession();
 
   const profile = profileQuery.data;
@@ -96,6 +121,42 @@ export function UserProfilePanel({
   const isSelf =
     currentPubkey !== undefined && pubkeyLower === currentPubkey.toLowerCase();
   const canViewActivity = isBot && Boolean(onOpenAgentSession);
+
+  // NIP-IA gates. Button shows when ANY of: self path (acting on own pubkey),
+  // admin path (current user is owner/admin in relay_members), or owner path
+  // (current user is the verified NIP-OA owner of the viewee per its live
+  // kind:0). The relay picks the consent path; we just ensure the request is
+  // permitted to be built locally.
+  const myRole = myMembershipQuery.data?.role;
+  const isRelayAdminOrOwner = myRole === "owner" || myRole === "admin";
+  const isOaOwnerOfViewee = oaOwnerQuery.data?.isMe === true;
+  const canArchive = isSelf || isRelayAdminOrOwner || isOaOwnerOfViewee;
+
+  const handleArchive = React.useCallback(() => {
+    archiveMutation.mutate(
+      { targetPubkey: pubkey },
+      {
+        onSuccess: () => toast.success("Archived on this relay"),
+        onError: (error) =>
+          toast.error(
+            `Archive failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+      },
+    );
+  }, [archiveMutation, pubkey]);
+
+  const handleUnarchive = React.useCallback(() => {
+    unarchiveMutation.mutate(
+      { targetPubkey: pubkey },
+      {
+        onSuccess: () => toast.success("Unarchived on this relay"),
+        onError: (error) =>
+          toast.error(
+            `Unarchive failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+      },
+    );
+  }, [pubkey, unarchiveMutation]);
 
   const handleCopyPubkey = React.useCallback(() => {
     void navigator.clipboard.writeText(pubkey).then(() => {
@@ -189,6 +250,18 @@ export function UserProfilePanel({
                   {profile.nip05Handle}
                 </p>
               ) : null}
+              {/* NIP-IA "Archived" flair (relay-scoped). Spec §Client Behavior:
+                  surface archive metadata where relevant. */}
+              {isArchived ? (
+                <span
+                  className="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-300"
+                  data-testid="user-profile-archived-flair"
+                  title="This identity is archived on this relay. Historical events remain attributed to it."
+                >
+                  <Archive className="h-3 w-3" />
+                  Archived on this relay
+                </span>
+              ) : null}
             </div>
 
             {/* Presence */}
@@ -274,6 +347,37 @@ export function UserProfilePanel({
                 <Activity className="h-3.5 w-3.5 text-muted-foreground" />
                 View activity log
               </button>
+            ) : null}
+            {/* NIP-IA archive / unarchive. Gated to self / relay admin / OA
+                owner of viewee. The relay verifies authority — these gates are
+                purely a UX guard. */}
+            {canArchive && isArchived === false ? (
+              <Button
+                className="w-full"
+                data-testid="user-profile-archive-identity"
+                disabled={archiveMutation.isPending}
+                onClick={handleArchive}
+                type="button"
+                variant="secondary"
+              >
+                <Archive className="h-4 w-4" />
+                {archiveMutation.isPending ? "Archiving…" : "Archive identity"}
+              </Button>
+            ) : null}
+            {canArchive && isArchived === true ? (
+              <Button
+                className="w-full"
+                data-testid="user-profile-unarchive-identity"
+                disabled={unarchiveMutation.isPending}
+                onClick={handleUnarchive}
+                type="button"
+                variant="secondary"
+              >
+                <ArchiveRestore className="h-4 w-4" />
+                {unarchiveMutation.isPending
+                  ? "Unarchiving…"
+                  : "Unarchive identity"}
+              </Button>
             ) : null}
           </div>
         </div>

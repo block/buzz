@@ -512,6 +512,11 @@ pub fn run() {
             add_relay_member,
             remove_relay_member,
             change_relay_member_role,
+            // NIP-IA identity archival
+            archive_identity,
+            unarchive_identity,
+            list_archived_identities,
+            resolve_oa_owner,
             list_relay_agents,
             list_managed_agents,
             create_managed_agent,
