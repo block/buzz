@@ -48,7 +48,7 @@ tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip"
 
 # Database
 sqlx = { version = "0.9", features = [
-    "runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"
+    "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"
 ] }
 
 # Redis
