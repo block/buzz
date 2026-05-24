@@ -217,16 +217,16 @@ If Sprout disappears tomorrow, your repos still work on gitworkshop.dev, your pa
 |---|---|
 | Channels, forums, DMs, canvases | ✅ Ships today |
 | Workflow engine (triggers, traces, conditional logic) | ✅ Ships today |
-| 44-tool MCP server + ACP agent harness | ✅ Ships today |
+| MCP server + ACP agent harness | ✅ Ships today |
 | Blossom media storage (SHA-256, S3) | ✅ Ships today |
 | Approval gates | 🚧 Infrastructure exists; executor wiring in progress |
 | Project binding (kind:30617 + `sprout-` tags) | 📋 Designed |
-| Git hosting (smart HTTP + NIP-34) | 📋 Designed |
+| Git hosting (smart HTTP + NIP-34) | ✅ Ships today |
 | Merge coordinator | 📋 Designed |
 | NIP-34 issues (kind:1621) | 📋 Designed |
 | Web-of-trust reputation | 📋 Designed |
 
-The collaboration platform is built. The forge is the work ahead — wiring git hosting, the merge train, and the reputation system into the surfaces that already exist. See [VISION.md](VISION.md) for the platform and [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) for the sovereign relay story.
+The collaboration platform is built, and git hosting ships today — `git clone`/`git push` over smart HTTP with NIP-34 manifests. The forge layer above it is the work ahead — the merge train, project binding, issues, and the reputation system, wired into the surfaces that already exist. See [VISION.md](VISION.md) for the platform and [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) for the sovereign relay story.
 
 ---
 

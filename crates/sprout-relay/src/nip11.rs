@@ -119,7 +119,7 @@ impl RelayInfo {
             pubkey: None,
             contact: None,
             supported_nips,
-            software: "https://github.com/sprout-rs/sprout".to_string(),
+            software: "https://github.com/block/sprout".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             limitation: Some(relay_limitation()),
             relay_self: relay_self.map(|s| s.to_string()),

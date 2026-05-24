@@ -139,7 +139,7 @@ End-to-end tests live in `crates/sprout-test-client/tests/`:
 Run them with (requires running infrastructure):
 
 ```bash
-cargo test -p sprout-test-client
+cargo test -p sprout-test-client -- --ignored
 ```
 
 See `TESTING.md` for the full multi-agent E2E testing guide.
@@ -296,7 +296,6 @@ sprout-acp        ← ACP harness (bridges Sprout relay events to AI agents via 
 sprout-proxy      ← Nostr client compatibility layer
 sprout-sdk        ← Typed Nostr event builders (used by sprout-mcp and sprout-cli)
 sprout-media      ← Blossom/S3 media storage
-sprout-huddle     ← LiveKit integration
 sprout-cli        ← Agent-first CLI for interacting with the relay
 sprout-admin      ← Operator CLI
 sprout-test-client← Integration test harness

@@ -61,40 +61,13 @@
 //!
 //! ## Available Tools
 //!
-//! 42 tools total, organized into toolsets. Tools are organized into toolsets. Set
-//! `SPROUT_TOOLSETS` to control which are active (default: 25 core tools).
-//!
-//! ### Messaging (default toolset)
-//! - **`send_message`** — Post a message to a channel.
-//! - **`send_diff_message`** — Post a diff-formatted message.
-//! - **`edit_message`** — Edit an existing message.
-//! - **`delete_message`** — Delete a message.
-//! - **`get_messages`** — Fetch recent messages from a channel (default 50, max 200).
-//! - **`get_thread`** — Fetch replies in a message thread.
-//! - **`search`** — Full-text search across channels.
-//! - **`get_feed`** — Retrieve the agent's personalized home feed (mentions, needs-action
-//!   items, channel activity). Replaces the former `get_feed_mentions` / `get_feed_actions`.
-//! - **`add_reaction`** / **`remove_reaction`** / **`get_reactions`** — Emoji reactions.
-//!
-//! ### Channels (default toolset)
-//! - **`list_channels`** / **`get_channel`** — List or inspect channels.
-//! - **`join_channel`** / **`leave_channel`** — Membership management.
-//! - **`update_channel`** / **`set_channel_topic`** / **`set_channel_purpose`** — Metadata.
-//! - **`open_dm`** — Open a direct-message channel.
-//! - **`list_channel_members`** — List members of a channel.
-//!
-//! ### Channel Admin (`channel_admin` toolset)
-//! - **`create_channel`** / **`archive_channel`** / **`unarchive_channel`**
-//! - **`add_channel_member`** / **`remove_channel_member`**
-//!
-//! ### Canvas (`canvas` toolset)
-//! - **`get_canvas`** — Retrieve the shared canvas document for a channel.
-//! - **`set_canvas`** — Write or replace the canvas document for a channel.
-//!
-//! ### Workflows
-//! - **`trigger_workflow`** / **`approve_step`** — Trigger and approve steps (default toolset).
-//! - **`list_workflows`** / **`create_workflow`** / **`update_workflow`** /
-//!   **`delete_workflow`** / **`get_workflow_runs`** — Workflow admin (`workflow_admin` toolset).
+//! Tools are organized into toolsets; set `SPROUT_TOOLSETS` to control which are
+//! active. The authoritative list and per-toolset grouping is `ALL_TOOLS` in
+//! [`toolsets`] — this doc deliberately doesn't duplicate it, since a hand-copied
+//! list drifts. The default toolset covers messaging, threads, search, feed,
+//! reactions, channel basics, DMs, profiles/presence, and workflow triggers;
+//! opt-in toolsets add channel admin, canvas, workflow admin, forums, social,
+//! and media.
 //!
 //! ## Example Configuration (Claude Desktop)
 //!
@@ -113,7 +86,7 @@
 //! }
 //! ```
 //!
-//! [Sprout]: https://github.com/sprout-rs/sprout
+//! [Sprout]: https://github.com/block/sprout
 //! [NIP-42]: https://github.com/nostr-protocol/nips/blob/master/42.md
 
 // NOTE: `parse_relay_message`, `OkResponse`, and `RelayMessage` from `relay_client`

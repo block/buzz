@@ -10,25 +10,38 @@ code style, PR process, architecture), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```
 crates/
-  sprout-relay        # WebSocket relay server — main entry point
-  sprout-core         # Core types, event verification, filter matching
+  # Relay + core
+  sprout-relay        # WebSocket relay server — main entry point; also hosts git + huddle audio
+  sprout-core         # Core types, event verification, filter matching, kind registry
   sprout-db           # Postgres event store and data access layer
   sprout-auth         # Authentication and authorization
   sprout-pubsub       # Redis pub/sub fan-out, presence, typing indicators
-  sprout-mcp          # MCP server providing AI agent tools
-  sprout-acp          # ACP harness bridging Sprout events to AI agents
-  sprout-workflow     # YAML-as-code workflow engine (evalexpr conditions)
   sprout-search       # Typesense-backed full-text search
   sprout-audit        # Hash-chain audit log
-  sprout-huddle       # LiveKit audio/video integration
-  sprout-proxy        # Nostr client compatibility proxy
+  sprout-media        # Blossom/S3 media storage
+  # Agent surface
+  sprout-mcp          # MCP server providing AI agent tools (being phased out in favor of the CLI)
+  sprout-acp          # ACP harness bridging Sprout events to AI agents
+  sprout-agent        # Minimal ACP-compliant agent (non-streaming, tool-calls-as-output)
+  sprout-dev-mcp      # Developer MCP server — shell + file-edit tools
+  sprout-persona      # Agent persona packs
+  sprout-workflow     # YAML-as-code workflow engine (evalexpr conditions)
+  # Clients + interop
+  sprout-proxy        # Nostr client compatibility proxy (NIP-28)
+  sprout-pair-relay   # Ephemeral sidecar relay for NIP-AB device pairing
+  sprout-pairing-cli  # CLI for NIP-AB device pairing interop testing
+  git-sign-nostr      # Sign git objects with a Nostr key
+  git-credential-nostr # Git credential helper for Nostr-authed push/fetch
+  # Tooling + shared
+  sprout-cli          # Agent-first CLI
+  sprout-sdk          # Typed Nostr event builders
   sprout-admin        # Operator CLI for relay administration
   sprout-test-client  # Integration test client and E2E test suite
-  sprout-sdk          # Typed Nostr event builders (used by sprout-mcp and sprout-cli)
-  sprout-media        # Blossom/S3 media storage
-  sprout-cli          # Agent-first CLI
+  sprig               # All-in-one harness bundling ACP, agent, and dev MCP
 
 desktop/              # Tauri 2 + React 19 desktop app
+web/                  # Browser web client (repo browser, served by the relay)
+mobile/               # Flutter mobile app
 migrations/           # SQL migrations (auto-applied on relay startup)
 scripts/              # Dev tooling
 .env.example          # Config template — copy to .env before running

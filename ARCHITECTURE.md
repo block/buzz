@@ -6,7 +6,7 @@ Sprout is a self-hosted team communication platform built on the Nostr protocol 
 
 The relay is the single source of truth. All reads and writes flow through it. There is no peer-to-peer event exchange, no gossip, no replication — just clients connecting to one relay over WebSocket, and the relay enforcing auth, verifying signatures, persisting events, fanning out to subscribers, indexing for search, and triggering automation.
 
-Sprout is a Rust monorepo (~72K LOC across 17 crates), licensed Apache 2.0 under Block, Inc.
+Sprout is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
 
 ---
 
@@ -81,15 +81,14 @@ sprout-core  (zero I/O — types, verification, filter matching, kind registry)
 sprout-mcp          (agent API surface — stdio MCP server; depends on sprout-core and sprout-sdk)
 sprout-acp          (agent harness — bridges relay @mentions → AI agents via ACP/JSON-RPC)
 sprout-proxy        (NIP-28 compatibility proxy — translates standard Nostr clients ↔ Sprout relay)
-sprout-huddle       (LiveKit audio/video integration — standalone, not wired into relay)
 sprout-sdk          (typed Nostr event builders — used by sprout-mcp, sprout-acp, and sprout-cli)
 sprout-media        (Blossom/S3 media storage)
 sprout-cli          (agent-first CLI)
-sprout-admin        (operator CLI: mint/list API tokens)
+sprout-admin        (operator CLI: relay membership + key generation)
 sprout-test-client  (integration test harness + manual CLI)
 ```
 
-**Key architectural principle:** The relay is the single source of truth. `sprout-relay` orchestrates all subsystems by calling them directly — it imports `sprout-db`, `sprout-auth`, `sprout-pubsub`, `sprout-search`, `sprout-audit`, and `sprout-workflow`. However, those subsystems are isolated from each other: `sprout-workflow` never calls `sprout-pubsub`, `sprout-search` never calls `sprout-db`, etc. Cross-subsystem coordination happens only through the relay. `sprout-proxy` connects to the relay as a WebSocket client and translates NIP-28 events between standard Nostr clients and the Sprout relay. `sprout-huddle` is a standalone crate not yet wired into the relay.
+**Key architectural principle:** The relay is the single source of truth. `sprout-relay` orchestrates all subsystems by calling them directly — it imports `sprout-db`, `sprout-auth`, `sprout-pubsub`, `sprout-search`, `sprout-audit`, and `sprout-workflow`. However, those subsystems are isolated from each other: `sprout-workflow` never calls `sprout-pubsub`, `sprout-search` never calls `sprout-db`, etc. Cross-subsystem coordination happens only through the relay. `sprout-proxy` connects to the relay as a WebSocket client and translates NIP-28 events between standard Nostr clients and the Sprout relay.
 
 ---
 
@@ -316,7 +315,7 @@ After registering, the REQ handler queries Postgres for stored events matching t
 
 ### sprout-core — Shared Types and Verification
 
-**1,196 LOC. Zero I/O.** The foundation every other crate builds on. Explicitly prohibits tokio, sqlx, redis, and axum in its `Cargo.toml`.
+**Zero I/O.** The foundation every other crate builds on. Explicitly prohibits tokio, sqlx, redis, and axum in its `Cargo.toml`.
 
 **Key types:**
 
@@ -345,7 +344,7 @@ pub const ALL_KINDS: &[u32]  // 80 entries (KIND_AUTH excluded — never stored)
 
 ### sprout-auth — Authentication and Authorization
 
-**2,310 LOC.** Handles authentication paths, scope enforcement, and token operations.
+Handles authentication paths, scope enforcement, and token operations.
 
 **Auth paths:**
 
@@ -378,7 +377,7 @@ pub trait RateLimiter: Send + Sync { ... }
 
 ### sprout-db — Postgres Event Store
 
-**7,367 LOC.** All database access. Uses `sqlx::query()` (runtime, not compile-time macros) — no `.sqlx/` offline cache required.
+All database access. Uses `sqlx::query()` (runtime, not compile-time macros) — no `.sqlx/` offline cache required.
 
 **Key operations:**
 
@@ -416,7 +415,7 @@ pub trait RateLimiter: Send + Sync { ... }
 
 ### sprout-pubsub — Redis Pub/Sub, Presence, Typing
 
-**887 LOC.** Manages Redis pub/sub fan-out, presence tracking, and typing indicators.
+Manages Redis pub/sub fan-out, presence tracking, and typing indicators.
 
 **Architecture:**
 
@@ -448,7 +447,7 @@ EXPIRE sprout:typing:{channel_id} 60
 
 ### sprout-search — Typesense Integration
 
-**1,126 LOC.** Full-text search via Typesense. All HTTP calls use `reqwest` with `X-TYPESENSE-API-KEY`.
+Full-text search via Typesense. All HTTP calls use `reqwest` with `X-TYPESENSE-API-KEY`.
 
 **Collection schema (7 fields):** `id`, `content`, `kind` (int32), `pubkey` (facet), `channel_id` (facet, optional), `created_at` (int64, default sort), `tags_flat` (string[]).
 
@@ -466,7 +465,7 @@ EXPIRE sprout:typing:{channel_id} 60
 
 ### sprout-audit — Hash-Chain Audit Log
 
-**776 LOC.** Tamper-evident append-only log with SHA-256 hash chaining.
+Tamper-evident append-only log with SHA-256 hash chaining.
 
 **Hash chain:** each entry stores `prev_hash` (hash of the previous entry). `verify_chain()` walks entries and recomputes hashes to detect tampering. Genesis entry uses `GENESIS_HASH` (64 zeros).
 
@@ -482,7 +481,7 @@ EXPIRE sprout:typing:{channel_id} 60
 
 ### sprout-workflow — YAML-as-Code Automation Engine
 
-**4,012 LOC.** Parses, validates, and executes channel-scoped workflow definitions.
+Parses, validates, and executes channel-scoped workflow definitions.
 
 **Workflow definition structure:**
 ```yaml
@@ -533,7 +532,7 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 
 ### sprout-proxy — NIP-28 Compatibility Proxy
 
-**4,933 LOC.** Lets standard Nostr clients (Coracle, nak, Amethyst, nostr-tools, nostr-sdk) read and write Sprout channels using the NIP-28 Public Chat Channels protocol. Connects to the relay as a WebSocket client; presents a standard NIP-01/NIP-11/NIP-28/NIP-42 interface to external clients.
+Lets standard Nostr clients (Coracle, nak, Amethyst, nostr-tools, nostr-sdk) read and write Sprout channels using the NIP-28 Public Chat Channels protocol. Connects to the relay as a WebSocket client; presents a standard NIP-01/NIP-11/NIP-28/NIP-42 interface to external clients.
 
 **Key modules:** `server.rs` (Axum WebSocket server, NIP-11, NIP-42 auth, filter splitting), `translate.rs` (bidirectional kind/tag translation), `upstream.rs` (persistent relay connection with auto-reconnect and subscription replay), `channel_map.rs` (bidirectional UUID ↔ kind:40 event ID mapping), `shadow_keys.rs` (deterministic keypair derivation), `guest_store.rs` (pubkey-based guest registry), `invite_store.rs` (token-based invite system).
 
@@ -575,27 +574,23 @@ Kind 5 (deletion) is intentionally blocked inbound — the relay's deletion hand
 
 ---
 
-### sprout-huddle — LiveKit Audio/Video Integration
+### Huddle Audio — WebSocket Opus Relay
 
-**728 LOC.** Mints LiveKit JWT tokens and parses LiveKit webhook events. Defines session/participant data structures (no active registry — types only).
+Real-time voice lives inside `sprout-relay` (`src/audio/`), not a separate crate. A WebSocket endpoint (`wss://.../huddle/{channel_id}/audio`) authenticates each participant with a NIP-42 challenge, checks channel membership, admits them to an in-memory room, and forwards opaque Opus frames between peers. No external SFU.
 
-**JWT token:** HS256, 6-hour TTL (overridable). Claims: `iss` (api_key), `sub` (identity), `iat`, `exp`, `name`, `video` (VideoGrant: room, roomJoin, canPublish, canSubscribe).
+**Frame protocol (v2):** 8-byte big-endian header (sequence `u16`, 48 kHz timestamp `u32`, level dBov `i8`, flags `u8`) followed by an opaque Opus payload. Invalid `level_dbov` values are clamped rather than dropped — losing a metric beats losing audio.
 
-**Webhook verification:** HMAC-SHA256 of raw body bytes, hex-encoded. Constant-time comparison via `hmac` crate's built-in `verify_slice`.
+**Room state:** an admission guard synchronizes joins against the room's ended flag; soft cap 25 peers (hard cap 255 via `u8` peer index). Per-peer audio uses a bounded channel (drop-on-full); the control channel is separate and never drops join/leave.
 
-**5 webhook event types:** `RoomStarted`, `RoomFinished`, `ParticipantJoined`, `ParticipantLeft`, `TrackPublished`.
+**Lifecycle events:** the relay emits Nostr events for participant joined / left and huddle ended; the desktop client emits huddle started and guidelines. When the last peer leaves, the room ends and the channel archives atomically.
 
-**Session types:** `HuddleSession` with `Vec<HuddleParticipant>`. Participants have `joined_at`, `left_at`, and `Vec<TrackInfo>`. These are data structures and helpers only — no session registry or lifecycle manager exists in the crate.
-
-**Room naming:** `"sprout-{uuid}"` format via `create_room_name(channel_id)`.
-
-**Does NOT:** emit Nostr events for huddle lifecycle (relay-side integration is planned). Does NOT persist session state.
+**Not yet built:** recording and per-track publishing (the corresponding kinds are reserved, no producer exists).
 
 ---
 
 ### sprout-relay — The Server
 
-**14,327 LOC.** Axum WebSocket server. Ties all other crates together. The only crate that imports and orchestrates all subsystems.
+Axum WebSocket server. Ties all other crates together. The only crate that imports and orchestrates all subsystems.
 
 **`AppState`** (Arc-wrapped, shared across all connections — key fields shown, not exhaustive):
 
@@ -686,19 +681,9 @@ pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), 
 
 ### sprout-mcp — Agent API Surface
 
-**4,879 LOC.** stdio MCP server using the `rmcp` SDK. The interface through which AI agents interact with Sprout. Logs to stderr (stdout is the MCP JSON-RPC channel).
+stdio MCP server using the `rmcp` SDK. The interface through which AI agents interact with Sprout. Logs to stderr (stdout is the MCP JSON-RPC channel).
 
-**43 registered tools (+ 1 implemented but unregistered, + 3 deferred media/realtime toolsets):**
-
-| Category | Tools |
-|----------|-------|
-| Default | `send_message`, `send_diff_message`, `edit_message`, `delete_message`, `get_messages`, `get_thread`, `search`, `get_feed`, `add_reaction`, `remove_reaction`, `get_reactions`, `list_channels`, `get_channel`, `join_channel`, `leave_channel`, `update_channel`, `set_channel_topic`, `set_channel_purpose`, `open_dm`, `get_users`, `set_profile`, `get_presence`, `set_presence`, `trigger_workflow`, `approve_step` |
-| Channel admin | `create_channel`, `archive_channel`, `unarchive_channel`, `add_channel_member`, `remove_channel_member`, `list_channel_members`, `delete_channel` |
-| DMs | `add_dm_member`, `hide_dm`, `list_dms` |
-| Canvas | `get_canvas`, `set_canvas` |
-| Workflow admin | `list_workflows`, `create_workflow`, `update_workflow`, `delete_workflow`, `get_workflow_runs` |
-| Identity | `set_channel_add_policy` |
-| Forums | `vote_on_post` |
+The registered tool surface is grouped into toolsets, enabled per server via `SPROUT_TOOLSETS`. The authoritative list (and per-toolset grouping) is `ALL_TOOLS` in `crates/sprout-mcp/src/toolsets.rs` — the doc deliberately doesn't duplicate it, since a hand-copied list drifts. The default toolset covers messaging, threads, search, feed, reactions, channel basics, DMs, profiles/presence, and workflow triggers; opt-in toolsets add channel admin, canvas, workflow admin, forums, social, and media.
 
 **Key implementation details:**
 - Connects to relay via WebSocket (`tokio_tungstenite`). Handles NIP-42 auth automatically.
@@ -717,7 +702,7 @@ pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), 
 
 ### sprout-acp — Agent Communication Protocol Harness
 
-**14,920 LOC.** Standalone binary that bridges Sprout relay events to AI agents via the [Agent Communication Protocol](https://agentclientprotocol.com/) (ACP). The active counterpart to `sprout-mcp`'s passive tool-serving role.
+Standalone binary that bridges Sprout relay events to AI agents via the [Agent Communication Protocol](https://agentclientprotocol.com/) (ACP). The active counterpart to `sprout-mcp`'s passive tool-serving role.
 
 **Architecture:**
 
@@ -753,22 +738,18 @@ Sprout Relay ──WS──→ sprout-acp ──stdio (ACP/JSON-RPC)──→ Ag
 
 ### sprout-admin — Operator CLI
 
-**213 LOC.** Two subcommands:
+Subcommands:
 
 | Subcommand | Purpose |
 |------------|---------|
-| `mint-token` | Generate API token, store SHA-256 hash in DB, display raw token once |
-| `list-tokens` | List all active tokens (ID, name, scopes, created) |
-
-`mint-token` options: `--name`, `--scopes` (comma-separated), optional `--pubkey`. If `--pubkey` omitted, generates a new keypair and displays `nsec` (bech32) and pubkey.
-
-Raw token is shown exactly once and never stored. Only the SHA-256 hash reaches the database.
+| `add-member` | Add a pubkey to the relay membership list (`--pubkey`, `--role`) |
+| `list-members` | List all relay members |
+| `generate-key` | Generate a new Nostr keypair (for bootstrapping) |
+| `reconcile-channels` | Emit kind:39000/39002 discovery events for channels missing them (idempotent) |
 
 ---
 
 ### sprout-test-client — Integration Test Harness
-
-**9,319 LOC** (832 in `src/`, remainder in `tests/` directory).
 
 **`SproutTestClient`** wraps a WebSocket connection with a `VecDeque<RelayMessage>` buffer for message interleaving. Methods: `connect`, `connect_unauthenticated`, `authenticate`, `send_event`, `send_text_message`, `subscribe`, `close_subscription`, `recv_event`, `collect_until_eose`, `disconnect`.
 
@@ -841,7 +822,6 @@ Applied in: `sprout-workflow` (CallWebhook action), `sprout-core` (shared utilit
 
 ### Webhook Security
 
-- LiveKit webhooks: HMAC-SHA256 of raw body bytes, hex-encoded, constant-time comparison
 - Workflow webhooks: constant-time XOR comparison of stored UUID secret (not HMAC — compares the secret directly, not a body MAC)
 - Outbound webhooks (CallWebhook): SSRF protection + redirects disabled + 1 MiB response cap
 
@@ -898,35 +878,6 @@ These are verified gaps in the current implementation — not design aspirations
 | 1 | **No sqlx offline query cache** | Uses `sqlx::query()` (runtime) not `sqlx::query!()` (compile-time). No `.sqlx/` directory. Queries are not validated at compile time. |
 | 2 | **No rate limiting implementation** | `RateLimiter` trait exists in `sprout-auth`. Only implementation is `AlwaysAllowRateLimiter` (test stub, gated behind `#[cfg(any(test, feature = "test-utils"))]`). `RateLimitConfig` defines 4 tiers (human, agent-standard, agent-elevated, agent-platform) but none are enforced. |
 | 3 | **No dedicated typing REST endpoint** | Typing indicators (kind 20002) are delivered via both local fan-out and Redis pub/sub (cross-node). There is no REST endpoint to query current typers — `/api/presence` returns online/away status only, not typing state. |
-| 4 | **sprout-huddle is scaffolding** | `sprout-huddle` defines types, token generation, and webhook parsing, but relay-side lifecycle event emission is not implemented. Huddle state events are not wired into the relay's event pipeline. `sprout-proxy` is now functional — see its section above. |
+| 4 | **Huddle recording/tracks not built** | Voice, room lifecycle, and join/leave/end events are wired (see Huddle Audio above). Recording and per-track publishing have reserved kinds but no producer yet. |
 | 5 | **Approval gates not wired end-to-end** | The executor returns `StepResult::Suspended` and the relay has grant/deny API endpoints with DB CRUD, but the engine intercepts before creating `WaitingApproval` rows — runs that hit an approval gate are marked as Failed (🚧 WF-08). |
-| 6 | **Workflow actions partially stubbed** | `send_dm` and `set_channel_topic` actions log intent but do not emit events (🚧 WF-07). |
-
----
-
-## Appendix: LOC Summary
-
-| Crate | LOC | Layer |
-|-------|-----|-------|
-| sprout-core | 1,196 | Foundation |
-| sprout-auth | 2,310 | Foundation |
-| sprout-db | 7,367 | Foundation |
-| sprout-pubsub | 887 | Foundation |
-| sprout-search | 1,126 | Foundation |
-| sprout-audit | 776 | Foundation |
-| sprout-workflow | 4,012 | Foundation |
-| sprout-proxy | 4,933 | Client compatibility |
-| sprout-huddle | 728 | Standalone |
-| sprout-relay | 14,327 | Server |
-| sprout-mcp | 4,879 | Agent API |
-| sprout-acp | 14,920 | Agent harness |
-| sprout-sdk | 1,237 | Shared library |
-| sprout-media | 977 | Media storage |
-| sprout-cli | 2,919 | Tooling |
-| sprout-admin | 213 | Tooling |
-| sprout-test-client | 9,319 | Tooling |
-| **Total** | **~72,126** | |
-
-*LOC counted with `find crates -name '*.rs' | xargs wc -l`. Includes tests. Measured 2026-04-05.*
-
-
+| 6 | **Workflow actions partially stubbed** | The `send_dm` and `set_channel_topic` workflow actions are in the schema but return `NotImplemented` — a run that reaches one fails at execution (🚧 WF-07). |

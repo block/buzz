@@ -68,7 +68,7 @@ New message type? New kind integer. Zero breaking changes.
 
 ## Architecture
 
-Rust backend, TypeScript/React desktop. The server is a Cargo workspace of focused crates — relay, auth, pub/sub, search, audit, workflow engine, MCP agent interface, and more. The desktop client is a Tauri 2 app with React 19. See [README.md](README.md) for the full crate map.
+Rust backend, TypeScript/React clients. The server is a Cargo workspace of focused crates — relay, auth, pub/sub, search, audit, workflow engine, MCP agent interface, and more. The desktop client is a Tauri 2 app with React 19; the relay also serves a browser web client (the repo browser at `myproject.com`). See [README.md](README.md) for the full crate map.
 
 ---
 
@@ -93,13 +93,12 @@ One model. TLS in transit. At-rest encryption delegated to the storage layer (e.
 
 ## Huddles
 
-LiveKit SFU handles all media routing. Sprout provides rooms and tokens.
+Real-time voice runs over a WebSocket Opus relay built into `sprout-relay`. Sprout authenticates participants (NIP-42), admits them to a room, and forwards Opus frames between peers — no external SFU.
 
-- Agents join via the same WebRTC API as humans — they bring their own STT/TTS
-- Huddle state flows as Nostr events (started, joined, left, ended, recording available)
-- Workflows can trigger on huddle events
+- Agents join the same audio relay as humans — they bring their own STT/TTS
+- Huddle lifecycle flows as Nostr events: started, joined, left, ended
 
-LiveKit token minting and kind definitions are in place. Relay-side lifecycle event emission is planned.
+Voice, room lifecycle, and lifecycle events are wired. Recording and per-track publishing are planned.
 
 ---
 
@@ -142,7 +141,7 @@ See [VISION_PROJECTS.md](VISION_PROJECTS.md) for the full forge vision: the proj
 
 ## Agent CLI
 
-`sprout-cli` is a 44-command agent-first CLI covering the full MCP surface. JSON-only stdout, structured errors on stderr, two-tier auth (NIP-98 keypair → dev pubkey). Agents can script the entire platform without a GUI.
+`sprout-cli` is an agent-first CLI that mirrors and extends the MCP surface — same primitives, plus repo, upload, and canvas operations where the CLI is the canonical interface. JSON-only stdout, structured errors on stderr, two-tier auth (NIP-98 keypair → dev pubkey). Agents can script the entire platform without a GUI.
 
 ---
 
@@ -194,18 +193,19 @@ Greenfield. Agent swarms build in parallel, integrating at the event store bound
 | | Area |
 |-|------|
 | ✅ | Core relay, auth, pub/sub, search, audit |
-| ✅ | MCP server — 44 tools, full feature surface |
+| ✅ | MCP server — full feature surface |
 | ✅ | ACP agent harness — goose, codex, claude code |
 | ✅ | Desktop client (Tauri) — Stream, Home, Forum, DMs, Agents, Workflows, Search, Settings, Profiles, Presence |
 | ✅ | Channel features — messaging, threads, reactions, canvases, media uploads, editing, deletion, typing indicators, NIP-29, soft-delete |
 | ✅ | Workflow engine — YAML-as-code, execution traces, message/reaction/schedule/webhook triggers |
 | ✅ | Identity — NIP-05, public profiles, NIP-98 auth, agent protection |
 | ✅ | NIP-28 proxy — third-party Nostr clients (Coracle, nak, Amethyst) via `sprout-proxy` |
-| ✅ | Agent CLI — `sprout-cli`, 44 commands, full MCP surface |
+| ✅ | Agent CLI — `sprout-cli`, mirrors and extends the MCP surface |
 | ✅ | Agent personas and teams — desktop-managed, built-in defaults, operator-defined |
 | 🚧 | Workflow approval gates — infrastructure exists (DB, API, UI); executor doesn't persist/resume (WF-08) |
-| 🚧 | Huddles — LiveKit token minting in place; relay-side lifecycle events not yet wired |
-| 📋 | Mobile clients, developer portal, push notifications, culture features |
+| ✅ | Huddles — WebSocket Opus voice relay + lifecycle events (recording/tracks planned) |
+| 🚧 | Mobile client — Flutter app (channels, forum, search, profile, pairing); in active development |
+| 📋 | Developer portal, push notifications, culture features |
 
 ---
 

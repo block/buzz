@@ -1,6 +1,6 @@
 //! Sprout V2 kind number registry.
 //!
-//! Authoritative source: RESEARCH/SPROUT_KIND_REGISTRY_V2.md
+//! This module is the authoritative source for Sprout kind numbers.
 //! All constants are `u32` — NIP-01 specifies kind as an unsigned integer,
 //! and u32 covers the full range without truncation.
 
