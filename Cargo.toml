@@ -47,7 +47,7 @@ tower       = { version = "0.5", features = ["timeout", "util"] }
 tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip", "limit", "fs"] }
 
 # Database
-sqlx = { version = "0.8", features = [
+sqlx = { version = "0.9", features = [
     "runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"
 ] }
 
