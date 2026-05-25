@@ -205,6 +205,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: desktop/src-tauri
+          lookup-only: true
 
       - name: Install Tauri dependencies (Linux)
         env:
