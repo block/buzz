@@ -81,7 +81,6 @@ test("notification settings drive the Home badge and desktop alerts", async ({
 
   await page.goto("/");
   await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);
-  await expect.poll(getAppBadgeCount).toBe(0);
 
   await openSettings(page, "notifications");
   await expect(page.getByTestId("settings-notifications")).toBeVisible();
@@ -92,6 +91,11 @@ test("notification settings drive the Home badge and desktop alerts", async ({
   await page.getByTestId("settings-close").click();
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  // The dock badge sums unreadChannelIds.size + homeBadgeCount. Seeded test
+  // channels may start with unreads, so capture the baseline after navigating
+  // to general (which marks it read) but before injecting the mock mention.
+  const baseline = await getAppBadgeCount();
 
   await page.evaluate(() => {
     const win = window as Window & {
@@ -129,7 +133,7 @@ test("notification settings drive the Home badge and desktop alerts", async ({
   });
 
   await expect(page.getByTestId("sidebar-home-count")).toHaveText("1");
-  await expect.poll(getAppBadgeCount).toBe(2);
+  await expect.poll(getAppBadgeCount).toBe(baseline + 2);
 
   await expect
     .poll(() =>
@@ -183,18 +187,18 @@ test("notification settings drive the Home badge and desktop alerts", async ({
   await page.getByTestId("settings-close").click();
   await expect(page.getByTestId("chat-title")).toHaveText("engineering");
   await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);
-  await expect.poll(getAppBadgeCount).toBe(0);
+  await expect.poll(getAppBadgeCount).toBe(baseline);
 
   await openSettings(page, "notifications");
   await page.getByTestId("notifications-home-badge-toggle").click();
   await page.getByTestId("settings-close").click();
   await expect(page.getByTestId("sidebar-home-count")).toHaveText("1");
-  await expect.poll(getAppBadgeCount).toBe(1);
+  await expect.poll(getAppBadgeCount).toBe(baseline + 1);
 
   await page.getByRole("button", { name: "Home" }).click();
   await expect(page.getByTestId("chat-title")).toHaveText("Home");
   await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);
-  await expect.poll(getAppBadgeCount).toBe(0);
+  await expect.poll(getAppBadgeCount).toBe(baseline);
 });
 
 test("desktop notification clicks open the matching forum thread", async ({
