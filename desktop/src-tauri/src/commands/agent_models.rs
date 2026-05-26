@@ -10,6 +10,7 @@ use crate::{
         load_managed_agents, managed_agent_avatar_url, missing_command_message,
         normalize_agent_args, resolve_command, save_managed_agents, sync_managed_agent_processes,
         AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
+        DEFAULT_MCP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -191,7 +192,11 @@ pub async fn update_managed_agent(
             record.agent_args = agent_args;
         }
         if let Some(mcp_command) = input.mcp_command {
-            record.mcp_command = mcp_command;
+            record.mcp_command = if mcp_command.trim().is_empty() {
+                DEFAULT_MCP_COMMAND.to_string()
+            } else {
+                mcp_command
+            };
         }
         if let Some(env_vars) = input.env_vars {
             crate::managed_agents::validate_user_env_keys(&env_vars)?;

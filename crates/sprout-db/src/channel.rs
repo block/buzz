@@ -340,7 +340,7 @@ pub async fn add_member(
                 DbError::InvalidData(format!("invalid role in database: {inviter_role_str}"))
             })?;
 
-            if !inviter_role.is_elevated() {
+            if !inviter_role.is_elevated() && role != MemberRole::Bot {
                 return Err(DbError::AccessDenied(
                     "inviter must be owner or admin".to_string(),
                 ));

@@ -105,7 +105,7 @@ export function EditAgentDialog({
   // "clear to None" path for Option<String> fields, so an empty string would
   // cause a runtime failure.
   const acpCommandValid = !(agent.acpCommand && acpCommand.trim() === "");
-  const mcpCommandValid = !(agent.mcpCommand && mcpCommand.trim() === "");
+  const mcpCommandValid = true;
   // Allowlist mode requires at least one entry — mirrors the harness's own
   // validation. The backend would reject the request anyway; we block early
   // so the user sees the disabled button instead of a round-tripped error.

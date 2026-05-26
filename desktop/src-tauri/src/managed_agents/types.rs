@@ -455,7 +455,7 @@ pub const DEFAULT_MCP_COMMAND: &str = "sprout-mcp-server";
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
 /// 1 hour — absolute wall-clock safety cap per turn.
 pub const DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS: u64 = 3600;
-pub const DEFAULT_AGENT_PARALLELISM: u32 = 3;
+pub const DEFAULT_AGENT_PARALLELISM: u32 = 24;
 
 fn default_agent_parallelism() -> u32 {
     DEFAULT_AGENT_PARALLELISM
