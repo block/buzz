@@ -120,12 +120,12 @@ export function MembersSidebar({
     (member: ChannelMember) => {
       return (
         (selfMember?.role === "admin" && member.pubkey !== currentPubkey) ||
-        (selfMember?.role === "owner" && isBot(member)) ||
+        (selfMember?.role === "owner" && member.role !== "owner") ||
         Boolean(selfMember && isMyBot(member)) ||
         member.pubkey === currentPubkey
       );
     },
-    [currentPubkey, isBot, isMyBot, selfMember],
+    [currentPubkey, isMyBot, selfMember],
   );
   const removableManagedBots = React.useMemo(
     () =>

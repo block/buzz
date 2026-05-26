@@ -10,8 +10,8 @@ void main() {
   test('dispose flushes a pending publish after marking disposed', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
-    final keychain = nostr.Keychain.generate();
-    final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+    final keychain = nostr.Keys.generate();
+    final nsec = keychain.nsec;
     final crypto = ReadStateCrypto.tryCreate(
       nsec: nsec,
       pubkey: keychain.public,
@@ -45,8 +45,8 @@ void main() {
   test('disables remote sync after relay rejects read-state kind', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
-    final keychain = nostr.Keychain.generate();
-    final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+    final keychain = nostr.Keys.generate();
+    final nsec = keychain.nsec;
     final crypto = ReadStateCrypto.tryCreate(
       nsec: nsec,
       pubkey: keychain.public,
@@ -77,8 +77,8 @@ void main() {
     () async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       final crypto = ReadStateCrypto.tryCreate(
         nsec: nsec,
         pubkey: keychain.public,

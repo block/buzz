@@ -14,6 +14,8 @@ pub(crate) struct KnownAcpProvider {
     pub aliases: &'static [&'static str],
     pub avatar_url: &'static str,
     /// MCP server binary to use instead of the default `sprout-mcp-server`.
+    /// `None` means this provider does not need a Sprout MCP server —
+    /// no MCP tools will be registered for the agent session.
     pub mcp_command: Option<&'static str>,
     /// Whether to enable MCP hook tools (`_Stop`, `_PostCompact`) for this agent.
     pub mcp_hooks: bool,
@@ -29,6 +31,11 @@ pub(crate) struct KnownAcpProvider {
     pub cli_install_hint: &'static str,
     /// Human-readable hint about installing the ACP adapter.
     pub adapter_install_hint: &'static str,
+    /// Harness-specific skill discovery directory (e.g. `.goose/skills`).
+    /// `Some(dir)` → Sprout creates a symlink at `<nest>/<dir>/sprout-cli`
+    /// pointing to the canonical `.agents/skills/sprout-cli`. `None` → this
+    /// provider reads the canonical path directly or has no skill support.
+    pub skill_dir: Option<&'static str>,
 }
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
@@ -74,6 +81,7 @@ const KNOWN_ACP_PROVIDERS: &[KnownAcpProvider] = &[
         install_instructions_url: "https://block.github.io/goose/",
         cli_install_hint: "Install Goose via the official install script.",
         adapter_install_hint: "",
+        skill_dir: Some(".goose/skills"),
     },
     KnownAcpProvider {
         id: "claude",
@@ -89,6 +97,7 @@ const KNOWN_ACP_PROVIDERS: &[KnownAcpProvider] = &[
         install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
         cli_install_hint: "Install the Claude Code CLI via the official install script.",
         adapter_install_hint: "Install the Claude Code ACP adapter via npm.",
+        skill_dir: Some(".claude/skills"),
     },
     KnownAcpProvider {
         id: "codex",
@@ -104,6 +113,7 @@ const KNOWN_ACP_PROVIDERS: &[KnownAcpProvider] = &[
         install_instructions_url: "https://github.com/zed-industries/codex-acp",
         cli_install_hint: "Install the Codex CLI via the official install script.",
         adapter_install_hint: "Install the Codex ACP adapter via npm.",
+        skill_dir: Some(".codex/skills"),
     },
     KnownAcpProvider {
         id: "sprout-agent",
@@ -119,8 +129,14 @@ const KNOWN_ACP_PROVIDERS: &[KnownAcpProvider] = &[
         install_instructions_url: "https://github.com/block/sprout",
         cli_install_hint: "Ships with the Sprout desktop app.",
         adapter_install_hint: "",
+        skill_dir: None,
     },
 ];
+
+/// Skill discovery directories declared by known providers.
+pub(crate) fn known_skill_dirs() -> impl Iterator<Item = &'static str> {
+    KNOWN_ACP_PROVIDERS.iter().filter_map(|p| p.skill_dir)
+}
 
 fn workspace_root_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")

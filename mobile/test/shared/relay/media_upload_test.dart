@@ -236,8 +236,8 @@ void main() {
 
   group('MediaUploadService', () {
     test('signs Blossom auth and uploads gallery image bytes', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
 
       http.Request? capturedRequest;
       final client = http_testing.MockClient((request) async {
@@ -322,8 +322,8 @@ void main() {
     });
 
     test('uses a bracketed IPv6 server tag in Blossom auth', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
 
       http.Request? capturedRequest;
       final client = http_testing.MockClient((request) async {
@@ -369,8 +369,8 @@ void main() {
     });
 
     test('transcodes HEIC gallery files on iOS before upload', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() {
@@ -419,8 +419,8 @@ void main() {
     });
 
     test('sanitizes iOS JPEG gallery files before upload', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() {
@@ -472,8 +472,8 @@ void main() {
     });
 
     test('transcodes HEIC gallery files on Android before upload', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       addTearDown(() {
@@ -522,8 +522,8 @@ void main() {
     });
 
     test('sanitizes Android JPEG gallery files before upload', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       addTearDown(() {
@@ -575,8 +575,8 @@ void main() {
     });
 
     test('sanitizes Android PNG gallery files before upload', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.android;
       addTearDown(() {
@@ -628,8 +628,8 @@ void main() {
     });
 
     test('rejects GIF gallery files before upload', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
@@ -653,8 +653,8 @@ void main() {
     });
 
     test('rejects animated PNG gallery files before upload', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
@@ -681,8 +681,8 @@ void main() {
     });
 
     test('uploads static PNG when acTL appears only in chunk payload', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
 
       http.Request? capturedRequest;
       final client = http_testing.MockClient((request) async {
@@ -720,8 +720,8 @@ void main() {
     });
 
     test('rejects animated WebP gallery files before upload', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
@@ -748,8 +748,8 @@ void main() {
     });
 
     test('rejects unsupported gallery files before upload', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
 
       final service = MediaUploadService(
         baseUrl: 'https://relay.example',
@@ -852,8 +852,8 @@ void main() {
     }
 
     test('uploads MP4 container directly without transcoding', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       var transcodeCalled = false;
       final client = http_testing.MockClient((request) async {
         return http.Response(
@@ -896,8 +896,8 @@ void main() {
     });
 
     test('transcodes non-MP4 container before uploading', () async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       var transcodeCalled = false;
       final client = http_testing.MockClient((request) async {
         expect(request.headers['Content-Type'], 'video/mp4');

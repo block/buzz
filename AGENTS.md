@@ -71,6 +71,14 @@ unit tests + builds. Clippy passing does not mean fmt passes; run both.
 Run `just test` for integration tests if you touched `sprout-relay`,
 `sprout-db`, or `sprout-auth` — these require a running Postgres and Redis.
 
+**Pre-commit and pre-push hooks** are installed automatically by `just setup`.
+Pre-commit runs 5 checks in parallel on every `git commit` (Rust fmt, Tauri Rust
+fmt, desktop lint, web lint, mobile fmt) — a commit will fail if any are dirty.
+Pre-push runs the full CI gate: all pre-commit checks plus clippy, unit tests,
+desktop build, Tauri check, web build, and mobile tests (~minutes). Run
+`just fmt-all` before committing to auto-fix all formatting in one shot. Run
+`just hooks` to re-install hooks after env changes.
+
 Additional rules:
 - No `unsafe` code
 - Do not introduce new `unwrap()` or `expect()` in production paths — use `?` and proper error types
@@ -110,11 +118,12 @@ first, then implement handling in the relay.
 **Channel scoping**: Channels use `h` tags (NIP-29 group tag), not `e` tags.
 Filters and queries must scope to `h` tags when operating within a channel.
 
-**MCP tools — dual transport**: The MCP server in `sprout-mcp` uses two
-patterns: write operations send signed Nostr events over WebSocket; read
-operations call REST endpoints (see `relay_client.rs` for the HTTP helpers).
-Add the REST endpoint or event handler first, then add the MCP tool that calls
-it. Do not implement logic directly in MCP handlers.
+**Agent-facing operations go in `sprout-cli`, not `sprout-mcp`**: `sprout-mcp`
+is being phased out. New agent-facing features belong in `sprout-cli` — add a
+subcommand there first, then wire the REST/WebSocket call in `client.rs`. Do
+not add new tools to `sprout-mcp` unless specifically required for backward
+compatibility. `sprout-dev-mcp` (shell + file tools for `sprout-agent`) is
+separate and not being phased out.
 
 **Workflow conditions**: `sprout-workflow` uses
 [evalexpr](https://docs.rs/evalexpr) for condition evaluation. Keep expressions
@@ -129,13 +138,17 @@ check existing reply handlers for the pattern.
 ## Agent CLI (`sprout-cli`)
 
 `sprout` is the agent-first CLI replacing `sprout-mcp`. Auth env vars
-(`SPROUT_RELAY_URL`, `SPROUT_PRIVATE_KEY`) are auto-injected by the ACP
-harness into managed agent subprocesses.
+(`SPROUT_RELAY_URL`, `SPROUT_PRIVATE_KEY`, `SPROUT_AUTH_TAG`) are auto-injected
+by the ACP harness into managed agent subprocesses.
 
 All reads return sig-stripped JSON arrays; all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
-0=ok, 1=input error, 3=auth missing. See `crates/sprout-cli/TESTING.md`
-for the full live-testing runbook.
+0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
+
+`--format compact` is a **global** flag — it goes before the subcommand:
+`sprout --format compact channels list`, NOT `sprout channels list --format compact`.
+
+See `crates/sprout-cli/TESTING.md` for the full live-testing runbook.
 
 ---
 
@@ -166,8 +179,10 @@ See [TESTING.md](TESTING.md) for the full multi-agent E2E guide.
 
 1. **Kind `39000` for channel metadata, not `41`** — kind 41 is NIP-01 (unused). All kinds defined in `sprout-core/src/kind.rs`.
 2. **Relay queries must specify `kinds`** — omitting `kinds` triggers the p-gate (403). Always include explicit kind filters.
-3. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
-4. **Desktop fmt check fails in worktrees** — run `just desktop-tauri-fmt-check` from the main checkout. CI is unaffected.
+3. **`messages search` must include `--kinds`** — an open-ended search (no kinds) hits the relay p-gate and returns 403. Pass at least `--kinds 9,45001,45003` to scope the query.
+4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
+5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
+6. **Desktop fmt check fails in worktrees and blocks commits** — the pre-commit hook runs `just desktop-tauri-fmt-check`, which fails in git worktrees because `cargo fmt` resolves workspace paths relative to the worktree root. Run `just desktop-tauri-fmt` from the main checkout to apply the fix, then re-stage and commit. CI is unaffected.
 
 ---
 
@@ -248,7 +263,7 @@ flutter analyze
 flutter test
 ```
 
-Or from repo root: `just mobile-check` and `just mobile-test`.
+Or from repo root: `just mobile-fmt` (auto-fix), `just mobile-check` (lint + fmt check), `just mobile-test` (tests).
 
 ### Testing Conventions
 
@@ -263,7 +278,7 @@ Or from repo root: `just mobile-check` and `just mobile-test`.
 
 ## See Also
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / MCP tools / API endpoints
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / CLI subcommands / API endpoints
 - [TESTING.md](TESTING.md) — multi-agent E2E test guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [README.md](README.md) — project overview and quick start

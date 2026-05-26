@@ -13,9 +13,9 @@ import {
 } from "@/features/agents/lib/managedAgentControlActions";
 import {
   channelsQueryKey,
-  removeChannelMemberWithManagedAgentCleanup,
   useRemoveChannelMemberMutation,
 } from "@/features/channels/hooks";
+import { removeChannelMember } from "@/shared/api/tauri";
 import type { ChannelMember, ManagedAgent } from "@/shared/api/types";
 
 type UseMembersSidebarActionsOptions = {
@@ -242,7 +242,7 @@ export function useMembersSidebarActions({
       throw new Error("No channel selected.");
     }
 
-    await removeChannelMemberWithManagedAgentCleanup(channelId, pubkey);
+    await removeChannelMember(channelId, pubkey);
   }
 
   async function invalidateSidebarQueries() {

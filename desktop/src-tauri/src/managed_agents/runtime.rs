@@ -529,8 +529,15 @@ pub fn spawn_agent_child(
     let agent_args = normalize_agent_args(&record.agent_command, record.agent_args.clone());
     let resolved_acp_command = resolve_command(&record.acp_command, Some(app))
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
-    let resolved_mcp_command = resolve_command(&record.mcp_command, Some(app))
-        .ok_or_else(|| missing_command_message(&record.mcp_command, "MCP server command"))?;
+    let resolved_mcp_command: Option<std::path::PathBuf> = if record.mcp_command.is_empty() {
+        None
+    } else {
+        Some(
+            resolve_command(&record.mcp_command, Some(app)).ok_or_else(|| {
+                missing_command_message(&record.mcp_command, "MCP server command")
+            })?,
+        )
+    };
     // Resolve agent command to a full path (DMG launches have minimal PATH).
     let resolved_agent_command = resolve_command(&record.agent_command, Some(app))
         .map(|p| p.display().to_string())
@@ -575,7 +582,14 @@ pub fn spawn_agent_child(
     command.env("SPROUT_RELAY_URL", &record.relay_url);
     command.env("SPROUT_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("SPROUT_ACP_AGENT_ARGS", agent_args.join(","));
-    command.env("SPROUT_ACP_MCP_COMMAND", &resolved_mcp_command);
+    match &resolved_mcp_command {
+        Some(mcp_cmd) => {
+            command.env("SPROUT_ACP_MCP_COMMAND", mcp_cmd);
+        }
+        None => {
+            command.env("SPROUT_ACP_MCP_COMMAND", "");
+        }
+    }
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "sprout-mcp".
     if known_acp_provider(&record.agent_command).is_some_and(|p| p.mcp_hooks) {

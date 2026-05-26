@@ -593,7 +593,7 @@ void _sendTypingIndicator(
     final nsec = config.nsec;
     if (nsec == null || nsec.isEmpty) return;
 
-    final privkeyHex = nostr.Nip19.decodePrivkey(nsec);
+    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
     if (privkeyHex.isEmpty) return;
 
     final tags = <List<String>>[
@@ -609,13 +609,13 @@ void _sendTypingIndicator(
       kind: EventKind.typingIndicator,
       content: '',
       tags: tags,
-      privkey: privkeyHex,
+      secretKey: privkeyHex,
       verify: false,
     );
 
     // Send directly over WebSocket — fire-and-forget, matching desktop.
     final session = ref.read(relaySessionProvider.notifier);
-    session.sendRaw(['EVENT', event.toJson()]);
+    session.sendRaw(['EVENT', event.toMap()]);
   } catch (_) {
     // Fire-and-forget — typing indicator failure is non-fatal.
   }

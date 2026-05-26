@@ -22,7 +22,7 @@ class ReadStateCrypto {
     required String pubkey,
   }) {
     try {
-      final privkeyHex = nostr.Nip19.decodePrivkey(nsec);
+      final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
       if (privkeyHex.isEmpty || pubkey.isEmpty) {
         return null;
       }

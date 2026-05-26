@@ -78,11 +78,11 @@ void main() {
   test(
     'subscribes with correct filter shape and transitions to open',
     () async {
-      final userKeychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(userKeychain.private);
+      final userKeychain = nostr.Keys.generate();
+      final nsec = userKeychain.nsec;
       final myPubkey = userKeychain.public;
       // Agent needs a valid 64-char hex pubkey for getConversationKey.
-      final agentKeychain = nostr.Keychain.generate();
+      final agentKeychain = nostr.Keys.generate();
       final agentPubkey = agentKeychain.public;
 
       final relaySession = _RecordingRelaySession();
@@ -119,16 +119,14 @@ void main() {
   test(
     'uses one shared relay subscription for channel-scoped readers',
     () async {
-      final userKeychain = nostr.Keychain.generate();
-      final agentKeychain = nostr.Keychain.generate();
+      final userKeychain = nostr.Keys.generate();
+      final agentKeychain = nostr.Keys.generate();
       final relaySession = _RecordingRelaySession();
       final container = ProviderContainer(
         overrides: [
           relaySessionProvider.overrideWith(() => relaySession),
           relayConfigProvider.overrideWith(
-            () => _FakeRelayConfigNotifier(
-              nsec: nostr.Nip19.encodePrivkey(userKeychain.private),
-            ),
+            () => _FakeRelayConfigNotifier(nsec: userKeychain.nsec),
           ),
         ],
       );
@@ -154,16 +152,14 @@ void main() {
   );
 
   test('surfaces relay CLOSED messages through observer state', () async {
-    final userKeychain = nostr.Keychain.generate();
-    final agentKeychain = nostr.Keychain.generate();
+    final userKeychain = nostr.Keys.generate();
+    final agentKeychain = nostr.Keys.generate();
     final relaySession = _RecordingRelaySession();
     final container = ProviderContainer(
       overrides: [
         relaySessionProvider.overrideWith(() => relaySession),
         relayConfigProvider.overrideWith(
-          () => _FakeRelayConfigNotifier(
-            nsec: nostr.Nip19.encodePrivkey(userKeychain.private),
-          ),
+          () => _FakeRelayConfigNotifier(nsec: userKeychain.nsec),
         ),
       ],
     );
@@ -181,17 +177,15 @@ void main() {
   });
 
   test('ignores stale subscribe completion after identity changes', () async {
-    final firstUser = nostr.Keychain.generate();
-    final secondUser = nostr.Keychain.generate();
-    final agentKeychain = nostr.Keychain.generate();
+    final firstUser = nostr.Keys.generate();
+    final secondUser = nostr.Keys.generate();
+    final agentKeychain = nostr.Keys.generate();
     final relaySession = _RecordingRelaySession()..delaySubscribes = true;
     final container = ProviderContainer(
       overrides: [
         relaySessionProvider.overrideWith(() => relaySession),
         relayConfigProvider.overrideWith(
-          () => _FakeRelayConfigNotifier(
-            nsec: nostr.Nip19.encodePrivkey(firstUser.private),
-          ),
+          () => _FakeRelayConfigNotifier(nsec: firstUser.nsec),
         ),
       ],
     );
@@ -205,7 +199,7 @@ void main() {
     expect(relaySession.filters.single.tags['#p'], [firstUser.public]);
 
     (container.read(relayConfigProvider.notifier) as _FakeRelayConfigNotifier)
-        .setNsec(nostr.Nip19.encodePrivkey(secondUser.private));
+        .setNsec(secondUser.nsec);
     container.read(observerSubscriptionProvider(key));
     await Future<void>.delayed(Duration.zero);
 
@@ -229,9 +223,9 @@ void main() {
   test(
     'decrypts observer frames and exposes channel-scoped transcript',
     () async {
-      final ownerKeychain = nostr.Keychain.generate();
-      final agentKeychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(ownerKeychain.private);
+      final ownerKeychain = nostr.Keys.generate();
+      final agentKeychain = nostr.Keys.generate();
+      final nsec = ownerKeychain.nsec;
       final relaySession = _RecordingRelaySession();
       final container = ProviderContainer(
         overrides: [
@@ -249,7 +243,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       final conversationKey = getConversationKey(
-        agentKeychain.private,
+        agentKeychain.secret,
         ownerKeychain.public,
       );
       final encrypted = nip44Encrypt(
@@ -273,11 +267,11 @@ void main() {
           ['agent', agentKeychain.public],
           ['frame', 'telemetry'],
         ],
-        privkey: agentKeychain.private,
+        secretKey: agentKeychain.secret,
         verify: false,
       );
 
-      relaySession.emit(NostrEvent.fromJson(event.toJson()));
+      relaySession.emit(NostrEvent.fromJson(event.toMap()));
 
       final state = container.read(observerSubscriptionProvider(key));
       expect(state.connection, ObserverConnectionState.open);

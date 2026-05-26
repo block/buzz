@@ -64,7 +64,7 @@ export function CreateAgentDialog({
   const [spawnAfterCreate, setSpawnAfterCreate] = React.useState(true);
   const [startOnAppLaunch, setStartOnAppLaunch] = React.useState(true);
   const [turnTimeoutSeconds, setTurnTimeoutSeconds] = React.useState("320");
-  const [parallelism, setParallelism] = React.useState("3");
+  const [parallelism, setParallelism] = React.useState("24");
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
   const [selectedProviderId, setSelectedProviderId] =
@@ -218,7 +218,7 @@ export function CreateAgentDialog({
     setMcpCommand("sprout-mcp-server");
     setMcpToolsets("");
     setTurnTimeoutSeconds("320");
-    setParallelism("3");
+    setParallelism("24");
     setSystemPrompt("");
     setEnvVars({});
     setSelectedProviderId("custom");

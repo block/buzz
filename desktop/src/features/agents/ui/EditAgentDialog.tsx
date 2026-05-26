@@ -101,11 +101,9 @@ export function EditAgentDialog({
   const timeoutValid =
     turnTimeoutSeconds.trim() === "" ||
     !Number.isNaN(Number.parseInt(turnTimeoutSeconds, 10));
-  // Block clearing a previously-set command to empty — the backend has no
-  // "clear to None" path for Option<String> fields, so an empty string would
-  // cause a runtime failure.
+  // Block clearing a previously-set command to empty — sending an empty string
+  // for a required command field would cause a runtime failure at spawn.
   const acpCommandValid = !(agent.acpCommand && acpCommand.trim() === "");
-  const mcpCommandValid = !(agent.mcpCommand && mcpCommand.trim() === "");
   // Allowlist mode requires at least one entry — mirrors the harness's own
   // validation. The backend would reject the request anyway; we block early
   // so the user sees the disabled button instead of a round-tripped error.
@@ -117,7 +115,6 @@ export function EditAgentDialog({
     parallelismValid &&
     timeoutValid &&
     acpCommandValid &&
-    mcpCommandValid &&
     respondToValid &&
     !updateMutation.isPending;
 

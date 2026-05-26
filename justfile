@@ -16,6 +16,11 @@ default:
 setup:
     ./scripts/dev-setup.sh
 
+# Install git hooks via lefthook
+hooks:
+    git config --local core.hooksPath .hooks
+    lefthook install --force
+
 # ⚠️  Wipe ALL data and recreate a clean environment
 [confirm("This will DELETE all local data. Continue? (y/N)")]
 reset:
@@ -92,6 +97,9 @@ desktop-tauri-fmt:
 # Check desktop Tauri Rust formatting
 desktop-tauri-fmt-check:
     cargo fmt --manifest-path {{desktop_tauri_manifest}} --all -- --check
+
+# Format all code (Rust + Tauri Rust + Dart)
+fmt-all: fmt desktop-tauri-fmt mobile-fmt
 
 # Ensure sidecar placeholder binaries exist (Tauri validates externalBin at compile time)
 _ensure-sidecar-stubs:
@@ -270,6 +278,10 @@ mobile_dir := "mobile"
 # Install mobile Flutter dependencies
 mobile-install:
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter pub get
+
+# Format all Dart code
+mobile-fmt:
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format .
 
 # Run mobile lint and format checks
 mobile-check:

@@ -55,7 +55,15 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
     let path = managed_agents_store_path(app)?;
     let payload = serde_json::to_vec_pretty(&sorted)
         .map_err(|error| format!("failed to serialize agent store: {error}"))?;
-    fs::write(&path, payload).map_err(|error| format!("failed to write agent store: {error}"))
+
+    // Atomic write: write to a temp file then rename. This prevents partial
+    // writes from corrupting the store if the process crashes mid-write.
+    // rename() is atomic on the same filesystem on both macOS and Linux.
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, &payload)
+        .map_err(|error| format!("failed to write temp agent store: {error}"))?;
+    fs::rename(&tmp_path, &path)
+        .map_err(|error| format!("failed to rename temp agent store: {error}"))
 }
 
 /// Maximum log file size before rotation (10 MB).

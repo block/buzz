@@ -57,9 +57,9 @@ class SettingsPage extends HookConsumerWidget {
             const SizedBox(height: Grid.xxs),
             Builder(
               builder: (context) {
-                final privHex = nostr.Nip19.decodePrivkey(config.nsec!);
+                final privHex = nostr.Nip19.decode(payload: config.nsec!).data;
                 final pubkey = privHex.isNotEmpty
-                    ? nostr.Keychain(privHex).public
+                    ? nostr.Keys(privHex).public
                     : 'unknown';
                 return ListTile(
                   leading: const Icon(LucideIcons.key),

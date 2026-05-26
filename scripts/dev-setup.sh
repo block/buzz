@@ -210,6 +210,13 @@ else
   warn "Web directory not found at ${WEB_DIR} — skipping."
 fi
 
+# ---- Install git hooks ------------------------------------------------------
+
+log "Installing git hooks..."
+git config --local core.hooksPath .hooks
+lefthook install --force
+success "Git hooks installed"
+
 # ---- Print connection info --------------------------------------------------
 
 echo ""

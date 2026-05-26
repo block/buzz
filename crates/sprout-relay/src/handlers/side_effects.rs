@@ -183,14 +183,29 @@ pub async fn validate_admin_event(
                 return Err(anyhow::anyhow!("invalid role: {role_str}"));
             }
 
-            // PUT_USER: open channels allow any authenticated user; private requires owner/admin.
-            // Policy check applies to both open and private channels.
+            // PUT_USER: open channels allow any authenticated user; private channels
+            // require the actor to be an existing member (any role can invite).
             if channel.visibility == "private" {
                 let members = state.db.get_members(channel_id).await?;
                 let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
                 match actor_member {
-                    Some(m) if m.role == "owner" || m.role == "admin" => {}
-                    _ => return Err(anyhow::anyhow!("actor not authorized")),
+                    Some(_) => {}
+                    None => return Err(anyhow::anyhow!("actor not authorized")),
+                }
+
+                // Only owners/admins may grant elevated roles.
+                let role: sprout_db::channel::MemberRole = role_str.parse().unwrap();
+                if role.is_elevated() {
+                    let actor_role: sprout_db::channel::MemberRole = actor_member
+                        .unwrap()
+                        .role
+                        .parse()
+                        .unwrap_or(sprout_db::channel::MemberRole::Member);
+                    if !actor_role.is_elevated() {
+                        return Err(anyhow::anyhow!(
+                            "only owners/admins may grant elevated roles"
+                        ));
+                    }
                 }
             }
 

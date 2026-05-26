@@ -166,12 +166,12 @@ class PairingSocket {
         kind: EventKind.auth,
         content: '',
         tags: tags,
-        privkey: _ephemeralPrivkey,
+        secretKey: _ephemeralPrivkey,
         createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
       );
 
       _pendingAuthEventId = event.id;
-      send(['AUTH', event.toJson()]);
+      send(['AUTH', event.toMap()]);
     } catch (e) {
       _failAuth(e);
     }

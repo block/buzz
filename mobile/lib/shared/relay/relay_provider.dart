@@ -66,9 +66,9 @@ final relayConfigProvider = NotifierProvider<RelayConfigNotifier, RelayConfig>(
 String? pubkeyFromNsec(String? nsec) {
   if (nsec == null || nsec.isEmpty) return null;
   try {
-    final privkeyHex = nostr.Nip19.decodePrivkey(nsec);
+    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
     if (privkeyHex.isEmpty) return null;
-    return nostr.Keychain(privkeyHex).public;
+    return nostr.Keys(privkeyHex).public;
   } catch (_) {
     return null;
   }

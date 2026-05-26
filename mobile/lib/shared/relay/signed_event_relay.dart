@@ -18,9 +18,9 @@ class SignedEventRelay {
   String? get pubkey {
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty) return null;
-    final privkeyHex = nostr.Nip19.decodePrivkey(nsec);
+    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
     if (privkeyHex.isEmpty) return null;
-    return nostr.Keychain(privkeyHex).public;
+    return nostr.Keys(privkeyHex).public;
   }
 
   /// Sign and submit an event. Returns the relay's OK response as a [NostrEvent]
@@ -37,7 +37,7 @@ class SignedEventRelay {
       throw Exception('Cannot submit event: no signing key available');
     }
 
-    final privkeyHex = nostr.Nip19.decodePrivkey(nsec);
+    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
     if (privkeyHex.isEmpty) {
       throw Exception('Invalid nsec');
     }
@@ -46,12 +46,12 @@ class SignedEventRelay {
       kind: kind,
       content: content,
       tags: tags,
-      privkey: privkeyHex,
+      secretKey: privkeyHex,
       createdAt: createdAt,
       verify: false,
     );
 
-    final nostrEvent = NostrEvent.fromJson(event.toJson());
+    final nostrEvent = NostrEvent.fromJson(event.toMap());
     return _session.publish(nostrEvent);
   }
 }

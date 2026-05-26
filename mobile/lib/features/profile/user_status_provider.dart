@@ -25,8 +25,8 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
 
     String pubkey;
     try {
-      final privkeyHex = nostr.Nip19.decodePrivkey(nsec);
-      final keyPair = nostr.Keychain(privkeyHex);
+      final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
+      final keyPair = nostr.Keys(privkeyHex);
       pubkey = keyPair.public.toLowerCase();
     } catch (_) {
       return null;
@@ -74,19 +74,17 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
       tags.add(['emoji', emoji]);
     }
 
-    final privkeyHex = nostr.Nip19.decodePrivkey(nsec);
+    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
     final event = nostr.Event.from(
       kind: EventKind.userStatus,
       content: trimmed,
       tags: tags,
-      privkey: privkeyHex,
+      secretKey: privkeyHex,
       verify: false,
     );
 
     final session = ref.read(relaySessionProvider.notifier);
-    await session.publish(
-      NostrEvent.fromJson(Map<String, dynamic>.from(event.toJson())),
-    );
+    await session.publish(NostrEvent.fromJson(event.toMap()));
 
     // Optimistic update: update own state immediately.
     final newStatus = (trimmed.isNotEmpty || emoji.isNotEmpty)
@@ -99,7 +97,7 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     state = AsyncValue.data(newStatus);
 
     // Also update the shared cache so other UI reads stay consistent.
-    final keyPair = nostr.Keychain(privkeyHex);
+    final keyPair = nostr.Keys(privkeyHex);
     final pubkey = keyPair.public.toLowerCase();
     ref.read(userStatusCacheProvider.notifier).updateStatus(pubkey, newStatus);
   }

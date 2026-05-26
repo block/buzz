@@ -352,6 +352,20 @@ pub struct CliArgs {
     )]
     pub no_memory: bool,
 
+    /// Disable the [Base] platform-context section prepended to every prompt.
+    /// When set, agents receive only the persona [System] prompt with no Sprout orientation.
+    #[arg(long, env = "SPROUT_ACP_NO_BASE_PROMPT")]
+    pub no_base_prompt: bool,
+
+    /// Path to a custom base prompt file. Overrides the compiled-in default.
+    /// Mutually exclusive with --no-base-prompt.
+    #[arg(
+        long,
+        env = "SPROUT_ACP_BASE_PROMPT_FILE",
+        conflicts_with = "no_base_prompt"
+    )]
+    pub base_prompt_file: Option<PathBuf>,
+
     /// Desired LLM model ID. Applied to every new ACP session after creation.
     /// Use `sprout-acp models` to discover available model IDs.
     #[arg(long, env = "SPROUT_ACP_MODEL")]
@@ -461,6 +475,12 @@ pub struct Config {
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
+    /// Disable the [Base] platform-context section prepended to every prompt.
+    pub no_base_prompt: bool,
+    /// Resolved content from `--base-prompt-file`, read and validated in
+    /// `from_cli()`. `None` when using the compiled-in default or when
+    /// `--no-base-prompt` is set.
+    pub base_prompt_content: Option<String>,
 }
 
 /// Validate and deduplicate allowlist entries: each must be exactly 64 hex chars.
@@ -586,6 +606,22 @@ impl Config {
             Some(text)
         } else if let Some(ref path) = args.heartbeat_prompt_file {
             Some(std::fs::read_to_string(path)?)
+        } else {
+            None
+        };
+
+        let base_prompt_content = if args.no_base_prompt {
+            None
+        } else if let Some(ref path) = args.base_prompt_file {
+            let content = std::fs::read_to_string(path)?;
+            if content.len() > 1_048_576 {
+                return Err(ConfigError::ConfigFile(format!(
+                    "base prompt file {} exceeds 1 MB limit ({} bytes)",
+                    path.display(),
+                    content.len()
+                )));
+            }
+            Some(content)
         } else {
             None
         };
@@ -798,6 +834,8 @@ impl Config {
             persona_env_vars,
             relay_observer: args.relay_observer,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
+            no_base_prompt: args.no_base_prompt,
+            base_prompt_content,
         };
 
         Ok(config)
@@ -1161,6 +1199,8 @@ mod tests {
             persona_env_vars: vec![],
             relay_observer: false,
             agent_owner: None,
+            no_base_prompt: false,
+            base_prompt_content: None,
         }
     }
 

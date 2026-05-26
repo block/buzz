@@ -9,10 +9,11 @@ use crate::{
         managed_agent_avatar_url, managed_agent_log_path, managed_agents_base_dir,
         normalize_agent_args, provider_deploy, read_log_tail, resolve_provider_binary,
         save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
-        sync_managed_agent_processes, validate_provider_config, BackendKind, BackendProviderInfo,
-        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentLogResponse,
-        ManagedAgentRecord, ManagedAgentSummary, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_COMMAND,
-        DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS, DEFAULT_MCP_COMMAND,
+        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
+        BackendProviderInfo, CreateManagedAgentRequest, CreateManagedAgentResponse,
+        ManagedAgentLogResponse, ManagedAgentRecord, ManagedAgentSummary, DEFAULT_ACP_COMMAND,
+        DEFAULT_AGENT_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        DEFAULT_MCP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -334,6 +335,19 @@ pub async fn create_managed_agent(
                 .collect::<Vec<_>>(),
         );
 
+        let mcp_command = input
+            .mcp_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(
+                || match crate::managed_agents::known_acp_provider(&agent_command) {
+                    Some(p) => p.mcp_command.unwrap_or("").to_string(),
+                    None => DEFAULT_MCP_COMMAND.to_string(),
+                },
+            );
+
         // For pack-backed personas, resolve the installed pack path and the
         // persona's internal name (slug). ACP's resolve_persona_by_name()
         // matches on this internal name, NOT display_name.
@@ -366,13 +380,7 @@ pub async fn create_managed_agent(
                 .to_string(),
             agent_command,
             agent_args,
-            mcp_command: input
-                .mcp_command
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(DEFAULT_MCP_COMMAND)
-                .to_string(),
+            mcp_command,
             turn_timeout_seconds: input
                 .turn_timeout_seconds
                 .filter(|seconds| *seconds > 0)
@@ -451,6 +459,8 @@ pub async fn create_managed_agent(
 
         (agent, spawn_error)
     };
+
+    try_regenerate_nest(&app);
 
     // ── Phase 4: sync agent profile on relay (async, outside lock) ───────────
     let avatar_url = input
@@ -672,48 +682,52 @@ pub fn delete_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|error| error.to_string())?;
-    let mut records = load_managed_agents(&app)?;
-    let mut runtimes = state
-        .managed_agent_processes
-        .lock()
-        .map_err(|error| error.to_string())?;
+    {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|error| error.to_string())?;
 
-    if sync_managed_agent_processes(&mut records, &mut runtimes) {
+        if sync_managed_agent_processes(&mut records, &mut runtimes) {
+            save_managed_agents(&app, &records)?;
+        }
+
+        // Guard: reject deletion of deployed remote agents unless explicitly forced.
+        // This turns "don't orphan remote infra" from a UI convention into a backend
+        // invariant — a buggy or compromised IPC caller cannot silently orphan a live
+        // remote deployment. The frontend sends force_remote_delete: true only after
+        // the user confirms the orphan warning.
+        if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
+            if record.backend != BackendKind::Local
+                && record.backend_agent_id.is_some()
+                && !force_remote_delete.unwrap_or(false)
+            {
+                return Err(
+                    "cannot delete a deployed remote agent without force_remote_delete: true"
+                        .to_string(),
+                );
+            }
+        }
+
+        if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
+            // For local agents: kills the process. For remote agents: no-op (the frontend
+            // sends !shutdown via WebSocket before calling delete). Either way, safe.
+            stop_managed_agent_process(&app, record, &mut runtimes)?;
+        }
+        let initial_len = records.len();
+        records.retain(|record| record.pubkey != pubkey);
+        if records.len() == initial_len {
+            return Err(format!("agent {pubkey} not found"));
+        }
         save_managed_agents(&app, &records)?;
     }
-
-    // Guard: reject deletion of deployed remote agents unless explicitly forced.
-    // This turns "don't orphan remote infra" from a UI convention into a backend
-    // invariant — a buggy or compromised IPC caller cannot silently orphan a live
-    // remote deployment. The frontend sends force_remote_delete: true only after
-    // the user confirms the orphan warning.
-    if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
-        if record.backend != BackendKind::Local
-            && record.backend_agent_id.is_some()
-            && !force_remote_delete.unwrap_or(false)
-        {
-            return Err(
-                "cannot delete a deployed remote agent without force_remote_delete: true"
-                    .to_string(),
-            );
-        }
-    }
-
-    if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
-        // For local agents: kills the process. For remote agents: no-op (the frontend
-        // sends !shutdown via WebSocket before calling delete). Either way, safe.
-        stop_managed_agent_process(&app, record, &mut runtimes)?;
-    }
-    let initial_len = records.len();
-    records.retain(|record| record.pubkey != pubkey);
-    if records.len() == initial_len {
-        return Err(format!("agent {pubkey} not found"));
-    }
-    save_managed_agents(&app, &records)
+    try_regenerate_nest(&app);
+    Ok(())
 }
 
 #[tauri::command]

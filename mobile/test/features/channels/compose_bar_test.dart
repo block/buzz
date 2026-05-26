@@ -156,8 +156,8 @@ void main() {
     testWidgets('uploads an image and sends markdown plus imeta tags', (
       tester,
     ) async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         apiToken: null,
@@ -222,8 +222,8 @@ void main() {
     testWidgets('keeps the remove button pinned to the attachment corner', (
       tester,
     ) async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         apiToken: null,
@@ -290,8 +290,8 @@ void main() {
     testWidgets('shows an upload error when gallery upload fails', (
       tester,
     ) async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         apiToken: null,
@@ -325,8 +325,8 @@ void main() {
     });
 
     testWidgets('shows a clean error when a GIF is picked', (tester) async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         apiToken: null,
@@ -362,8 +362,8 @@ void main() {
     testWidgets('shows a clean error when an animated PNG is picked', (
       tester,
     ) async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         apiToken: null,
@@ -401,8 +401,8 @@ void main() {
     testWidgets('taps Video in chooser sheet and uploads video', skip: true, (
       tester,
     ) async {
-      final keychain = nostr.Keychain.generate();
-      final nsec = nostr.Nip19.encodePrivkey(keychain.private);
+      final keychain = nostr.Keys.generate();
+      final nsec = keychain.nsec;
 
       // Build a temp file with a valid MP4 ftyp header (isom brand).
       final mp4Bytes = Uint8List(32);

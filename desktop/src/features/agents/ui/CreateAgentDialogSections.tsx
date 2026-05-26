@@ -19,6 +19,7 @@ export function CreateAgentBasicsFields({
       <Input
         aria-describedby="help-agent-name"
         autoCapitalize="none"
+        autoComplete="off"
         autoCorrect="off"
         data-testid="agent-name-input"
         id="agent-name"
@@ -150,6 +151,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-relay-url"
+            autoComplete="off"
             id="agent-relay-url"
             onChange={(event) => onRelayUrlChange(event.target.value)}
             placeholder="Leave blank to use the desktop relay"
@@ -170,6 +172,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-acp-command"
+            autoComplete="off"
             id="agent-acp-command"
             onChange={(event) => onAcpCommandChange(event.target.value)}
             value={acpCommand}
@@ -194,6 +197,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-runtime-command"
+            autoComplete="off"
             id="agent-runtime-command"
             onChange={(event) => onAgentCommandChange(event.target.value)}
             value={agentCommand}
@@ -215,6 +219,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-runtime-args"
+            autoComplete="off"
             id="agent-runtime-args"
             onChange={(event) => onAgentArgsChange(event.target.value)}
             placeholder="Comma-separated"
@@ -234,6 +239,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-mcp-command"
+            autoComplete="off"
             id="agent-mcp-command"
             onChange={(event) => onMcpCommandChange(event.target.value)}
             value={mcpCommand}
@@ -253,6 +259,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-timeout"
+            autoComplete="off"
             id="agent-timeout"
             onChange={(event) => onTurnTimeoutChange(event.target.value)}
             placeholder="300"
@@ -269,6 +276,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-parallelism"
+            autoComplete="off"
             data-testid="agent-parallelism-input"
             id="agent-parallelism"
             inputMode="numeric"
@@ -294,6 +302,7 @@ export function CreateAgentRuntimeFields({
           MCP toolsets
         </label>
         <Input
+          autoComplete="off"
           id="agent-mcp-toolsets"
           onChange={(event) => onMcpToolsetsChange(event.target.value)}
           placeholder="default,canvas,forums,dms,media"

@@ -2,6 +2,9 @@
 /target/
 /dist/
 
+# lefthook-generated hook scripts (machine-specific)
+.hooks/
+
 # Environment files (may contain secrets)
 .env
 .env.local

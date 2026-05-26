@@ -7,7 +7,7 @@ use crate::{
     managed_agents::{
         encode_persona_json, import_persona_pack, list_installed_packs, load_managed_agents,
         load_personas, load_teams, parse_json_persona, parse_md_persona, parse_png_persona,
-        parse_zip_personas, save_managed_agents, save_personas,
+        parse_zip_personas, save_managed_agents, save_personas, try_regenerate_nest,
         uninstall_persona_pack as do_uninstall_persona_pack, validate_persona_activation_change,
         validate_persona_deletion, CreatePersonaRequest, PackSummary, ParsePersonaFilesResult,
         PersonaRecord, UpdatePersonaRequest,
@@ -85,6 +85,7 @@ pub fn create_persona(
     };
     personas.push(persona.clone());
     save_personas(&app, &personas)?;
+    try_regenerate_nest(&app);
     Ok(persona)
 }
 
@@ -125,19 +126,18 @@ pub fn update_persona(
         .filter(|s| !s.is_empty())
         .collect();
     if let Some(env_vars) = input.env_vars {
-        // Caller explicitly sent env_vars — replace entirely (empty = clear).
         crate::managed_agents::validate_user_env_keys(&env_vars)?;
         persona.env_vars = env_vars;
     }
-    // Absent env_vars means "don't touch" — preserve existing creds when
-    // the caller only meant to edit a different field.
     persona.updated_at = now_iso();
 
     save_personas(&app, &personas)?;
-    personas
+    let result = personas
         .into_iter()
         .find(|record| record.id == input.id)
-        .ok_or_else(|| format!("persona {} disappeared unexpectedly", input.id))
+        .ok_or_else(|| format!("persona {} disappeared unexpectedly", input.id))?;
+    try_regenerate_nest(&app);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -182,6 +182,7 @@ pub fn delete_persona(
     if changed_agents {
         save_managed_agents(&app, &agents)?;
     }
+    try_regenerate_nest(&app);
 
     Ok(())
 }
@@ -230,6 +231,7 @@ pub fn set_persona_active(
 
     let updated = persona.clone();
     save_personas(&app, &personas)?;
+    try_regenerate_nest(&app);
     Ok(updated)
 }
 
@@ -383,7 +385,9 @@ pub fn install_persona_pack(
     if !source.is_dir() {
         return Err(format!("pack path is not a directory: {path}"));
     }
-    import_persona_pack(&app, &source)
+    let result = import_persona_pack(&app, &source)?;
+    try_regenerate_nest(&app);
+    Ok(result)
 }
 
 #[tauri::command]
@@ -396,7 +400,9 @@ pub fn uninstall_persona_pack(
         .managed_agents_store_lock
         .lock()
         .map_err(|e| e.to_string())?;
-    do_uninstall_persona_pack(&app, &pack_id)
+    do_uninstall_persona_pack(&app, &pack_id)?;
+    try_regenerate_nest(&app);
+    Ok(())
 }
 
 #[tauri::command]

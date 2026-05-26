@@ -1,4 +1,5 @@
 pre-commit:
+  parallel: true
   commands:
     rust-fmt:
       run: just fmt-check

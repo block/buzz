@@ -340,13 +340,7 @@ pub async fn add_member(
                 DbError::InvalidData(format!("invalid role in database: {inviter_role_str}"))
             })?;
 
-            if !inviter_role.is_elevated() {
-                return Err(DbError::AccessDenied(
-                    "inviter must be owner or admin".to_string(),
-                ));
-            }
-
-            // Only owners/admins may grant elevated roles (already verified above — kept for clarity).
+            // Any member can invite others, but only owners/admins may grant elevated roles.
             if role.is_elevated() && !inviter_role.is_elevated() {
                 return Err(DbError::AccessDenied(
                     "only owners/admins may grant elevated roles".to_string(),

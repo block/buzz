@@ -4,7 +4,6 @@ mod events;
 mod huddle;
 mod managed_agents;
 mod media_proxy;
-mod migration;
 mod models;
 pub mod nostr_convert;
 mod prevent_sleep;
@@ -26,7 +25,7 @@ use huddle::{
 use managed_agents::{
     ensure_nest, kill_stale_tracked_processes, load_managed_agents,
     restore_managed_agents_on_launch, save_managed_agents, sync_managed_agent_processes,
-    BackendKind, ManagedAgentProcess,
+    try_regenerate_nest, BackendKind, ManagedAgentProcess,
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -352,11 +351,6 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let shutdown_started = Arc::clone(&restore_shutdown_started);
 
-            // Migrate data from the legacy `com.wesb.sprout` directory before
-            // resolving identity, so the persisted key is available at the new
-            // path on first launch after the identifier change.
-            migration::migrate_legacy_data_dir(&app_handle);
-
             // Resolve persisted identity key (env var → file → generate+save).
             // This is fatal — the app should not start with an ephemeral identity
             // that will be lost on restart, as that silently breaks channel
@@ -402,6 +396,8 @@ pub fn run() {
                     }
                 }
             }
+
+            try_regenerate_nest(&app_handle);
 
             // Pre-download voice models in the background so they're ready
             // when the user starts their first huddle. Idempotent — no-op if

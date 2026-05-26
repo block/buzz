@@ -94,7 +94,7 @@ none of them override it.
 - **Extension mechanism**: Sprout-specific fields sit at the top level of `plugin.json` alongside
   OPS fields. No OPS core field is overloaded.
 - **`defaults`**: ignored entirely by OPS consumers. sprout-acp resolves it at deploy time before
-  constructing per-persona configurations (see Section 9 and Section 11).
+  constructing per-persona configurations (see Section 10 and Section 12).
 
 ---
 
@@ -129,7 +129,7 @@ my-pack/
 
 - `agents/` — all persona files. No nesting; flat directory.
 - `skills/` — one subdirectory per skill. Each skill directory contains a `SKILL.md` file.
-  Both `name:` and `description:` frontmatter fields are **required** — see Section 5.
+  Both `name:` and `description:` frontmatter fields are **required** — see Section 6.
 - `.plugin/` — OPS-required location for the manifest.
 - `hooks/` — optional; omit if no hooks are needed.
 - `instructions.md` — optional; omit if no pack-level instructions.
@@ -146,7 +146,7 @@ A persona file is a markdown document with YAML frontmatter. The **YAML frontmat
 identity, skills, MCP servers, and behavioral config. The **markdown body** (everything after the
 closing `---`) is the agent's persona prompt text.
 
-> **Note**: The persona prompt is currently delivered as a `[System]` prefix in the user message text (see Section 11). True system prompt injection (once at session creation rather than every turn) is planned — see Section 15.
+> **Note**: The persona prompt is currently delivered as a `[System]` prefix in the user message text (see Section 12). True system prompt injection (once at session creation rather than every turn) is planned — see Section 16.
 
 ### Full Schema
 
@@ -209,14 +209,14 @@ You are Lep, a security-focused code reviewer on the Meadow team.
 | `author` | string | ❌ | OPS compatibility field. |
 | `skills` | string[] | ❌ | Pack-relative paths to skill directories for this agent only. |
 | `mcp_servers` | object[] | ❌ | Per-persona MCP servers. Merged with pack-level `.mcp.json`. |
-| `subscribe` | string[] | ❌ | Channels to monitor. See Section 9. |
-| `triggers` | object | ❌ | Controls which messages activate a response. See Section 9. |
-| `model` | string | ❌ | Model to use. See Section 9. |
-| `temperature` | float | ❌ | Sampling temperature. See Section 9. |
-| `max_context_tokens` | int | ❌ | Context window limit. See Section 9. |
-| `thread_replies` | bool | ❌ | Reply in-thread when triggering message is in a thread. See Section 9. |
-| `broadcast_replies` | bool | ❌ | Surface thread replies to the main channel. See Section 9. |
-| `hooks` | object | ❌ | Lifecycle hooks. Harness-managed. See Section 8. |
+| `subscribe` | string[] | ❌ | Channels to monitor. See Section 10. |
+| `triggers` | object | ❌ | Controls which messages activate a response. See Section 10. |
+| `model` | string | ❌ | Model to use. See Section 10. |
+| `temperature` | float | ❌ | Sampling temperature. See Section 10. |
+| `max_context_tokens` | int | ❌ | Context window limit. See Section 10. |
+| `thread_replies` | bool | ❌ | Reply in-thread when triggering message is in a thread. See Section 10. |
+| `broadcast_replies` | bool | ❌ | Surface thread replies to the main channel. See Section 10. |
+| `hooks` | object | ❌ | Lifecycle hooks. Harness-managed. See Section 9. |
 
 > **Legacy alias**: The YAML key `respond_to` is accepted as an alias for `triggers` in persona frontmatter. In `plugin.json` defaults, both `triggers` and `respond_to` are accepted. The canonical key is `triggers`.
 
@@ -228,7 +228,86 @@ files (agent runtimes typically do not read them).
 
 ---
 
-## 5. Skills
+## 5. Two-Layer Prompt Architecture
+
+sprout-acp assembles the agent's context from two distinct prompt layers before sending each
+message. Understanding this layering is essential for persona authors — content that belongs in
+one layer should not be duplicated in the other.
+
+### Prompt Section Order
+
+Each message delivered to the agent runtime includes these sections in order:
+
+```
+[Base]
+<platform orientation — injected by sprout-acp>
+
+[System]
+<persona prompt — markdown body of .persona.md>
+
+---
+# Team Instructions
+<contents of instructions.md, if present>
+
+[Context]
+<scope, channel name, and contextual hints>
+
+[Thread/Conversation Context]
+<recent message history, if applicable>
+
+[Sprout event]
+<the triggering message or event>
+```
+
+### The `[Base]` Layer
+
+The `[Base]` layer is compiled into sprout-acp and is **identical for every agent**. It covers:
+
+| Content | Purpose |
+|---------|---------|
+| Platform identity | Tells the agent it is running inside Sprout and what that means |
+| MCP tool reference | Documents the tools available via the connected MCP servers |
+| Workspace layout | Describes `$AGENT_CWD`, skill discovery paths, and file conventions |
+| Message polling | Explains how to check for new messages proactively |
+
+Pack authors do not write or configure the `[Base]` layer — it is maintained by the Sprout team
+and updated in sprout-acp releases.
+
+**Disabling or customizing the base layer**: Set `SPROUT_ACP_NO_BASE_PROMPT` to omit the `[Base]`
+section entirely. To replace the compiled-in default with custom content, set
+`SPROUT_ACP_BASE_PROMPT_FILE` to a file path — sprout-acp reads it at startup and uses it instead.
+
+### The `[System]` Layer
+
+The `[System]` layer is the persona prompt — the markdown body of the `.persona.md` file. It is
+**unique per agent** and defines the agent's role, identity, and behavioral rules. This is where
+pack authors write their persona content.
+
+What belongs in `[System]`:
+
+| Content | Examples |
+|---------|---------|
+| Agent name and role | "You are Lep, a security-focused code reviewer" |
+| Team protocols | Escalation rules, @-mention discipline, handoff conventions |
+| Domain rules | Security checklists, review criteria, coding standards |
+| Behavioral autonomy | When to act independently vs. when to ask |
+
+### Guidance for Pack Authors
+
+**Do not duplicate base layer content in persona prompts.** Users with the base layer enabled
+(the default) would see that content twice per message. Specifically, do not re-explain:
+
+- How to use MCP tools (covered by `[Base]`)
+- How to poll for new messages or use the `since` parameter (covered by `[Base]`)
+- Workspace layout or skill loading mechanics (covered by `[Base]`)
+- That the agent is running inside Sprout (covered by `[Base]`)
+
+Focus persona prompts on what makes this agent unique: its role, personality, domain expertise,
+and team-specific protocols.
+
+---
+
+## 6. Skills
 
 > **Implementation note**: Skill paths are stored as declared in persona frontmatter. Resolution
 > to `SKILL.md` `name:` fields and runtime copying to `$AGENT_CWD/.agents/skills/` is planned
@@ -323,7 +402,7 @@ load(source: "security-review")
 ```
 
 sprout-acp lists available skills in the user message prefix so the agent knows what's available.
-See Section 11 for the full message format.
+See Section 12 for the full message format.
 
 ### Skill File Format
 
@@ -344,7 +423,7 @@ enforce required metadata fields (see PF-5).
 
 ---
 
-## 6. MCP Server Configuration
+## 7. MCP Server Configuration
 
 MCP servers provide external tool access (GitHub, Semgrep, databases, etc.). Configuration is
 defined at two levels: pack-level (shared across all agents) and per-persona (agent-specific).
@@ -408,13 +487,13 @@ sprout-acp passes the merged config via `NewSessionRequest.mcp_servers`. **No `.
 
 ---
 
-## 7. Pack-Level Instructions
+## 8. Pack-Level Instructions
 
 `instructions.md` contains shared rules, coding standards, and team norms that apply to all agents
 in the pack. sprout-acp appends it to the persona prompt in the user message prefix.
 
 sprout-acp appends `instructions.md` to the persona prompt in the user message prefix (see
-Section 11). **No file is written to disk.**
+Section 12). **No file is written to disk.**
 
 **What does NOT work**: `.mdc` rule files (agent runtimes typically don't read them), `rules/` directory (no
 `--rules-dir` flag), relying on the pack's `AGENTS.md` for runtime injection (it's for human
@@ -426,7 +505,7 @@ contributors only).
 
 ---
 
-## 8. Lifecycle Hooks
+## 9. Lifecycle Hooks
 
 > **Implementation note**: Hooks are parsed and validated at pack load time but not yet executed.
 > Hook execution is planned for a future release.
@@ -492,7 +571,7 @@ sprout-acp means no hooks fire.
 
 ---
 
-## 9. Behavioral Configuration
+## 10. Behavioral Configuration
 
 The behavioral config fields in a persona's frontmatter control how the agent participates in
 Sprout conversations. These are all Sprout-specific — the agent runtime has no awareness of them. They sit
@@ -763,7 +842,7 @@ All fields are consumed entirely by sprout-acp. None are passed to the agent run
 
 ---
 
-## 10. Distribution
+## 11. Distribution
 
 ### Phase 1: Zip File
 
@@ -845,7 +924,7 @@ The Sprout desktop app can import persona packs via the Import button:
 
 ---
 
-## 11. Delivery Mechanism Summary
+## 12. Delivery Mechanism Summary
 
 How each pack component reaches the running agent:
 
@@ -862,7 +941,7 @@ How each pack component reaches the running agent:
 
 > **Pack defaults are resolved at deploy time**, not at runtime. When sprout-acp loads a pack and
 > constructs per-persona session configurations, it merges the `defaults` object with each persona's
-> frontmatter behavioral config fields (per the precedence model in Section 9) and stores the
+> frontmatter behavioral config fields (per the precedence model in Section 10) and stores the
 > resulting effective configuration. The `defaults` object itself is not forwarded to the agent runtime or
 > stored in any runtime artifact — only the resolved per-persona values are used.
 
@@ -892,7 +971,7 @@ Load a skill with: load(source: "skill-name")
 
 The `[System]` prefix re-sends the full persona prompt on every turn. True system prompt injection
 — calling `agent.extend_system_prompt()` after `create_agent_for_session()` in `on_new_session()`
-— fires once at session creation. This is planned work; see Section 15.
+— fires once at session creation. This is planned work; see Section 16.
 
 ### What Does NOT Work (Anti-Pattern Reference)
 
@@ -911,12 +990,12 @@ The `[System]` prefix re-sends the full persona prompt on every turn. True syste
 
 ---
 
-## 12. Security Considerations
+## 13. Security Considerations
 
 ### Secret Management
 
 Never embed secrets in pack files. Use `${VAR_NAME}` references in all `env` blocks. Currently,
-`${VAR_NAME}` strings are passed through as literals to the agent runtime (see Section 6). When
+`${VAR_NAME}` strings are passed through as literals to the agent runtime (see Section 7). When
 harness-side interpolation is implemented, sprout-acp will resolve them from the process
 environment at startup and refuse to start if any are unresolved. Inject secrets via your
 deployment mechanism (systemd env files, Vault, Kubernetes secrets, etc.).
@@ -944,7 +1023,7 @@ both with the same caution as any untrusted prompt content.
 
 ---
 
-## 13. Migration Path
+## 14. Migration Path
 
 ### From V6 (sprout-namespaced) Format
 
@@ -1022,7 +1101,7 @@ The V6 namespaced `sprout:` block format is not supported. Only the current flat
 
 ---
 
-## 14. Open Questions / Future Work
+## 15. Open Questions / Future Work
 
 ### Unresolved
 
@@ -1052,7 +1131,7 @@ The V6 namespaced `sprout:` block format is not supported. Only the current flat
 
 ---
 
-## 15. Planned Features
+## 16. Planned Features
 
 Features required by this spec but not yet implemented.
 

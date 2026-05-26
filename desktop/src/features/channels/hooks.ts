@@ -21,10 +21,6 @@ import {
   unarchiveChannel,
   updateChannel,
 } from "@/shared/api/tauri";
-import {
-  cleanupChannelAgents,
-  cleanupManagedAgentIfOrphaned,
-} from "@/features/channels/cleanupChannelAgents";
 import type {
   AddChannelMembersInput,
   Channel,
@@ -335,13 +331,6 @@ export function useDeleteChannelMutation(channelId: string | null) {
         throw new Error("No channel selected.");
       }
 
-      // Best-effort cleanup of managed agents scoped to this channel.
-      try {
-        await cleanupChannelAgents(channelId);
-      } catch (error) {
-        console.warn("Failed to clean up managed agents:", error);
-      }
-
       await deleteChannel(channelId);
     },
     onSuccess: () => {
@@ -386,19 +375,6 @@ export function useAddChannelMembersMutation(channelId: string | null) {
   });
 }
 
-export async function removeChannelMemberWithManagedAgentCleanup(
-  channelId: string,
-  pubkey: string,
-) {
-  await removeChannelMember(channelId, pubkey);
-
-  try {
-    await cleanupManagedAgentIfOrphaned(pubkey, channelId);
-  } catch (error) {
-    console.warn("Failed to clean up managed agent:", error);
-  }
-}
-
 export function useRemoveChannelMemberMutation(channelId: string | null) {
   const queryClient = useQueryClient();
 
@@ -408,7 +384,7 @@ export function useRemoveChannelMemberMutation(channelId: string | null) {
         throw new Error("No channel selected.");
       }
 
-      await removeChannelMemberWithManagedAgentCleanup(channelId, pubkey);
+      await removeChannelMember(channelId, pubkey);
     },
     onSettled: async () => {
       await Promise.all([
