@@ -126,9 +126,7 @@ void main() {
         overrides: [
           relaySessionProvider.overrideWith(() => relaySession),
           relayConfigProvider.overrideWith(
-            () => _FakeRelayConfigNotifier(
-              nsec: userKeychain.nsec,
-            ),
+            () => _FakeRelayConfigNotifier(nsec: userKeychain.nsec),
           ),
         ],
       );
@@ -161,9 +159,7 @@ void main() {
       overrides: [
         relaySessionProvider.overrideWith(() => relaySession),
         relayConfigProvider.overrideWith(
-          () => _FakeRelayConfigNotifier(
-            nsec: userKeychain.nsec,
-          ),
+          () => _FakeRelayConfigNotifier(nsec: userKeychain.nsec),
         ),
       ],
     );
@@ -189,9 +185,7 @@ void main() {
       overrides: [
         relaySessionProvider.overrideWith(() => relaySession),
         relayConfigProvider.overrideWith(
-          () => _FakeRelayConfigNotifier(
-            nsec: firstUser.nsec,
-          ),
+          () => _FakeRelayConfigNotifier(nsec: firstUser.nsec),
         ),
       ],
     );

@@ -84,9 +84,7 @@ class UserStatusNotifier extends AsyncNotifier<UserStatus?> {
     );
 
     final session = ref.read(relaySessionProvider.notifier);
-    await session.publish(
-      NostrEvent.fromJson(event.toMap()),
-    );
+    await session.publish(NostrEvent.fromJson(event.toMap()));
 
     // Optimistic update: update own state immediately.
     final newStatus = (trimmed.isNotEmpty || emoji.isNotEmpty)
