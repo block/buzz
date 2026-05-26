@@ -232,7 +232,11 @@ function AgentSummary({
           {channelNames.length > 0 ? (
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
               {channelNames.map((name) => (
-                <Badge className="normal-case" key={name} variant="secondary">
+                <Badge
+                  className="normal-case tracking-normal"
+                  key={name}
+                  variant="outline"
+                >
                   # {name}
                 </Badge>
               ))}
