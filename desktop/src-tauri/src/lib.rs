@@ -4,7 +4,6 @@ mod events;
 mod huddle;
 mod managed_agents;
 mod media_proxy;
-mod migration;
 mod models;
 pub mod nostr_convert;
 mod prevent_sleep;
@@ -351,11 +350,6 @@ pub fn run() {
         .setup(move |app| {
             let app_handle = app.handle().clone();
             let shutdown_started = Arc::clone(&restore_shutdown_started);
-
-            // Migrate data from the legacy `com.wesb.sprout` directory before
-            // resolving identity, so the persisted key is available at the new
-            // path on first launch after the identifier change.
-            migration::migrate_legacy_data_dir(&app_handle);
 
             // Resolve persisted identity key (env var → file → generate+save).
             // This is fatal — the app should not start with an ephemeral identity
