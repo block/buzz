@@ -44,11 +44,7 @@ export function notificationBody(item: FeedItem) {
 }
 
 export function collectHomeAlertItems(feed: HomeFeedResponse) {
-  return [
-    ...feed.feed.mentions,
-    ...feed.feed.needsAction,
-    ...feed.feed.activity,
-  ];
+  return [...feed.feed.mentions, ...feed.feed.needsAction];
 }
 
 export function eligibleFeedNotificationItems(
