@@ -73,6 +73,29 @@ pub async fn set_contact_list(
     submit_event(builder, &state).await
 }
 
+/// Fetch global NIP-01 kind:1 notes without an author filter.
+#[tauri::command]
+pub async fn get_global_notes(
+    limit: Option<u32>,
+    before: Option<i64>,
+    before_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<UserNotesResponse, String> {
+    let _ = before_id;
+    let mut filter = serde_json::Map::new();
+    filter.insert("kinds".to_string(), serde_json::json!([1]));
+    filter.insert(
+        "limit".to_string(),
+        serde_json::json!(limit.unwrap_or(50).min(200)),
+    );
+    if let Some(t) = before {
+        filter.insert("until".to_string(), serde_json::json!(t));
+    }
+
+    let events = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
+    Ok(nostr_convert::user_notes_from_events(&events))
+}
+
 /// Maximum number of pubkeys per timeline request to keep filter size bounded.
 const MAX_TIMELINE_PUBKEYS: usize = 100;
 

@@ -137,6 +137,28 @@ export async function setContactList(
   };
 }
 
+export async function getGlobalNotes(options?: {
+  limit?: number;
+  before?: number;
+  beforeId?: string;
+}): Promise<UserNotesResponse> {
+  const response = await invokeTauri<RawUserNotesResponse>("get_global_notes", {
+    limit: options?.limit ?? null,
+    before: options?.before ?? null,
+    beforeId: options?.beforeId ?? null,
+  });
+
+  return {
+    notes: response.notes.map(fromRawUserNote),
+    nextCursor: response.next_cursor
+      ? {
+          before: response.next_cursor.before,
+          beforeId: response.next_cursor.before_id,
+        }
+      : null,
+  };
+}
+
 export async function getNotesTimeline(
   pubkeys: string[],
   limitPerUser?: number,

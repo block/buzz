@@ -6,6 +6,7 @@ import { useUsersBatchQuery } from "@/features/profile/hooks";
 import {
   useContactListQuery,
   useFollowMutation,
+  useGlobalNotesQuery,
   useMyNotesQuery,
   usePublishNoteMutation,
   useTimelineQuery,
@@ -32,7 +33,7 @@ import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-type PulseTab = "search" | "foryou" | "people" | "agents" | "mine";
+type PulseTab = "search" | "everyone" | "people" | "agents" | "mine";
 
 const tabButtonClassName =
   "h-7 rounded-full border border-transparent px-1.5 text-[10.5px] font-medium text-muted-foreground data-[active=true]:border-border/70 data-[active=true]:bg-background/80 data-[active=true]:text-foreground data-[active=true]:shadow-xs data-[active=true]:backdrop-blur-sm";
@@ -130,7 +131,7 @@ function AgentFilter({
 }
 
 export function PulseView({ currentPubkey }: PulseViewProps) {
-  const [activeTab, setActiveTab] = React.useState<PulseTab>("foryou");
+  const [activeTab, setActiveTab] = React.useState<PulseTab>("everyone");
   const [agentFilter, setAgentFilter] = React.useState<string | null>(null);
   const [searchQuery, setSearchQuery] = React.useState("");
 
@@ -171,12 +172,12 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     return map;
   }, [relayAgents]);
 
-  const forYouPubkeys = React.useMemo(
+  const mentionPubkeys = React.useMemo(
     () => [...new Set([...peoplePubkeys, ...agentPubkeys])],
     [peoplePubkeys, agentPubkeys],
   );
 
-  const forYouQuery = useTimelineQuery(forYouPubkeys, activeTab === "foryou");
+  const everyoneQuery = useGlobalNotesQuery(activeTab === "everyone");
   const peopleQuery = useTimelineQuery(peoplePubkeys, activeTab === "people");
   const agentTimelineQuery = useTimelineQuery(
     agentFilter ? [agentFilter] : agentPubkeys,
@@ -190,8 +191,8 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
   const unfollowMutation = useUnfollowMutation(currentPubkey);
 
   const visibleNotes: UserNote[] = React.useMemo(() => {
-    if (activeTab === "foryou") {
-      return forYouQuery.data?.notes ?? [];
+    if (activeTab === "everyone") {
+      return everyoneQuery.data?.notes ?? [];
     }
     if (activeTab === "people") {
       // Filter out agent notes from the people timeline.
@@ -205,7 +206,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     return myNotesQuery.data?.notes ?? [];
   }, [
     activeTab,
-    forYouQuery.data,
+    everyoneQuery.data,
     peopleQuery.data,
     agentTimelineQuery.data,
     myNotesQuery.data,
@@ -227,8 +228,8 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
   const profiles: Record<string, UserProfileSummary> =
     profilesQuery.data?.profiles ?? {};
 
-  const mentionProfilesQuery = useUsersBatchQuery(forYouPubkeys, {
-    enabled: forYouPubkeys.length > 0,
+  const mentionProfilesQuery = useUsersBatchQuery(mentionPubkeys, {
+    enabled: mentionPubkeys.length > 0,
   });
   const mentionProfiles = mentionProfilesQuery.data?.profiles ?? {};
   const currentProfile = currentPubkey
@@ -240,7 +241,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
 
   const pulseMentionMembers = React.useMemo<ChannelMember[]>(() => {
     const members: ChannelMember[] = [];
-    for (const pubkey of forYouPubkeys) {
+    for (const pubkey of mentionPubkeys) {
       const profile = mentionProfiles[pubkey.toLowerCase()];
       members.push({
         pubkey,
@@ -250,11 +251,11 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
       });
     }
     return members;
-  }, [forYouPubkeys, mentionProfiles]);
+  }, [mentionPubkeys, mentionProfiles]);
 
   const activeQuery =
-    activeTab === "foryou"
-      ? forYouQuery
+    activeTab === "everyone"
+      ? everyoneQuery
       : activeTab === "people"
         ? peopleQuery
         : activeTab === "agents"
@@ -272,8 +273,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
 
   const emptyMessages: Record<PulseTab, string> = {
     search: "Search Pulse notes by author or text.",
-    foryou:
-      "No notes yet. Follow people and agents to build your personalized feed.",
+    everyone: "No public notes yet.",
     people: "No notes yet. Follow people to see their updates here.",
     agents:
       agentPubkeys.length === 0
@@ -340,8 +340,8 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
                 </Button>
                 <Button
                   className={tabButtonClassName}
-                  data-active={activeTab === "foryou"}
-                  onClick={() => setActiveTab("foryou")}
+                  data-active={activeTab === "everyone"}
+                  onClick={() => setActiveTab("everyone")}
                   size="sm"
                   type="button"
                   variant="ghost"

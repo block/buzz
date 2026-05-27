@@ -455,7 +455,6 @@ pub fn run() {
 
             // Pre-download voice models in the background so they're ready
             // when the user starts their first huddle. Idempotent — no-op if
-            // already downloaded. ~289 MB total (~100 MB Parakeet STT + ~189 MB Pocket TTS).
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
                 mgr.start_tts_download(state.http_client.clone());
@@ -614,6 +613,7 @@ pub fn run() {
             get_contact_list,
             set_contact_list,
             get_notes_timeline,
+            get_global_notes,
             start_huddle,
             join_huddle,
             leave_huddle,
