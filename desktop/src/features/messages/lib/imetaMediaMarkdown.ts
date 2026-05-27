@@ -135,3 +135,25 @@ export function formatImetaMediaLine({ url, type }: ImetaMedia): string {
   const isVideo = type.startsWith("video/");
   return isVideo ? `\n![video](${url})` : `\n![image](${url})`;
 }
+
+/**
+ * Build the body + tags pair for an outgoing message (initial send or
+ * edit). Appends `![image|video](url)` markdown lines for each attachment
+ * to the body so the renderer (which keys on URLs literally present in
+ * the content) draws them, and returns the matching imeta tag set.
+ *
+ * Returns `mediaTags: undefined` when there are no attachments. Callers
+ * that need an explicit "wipe attachments" signal (the edit path, where
+ * `[]` instructs the receiver overlay to drop existing imeta) should
+ * coerce with `?? []`.
+ */
+export function buildOutgoingMessage(
+  body: string,
+  pendingImeta: ReadonlyArray<ImetaMedia>,
+): { content: string; mediaTags: string[][] | undefined } {
+  let content = body;
+  for (const d of pendingImeta) content += formatImetaMediaLine(d);
+  const mediaTags =
+    pendingImeta.length > 0 ? buildImetaTags(pendingImeta) : undefined;
+  return { content, mediaTags };
+}

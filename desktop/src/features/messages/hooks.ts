@@ -23,7 +23,7 @@ import {
 import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
 // Same .mjs the renderer uses, so the cache-update projection can't drift
 // from the on-render overlay.
-import { applyEditTagOverlay } from "@/features/messages/lib/applyEditOverlay.mjs";
+import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
 import {
   KIND_STREAM_MESSAGE,
   KIND_SYSTEM_MESSAGE,

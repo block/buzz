@@ -48,6 +48,14 @@ function buildImetaTags(imetaMedia) {
   ]);
 }
 
+function buildOutgoingMessage(body, pendingImeta) {
+  let content = body;
+  for (const d of pendingImeta) content += formatImetaMediaLine(d);
+  const mediaTags =
+    pendingImeta.length > 0 ? buildImetaTags(pendingImeta) : undefined;
+  return { content, mediaTags };
+}
+
 // Mirror of `parseImetaTags` + `imetaMediaFromTags` so the projection's
 // type/x/size/dim/blurhash/thumb/duration/image fields can be tested without
 // a TS loader.
@@ -317,4 +325,49 @@ test("edit flow: imeta tags rebuilt from current pending after user removes one"
   const editMediaTags = buildImetaTags(after);
   assert.equal(editMediaTags.length, 1);
   assert.equal(editMediaTags[0][1], "url https://b/b.png");
+});
+
+// ── buildOutgoingMessage (shared body+tags builder for send + edit) ───
+
+test("buildOutgoingMessage: empty pendingImeta returns body untouched and undefined mediaTags", () => {
+  const out = buildOutgoingMessage("hello", []);
+  assert.equal(out.content, "hello");
+  assert.equal(out.mediaTags, undefined);
+});
+
+test("buildOutgoingMessage: appends media markdown line per attachment, in order", () => {
+  const out = buildOutgoingMessage("hi", [
+    {
+      url: "https://b/a.png",
+      type: "image/png",
+      sha256: "x",
+      size: 1,
+      uploaded: 0,
+    },
+    {
+      url: "https://b/v.mp4",
+      type: "video/mp4",
+      sha256: "y",
+      size: 2,
+      uploaded: 0,
+    },
+  ]);
+  assert.equal(
+    out.content,
+    "hi\n![image](https://b/a.png)\n![video](https://b/v.mp4)",
+  );
+});
+
+test("buildOutgoingMessage: mediaTags mirror buildImetaTags output for non-empty pending", () => {
+  const pending = [
+    {
+      url: "https://b/a.png",
+      type: "image/png",
+      sha256: "abc",
+      size: 99,
+      uploaded: 0,
+    },
+  ];
+  const out = buildOutgoingMessage("", pending);
+  assert.deepEqual(out.mediaTags, buildImetaTags(pending));
 });

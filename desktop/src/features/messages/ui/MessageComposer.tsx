@@ -9,8 +9,7 @@ import { useDrafts } from "@/features/messages/lib/useDrafts";
 import { useEmojiAutocomplete } from "@/features/messages/lib/useEmojiAutocomplete";
 import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
 import {
-  buildImetaTags,
-  formatImetaMediaLine,
+  buildOutgoingMessage,
   type ImetaMedia,
   stripImetaMediaLines,
 } from "@/features/messages/lib/imetaMediaMarkdown";
@@ -120,12 +119,14 @@ export function MessageComposer({
   const previousDraftKeyRef = React.useRef<string | null>(null);
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
   effectiveDraftKeyRef.current = effectiveDraftKey;
-  const preEditContentRef = React.useRef<string | null>(null);
-  // Snapshot of `pendingImeta` at the moment we enter edit mode, so any
-  // draft attachments the user had staged for a fresh send aren't lost when
-  // the composer is hijacked for editing. Restored on edit-cancel/exit
-  // alongside the text body in `preEditContentRef`.
-  const preEditPendingImetaRef = React.useRef<ImetaMedia[] | null>(null);
+  // Snapshot of composer state at the moment we enter edit mode (text body
+  // + draft attachments) so the user's pre-edit work isn't lost when the
+  // composer is hijacked for editing. Restored on edit-cancel/exit. `null`
+  // while not in edit mode.
+  const preEditSnapshotRef = React.useRef<{
+    content: string;
+    pendingImeta: ImetaMedia[];
+  } | null>(null);
   const mentions = useMentions(channelId, undefined, profiles);
   const channelLinks = useChannelLinks();
   const emojiAutocomplete = useEmojiAutocomplete();
@@ -239,11 +240,13 @@ export function MessageComposer({
   // biome-ignore lint/correctness/useExhaustiveDependencies: editTarget?.id is the trigger
   React.useEffect(() => {
     if (editTarget) {
-      preEditContentRef.current = contentRef.current;
-      // Stash the user's in-flight attachment draft (if any) before we
-      // overwrite pendingImeta with the edit target's attachments. Restored
-      // in the else branch on edit-cancel/exit.
-      preEditPendingImetaRef.current = [...media.pendingImetaRef.current];
+      // Snapshot the current draft (text + attachments) so the user's
+      // in-flight work survives the edit-mode hijack and is restored on
+      // edit-cancel/exit.
+      preEditSnapshotRef.current = {
+        content: contentRef.current,
+        pendingImeta: [...media.pendingImetaRef.current],
+      };
       // Strip the trailing `![image|video](url)` lines that correspond to
       // imeta attachments — the user manages those via the attachments row,
       // not via raw markdown in the editor.
@@ -259,16 +262,16 @@ export function MessageComposer({
       // can remove existing ones / add new ones before saving.
       media.setPendingImeta(editTarget.imetaMedia ?? []);
       richText.focus();
-    } else if (preEditContentRef.current !== null) {
-      const restored = preEditContentRef.current;
-      preEditContentRef.current = null;
-      setContent(restored);
-      contentRef.current = restored;
-      restored ? richText.setContent(restored) : richText.clearContent();
-      // Restore the draft attachments the user had staged before they
-      // entered edit mode (empty array if they had none).
-      media.setPendingImeta(preEditPendingImetaRef.current ?? []);
-      preEditPendingImetaRef.current = null;
+    } else if (preEditSnapshotRef.current !== null) {
+      const { content: restoredContent, pendingImeta: restoredImeta } =
+        preEditSnapshotRef.current;
+      preEditSnapshotRef.current = null;
+      setContent(restoredContent);
+      contentRef.current = restoredContent;
+      restoredContent
+        ? richText.setContent(restoredContent)
+        : richText.clearContent();
+      media.setPendingImeta(restoredImeta);
     }
   }, [editTarget?.id]);
 
@@ -388,16 +391,14 @@ export function MessageComposer({
       // effective deletion).
       if (!trimmed && !hasMedia) return;
 
-      // Append `![image|video](url)` lines for each attachment, mirroring
-      // the send path exactly. The renderer (`markdown.tsx`) only emits
-      // <img>/<VideoPlayer> for URLs literally present in the body, so the
-      // saved content has to carry the markdown lines even though the
-      // imeta tags are also on the edit event.
-      let finalContent = trimmed;
-      for (const d of currentPendingImeta) {
-        finalContent += formatImetaMediaLine(d);
-      }
-      const mediaTags = hasMedia ? buildImetaTags(currentPendingImeta) : [];
+      // Build the edit's body + imeta tag set. Coerce `mediaTags ?? []`
+      // because edit semantics use `[]` as the explicit "wipe all
+      // attachments" signal — the receiver overlay drops imeta when the
+      // edit carries an empty (but defined) set.
+      const { content: finalContent, mediaTags } = buildOutgoingMessage(
+        trimmed,
+        currentPendingImeta,
+      );
 
       const savedContent = trimmed;
       const savedImeta = [...currentPendingImeta];
@@ -411,7 +412,7 @@ export function MessageComposer({
       setIsEmojiPickerOpen(false);
 
       try {
-        await onEditSaveRef.current(finalContent, mediaTags);
+        await onEditSaveRef.current(finalContent, mediaTags ?? []);
       } catch {
         setContent(savedContent);
         contentRef.current = savedContent;
@@ -435,16 +436,13 @@ export function MessageComposer({
 
     const pubkeys = mentions.extractMentionPubkeys(trimmed);
 
-    const mediaTags =
-      currentPendingImeta.length > 0
-        ? buildImetaTags(currentPendingImeta)
-        : undefined;
-
-    // Append all attachments as markdown images at the end of the message.
-    let finalContent = trimmed;
-    for (const d of currentPendingImeta) {
-      finalContent += formatImetaMediaLine(d);
-    }
+    // Send semantics use `undefined` for "no attachments" (no imeta tags
+    // emitted on the publish), which is what `buildOutgoingMessage`
+    // returns by default.
+    const { content: finalContent, mediaTags } = buildOutgoingMessage(
+      trimmed,
+      currentPendingImeta,
+    );
 
     const savedContent = trimmed;
     const savedImeta = [...currentPendingImeta];
