@@ -29,6 +29,11 @@
       "matchPackageNames": ["redis", "deadpool-redis"],
       "matchManagers": ["cargo"],
       "groupName": "redis"
+    },
+    {
+      "description": "tiptap 3.23.x breaks editor lifecycle under real relay latency — pin until upstream stabilizes.",
+      "matchPackageNames": ["@tiptap/{/,}**"],
+      "allowedVersions": "<3.23.0"
     }
   ]
 }
