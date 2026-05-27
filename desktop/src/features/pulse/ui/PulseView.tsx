@@ -1,12 +1,7 @@
 import { Search } from "lucide-react";
 import * as React from "react";
 
-import { useNavigate } from "@tanstack/react-router";
-import { toast } from "sonner";
-
 import { useRelayAgentsQuery } from "@/features/agents/hooks";
-import { useOpenDmMutation } from "@/features/channels/hooks";
-import { useToggleReactionMutation } from "@/features/messages/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import {
   useContactListQuery,
@@ -18,10 +13,7 @@ import {
   useUnfollowMutation,
 } from "@/features/pulse/hooks";
 import { groupAgentNotes } from "@/features/pulse/lib/groupAgentNotes";
-import {
-  buildNoteShareUri,
-  toggleNoteIdInSet,
-} from "@/features/pulse/lib/noteActions";
+import { usePulseNoteActions } from "@/features/pulse/lib/useNoteActions";
 import { AgentActivityCard } from "@/features/pulse/ui/AgentActivityCard";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import { NoteCard } from "@/features/pulse/ui/NoteCard";
@@ -70,14 +62,6 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
   const [activeTab, setActiveTab] = React.useState<PulseTab>("everyone");
   const [agentFilter, setAgentFilter] = React.useState<string | null>(null);
   const [searchQuery, setSearchQuery] = React.useState("");
-  const [upvotedNoteIds, setUpvotedNoteIds] = React.useState<
-    ReadonlySet<string>
-  >(() => new Set());
-  const [pendingUpvoteNoteIds, setPendingUpvoteNoteIds] = React.useState<
-    ReadonlySet<string>
-  >(() => new Set());
-  const navigate = useNavigate();
-
   const contactListQuery = useContactListQuery(currentPubkey);
   const contacts = contactListQuery.data?.contacts ?? [];
   const contactPubkeys = React.useMemo(
@@ -130,11 +114,9 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     activeTab === "mine" ? currentPubkey : undefined,
   );
   const publishMutation = usePublishNoteMutation(currentPubkey);
-  const replyMutation = usePublishNoteMutation(currentPubkey);
+  const noteActions = usePulseNoteActions(currentPubkey);
   const followMutation = useFollowMutation(currentPubkey);
   const unfollowMutation = useUnfollowMutation(currentPubkey);
-  const toggleReactionMutation = useToggleReactionMutation();
-  const openDmMutation = useOpenDmMutation();
 
   const visibleNotes: UserNote[] = React.useMemo(() => {
     if (activeTab === "everyone") {
@@ -217,84 +199,6 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     unfollowMutation.mutate(pubkey);
   }
 
-  async function handleToggleUpvote(note: UserNote, remove: boolean) {
-    if (pendingUpvoteNoteIds.has(note.id)) {
-      return;
-    }
-
-    setPendingUpvoteNoteIds((current) =>
-      toggleNoteIdInSet(current, note.id, true),
-    );
-    setUpvotedNoteIds((current) =>
-      toggleNoteIdInSet(current, note.id, !remove),
-    );
-
-    try {
-      await toggleReactionMutation.mutateAsync({
-        eventId: note.id,
-        emoji: "+",
-        remove,
-      });
-    } catch (error) {
-      setUpvotedNoteIds((current) =>
-        toggleNoteIdInSet(current, note.id, remove),
-      );
-      toast.error(
-        error instanceof Error ? error.message : "Failed to update reaction",
-      );
-    } finally {
-      setPendingUpvoteNoteIds((current) =>
-        toggleNoteIdInSet(current, note.id, false),
-      );
-    }
-  }
-
-  async function handleReply(
-    note: UserNote,
-    content: string,
-    mentionPubkeys: string[],
-    mediaTags?: string[][],
-  ) {
-    const replyMentionPubkeys = [...new Set([note.pubkey, ...mentionPubkeys])];
-
-    try {
-      await replyMutation.mutateAsync({
-        content,
-        replyTo: note.id,
-        mentionPubkeys: replyMentionPubkeys,
-        mediaTags,
-      });
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to post reply",
-      );
-      throw error;
-    }
-  }
-
-  async function handleShare(note: UserNote) {
-    try {
-      await navigator.clipboard.writeText(buildNoteShareUri(note));
-      toast.success("Copied note link");
-    } catch {
-      toast.error("Failed to copy note link");
-    }
-  }
-
-  async function handleStartDm(pubkey: string) {
-    try {
-      const directMessage = await openDmMutation.mutateAsync({
-        pubkeys: [pubkey],
-      });
-      await navigate({
-        to: "/channels/$channelId",
-        params: { channelId: directMessage.id },
-      });
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to open DM");
-    }
-  }
-
   const emptyMessages: Record<PulseTab, string> = {
     search: "Search Pulse notes by author or text.",
     everyone: "No public notes yet.",
@@ -329,24 +233,26 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     ) : (
       visibleNotes.map((note) => (
         <NoteCard
+          actions={{
+            follow: handleFollow,
+            reply: noteActions.reply,
+            share: noteActions.share,
+            startDm: noteActions.startDm,
+            toggleUpvote: noteActions.toggleUpvote,
+            unfollow: handleUnfollow,
+          }}
           composerProfiles={mentionProfiles}
           currentUserDisplayName={currentDisplayName}
           currentUserProfile={currentProfile}
           isAgent={agentPubkeySet.has(note.pubkey)}
           isFollowing={followingSet.has(note.pubkey)}
           isOwnNote={note.pubkey === currentPubkey}
-          isReplySending={replyMutation.isPending}
-          isUpvotePending={pendingUpvoteNoteIds.has(note.id)}
-          isUpvoted={upvotedNoteIds.has(note.id)}
+          isReplySending={noteActions.isReplySending}
+          isUpvotePending={noteActions.isUpvotePending(note.id)}
+          isUpvoted={noteActions.isUpvoted(note.id)}
           key={note.id}
           members={pulseMentionMembers}
           note={note}
-          onFollow={handleFollow}
-          onReply={handleReply}
-          onShare={handleShare}
-          onStartDm={handleStartDm}
-          onToggleUpvote={handleToggleUpvote}
-          onUnfollow={handleUnfollow}
           profile={profiles[note.pubkey.toLowerCase()] ?? null}
         />
       ))

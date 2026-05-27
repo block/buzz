@@ -13,6 +13,20 @@ import type { ChannelMember, UserProfileSummary } from "@/shared/api/types";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
+export type NoteCardActions = {
+  follow?: (pubkey: string) => void;
+  reply?: (
+    note: UserNote,
+    content: string,
+    mentionPubkeys: string[],
+    mediaTags?: string[][],
+  ) => Promise<unknown>;
+  share?: (note: UserNote) => void;
+  startDm?: (pubkey: string) => void;
+  toggleUpvote?: (note: UserNote, remove: boolean) => Promise<unknown>;
+  unfollow?: (pubkey: string) => void;
+};
+
 type NoteCardProps = {
   note: UserNote;
   profile?: UserProfileSummary | null;
@@ -26,17 +40,7 @@ type NoteCardProps = {
   isAgent?: boolean;
   isOwnNote: boolean;
   isFollowing: boolean;
-  onFollow?: (pubkey: string) => void;
-  onReply?: (
-    note: UserNote,
-    content: string,
-    mentionPubkeys: string[],
-    mediaTags?: string[][],
-  ) => Promise<unknown>;
-  onShare?: (note: UserNote) => void;
-  onStartDm?: (pubkey: string) => void;
-  onToggleUpvote?: (note: UserNote, remove: boolean) => Promise<unknown>;
-  onUnfollow?: (pubkey: string) => void;
+  actions?: NoteCardActions;
 };
 
 function formatRelativeTime(unixSeconds: number): string {
@@ -67,12 +71,7 @@ export function NoteCard({
   isUpvotePending = false,
   isUpvoted = false,
   members = [],
-  onFollow,
-  onReply,
-  onShare,
-  onStartDm,
-  onToggleUpvote,
-  onUnfollow,
+  actions,
 }: NoteCardProps) {
   const displayName = profile?.displayName ?? `${note.pubkey.slice(0, 8)}...`;
   const avatarUrl = profile?.avatarUrl ?? null;
@@ -129,7 +128,7 @@ export function NoteCard({
               disabled={isUpvotePending}
               onClick={() => {
                 if (!isUpvotePending) {
-                  void onToggleUpvote?.(note, isUpvoted);
+                  void actions?.toggleUpvote?.(note, isUpvoted);
                 }
               }}
               type="button"
@@ -152,7 +151,7 @@ export function NoteCard({
             <button
               aria-label="Share"
               className={actionButtonClass}
-              onClick={() => onShare?.(note)}
+              onClick={() => actions?.share?.(note)}
               type="button"
             >
               <SquareArrowOutUpRight className="h-4 w-4" />
@@ -162,7 +161,7 @@ export function NoteCard({
               <button
                 aria-label="Start direct message"
                 className={actionButtonClass}
-                onClick={() => onStartDm?.(note.pubkey)}
+                onClick={() => actions?.startDm?.(note.pubkey)}
                 type="button"
               >
                 <PenSquare className="h-4 w-4" />
@@ -172,7 +171,7 @@ export function NoteCard({
               isFollowing ? (
                 <button
                   className="text-muted-foreground/60 transition-colors hover:text-foreground hover:underline focus-visible:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                  onClick={() => onUnfollow?.(note.pubkey)}
+                  onClick={() => actions?.unfollow?.(note.pubkey)}
                   type="button"
                 >
                   Unfollow
@@ -180,7 +179,7 @@ export function NoteCard({
               ) : (
                 <button
                   className="text-muted-foreground/60 transition-colors hover:text-foreground hover:underline focus-visible:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-                  onClick={() => onFollow?.(note.pubkey)}
+                  onClick={() => actions?.follow?.(note.pubkey)}
                   type="button"
                 >
                   Follow
@@ -194,7 +193,7 @@ export function NoteCard({
             <ForumComposer
               compact
               className="pulse-reply-composer border-0 bg-transparent p-0 shadow-none"
-              disabled={!onReply}
+              disabled={!actions?.reply}
               header={
                 <div className="flex min-w-0 items-center gap-2">
                   <UserAvatar
@@ -211,11 +210,11 @@ export function NoteCard({
               members={members}
               onCancel={() => setIsReplyComposerOpen(false)}
               onSubmit={(content, mentionPubkeys, mediaTags) =>
-                onReply?.(note, content, mentionPubkeys, mediaTags)?.then(
-                  () => {
+                actions
+                  ?.reply?.(note, content, mentionPubkeys, mediaTags)
+                  ?.then(() => {
                     setIsReplyComposerOpen(false);
-                  },
-                )
+                  })
               }
               placeholder="Post your reply"
               profiles={composerProfiles}
