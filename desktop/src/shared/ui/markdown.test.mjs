@@ -521,13 +521,44 @@ test("remarkMessageLinks: two URLs in one text node both replaced", () => {
   assert.equal(links[1].value, "sprout://message?channel=b&id=2");
 });
 
-test("remarkMessageLinks: trailing `)` is excluded from URL", () => {
+test("remarkMessageLinks: trailing sentence punctuation stays outside URL", () => {
+  for (const punctuation of [".", ",", ";", ":", "!", "?"]) {
+    const tree = runPlugin(
+      paragraph(text(`see sprout://message?channel=c&id=m${punctuation}`)),
+    );
+    const kids = tree.children[0].children;
+
+    assert.equal(kids.length, 3, punctuation);
+    assert.equal(kids[0].value, "see ", punctuation);
+    assert.equal(kids[1].type, "message-link", punctuation);
+    assert.equal(kids[1].value, "sprout://message?channel=c&id=m", punctuation);
+    assert.equal(kids[2].type, "text", punctuation);
+    assert.equal(kids[2].value, punctuation, punctuation);
+  }
+});
+
+test("remarkMessageLinks: URL inside parens keeps closing paren outside", () => {
   const tree = runPlugin(
     paragraph(text("see (sprout://message?channel=c&id=m) for details")),
   );
-  const link = tree.children[0].children.find((c) => c.type === "message-link");
-  assert.ok(link);
-  assert.equal(link.value, "sprout://message?channel=c&id=m");
+  const kids = tree.children[0].children;
+
+  assert.equal(kids.length, 3);
+  assert.equal(kids[0].value, "see (");
+  assert.equal(kids[1].type, "message-link");
+  assert.equal(kids[1].value, "sprout://message?channel=c&id=m");
+  assert.equal(kids[2].type, "text");
+  assert.equal(kids[2].value, ") for details");
+});
+
+test("remarkMessageLinks: URL without trailing punctuation matches end-to-end", () => {
+  const value = "sprout://message?channel=c&id=m";
+  const tree = runPlugin(paragraph(text(value)));
+  const kids = tree.children[0].children;
+
+  assert.equal(kids.length, 1);
+  assert.equal(kids[0].type, "message-link");
+  assert.equal(kids[0].value, value);
 });
 
 test("remarkMessageLinks: non-message sprout:// URLs are not matched", () => {
