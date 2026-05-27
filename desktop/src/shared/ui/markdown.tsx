@@ -1,5 +1,8 @@
 import * as React from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, {
+  type Components,
+  defaultUrlTransform,
+} from "react-markdown";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Copy } from "lucide-react";
 import remarkBreaks from "remark-breaks";
@@ -35,6 +38,19 @@ import {
 import { VideoPlayer } from "./VideoPlayer";
 
 type ImetaLookup = Map<string, { image?: string; thumb?: string }>;
+
+/**
+ * `urlTransform` for `<ReactMarkdown>` that preserves `sprout://message?…`
+ * links. The default transform strips unknown schemes (returns `""`) before
+ * the `a` component override can see them, which would break copy → paste →
+ * click end-to-end. Everything else delegates to `defaultUrlTransform`.
+ */
+function messageLinkUrlTransform(value: string, key: string): string {
+  if (key === "href" && isMessageLink(value)) {
+    return value;
+  }
+  return defaultUrlTransform(value);
+}
 
 type MarkdownProps = {
   channelNames?: string[];
@@ -556,6 +572,7 @@ function MarkdownInner({
       components={components}
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
+      urlTransform={messageLinkUrlTransform}
     >
       {processedContent}
     </ReactMarkdown>

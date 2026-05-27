@@ -390,3 +390,77 @@ test("rehypeImageGallery: mixed content paragraph is not image-only", () => {
   // Middle paragraph has text, so it breaks the run
   assert.equal(tree.children.length, 3);
 });
+
+// ── messageLinkUrlTransform: sprout:// link preservation ──────────────
+// Regression test: react-markdown's `defaultUrlTransform` strips unknown
+// schemes (returns `""`) before our `a` component override can see them,
+// which would break copy → paste → click for `sprout://message?…` links
+// end-to-end. We pass a custom `urlTransform` that delegates to the
+// default for everything except `sprout://message` hrefs.
+//
+// This test renders real `<ReactMarkdown>` with the production transform
+// and asserts the link href survives to the rendered DOM. Mirrors the
+// `markdown.tsx` source — keep in sync if either changes.
+
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+
+function isMessageLink(href) {
+  if (!href) return false;
+  return href.startsWith("sprout://message?") || href === "sprout://message";
+}
+
+function messageLinkUrlTransform(value, key) {
+  if (key === "href" && isMessageLink(value)) {
+    return value;
+  }
+  return defaultUrlTransform(value);
+}
+
+function renderMarkdown(content) {
+  return renderToStaticMarkup(
+    React.createElement(
+      ReactMarkdown,
+      { urlTransform: messageLinkUrlTransform },
+      content,
+    ),
+  );
+}
+
+test("messageLinkUrlTransform: preserves sprout://message href", () => {
+  const html = renderMarkdown(
+    "Click [here](sprout://message?channel=abc&id=xyz)",
+  );
+  // HTML-encoded `&` in attributes is fine — the browser decodes back to `&`.
+  assert.match(html, /href="sprout:\/\/message\?channel=abc&(?:amp;)?id=xyz"/);
+});
+
+test("messageLinkUrlTransform: preserves sprout://message href with thread", () => {
+  const html = renderMarkdown(
+    "[link](sprout://message?channel=c1&id=m1&thread=t1)",
+  );
+  assert.match(html, /href="sprout:\/\/message\?[^"]*thread=t1"/);
+});
+
+test("messageLinkUrlTransform: still strips javascript: scheme", () => {
+  const html = renderMarkdown("[xss](javascript:alert(1))");
+  // defaultUrlTransform replaces unsafe schemes with the empty string.
+  assert.match(html, /href=""/);
+  assert.doesNotMatch(html, /javascript:/);
+});
+
+test("messageLinkUrlTransform: passes http(s) through unchanged", () => {
+  const html = renderMarkdown("[ext](https://example.com/path)");
+  assert.match(html, /href="https:\/\/example\.com\/path"/);
+});
+
+test("messageLinkUrlTransform: leaves non-message sprout:// schemes to default", () => {
+  // `sprout://connect?relay=…` is handled by a different code path (Tauri
+  // single-instance). The markdown renderer should let it pass through
+  // defaultUrlTransform (which strips it) since it's not clickable in-app.
+  const html = renderMarkdown(
+    "[connect](sprout://connect?relay=wss://relay.example)",
+  );
+  assert.match(html, /href=""/);
+});

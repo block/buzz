@@ -15,6 +15,11 @@ export type MessageLinkInput = {
   /**
    * Optional thread root event id. Present when the linked message is a
    * reply (so the caller can route into a thread / forum post view).
+   *
+   * Currently emitted into the URL but not consumed by the click handler
+   * or deep-link listener — both route via `goChannel(channelId,
+   * { messageId })` and let `useTimelineScrollManager` resolve the target.
+   * Reserved for future "open in thread view" routing.
    */
   threadRootId?: string | null;
 };
