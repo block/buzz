@@ -1,4 +1,8 @@
-import type { InboxFilter, InboxItem } from "@/features/home/lib/inbox";
+import {
+  formatInboxTypeLabel,
+  type InboxFilter,
+  type InboxItem,
+} from "@/features/home/lib/inbox";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -70,6 +74,7 @@ export function InboxListPane({
             {items.map((item) => {
               const isSelected = item.id === selectedId;
               const isDone = doneSet.has(item.id);
+              const typeLabel = formatInboxTypeLabel(item);
 
               return (
                 <button
@@ -132,16 +137,14 @@ export function InboxListPane({
                     </p>
 
                     <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      {item.channelLabel ? (
-                        <span
-                          className={cn(
-                            "text-[11px] text-muted-foreground",
-                            isDone ? "font-normal" : "font-semibold",
-                          )}
-                        >
-                          #{item.channelLabel}
-                        </span>
-                      ) : null}
+                      <span
+                        className={cn(
+                          "text-[11px] text-muted-foreground",
+                          isDone ? "font-normal" : "font-semibold",
+                        )}
+                      >
+                        {typeLabel}
+                      </span>
                     </div>
                   </div>
                 </button>

@@ -159,6 +159,26 @@ function categoryLabelFor(category: FeedItemCategory) {
         : "Activity";
 }
 
+export function formatInboxTypeLabel(item: InboxItem) {
+  const channelName = item.channelLabel;
+  const channelSuffix = channelName ? ` in #${channelName}` : "";
+
+  if (item.item.channelType === "dm") {
+    return item.senderLabel ? `DM from ${item.senderLabel}` : "DM";
+  }
+
+  const category = item.categories[0] ?? item.item.category;
+  if (category === "mention") {
+    return channelName ? `Mentioned in #${channelName}` : "Mentioned";
+  }
+
+  if (category === "needs_action") {
+    return channelName ? `Needs action in #${channelName}` : "Needs action";
+  }
+
+  return `${feedHeadline(item.item)}${channelSuffix}`;
+}
+
 function categoryPriority(category: FeedItemCategory) {
   switch (category) {
     case "needs_action":

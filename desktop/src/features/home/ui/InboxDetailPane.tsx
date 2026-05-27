@@ -12,6 +12,7 @@ import type {
   InboxItem,
   InboxReply,
 } from "@/features/home/lib/inbox";
+import { formatInboxTypeLabel } from "@/features/home/lib/inbox";
 import {
   type InboxDisplayMessage,
   InboxMessageRow,
@@ -193,8 +194,8 @@ export function InboxDetailPane({
       : null;
   const channelContextName = contextChannelName ?? item.channelLabel;
   const contextLabel = channelContextName
-    ? `#${channelContextName}`
-    : item.categoryLabel;
+    ? formatInboxTypeLabel({ ...item, channelLabel: channelContextName })
+    : formatInboxTypeLabel(item);
   const contextChannelId = item.item.channelId;
 
   const handleSelectReplyTarget = (message: InboxDisplayMessage) => {
