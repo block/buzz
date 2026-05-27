@@ -1,30 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-// ── Inlined edit-overlay logic from formatTimelineMessages.ts ─────────
-// `formatTimelineMessages` itself has a heavy import graph; the imeta-tag
-// overlay is the only piece touched by the attachment-editable edit feature
-// and is a pure projection, so we inline + test it directly.
-
-/**
- * Given an original event and (optionally) an edit event for it, return the
- * effective (body, tags) pair the renderer should use:
- *  - body comes from the edit when present, else original
- *  - imeta tags come from the edit when present (full new tag set)
- *  - all non-imeta tags from the original are preserved
- */
-function applyEditOverlay(originalEvent, edit) {
-  if (!edit) {
-    return { body: originalEvent.content, tags: originalEvent.tags };
-  }
-  return {
-    body: edit.content,
-    tags: [
-      ...originalEvent.tags.filter((t) => t[0] !== "imeta"),
-      ...edit.tags.filter((t) => t[0] === "imeta"),
-    ],
-  };
-}
+// Imports the exact source the renderer (formatTimelineMessages.ts) and the
+// post-edit cache-update (useEditMessageMutation) use. No inlined copy → no
+// drift risk between test expectations and production behaviour.
+import { applyEditOverlay, applyEditTagOverlay } from "./applyEditOverlay.mjs";
 
 const IMETA = (url) => ["imeta", `url ${url}`, "m image/png", "x x", "size 1"];
 
@@ -116,4 +96,33 @@ test("overlay: edit adding imeta to a previously text-only message", () => {
     out.tags.some((t) => t[0] === "p" && t[1] === "mention"),
     "non-imeta tags from original must be preserved",
   );
+});
+
+test("applyEditTagOverlay: undefined editTags is a pass-through", () => {
+  const tags = [["h", "uuid"], IMETA("https://b/a.png")];
+  assert.equal(applyEditTagOverlay(tags, undefined), tags);
+});
+
+test("applyEditTagOverlay: edit's non-imeta tags are dropped (only imeta wins)", () => {
+  // The edit event itself carries `h` and `e` tags — the overlay must not
+  // promote those into the merged set; only imeta tags from the edit win.
+  const original = [
+    ["h", "uuid-original"],
+    ["p", "mention1"],
+  ];
+  const edit = [
+    ["h", "uuid-from-edit-must-be-ignored"],
+    ["e", "edit-target-event-id"],
+    IMETA("https://b/a.png"),
+  ];
+  const out = applyEditTagOverlay(original, edit);
+  // The original h survives, the edit's h is ignored.
+  const hTags = out.filter((t) => t[0] === "h");
+  assert.deepEqual(hTags, [["h", "uuid-original"]]);
+  // No `e` tag from the edit leaked through.
+  assert.equal(out.filter((t) => t[0] === "e").length, 0);
+  // Original p mention still there.
+  assert.ok(out.some((t) => t[0] === "p" && t[1] === "mention1"));
+  // Imeta from the edit is present.
+  assert.equal(out.filter((t) => t[0] === "imeta").length, 1);
 });

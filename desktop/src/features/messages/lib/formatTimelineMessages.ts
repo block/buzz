@@ -31,6 +31,9 @@ import {
 } from "@/shared/constants/kinds";
 import { resolveEventAuthorPubkey } from "@/shared/lib/authors";
 import { formatTime } from "@/features/messages/lib/dateFormatters";
+// Pure overlay helpers live in a sibling .mjs so node:test (no TS loader)
+// can exercise the exact same source the renderer uses.
+import { applyEditTagOverlay } from "@/features/messages/lib/applyEditOverlay.mjs";
 
 const HEX_RE = /^[0-9a-f]+$/i;
 
@@ -354,12 +357,9 @@ export function formatTimelineMessages(
       kind: event.kind,
       // When edited, swap the original event's imeta tags for the edit's
       // imeta tags. All non-imeta tags on the original are preserved.
-      tags: edit
-        ? [
-            ...event.tags.filter((t) => t[0] !== "imeta"),
-            ...edit.tags.filter((t) => t[0] === "imeta"),
-          ]
-        : event.tags,
+      // Logic lives in `applyEditOverlay.mjs` so prod and tests share a
+      // single source.
+      tags: applyEditTagOverlay(event.tags, edit?.tags),
       reactions: (() => {
         const reactions = reactionsByEventId.get(event.id);
         return reactions ? [...reactions.values()] : undefined;

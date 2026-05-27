@@ -37,6 +37,14 @@ export type ImetaMedia = BlobDescriptor;
  * Falls back to `image/jpeg` when an entry is missing `m` (legacy events).
  * The `uploaded` field isn't transmitted in imeta tags — set to 0 since no
  * consumer reads it.
+ *
+ * Projection ceiling: NIP-92 also defines `alt`, `fallback`, and `service`
+ * fields that `BlobDescriptor` doesn't carry. We drop them on edit-load,
+ * which means an edit will silently strip those fields from the saved tag
+ * set. In practice this only fires on cross-client edits today (our send
+ * path doesn't emit them), so the data loss is bounded. If/when those
+ * fields become first-class in the composer, widen `BlobDescriptor`
+ * (or split `ImetaMedia` from it) and pass them through here.
  */
 export function imetaMediaFromTags(
   tags: ReadonlyArray<ReadonlyArray<string>> | undefined,

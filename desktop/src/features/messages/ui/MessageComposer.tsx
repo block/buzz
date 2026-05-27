@@ -121,6 +121,11 @@ export function MessageComposer({
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
   effectiveDraftKeyRef.current = effectiveDraftKey;
   const preEditContentRef = React.useRef<string | null>(null);
+  // Snapshot of `pendingImeta` at the moment we enter edit mode, so any
+  // draft attachments the user had staged for a fresh send aren't lost when
+  // the composer is hijacked for editing. Restored on edit-cancel/exit
+  // alongside the text body in `preEditContentRef`.
+  const preEditPendingImetaRef = React.useRef<ImetaMedia[] | null>(null);
   const mentions = useMentions(channelId, undefined, profiles);
   const channelLinks = useChannelLinks();
   const emojiAutocomplete = useEmojiAutocomplete();
@@ -235,6 +240,10 @@ export function MessageComposer({
   React.useEffect(() => {
     if (editTarget) {
       preEditContentRef.current = contentRef.current;
+      // Stash the user's in-flight attachment draft (if any) before we
+      // overwrite pendingImeta with the edit target's attachments. Restored
+      // in the else branch on edit-cancel/exit.
+      preEditPendingImetaRef.current = [...media.pendingImetaRef.current];
       // Strip the trailing `![image|video](url)` lines that correspond to
       // imeta attachments — the user manages those via the attachments row,
       // not via raw markdown in the editor.
@@ -256,9 +265,10 @@ export function MessageComposer({
       setContent(restored);
       contentRef.current = restored;
       restored ? richText.setContent(restored) : richText.clearContent();
-      // Drop any imeta we'd seeded for the edit; the send-path defaults are
-      // empty until the user re-attaches.
-      media.setPendingImeta([]);
+      // Restore the draft attachments the user had staged before they
+      // entered edit mode (empty array if they had none).
+      media.setPendingImeta(preEditPendingImetaRef.current ?? []);
+      preEditPendingImetaRef.current = null;
     }
   }, [editTarget?.id]);
 
@@ -375,11 +385,18 @@ export function MessageComposer({
       const currentPendingImeta = media.pendingImetaRef.current;
       const hasMedia = currentPendingImeta.length > 0;
       // Empty text + zero attachments is a no-op (don't let edit become an
-      // effective deletion). The user-visible body is now the source of
-      // truth for the saved content — attachments live in tags.
+      // effective deletion).
       if (!trimmed && !hasMedia) return;
 
-      const finalContent = trimmed;
+      // Append `![image|video](url)` lines for each attachment, mirroring
+      // the send path exactly. The renderer (`markdown.tsx`) only emits
+      // <img>/<VideoPlayer> for URLs literally present in the body, so the
+      // saved content has to carry the markdown lines even though the
+      // imeta tags are also on the edit event.
+      let finalContent = trimmed;
+      for (const d of currentPendingImeta) {
+        finalContent += formatImetaMediaLine(d);
+      }
       const mediaTags = hasMedia ? buildImetaTags(currentPendingImeta) : [];
 
       const savedContent = trimmed;
