@@ -107,6 +107,41 @@ function writeAuthoredToStorage(pubkey: string, rootIds: Set<string>): void {
   }
 }
 
+const MUTED_STORAGE_PREFIX = "sprout-thread-muted.v1";
+const MAX_MUTED_ENTRIES = 1000;
+
+function mutedStorageKey(pubkey: string): string {
+  return `${MUTED_STORAGE_PREFIX}:${pubkey}`;
+}
+
+function readMutedFromStorage(pubkey: string): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(mutedStorageKey(pubkey));
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((id): id is string => typeof id === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeMutedToStorage(pubkey: string, rootIds: Set<string>): void {
+  try {
+    const arr = [...rootIds];
+    const capped =
+      arr.length > MAX_MUTED_ENTRIES
+        ? arr.slice(arr.length - MAX_MUTED_ENTRIES)
+        : arr;
+    window.localStorage.setItem(
+      mutedStorageKey(pubkey),
+      JSON.stringify(capped),
+    );
+  } catch {
+    // Ignore storage errors (private browsing, quota exceeded).
+  }
+}
+
 export type ThreadActivityItem = {
   id: string;
   kind: number;
@@ -222,6 +257,10 @@ export function useUnreadChannels(
   // Used to notify the author when someone replies to their posts.
   const authoredRootIdsRef = React.useRef(new Set<string>());
 
+  // Root event IDs of threads the user has explicitly muted. Takes precedence
+  // over participation, follow, and authorship for notification suppression.
+  const mutedRootIdsRef = React.useRef(new Set<string>());
+
   // Thread reply events that triggered notifications — surfaced in the Home
   // activity feed as synthetic FeedItems.
   const threadActivityRef = React.useRef<ThreadActivityItem[]>([]);
@@ -250,6 +289,7 @@ export function useUnreadChannels(
     authoredRootIdsRef.current = pubkey
       ? readAuthoredFromStorage(pubkey)
       : new Set();
+    mutedRootIdsRef.current = pubkey ? readMutedFromStorage(pubkey) : new Set();
     threadActivityRef.current = pubkey ? readActivityFromStorage(pubkey) : [];
     bumpLatestVersion();
   }, [pubkey, relayClient]);
@@ -375,6 +415,28 @@ export function useUnreadChannels(
     [channels, normalizedPubkey],
   );
 
+  const muteThread = React.useCallback(
+    (rootId: string) => {
+      mutedRootIdsRef.current.add(rootId);
+      if (normalizedPubkey !== null) {
+        writeMutedToStorage(normalizedPubkey, mutedRootIdsRef.current);
+      }
+      bumpLatestVersion();
+    },
+    [normalizedPubkey],
+  );
+
+  const unmuteThread = React.useCallback(
+    (rootId: string) => {
+      mutedRootIdsRef.current.delete(rootId);
+      if (normalizedPubkey !== null) {
+        writeMutedToStorage(normalizedPubkey, mutedRootIdsRef.current);
+      }
+      bumpLatestVersion();
+    },
+    [normalizedPubkey],
+  );
+
   useLiveChannelUpdates(channels, activeChannelId, {
     ...liveUpdateOptions,
     onChannelMessage: handleChannelMessage,
@@ -383,6 +445,7 @@ export function useUnreadChannels(
     participatedRootIds: participatedRootIdsRef.current,
     followedRootIds: liveUpdateOptions.followedRootIds,
     authoredRootIds: authoredRootIdsRef.current,
+    mutedRootIds: mutedRootIdsRef.current,
   });
 
   // Effect-key the catch-up on the *set* of channel IDs, not the array
@@ -492,6 +555,7 @@ export function useUnreadChannels(
                 participatedRootIdsRef.current,
                 options.followedRootIds ?? EMPTY_SET,
                 authoredRootIdsRef.current,
+                mutedRootIdsRef.current,
               )
             ) {
               continue;
@@ -641,5 +705,8 @@ export function useUnreadChannels(
     participatedRootIds: participatedRootIdsRef.current as ReadonlySet<string>,
     authoredRootIds: authoredRootIdsRef.current as ReadonlySet<string>,
     threadActivityItems: threadActivityRef.current,
+    mutedRootIds: mutedRootIdsRef.current as ReadonlySet<string>,
+    muteThread,
+    unmuteThread,
   };
 }

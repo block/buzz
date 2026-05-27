@@ -169,11 +169,6 @@ function MoreActionsMenu({
               )}
               {isFollowingThread ? "Unfollow thread" : "Follow thread"}
             </DropdownMenuItem>
-          ) : isFollowingThread ? (
-            <DropdownMenuItem disabled>
-              <BellRing className="h-4 w-4" />
-              Following
-            </DropdownMenuItem>
           ) : null}
 
           {hasCopyActions ? (

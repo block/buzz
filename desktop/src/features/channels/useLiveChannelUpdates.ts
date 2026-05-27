@@ -33,6 +33,7 @@ export type UseLiveChannelUpdatesOptions = {
   participatedRootIds?: ReadonlySet<string>;
   followedRootIds?: ReadonlySet<string>;
   authoredRootIds?: ReadonlySet<string>;
+  mutedRootIds?: ReadonlySet<string>;
 };
 
 const LIVE_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
@@ -181,15 +182,15 @@ export function useLiveChannelUpdates(
         options.participatedRootIds ?? EMPTY_SET,
         options.followedRootIds ?? EMPTY_SET,
         options.authoredRootIds ?? EMPTY_SET,
+        options.mutedRootIds ?? EMPTY_SET,
       )
     ) {
+      options.onChannelMessage?.(channelId, event);
       const ref = getThreadReference(event.tags);
       const isThreadReply =
         ref.parentId !== null && !isBroadcastReply(event.tags);
       if (isThreadReply) {
         options.onThreadReplyNotification?.(channelId, event);
-      } else {
-        options.onChannelMessage?.(channelId, event);
       }
     }
 

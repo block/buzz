@@ -99,8 +99,6 @@ export function ChannelScreen({
   );
   const isNotifiedForCurrentThread =
     openThreadHeadId != null ? isNotifiedForThread(openThreadHeadId) : false;
-  const isExplicitlyFollowingCurrentThread =
-    openThreadHeadId != null ? isFollowingThread(openThreadHeadId) : false;
   const [expandedThreadReplyIds, setExpandedThreadReplyIds] = React.useState(
     () => new Set<string>(),
   );
@@ -516,8 +514,7 @@ export function ChannelScreen({
                       : undefined
                   }
                   onUnfollowThread={
-                    openThreadHeadId != null &&
-                    isExplicitlyFollowingCurrentThread
+                    openThreadHeadId != null && isNotifiedForCurrentThread
                       ? () => unfollowThread(openThreadHeadId)
                       : undefined
                   }

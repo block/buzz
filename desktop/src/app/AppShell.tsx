@@ -289,6 +289,9 @@ export function AppShell() {
     participatedRootIds,
     authoredRootIds,
     threadActivityItems,
+    mutedRootIds,
+    muteThread,
+    unmuteThread,
   } = useUnreadChannels(
     sidebarChannels,
     activeChannel,
@@ -324,10 +327,27 @@ export function AppShell() {
 
   const isNotifiedForThread = React.useCallback(
     (rootId: string) =>
-      followedRootIds.has(rootId) ||
-      participatedRootIds.has(rootId) ||
-      authoredRootIds.has(rootId),
-    [followedRootIds, participatedRootIds, authoredRootIds],
+      !mutedRootIds.has(rootId) &&
+      (followedRootIds.has(rootId) ||
+        participatedRootIds.has(rootId) ||
+        authoredRootIds.has(rootId)),
+    [followedRootIds, mutedRootIds, participatedRootIds, authoredRootIds],
+  );
+
+  const handleFollowThread = React.useCallback(
+    (rootId: string) => {
+      followThread(rootId);
+      unmuteThread(rootId);
+    },
+    [followThread, unmuteThread],
+  );
+
+  const handleUnfollowThread = React.useCallback(
+    (rootId: string) => {
+      unfollowThread(rootId);
+      muteThread(rootId);
+    },
+    [unfollowThread, muteThread],
   );
 
   const createChannelMutation = useCreateChannelMutation();
@@ -629,8 +649,8 @@ export function AppShell() {
             },
             getChannelReadAt,
             readStateVersion,
-            followThread,
-            unfollowThread,
+            followThread: handleFollowThread,
+            unfollowThread: handleUnfollowThread,
             isFollowingThread,
             isNotifiedForThread,
             threadActivityItems,
