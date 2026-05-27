@@ -34,6 +34,9 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 export type PulseTab = "search" | "everyone" | "people" | "agents" | "mine";
 
+const pulsePanelId = (tab: PulseTab) => `pulse-panel-${tab}`;
+const pulseTabId = (tab: PulseTab) => `pulse-tab-${tab}`;
+
 type PulseViewProps = {
   currentPubkey?: string;
 };
@@ -68,6 +71,9 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
   const [agentFilter, setAgentFilter] = React.useState<string | null>(null);
   const [searchQuery, setSearchQuery] = React.useState("");
   const [upvotedNoteIds, setUpvotedNoteIds] = React.useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  const [pendingUpvoteNoteIds, setPendingUpvoteNoteIds] = React.useState<
     ReadonlySet<string>
   >(() => new Set());
   const navigate = useNavigate();
@@ -212,6 +218,13 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
   }
 
   async function handleToggleUpvote(note: UserNote, remove: boolean) {
+    if (pendingUpvoteNoteIds.has(note.id)) {
+      return;
+    }
+
+    setPendingUpvoteNoteIds((current) =>
+      toggleNoteIdInSet(current, note.id, true),
+    );
     setUpvotedNoteIds((current) =>
       toggleNoteIdInSet(current, note.id, !remove),
     );
@@ -229,6 +242,10 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
       toast.error(
         error instanceof Error ? error.message : "Failed to update reaction",
       );
+    } finally {
+      setPendingUpvoteNoteIds((current) =>
+        toggleNoteIdInSet(current, note.id, false),
+      );
     }
   }
 
@@ -238,12 +255,21 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     mentionPubkeys: string[],
     mediaTags?: string[][],
   ) {
-    await replyMutation.mutateAsync({
-      content,
-      replyTo: note.id,
-      mentionPubkeys,
-      mediaTags,
-    });
+    const replyMentionPubkeys = [...new Set([note.pubkey, ...mentionPubkeys])];
+
+    try {
+      await replyMutation.mutateAsync({
+        content,
+        replyTo: note.id,
+        mentionPubkeys: replyMentionPubkeys,
+        mediaTags,
+      });
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to post reply",
+      );
+      throw error;
+    }
   }
 
   async function handleShare(note: UserNote) {
@@ -310,6 +336,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
           isFollowing={followingSet.has(note.pubkey)}
           isOwnNote={note.pubkey === currentPubkey}
           isReplySending={replyMutation.isPending}
+          isUpvotePending={pendingUpvoteNoteIds.has(note.id)}
           isUpvoted={upvotedNoteIds.has(note.id)}
           key={note.id}
           members={pulseMentionMembers}
@@ -331,6 +358,8 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
       <PulseTabBar
         activeTab={activeTab}
         agentFilter={agentFilter}
+        getPanelId={pulsePanelId}
+        getTabId={pulseTabId}
         onAgentFilterChange={setAgentFilter}
         onTabChange={setActiveTab}
         profiles={profiles}
@@ -339,9 +368,12 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
 
       <div className="mt-0 min-h-0 flex-1 overflow-y-auto">
         <div
+          aria-labelledby={pulseTabId(activeTab)}
           className={`mx-auto flex w-full max-w-2xl flex-col px-4 pb-10 sm:px-6 ${
             activeTab !== "search" && activeTab !== "agents" ? "pt-0" : "pt-7"
           }`}
+          id={pulsePanelId(activeTab)}
+          role="tabpanel"
         >
           {activeTab === "search" ? (
             <div className="flex min-h-[calc(100vh-96px)] items-center justify-center">

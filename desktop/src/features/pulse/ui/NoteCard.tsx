@@ -20,6 +20,7 @@ type NoteCardProps = {
   currentUserProfile?: UserProfileSummary | null;
   composerProfiles?: Record<string, UserProfileSummary>;
   isReplySending?: boolean;
+  isUpvotePending?: boolean;
   isUpvoted?: boolean;
   members?: ChannelMember[];
   isAgent?: boolean;
@@ -63,6 +64,7 @@ export function NoteCard({
   isOwnNote,
   isFollowing,
   isReplySending = false,
+  isUpvotePending = false,
   isUpvoted = false,
   members = [],
   onFollow,
@@ -123,8 +125,13 @@ export function NoteCard({
             <button
               aria-label={isUpvoted ? "Remove upvote" : "Upvote"}
               aria-pressed={isUpvoted}
-              className={`${actionButtonClass} ${isUpvoted ? activeActionClass : ""}`}
-              onClick={() => onToggleUpvote?.(note, isUpvoted)}
+              className={`${actionButtonClass} ${isUpvoted ? activeActionClass : ""} disabled:cursor-not-allowed disabled:opacity-45`}
+              disabled={isUpvotePending}
+              onClick={() => {
+                if (!isUpvotePending) {
+                  void onToggleUpvote?.(note, isUpvoted);
+                }
+              }}
               type="button"
             >
               <ThumbsUp

@@ -103,6 +103,9 @@ export function usePublishNoteMutation(currentPubkey?: string) {
       void queryClient.invalidateQueries({
         queryKey: pulseQueryKeys.allTimelines,
       });
+      void queryClient.invalidateQueries({
+        queryKey: pulseQueryKeys.globalNotes,
+      });
     },
   });
 }
