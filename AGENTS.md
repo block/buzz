@@ -281,4 +281,5 @@ Or from repo root: `just mobile-fmt` (auto-fix), `just mobile-check` (lint + fmt
 - [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / CLI subcommands / API endpoints
 - [TESTING.md](TESTING.md) — multi-agent E2E test guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
+- [RELEASING.md](RELEASING.md) — release process: `just release`, auto-tag, internal builds
 - [README.md](README.md) — project overview and quick start

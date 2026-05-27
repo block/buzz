@@ -66,7 +66,7 @@ If the automated flow isn't suitable (e.g., building from a non-main ref):
 
 After the OSS release ships, trigger an internal build via the **sprout-releases** Buildkite pipeline:
 
-1. Go to the [sprout-releases pipeline](https://buildkite.com/cash/sprout-releases) and click **New Build**
+1. Go to the [sprout-releases pipeline](https://buildkite.com/runway/sprout-releases) and click **New Build**
 2. Fill in the input fields:
 
    | Field | Value | Notes |
