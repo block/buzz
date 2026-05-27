@@ -38,8 +38,8 @@ function buildImetaTags(imetaMedia) {
     "imeta",
     `url ${d.url}`,
     `m ${d.type}`,
-    `x ${d.sha256}`,
-    `size ${d.size}`,
+    ...(d.sha256 ? [`x ${d.sha256}`] : []),
+    ...(typeof d.size === "number" && d.size > 0 ? [`size ${d.size}`] : []),
     ...(d.dim ? [`dim ${d.dim}`] : []),
     ...(d.blurhash ? [`blurhash ${d.blurhash}`] : []),
     ...(d.thumb ? [`thumb ${d.thumb}`] : []),
@@ -370,4 +370,82 @@ test("buildOutgoingMessage: mediaTags mirror buildImetaTags output for non-empty
   ];
   const out = buildOutgoingMessage("", pending);
   assert.deepEqual(out.mediaTags, buildImetaTags(pending));
+});
+
+// ── Sparse / legacy hygiene: omit empty x and zero size ───────────────
+
+test("imetaMediaFromTags: entry without x leaves sha256 empty", () => {
+  const tags = [["imeta", "url https://b/a.png", "m image/png", "size 1"]];
+  const out = imetaMediaFromTags(tags);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].sha256, "");
+});
+
+test("imetaMediaFromTags: entry without size leaves size 0", () => {
+  const tags = [["imeta", "url https://b/a.png", "m image/png", "x deadbeef"]];
+  const out = imetaMediaFromTags(tags);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].size, 0);
+});
+
+test("buildImetaTags: omits x line when sha256 is empty", () => {
+  const tags = buildImetaTags([
+    {
+      url: "https://b/a.png",
+      type: "image/png",
+      sha256: "",
+      size: 1,
+      uploaded: 0,
+    },
+  ]);
+  assert.equal(tags.length, 1);
+  // No element starts with "x " or "x\t" — no empty x line emitted.
+  assert.ok(
+    !tags[0].some((part) => /^x[\s\t]/.test(part)),
+    `expected no x line, got ${JSON.stringify(tags[0])}`,
+  );
+});
+
+test("buildImetaTags: omits size line when size is 0", () => {
+  const tags = buildImetaTags([
+    {
+      url: "https://b/a.png",
+      type: "image/png",
+      sha256: "deadbeef",
+      size: 0,
+      uploaded: 0,
+    },
+  ]);
+  assert.equal(tags.length, 1);
+  assert.ok(
+    !tags[0].some((part) => /^size[\s\t]/.test(part)),
+    `expected no size line, got ${JSON.stringify(tags[0])}`,
+  );
+});
+
+test("round-trip: sparse imeta from legacy tags rebuilds without empty x/size", () => {
+  // Legacy / cross-client entry: only url + m. No x, no size.
+  const legacyTags = [["imeta", "url https://b/legacy.png", "m image/png"]];
+  const projected = imetaMediaFromTags(legacyTags);
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0].sha256, "");
+  assert.equal(projected[0].size, 0);
+
+  const rebuilt = buildImetaTags(projected);
+  assert.equal(rebuilt.length, 1);
+  // Neither "x " nor "size 0" leaked into the rebuilt tag.
+  assert.ok(
+    !rebuilt[0].some((part) => /^x[\s\t]/.test(part)),
+    `expected no x line, got ${JSON.stringify(rebuilt[0])}`,
+  );
+  assert.ok(
+    !rebuilt[0].some((part) => /^size[\s\t]/.test(part)),
+    `expected no size line, got ${JSON.stringify(rebuilt[0])}`,
+  );
+  // url and m survived.
+  assert.deepEqual(rebuilt[0], [
+    "imeta",
+    "url https://b/legacy.png",
+    "m image/png",
+  ]);
 });

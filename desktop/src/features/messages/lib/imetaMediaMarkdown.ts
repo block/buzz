@@ -74,6 +74,13 @@ export function imetaMediaFromTags(
  * Build the imeta tag set for an outbound event from a list of attachments.
  * Shared by the send path (initial post) and the edit path (full new tag set
  * on the edit event), so the two stay perfectly symmetric.
+ *
+ * `url` and `m` are always emitted (NIP-92's only de-facto required fields;
+ * `m` carries a fallback in `imetaMediaFromTags`). All other fields are
+ * conditional — including `x` and `size` — because legacy and cross-client
+ * imeta entries can land without a sha256 or size, and our relay validator
+ * rejects literal `"x "` / `"size 0"` empties. NIP-92 itself treats every
+ * field except `url` as optional, so dropping them is spec-clean.
  */
 export function buildImetaTags(
   imetaMedia: ReadonlyArray<ImetaMedia>,
@@ -82,8 +89,8 @@ export function buildImetaTags(
     "imeta",
     `url ${d.url}`,
     `m ${d.type}`,
-    `x ${d.sha256}`,
-    `size ${d.size}`,
+    ...(d.sha256 ? [`x ${d.sha256}`] : []),
+    ...(typeof d.size === "number" && d.size > 0 ? [`size ${d.size}`] : []),
     ...(d.dim ? [`dim ${d.dim}`] : []),
     ...(d.blurhash ? [`blurhash ${d.blurhash}`] : []),
     ...(d.thumb ? [`thumb ${d.thumb}`] : []),
