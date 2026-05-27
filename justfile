@@ -308,6 +308,116 @@ clean:
 check-compile:
     cargo check --workspace --all-targets
 
+# ─── Release ─────────────────────────────────────────────────────────────────
+
+# Read the current desktop version from package.json
+get-current-version:
+    @node -p "require('./desktop/package.json').version"
+
+# Compute next minor version (e.g., 0.3.0 → 0.4.0)
+get-next-minor-version:
+    @python3 -c "v='$(just get-current-version)'.split('.'); print(f'{v[0]}.{int(v[1])+1}.0')"
+
+# Compute next patch version (e.g., 0.3.0 → 0.3.1)
+get-next-patch-version:
+    @python3 -c "v='$(just get-current-version)'.split('.'); print(f'{v[0]}.{v[1]}.{int(v[2])+1}')"
+
+# Update version in all package manifests and regenerate lockfiles
+bump-version version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Validate semver format
+    if ! echo "{{ version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "Error: '{{ version }}' is not valid semver (expected X.Y.Z)"
+        exit 1
+    fi
+    # desktop/package.json
+    cd desktop && npm pkg set "version={{ version }}" && cd ..
+    # desktop/src-tauri/tauri.conf.json
+    node -e "
+        const fs = require('fs');
+        const p = 'desktop/src-tauri/tauri.conf.json';
+        const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+        c.version = '{{ version }}';
+        fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');
+    "
+    # desktop/src-tauri/Cargo.toml — only first version line (under [package])
+    sed -i '' '0,/^version = ".*"/s//version = "{{ version }}"/' desktop/src-tauri/Cargo.toml
+    # mobile/pubspec.yaml — bump version but preserve build number
+    sed -i '' "s/^version: .*/version: {{ version }}+1/" mobile/pubspec.yaml
+    # Regenerate lockfiles
+    pnpm install --lockfile-only
+    cargo generate-lockfile --manifest-path desktop/src-tauri/Cargo.toml
+    (unset GIT_DIR GIT_WORK_TREE; cd mobile && flutter pub get)
+    echo "Bumped all manifests to {{ version }} and regenerated lockfiles"
+
+# Create a release PR that bumps version and generates changelog
+release *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Determine target version
+    ARG="{{ ARGS }}"
+    if [[ -z "$ARG" ]]; then
+        VERSION=$(just get-next-minor-version)
+    elif [[ "$ARG" == "patch" ]]; then
+        VERSION=$(just get-next-patch-version)
+    else
+        VERSION="$ARG"
+    fi
+    echo "Preparing release v${VERSION}..."
+    # Ensure on main branch
+    CURRENT_BRANCH=$(git symbolic-ref --short HEAD)
+    if [[ "$CURRENT_BRANCH" != "main" ]]; then
+        echo "Error: must be on main branch (currently on '$CURRENT_BRANCH')"
+        exit 1
+    fi
+    # Ensure clean working tree
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        echo "Error: working tree is dirty. Commit or stash changes first."
+        exit 1
+    fi
+    # Create version-bump branch
+    BRANCH="version-bump/${VERSION}"
+    git switch -c "$BRANCH"
+    # Bump versions and lockfiles
+    just bump-version "$VERSION"
+    # Generate changelog
+    LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+    if [[ ! -f CHANGELOG.md ]]; then
+        echo "# Changelog" > CHANGELOG.md
+    fi
+    {
+        echo ""
+        echo "## v${VERSION}"
+        echo ""
+        if [[ -n "$LAST_TAG" ]]; then
+            git log "${LAST_TAG}..HEAD" --oneline --no-merges
+        else
+            echo "Initial release"
+        fi
+        echo ""
+    } >> CHANGELOG.md
+    # Commit
+    git add -A
+    git commit -m "chore(release): release version ${VERSION}"
+    # Push and open PR
+    git push -u origin "$BRANCH"
+    # Build PR body
+    PR_BODY="## Release v${VERSION}"$'\n\n'
+    if [[ -n "$LAST_TAG" ]]; then
+        PR_BODY+="### Changes since ${LAST_TAG}:"$'\n\n'
+        PR_BODY+="$(git log "${LAST_TAG}..HEAD~1" --oneline --no-merges)"$'\n\n'
+    else
+        PR_BODY+="Initial release."$'\n\n'
+    fi
+    PR_BODY+="**To release:** merge this PR. The tag and build will happen automatically."
+    PR_URL=$(gh pr create \
+        --title "chore(release): release version ${VERSION}" \
+        --body "$PR_BODY")
+    echo ""
+    echo "Release PR opened: ${PR_URL}"
+    echo "Merge it to trigger the release build."
+
 # ─── Agent Harness ────────────────────────────────────────────────────────────
 
 # Run a goose agent connected to a Sprout relay (foreground)

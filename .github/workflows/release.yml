@@ -1,13 +1,16 @@
 name: Release
 
 on:
+  push:
+    tags:
+      - 'v[0-9]*'
   workflow_dispatch:
     inputs:
       version:
-        description: "Semver version (e.g. 0.4.0)"
+        description: "Semver version (e.g. 0.4.0) — only for manual runs"
         required: true
       ref:
-        description: "Branch, tag, or SHA to build"
+        description: "Branch, tag, or SHA to build — only for manual runs"
         default: main
         required: true
 
@@ -19,19 +22,29 @@ jobs:
     permissions:
       contents: write
       id-token: write # required by block/apple-codesign-action for OIDC
-    env:
-      VERSION: ${{ inputs.version }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Validate version
         run: |
-          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-            echo "::error::Invalid version '$VERSION'. Expected semver (e.g. 0.4.0 or 1.0.0-beta.1)"
+          if ! echo "${{ steps.version.outputs.version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Invalid version '${{ steps.version.outputs.version }}'. Expected semver (e.g. 0.4.0 or 1.0.0-beta.1)"
             exit 1
           fi
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
           persist-credentials: false
 
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
@@ -41,7 +54,7 @@ jobs:
 
       - name: Patch version
         run: |
-          cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
+          cd desktop && node scripts/set-version-from-tag.mjs "${{ steps.version.outputs.version }}"
           cd src-tauri && cargo update --workspace
 
       - name: Generate release config
@@ -147,7 +160,7 @@ jobs:
       - name: Generate latest.json
         run: |
           bash desktop/scripts/generate-oss-latest-json.sh \
-            "$VERSION" \
+            "${{ steps.version.outputs.version }}" \
             "$SIG_PATH" \
             "https://github.com/block/sprout/releases/download/sprout-desktop-latest/$ARCHIVE_NAME" \
             > latest.json
@@ -159,10 +172,10 @@ jobs:
       - name: Create versioned GitHub release
         run: |
           RELEASE_SHA=$(git rev-parse HEAD)
-          gh release create "v${VERSION}" \
+          gh release create "v${{ steps.version.outputs.version }}" \
             --target "$RELEASE_SHA" \
-            --title "Sprout Desktop v${VERSION}" \
-            --notes "Sprout Desktop v${VERSION}" \
+            --title "Sprout Desktop v${{ steps.version.outputs.version }}" \
+            --notes "Sprout Desktop v${{ steps.version.outputs.version }}" \
             "$DMG_PATH"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -192,12 +205,10 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: write
-    env:
-      VERSION: ${{ inputs.version }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
           persist-credentials: false
 
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
@@ -238,7 +249,7 @@ jobs:
 
       - name: Patch version
         run: |
-          cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
+          cd desktop && node scripts/set-version-from-tag.mjs "${{ needs.release.outputs.version }}"
           cd src-tauri && cargo update --workspace
 
       - name: Build sidecars
@@ -272,7 +283,7 @@ jobs:
 
       - name: Upload Linux artifacts to versioned GitHub release
         run: |
-          gh release upload "v${VERSION}" \
+          gh release upload "v${{ needs.release.outputs.version }}" \
             "$DEB_PATH" \
             "$APPIMAGE_PATH" \
             --clobber
