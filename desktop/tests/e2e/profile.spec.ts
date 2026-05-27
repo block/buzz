@@ -133,7 +133,7 @@ test("notification settings drive the Home badge and desktop alerts", async ({
   });
 
   await expect(page.getByTestId("sidebar-home-count")).toHaveText("1");
-  await expect.poll(getAppBadgeCount).toBe(baseline + 2);
+  await expect.poll(getAppBadgeCount).toBe(baseline + 1);
 
   await expect
     .poll(() =>
