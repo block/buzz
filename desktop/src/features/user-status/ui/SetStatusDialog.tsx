@@ -1,4 +1,7 @@
 import * as React from "react";
+import Picker from "@emoji-mart/react";
+import data from "@emoji-mart/data";
+import * as PopoverPrimitive from "@radix-ui/react-popover";
 
 import {
   Dialog,
@@ -9,21 +12,7 @@ import {
 } from "@/shared/ui/dialog";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
-
-// ---------------------------------------------------------------------------
-// Curated emoji list
-// ---------------------------------------------------------------------------
-
-const EMOJI_OPTIONS = [
-  { emoji: "\uD83D\uDDE3\uFE0F", label: "In a meeting" },
-  { emoji: "\uD83D\uDE8C", label: "Commuting" },
-  { emoji: "\uD83E\uDD12", label: "Out sick" },
-  { emoji: "\uD83C\uDFD6\uFE0F", label: "Vacationing" },
-  { emoji: "\uD83C\uDFE0", label: "Working remotely" },
-  { emoji: "\uD83C\uDF54", label: "Lunch" },
-  { emoji: "\uD83C\uDFAF", label: "Focus" },
-  { emoji: "\uD83D\uDCAA", label: "Exercising" },
-] as const;
+import { Popover, PopoverTrigger } from "@/shared/ui/popover";
 
 const PRESETS = [
   { text: "In a meeting", emoji: "\uD83D\uDDE3\uFE0F" },
@@ -62,6 +51,7 @@ export function SetStatusDialog({
 }: SetStatusDialogProps) {
   const [text, setText] = React.useState(initialText);
   const [emoji, setEmoji] = React.useState(initialEmoji);
+  const [pickerOpen, setPickerOpen] = React.useState(false);
 
   React.useEffect(() => {
     if (open) {
@@ -70,13 +60,14 @@ export function SetStatusDialog({
     }
   }, [open, initialText, initialEmoji]);
 
-  function handleEmojiClick(clickedEmoji: string) {
-    setEmoji((prev) => (prev === clickedEmoji ? "" : clickedEmoji));
-  }
-
   function handlePresetClick(preset: { text: string; emoji: string }) {
     setText(preset.text);
     setEmoji(preset.emoji);
+  }
+
+  function handleEmojiSelect(selectedEmoji: { native: string }) {
+    setEmoji(selectedEmoji.native);
+    setPickerOpen(false);
   }
 
   function handleSave() {
@@ -111,9 +102,48 @@ export function SetStatusDialog({
 
         <div className="flex flex-col gap-4 pt-2">
           <div className="flex items-center gap-2">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-input text-lg">
-              {emoji || "\uD83D\uDCAC"}
-            </span>
+            <Popover onOpenChange={setPickerOpen} open={pickerOpen}>
+              <div className="relative shrink-0">
+                <PopoverTrigger asChild>
+                  <button
+                    aria-label="Choose status emoji"
+                    className="flex h-9 w-9 items-center justify-center rounded-md border border-input text-lg transition-colors hover:bg-accent"
+                    type="button"
+                  >
+                    {emoji || "\uD83D\uDCAC"}
+                  </button>
+                </PopoverTrigger>
+                {emoji ? (
+                  <button
+                    aria-label="Clear status emoji"
+                    className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-background bg-muted text-[10px] leading-none text-muted-foreground hover:bg-accent hover:text-foreground"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setEmoji("");
+                    }}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                ) : null}
+              </div>
+              <PopoverPrimitive.Content
+                align="start"
+                sideOffset={4}
+                className="z-50 w-auto overflow-hidden rounded-2xl shadow-md outline-hidden data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95"
+              >
+                <Picker
+                  data={data}
+                  maxFrequentRows={2}
+                  onEmojiSelect={handleEmojiSelect}
+                  perLine={8}
+                  previewPosition="none"
+                  set="native"
+                  skinTonePosition="search"
+                  theme="auto"
+                />
+              </PopoverPrimitive.Content>
+            </Popover>
             <Input
               autoFocus
               data-testid="set-status-input"
@@ -122,26 +152,6 @@ export function SetStatusDialog({
               placeholder="What's your status?"
               value={text}
             />
-          </div>
-
-          <div className="flex flex-wrap gap-1.5">
-            {EMOJI_OPTIONS.map((option) => (
-              <button
-                aria-label={option.label}
-                className={`flex h-8 w-8 items-center justify-center rounded-md text-base transition-colors ${
-                  emoji === option.emoji
-                    ? "bg-accent ring-1 ring-ring"
-                    : "hover:bg-accent/60"
-                }`}
-                data-testid={`set-status-emoji-${option.label.toLowerCase().replace(/\s+/g, "-")}`}
-                key={option.emoji}
-                onClick={() => handleEmojiClick(option.emoji)}
-                title={option.label}
-                type="button"
-              >
-                {option.emoji}
-              </button>
-            ))}
           </div>
 
           <div className="flex flex-wrap gap-1.5">

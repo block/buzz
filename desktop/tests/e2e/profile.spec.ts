@@ -53,12 +53,14 @@ test("updates presence from the profile menu", async ({ page }) => {
     page.getByTestId("profile-popover-current-status"),
   ).toContainText("Online");
 
+  await page.getByText("Change presence").click();
   await page.getByTestId("profile-popover-status-away").click();
   await openProfileMenu(page);
   await expect(
     page.getByTestId("profile-popover-current-status"),
   ).toContainText("Away");
 
+  await page.getByText("Change presence").click();
   await page.getByTestId("profile-popover-status-offline").click();
   await openProfileMenu(page);
   await expect(

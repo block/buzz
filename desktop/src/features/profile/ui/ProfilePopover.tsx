@@ -1,12 +1,10 @@
 import * as React from "react";
-import { MessageSquare, Settings } from "lucide-react";
+import { ChevronRight, MessageSquare, Settings } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
-import {
-  PresenceDot,
-  PresenceBadge,
-} from "@/features/presence/ui/PresenceBadge";
+import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
+import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { SetStatusDialog } from "@/features/user-status/ui/SetStatusDialog";
 import type { PresenceStatus } from "@/shared/api/types";
 
@@ -40,12 +38,6 @@ const MENU_ITEM_CLASS =
 
 const ALL_STATUSES: PresenceStatus[] = ["online", "away", "offline"];
 
-const STATUS_ACTION_LABELS: Record<PresenceStatus, string> = {
-  online: "Set yourself as online",
-  away: "Set yourself as away",
-  offline: "Set yourself as offline",
-};
-
 // ---------------------------------------------------------------------------
 // ProfilePopover
 // ---------------------------------------------------------------------------
@@ -66,16 +58,33 @@ export function ProfilePopover({
   onOpenSettings,
   children,
 }: ProfilePopoverProps) {
-  const otherStatuses = ALL_STATUSES.filter((s) => s !== currentStatus);
   const isMac =
     typeof navigator !== "undefined" &&
     /Mac|iPod|iPhone|iPad/.test(navigator.userAgent);
   const [statusDialogOpen, setStatusDialogOpen] = React.useState(false);
+  const [presenceMenuOpen, setPresenceMenuOpen] = React.useState(false);
   const hasUserStatus = Boolean(userStatusText || userStatusEmoji);
+
+  function handlePopoverOpenChange(nextOpen: boolean) {
+    if (!nextOpen) {
+      setPresenceMenuOpen(false);
+    }
+    onOpenChange(nextOpen);
+  }
+
+  function closePopover() {
+    setPresenceMenuOpen(false);
+    onOpenChange(false);
+  }
+
+  function handlePresenceSelect(status: PresenceStatus) {
+    onSetStatus(status);
+    closePopover();
+  }
 
   return (
     <>
-      <Popover open={open} onOpenChange={onOpenChange}>
+      <Popover open={open} onOpenChange={handlePopoverOpenChange}>
         <PopoverTrigger asChild>{children}</PopoverTrigger>
 
         <PopoverContent
@@ -103,11 +112,13 @@ export function ProfilePopover({
                 <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   {nip05 ? <span className="truncate">@{nip05}</span> : null}
                   {nip05 ? <span aria-hidden="true">·</span> : null}
-                  <PresenceBadge
-                    className="border-0 bg-transparent px-0 py-0 text-xs"
+                  <span
+                    className="inline-flex items-center gap-1.5"
                     data-testid="profile-popover-current-status"
-                    status={currentStatus}
-                  />
+                  >
+                    <PresenceDot status={currentStatus} />
+                    <span>{getPresenceLabel(currentStatus)}</span>
+                  </span>
                 </div>
                 {hasUserStatus ? (
                   <p
@@ -131,7 +142,7 @@ export function ProfilePopover({
                 className={MENU_ITEM_CLASS}
                 data-testid="profile-popover-set-status"
                 onClick={() => {
-                  onOpenChange(false);
+                  closePopover();
                   window.requestAnimationFrame(() => {
                     setStatusDialogOpen(true);
                   });
@@ -150,7 +161,7 @@ export function ProfilePopover({
                   data-testid="profile-popover-clear-status"
                   onClick={() => {
                     onClearUserStatus();
-                    onOpenChange(false);
+                    closePopover();
                   }}
                   role="menuitem"
                   type="button"
@@ -164,25 +175,55 @@ export function ProfilePopover({
 
             {/* ── Presence status options ───────────────────────── */}
             <div className="px-1.5 py-1">
-              {otherStatuses.map((status) => (
-                <button
-                  key={status}
-                  className={MENU_ITEM_CLASS}
-                  data-testid={`profile-popover-status-${status}`}
-                  disabled={isStatusPending}
-                  onClick={() => {
-                    onSetStatus(status);
-                    onOpenChange(false);
-                  }}
-                  role="menuitem"
-                  type="button"
+              <Popover
+                onOpenChange={setPresenceMenuOpen}
+                open={presenceMenuOpen}
+              >
+                <PopoverTrigger asChild>
+                  <button
+                    aria-expanded={presenceMenuOpen}
+                    aria-haspopup="menu"
+                    className={MENU_ITEM_CLASS}
+                    disabled={isStatusPending}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <PresenceDot
+                      className="h-2.5 w-2.5"
+                      status={currentStatus}
+                    />
+                    <span className="flex-1 text-sm text-popover-foreground">
+                      Change presence
+                    </span>
+                    <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  align="start"
+                  className="w-44 rounded-xl border border-border bg-popover p-1.5 shadow-lg"
+                  side="right"
+                  sideOffset={4}
                 >
-                  <PresenceDot className="h-2.5 w-2.5" status={status} />
-                  <span className="text-sm text-popover-foreground">
-                    {STATUS_ACTION_LABELS[status]}
-                  </span>
-                </button>
-              ))}
+                  <div aria-label="Presence status" role="menu">
+                    {ALL_STATUSES.map((status) => (
+                      <button
+                        className={MENU_ITEM_CLASS}
+                        data-testid={`profile-popover-status-${status}`}
+                        disabled={isStatusPending}
+                        key={status}
+                        onClick={() => handlePresenceSelect(status)}
+                        role="menuitem"
+                        type="button"
+                      >
+                        <PresenceDot className="h-2.5 w-2.5" status={status} />
+                        <span className="text-sm text-popover-foreground">
+                          {getPresenceLabel(status)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </PopoverContent>
+              </Popover>
             </div>
 
             <hr className="my-1 h-px border-0 bg-border" />
@@ -193,7 +234,7 @@ export function ProfilePopover({
                 className={MENU_ITEM_CLASS}
                 data-testid="profile-popover-settings"
                 onClick={() => {
-                  onOpenChange(false);
+                  closePopover();
                   window.requestAnimationFrame(() => {
                     onOpenSettings();
                   });
