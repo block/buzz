@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   getGlobalNotes,
+  getLikedNotes,
   getNote,
   getNoteReactions,
   getNotesTimeline,
@@ -15,6 +16,7 @@ import type { UserNote, UserNotesResponse } from "@/shared/api/socialTypes";
 
 export const pulseQueryKeys = {
   globalNotes: ["global-notes"] as const,
+  likedNotes: (pubkey: string) => ["liked-notes", pubkey] as const,
   myNotes: (pubkey: string) => ["my-notes", pubkey] as const,
   note: (noteId: string) => ["pulse-note", noteId] as const,
   reactions: (noteIds: string[]) =>
@@ -26,6 +28,18 @@ export const pulseQueryKeys = {
 };
 
 // ── Own notes ───────────────────────────────────────────────────────────────
+
+export function useLikedNotesQuery(pubkey?: string, enabled = true) {
+  return useQuery<UserNotesResponse>({
+    queryKey: pulseQueryKeys.likedNotes(pubkey ?? ""),
+    // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
+    queryFn: () => getLikedNotes(pubkey!, 50),
+    enabled: enabled && !!pubkey,
+    staleTime: 15_000,
+    gcTime: 5 * 60_000,
+    refetchInterval: 30_000,
+  });
+}
 
 export function useMyNotesQuery(pubkey?: string) {
   return useQuery<UserNotesResponse>({

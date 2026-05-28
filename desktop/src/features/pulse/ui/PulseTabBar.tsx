@@ -151,6 +151,20 @@ export function PulseTabBar({
                 Following
               </Button>
               <Button
+                aria-controls={getPanelId("liked")}
+                aria-selected={activeTab === "liked"}
+                className={tabButtonClassName}
+                data-active={activeTab === "liked"}
+                id={getTabId("liked")}
+                onClick={() => onTabChange("liked")}
+                role="tab"
+                size="sm"
+                type="button"
+                variant="ghost"
+              >
+                Liked
+              </Button>
+              <Button
                 aria-controls={getPanelId("agents")}
                 aria-selected={activeTab === "agents"}
                 className={tabButtonClassName}

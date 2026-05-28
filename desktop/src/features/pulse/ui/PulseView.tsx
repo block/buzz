@@ -12,6 +12,7 @@ import {
 import {
   useGlobalNotesQuery,
   pulseQueryKeys,
+  useLikedNotesQuery,
   useMyNotesQuery,
   usePublishNoteMutation,
   usePulseReactionsQuery,
@@ -29,7 +30,13 @@ import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
-export type PulseTab = "search" | "everyone" | "people" | "agents" | "mine";
+export type PulseTab =
+  | "search"
+  | "everyone"
+  | "people"
+  | "liked"
+  | "agents"
+  | "mine";
 
 const pulsePanelId = (tab: PulseTab) => `pulse-panel-${tab}`;
 const pulseTabId = (tab: PulseTab) => `pulse-tab-${tab}`;
@@ -130,6 +137,10 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
 
   const everyoneQuery = useGlobalNotesQuery(activeTab === "everyone");
   const peopleQuery = useTimelineQuery(peoplePubkeys, activeTab === "people");
+  const likedNotesQuery = useLikedNotesQuery(
+    currentPubkey,
+    activeTab === "liked",
+  );
   const agentTimelineQuery = useTimelineQuery(
     agentFilter ? [agentFilter] : agentPubkeys,
     activeTab === "agents",
@@ -148,6 +159,9 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
         (n) => !agentPubkeySet.has(n.pubkey),
       );
     }
+    if (activeTab === "liked") {
+      return likedNotesQuery.data?.notes ?? [];
+    }
     if (activeTab === "agents") {
       return agentTimelineQuery.data?.notes ?? [];
     }
@@ -157,6 +171,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     everyoneQuery.data,
     peopleQuery.data,
     agentTimelineQuery.data,
+    likedNotesQuery.data,
     myNotesQuery.data,
     agentPubkeySet,
   ]);
@@ -221,15 +236,18 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
       ? everyoneQuery
       : activeTab === "people"
         ? peopleQuery
-        : activeTab === "agents"
-          ? agentTimelineQuery
-          : myNotesQuery;
+        : activeTab === "liked"
+          ? likedNotesQuery
+          : activeTab === "agents"
+            ? agentTimelineQuery
+            : myNotesQuery;
   const isLoading = activeQuery.isLoading;
 
   const emptyMessages: Record<PulseTab, string> = {
     search: "Search Pulse notes by author or text.",
     everyone: "No public notes yet.",
     people: "No notes yet. Follow people to see their updates here.",
+    liked: "No likes yet — tap the heart on a note to save it here.",
     agents:
       agentPubkeys.length === 0
         ? "No agents registered yet."

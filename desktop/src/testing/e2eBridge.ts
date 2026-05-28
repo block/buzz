@@ -2065,6 +2065,10 @@ function handleGetNoteReactions() {
   return [];
 }
 
+function handleGetLikedNotes(): RawUserNotesResponse {
+  return { notes: [], next_cursor: null };
+}
+
 function createMockEvent(
   kind: number,
   content: string,
@@ -4800,6 +4804,8 @@ export function maybeInstallE2eTauriMocks() {
         return handleGetNote(payload as Parameters<typeof handleGetNote>[0]);
       case "get_note_reactions":
         return handleGetNoteReactions();
+      case "get_liked_notes":
+        return handleGetLikedNotes();
       case "search_users":
         return handleSearchUsers(
           payload as Parameters<typeof handleSearchUsers>[0],

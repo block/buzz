@@ -225,6 +225,91 @@ pub async fn get_note_reactions(
     Ok(summaries)
 }
 
+/// Fetch notes liked by a user, excluding deleted reaction events.
+#[tauri::command]
+pub async fn get_liked_notes(
+    author_pubkey: String,
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<UserNotesResponse, String> {
+    let cap = limit.unwrap_or(50).min(200);
+    let reactions = query_relay(
+        &state,
+        &[serde_json::json!({
+            "kinds": [7],
+            "authors": [author_pubkey],
+            "limit": cap,
+        })],
+    )
+    .await?;
+
+    let reaction_ids: Vec<String> = reactions.iter().map(|event| event.id.to_hex()).collect();
+    let deletions = if reaction_ids.is_empty() {
+        Vec::new()
+    } else {
+        query_relay(
+            &state,
+            &[serde_json::json!({
+                "kinds": [5],
+                "authors": [author_pubkey],
+                "#e": reaction_ids,
+                "limit": 500,
+            })],
+        )
+        .await?
+    };
+    let deleted_reaction_ids: HashSet<String> = deletions
+        .iter()
+        .flat_map(|event| {
+            event.tags.iter().filter_map(|tag| {
+                let values = tag.as_slice();
+                match (values.first().map(String::as_str), values.get(1)) {
+                    (Some("e"), Some(id)) => Some(id.clone()),
+                    _ => None,
+                }
+            })
+        })
+        .collect();
+
+    let mut target_ids = Vec::<String>::new();
+    let mut seen_targets = HashSet::<String>::new();
+    for reaction in reactions {
+        if deleted_reaction_ids.contains(&reaction.id.to_hex()) {
+            continue;
+        }
+        let Some(target_id) = reaction.tags.iter().rev().find_map(|tag| {
+            let values = tag.as_slice();
+            match (values.first().map(String::as_str), values.get(1)) {
+                (Some("e"), Some(id)) => Some(id.clone()),
+                _ => None,
+            }
+        }) else {
+            continue;
+        };
+        if seen_targets.insert(target_id.clone()) {
+            target_ids.push(target_id);
+        }
+    }
+
+    if target_ids.is_empty() {
+        return Ok(UserNotesResponse {
+            notes: Vec::new(),
+            next_cursor: None,
+        });
+    }
+
+    let events = query_relay(
+        &state,
+        &[serde_json::json!({
+            "kinds": [1],
+            "ids": target_ids,
+            "limit": cap,
+        })],
+    )
+    .await?;
+    Ok(nostr_convert::user_notes_from_events(&events))
+}
+
 /// Maximum number of pubkeys per timeline request to keep filter size bounded.
 const MAX_TIMELINE_PUBKEYS: usize = 100;
 

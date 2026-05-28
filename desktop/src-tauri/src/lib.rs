@@ -458,7 +458,6 @@ pub fn run() {
                 mgr.start_tts_download(state.http_client.clone());
             }
 
-            // Register PTT global shortcut (Ctrl+Space).
             // Non-fatal: huddle works without the shortcut (user can switch to VAD mode).
             #[cfg(desktop)]
             {
@@ -614,6 +613,7 @@ pub fn run() {
             get_global_notes,
             get_note,
             get_note_reactions,
+            get_liked_notes,
             start_huddle,
             join_huddle,
             leave_huddle,

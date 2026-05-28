@@ -169,6 +169,26 @@ export async function setContactList(
   };
 }
 
+export async function getLikedNotes(
+  authorPubkey: string,
+  limit?: number,
+): Promise<UserNotesResponse> {
+  const response = await invokeTauri<RawUserNotesResponse>("get_liked_notes", {
+    authorPubkey,
+    limit: limit ?? null,
+  });
+
+  return {
+    notes: response.notes.map(fromRawUserNote),
+    nextCursor: response.next_cursor
+      ? {
+          before: response.next_cursor.before,
+          beforeId: response.next_cursor.before_id,
+        }
+      : null,
+  };
+}
+
 export async function getGlobalNotes(options?: {
   limit?: number;
   before?: number;
