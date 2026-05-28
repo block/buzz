@@ -148,21 +148,47 @@ pub async fn get_note_reactions(
     )
     .await?;
 
+    let reaction_ids: Vec<String> = events.iter().map(|event| event.id.to_hex()).collect();
+    let deletion_events = if reaction_ids.is_empty() {
+        Vec::new()
+    } else {
+        query_relay(
+            &state,
+            &[serde_json::json!({
+                "kinds": [5],
+                "#e": reaction_ids,
+                "limit": 500,
+            })],
+        )
+        .await?
+    };
+    let deleted_reaction_ids: HashSet<String> = deletion_events
+        .iter()
+        .flat_map(|event| {
+            event.tags.iter().filter_map(|tag| {
+                let values = tag.as_slice();
+                match (values.first().map(String::as_str), values.get(1)) {
+                    (Some("e"), Some(id)) => Some(id.clone()),
+                    _ => None,
+                }
+            })
+        })
+        .collect();
+
     let targets: HashSet<String> = note_ids.into_iter().collect();
     let mut folded = HashSet::<(String, String, String)>::new();
     for event in events {
-        let Some(target_id) = event
-            .tags
-            .iter()
-            .filter_map(|tag| {
-                let values = tag.as_slice();
-                (values.first().map(String::as_str) == Some("e"))
-                    .then(|| values.get(1))
-                    .flatten()
-            })
-            .find(|id| targets.contains(*id))
-            .cloned()
-        else {
+        if deleted_reaction_ids.contains(&event.id.to_hex()) {
+            continue;
+        }
+
+        let Some(target_id) = event.tags.iter().rev().find_map(|tag| {
+            let values = tag.as_slice();
+            match (values.first().map(String::as_str), values.get(1)) {
+                (Some("e"), Some(id)) if targets.contains(id) => Some(id.clone()),
+                _ => None,
+            }
+        }) else {
             continue;
         };
 

@@ -101,6 +101,7 @@ export function usePulseReactionsQuery(
     enabled: noteIds.length > 0,
     staleTime: 15_000,
     gcTime: 5 * 60_000,
+    refetchInterval: 60_000,
   });
 }
 

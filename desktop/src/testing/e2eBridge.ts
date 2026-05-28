@@ -231,6 +231,7 @@ type RawUserNote = {
   pubkey: string;
   created_at: number;
   content: string;
+  tags: string[][];
 };
 
 type RawUserNotesCursor = {
@@ -1930,12 +1931,14 @@ function getMockUserNotes(pubkey: string): RawUserNote[] {
         pubkey,
         created_at: now - 20 * 60,
         content: "Shipped the new desktop sidebar polish today.",
+        tags: [],
       },
       {
         id: "mock-note-forum",
         pubkey,
         created_at: now - 3 * 60 * 60,
         content: "Forum threads feel like the right home for slower decisions.",
+        tags: [],
       },
     ];
   }
@@ -1947,12 +1950,14 @@ function getMockUserNotes(pubkey: string): RawUserNote[] {
         pubkey,
         created_at: now - 45 * 60,
         content: "Release checklist is ready for async feedback.",
+        tags: [],
       },
       {
         id: "mock-alice-note-design",
         pubkey,
         created_at: now - 5 * 60 * 60,
         content: "Trying a lighter forum layout for longer-form notes.",
+        tags: [],
       },
     ];
   }
@@ -1998,11 +2003,66 @@ async function handleGetUserNotes(
     pubkey: ev.pubkey,
     content: ev.content,
     created_at: ev.created_at,
-    kind: ev.kind,
     tags: ev.tags,
-    sig: ev.sig,
   }));
   return { notes, next_cursor: null };
+}
+
+async function handleGetGlobalNotes(
+  args: { limit?: number | null; before?: number | null } | null,
+  config: E2eConfig | undefined,
+): Promise<RawUserNotesResponse> {
+  const notes = [
+    ...getMockUserNotes(DEFAULT_MOCK_IDENTITY.pubkey),
+    ...getMockUserNotes(ALICE_PUBKEY),
+  ]
+    .filter((note) => (args?.before ? note.created_at < args.before : true))
+    .sort((left, right) => right.created_at - left.created_at)
+    .slice(0, args?.limit ?? 50);
+
+  if (!getIdentity(config)) {
+    return { notes, next_cursor: null };
+  }
+
+  const events = await relayQuery(config, [
+    { kinds: [1], limit: args?.limit ?? 50, until: args?.before ?? undefined },
+  ]);
+  return {
+    notes: events.map((ev) => ({
+      id: ev.id,
+      pubkey: ev.pubkey,
+      content: ev.content,
+      created_at: ev.created_at,
+      tags: ev.tags,
+    })),
+    next_cursor: null,
+  };
+}
+
+function handleGetNotesTimeline(args: {
+  pubkeys?: string[];
+  limitPerUser?: number | null;
+}) {
+  const pubkeys = args.pubkeys ?? [];
+  const limitPerUser = args.limitPerUser ?? 10;
+  const notes = pubkeys
+    .flatMap((pubkey) => getMockUserNotes(pubkey).slice(0, limitPerUser))
+    .sort((left, right) => right.created_at - left.created_at);
+  return { notes, next_cursor: null };
+}
+
+function handleGetNote(args: { noteId?: string }) {
+  const noteId = args.noteId;
+  return (
+    [
+      ...getMockUserNotes(DEFAULT_MOCK_IDENTITY.pubkey),
+      ...getMockUserNotes(ALICE_PUBKEY),
+    ].find((note) => note.id === noteId) ?? null
+  );
+}
+
+function handleGetNoteReactions() {
+  return [];
 }
 
 function createMockEvent(
@@ -4727,6 +4787,19 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleGetUserNotes>[0],
           activeConfig,
         );
+      case "get_global_notes":
+        return handleGetGlobalNotes(
+          payload as Parameters<typeof handleGetGlobalNotes>[0],
+          activeConfig,
+        );
+      case "get_notes_timeline":
+        return handleGetNotesTimeline(
+          payload as Parameters<typeof handleGetNotesTimeline>[0],
+        );
+      case "get_note":
+        return handleGetNote(payload as Parameters<typeof handleGetNote>[0]);
+      case "get_note_reactions":
+        return handleGetNoteReactions();
       case "search_users":
         return handleSearchUsers(
           payload as Parameters<typeof handleSearchUsers>[0],
