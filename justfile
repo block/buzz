@@ -56,7 +56,7 @@ reindex-kind0:
     cargo run --release -p sprout-relay --bin sprout-reindex-kind0
 
 # Run repo lint and formatting checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check web-check mobile-check
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check
 
 # Format all Rust code
 fmt:
@@ -82,6 +82,10 @@ desktop-install-ci:
 desktop-check:
     cd {{desktop_dir}} && pnpm check
 
+# Fix desktop lint and format issues
+desktop-fix:
+    cd {{desktop_dir}} && pnpm exec biome check --write . && pnpm check:file-sizes
+
 # Run desktop TS helper unit tests
 desktop-test:
     cd {{desktop_dir}} && pnpm test
@@ -105,6 +109,9 @@ desktop-tauri-fmt-check:
 # Format all code (Rust + Tauri Rust + Dart)
 fmt-all: fmt desktop-tauri-fmt mobile-fmt
 
+# Fix all formatting and lint issues
+fix-all: fmt desktop-tauri-fmt desktop-fix web-fix mobile-fix
+
 # Ensure sidecar placeholder binaries exist (Tauri validates externalBin at compile time)
 _ensure-sidecar-stubs:
     #!/usr/bin/env bash
@@ -114,6 +121,10 @@ _ensure-sidecar-stubs:
     for bin in sprout-acp sprout-mcp-server sprout-agent sprout-dev-mcp git-credential-nostr sprout; do
         touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
+
+# Run clippy on the desktop Tauri Rust crate
+desktop-tauri-clippy: _ensure-sidecar-stubs
+    cargo clippy --manifest-path {{desktop_tauri_manifest}} --all-targets -- -D warnings
 
 # Check the desktop Tauri Rust crate compiles
 desktop-tauri-check: _ensure-sidecar-stubs
@@ -267,6 +278,10 @@ web-install-ci:
 web-check:
     cd {{web_dir}} && pnpm check
 
+# Fix web lint and format issues
+web-fix:
+    cd {{web_dir}} && pnpm exec biome check --write . && pnpm check:file-sizes
+
 # Run web TypeScript checks
 web-typecheck:
     cd {{web_dir}} && pnpm typecheck
@@ -290,6 +305,10 @@ mobile-install:
 # Format all Dart code
 mobile-fmt:
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format .
+
+# Fix mobile formatting and run analysis
+mobile-fix:
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format . && flutter analyze
 
 # Run mobile lint and format checks
 mobile-check:
