@@ -277,7 +277,7 @@ mod tests {
         let agent_hex = agent.public_key().to_hex();
         let agent_compat = nostr::PublicKey::from_hex(&agent_hex).unwrap();
         let owner_compat_secret =
-            nostr::SecretKey::from_slice(&owner.secret_key().as_secret_bytes()[..]).unwrap();
+            nostr::SecretKey::from_slice(owner.secret_key().as_secret_bytes()).unwrap();
         let owner_compat_keys = nostr::Keys::new(owner_compat_secret);
         let tag_json = sprout_sdk::nip_oa::compute_auth_tag(&owner_compat_keys, &agent_compat, "")
             .expect("compute_auth_tag");

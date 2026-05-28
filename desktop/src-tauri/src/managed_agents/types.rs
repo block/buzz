@@ -696,7 +696,7 @@ mod tests {
     fn validate_respond_to_allowlist_accepts_valid_hex_and_lowercases() {
         let upper = "A".repeat(64);
         let lower = "a".repeat(64);
-        let result = validate_respond_to_allowlist(&[upper.clone()]).unwrap();
+        let result = validate_respond_to_allowlist(std::slice::from_ref(&upper)).unwrap();
         assert_eq!(result, vec![lower.clone()]);
     }
 

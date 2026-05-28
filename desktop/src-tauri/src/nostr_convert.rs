@@ -1046,7 +1046,7 @@ mod tests {
     #[test]
     fn agents_overwrites_pubkey_from_event_author() {
         let e = ev(10100, r#"{"pubkey":"forged","name":"agent-1"}"#, vec![]);
-        let v = agents_from_events(&[e.clone()]);
+        let v = agents_from_events(std::slice::from_ref(&e));
         let arr = v.get("agents").and_then(Value::as_array).unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(
@@ -1059,7 +1059,7 @@ mod tests {
     #[test]
     fn agents_handles_invalid_content() {
         let e = ev(10100, "not-json", vec![]);
-        let v = agents_from_events(&[e.clone()]);
+        let v = agents_from_events(std::slice::from_ref(&e));
         let arr = v.get("agents").and_then(Value::as_array).unwrap();
         assert_eq!(
             arr[0].get("pubkey").and_then(Value::as_str).unwrap(),

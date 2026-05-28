@@ -61,8 +61,8 @@ pub fn acquire(
 
     #[cfg(target_os = "macos")]
     {
-        let assertion_type = b"PreventUserIdleSystemSleep\0".as_ptr() as *const std::ffi::c_char;
-        let reason = b"Sprout \xe2\x80\x94 agents are active\0".as_ptr() as *const std::ffi::c_char;
+        let assertion_type = c"PreventUserIdleSystemSleep".as_ptr();
+        let reason = c"Sprout \u{2014} agents are active".as_ptr();
 
         unsafe {
             let cf_type = macos::CFStringCreateWithCString(

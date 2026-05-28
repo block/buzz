@@ -133,7 +133,7 @@ fn sign_blossom_upload_auth(
         Tag::parse(vec!["expiration", &(now + expiry_secs).to_string()])
             .map_err(|e| e.to_string())?,
     ];
-    if let Some(domain) = extract_server_authority(&base_url) {
+    if let Some(domain) = extract_server_authority(base_url) {
         tags.push(Tag::parse(vec!["server".to_string(), domain]).map_err(|e| e.to_string())?);
     }
     EventBuilder::new(Kind::from(24242), "Upload sprout-media")
@@ -265,7 +265,7 @@ fn find_ffmpeg() -> Result<std::path::PathBuf, String> {
 
 /// Detect if a file is a video based on magic bytes.
 fn is_video_file(buf: &[u8]) -> bool {
-    infer::get(buf).map_or(false, |t| t.mime_type().starts_with("video/"))
+    infer::get(buf).is_some_and(|t| t.mime_type().starts_with("video/"))
 }
 
 /// Maximum wall-clock time for an ffmpeg transcode before we kill it.

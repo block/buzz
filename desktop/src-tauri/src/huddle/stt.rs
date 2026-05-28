@@ -127,7 +127,7 @@ impl SttPipeline {
     /// Returns `true` if the worker thread has exited (init failure, crash, or normal exit).
     /// Used by hot-start to detect dead pipelines and clear them for retry.
     pub fn is_finished(&self) -> bool {
-        self.thread.as_ref().map_or(true, |h| h.is_finished())
+        self.thread.as_ref().is_none_or(|h| h.is_finished())
     }
 
     /// Feed raw PCM bytes into the pipeline.
@@ -136,7 +136,7 @@ impl SttPipeline {
     /// better to lose frames than to stall the UI thread.
     pub fn push_audio(&self, pcm_bytes: Vec<u8>) -> Result<(), String> {
         // Reject non-4-byte-aligned input — would silently truncate in bytes_to_f32.
-        if pcm_bytes.len() % 4 != 0 {
+        if !pcm_bytes.len().is_multiple_of(4) {
             return Err(format!(
                 "audio input not 4-byte aligned ({} bytes) — expected f32 LE samples",
                 pcm_bytes.len()
@@ -283,7 +283,7 @@ fn stt_worker(
     let mut tts_was_active = false;
     let mut ptt_was_active = ptt_active
         .as_ref()
-        .map_or(false, |p| p.load(Ordering::Acquire));
+        .is_some_and(|p| p.load(Ordering::Acquire));
     loop {
         // Check shutdown flag before blocking.
         if shutdown.load(Ordering::Acquire) {

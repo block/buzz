@@ -759,8 +759,8 @@ mod tests {
         let external = tmp.path().join("external");
         fs::create_dir(&external).unwrap();
         fs::set_permissions(&external, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::remove_dir(&root.join("REPOS")).unwrap();
-        std::os::unix::fs::symlink(&external, &root.join("REPOS")).unwrap();
+        fs::remove_dir(root.join("REPOS")).unwrap();
+        std::os::unix::fs::symlink(&external, root.join("REPOS")).unwrap();
 
         // Second call should succeed — it skips chmod on the symlinked child.
         ensure_nest_at(&root).unwrap();

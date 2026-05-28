@@ -461,7 +461,7 @@ pub fn discover_acp_providers() -> Vec<AcpProviderCatalogEntry> {
 
             let underlying_cli_path = provider
                 .underlying_cli
-                .and_then(|cli| find_command(cli))
+                .and_then(find_command)
                 .map(|p| p.display().to_string());
 
             let default_args = command

@@ -11,6 +11,8 @@ use crate::{
     util::now_iso,
 };
 
+type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
+
 /// Binary name fragments for all known agent/harness processes that Sprout
 /// may spawn. Used by `process_belongs_to_us()` and the orphan sweep to
 /// identify processes we should clean up. Both hyphenated and underscored
@@ -459,7 +461,7 @@ pub fn find_managed_agent_mut<'a>(
 pub(crate) fn build_respond_to_env(
     record: &ManagedAgentRecord,
     owner_hex: Option<&str>,
-) -> Result<(Vec<(&'static str, String)>, Vec<&'static str>), String> {
+) -> Result<RespondToEnv, String> {
     // Defensive re-validation: an on-disk record could have been hand-edited.
     let normalized = super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)?;
     if record.respond_to == super::types::RespondTo::Allowlist && normalized.is_empty() {
