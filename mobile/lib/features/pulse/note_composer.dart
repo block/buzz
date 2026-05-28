@@ -17,7 +17,7 @@ class NoteComposer extends HookConsumerWidget {
     super.key,
     this.replyTo,
     this.onSent,
-    this.hintText = 'What’s pulsing?',
+    this.hintText = 'What’s on your mind?',
   });
 
   @override

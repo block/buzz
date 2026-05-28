@@ -30,7 +30,12 @@ class PulseTabBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.fromLTRB(Grid.xs, Grid.half, Grid.xs, Grid.xxs),
+      padding: const EdgeInsets.fromLTRB(
+        Grid.xs,
+        Grid.twelve,
+        Grid.xs,
+        Grid.xxs,
+      ),
       child: Row(
         children: [
           for (final tab in tabs) ...[

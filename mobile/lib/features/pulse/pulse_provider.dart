@@ -98,13 +98,35 @@ final contactListProvider = FutureProvider.family<List<ContactEntry>, String>((
 
 final agentPubkeysProvider = FutureProvider<List<String>>((ref) async {
   final session = ref.watch(relaySessionProvider.notifier);
-  final events = await session.fetchHistory(NostrFilters.agentProfiles());
+
+  // Primary source: kind:10100 agent profile events (each agent signs its own).
+  final profileEvents = await session.fetchHistory(
+    NostrFilters.agentProfiles(),
+  );
   final pubkeys = <String>{};
-  for (final event in events) {
+  for (final event in profileEvents) {
     pubkeys.add(event.pubkey.toLowerCase());
     final p = event.getTagValue('p');
     if (p != null) pubkeys.add(p.toLowerCase());
   }
+
+  // Fallback: relay membership list (kind:13534) — extract members with
+  // role "bot". This catches managed agents that may not have published
+  // a kind:10100 profile event yet.
+  final memberEvents = await session.fetchHistory(NostrFilters.relayMembers());
+  if (memberEvents.isNotEmpty) {
+    final event = memberEvents.first;
+    for (final tag in event.tags) {
+      if (tag.length >= 3 && tag[0] == 'member' && tag[2] == 'bot') {
+        pubkeys.add(tag[1].toLowerCase());
+      }
+      // NIP-29 fallback: ["p", pubkey, relay_url?, role?]
+      if (tag.length >= 4 && tag[0] == 'p' && tag[3] == 'bot') {
+        pubkeys.add(tag[1].toLowerCase());
+      }
+    }
+  }
+
   return pubkeys.toList();
 });
 
