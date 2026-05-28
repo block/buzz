@@ -625,7 +625,15 @@ export function AppSidebar({
         </SidebarMenu>
       </SidebarHeader>
 
-      <div className="relative flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1 flex-col">
+        {unreadAboveCount > 0 ? (
+          <MoreUnreadButton
+            count={unreadAboveCount}
+            icon={<ArrowUp />}
+            onClick={scrollToNextAbove}
+            testId="sidebar-more-unread-above"
+          />
+        ) : null}
         <SidebarContent ref={scrollRef}>
           {isLoading ? (
             <SidebarGroup>
@@ -727,22 +735,11 @@ export function AppSidebar({
           ) : null}
         </SidebarContent>
 
-        {unreadAboveCount > 0 ? (
-          <MoreUnreadButton
-            count={unreadAboveCount}
-            icon={<ArrowUp />}
-            onClick={scrollToNextAbove}
-            position="top"
-            testId="sidebar-more-unread-above"
-          />
-        ) : null}
-
         {unreadBelowCount > 0 ? (
           <MoreUnreadButton
             count={unreadBelowCount}
             icon={<ArrowDown />}
             onClick={scrollToNextBelow}
-            position="bottom"
             testId="sidebar-more-unread-below"
           />
         ) : null}
