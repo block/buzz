@@ -47,6 +47,38 @@ type NoteCardProps = {
   actions?: NoteCardActions;
 };
 
+function ReplyParentContext({
+  parentId,
+  profiles,
+}: {
+  parentId: string;
+  profiles: Record<string, UserProfileSummary>;
+}) {
+  const parentNoteQuery = useNoteByIdQuery(parentId);
+  const parentNote = parentNoteQuery.data ?? null;
+  const parentProfile = parentNote
+    ? profiles[parentNote.pubkey.toLowerCase()]
+    : null;
+  const parentDisplayName = parentNote
+    ? (parentProfile?.displayName ?? `${parentNote.pubkey.slice(0, 8)}...`)
+    : null;
+  const parentSnippet = parentNote ? noteSnippet(parentNote.content) : null;
+
+  return (
+    <div className="mt-2 truncate rounded-xl border border-border/50 bg-muted/25 px-3 py-2 text-xs text-muted-foreground">
+      {parentNote ? (
+        <>
+          Replying to {parentDisplayName}: {parentSnippet || "No text"}
+        </>
+      ) : parentNoteQuery.isLoading ? (
+        "Loading reply context…"
+      ) : (
+        "Replying to an unavailable note"
+      )}
+    </div>
+  );
+}
+
 function formatRelativeTime(unixSeconds: number): string {
   const now = Date.now() / 1_000;
   const diff = now - unixSeconds;
@@ -91,15 +123,6 @@ export function NoteCard({
     ) : null;
   const currentUserAvatarUrl = currentUserProfile?.avatarUrl ?? null;
   const replyParentId = getReplyParent(note);
-  const parentNoteQuery = useNoteByIdQuery(replyParentId);
-  const parentNote = parentNoteQuery.data ?? null;
-  const parentProfile = parentNote
-    ? composerProfiles[parentNote.pubkey.toLowerCase()]
-    : null;
-  const parentDisplayName = parentNote
-    ? (parentProfile?.displayName ?? `${parentNote.pubkey.slice(0, 8)}...`)
-    : null;
-  const parentSnippet = parentNote ? noteSnippet(parentNote.content) : null;
 
   return (
     <article className="flex items-start gap-2.5 rounded-2xl px-1 pb-1 pt-4 sm:px-2">
@@ -135,17 +158,10 @@ export function NoteCard({
         </div>
 
         {replyParentId ? (
-          <div className="mt-2 truncate rounded-xl border border-border/50 bg-muted/25 px-3 py-2 text-xs text-muted-foreground">
-            {parentNote ? (
-              <>
-                Replying to {parentDisplayName}: {parentSnippet || "No text"}
-              </>
-            ) : parentNoteQuery.isLoading ? (
-              "Loading reply context…"
-            ) : (
-              "Replying to an unavailable note"
-            )}
-          </div>
+          <ReplyParentContext
+            parentId={replyParentId}
+            profiles={composerProfiles}
+          />
         ) : null}
 
         <div className="mt-0.5 pb-3 text-sm text-foreground">
