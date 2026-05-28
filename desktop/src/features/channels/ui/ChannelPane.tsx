@@ -17,45 +17,12 @@ import {
 } from "@/features/channels/ui/BotActivityBar";
 import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
 import { Button } from "@/shared/ui/button";
+import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import type { useChannelFind } from "@/features/search/useChannelFind";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
-
-const THREAD_PANEL_DEFAULT_WIDTH_PX = 380;
-const THREAD_PANEL_MIN_WIDTH_PX = 320;
-const THREAD_PANEL_MAX_WIDTH_PX = 720;
-const THREAD_PANEL_WIDTH_SESSION_KEY = "sprout.desktop.thread-panel-width";
-
-function clampThreadPanelWidth(width: number): number {
-  return Math.max(
-    THREAD_PANEL_MIN_WIDTH_PX,
-    Math.min(THREAD_PANEL_MAX_WIDTH_PX, width),
-  );
-}
-
-function getInitialThreadPanelWidth(): number {
-  if (typeof window === "undefined") {
-    return THREAD_PANEL_DEFAULT_WIDTH_PX;
-  }
-
-  try {
-    const raw = window.sessionStorage.getItem(THREAD_PANEL_WIDTH_SESSION_KEY);
-    if (!raw) {
-      return THREAD_PANEL_DEFAULT_WIDTH_PX;
-    }
-
-    const parsed = Number.parseInt(raw, 10);
-    if (!Number.isFinite(parsed)) {
-      return THREAD_PANEL_DEFAULT_WIDTH_PX;
-    }
-
-    return clampThreadPanelWidth(parsed);
-  } catch {
-    return THREAD_PANEL_DEFAULT_WIDTH_PX;
-  }
-}
 
 type ChannelPaneProps = {
   activeChannel: Channel | null;
@@ -174,65 +141,16 @@ export const ChannelPane = React.memo(function ChannelPane({
   threadReplyTargetMessage,
   typingPubkeys,
 }: ChannelPaneProps) {
-  const [threadPanelWidthPx, setThreadPanelWidthPx] = React.useState<number>(
-    () => getInitialThreadPanelWidth(),
-  );
+  const {
+    canReset: canResetThreadPanelWidth,
+    onResetWidth: handleThreadPanelWidthReset,
+    onResizeStart: handleThreadPanelResizeStart,
+    widthPx: threadPanelWidthPx,
+  } = useThreadPanelWidth();
 
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
   useComposerHeightPadding(timelineScrollRef, composerWrapperRef);
-
-  React.useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    try {
-      window.sessionStorage.setItem(
-        THREAD_PANEL_WIDTH_SESSION_KEY,
-        String(threadPanelWidthPx),
-      );
-    } catch {
-      // Ignore storage failures and keep in-memory width for this session.
-    }
-  }, [threadPanelWidthPx]);
-
-  const handleThreadPanelResizeStart = React.useCallback(
-    (event: React.PointerEvent<HTMLButtonElement>) => {
-      event.preventDefault();
-
-      const startX = event.clientX;
-      const startWidth = threadPanelWidthPx;
-      const previousCursor = document.body.style.cursor;
-      const previousUserSelect = document.body.style.userSelect;
-
-      document.body.style.cursor = "col-resize";
-      document.body.style.userSelect = "none";
-
-      const handlePointerMove = (moveEvent: PointerEvent) => {
-        const deltaX = startX - moveEvent.clientX;
-        const nextWidth = clampThreadPanelWidth(startWidth + deltaX);
-        setThreadPanelWidthPx(nextWidth);
-      };
-
-      const handlePointerUp = () => {
-        document.body.style.cursor = previousCursor;
-        document.body.style.userSelect = previousUserSelect;
-        window.removeEventListener("pointermove", handlePointerMove);
-      };
-
-      window.addEventListener("pointermove", handlePointerMove);
-      window.addEventListener("pointerup", handlePointerUp, { once: true });
-    },
-    [threadPanelWidthPx],
-  );
-
-  const handleThreadPanelWidthReset = React.useCallback(() => {
-    setThreadPanelWidthPx(THREAD_PANEL_DEFAULT_WIDTH_PX);
-  }, []);
-
-  const canResetThreadPanelWidth =
-    threadPanelWidthPx !== THREAD_PANEL_DEFAULT_WIDTH_PX;
 
   // Scope the edit target to the correct composer: if the message being edited
   // lives inside the open thread (thread head or a reply), show the editing UI
