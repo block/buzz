@@ -2,7 +2,7 @@
 
 [package]
 name = "sprout-desktop"
-version = "0.3.1"
+version = "0.3.2"
 description = "Sprout desktop app"
 authors = ["you"]
 edition = "2021"

@@ -4847,7 +4847,7 @@ dependencies = [
 
 [[package]]
 name = "sprout-desktop"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "atomic-write-file",
  "audioadapter-buffers",
