@@ -11,6 +11,7 @@
     "lint": "biome lint .",
     "check": "biome check . && pnpm check:file-sizes",
     "format": "biome format --write .",
+    "test": "node --test 'src/**/*.test.mjs'",
     "preview": "vite preview",
     "tauri": "tauri",
     "test:e2e": "pnpm build && playwright test",

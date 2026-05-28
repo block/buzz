@@ -7,6 +7,8 @@ pre-commit:
       run: just desktop-tauri-fmt-check
     desktop-check:
       run: just desktop-check
+    desktop-test:
+      run: just desktop-test
     web-check:
       run: just web-check
     mobile-check:
@@ -23,6 +25,8 @@ pre-push:
       run: just test-unit
     desktop-check:
       run: just desktop-check
+    desktop-test:
+      run: just desktop-test
     desktop-tauri-fmt:
       run: just desktop-tauri-fmt-check
     desktop-build:

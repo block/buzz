@@ -164,6 +164,8 @@ jobs:
           key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
       - name: Desktop lint and format
         run: just desktop-check
+      - name: Desktop unit tests
+        run: just desktop-test
       - name: Desktop build
         run: just desktop-build
       - name: Desktop smoke e2e

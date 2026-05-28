@@ -82,6 +82,10 @@ desktop-install-ci:
 desktop-check:
     cd {{desktop_dir}} && pnpm check
 
+# Run desktop TS helper unit tests
+desktop-test:
+    cd {{desktop_dir}} && pnpm test
+
 # Run desktop TypeScript checks
 desktop-typecheck:
     cd {{desktop_dir}} && pnpm typecheck
@@ -131,7 +135,7 @@ desktop-release-build target="aarch64-apple-darwin":
     cd {{desktop_dir}} && pnpm tauri build --target {{target}}
 
 # Run desktop checks suitable for CI / pre-push
-desktop-ci: desktop-check desktop-tauri-fmt-check desktop-build desktop-tauri-check
+desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check
 
 # Seed deterministic channel data for desktop Playwright tests
 desktop-e2e-seed:
@@ -146,7 +150,7 @@ desktop-e2e-integration:
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
 # Run all checks suitable for CI / pre-push (no infra needed)
-ci: check test-unit desktop-build desktop-tauri-check web-build mobile-test
+ci: check test-unit desktop-test desktop-build desktop-tauri-check web-build mobile-test
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
 

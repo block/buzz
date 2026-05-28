@@ -45,6 +45,18 @@ test("getReplyParent uses a root marker when no closer parent exists", () => {
   assert.equal(getReplyParent(note([["e", A, "", "root"]])), A);
 });
 
+test("getReplyParent uses reply before later root", () => {
+  assert.equal(
+    getReplyParent(
+      note([
+        ["e", A, "", "reply"],
+        ["e", B, "", "root"],
+      ]),
+    ),
+    A,
+  );
+});
+
 test("getReplyParent keeps reply precedence over root and unmarked fallbacks", () => {
   assert.equal(
     getReplyParent(
