@@ -349,6 +349,8 @@ bump-version version:
         c.version = '{{ version }}';
         fs.writeFileSync(p, JSON.stringify(c, null, 2) + '\n');
     "
+    # JSON.stringify expands arrays/objects in a way biome rejects; reformat to match.
+    (cd desktop && pnpm exec biome format --write src-tauri/tauri.conf.json)
     # desktop/src-tauri/Cargo.toml — only first version line (under [package])
     node -e "
         const fs = require('fs');
