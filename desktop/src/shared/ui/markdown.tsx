@@ -423,7 +423,10 @@ function createMarkdownComponents(
       <strong className="font-semibold">{children}</strong>
     ),
     table: ({ children }) => (
-      <div className="overflow-x-auto rounded-2xl border border-border/70" data-table-block="">
+      <div
+        className="overflow-x-auto rounded-2xl border border-border/70"
+        data-table-block=""
+      >
         <table className="w-full border-collapse text-left text-sm">
           {children}
         </table>
