@@ -1,7 +1,10 @@
 import { Search } from "lucide-react";
 import * as React from "react";
 
-import { useRelayAgentsQuery } from "@/features/agents/hooks";
+import {
+  useManagedAgentsQuery,
+  useRelayAgentsQuery,
+} from "@/features/agents/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import {
   useContactListQuery,
@@ -78,7 +81,33 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
   const peoplePubkeys = React.useMemo(() => contactPubkeys, [contactPubkeys]);
 
   const relayAgentsQuery = useRelayAgentsQuery();
-  const relayAgents = relayAgentsQuery.data ?? [];
+  const managedAgentsQuery = useManagedAgentsQuery();
+  const relayAgents = React.useMemo(() => {
+    const agentsByPubkey = new Map<
+      string,
+      NonNullable<typeof relayAgentsQuery.data>[number]
+    >();
+    for (const agent of relayAgentsQuery.data ?? []) {
+      agentsByPubkey.set(agent.pubkey, agent);
+    }
+    for (const agent of managedAgentsQuery.data ?? []) {
+      if (!agentsByPubkey.has(agent.pubkey)) {
+        agentsByPubkey.set(agent.pubkey, {
+          pubkey: agent.pubkey,
+          name: agent.name,
+          agentType: agent.agentCommand,
+          channels: [],
+          channelIds: [],
+          capabilities: [],
+          status:
+            agent.status === "running" || agent.status === "deployed"
+              ? "online"
+              : "offline",
+        });
+      }
+    }
+    return [...agentsByPubkey.values()];
+  }, [managedAgentsQuery.data, relayAgentsQuery.data]);
   const agentPubkeys = React.useMemo(
     () => relayAgents.map((a) => a.pubkey),
     [relayAgents],
