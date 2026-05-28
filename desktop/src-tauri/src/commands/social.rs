@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use nostr::EventId;
+use nostr::{Event, EventId, Tag};
 use tauri::State;
 
 use crate::{
@@ -12,6 +12,43 @@ use crate::{
     nostr_convert,
     relay::{query_relay, submit_event, SubmitEventResponse},
 };
+
+fn e_tag_id(tag: &Tag) -> Option<&String> {
+    let values = tag.as_slice();
+    match (values.first().map(String::as_str), values.get(1)) {
+        (Some("e"), Some(id)) => Some(id),
+        _ => None,
+    }
+}
+
+fn deleted_event_ids(events: &[Event]) -> HashSet<String> {
+    events
+        .iter()
+        .flat_map(|event| event.tags.iter().filter_map(e_tag_id).cloned())
+        .collect()
+}
+
+fn last_event_tag_id(event: &Event) -> Option<String> {
+    event.tags.iter().rev().find_map(e_tag_id).cloned()
+}
+
+fn last_matching_event_tag_id(event: &Event, targets: &HashSet<String>) -> Option<String> {
+    event
+        .tags
+        .iter()
+        .rev()
+        .filter_map(e_tag_id)
+        .find(|id| targets.contains(*id))
+        .cloned()
+}
+
+fn reaction_emoji(event: &Event) -> String {
+    if event.content.is_empty() {
+        "+".to_string()
+    } else {
+        event.content.clone()
+    }
+}
 
 /// Publish a global kind:1 text note (NIP-01).
 #[tauri::command]
@@ -162,18 +199,7 @@ pub async fn get_note_reactions(
         )
         .await?
     };
-    let deleted_reaction_ids: HashSet<String> = deletion_events
-        .iter()
-        .flat_map(|event| {
-            event.tags.iter().filter_map(|tag| {
-                let values = tag.as_slice();
-                match (values.first().map(String::as_str), values.get(1)) {
-                    (Some("e"), Some(id)) => Some(id.clone()),
-                    _ => None,
-                }
-            })
-        })
-        .collect();
+    let deleted_reaction_ids = deleted_event_ids(&deletion_events);
 
     let targets: HashSet<String> = note_ids.into_iter().collect();
     let mut by_note_and_emoji = HashMap::<(String, String), HashSet<String>>::new();
@@ -182,21 +208,11 @@ pub async fn get_note_reactions(
             continue;
         }
 
-        let Some(target_id) = event.tags.iter().rev().find_map(|tag| {
-            let values = tag.as_slice();
-            match (values.first().map(String::as_str), values.get(1)) {
-                (Some("e"), Some(id)) if targets.contains(id) => Some(id.clone()),
-                _ => None,
-            }
-        }) else {
+        let Some(target_id) = last_matching_event_tag_id(&event, &targets) else {
             continue;
         };
 
-        let emoji = if event.content.is_empty() {
-            "+".to_string()
-        } else {
-            event.content.clone()
-        };
+        let emoji = reaction_emoji(&event);
         by_note_and_emoji
             .entry((target_id, emoji))
             .or_default()
@@ -260,18 +276,7 @@ pub async fn get_liked_notes(
         )
         .await?
     };
-    let deleted_reaction_ids: HashSet<String> = deletions
-        .iter()
-        .flat_map(|event| {
-            event.tags.iter().filter_map(|tag| {
-                let values = tag.as_slice();
-                match (values.first().map(String::as_str), values.get(1)) {
-                    (Some("e"), Some(id)) => Some(id.clone()),
-                    _ => None,
-                }
-            })
-        })
-        .collect();
+    let deleted_reaction_ids = deleted_event_ids(&deletions);
 
     let mut target_ids = Vec::<String>::new();
     let mut target_liked_at = HashMap::<String, i64>::new();
@@ -283,13 +288,7 @@ pub async fn get_liked_notes(
         if deleted_reaction_ids.contains(&reaction.id.to_hex()) {
             continue;
         }
-        let Some(target_id) = reaction.tags.iter().rev().find_map(|tag| {
-            let values = tag.as_slice();
-            match (values.first().map(String::as_str), values.get(1)) {
-                (Some("e"), Some(id)) => Some(id.clone()),
-                _ => None,
-            }
-        }) else {
+        let Some(target_id) = last_event_tag_id(&reaction) else {
             continue;
         };
         if seen_targets.insert(target_id.clone()) {
