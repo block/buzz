@@ -16,6 +16,13 @@ export function getReplyParent(note: UserNote): string | null {
     }
   }
 
+  for (let index = eTags.length - 1; index >= 0; index -= 1) {
+    const tag = eTags[index];
+    if (tag[3] === "root") {
+      return tag[1] ?? null;
+    }
+  }
+
   return null;
 }
 
