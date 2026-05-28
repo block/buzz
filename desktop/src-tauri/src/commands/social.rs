@@ -1,10 +1,14 @@
+use std::collections::{HashMap, HashSet};
+
 use nostr::EventId;
 use tauri::State;
 
 use crate::{
     app_state::AppState,
     events,
-    models::{ContactEntry, ContactListResponse, UserNoteInfo, UserNotesResponse},
+    models::{
+        ContactEntry, ContactListResponse, NoteReactionSummary, UserNoteInfo, UserNotesResponse,
+    },
     nostr_convert,
     relay::{query_relay, submit_event, SubmitEventResponse},
 };
@@ -122,6 +126,81 @@ pub async fn get_note(
         .notes
         .into_iter()
         .next())
+}
+
+/// Fetch and fold kind:7 reactions for visible Pulse notes.
+#[tauri::command]
+pub async fn get_note_reactions(
+    note_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<NoteReactionSummary>, String> {
+    if note_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let events = query_relay(
+        &state,
+        &[serde_json::json!({
+            "kinds": [7],
+            "#e": note_ids,
+            "limit": 500,
+        })],
+    )
+    .await?;
+
+    let targets: HashSet<String> = note_ids.into_iter().collect();
+    let mut folded = HashSet::<(String, String, String)>::new();
+    for event in events {
+        let Some(target_id) = event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let values = tag.as_slice();
+                (values.first().map(String::as_str) == Some("e"))
+                    .then(|| values.get(1))
+                    .flatten()
+            })
+            .find(|id| targets.contains(*id))
+            .cloned()
+        else {
+            continue;
+        };
+
+        let emoji = if event.content.is_empty() {
+            "+".to_string()
+        } else {
+            event.content.clone()
+        };
+        folded.insert((target_id, event.pubkey.to_hex(), emoji));
+    }
+
+    let mut by_note_and_emoji = HashMap::<(String, String), Vec<String>>::new();
+    for (note_id, pubkey, emoji) in folded {
+        by_note_and_emoji
+            .entry((note_id, emoji))
+            .or_default()
+            .push(pubkey);
+    }
+
+    let mut summaries: Vec<NoteReactionSummary> = by_note_and_emoji
+        .into_iter()
+        .map(|((note_id, emoji), mut pubkeys)| {
+            pubkeys.sort();
+            NoteReactionSummary {
+                note_id,
+                emoji,
+                count: pubkeys.len(),
+                pubkeys,
+            }
+        })
+        .collect();
+    summaries.sort_by(|left, right| {
+        left.note_id
+            .cmp(&right.note_id)
+            .then_with(|| left.emoji.cmp(&right.emoji))
+    });
+
+    Ok(summaries)
 }
 
 /// Maximum number of pubkeys per timeline request to keep filter size bounded.

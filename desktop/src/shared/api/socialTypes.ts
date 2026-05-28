@@ -6,6 +6,13 @@ export type UserNote = {
   tags: string[][];
 };
 
+export type NoteReactionSummary = {
+  noteId: string;
+  emoji: string;
+  count: number;
+  pubkeys: string[];
+};
+
 export type UserNotesCursor = {
   before: number;
   beforeId: string;

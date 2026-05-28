@@ -4,6 +4,7 @@ import {
   getContactList,
   getGlobalNotes,
   getNote,
+  getNoteReactions,
   getNotesTimeline,
   getUserNotes,
   publishNote,
@@ -22,6 +23,8 @@ export const pulseQueryKeys = {
   globalNotes: ["global-notes"] as const,
   myNotes: (pubkey: string) => ["my-notes", pubkey] as const,
   note: (noteId: string) => ["pulse-note", noteId] as const,
+  reactions: (noteIds: string[]) =>
+    ["pulse-reactions", [...noteIds].sort().join(",")] as const,
   // Use a stable sorted string key to avoid reference-equality refetch churn.
   timeline: (pubkeys: string[]) =>
     ["pulse-timeline", [...pubkeys].sort().join(",")] as const,
@@ -65,6 +68,39 @@ export function useTimelineQuery(contactPubkeys: string[], enabled: boolean) {
     staleTime: 15_000,
     gcTime: 5 * 60_000,
     refetchInterval: 30_000,
+  });
+}
+
+export type PulseReactionState = {
+  count: number;
+  reactedByCurrentUser: boolean;
+};
+
+export function usePulseReactionsQuery(
+  noteIds: string[],
+  currentPubkey?: string,
+) {
+  return useQuery<Map<string, PulseReactionState>>({
+    queryKey: pulseQueryKeys.reactions(noteIds),
+    queryFn: async () => {
+      const summaries = await getNoteReactions(noteIds);
+      const result = new Map<string, PulseReactionState>();
+      for (const summary of summaries) {
+        if (summary.emoji !== "+") {
+          continue;
+        }
+        result.set(summary.noteId, {
+          count: summary.count,
+          reactedByCurrentUser: currentPubkey
+            ? summary.pubkeys.includes(currentPubkey)
+            : false,
+        });
+      }
+      return result;
+    },
+    enabled: noteIds.length > 0,
+    staleTime: 15_000,
+    gcTime: 5 * 60_000,
   });
 }
 

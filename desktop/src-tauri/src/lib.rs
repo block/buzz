@@ -453,7 +453,6 @@ pub fn run() {
 
             try_regenerate_nest(&app_handle);
 
-            // Pre-download voice models in background. Idempotent — no-op if present.
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
                 mgr.start_tts_download(state.http_client.clone());
@@ -614,6 +613,7 @@ pub fn run() {
             get_notes_timeline,
             get_global_notes,
             get_note,
+            get_note_reactions,
             start_huddle,
             join_huddle,
             leave_huddle,

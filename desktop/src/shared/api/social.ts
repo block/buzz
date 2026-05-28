@@ -1,5 +1,6 @@
 import type {
   ContactListResponse,
+  NoteReactionSummary,
   PublishNoteResult,
   UserNote,
   UserNotesResponse,
@@ -13,6 +14,13 @@ type RawUserNote = {
   created_at: number;
   content: string;
   tags: string[][];
+};
+
+type RawNoteReactionSummary = {
+  note_id: string;
+  emoji: string;
+  count: number;
+  pubkeys: string[];
 };
 
 type RawUserNotesCursor = {
@@ -41,6 +49,21 @@ function fromRawUserNote(note: RawUserNote): UserNote {
     content: note.content,
     tags: note.tags,
   };
+}
+
+export async function getNoteReactions(
+  noteIds: string[],
+): Promise<NoteReactionSummary[]> {
+  const response = await invokeTauri<RawNoteReactionSummary[]>(
+    "get_note_reactions",
+    { noteIds },
+  );
+  return response.map((summary) => ({
+    noteId: summary.note_id,
+    emoji: summary.emoji,
+    count: summary.count,
+    pubkeys: summary.pubkeys,
+  }));
 }
 
 export async function getNote(noteId: string): Promise<UserNote | null> {
