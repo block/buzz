@@ -72,7 +72,6 @@ function TimelineSkeleton() {
 
 export function PulseView({ currentPubkey }: PulseViewProps) {
   const [activeTab, setActiveTab] = React.useState<PulseTab>("everyone");
-  const [agentFilter, setAgentFilter] = React.useState<string | null>(null);
   const [searchQuery, setSearchQuery] = React.useState("");
   const contactListQuery = useContactListQuery(currentPubkey);
   const contacts = contactListQuery.data?.contacts ?? [];
@@ -146,7 +145,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     activeTab === "liked",
   );
   const agentTimelineQuery = useTimelineQuery(
-    agentFilter ? [agentFilter] : agentPubkeys,
+    agentPubkeys,
     activeTab === "agents",
   );
   const myNotesQuery = useMyNotesQuery(
@@ -311,12 +310,9 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <PulseTabBar
         activeTab={activeTab}
-        agentFilter={agentFilter}
         getPanelId={pulsePanelId}
         getTabId={pulseTabId}
-        onAgentFilterChange={setAgentFilter}
         onTabChange={setActiveTab}
-        profiles={profiles}
         relayAgents={relayAgents}
       />
 
