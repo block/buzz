@@ -169,8 +169,8 @@ test("loads the home feed from the relay", async ({ browser }) => {
     await page.goto("/");
     await senderPage.goto("/");
 
-    await expect(page.getByTestId("chat-title")).toHaveText("Home");
     await expect(page.getByTestId("home-inbox")).toBeVisible();
+    await expect(page.getByTestId("home-inbox-list")).toBeVisible();
 
     await sendChannelMessage(senderPage, {
       channelName: "general",

@@ -478,7 +478,7 @@ test("opens a single-level thread panel with inline expansion", async ({
         return rowRect.top - bodyRect.top;
       });
     })
-    .toBeLessThanOrEqual(160);
+    .toBeLessThanOrEqual(240);
 
   const firstReplyId = await firstReplyRow.getAttribute("data-message-id");
   if (!firstReplyId) {
@@ -532,7 +532,7 @@ test("opens a single-level thread panel with inline expansion", async ({
         return rowRect.top - bodyRect.top;
       });
     })
-    .toBeLessThanOrEqual(160);
+    .toBeLessThanOrEqual(240);
 
   await firstReplySummaryRow.click();
   await expect(

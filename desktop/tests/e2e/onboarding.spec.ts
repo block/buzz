@@ -79,6 +79,10 @@ async function expectShellHidden(page: Page) {
   await expect(page.getByTestId("chat-title")).toHaveCount(0);
 }
 
+async function expectHomeView(page: Page) {
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+}
+
 async function expectIncompleteOnboarding(page: Page) {
   await expect(page.getByTestId("onboarding-gate")).toBeVisible();
   await expectShellHidden(page);
@@ -101,7 +105,7 @@ test("completed users skip the loading gate while profile is still settling", as
   await page.goto("/");
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
 });
 
 test("identity fallback text does not count as a real onboarding name", async ({
@@ -160,7 +164,7 @@ test("first-run onboarding keeps the shell hidden through both pages and only ma
 
   await page.getByTestId("onboarding-finish").click();
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
   await expectHomeSeenCount(page, 2);
 });
 
@@ -172,7 +176,7 @@ test("existing relay profile auto-skips onboarding without localStorage completi
   await page.goto("/");
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
 });
 
 test("finishing onboarding auto-joins the #general channel for a new member", async ({
@@ -186,7 +190,7 @@ test("finishing onboarding auto-joins the #general channel for a new member", as
   await continueToSetupPage(page);
   await page.getByTestId("onboarding-finish").click();
 
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
   await expect(page.getByTestId("channel-general")).toBeVisible();
 });
 
@@ -250,5 +254,5 @@ test("failed first profile saves can be skipped for the current session", async 
   await page.getByTestId("onboarding-skip").click();
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
 });

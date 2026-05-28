@@ -297,7 +297,7 @@ test("live mentions refetch the home feed without waiting for polling", async ({
     // the new mention — so the assertion that the refetch happened is the
     // inbox-list content, not the badge.
     await targetPage.getByRole("button", { name: "Home" }).click();
-    await expect(targetPage.getByTestId("chat-title")).toHaveText("Home");
+    await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toContainText(
       message,
       { timeout: relayDeliveryTimeoutMs },
@@ -365,7 +365,7 @@ test("live forum mentions refetch the home feed without waiting for polling", as
     ]);
 
     await targetPage.getByRole("button", { name: "Home" }).click();
-    await expect(targetPage.getByTestId("chat-title")).toHaveText("Home");
+    await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toContainText(
       message,

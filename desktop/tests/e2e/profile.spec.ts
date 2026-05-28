@@ -3,6 +3,10 @@ import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 import { openProfileMenu, openSettings } from "../helpers/settings";
 
+async function expectHomeView(page: import("@playwright/test").Page) {
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
@@ -33,7 +37,7 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
   await expect(page.getByTestId("profile-about")).toHaveValue(about);
 
   await page.getByTestId("settings-close").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
   await expect(page.getByTestId("open-settings")).toBeVisible();
 
   await openSettings(page, "profile");
@@ -198,7 +202,7 @@ test("notification settings drive the Home badge and desktop alerts", async ({
   await expect.poll(getAppBadgeCount).toBe(baseline + 1);
 
   await page.getByRole("button", { name: "Home" }).click();
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
   await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);
   await expect.poll(getAppBadgeCount).toBe(baseline);
 });
@@ -213,7 +217,7 @@ test("desktop notification clicks open the matching forum thread", async ({
     "On",
   );
   await page.getByTestId("settings-close").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
 
   await page.evaluate(() => {
     const win = window as Window & {
@@ -281,7 +285,7 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
   page,
 }) => {
   await page.goto("/");
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
 
   await page.keyboard.press(
     process.platform === "darwin" ? "Meta+," : "Control+,",
@@ -345,12 +349,12 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
     process.platform === "darwin" ? "Meta+," : "Control+,",
   );
   await expect(page.getByTestId("settings-view")).toHaveCount(0);
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
 });
 
 test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
 
   const getTextScaleState = () =>
     page.evaluate(() => ({

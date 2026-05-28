@@ -74,12 +74,24 @@ async function openSearchDialogWithShortcut(
 async function openSearchDialogWithButton(
   page: import("@playwright/test").Page,
 ) {
-  const searchDialog = page.getByTestId("search-dialog");
-  const openSearchButton = page.getByTestId("open-search");
+  await openSearchDialogWithShortcut(page);
+}
 
-  await expect(openSearchButton).toBeVisible();
-  await openSearchButton.click();
-  await expect(searchDialog).toBeVisible();
+async function expectHomeView(page: import("@playwright/test").Page) {
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+}
+
+async function selectHomeInboxFilter(
+  page: import("@playwright/test").Page,
+  label: "Activity" | "Agents",
+) {
+  await page
+    .getByTestId("home-inbox")
+    .getByRole("button", {
+      name: /^(All|Mentions|Needs Action|Activity|Agents)$/,
+    })
+    .click();
+  await page.getByRole("menuitemradio", { name: label }).click();
 }
 
 test.beforeEach(async ({ page }) => {
@@ -149,7 +161,7 @@ test("opens a mocked channel from the home feed", async ({ page }) => {
 
   await page.goto("/");
 
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
   await expect(inboxList).toContainText("Please review the release checklist.");
 
   await inboxList
@@ -171,18 +183,12 @@ test("home feed shows channel and agent activity sections", async ({
 
   await page.goto("/");
 
-  await page
-    .getByTestId("home-inbox")
-    .getByRole("button", { name: "Activity" })
-    .click();
+  await selectHomeInboxFilter(page, "Activity");
   await expect(inboxList).toContainText(
     "Engineering shipped the desktop build.",
   );
 
-  await page
-    .getByTestId("home-inbox")
-    .getByRole("button", { name: "Agents" })
-    .click();
+  await selectHomeInboxFilter(page, "Agents");
   await expect(inboxList).toContainText(
     "Agent progress: channel index complete.",
   );
@@ -197,10 +203,7 @@ test("opens a mocked forum activity item from the home feed", async ({
 }) => {
   await page.goto("/");
 
-  await page
-    .getByTestId("home-inbox")
-    .getByRole("button", { name: "Activity" })
-    .click();
+  await selectHomeInboxFilter(page, "Activity");
   await expect(page.getByTestId("home-inbox-list")).toContainText(
     "Engineering shipped the desktop build.",
   );

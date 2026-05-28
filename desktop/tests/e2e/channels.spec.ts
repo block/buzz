@@ -1200,7 +1200,7 @@ test("manage channel can delete an owned stream", async ({ page }) => {
   ).toBeVisible();
   await page.getByTestId("channel-delete-confirm").click();
 
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   await expect(page.getByTestId("stream-list")).not.toContainText(channelName);
 });
 
