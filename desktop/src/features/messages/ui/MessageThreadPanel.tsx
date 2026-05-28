@@ -159,10 +159,7 @@ export function MessageThreadPanel({
     <>
       {isOverlay && <OverlayPanelBackdrop onClose={onClose} />}
       <aside
-        className={cn(
-          PANEL_BASE_CLASS,
-          isOverlay && PANEL_OVERLAY_CLASS,
-        )}
+        className={cn(PANEL_BASE_CLASS, isOverlay && PANEL_OVERLAY_CLASS)}
         data-testid="message-thread-panel"
         style={{ width: `${widthPx}px` }}
       >
@@ -184,10 +181,19 @@ export function MessageThreadPanel({
           </button>
         )}
 
+        {!isOverlay ? (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[76px] bg-background/45 backdrop-blur-xl after:absolute after:bottom-0 after:left-0 after:top-10 after:w-px after:bg-border/80 supports-[backdrop-filter]:bg-background/35"
+          />
+        ) : null}
+
         <div
           className={cn(
-            "z-40 flex min-h-[44px] cursor-default select-none items-center gap-3 bg-background/70 px-4 py-[6px] backdrop-blur-xl supports-[backdrop-filter]:bg-background/55",
-            isOverlay ? "relative shrink-0" : "absolute left-0 top-0",
+            "z-50 flex cursor-default select-none items-center gap-3 px-4",
+            isOverlay
+              ? "relative min-h-[44px] shrink-0 bg-background/70 py-[6px] backdrop-blur-xl supports-[backdrop-filter]:bg-background/55"
+              : "absolute inset-x-0 top-11 min-h-[32px] py-[4px]",
           )}
           data-tauri-drag-region
         >
@@ -208,10 +214,7 @@ export function MessageThreadPanel({
         </div>
 
         <div
-          className={cn(
-            "min-h-0 flex-1 overflow-y-auto pb-24",
-            !isOverlay && "pt-11",
-          )}
+          className="min-h-0 flex-1 overflow-y-auto pb-24"
           data-testid="message-thread-body"
           onScroll={syncScrollState}
           ref={threadBodyRef}

@@ -1,6 +1,7 @@
 import { LoaderCircle, Search } from "lucide-react";
 import * as React from "react";
 
+import { resolveUserLabel } from "@/features/profile/lib/identity";
 import {
   MIN_SEARCH_QUERY_LENGTH,
   useSearchResults,
@@ -13,29 +14,66 @@ import {
 } from "@/features/search/ui/SearchResultItem";
 import type { Channel, SearchHit } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type TopbarSearchProps = {
   channels: Channel[];
   className?: string;
   currentPubkey?: string;
   onOpenChannel: (channelId: string) => void;
+  onOpenFullSearch: (query: string) => void;
   onOpenResult: (hit: SearchHit) => void;
 };
 
-function resultTitle(result: SearchResult) {
-  if (result.kind === "channel") {
-    return result.channel.name;
+function describeSearchHit(hit: SearchHit) {
+  switch (hit.kind) {
+    case 45001:
+      return "Forum post";
+    case 45003:
+      return "Forum reply";
+    case 43001:
+      return "Agent job";
+    case 43003:
+      return "Agent update";
+    case 46010:
+      return "Approval";
+    default:
+      return "Message";
   }
-
-  return result.hit.channelName ?? "Message";
 }
 
-function resultSummary(result: SearchResult) {
-  if (result.kind === "channel") {
-    return result.channel.description || result.channel.channelType;
+function truncateResultText(content: string, maxLength = 96) {
+  const trimmed = content.trim();
+  if (trimmed.length === 0) {
+    return "No message body.";
   }
 
-  return result.hit.content.trim() || "No message body.";
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+
+  return `${trimmed.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
+function formatRelativeTime(unixSeconds: number) {
+  const diff = Math.floor(Date.now() / 1_000) - unixSeconds;
+
+  if (diff < 60) {
+    return "now";
+  }
+
+  if (diff < 60 * 60) {
+    return `${Math.floor(diff / 60)}m`;
+  }
+
+  if (diff < 60 * 60 * 24) {
+    return `${Math.floor(diff / (60 * 60))}h`;
+  }
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+  }).format(new Date(unixSeconds * 1_000));
 }
 
 export function TopbarSearch({
@@ -43,9 +81,11 @@ export function TopbarSearch({
   className,
   currentPubkey,
   onOpenChannel,
+  onOpenFullSearch,
   onOpenResult,
 }: TopbarSearchProps) {
   const [isOpen, setIsOpen] = React.useState(false);
+  const [selectedMenuIndex, setSelectedMenuIndex] = React.useState(0);
   const rootRef = React.useRef<HTMLDivElement>(null);
   const {
     channelLookup,
@@ -54,11 +94,11 @@ export function TopbarSearch({
     resultProfiles,
     results,
     searchQuery,
-    selectedIndex,
-    selectedResult,
     setQuery,
-    setSelectedIndex,
   } = useSearchResults({ channels, enabled: isOpen, limit: 8 });
+  const trimmedQuery = query.trim();
+  const showSuggestions = isOpen && trimmedQuery.length > 0;
+  const selectableCount = showSuggestions ? results.length + 1 : 0;
 
   const openResult = React.useCallback(
     (result: SearchResult) => {
@@ -74,6 +114,16 @@ export function TopbarSearch({
     },
     [onOpenChannel, onOpenResult, setQuery],
   );
+
+  const openFullSearch = React.useCallback(() => {
+    if (trimmedQuery.length === 0) {
+      return;
+    }
+
+    setIsOpen(false);
+    setQuery("");
+    onOpenFullSearch(trimmedQuery);
+  }, [onOpenFullSearch, setQuery, trimmedQuery]);
 
   React.useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
@@ -93,7 +143,15 @@ export function TopbarSearch({
     };
   }, []);
 
-  const showSuggestions = isOpen && query.trim().length > 0;
+  React.useEffect(() => {
+    setSelectedMenuIndex((current) => {
+      if (selectableCount === 0) {
+        return 0;
+      }
+
+      return Math.min(current, selectableCount - 1);
+    });
+  }, [selectableCount]);
 
   return (
     <div className={cn("relative", className)} ref={rootRef}>
@@ -106,21 +164,21 @@ export function TopbarSearch({
           onChange={(event) => {
             setIsOpen(true);
             setQuery(event.target.value);
-            setSelectedIndex(0);
+            setSelectedMenuIndex(0);
           }}
           onFocus={() => setIsOpen(true)}
           onKeyDown={(event) => {
-            if (event.key === "ArrowDown" && results.length > 0) {
+            if (event.key === "ArrowDown" && selectableCount > 0) {
               event.preventDefault();
-              setSelectedIndex((current) =>
-                Math.min(current + 1, results.length - 1),
+              setSelectedMenuIndex((current) =>
+                Math.min(current + 1, selectableCount - 1),
               );
               return;
             }
 
-            if (event.key === "ArrowUp" && results.length > 0) {
+            if (event.key === "ArrowUp" && selectableCount > 0) {
               event.preventDefault();
-              setSelectedIndex((current) => Math.max(current - 1, 0));
+              setSelectedMenuIndex((current) => Math.max(current - 1, 0));
               return;
             }
 
@@ -130,13 +188,17 @@ export function TopbarSearch({
               return;
             }
 
-            if (
-              event.key === "Enter" &&
-              !event.nativeEvent.isComposing &&
-              selectedResult
-            ) {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
               event.preventDefault();
-              openResult(selectedResult);
+              if (selectedMenuIndex === 0) {
+                openFullSearch();
+                return;
+              }
+
+              const result = results[selectedMenuIndex - 1];
+              if (result) {
+                openResult(result);
+              }
             }
           }}
           placeholder="Search everything"
@@ -148,11 +210,33 @@ export function TopbarSearch({
       </div>
 
       {showSuggestions ? (
-        <div className="absolute left-1/2 top-full z-50 mt-1 w-[560px] max-w-[min(80vw,560px)] -translate-x-1/2 overflow-hidden rounded-xl border border-border/80 bg-popover text-popover-foreground shadow-xl">
+        <div className="absolute left-1/2 top-full z-50 mt-1 w-[620px] max-w-[min(82vw,620px)] -translate-x-1/2 overflow-hidden rounded-xl border border-border/80 bg-popover text-popover-foreground shadow-xl">
           {debouncedQuery.length < MIN_SEARCH_QUERY_LENGTH ? (
-            <p className="px-3 py-3 text-xs text-muted-foreground">
-              Type at least two characters to search.
-            </p>
+            <div className="p-1.5">
+              <button
+                className={cn(
+                  "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors",
+                  selectedMenuIndex === 0
+                    ? "bg-accent text-accent-foreground"
+                    : "hover:bg-accent/70",
+                )}
+                onClick={openFullSearch}
+                onMouseEnter={() => setSelectedMenuIndex(0)}
+                type="button"
+              >
+                <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate text-sm">
+                  Search for{" "}
+                  <span className="font-semibold">{trimmedQuery}</span>
+                </span>
+                <span className="rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  Enter
+                </span>
+              </button>
+              <p className="px-3 pb-2 pt-1 text-[11px] text-muted-foreground">
+                Type at least two characters for live suggestions.
+              </p>
+            </div>
           ) : searchQuery.isLoading && results.length === 0 ? (
             <div className="flex items-center gap-2 px-3 py-3 text-xs text-muted-foreground">
               <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
@@ -163,37 +247,117 @@ export function TopbarSearch({
               {searchQuery.error.message}
             </p>
           ) : results.length === 0 ? (
-            <p className="px-3 py-3 text-xs text-muted-foreground">
-              No matches found.
-            </p>
+            <div className="p-1.5">
+              <button
+                className={cn(
+                  "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors",
+                  selectedMenuIndex === 0
+                    ? "bg-accent text-accent-foreground"
+                    : "hover:bg-accent/70",
+                )}
+                onClick={openFullSearch}
+                onMouseEnter={() => setSelectedMenuIndex(0)}
+                type="button"
+              >
+                <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate text-sm">
+                  Show results for{" "}
+                  <span className="font-semibold">{trimmedQuery}</span>
+                </span>
+                <span className="rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  Enter
+                </span>
+              </button>
+              <p className="px-3 pb-2 pt-1 text-[11px] text-muted-foreground">
+                No quick matches. Open full search for broader results.
+              </p>
+            </div>
           ) : (
             <div className="max-h-[360px] overflow-y-auto p-1.5">
+              <button
+                className={cn(
+                  "mb-1 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors",
+                  selectedMenuIndex === 0
+                    ? "bg-accent text-accent-foreground"
+                    : "hover:bg-accent/70",
+                )}
+                onClick={openFullSearch}
+                onMouseEnter={() => setSelectedMenuIndex(0)}
+                type="button"
+              >
+                <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate text-sm">
+                  Show results for{" "}
+                  <span className="font-semibold">{trimmedQuery}</span>
+                </span>
+                <span className="rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  Enter
+                </span>
+              </button>
               {results.map((result, index) => (
                 <button
                   className={cn(
-                    "flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left transition-colors",
-                    index === selectedIndex
+                    "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors",
+                    index + 1 === selectedMenuIndex
                       ? "bg-accent text-accent-foreground"
                       : "hover:bg-accent/70",
                   )}
                   key={resultKey(result)}
                   onClick={() => openResult(result)}
-                  onMouseEnter={() => setSelectedIndex(index)}
+                  onMouseEnter={() => setSelectedMenuIndex(index + 1)}
                   type="button"
                   data-testid={resultTestId(result)}
                 >
-                  {React.createElement(resultIcon(result, channelLookup), {
-                    className: "h-3.5 w-3.5 shrink-0 text-muted-foreground",
-                  })}
-                  <span className="min-w-0 flex-1 truncate text-xs">
-                    <span className="font-medium">{resultTitle(result)}</span>
-                    <span className="mx-1.5 text-muted-foreground">-</span>
-                    <span className="text-muted-foreground">
-                      {resultSummary(result)}
+                  {result.kind === "message" ? (
+                    <UserAvatar
+                      avatarUrl={
+                        resultProfiles?.[result.hit.pubkey.toLowerCase()]
+                          ?.avatarUrl ?? null
+                      }
+                      className="h-7 w-7 rounded-md"
+                      displayName={resolveUserLabel({
+                        currentPubkey,
+                        profiles: resultProfiles,
+                        pubkey: result.hit.pubkey,
+                        preferResolvedSelfLabel: true,
+                      })}
+                      size="sm"
+                    />
+                  ) : (
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted/70 text-muted-foreground">
+                      {React.createElement(resultIcon(result, channelLookup), {
+                        className: "h-4 w-4",
+                      })}
+                    </span>
+                  )}
+                  <span className="min-w-0 flex-1">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate text-sm font-semibold">
+                        {result.kind === "channel"
+                          ? result.channel.name
+                          : resolveUserLabel({
+                              currentPubkey,
+                              profiles: resultProfiles,
+                              pubkey: result.hit.pubkey,
+                              preferResolvedSelfLabel: true,
+                            })}
+                      </span>
+                      <span className="truncate text-xs text-muted-foreground">
+                        {result.kind === "channel"
+                          ? result.channel.channelType
+                          : `in #${result.hit.channelName ?? "unknown"}`}
+                      </span>
+                    </span>
+                    <span className="block truncate text-xs text-muted-foreground">
+                      {result.kind === "channel"
+                        ? result.channel.description || "Channel"
+                        : truncateResultText(result.hit.content)}
                     </span>
                   </span>
-                  <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground/70">
-                    {result.kind === "channel" ? "Channel" : "Message"}
+                  <span className="shrink-0 text-[11px] text-muted-foreground/75">
+                    {result.kind === "channel"
+                      ? "Channel"
+                      : `${describeSearchHit(result.hit)} · ${formatRelativeTime(result.hit.createdAt)}`}
                   </span>
                 </button>
               ))}

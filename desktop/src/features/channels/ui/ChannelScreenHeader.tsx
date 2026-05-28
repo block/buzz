@@ -40,6 +40,9 @@ export function ChannelScreenHeader({
 
   return (
     <ChatHeader
+      actionsPlacement="top-right"
+      belowSystemChrome
+      density="compact"
       actions={
         activeChannel ? (
           showJoinButton ? (
@@ -64,7 +67,6 @@ export function ChannelScreenHeader({
       }
       channelType={activeChannel?.channelType}
       description={getChannelDescription(activeChannel)}
-      overlaysContent
       statusBadge={
         <ChannelHeaderStatusBadge
           channelType={activeChannel?.channelType}

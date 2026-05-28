@@ -1,5 +1,6 @@
 import {
   CheckCheck,
+  Hash,
   Mail,
   MailOpen,
   MoreHorizontal,
@@ -192,9 +193,8 @@ export function InboxDetailPane({
         }
       : null;
   const channelContextName = contextChannelName ?? item.channelLabel;
-  const contextLabel = channelContextName
-    ? `#${channelContextName}`
-    : item.categoryLabel;
+  const contextLabel = channelContextName ?? item.categoryLabel;
+  const hasChannelContext = Boolean(channelContextName);
   const contextChannelId = item.item.channelId;
 
   const handleSelectReplyTarget = (message: InboxDisplayMessage) => {
@@ -211,23 +211,33 @@ export function InboxDetailPane({
       ref={detailPaneRef}
     >
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        <div className="absolute inset-x-0 top-0 z-40 flex min-h-[44px] items-center justify-between gap-3 bg-background/70 py-[6px] pl-6 pr-3 backdrop-blur-xl supports-[backdrop-filter]:bg-background/55">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[76px] bg-background/45 backdrop-blur-xl supports-[backdrop-filter]:bg-background/35"
+        />
+        <div className="absolute inset-x-0 top-[38px] z-50 flex min-h-[32px] items-center justify-between gap-3 py-[4px] pl-6 pr-3">
           <div className="min-w-0">
             {canOpenChannel && contextChannelId && onOpenContext ? (
               <button
-                className="truncate text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                className="flex min-w-0 items-center gap-[4px] text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                 onClick={() => onOpenContext(contextChannelId, item.id)}
                 title={item.fullTimestampLabel}
                 type="button"
               >
-                {contextLabel}
+                {hasChannelContext ? (
+                  <Hash className="h-[14px] w-[14px] shrink-0" color="gray" />
+                ) : null}
+                <span className="min-w-0 truncate">{contextLabel}</span>
               </button>
             ) : (
               <h2
-                className="truncate text-sm font-semibold leading-5 tracking-tight text-foreground"
+                className="flex min-w-0 items-center gap-[4px] text-sm font-semibold leading-5 tracking-tight text-foreground"
                 title={item.fullTimestampLabel}
               >
-                {contextLabel}
+                {hasChannelContext ? (
+                  <Hash className="h-[14px] w-[14px] shrink-0" color="gray" />
+                ) : null}
+                <span className="min-w-0 truncate">{contextLabel}</span>
               </h2>
             )}
           </div>
@@ -245,7 +255,7 @@ export function InboxDetailPane({
           </TooltipProvider>
         </div>
 
-        <div className="absolute inset-0 overflow-y-auto overscroll-contain pb-32 pt-14">
+        <div className="absolute inset-0 overflow-y-auto overscroll-contain pb-32 pt-[76px]">
           <div>
             {isThreadContextLoading ? (
               <div className="px-6 pb-3 text-[11px] text-muted-foreground">

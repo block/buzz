@@ -505,7 +505,7 @@ export function AppSidebar({
       variant="sidebar"
     >
       <SidebarHeader
-        className="cursor-default select-none pt-10"
+        className="cursor-default select-none pt-11"
         data-tauri-drag-region
       >
         <SidebarMenu>

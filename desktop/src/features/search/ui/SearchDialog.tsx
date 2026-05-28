@@ -72,6 +72,7 @@ function SearchLoadingState() {
 type SearchDialogProps = {
   channels: Channel[];
   currentPubkey?: string;
+  initialQuery?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onOpenChannel: (channelId: string) => void;
@@ -81,6 +82,7 @@ type SearchDialogProps = {
 export function SearchDialog({
   channels,
   currentPubkey,
+  initialQuery = "",
   open,
   onOpenChange,
   onOpenChannel,
@@ -115,6 +117,15 @@ export function SearchDialog({
     },
     [onOpenChange, onOpenChannel, onOpenResult],
   );
+
+  React.useEffect(() => {
+    if (!open || initialQuery.length === 0) {
+      return;
+    }
+
+    setQuery(initialQuery);
+    setSelectedIndex(0);
+  }, [initialQuery, open, setQuery, setSelectedIndex]);
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>

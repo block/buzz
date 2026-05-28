@@ -14,6 +14,8 @@ import { useFeedItemState } from "@/features/home/useFeedItemState";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
 import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
 import { useResizableInboxListWidth } from "@/features/home/useResizableInboxListWidth";
+import { HomeChannelActions } from "@/features/home/ui/HomeChannelActions";
+import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
 import { InboxListPane } from "@/features/home/ui/InboxListPane";
 import {
@@ -29,7 +31,6 @@ import type { HomeFeedResponse, RelayEvent } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
 import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
 import { Button } from "@/shared/ui/button";
-import { Skeleton } from "@/shared/ui/skeleton";
 
 function matchesInboxFilter(
   item: { categories: InboxFilter[] },
@@ -40,37 +41,6 @@ function matchesInboxFilter(
   }
 
   return item.categories.includes(filter);
-}
-
-function HomeLoadingState() {
-  return (
-    <div className="flex-1 overflow-hidden">
-      <div className="grid h-full min-h-0 w-full lg:grid-cols-[320px_minmax(0,1fr)]">
-        <div className="overflow-hidden border-r border-border/70 bg-background/60">
-          <div className="border-b border-border/70 px-4 pb-4 pt-14">
-            <Skeleton className="h-4 w-20" />
-            <Skeleton className="mt-2 h-4 w-28" />
-            <Skeleton className="mt-4 h-10 rounded-md" />
-          </div>
-          <div className="space-y-3 px-4 py-4">
-            {["a", "b", "c", "d"].map((row) => (
-              <Skeleton className="h-20 rounded-md" key={row} />
-            ))}
-          </div>
-        </div>
-
-        <div className="overflow-hidden bg-background/60">
-          <div className="border-b border-border/70 px-5 pb-4 pt-14">
-            <Skeleton className="h-5 w-48" />
-            <Skeleton className="mt-3 h-8 w-72" />
-          </div>
-          <div className="px-5 py-5">
-            <Skeleton className="h-64 rounded-md" />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function getContextMessageDepth(
@@ -107,6 +77,7 @@ type HomeViewProps = {
   errorMessage?: string;
   currentPubkey?: string;
   availableChannelIds: ReadonlySet<string>;
+  onOpenChannel: (channelId: string) => void;
   onOpenContext: (channelId: string, messageId: string) => void;
   onRefresh: () => void;
 };
@@ -117,6 +88,7 @@ export function HomeView({
   errorMessage,
   currentPubkey,
   availableChannelIds,
+  onOpenChannel,
   onOpenContext,
   onRefresh,
 }: HomeViewProps) {
@@ -354,6 +326,11 @@ export function HomeView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <HomeChannelActions
+        channel={selectedChannel}
+        currentPubkey={currentPubkey}
+        onOpenChannel={onOpenChannel}
+      />
       <div
         className="relative grid min-h-0 flex-1 w-full lg:grid-cols-[var(--home-inbox-list-width)_minmax(0,1fr)]"
         data-testid="home-inbox"

@@ -1,4 +1,3 @@
-import { ChevronLeft, ChevronRight, Search } from "lucide-react";
 import * as React from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useQueryClient } from "@tanstack/react-query";
@@ -9,6 +8,7 @@ import {
   AppShellOverlays,
   type BrowseDialogType,
 } from "@/app/AppShellOverlays";
+import { AppTopChrome } from "@/app/AppTopChrome";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
@@ -49,7 +49,6 @@ import {
   DEFAULT_SETTINGS_SECTION,
   type SettingsSection,
 } from "@/features/settings/ui/SettingsPanels";
-import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { HuddleBar, HuddleProvider } from "@/features/huddle";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
@@ -61,12 +60,7 @@ import { joinChannel } from "@/shared/api/tauri";
 import type { Channel, RelayEvent, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
-import { Button } from "@/shared/ui/button";
-import {
-  SidebarInset,
-  SidebarProvider,
-  SidebarTrigger,
-} from "@/shared/ui/sidebar";
+import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 
 type AppView =
   | "home"
@@ -174,6 +168,7 @@ export function AppShell() {
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
   const [isSearchOpen, setIsSearchOpen] = React.useState(false);
+  const [searchInitialQuery, setSearchInitialQuery] = React.useState("");
   const [browseDialogType, setBrowseDialogType] =
     React.useState<BrowseDialogType>(null);
   const [isNewDmOpen, setIsNewDmOpen] = React.useState(false);
@@ -324,10 +319,14 @@ export function AppShell() {
     setBrowseDialogType("forum");
     void refetchChannels();
   }, [refetchChannels]);
-  const handleOpenSearch = React.useCallback(() => {
-    setIsSearchOpen(true);
-    void refetchChannels();
-  }, [refetchChannels]);
+  const handleOpenSearch = React.useCallback(
+    (initialQuery = "") => {
+      setSearchInitialQuery(initialQuery);
+      setIsSearchOpen(true);
+      void refetchChannels();
+    },
+    [refetchChannels],
+  );
 
   const handleBrowseDialogOpenChange = React.useCallback((open: boolean) => {
     if (!open) {
@@ -611,59 +610,19 @@ export function AppShell() {
           <HuddleProvider>
             <div className="flex h-dvh flex-col overflow-hidden overscroll-none">
               <SidebarProvider className="min-h-0 flex-1 overflow-hidden">
-                <div
-                  aria-hidden="true"
-                  className="fixed inset-x-0 top-0 z-20 h-10 cursor-default select-none"
-                  data-tauri-drag-region
-                />
-                <div className="fixed left-[80px] top-[9px] z-50 flex items-center gap-0.5">
-                  <SidebarTrigger className="h-[22px] w-[22px] text-muted-foreground/70 hover:bg-muted/60 hover:text-foreground" />
-                  <Button
-                    aria-label="Go back"
-                    className="h-[22px] w-[22px] text-muted-foreground/70 hover:bg-muted/60 hover:text-foreground"
-                    data-testid="global-back"
-                    disabled={!canGoBack}
-                    onClick={goBack}
-                    size="icon"
-                    variant="ghost"
-                  >
-                    <ChevronLeft className="h-3 w-3" />
-                  </Button>
-                  <Button
-                    aria-label="Go forward"
-                    className="h-[22px] w-[22px] text-muted-foreground/70 hover:bg-muted/60 hover:text-foreground"
-                    data-testid="global-forward"
-                    disabled={!canGoForward}
-                    onClick={goForward}
-                    size="icon"
-                    variant="ghost"
-                  >
-                    <ChevronRight className="h-3 w-3" />
-                  </Button>
-                </div>
-                <TopbarSearch
+                <AppTopChrome
+                  canGoBack={canGoBack}
+                  canGoForward={canGoForward}
                   channels={channels}
-                  className="fixed left-1/2 top-[7px] z-50 hidden w-[360px] max-w-[42vw] -translate-x-1/2 md:block"
                   currentPubkey={identityQuery.data?.pubkey}
+                  onGoBack={goBack}
+                  onGoForward={goForward}
                   onOpenChannel={(channelId) => {
                     void goChannel(channelId);
                   }}
+                  onOpenFullSearch={handleOpenSearch}
                   onOpenResult={handleOpenSearchResult}
                 />
-                <div className="fixed right-3 top-[9px] z-50 flex items-center gap-0.5 md:hidden">
-                  <Button
-                    aria-label="Search everything"
-                    className="h-[22px] w-[22px] text-muted-foreground/70 hover:bg-muted/60 hover:text-foreground"
-                    data-testid="open-search-compact"
-                    onClick={handleOpenSearch}
-                    size="icon"
-                    title="Search everything"
-                    type="button"
-                    variant="ghost"
-                  >
-                    <Search className="h-3 w-3" />
-                  </Button>
-                </div>
                 <AppSidebar
                   activeWorkspace={workspacesHook.activeWorkspace}
                   channels={sidebarChannels}
@@ -796,6 +755,7 @@ export function AppShell() {
                   currentPubkey={identityQuery.data?.pubkey}
                   isChannelManagementOpen={isChannelManagementOpen}
                   isSearchOpen={isSearchOpen}
+                  searchInitialQuery={searchInitialQuery}
                   onBrowseChannelJoin={handleBrowseChannelJoin}
                   onBrowseDialogOpenChange={handleBrowseDialogOpenChange}
                   onChannelManagementOpenChange={setIsChannelManagementOpen}

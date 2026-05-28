@@ -100,6 +100,20 @@ export function ChannelMembersBar({
           <Plus className="h-3 w-3" />
         </Button>
 
+        <Button
+          aria-label={`View channel members (${memberCount})`}
+          className="h-7 gap-1 rounded-full px-2"
+          data-testid="channel-members-trigger"
+          onClick={onToggleMembers}
+          type="button"
+          variant="outline"
+        >
+          <Users className="h-3 w-3" />
+          <span className="min-w-[1ch] text-[11px] font-medium tabular-nums">
+            {memberCount}
+          </span>
+        </Button>
+
         <HuddleIndicator
           className="h-7 w-7"
           channelId={channel.id}
@@ -115,20 +129,6 @@ export function ChannelMembersBar({
           }}
           startDisabled={!canAddAgents || isStartingHuddle}
         />
-
-        <Button
-          aria-label={`View channel members (${memberCount})`}
-          className="h-7 gap-1 rounded-full px-2"
-          data-testid="channel-members-trigger"
-          onClick={onToggleMembers}
-          type="button"
-          variant="outline"
-        >
-          <Users className="h-3 w-3" />
-          <span className="min-w-[1ch] text-[11px] font-medium tabular-nums">
-            {memberCount}
-          </span>
-        </Button>
 
         <Button
           aria-label="Manage channel"
