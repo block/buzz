@@ -7,6 +7,10 @@ const MAX_HINTS_BYTES: usize = 128 * 1024;
 const MAX_SKILL_BODY_BYTES: usize = 32 * 1024;
 const SKILL_DIRS: &[&str] = &[".agents/skills", ".goose/skills", ".claude/skills"];
 
+fn home_dir() -> Option<PathBuf> {
+    std::env::var("HOME").ok().map(PathBuf::from)
+}
+
 pub struct SkillEntry {
     pub name: String,
     pub description: String,
@@ -27,28 +31,30 @@ fn find_git_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
-fn load_hint_files(cwd: &Path) -> String {
-    let dirs = match find_git_root(cwd) {
+fn load_hint_files_impl(cwd: &Path, home: Option<&Path>) -> String {
+    let mut chain = match find_git_root(cwd) {
         Some(root) => {
-            // Collect ancestors of cwd that are at or below root (inclusive),
-            // ordered from root → cwd.
-            let mut chain: Vec<PathBuf> = cwd
+            let mut c: Vec<PathBuf> = cwd
                 .ancestors()
-                .take_while(|a| {
-                    // Keep while the ancestor is equal to or starts with root.
-                    a.starts_with(&root)
-                })
+                .take_while(|a| a.starts_with(&root))
                 .map(|a| a.to_path_buf())
                 .collect();
             // ancestors() yields cwd first, root last — reverse for root→cwd.
-            chain.reverse();
-            chain
+            c.reverse();
+            c
         }
         None => vec![cwd.to_path_buf()],
     };
 
+    // Prepend ~/AGENTS.md as global layer, unless ~ is already in the chain.
+    if let Some(home) = home {
+        if !chain.iter().any(|d| d == home) {
+            chain.insert(0, home.to_path_buf());
+        }
+    }
+
     let mut result = String::new();
-    for dir in &dirs {
+    for dir in &chain {
         let path = dir.join("AGENTS.md");
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
@@ -104,49 +110,59 @@ fn parse_skill_frontmatter(content: &str) -> Option<(String, String, String)> {
     Some((name, description, body))
 }
 
-fn discover_skills(cwd: &Path) -> Vec<SkillEntry> {
-    let mut seen = HashSet::new();
-    let mut skills: Vec<SkillEntry> = Vec::new();
+fn scan_skill_dir(dir: &Path, seen: &mut HashSet<String>, skills: &mut Vec<SkillEntry>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut subdirs: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .collect();
+    subdirs.sort();
 
-    for dir_suffix in SKILL_DIRS {
-        let skills_dir = cwd.join(dir_suffix);
-        let Ok(entries) = std::fs::read_dir(&skills_dir) else {
+    for subdir in subdirs {
+        let skill_md = subdir.join("SKILL.md");
+        let Ok(content) = std::fs::read_to_string(&skill_md) else {
             continue;
         };
-        let mut subdirs: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-            .map(|e| e.path())
-            .collect();
-        // Sort for deterministic ordering.
-        subdirs.sort();
-
-        for subdir in subdirs {
-            let skill_md = subdir.join("SKILL.md");
-            let Ok(content) = std::fs::read_to_string(&skill_md) else {
-                continue;
-            };
-            let Some((name, description, body)) = parse_skill_frontmatter(&content) else {
-                continue;
-            };
-            if seen.contains(&name) {
-                continue;
-            }
-            seen.insert(name.clone());
-            skills.push(SkillEntry {
-                name,
-                description,
-                body,
-            });
+        let Some((name, description, body)) = parse_skill_frontmatter(&content) else {
+            continue;
+        };
+        if seen.contains(&name) {
+            continue;
         }
+        seen.insert(name.clone());
+        skills.push(SkillEntry {
+            name,
+            description,
+            body,
+        });
+    }
+}
+
+fn discover_skills_impl(cwd: &Path, home: Option<&Path>) -> Vec<SkillEntry> {
+    let mut seen = HashSet::new();
+    let mut skills = Vec::new();
+
+    for dir_suffix in SKILL_DIRS {
+        scan_skill_dir(&cwd.join(dir_suffix), &mut seen, &mut skills);
+    }
+
+    if let Some(home) = home {
+        scan_skill_dir(&home.join(".agents/skills"), &mut seen, &mut skills);
     }
 
     skills
 }
 
 pub fn build_hints_section(cwd: &Path) -> String {
-    let hints_text = load_hint_files(cwd);
-    let skills = discover_skills(cwd);
+    build_hints_section_impl(cwd, home_dir().as_deref())
+}
+
+fn build_hints_section_impl(cwd: &Path, home: Option<&Path>) -> String {
+    let hints_text = load_hint_files_impl(cwd, home);
+    let skills = discover_skills_impl(cwd, home);
 
     if hints_text.is_empty() && skills.is_empty() {
         return String::new();
@@ -228,7 +244,7 @@ mod tests {
         let cwd = tmp.path();
         // No .git → no git root discovery; only cwd is checked.
         std::fs::write(cwd.join("AGENTS.md"), "cwd hints").unwrap();
-        let result = load_hint_files(cwd);
+        let result = load_hint_files_impl(cwd, None);
         assert_eq!(result, "cwd hints");
     }
 
@@ -241,7 +257,7 @@ mod tests {
         let sub = root.join("sub");
         std::fs::create_dir(&sub).unwrap();
         std::fs::write(sub.join("AGENTS.md"), "sub hints").unwrap();
-        let result = load_hint_files(&sub);
+        let result = load_hint_files_impl(&sub, None);
         // Root hints must come first.
         assert!(
             result.starts_with("root hints"),
@@ -256,7 +272,7 @@ mod tests {
     #[test]
     fn load_hint_files_missing_files() {
         let tmp = TempDir::new().unwrap();
-        let result = load_hint_files(tmp.path());
+        let result = load_hint_files_impl(tmp.path(), None);
         assert_eq!(result, "");
     }
 
@@ -283,7 +299,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills(cwd);
+        let skills = discover_skills_impl(cwd, None);
         assert_eq!(skills.len(), 2);
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"my-skill"), "missing my-skill");
@@ -312,7 +328,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills(cwd);
+        let skills = discover_skills_impl(cwd, None);
         assert_eq!(skills.len(), 1, "duplicate name should be deduplicated");
         assert_eq!(
             skills[0].description, "from agents",
@@ -334,14 +350,14 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills(cwd);
+        let skills = discover_skills_impl(cwd, None);
         assert!(skills.is_empty(), "entry without name should be skipped");
     }
 
     #[test]
     fn build_hints_section_empty() {
         let tmp = TempDir::new().unwrap();
-        let result = build_hints_section(tmp.path());
+        let result = build_hints_section_impl(tmp.path(), None);
         assert_eq!(result, "");
     }
 
@@ -360,7 +376,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = build_hints_section(cwd);
+        let result = build_hints_section_impl(cwd, None);
 
         assert!(
             result.contains("# Additional Instructions"),
@@ -384,5 +400,126 @@ mod tests {
             result.contains("Use `sprout` to manage agents."),
             "missing skill body"
         );
+    }
+
+    #[test]
+    fn load_hint_files_global_loaded_first() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        std::fs::write(home.path().join("AGENTS.md"), "global hints").unwrap();
+        std::fs::write(cwd.path().join("AGENTS.md"), "local hints").unwrap();
+        let result = load_hint_files_impl(cwd.path(), Some(home.path()));
+        let global_pos = result.find("global hints").unwrap();
+        let local_pos = result.find("local hints").unwrap();
+        assert!(
+            global_pos < local_pos,
+            "global hints should precede local hints"
+        );
+    }
+
+    #[test]
+    fn load_hint_files_home_missing_agents_md() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        std::fs::write(cwd.path().join("AGENTS.md"), "local only").unwrap();
+        let result = load_hint_files_impl(cwd.path(), Some(home.path()));
+        assert_eq!(result, "local only");
+    }
+
+    #[test]
+    fn load_hint_files_no_home_dir() {
+        let cwd = TempDir::new().unwrap();
+        std::fs::write(cwd.path().join("AGENTS.md"), "local only").unwrap();
+        let result = load_hint_files_impl(cwd.path(), None);
+        assert_eq!(result, "local only");
+    }
+
+    #[test]
+    fn load_hint_files_dedup_when_home_in_chain() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::write(home.join("AGENTS.md"), "single load").unwrap();
+        let result = load_hint_files_impl(home, Some(home));
+        assert_eq!(
+            result.matches("single load").count(),
+            1,
+            "AGENTS.md should be loaded exactly once when CWD is home"
+        );
+    }
+
+    #[test]
+    fn load_hint_files_dedup_when_home_is_git_root() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir(home.join(".git")).unwrap();
+        std::fs::write(home.join("AGENTS.md"), "root+home hints").unwrap();
+        let sub = home.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let result = load_hint_files_impl(&sub, Some(home));
+        assert_eq!(
+            result.matches("root+home hints").count(),
+            1,
+            "AGENTS.md should be loaded once when home is git root"
+        );
+    }
+
+    #[test]
+    fn discover_skills_global_skills_loaded() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+        let skill_dir = home.path().join(".agents/skills/global-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: global-skill\ndescription: A global skill\n---\nGlobal body.\n",
+        )
+        .unwrap();
+        let skills = discover_skills_impl(cwd.path(), Some(home.path()));
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "global-skill");
+    }
+
+    #[test]
+    fn discover_skills_project_wins_over_global() {
+        let home = TempDir::new().unwrap();
+        let cwd = TempDir::new().unwrap();
+
+        let project_skill = cwd.path().join(".agents/skills/shared");
+        std::fs::create_dir_all(&project_skill).unwrap();
+        std::fs::write(
+            project_skill.join("SKILL.md"),
+            "---\nname: shared\ndescription: from project\n---\nProject body.\n",
+        )
+        .unwrap();
+
+        let global_skill = home.path().join(".agents/skills/shared");
+        std::fs::create_dir_all(&global_skill).unwrap();
+        std::fs::write(
+            global_skill.join("SKILL.md"),
+            "---\nname: shared\ndescription: from global\n---\nGlobal body.\n",
+        )
+        .unwrap();
+
+        let skills = discover_skills_impl(cwd.path(), Some(home.path()));
+        assert_eq!(skills.len(), 1, "duplicate name should be deduplicated");
+        assert_eq!(
+            skills[0].description, "from project",
+            "project-level should win over global"
+        );
+    }
+
+    #[test]
+    fn discover_skills_no_home_dir() {
+        let cwd = TempDir::new().unwrap();
+        let skill_dir = cwd.path().join(".agents/skills/local");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: local\ndescription: Local skill\n---\nBody.\n",
+        )
+        .unwrap();
+        let skills = discover_skills_impl(cwd.path(), None);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "local");
     }
 }

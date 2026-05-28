@@ -335,3 +335,109 @@ async fn git_root_hints_included() {
     );
     h.shutdown().await;
 }
+
+/// ~/AGENTS.md (global) is loaded before CWD AGENTS.md when HOME is set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn global_agents_md_loaded() {
+    let home_tmp = tempfile::TempDir::new().unwrap();
+    let cwd_tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(home_tmp.path().join("AGENTS.md"), "GLOBAL_HINT_MARKER_55").unwrap();
+    std::fs::write(cwd_tmp.path().join("AGENTS.md"), "LOCAL_HINT_MARKER_66").unwrap();
+
+    let llm = spawn_capturing_llm(vec![openai_text("done")]).await;
+    let mut h =
+        Harness::spawn_with_env(&llm.url, &[("HOME", home_tmp.path().to_str().unwrap())]).await;
+    let sid = init_session(&mut h, cwd_tmp.path().to_str().unwrap()).await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p)).await;
+
+    let captured = llm.captured.lock().await;
+    assert!(!captured.is_empty(), "no LLM request captured");
+    let system = captured[0]["messages"][0]["content"].as_str().unwrap_or("");
+    assert!(
+        system.contains("GLOBAL_HINT_MARKER_55"),
+        "system prompt missing global hint: {system}"
+    );
+    assert!(
+        system.contains("LOCAL_HINT_MARKER_66"),
+        "system prompt missing local hint: {system}"
+    );
+    let global_pos = system.find("GLOBAL_HINT_MARKER_55").unwrap();
+    let local_pos = system.find("LOCAL_HINT_MARKER_66").unwrap();
+    assert!(
+        global_pos < local_pos,
+        "global hint should appear before local hint in system prompt"
+    );
+    h.shutdown().await;
+}
+
+/// Global skills from ~/.agents/skills/ are loaded; project-level wins on name conflict.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn global_skills_loaded_and_project_wins() {
+    let home_tmp = tempfile::TempDir::new().unwrap();
+    let cwd_tmp = tempfile::TempDir::new().unwrap();
+
+    let global_only_dir = home_tmp.path().join(".agents/skills/global-only");
+    std::fs::create_dir_all(&global_only_dir).unwrap();
+    std::fs::write(
+        global_only_dir.join("SKILL.md"),
+        "---\nname: global-only\ndescription: A global skill\n---\nGLOBAL_SKILL_BODY_88\n",
+    )
+    .unwrap();
+
+    let global_shared_dir = home_tmp.path().join(".agents/skills/shared-name");
+    std::fs::create_dir_all(&global_shared_dir).unwrap();
+    std::fs::write(
+        global_shared_dir.join("SKILL.md"),
+        "---\nname: shared-name\ndescription: Global version\n---\nGLOBAL_SHARED_BODY_LOSE\n",
+    )
+    .unwrap();
+
+    let project_shared_dir = cwd_tmp.path().join(".agents/skills/shared-name");
+    std::fs::create_dir_all(&project_shared_dir).unwrap();
+    std::fs::write(
+        project_shared_dir.join("SKILL.md"),
+        "---\nname: shared-name\ndescription: Project version\n---\nPROJECT_SHARED_BODY_WIN\n",
+    )
+    .unwrap();
+
+    let llm = spawn_capturing_llm(vec![openai_text("done")]).await;
+    let mut h =
+        Harness::spawn_with_env(&llm.url, &[("HOME", home_tmp.path().to_str().unwrap())]).await;
+    let sid = init_session(&mut h, cwd_tmp.path().to_str().unwrap()).await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p)).await;
+
+    let captured = llm.captured.lock().await;
+    assert!(!captured.is_empty(), "no LLM request captured");
+    let system = captured[0]["messages"][0]["content"].as_str().unwrap_or("");
+    assert!(
+        system.contains("global-only"),
+        "system prompt missing global-only skill name: {system}"
+    );
+    assert!(
+        system.contains("GLOBAL_SKILL_BODY_88"),
+        "system prompt missing global-only skill body: {system}"
+    );
+    assert!(
+        system.contains("PROJECT_SHARED_BODY_WIN"),
+        "system prompt missing project skill body: {system}"
+    );
+    assert!(
+        !system.contains("GLOBAL_SHARED_BODY_LOSE"),
+        "system prompt should NOT contain shadowed global skill body: {system}"
+    );
+    h.shutdown().await;
+}
