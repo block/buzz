@@ -219,7 +219,7 @@ function createMarkdownComponents(
       : "space-y-1 pl-6 marker:text-muted-foreground";
 
   return {
-    a: ({ children, href, ...props }) => {
+    a: ({ children, href, node: _node, ...props }) => {
       // Intercept `sprout://message?channel=…&id=…` links so a click navigates
       // in-app instead of opening the URL in the OS browser. http(s) links
       // continue to use the existing target="_blank" behavior.
@@ -230,7 +230,7 @@ function createMarkdownComponents(
           return (
             <a
               {...props}
-              className="font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80 cursor-pointer"
+              className="text-primary underline underline-offset-2 transition-colors hover:text-primary/80 cursor-pointer"
               href={href}
               onClick={(event) => {
                 event.preventDefault();
@@ -247,7 +247,7 @@ function createMarkdownComponents(
       return (
         <a
           {...props}
-          className="font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80"
+          className="text-primary underline underline-offset-2 transition-colors hover:text-primary/80"
           href={href}
           rel="noreferrer"
           target="_blank"
