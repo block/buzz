@@ -33,6 +33,8 @@ pre-push:
       run: just desktop-build
     desktop-tauri-check:
       run: just desktop-tauri-check
+    desktop-tauri-test:
+      run: just desktop-tauri-test
     web-check:
       run: just web-check
     web-build:

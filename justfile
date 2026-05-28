@@ -119,6 +119,10 @@ _ensure-sidecar-stubs:
 desktop-tauri-check: _ensure-sidecar-stubs
     cargo check --manifest-path {{desktop_tauri_manifest}}
 
+# Run desktop Tauri Rust unit tests
+desktop-tauri-test: _ensure-sidecar-stubs
+    cd desktop/src-tauri && cargo test
+
 # Build the full desktop Tauri app locally (unsigned, for testing)
 desktop-release-build target="aarch64-apple-darwin":
     #!/usr/bin/env bash
@@ -135,7 +139,7 @@ desktop-release-build target="aarch64-apple-darwin":
     cd {{desktop_dir}} && pnpm tauri build --target {{target}}
 
 # Run desktop checks suitable for CI / pre-push
-desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check
+desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
 
 # Seed deterministic channel data for desktop Playwright tests
 desktop-e2e-seed:
@@ -150,7 +154,7 @@ desktop-e2e-integration:
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
 # Run all checks suitable for CI / pre-push (no infra needed)
-ci: check test-unit desktop-test desktop-build desktop-tauri-check web-build mobile-test
+ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
 # ─── Test ─────────────────────────────────────────────────────────────────────
 
