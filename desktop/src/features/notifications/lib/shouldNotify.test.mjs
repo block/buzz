@@ -1,48 +1,7 @@
-// Run with: node --experimental-strip-types --test shouldNotify.test.mjs
-//
-// The module under test imports from "@/" path aliases. We register a loader
-// hook to resolve those aliases to absolute paths before importing.
-
 import assert from "node:assert/strict";
-import { register } from "node:module";
-import { pathToFileURL, fileURLToPath } from "node:url";
-import path from "node:path";
 import test from "node:test";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// Resolve the desktop/src root (3 levels up from this file's directory)
-const srcRoot = path.resolve(__dirname, "../../../");
-
-// Inline loader hook data sent to the hook thread via the MessageChannel
-const loaderSource = `
-export function resolve(specifier, context, nextResolve) {
-  if (specifier.startsWith("@/")) {
-    const srcRoot = ${JSON.stringify(srcRoot)};
-    // Map @/foo/bar → <srcRoot>/foo/bar.ts
-    const withoutAlias = specifier.slice(2); // drop "@/"
-    const resolved = srcRoot + "/" + withoutAlias + ".ts";
-    return nextResolve(resolved, context);
-  }
-  return nextResolve(specifier, context);
-}
-`;
-
-// Write the loader to a temp file so we can register it
-import { writeFileSync, mkdirSync, rmSync } from "node:fs";
-import os from "node:os";
-
-const tmpDir = path.join(os.tmpdir(), `sprout-test-loader-${process.pid}`);
-mkdirSync(tmpDir, { recursive: true });
-const loaderPath = path.join(tmpDir, "alias-loader.mjs");
-writeFileSync(loaderPath, loaderSource);
-
-register(pathToFileURL(loaderPath).href);
-
-// Now dynamically import the module under test so the loader is active
-const { shouldNotifyForEvent } = await import("./shouldNotify.ts");
-
-// Clean up the temp loader
-rmSync(tmpDir, { recursive: true, force: true });
+import { shouldNotifyForEvent } from "./shouldNotify.ts";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
