@@ -11,6 +11,7 @@ import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import type { UserNote } from "@/shared/api/socialTypes";
 import type { ChannelMember, UserProfileSummary } from "@/shared/api/types";
 import { Markdown } from "@/shared/ui/markdown";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 export type NoteCardActions = {
@@ -121,51 +122,73 @@ export function NoteCard({
 
         <div className="flex flex-wrap items-center gap-5 text-xs font-medium">
           <div className="flex flex-wrap items-center gap-5">
-            <button
-              aria-label={isUpvoted ? "Remove upvote" : "Upvote"}
-              aria-pressed={isUpvoted}
-              className={`${actionButtonClass} ${isUpvoted ? activeActionClass : ""} disabled:cursor-not-allowed disabled:opacity-45`}
-              disabled={isUpvotePending}
-              onClick={() => {
-                if (!isUpvotePending) {
-                  void actions?.toggleUpvote?.(note, isUpvoted);
-                }
-              }}
-              type="button"
-            >
-              <ThumbsUp
-                className={`h-4 w-4 ${isUpvoted ? "fill-current" : ""}`}
-              />
-              {countPlaceholder}
-            </button>
-            <button
-              aria-label="Reply"
-              aria-expanded={isReplyComposerOpen}
-              className={actionButtonClass}
-              onClick={() => setIsReplyComposerOpen((current) => !current)}
-              type="button"
-            >
-              <MessageCircle className="h-4 w-4" />
-              {countPlaceholder}
-            </button>
-            <button
-              aria-label="Share"
-              className={actionButtonClass}
-              onClick={() => actions?.share?.(note)}
-              type="button"
-            >
-              <SquareArrowOutUpRight className="h-4 w-4" />
-              {countPlaceholder}
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  aria-label={isUpvoted ? "Remove upvote" : "Upvote"}
+                  aria-pressed={isUpvoted}
+                  className={`${actionButtonClass} ${isUpvoted ? activeActionClass : ""} disabled:cursor-not-allowed disabled:opacity-45`}
+                  disabled={isUpvotePending}
+                  onClick={() => {
+                    if (!isUpvotePending) {
+                      void actions?.toggleUpvote?.(note, isUpvoted);
+                    }
+                  }}
+                  type="button"
+                >
+                  <ThumbsUp
+                    className={`h-4 w-4 ${isUpvoted ? "fill-current" : ""}`}
+                  />
+                  {countPlaceholder}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {isUpvoted ? "Remove upvote" : "Upvote"}
+              </TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  aria-label="Reply"
+                  aria-expanded={isReplyComposerOpen}
+                  className={actionButtonClass}
+                  onClick={() => setIsReplyComposerOpen((current) => !current)}
+                  type="button"
+                >
+                  <MessageCircle className="h-4 w-4" />
+                  {countPlaceholder}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Reply</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  aria-label="Share"
+                  className={actionButtonClass}
+                  onClick={() => actions?.share?.(note)}
+                  type="button"
+                >
+                  <SquareArrowOutUpRight className="h-4 w-4" />
+                  {countPlaceholder}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>Share</TooltipContent>
+            </Tooltip>
             {!isOwnNote ? (
-              <button
-                aria-label="Start direct message"
-                className={actionButtonClass}
-                onClick={() => actions?.startDm?.(note.pubkey)}
-                type="button"
-              >
-                <PenSquare className="h-4 w-4" />
-              </button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    aria-label="Start direct message"
+                    className={actionButtonClass}
+                    onClick={() => actions?.startDm?.(note.pubkey)}
+                    type="button"
+                  >
+                    <PenSquare className="h-4 w-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>Start direct message</TooltipContent>
+              </Tooltip>
             ) : null}
             {!isOwnNote ? (
               isFollowing ? (
