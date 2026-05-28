@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.3
+
+c761a76ff2d fix(release): sync release tags during preflight (#780)
+3f3ec64791b feat(desktop): thread-aware notifications with mutable follow/mute controls (#761)
+03e678cfbca fix(desktop): improve model picker message and runtime dropdown clarity (#778)
+9db8f6ccb88 desktop: float unread indicator + fix sidebar scroll jump (#777)
+3fbee555f06 chore(hooks): standardize check/fix convention with auto-fix pre-commit (#776)
+0f89ad16925 web: clickable repo tree + per-file blob viewer (#773)
+61297ac80a3 fix(agent): keep parallel tool-result messages contiguous on OpenAI Chat (Databricks image fix) (#770)
+5f2423c231e fix(release): fetch tags so changelog tracks versions correctly (#775)
+
+
 ## v0.3.2
 
 1218572f feat(mobile): add Pulse social feed tab (#772)
