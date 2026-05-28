@@ -636,6 +636,8 @@ function MarkdownInner({
               "[&>*+[data-table-block]]:mt-3.5 [&>[data-table-block]+*]:mt-3.5",
               // hr: clear section divider
               "[&>*+hr]:mt-4 [&>hr+*]:mt-4",
+              // Lists after paragraphs: tighter to feel related
+              "[&>p+ul]:mt-1.5 [&>p+ol]:mt-1.5 [&>div+ul]:mt-1.5 [&>div+ol]:mt-1.5",
             ].join(" ")
           : compact
             ? [
@@ -648,6 +650,7 @@ function MarkdownInner({
                 "[&>*+[data-code-block]]:mt-4 [&>[data-code-block]+*]:mt-4",
                 "[&>*+[data-table-block]]:mt-4 [&>[data-table-block]+*]:mt-4",
                 "[&>*+hr]:mt-5 [&>hr+*]:mt-5",
+                "[&>p+ul]:mt-2 [&>p+ol]:mt-2 [&>div+ul]:mt-2 [&>div+ol]:mt-2",
               ].join(" ")
             : [
                 "max-w-none break-words text-sm leading-7 text-foreground/90",
@@ -659,6 +662,7 @@ function MarkdownInner({
                 "[&>*+[data-code-block]]:mt-5 [&>[data-code-block]+*]:mt-5",
                 "[&>*+[data-table-block]]:mt-5 [&>[data-table-block]+*]:mt-5",
                 "[&>*+hr]:mt-6 [&>hr+*]:mt-6",
+                "[&>p+ul]:mt-2.5 [&>p+ol]:mt-2.5 [&>div+ul]:mt-2.5 [&>div+ol]:mt-2.5",
               ].join(" "),
         className,
       )}
