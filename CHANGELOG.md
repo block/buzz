@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.4
+
+d77b111b153 Update desktop navigation chrome and search (#779)
+5ee2cd05173 feat(desktop): reload webview on Cmd/Ctrl+R (#785)
+fa7febe40f5 fix(desktop): sync persona pack directory across worktree instances (#782)
+
+
 ## v0.3.3
 
 c761a76ff2d fix(release): sync release tags during preflight (#780)
