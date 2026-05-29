@@ -479,9 +479,26 @@ jobs:
           touch "desktop/src-tauri/binaries/sprout-dev-mcp-$TARGET"
           touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
           touch "desktop/src-tauri/binaries/sprout-$TARGET"
+      - name: Build mesh llama native libraries
+        run: |
+          set -euo pipefail
+          cargo fetch --manifest-path desktop/src-tauri/Cargo.toml
+          MESH_ROOT=$(find "$HOME/.cargo/git/checkouts" -path '*/bd16da4' -type d -name bd16da4 | head -1)
+          if [[ -z "$MESH_ROOT" ]]; then
+            echo "::error::mesh-llm checkout for bd16da4 not found after cargo fetch"
+            exit 1
+          fi
+          export LLAMA_STAGE_BACKEND=metal
+          export LLAMA_STAGE_BUILD_DIR="$GITHUB_WORKSPACE/.cache/mesh-llama/build-stage-abi-metal"
+          export CMAKE_OSX_DEPLOYMENT_TARGET=10.15
+          "$MESH_ROOT/scripts/prepare-llama.sh" pinned
+          "$MESH_ROOT/scripts/build-llama.sh" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
       - name: Build Tauri app
         run: cd desktop && pnpm tauri build
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
           MACOSX_DEPLOYMENT_TARGET: "10.15"
           CMAKE_OSX_DEPLOYMENT_TARGET: "10.15"
+          LLAMA_STAGE_BACKEND: metal
+          LLAMA_STAGE_BUILD_DIR: ${{ github.workspace }}/.cache/mesh-llama/build-stage-abi-metal
+          SKIPPY_LLAMA_AUTO_BUILD: "0"
