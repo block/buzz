@@ -101,6 +101,7 @@ export class ReadStateManager {
   }
 
   markContextRead(contextId: string, unixTimestamp: number): void {
+    this.forcedContexts.delete(contextId);
     this.advanceContext(contextId, unixTimestamp, { publishable: true });
   }
 

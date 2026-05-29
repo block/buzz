@@ -296,7 +296,10 @@ export function useUnreadChannels(
 
   const markChannelRead = React.useCallback(
     (channelId: string, readAt: string | null | undefined) => {
-      const unixSeconds = toUnixSeconds(readAt);
+      const unixSeconds =
+        toUnixSeconds(readAt) ??
+        latestByChannelRef.current.get(channelId) ??
+        null;
       if (unixSeconds === null) return;
       // Reading clears any prior manual mark-unread.
       if (forcedUnreadRef.current.delete(channelId)) {
