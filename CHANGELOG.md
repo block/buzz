@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.5
+
+b820420909d feat(mobile): Pulse polish — flat feed, compose page, shared filter chips, like + accent fixes (#796)
+10f37e4cab2 feat(desktop): add standalone Playwright screenshot helper (#795)
+f34a21d32ff feat(sprout-agent): load AGENTS.md and SKILL.md into system prompt (#762)
+85861f33fe0 feat: add code block support to message composer (#788)
+7beb0f8e685 fix(desktop): reap orphaned agent processes on shutdown and restart (#787)
+
+
 ## v0.3.4
 
 d77b111b153 Update desktop navigation chrome and search (#779)
