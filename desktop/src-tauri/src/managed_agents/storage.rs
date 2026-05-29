@@ -198,18 +198,6 @@ fn bytecount_newlines(buf: &[u8]) -> usize {
     buf.iter().filter(|&&b| b == b'\n').count()
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn strips_ansi_from_typical_tracing_line() {
-        let input = "\x1b[2m2026-05-27T15:16:32\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2msprout_acp\x1b[0m\x1b[2m:\x1b[0m starting";
-        assert_eq!(
-            strip_ansi_escapes::strip_str(input),
-            "2026-05-27T15:16:32  INFO sprout_acp: starting"
-        );
-    }
-}
-
 pub fn meaningful_agent_error_from_log(path: &Path) -> Option<String> {
     let tail = read_log_tail(path, 200).ok()?;
     tail.lines().rev().map(str::trim).find_map(|line| {
@@ -221,4 +209,16 @@ pub fn meaningful_agent_error_from_log(path: &Path) -> Option<String> {
         }
         None
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn strips_ansi_from_typical_tracing_line() {
+        let input = "\x1b[2m2026-05-27T15:16:32\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2msprout_acp\x1b[0m\x1b[2m:\x1b[0m starting";
+        assert_eq!(
+            strip_ansi_escapes::strip_str(input),
+            "2026-05-27T15:16:32  INFO sprout_acp: starting"
+        );
+    }
 }

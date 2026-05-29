@@ -338,10 +338,8 @@ fn collect_model_options(value: &serde_json::Value, out: &mut Vec<MeshModelOptio
                 collect_model_options(child, out);
             }
         }
-        serde_json::Value::String(value) => {
-            if looks_like_model_ref(value) {
-                push_model(out, value, None);
-            }
+        serde_json::Value::String(value) if looks_like_model_ref(value) => {
+            push_model(out, value, None);
         }
         _ => {}
     }
