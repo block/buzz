@@ -42,3 +42,17 @@ export LLAMA_STAGE_LIB_DIR=/path/to/prebuilt/llama/libs
 Do not use dynamic-link locally unless you already have compatible `llama`,
 `llama-common`, and `mtmd` dynamic libraries. The default static build is the
 supported local path for M1.
+
+## Current privacy limitation: public STUN
+
+Sprout Desktop now refuses to start an embedded mesh node unless the active relay
+advertises a Sprout-owned `iroh_relay_url`, and it passes a fresh NIP-98 bearer
+to that relay. This prevents mesh-llm's empty-relay fallback to public iroh relay
+URLs.
+
+mesh-llm `bd16da4` still performs raw public STUN on startup to discover the
+host's public IP (`stun.l.google.com`, `stun.cloudflare.com`, or
+`stun.stunprotocol.org`) and may include that public address in its invite token.
+That behavior is inside mesh-llm's host runtime and is not currently exposed as
+an SDK option. Treat it as a v1 limitation until mesh exposes a disable-public-
+STUN / relay-only-addressing knob.
