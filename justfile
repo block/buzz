@@ -153,7 +153,7 @@ _ensure-migrations: _ensure-services
     #!/usr/bin/env bash
     set -euo pipefail
     if [[ -x bin/pgschema && -f schema/schema.sql ]]; then
-        bin/pgschema apply --file schema/schema.sql --auto-approve 2>/dev/null || true
+        bin/pgschema apply --file schema/schema.sql --auto-approve || true
     fi
 
 # Run clippy on the desktop Tauri Rust crate
@@ -187,7 +187,7 @@ desktop-release-build target="aarch64-apple-darwin":
 desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
 
 # Seed deterministic channel data for desktop Playwright tests
-desktop-e2e-seed:
+desktop-e2e-seed: _ensure-migrations
     ./scripts/setup-desktop-test-data.sh
 
 # Run desktop browser smoke tests
@@ -195,7 +195,7 @@ desktop-e2e-smoke:
     cd {{desktop_dir}} && pnpm test:e2e:smoke
 
 # Run desktop relay-backed e2e tests
-desktop-e2e-integration:
+desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
 # Run all checks suitable for CI / pre-push (no infra needed)
@@ -227,7 +227,7 @@ relay: _ensure-migrations
     cargo run -p sprout-relay
 
 # Start the relay with the built web UI served from it
-relay-web:
+relay-web: _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     [[ -d node_modules ]] || pnpm install
@@ -235,7 +235,7 @@ relay-web:
     SPROUT_WEB_DIR=./web/dist cargo run -p sprout-relay
 
 # Start the relay server in release mode
-relay-release:
+relay-release: _ensure-migrations
     cargo run -p sprout-relay --release
 
 # Start sprout-proxy (dev mode)
@@ -282,10 +282,6 @@ desktop-dev:
     echo "Starting frontend dev server on Vite port ${SPROUT_VITE_PORT}, relay ${SPROUT_RELAY_URL}"
     pnpm exec vite --port "${SPROUT_VITE_PORT}" --strictPort
 
-# Run the desktop Tauri app (alias for dev)
-desktop-app *ARGS:
-    just dev {{ARGS}}
-
 # ─── Web ─────────────────────────────────────────────────────────────────────
 
 # Run the web frontend dev server (port derived from worktree to avoid collisions)
@@ -299,14 +295,6 @@ web:
     echo "Starting web dev server on port ${VITE_PORT}, relay ${SPROUT_RELAY_URL}"
     cd {{web_dir}}
     pnpm exec vite --port "${VITE_PORT}" --strictPort
-
-# Install web JS dependencies (pnpm workspace — installs all packages from root)
-web-install:
-    pnpm install
-
-# Install web JS dependencies reproducibly for CI (pnpm workspace)
-web-install-ci:
-    pnpm install --frozen-lockfile
 
 # Run web lint and format checks
 web-check:
@@ -358,10 +346,19 @@ mobile-dev:
     set -euo pipefail
     just _ensure-migrations
     # Start relay in background if not already running
+    RELAY_PID=""
     if ! lsof -i :3000 -sTCP:LISTEN -t &>/dev/null; then
         echo "Starting relay in background (log: /tmp/sprout-relay.log)..."
         cargo run -p sprout-relay &>/tmp/sprout-relay.log &
-        sleep 3
+        RELAY_PID=$!
+        trap 'if [[ -n "$RELAY_PID" ]]; then kill "$RELAY_PID" 2>/dev/null || true; fi' EXIT
+        echo -n "Waiting for relay"
+        for _ in $(seq 1 30); do
+            lsof -i :3000 -sTCP:LISTEN -t &>/dev/null && break
+            echo -n "."
+            sleep 3
+        done
+        echo " ready"
     else
         echo "Relay already running on :3000"
     fi
@@ -378,7 +375,7 @@ mobile-dev:
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 # Apply schema migrations via pgschema
-migrate:
+migrate: _ensure-services
     ./bin/pgschema apply --file schema/schema.sql --auto-approve
 
 # ─── Utilities ────────────────────────────────────────────────────────────────

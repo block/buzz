@@ -11,7 +11,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-TIMEOUT=120  # seconds to wait for services to become healthy
 
 # Colors
 RED='\033[0;31m'
@@ -71,53 +70,8 @@ load_env
 
 # ---- Start services ---------------------------------------------------------
 
-log "Starting services..."
-docker compose up -d
-
-# ---- Wait for healthy -------------------------------------------------------
-
-wait_healthy() {
-  local service="$1"
-  local container="$2"
-  local elapsed=0
-  local interval=3
-
-  log "Waiting for ${service} to be healthy..."
-  while true; do
-    local status
-    status=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "not_found")
-
-    case "${status}" in
-      healthy)
-        success "${service} is healthy"
-        return 0
-        ;;
-      unhealthy)
-        error "${service} is unhealthy. Check logs: docker logs ${container}"
-        return 1
-        ;;
-      not_found)
-        error "Container ${container} not found"
-        return 1
-        ;;
-    esac
-
-    if [[ ${elapsed} -ge ${TIMEOUT} ]]; then
-      error "Timed out waiting for ${service} (${TIMEOUT}s). Check: docker logs ${container}"
-      return 1
-    fi
-
-    sleep "${interval}"
-    elapsed=$((elapsed + interval))
-    echo -n "."
-  done
-}
-
-echo ""
-wait_healthy "Postgres"   "sprout-postgres"
-wait_healthy "Redis"      "sprout-redis"
-wait_healthy "Typesense"  "sprout-typesense"
-echo ""
+log "Starting services and waiting for health..."
+"${REPO_ROOT}/bin/just" _ensure-services
 
 # ---- Run migrations ---------------------------------------------------------
 
@@ -204,7 +158,7 @@ if [[ -d "${WEB_DIR}" ]]; then
     success "Web dependencies installed"
   else
     warn "pnpm not found — skipping web dependency install."
-    warn "Run '. ./bin/activate-hermit' to get pnpm, then 'just web-install'."
+    warn "Run '. ./bin/activate-hermit' to get pnpm, then 'just desktop-install'."
   fi
 else
   warn "Web directory not found at ${WEB_DIR} — skipping."
