@@ -79,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo fetch --manifest-path desktop/src-tauri/Cargo.toml
-          MESH_ROOT=$(find "$HOME/.cargo/git/checkouts" -path '*/bd16da4' -type d -name bd16da4 | head -1)
+          MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path '*/bd16da4' -type d -name bd16da4 | head -1)
           if [[ -z "$MESH_ROOT" ]]; then
             echo "::error::mesh-llm checkout for bd16da4 not found after cargo fetch"
             exit 1
