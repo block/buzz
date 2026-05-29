@@ -47,6 +47,16 @@ class NoteCard extends HookConsumerWidget {
         pendingUpvote.value ?? reaction.reactedByCurrentUser;
     final effectiveCount = _effectiveCount(reaction, pendingUpvote.value);
 
+    // Clear the optimistic flag only once the refetched server state matches
+    // it, so the count never flickers back through the stale value mid-refetch.
+    useEffect(() {
+      if (pendingUpvote.value != null &&
+          reaction.reactedByCurrentUser == pendingUpvote.value) {
+        pendingUpvote.value = null;
+      }
+      return null;
+    }, [reaction.reactedByCurrentUser]);
+
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: Grid.twelve),
       child: Row(
@@ -141,11 +151,10 @@ class NoteCard extends HookConsumerWidget {
                   children: [
                     _ActionButton(
                       icon: effectiveUpvoted
-                          ? LucideIcons.heart
-                          : LucideIcons.heart,
+                          ? Icons.favorite
+                          : Icons.favorite_border,
                       label: effectiveCount > 0 ? '$effectiveCount' : null,
                       color: effectiveUpvoted ? Colors.redAccent : null,
-                      filled: effectiveUpvoted,
                       onTap: () async {
                         final next = !effectiveUpvoted;
                         pendingUpvote.value = next;
@@ -157,7 +166,8 @@ class NoteCard extends HookConsumerWidget {
                             reactionEventId: reaction.currentUserReactionId,
                           );
                           onReactionChanged?.call();
-                        } finally {
+                        } catch (_) {
+                          // Revert the optimistic state on failure.
                           pendingUpvote.value = null;
                         }
                       },
@@ -241,14 +251,12 @@ class _ActionButton extends StatelessWidget {
   final String? label;
   final VoidCallback onTap;
   final Color? color;
-  final bool filled;
 
   const _ActionButton({
     required this.icon,
     required this.onTap,
     this.label,
     this.color,
-    this.filled = false,
   });
 
   @override
@@ -265,7 +273,7 @@ class _ActionButton extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 16, color: effectiveColor, fill: filled ? 1 : 0),
+            Icon(icon, size: 16, color: effectiveColor),
             if (label != null) ...[
               const SizedBox(width: 3),
               Text(

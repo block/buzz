@@ -61,22 +61,27 @@ class FilterChipBar<T> extends StatelessWidget {
   }
 
   Widget _chip(BuildContext context, FilterChipItem<T> item) {
+    final isSelected = selected == item.id;
     final text = item.count != null
         ? '${item.label} (${item.count})'
         : item.label;
+    final fg = isSelected
+        ? context.colors.onPrimary
+        : context.colors.onSurfaceVariant;
+    final labelStyle = context.textTheme.labelSmall?.copyWith(color: fg);
     return FilterChip(
-      selected: selected == item.id,
+      selected: isSelected,
       showCheckmark: false,
       label: item.icon != null
           ? Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(item.icon, size: 14),
+                Icon(item.icon, size: 14, color: fg),
                 const SizedBox(width: Grid.half),
-                Text(text, style: context.textTheme.labelSmall),
+                Text(text, style: labelStyle),
               ],
             )
-          : Text(text, style: context.textTheme.labelSmall),
+          : Text(text, style: labelStyle),
       onSelected: (_) => onSelected(item.id),
       visualDensity: VisualDensity.compact,
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,

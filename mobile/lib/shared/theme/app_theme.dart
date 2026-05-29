@@ -244,6 +244,13 @@ class AppTheme {
       // Chips: desktop uses rounded-sm (6px)
       chipTheme: ChipThemeData(
         labelStyle: textTheme.bodySmall?.copyWith(color: scheme.secondary),
+        // Selected filter chips (Pulse/Search/Activity tabs) use the accent.
+        selectedColor: scheme.primary,
+        secondarySelectedColor: scheme.primary,
+        secondaryLabelStyle: textTheme.bodySmall?.copyWith(
+          color: scheme.onPrimary,
+        ),
+        checkmarkColor: scheme.onPrimary,
         shape: RoundedRectangleBorder(
           side: BorderSide.none,
           borderRadius: BorderRadius.circular(Radii.sm),
