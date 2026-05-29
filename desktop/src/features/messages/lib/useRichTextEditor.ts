@@ -199,6 +199,20 @@ export function useRichTextEditor({
 
             return {
               "Shift-Enter": ({ editor: ed }) => {
+                // Code block: insert a literal newline (hardBreak nodes aren't
+                // valid inside code blocks).
+                if (ed.isActive("codeBlock")) {
+                  return ed
+                    .chain()
+                    .focus()
+                    .command(({ tr, dispatch }) => {
+                      if (dispatch) {
+                        tr.replaceSelectionWith(ed.state.schema.text("\n"));
+                      }
+                      return true;
+                    })
+                    .run();
+                }
                 // Empty last list item → exit list to paragraph below.
                 if (exitListIfEmptyLast(ed)) return true;
                 // Non-empty or non-last list item → split.
