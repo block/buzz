@@ -1,0 +1,62 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:sprout_mobile/features/profile/user_cache_provider.dart';
+import 'package:sprout_mobile/features/profile/user_profile.dart';
+import 'package:sprout_mobile/features/pulse/compose_note_page.dart';
+import 'package:sprout_mobile/features/pulse/pulse_models.dart';
+import 'package:sprout_mobile/shared/theme/theme.dart';
+
+class _FakeUserCacheNotifier extends UserCacheNotifier {
+  final Map<String, UserProfile> _users;
+  _FakeUserCacheNotifier(this._users);
+
+  @override
+  Map<String, UserProfile> build() => _users;
+}
+
+void main() {
+  final replyNote = UserNote(
+    id: 'note1',
+    pubkey: 'alice_pk',
+    createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 120,
+    content: 'The original note being replied to',
+    tags: const [],
+  );
+
+  Widget buildTestable(Widget home) {
+    return ProviderScope(
+      overrides: [
+        userCacheProvider.overrideWith(
+          () => _FakeUserCacheNotifier({
+            'alice_pk': const UserProfile(
+              pubkey: 'alice_pk',
+              displayName: 'Alice',
+            ),
+          }),
+        ),
+      ],
+      child: MaterialApp(theme: AppTheme.light(), home: home),
+    );
+  }
+
+  testWidgets('reply mode shows a rich preview of the replied-to note', (
+    tester,
+  ) async {
+    await tester.pumpWidget(buildTestable(ComposeNotePage(replyTo: replyNote)));
+    await tester.pump();
+
+    expect(find.text('Replying to Alice'), findsOneWidget);
+    expect(find.text('Alice'), findsOneWidget); // author name in the row
+    expect(find.textContaining('original note being replied to'), findsWidgets);
+    expect(find.text('Reply'), findsOneWidget); // action button label
+  });
+
+  testWidgets('new-note mode shows no reply preview', (tester) async {
+    await tester.pumpWidget(buildTestable(const ComposeNotePage()));
+    await tester.pump();
+
+    expect(find.textContaining('Replying to'), findsNothing);
+    expect(find.text('Post'), findsOneWidget);
+  });
+}
