@@ -146,7 +146,7 @@ class SettingsPage extends HookConsumerWidget {
               _AccentSwatch(
                 color: context.colors.brightness == Brightness.light
                     ? const Color(0xFF8839EF)
-                    : const Color(0xFFC6A0F6),
+                    : const Color(0xFFA875F5),
                 label: 'Mauve',
                 selected: selectedAccent == defaultAccentIndex,
                 onTap: () => ref

@@ -34,7 +34,6 @@ const accentColors = [
     light: Color(0xFF6366F1),
     dark: Color(0xFF818CF8),
   ),
-  AccentColor(name: 'Lilac', light: Color(0xFFC0A2F1), dark: Color(0xFFC0A2F1)),
 ];
 
 /// Default: Catppuccin Mauve (the current primary).
