@@ -137,7 +137,7 @@ test("page 1 accepts an avatar URL as the secondary avatar path", async ({
   expect(box?.height).toBeCloseTo(80, 0);
 
   await continueToSetupPage(page);
-  await expect(page.getByTestId("onboarding-provider-goose")).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
 });
 
 test("first-run onboarding keeps the shell hidden through both pages and only marks Home seen after finish", async ({
@@ -155,7 +155,7 @@ test("first-run onboarding keeps the shell hidden through both pages and only ma
   await page.getByTestId("onboarding-display-name").fill("Alice");
   await continueToSetupPage(page);
   await expectShellHidden(page);
-  await expect(page.getByTestId("onboarding-provider-goose")).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
   await expectNoHomeSeenEntries(page);
 
   await page.getByTestId("onboarding-finish").click();
