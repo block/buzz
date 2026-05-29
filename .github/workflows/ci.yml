@@ -483,3 +483,4 @@ jobs:
         run: cd desktop && pnpm tauri build
         env:
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          MACOSX_DEPLOYMENT_TARGET: "10.15"

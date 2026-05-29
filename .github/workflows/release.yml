@@ -83,6 +83,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
 
       - name: Locate unsigned DMG
         id: unsigned
