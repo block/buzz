@@ -17,7 +17,7 @@ docker compose ps
 # sprout-typesense  healthy
 ```
 
-If not running: `./scripts/dev-setup.sh` from the repo root.
+If not running: `just setup` from the repo root.
 
 Tools: `jq`, `curl`, Rust toolchain.
 

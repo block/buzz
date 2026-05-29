@@ -5,27 +5,19 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/filter_chip_bar.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import 'agent_activity_card.dart';
+import 'compose_note_page.dart';
 import 'note_card.dart';
-import 'note_composer.dart';
 import 'pulse_models.dart';
 import 'pulse_provider.dart';
-import 'pulse_tab_bar.dart';
 
 enum PulseTab { everyone, following, liked, agents, mine }
 
 class PulsePage extends HookConsumerWidget {
   const PulsePage({super.key});
-
-  static const _tabs = [
-    PulseTabSpec(id: 'everyone', label: 'Everyone', icon: LucideIcons.radio),
-    PulseTabSpec(id: 'following', label: 'Following', icon: LucideIcons.users),
-    PulseTabSpec(id: 'liked', label: 'Liked', icon: LucideIcons.heart),
-    PulseTabSpec(id: 'agents', label: 'Agents', icon: LucideIcons.bot),
-    PulseTabSpec(id: 'mine', label: 'Mine', icon: LucideIcons.user),
-  ];
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -63,25 +55,48 @@ class PulsePage extends HookConsumerWidget {
     return FrostedScaffold(
       resizeToAvoidBottomInset: true,
       appBar: const FrostedAppBar(title: Text('Pulse')),
+      floatingActionButton: FloatingActionButton(
+        heroTag: 'pulse-compose-fab',
+        onPressed: () => Navigator.of(context).push(
+          MaterialPageRoute<void>(builder: (_) => const ComposeNotePage()),
+        ),
+        tooltip: 'New note',
+        shape: const CircleBorder(),
+        child: const Icon(LucideIcons.plus),
+      ),
       body: Column(
         children: [
           SizedBox(height: frostedAppBarHeight(context)),
-          PulseTabBar(
-            tabs: _tabs,
-            selected: active.value.name,
-            onSelected: (id) => active.value = PulseTab.values.firstWhere(
-              (tab) => tab.name == id,
-              orElse: () => PulseTab.everyone,
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.xs,
-              Grid.xxs,
-              Grid.xs,
-              Grid.xxs,
-            ),
-            child: const NoteComposer(),
+          FilterChipBar<PulseTab>(
+            selected: active.value,
+            onSelected: (tab) => active.value = tab,
+            items: const [
+              FilterChipItem(
+                id: PulseTab.everyone,
+                label: 'Everyone',
+                icon: LucideIcons.radio,
+              ),
+              FilterChipItem(
+                id: PulseTab.following,
+                label: 'Following',
+                icon: LucideIcons.users,
+              ),
+              FilterChipItem(
+                id: PulseTab.liked,
+                label: 'Liked',
+                icon: LucideIcons.heart,
+              ),
+              FilterChipItem(
+                id: PulseTab.agents,
+                label: 'Agents',
+                icon: LucideIcons.bot,
+              ),
+              FilterChipItem(
+                id: PulseTab.mine,
+                label: 'Mine',
+                icon: LucideIcons.user,
+              ),
+            ],
           ),
           Expanded(
             child: RefreshIndicator(
@@ -164,7 +179,7 @@ class _PulseBody extends ConsumerWidget {
               Grid.xs,
             ),
             itemCount: groups.length,
-            separatorBuilder: (_, _) => const SizedBox(height: Grid.xxs),
+            separatorBuilder: (_, _) => const _NoteDivider(),
             itemBuilder: (context, index) => AgentActivityCard(
               group: groups[index],
               reactions: reactions,
@@ -181,7 +196,7 @@ class _PulseBody extends ConsumerWidget {
             Grid.xs,
           ),
           itemCount: notes.length,
-          separatorBuilder: (_, _) => const SizedBox(height: Grid.xxs),
+          separatorBuilder: (_, _) => const _NoteDivider(),
           itemBuilder: (context, index) {
             final note = notes[index];
             return NoteCard(
@@ -274,16 +289,34 @@ class _TimelineSkeleton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListView.separated(
-      padding: const EdgeInsets.all(Grid.xs),
+      padding: const EdgeInsets.fromLTRB(Grid.xs, Grid.xxs, Grid.xs, Grid.xs),
       itemCount: 5,
-      separatorBuilder: (_, _) => const SizedBox(height: Grid.xxs),
-      itemBuilder: (_, _) => Container(
-        height: 112,
-        decoration: BoxDecoration(
-          color: context.colors.surfaceContainerHighest.withValues(alpha: 0.55),
-          borderRadius: BorderRadius.circular(Radii.lg),
+      separatorBuilder: (_, _) => const _NoteDivider(),
+      itemBuilder: (_, _) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: Grid.twelve),
+        child: Container(
+          height: 64,
+          decoration: BoxDecoration(
+            color: context.colors.surfaceContainerHighest.withValues(
+              alpha: 0.55,
+            ),
+            borderRadius: BorderRadius.circular(Radii.md),
+          ),
         ),
       ),
+    );
+  }
+}
+
+class _NoteDivider extends StatelessWidget {
+  const _NoteDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Divider(
+      height: 1,
+      thickness: 1,
+      color: context.colors.outlineVariant.withValues(alpha: 0.5),
     );
   }
 }

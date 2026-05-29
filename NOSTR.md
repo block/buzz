@@ -23,16 +23,13 @@ Connect any NIP-29 client straight to the relay.
 ### Quick Start
 
 ```bash
-# 1. Start infrastructure
-docker compose up -d
-
-# 2. (Optional) Enable pubkey allowlist — must be set BEFORE relay startup
+# 1. (Optional) Enable pubkey allowlist — must be set BEFORE relay startup
 export SPROUT_PUBKEY_ALLOWLIST=true
 
-# 3. Start the relay (runs migrations automatically)
-cargo run -p sprout-relay &          # relay on :3000
+# 2. Start the relay (auto-starts Docker services and runs migrations)
+just relay &                         # relay on :3000
 
-# 4. Add a pubkey to the allowlist (if enabled)
+# 3. Add a pubkey to the allowlist (if enabled)
 #    Insert directly — there is no CLI command for this yet.
 PGPASSWORD=sprout_dev psql -h localhost -U sprout -d sprout -c \
   "INSERT INTO pubkey_allowlist (pubkey) VALUES (decode('<64-char-hex-pubkey>', 'hex'))"

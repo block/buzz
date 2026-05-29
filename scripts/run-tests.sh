@@ -13,7 +13,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MODE="${1:-all}"
-TIMEOUT=60  # seconds to wait for services if starting them
 
 # Colors
 RED='\033[0;31m'
@@ -72,57 +71,8 @@ run_test_step() {
 
 # ---- Check / start infra (for integration tests) ----------------------------
 
-services_healthy() {
-  local pg_ok redis_ok
-  pg_ok=$(docker inspect --format='{{.State.Health.Status}}' sprout-postgres 2>/dev/null || echo "not_found")
-  redis_ok=$(docker inspect --format='{{.State.Health.Status}}' sprout-redis 2>/dev/null || echo "not_found")
-  [[ "${pg_ok}" == "healthy" && "${redis_ok}" == "healthy" ]]
-}
-
-ensure_services() {
-  if services_healthy; then
-    success "Services already healthy"
-    return 0
-  fi
-
-  warn "Services not running — starting them..."
-  docker compose up -d
-
-  local elapsed=0
-  local interval=3
-  while ! services_healthy; do
-    if [[ ${elapsed} -ge ${TIMEOUT} ]]; then
-      error "Timed out waiting for services (${TIMEOUT}s)"
-      return 1
-    fi
-    sleep "${interval}"
-    elapsed=$((elapsed + interval))
-    echo -n "."
-  done
-  echo ""
-  success "Services healthy"
-
-  # Ensure migrations are current
-  ensure_migrations
-}
-
-ensure_migrations() {
-  log "Ensuring migrations are current..."
-  local pgschema="${REPO_ROOT}/bin/pgschema"
-  local schema_file="${REPO_ROOT}/schema/schema.sql"
-
-  if [[ ! -f "${schema_file}" ]]; then
-    warn "No schema.sql. Skipping."
-    return 0
-  fi
-
-  if [[ -x "${pgschema}" ]]; then
-    "${pgschema}" apply --file "${schema_file}" --auto-approve 2>/dev/null \
-      && success "Migrations current" \
-      || warn "pgschema apply failed — DB may be out of date"
-  else
-    warn "pgschema not found at ${pgschema}. Schema may be out of date."
-  fi
+ensure_infra() {
+  "${REPO_ROOT}/bin/just" _ensure-migrations
 }
 
 # ---- Unit tests (no infra needed) -------------------------------------------
@@ -142,7 +92,7 @@ run_unit_tests() {
 run_integration_tests() {
   section "Integration Tests (requires running services)"
 
-  ensure_services
+  ensure_infra
 
   run_test_step "sprout-db tests" \
     cargo test -p sprout-db -- --nocapture

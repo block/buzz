@@ -161,6 +161,7 @@ class ChannelsPage extends HookConsumerWidget {
         ],
       ),
       floatingActionButton: FloatingActionButton(
+        heroTag: 'channels-fab',
         onPressed: openQuickActions,
         tooltip: 'Create or start conversation',
         shape: const CircleBorder(),

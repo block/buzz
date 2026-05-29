@@ -11,7 +11,7 @@ import '../channels/channel_management_provider.dart';
 import '../channels/message_content.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile_sheet.dart';
-import 'note_composer.dart';
+import 'compose_note_page.dart';
 import 'pulse_actions.dart';
 import 'pulse_models.dart';
 
@@ -37,7 +37,6 @@ class NoteCard extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final showReply = useState(false);
     final pendingUpvote = useState<bool?>(null);
     final pubkey = note.pubkey.toLowerCase();
     final profile =
@@ -48,15 +47,18 @@ class NoteCard extends HookConsumerWidget {
         pendingUpvote.value ?? reaction.reactedByCurrentUser;
     final effectiveCount = _effectiveCount(reaction, pendingUpvote.value);
 
-    return Container(
-      padding: const EdgeInsets.all(Grid.twelve),
-      decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHighest.withValues(alpha: 0.72),
-        borderRadius: BorderRadius.circular(Radii.lg),
-        border: Border.all(
-          color: context.colors.outlineVariant.withValues(alpha: 0.5),
-        ),
-      ),
+    // Clear the optimistic flag only once the refetched server state matches
+    // it, so the count never flickers back through the stale value mid-refetch.
+    useEffect(() {
+      if (pendingUpvote.value != null &&
+          reaction.reactedByCurrentUser == pendingUpvote.value) {
+        pendingUpvote.value = null;
+      }
+      return null;
+    }, [reaction.reactedByCurrentUser]);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: Grid.twelve),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -149,11 +151,10 @@ class NoteCard extends HookConsumerWidget {
                   children: [
                     _ActionButton(
                       icon: effectiveUpvoted
-                          ? LucideIcons.heart
-                          : LucideIcons.heart,
-                      label: effectiveCount > 0 ? '$effectiveCount' : 'Like',
+                          ? Icons.favorite
+                          : Icons.favorite_border,
+                      label: effectiveCount > 0 ? '$effectiveCount' : null,
                       color: effectiveUpvoted ? Colors.redAccent : null,
-                      filled: effectiveUpvoted,
                       onTap: () async {
                         final next = !effectiveUpvoted;
                         pendingUpvote.value = next;
@@ -165,19 +166,22 @@ class NoteCard extends HookConsumerWidget {
                             reactionEventId: reaction.currentUserReactionId,
                           );
                           onReactionChanged?.call();
-                        } finally {
+                        } catch (_) {
+                          // Revert the optimistic state on failure.
                           pendingUpvote.value = null;
                         }
                       },
                     ),
                     _ActionButton(
                       icon: LucideIcons.messageCircle,
-                      label: 'Reply',
-                      onTap: () => showReply.value = !showReply.value,
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => ComposeNotePage(replyTo: note),
+                        ),
+                      ),
                     ),
                     _ActionButton(
                       icon: LucideIcons.share,
-                      label: 'Share',
                       onTap: () {
                         Clipboard.setData(ClipboardData(text: _shareUri(note)));
                         ScaffoldMessenger.of(context).showSnackBar(
@@ -187,7 +191,6 @@ class NoteCard extends HookConsumerWidget {
                     ),
                     _ActionButton(
                       icon: LucideIcons.mail,
-                      label: 'DM',
                       onTap: () async {
                         final channel = await ref
                             .read(channelActionsProvider)
@@ -202,14 +205,6 @@ class NoteCard extends HookConsumerWidget {
                     ),
                   ],
                 ),
-                if (showReply.value) ...[
-                  const SizedBox(height: Grid.xxs),
-                  NoteComposer(
-                    replyTo: note,
-                    hintText: 'Reply to $displayName',
-                    onSent: () => showReply.value = false,
-                  ),
-                ],
               ],
             ),
           ),
@@ -253,46 +248,43 @@ class _FollowButton extends StatelessWidget {
 
 class _ActionButton extends StatelessWidget {
   final IconData icon;
-  final String label;
+  final String? label;
   final VoidCallback onTap;
   final Color? color;
-  final bool filled;
 
   const _ActionButton({
     required this.icon,
-    required this.label,
     required this.onTap,
+    this.label,
     this.color,
-    this.filled = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final effectiveColor = color ?? context.colors.onSurfaceVariant;
-    return Expanded(
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(Radii.md),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: Grid.half),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 16, color: effectiveColor, fill: filled ? 1 : 0),
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(Radii.md),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: Grid.xs,
+          vertical: Grid.half,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: effectiveColor),
+            if (label != null) ...[
               const SizedBox(width: 3),
-              Flexible(
-                child: Text(
-                  label,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.textTheme.labelSmall?.copyWith(
-                    color: effectiveColor,
-                    fontWeight: FontWeight.w600,
-                  ),
+              Text(
+                label!,
+                style: context.textTheme.labelSmall?.copyWith(
+                  color: effectiveColor,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
             ],
-          ),
+          ],
         ),
       ),
     );

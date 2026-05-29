@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/filter_chip_bar.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../channels/channel.dart';
@@ -81,9 +82,13 @@ class SearchPage extends HookConsumerWidget {
       body: Column(
         children: [
           SizedBox(height: frostedAppBarHeight(context)),
-          _FilterChips(
-            active: activeFilter.value,
-            onChanged: (f) => activeFilter.value = f,
+          FilterChipBar<_SearchFilter>(
+            selected: activeFilter.value,
+            onSelected: (f) => activeFilter.value = f,
+            items: [
+              for (final f in _SearchFilter.values)
+                FilterChipItem(id: f, label: f.label),
+            ],
           ),
           Expanded(
             child: _SearchBody(
@@ -92,56 +97,6 @@ class SearchPage extends HookConsumerWidget {
               currentPubkey: currentPubkey,
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class _FilterChips extends StatelessWidget {
-  final _SearchFilter active;
-  final ValueChanged<_SearchFilter> onChanged;
-
-  const _FilterChips({required this.active, required this.onChanged});
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.fromLTRB(Grid.xs, Grid.half, Grid.xs, Grid.xxs),
-      child: Row(
-        children: [
-          for (final filter in _SearchFilter.values) ...[
-            if (filter != _SearchFilter.values.first)
-              const SizedBox(width: Grid.xxs),
-            GestureDetector(
-              onTap: () => onChanged(filter),
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: Grid.twelve,
-                  vertical: Grid.half + 2,
-                ),
-                decoration: BoxDecoration(
-                  color: active == filter
-                      ? context.colors.primary
-                      : context.colors.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(Radii.lg),
-                  border: active == filter
-                      ? null
-                      : Border.all(color: context.colors.outlineVariant),
-                ),
-                child: Text(
-                  filter.label,
-                  style: context.textTheme.labelMedium?.copyWith(
-                    color: active == filter
-                        ? context.colors.onPrimary
-                        : context.colors.onSurfaceVariant,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
-            ),
-          ],
         ],
       ),
     );

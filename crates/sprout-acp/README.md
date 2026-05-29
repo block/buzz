@@ -13,8 +13,7 @@ Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdi
 
 ## Prerequisites
 
-- A running Sprout relay (`just relay` or a hosted instance)
-- Docker services up (`docker compose up -d`) if running locally
+- A running Sprout relay (`just relay` starts Docker services automatically, or use a hosted instance)
 - A Nostr keypair for the agent (see [Generating Keys](#generating-keys))
 
 Build:

@@ -8,7 +8,7 @@ just test               # unit + integration (starts Docker if needed)
 ```
 
 `just test` runs unit tests plus integration tests against Postgres and Redis
-(started via `docker compose`). Neither task runs the E2E suites in
+(started automatically if not already running). Neither task runs the E2E suites in
 `sprout-test-client` — those are marked `#[ignore]` and require a running relay:
 
 ```bash
@@ -264,7 +264,7 @@ Replies are kind:9 in the same channel; `sprout messages thread --channel <id>
 ## Configuration reference
 
 The relay reads all configuration from environment variables. Defaults work
-out of the box with `docker compose up`. Common overrides:
+out of the box with `just setup` or `just relay`. Common overrides:
 
 | Variable                          | Default                     | Notes |
 |-----------------------------------|-----------------------------|-------|

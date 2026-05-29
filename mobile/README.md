@@ -12,7 +12,11 @@ flutter pub get
 ## Run
 
 ```bash
-flutter run
+# From repo root (recommended — starts Docker, relay, and simulator):
+just mobile-dev
+
+# Direct (requires services and relay already running):
+cd mobile && flutter run
 ```
 
 ## Checks

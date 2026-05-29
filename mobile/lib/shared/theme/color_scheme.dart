@@ -28,7 +28,7 @@ const lightColorScheme = ColorScheme(
   outlineVariant: Color(0xFFCCD0DA), // Latte Surface1
   inverseSurface: Color(0xFF4C4F69), // Latte Text
   onInverseSurface: Color(0xFFEFF1F5), // Latte Base
-  inversePrimary: Color(0xFFC6A0F6), // Macchiato Mauve
+  inversePrimary: Color(0xFFA875F5), // Macchiato Mauve (saturated)
   shadow: Color(0xFF000000),
   scrim: Color(0xFF000000),
   surfaceTint: Color(0xFF8839EF), // Latte Mauve
@@ -38,7 +38,7 @@ const lightColorScheme = ColorScheme(
 // Catppuccin Macchiato (mauve accent) — matches Sprout desktop dark theme
 const darkColorScheme = ColorScheme(
   brightness: Brightness.dark,
-  primary: Color(0xFFC6A0F6), // Macchiato Mauve
+  primary: Color(0xFFA875F5), // Macchiato Mauve (saturated)
   onPrimary: Color(0xFF24273A), // Macchiato Base
   primaryContainer: Color(0xFF363A4F), // Macchiato Surface0
   onPrimaryContainer: Color(0xFFCAD3F5), // Macchiato Text
@@ -64,7 +64,7 @@ const darkColorScheme = ColorScheme(
   inversePrimary: Color(0xFF8839EF), // Latte Mauve
   shadow: Color(0xFF000000),
   scrim: Color(0xFF000000),
-  surfaceTint: Color(0xFFC6A0F6), // Macchiato Mauve
+  surfaceTint: Color(0xFFA875F5), // Macchiato Mauve (saturated)
   surfaceContainerHighest: Color(0xFF1E2030), // Macchiato Mantle
 );
 

@@ -29,8 +29,8 @@ class HomePage extends HookConsumerWidget {
             label: 'Home',
           ),
           NavigationDestination(
-            icon: Icon(LucideIcons.radio),
-            selectedIcon: Icon(LucideIcons.radio),
+            icon: Icon(LucideIcons.activity),
+            selectedIcon: Icon(LucideIcons.activity),
             label: 'Pulse',
           ),
           NavigationDestination(

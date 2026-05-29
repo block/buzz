@@ -244,6 +244,14 @@ class AppTheme {
       // Chips: desktop uses rounded-sm (6px)
       chipTheme: ChipThemeData(
         labelStyle: textTheme.bodySmall?.copyWith(color: scheme.secondary),
+        // M3 resolves the chip container via `color` (WidgetStateProperty);
+        // `selectedColor` is the legacy M2 path and is ignored here. Selected
+        // filter chips (Pulse/Search/Activity tabs) use the accent.
+        color: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.selected)) return scheme.primary;
+          return scheme.surfaceContainerHighest;
+        }),
+        checkmarkColor: scheme.onPrimary,
         shape: RoundedRectangleBorder(
           side: BorderSide.none,
           borderRadius: BorderRadius.circular(Radii.sm),
