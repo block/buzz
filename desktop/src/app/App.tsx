@@ -10,6 +10,7 @@ import {
 } from "react";
 
 import { router } from "@/app/router";
+import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
 import { useWorkspaceInit } from "@/features/workspaces/useWorkspaceInit";
@@ -66,6 +67,10 @@ function AppReady({ isSharedIdentity }: { isSharedIdentity: boolean }) {
 }
 
 export function App() {
+  // Mounted at the root so Cmd/Ctrl+R reloads in every app state,
+  // including the loading and first-run setup screens below.
+  useReloadShortcut();
+
   useLayoutEffect(() => {
     void getCurrentWindow().show();
   }, []);
