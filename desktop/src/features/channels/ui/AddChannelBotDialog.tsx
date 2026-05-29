@@ -119,7 +119,7 @@ export function AddChannelBotDialog({
     () => getUsableTeams(teamsQuery.data ?? [], personas),
     [personas, teamsQuery.data],
   );
-  const [selectedProviderId, setSelectedProviderId] = React.useState("");
+  const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("");
   const [selectedPersonaIds, setSelectedPersonaIds] = React.useState<string[]>(
     [],
   );
@@ -150,12 +150,12 @@ export function AddChannelBotDialog({
     React.useState<BackendProviderProbeResult | null>(null);
   const [probeError, setProbeError] = React.useState<string | null>(null);
 
-  const selectedProvider = React.useMemo(
+  const selectedRuntime = React.useMemo(
     () =>
-      providers.find((provider) => provider.id === selectedProviderId) ??
+      providers.find((runtime) => runtime.id === selectedRuntimeId) ??
       providers[0] ??
       null,
-    [providers, selectedProviderId],
+    [providers, selectedRuntimeId],
   );
   const selectedPersonas = React.useMemo(
     () => personas.filter((persona) => selectedPersonaIds.includes(persona.id)),
@@ -166,7 +166,7 @@ export function AddChannelBotDialog({
   const reusableAgent = useReusableAgentDetection(
     channelId,
     open && channelId !== null,
-    selectedProvider,
+    selectedRuntime,
     selectedPersonas,
     includeGeneric,
     customPrompt,
@@ -174,13 +174,13 @@ export function AddChannelBotDialog({
 
   // Surface warnings when a persona's preferred runtime differs from the
   // user-selected runtime. In this dialog the user explicitly picks a
-  // runtime via the dropdown, so the fallback is `selectedProvider` (their
+  // runtime via the dropdown, so the fallback is `selectedRuntime` (their
   // choice), NOT `providers[0]`. This differs intentionally from
   // AddTeamToChannelDialog which has no runtime selector and falls back
   // to the first available runtime.
   const runtimeWarnings = React.useMemo(
-    () => collectRuntimeWarnings(selectedPersonas, providers, selectedProvider),
-    [selectedPersonas, providers, selectedProvider],
+    () => collectRuntimeWarnings(selectedPersonas, providers, selectedRuntime),
+    [selectedPersonas, providers, selectedRuntime],
   );
 
   const isProviderMode = runOn !== "local";
@@ -202,21 +202,21 @@ export function AddChannelBotDialog({
       return;
     }
 
-    if (!selectedProviderId && providers.length > 0) {
+    if (!selectedRuntimeId && providers.length > 0) {
       const remembered = lastRuntimeId
         ? providers.find((p) => p.id === lastRuntimeId)
         : null;
-      setSelectedProviderId(remembered ? remembered.id : providers[0].id);
+      setSelectedRuntimeId(remembered ? remembered.id : providers[0].id);
     }
-  }, [open, providers, selectedProviderId, lastRuntimeId]);
+  }, [open, providers, selectedRuntimeId, lastRuntimeId]);
 
   React.useEffect(() => {
-    if (!selectedProvider || hasEditedCustomName) {
+    if (!selectedRuntime || hasEditedCustomName) {
       return;
     }
 
-    setCustomName(defaultBotName(selectedProvider));
-  }, [hasEditedCustomName, selectedProvider]);
+    setCustomName(defaultBotName(selectedRuntime));
+  }, [hasEditedCustomName, selectedRuntime]);
 
   React.useEffect(() => {
     setSelectedPersonaIds((current) =>
@@ -269,7 +269,7 @@ export function AddChannelBotDialog({
   }, [isProviderMode, selectedBackendProvider]);
 
   function reset() {
-    setSelectedProviderId("");
+    setSelectedRuntimeId("");
     setSelectedPersonaIds([]);
     setIncludeGeneric(false);
     setCustomName(providers[0] ? defaultBotName(providers[0]) : "");
@@ -318,7 +318,7 @@ export function AddChannelBotDialog({
   }
 
   async function handleSubmit() {
-    if (!selectedProvider || selectedCount === 0) {
+    if (!selectedRuntime || selectedCount === 0) {
       return;
     }
 
@@ -346,7 +346,7 @@ export function AddChannelBotDialog({
       ...(includeGeneric
         ? [
             {
-              runtime: selectedProvider,
+              runtime: selectedRuntime,
               name: customName,
               systemPrompt: customPrompt,
               role: "bot" as const,
@@ -360,10 +360,10 @@ export function AddChannelBotDialog({
         const resolved = resolvePersonaRuntime(
           persona.runtime,
           providers,
-          selectedProvider,
+          selectedRuntime,
         );
         return {
-          runtime: resolved.runtime ?? selectedProvider,
+          runtime: resolved.runtime ?? selectedRuntime,
           name: persona.displayName,
           personaId: persona.id,
           systemPrompt: persona.systemPrompt,
@@ -424,7 +424,7 @@ export function AddChannelBotDialog({
     respondTo !== "allowlist" || respondToAllowlist.length > 0;
 
   const canSubmit =
-    selectedProvider !== null &&
+    selectedRuntime !== null &&
     selectedCount > 0 &&
     (!includeGeneric || customName.trim().length > 0) &&
     respondToValid &&
@@ -438,7 +438,7 @@ export function AddChannelBotDialog({
   const canToggleSelections = !createBotsMutation.isPending;
   const providerTriggerLabel = providersLoading
     ? "Loading runtimes..."
-    : (selectedProvider?.label ?? "No runtimes found");
+    : (selectedRuntime?.label ?? "No runtimes found");
   const addButtonLabel = createBotsMutation.isPending
     ? selectedCount > 1
       ? `Adding ${selectedCount}...`
@@ -549,10 +549,10 @@ export function AddChannelBotDialog({
             >
               <DropdownMenuRadioGroup
                 onValueChange={(id) => {
-                  setSelectedProviderId(id);
+                  setSelectedRuntimeId(id);
                   setLastRuntime(id);
                 }}
-                value={selectedProvider?.id ?? ""}
+                value={selectedRuntime?.id ?? ""}
               >
                 {providers.map((provider) => (
                   <DropdownMenuRadioItem key={provider.id} value={provider.id}>

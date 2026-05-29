@@ -296,7 +296,7 @@ function TemplateFormDialog({
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
   const providersQuery = useAvailableAcpRuntimes();
-  const providers = providersQuery.data ?? [];
+  const runtimes = providersQuery.data ?? [];
 
   const [name, setName] = React.useState("");
   const [description, setDescription] = React.useState("");
@@ -562,7 +562,7 @@ function TemplateFormDialog({
             isPending={isPending}
             personas={personasQuery.data ?? []}
             personaRuntimes={personaRuntimes}
-            providers={providers}
+            providers={runtimes}
             providersLoading={providersQuery.isLoading}
             selectedPersonaIds={selectedPersonaIds}
             selectedTeamIds={selectedTeamIds}
@@ -769,9 +769,9 @@ function RuntimeRow({
         value={value}
       >
         <option value="">Default</option>
-        {providers.map((provider) => (
-          <option key={provider.id} value={provider.id}>
-            {provider.label}
+        {providers.map((runtime) => (
+          <option key={runtime.id} value={runtime.id}>
+            {runtime.label}
           </option>
         ))}
       </select>

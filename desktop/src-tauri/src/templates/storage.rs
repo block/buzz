@@ -224,6 +224,19 @@ mod tests {
         assert!(parsed.agents.teams.is_empty());
     }
 
+    #[test]
+    fn deserialization_backward_compat_provider_alias() {
+        use crate::templates::{TemplateAgentEntry, TemplateTeamEntry};
+
+        let agent_json = r#"{"personaId":"builtin:kit","provider":"goose"}"#;
+        let agent: TemplateAgentEntry = serde_json::from_str(agent_json).unwrap();
+        assert_eq!(agent.runtime.as_deref(), Some("goose"));
+
+        let team_json = r#"{"teamId":"team-1","provider":"claude"}"#;
+        let team: TemplateTeamEntry = serde_json::from_str(team_json).unwrap();
+        assert_eq!(team.runtime.as_deref(), Some("claude"));
+    }
+
     // -----------------------------------------------------------------------
     // validate_channel_template_deletion
     // -----------------------------------------------------------------------

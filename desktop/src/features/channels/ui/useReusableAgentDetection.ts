@@ -18,7 +18,7 @@ type Persona = { id: string };
 export function useReusableAgentDetection(
   channelId: string | null,
   enabled: boolean,
-  selectedProvider: AcpRuntime | null,
+  selectedRuntime: AcpRuntime | null,
   selectedPersonas: readonly Persona[],
   includeGeneric: boolean,
   customPrompt: string,
@@ -29,7 +29,7 @@ export function useReusableAgentDetection(
   return React.useMemo(() => {
     const agents = managedAgentsQuery.data;
     const members = channelMembersQuery.data;
-    if (!agents || !members || !selectedProvider) return undefined;
+    if (!agents || !members || !selectedRuntime) return undefined;
     const memberPubkeys = new Set(
       members.map((m) => normalizePubkey(m.pubkey)),
     );
@@ -38,7 +38,7 @@ export function useReusableAgentDetection(
     if (selectedPersonas.length === 1 && !includeGeneric) {
       return findReusableAgent(agents, memberPubkeys, {
         personaId: selectedPersonas[0].id,
-        command: selectedProvider.command,
+        command: selectedRuntime.command,
       });
     }
 
@@ -49,7 +49,7 @@ export function useReusableAgentDetection(
       !customPrompt.trim()
     ) {
       return findReusableAgent(agents, memberPubkeys, {
-        command: selectedProvider.command,
+        command: selectedRuntime.command,
         systemPrompt: customPrompt,
       });
     }
@@ -58,7 +58,7 @@ export function useReusableAgentDetection(
   }, [
     managedAgentsQuery.data,
     channelMembersQuery.data,
-    selectedProvider,
+    selectedRuntime,
     selectedPersonas,
     includeGeneric,
     customPrompt,

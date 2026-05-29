@@ -212,8 +212,8 @@ export function AgentsView() {
           personas.createPersonaMutation.isPending ||
           personas.updatePersonaMutation.isPending
         }
-        runtimes={personas.acpProvidersQuery.data ?? []}
-        runtimesLoading={personas.acpProvidersQuery.isLoading}
+        runtimes={personas.acpRuntimesQuery.data ?? []}
+        runtimesLoading={personas.acpRuntimesQuery.isLoading}
         onImportUpdateFile={
           personas.personaImportActions.handleEditDialogImportUpdateFile
         }

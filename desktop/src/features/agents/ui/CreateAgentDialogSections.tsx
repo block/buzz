@@ -109,7 +109,7 @@ export function CreateAgentRuntimeFields({
   mcpToolsets,
   parallelism,
   relayUrl,
-  selectedProviderId,
+  selectedRuntimeId,
   systemPrompt,
   turnTimeoutSeconds,
   onAcpCommandChange,
@@ -129,7 +129,7 @@ export function CreateAgentRuntimeFields({
   mcpToolsets: string;
   parallelism: string;
   relayUrl: string;
-  selectedProviderId: string;
+  selectedRuntimeId: string;
   systemPrompt: string;
   turnTimeoutSeconds: string;
   onAcpCommandChange: (value: string) => void;
@@ -187,7 +187,7 @@ export function CreateAgentRuntimeFields({
         </div>
       </div>
 
-      {selectedProviderId === "custom" ? (
+      {selectedRuntimeId === "custom" ? (
         <div className="space-y-1.5">
           <label
             className="text-sm font-medium"

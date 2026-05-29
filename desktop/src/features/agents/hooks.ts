@@ -74,7 +74,7 @@ export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
 export const teamsQueryKey = ["teams"] as const;
-export const acpRuntimesQueryKey = ["acp-providers"] as const;
+export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
 

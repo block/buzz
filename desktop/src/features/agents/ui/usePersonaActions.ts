@@ -36,7 +36,7 @@ type PersonaFeedbackSurface = "catalog" | "library";
 export function usePersonaActions() {
   const queryClient = useQueryClient();
   const personasQuery = usePersonasQuery();
-  const acpProvidersQuery = useAcpRuntimesQuery();
+  const acpRuntimesQuery = useAcpRuntimesQuery();
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
   const deletePersonaMutation = useDeletePersonaMutation();
@@ -215,7 +215,7 @@ export function usePersonaActions() {
   return {
     // Queries
     personasQuery,
-    acpProvidersQuery,
+    acpRuntimesQuery,
     // Mutations (for error/pending access)
     createPersonaMutation,
     updatePersonaMutation,

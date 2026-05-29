@@ -29,7 +29,7 @@ function toManagedBackend(
 export function useApplyTemplate() {
   const queryClient = useQueryClient();
   const channelTemplatesQuery = useChannelTemplatesQuery();
-  const acpProvidersQuery = useAvailableAcpRuntimes();
+  const acpRuntimesQuery = useAvailableAcpRuntimes();
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
   const { lastRuntimeId } = useLastRuntime();
@@ -69,12 +69,12 @@ export function useApplyTemplate() {
 
     const allPersonas = personasQuery.data ?? [];
     const allTeams = teamsQuery.data ?? [];
-    const providers = acpProvidersQuery.data ?? [];
-    if (providers.length === 0) return; // No runtimes — skip silently
+    const runtimes = acpRuntimesQuery.data ?? [];
+    if (runtimes.length === 0) return; // No runtimes — skip silently
 
     // Resolve default provider: user's last-used preference, or first available
     const defaultProvider =
-      providers.find((p) => p.id === lastRuntimeId) ?? providers[0] ?? null;
+      runtimes.find((p) => p.id === lastRuntimeId) ?? runtimes[0] ?? null;
     if (!defaultProvider) return;
 
     const seenPersonaIds = new Set<string>();
@@ -88,7 +88,7 @@ export function useApplyTemplate() {
       seenPersonaIds.add(persona.id);
       const resolved = resolvePersonaRuntime(
         entry.runtime ?? persona.runtime,
-        providers,
+        runtimes,
         defaultProvider,
       );
       inputs.push({
@@ -113,7 +113,7 @@ export function useApplyTemplate() {
         seenPersonaIds.add(persona.id);
         const resolved = resolvePersonaRuntime(
           teamEntry.runtime ?? persona.runtime,
-          providers,
+          runtimes,
           defaultProvider,
         );
         inputs.push({

@@ -42,7 +42,7 @@ type MockCommandAvailability = {
 };
 
 type MockBridgeOptions = {
-  acpProvidersCatalog?: Record<string, unknown>[];
+  acpRuntimesCatalog?: Record<string, unknown>[];
   managedAgentPrereqs?: {
     acp?: MockCommandAvailability;
     mcp?: MockCommandAvailability;

@@ -1,6 +1,7 @@
 import * as React from "react";
 
 const STORAGE_KEY = "sprout:last-runtime";
+const LEGACY_STORAGE_KEY = "sprout:last-runtime-provider";
 
 export function useLastRuntime(): {
   lastRuntimeId: string | null;
@@ -9,7 +10,10 @@ export function useLastRuntime(): {
   const [lastRuntimeId, setLastRuntimeId] = React.useState<string | null>(
     () => {
       try {
-        return localStorage.getItem(STORAGE_KEY);
+        return (
+          localStorage.getItem(STORAGE_KEY) ??
+          localStorage.getItem(LEGACY_STORAGE_KEY)
+        );
       } catch {
         return null;
       }
@@ -20,6 +24,7 @@ export function useLastRuntime(): {
     setLastRuntimeId(id);
     try {
       localStorage.setItem(STORAGE_KEY, id);
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
     } catch {
       // localStorage full — ignore
     }
