@@ -3,7 +3,7 @@ import {
   DndContext,
   DragOverlay,
   PointerSensor,
-  closestCenter,
+  pointerWithin,
   useDraggable,
   useDroppable,
   useSensor,
@@ -274,7 +274,7 @@ export function SidebarDndContext({
 
   return (
     <DndContext
-      collisionDetection={closestCenter}
+      collisionDetection={pointerWithin}
       onDragEnd={handleDragEnd}
       onDragStart={handleDragStart}
       sensors={sensors}

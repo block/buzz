@@ -351,7 +351,7 @@ export function ChannelGroupSection({
       </SidebarMenu>
     ) : null;
 
-  return (
+  const sectionContent = (
     <SidebarGroup className={groupClassName}>
       <div className="group/sidebar-section relative">
         <SidebarGroupLabel asChild>
@@ -384,15 +384,15 @@ export function ChannelGroupSection({
         />
       </div>
       {!isCollapsed ? (
-        <SidebarGroupContent id={contentId}>
-          {draggable ? (
-            <DroppableUngroupedBody>{channelList}</DroppableUngroupedBody>
-          ) : (
-            channelList
-          )}
-        </SidebarGroupContent>
+        <SidebarGroupContent id={contentId}>{channelList}</SidebarGroupContent>
       ) : null}
     </SidebarGroup>
+  );
+
+  return draggable ? (
+    <DroppableUngroupedBody>{sectionContent}</DroppableUngroupedBody>
+  ) : (
+    sectionContent
   );
 }
 
@@ -460,109 +460,109 @@ export function CustomChannelSection({
   return (
     <SortableSectionShell sectionId={section.id}>
       {({ dragHandleProps, isDragging }) => (
-        <SidebarGroup className={cn(isDragging && "opacity-30")}>
-          <ContextMenu>
-            <ContextMenuTrigger asChild>
-              <div
-                className="group/sidebar-section relative"
-                {...dragHandleProps}
-              >
-                <SidebarGroupLabel asChild>
-                  <button
-                    aria-controls={contentId}
-                    aria-expanded={!isCollapsed}
-                    className={SECTION_LABEL_BUTTON_CLASS}
-                    onClick={onToggleCollapsed}
-                    type="button"
-                  >
-                    <GripVertical
-                      className={cn(
-                        "h-3 w-3 shrink-0 text-sidebar-foreground/30",
-                        SECTION_ACTION_VISIBILITY_CLASS,
-                      )}
-                      aria-hidden="true"
-                    />
-                    <span>{section.name}</span>
-                    <ChevronDown
-                      aria-hidden="true"
-                      className={cn(
-                        SECTION_LABEL_CHEVRON_CLASS,
-                        isCollapsed ? "-rotate-90" : "rotate-0",
-                      )}
-                    />
-                  </button>
-                </SidebarGroupLabel>
+        <DroppableSectionBody sectionId={section.id}>
+          <SidebarGroup className={cn(isDragging && "opacity-30")}>
+            <ContextMenu>
+              <ContextMenuTrigger asChild>
                 <div
-                  className={cn(
-                    "absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5",
-                    SECTION_ACTION_VISIBILITY_CLASS,
-                  )}
+                  className="group/sidebar-section relative"
+                  {...dragHandleProps}
                 >
-                  {hasUnread ? (
+                  <SidebarGroupLabel asChild>
                     <button
-                      aria-label="Mark all as read"
+                      aria-controls={contentId}
+                      aria-expanded={!isCollapsed}
+                      className={SECTION_LABEL_BUTTON_CLASS}
+                      onClick={onToggleCollapsed}
+                      type="button"
+                    >
+                      <GripVertical
+                        className={cn(
+                          "h-3 w-3 shrink-0 text-sidebar-foreground/30",
+                          SECTION_ACTION_VISIBILITY_CLASS,
+                        )}
+                        aria-hidden="true"
+                      />
+                      <span>{section.name}</span>
+                      <ChevronDown
+                        aria-hidden="true"
+                        className={cn(
+                          SECTION_LABEL_CHEVRON_CLASS,
+                          isCollapsed ? "-rotate-90" : "rotate-0",
+                        )}
+                      />
+                    </button>
+                  </SidebarGroupLabel>
+                  <div
+                    className={cn(
+                      "absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5",
+                      SECTION_ACTION_VISIBILITY_CLASS,
+                    )}
+                  >
+                    {hasUnread ? (
+                      <button
+                        aria-label="Mark all as read"
+                        className={SECTION_ICON_BUTTON_CLASS}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onMarkSectionRead();
+                        }}
+                        title="Mark all as read"
+                        type="button"
+                      >
+                        <CheckCheck className="h-3.5 w-3.5" />
+                      </button>
+                    ) : null}
+                    <button
+                      aria-label="Rename section"
                       className={SECTION_ICON_BUTTON_CLASS}
                       onClick={(e) => {
                         e.stopPropagation();
-                        onMarkSectionRead();
+                        onRenameSection();
                       }}
-                      title="Mark all as read"
                       type="button"
                     >
-                      <CheckCheck className="h-3.5 w-3.5" />
+                      <Pencil className="h-3.5 w-3.5" />
                     </button>
-                  ) : null}
-                  <button
-                    aria-label="Rename section"
-                    className={SECTION_ICON_BUTTON_CLASS}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onRenameSection();
-                    }}
-                    type="button"
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    aria-label="Delete section"
-                    className={SECTION_ICON_BUTTON_CLASS}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onDeleteSection();
-                    }}
-                    type="button"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                    <button
+                      aria-label="Delete section"
+                      className={SECTION_ICON_BUTTON_CLASS}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteSection();
+                      }}
+                      type="button"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
-              </div>
-            </ContextMenuTrigger>
-            <ContextMenuContent>
-              <ContextMenuItem onClick={onRenameSection}>
-                <Pencil className="h-4 w-4" />
-                Rename section
-              </ContextMenuItem>
-              <ContextMenuItem disabled={isFirst} onClick={onMoveSectionUp}>
-                <ArrowUp className="h-4 w-4" />
-                Move up
-              </ContextMenuItem>
-              <ContextMenuItem disabled={isLast} onClick={onMoveSectionDown}>
-                <ArrowDown className="h-4 w-4" />
-                Move down
-              </ContextMenuItem>
-              <ContextMenuSeparator />
-              <ContextMenuItem
-                className="text-destructive focus:text-destructive"
-                onClick={onDeleteSection}
-              >
-                <Trash2 className="h-4 w-4" />
-                Delete section
-              </ContextMenuItem>
-            </ContextMenuContent>
-          </ContextMenu>
-          {!isCollapsed ? (
-            <SidebarGroupContent id={contentId}>
-              <DroppableSectionBody sectionId={section.id}>
+              </ContextMenuTrigger>
+              <ContextMenuContent>
+                <ContextMenuItem onClick={onRenameSection}>
+                  <Pencil className="h-4 w-4" />
+                  Rename section
+                </ContextMenuItem>
+                <ContextMenuItem disabled={isFirst} onClick={onMoveSectionUp}>
+                  <ArrowUp className="h-4 w-4" />
+                  Move up
+                </ContextMenuItem>
+                <ContextMenuItem disabled={isLast} onClick={onMoveSectionDown}>
+                  <ArrowDown className="h-4 w-4" />
+                  Move down
+                </ContextMenuItem>
+                <ContextMenuSeparator />
+                <ContextMenuItem
+                  className="text-destructive focus:text-destructive"
+                  onClick={onDeleteSection}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete section
+                </ContextMenuItem>
+              </ContextMenuContent>
+            </ContextMenu>
+            {!isCollapsed ? (
+              <SidebarGroupContent id={contentId}>
                 {channels.length > 0 ? (
                   <SidebarMenu>
                     {channels.map((channel) => (
@@ -601,10 +601,10 @@ export function CustomChannelSection({
                     ))}
                   </SidebarMenu>
                 ) : null}
-              </DroppableSectionBody>
-            </SidebarGroupContent>
-          ) : null}
-        </SidebarGroup>
+              </SidebarGroupContent>
+            ) : null}
+          </SidebarGroup>
+        </DroppableSectionBody>
       )}
     </SortableSectionShell>
   );
