@@ -59,4 +59,24 @@ void main() {
     expect(find.textContaining('Replying to'), findsNothing);
     expect(find.text('Post'), findsOneWidget);
   });
+
+  testWidgets('reply preview stays compact for a short note', (tester) async {
+    await tester.pumpWidget(buildTestable(ComposeNotePage(replyTo: replyNote)));
+    await tester.pump();
+
+    // The preview content sits just above the divider; for a one-line note
+    // the gap between the content text and the divider must be small (this
+    // guards the earlier "preview row way too tall" regression).
+    final contentBottom = tester
+        .getRect(find.text('The original note being replied to'))
+        .bottom;
+    final divider = find.byType(Divider);
+    expect(divider, findsOneWidget);
+    final dividerTop = tester.getRect(divider).top;
+    expect(
+      dividerTop - contentBottom,
+      lessThan(24),
+      reason: 'reply preview should hug its content, not reserve tall space',
+    );
+  });
 }

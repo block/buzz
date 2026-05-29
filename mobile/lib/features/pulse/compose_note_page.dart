@@ -5,7 +5,6 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
-import '../channels/message_content.dart';
 import '../profile/profile_provider.dart';
 import '../profile/user_cache_provider.dart';
 import 'note_card.dart';
@@ -176,62 +175,66 @@ class _ReplyContext extends ConsumerWidget {
               color: context.colors.onSurfaceVariant,
             ),
           ),
-          const SizedBox(height: Grid.half),
-          // Mirror the NoteCard list-row layout, read-only.
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 140),
-            child: ClipRect(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  CircleAvatar(
-                    radius: 18,
-                    backgroundColor: context.colors.primaryContainer,
-                    backgroundImage: profile?.avatarUrl != null
-                        ? NetworkImage(profile!.avatarUrl!)
-                        : null,
-                    child: profile?.avatarUrl == null
-                        ? Text(
-                            (profile?.initial ?? displayName[0]).toUpperCase(),
-                            style: context.textTheme.labelMedium?.copyWith(
-                              color: context.colors.onPrimaryContainer,
-                            ),
-                          )
-                        : null,
-                  ),
-                  const SizedBox(width: Grid.xs),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                displayName,
-                                style: context.textTheme.labelMedium?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            const SizedBox(width: Grid.half),
-                            Text(
-                              formatPulseRelativeTime(note.createdAt),
-                              style: context.textTheme.labelSmall?.copyWith(
-                                color: context.colors.onSurfaceVariant,
-                              ),
-                            ),
-                          ],
+          const SizedBox(height: Grid.xs),
+          // Mirror the NoteCard list-row layout, read-only. Shrink-wraps to
+          // the content; long notes are capped to ~3 lines via the parent
+          // page scroll + ellipsis on the content.
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              CircleAvatar(
+                radius: 18,
+                backgroundColor: context.colors.primaryContainer,
+                backgroundImage: profile?.avatarUrl != null
+                    ? NetworkImage(profile!.avatarUrl!)
+                    : null,
+                child: profile?.avatarUrl == null
+                    ? Text(
+                        (profile?.initial ?? displayName[0]).toUpperCase(),
+                        style: context.textTheme.labelMedium?.copyWith(
+                          color: context.colors.onPrimaryContainer,
                         ),
-                        const SizedBox(height: Grid.half),
-                        MessageContent(content: note.content, tags: note.tags),
+                      )
+                    : null,
+              ),
+              const SizedBox(width: Grid.xs),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            displayName,
+                            style: context.textTheme.labelMedium?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: Grid.half),
+                        Text(
+                          formatPulseRelativeTime(note.createdAt),
+                          style: context.textTheme.labelSmall?.copyWith(
+                            color: context.colors.onSurfaceVariant,
+                          ),
+                        ),
                       ],
                     ),
-                  ),
-                ],
+                    const SizedBox(height: Grid.half),
+                    Text(
+                      note.content,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.textTheme.bodyMedium?.copyWith(
+                        color: context.colors.onSurface,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
+            ],
           ),
           const SizedBox(height: Grid.xs),
           Divider(
