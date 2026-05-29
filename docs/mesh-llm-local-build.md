@@ -1,27 +1,44 @@
 # Mesh LLM local build prerequisites
 
 Sprout embeds mesh-llm through the Rust SDK pinned in Cargo. mesh-llm's native
-skippy/llama layer must be available when building the relay or desktop crates.
+skippy/llama layer is linked into the relay and desktop binaries.
 
-For local development we fail closed unless the native libraries are already
-prepared. Build them once from the pinned mesh-llm checkout, then point Cargo at
-the library directory:
+## Local Mac demo path
+
+For the first local milestone, use mesh-llm's default native build path. On macOS
+this compiles patched llama.cpp/ggml with Metal support the first time a Sprout
+binary that depends on mesh is built. The result is cached under Cargo's git
+checkout of mesh-llm, so subsequent builds are much faster.
+
+Prerequisites:
 
 ```bash
-# From a mesh-llm checkout pinned to the same rev as Cargo.toml (bd16da4 for v1):
-scripts/prepare-llama.sh pinned
-LLAMA_STAGE_LINK_MODE=dynamic scripts/build-llama.sh
-
-# Then build Sprout with dynamic linking enabled. Adjust the lib dir to the
-# build output printed by mesh-llm's build script.
-export LLAMA_STAGE_LINK_MODE=dynamic
-export LLAMA_STAGE_LIB_DIR=/path/to/mesh-llm/.deps/llama-build/build-stage-abi-cpu/lib
-cargo check --manifest-path desktop/src-tauri/Cargo.toml
-cargo check -p sprout-relay
+xcode-select --install   # if Command Line Tools are not installed yet
+brew install cmake       # if cmake is not already available
 ```
 
-If `LLAMA_STAGE_LINK_MODE` is omitted, mesh-llm's build script may try to build
-or link static llama archives. CI will eventually cache that build, but the first
-local milestone expects explicit dynamic-link configuration so missing native
-artifacts fail with a clear build error instead of silently doing surprise native
-work.
+Then build normally:
+
+```bash
+cargo build -p sprout-relay --bin sprout-relay
+cargo check --manifest-path desktop/src-tauri/Cargo.toml
+```
+
+Expect the first build to take several minutes while mesh-llm prepares and builds
+patched llama.cpp. This is intentional for the local demo: there is no external
+binary artifact to fetch and no separate dylib path to configure.
+
+## CI / release path
+
+CI should not rebuild llama.cpp from scratch on every job. For CI/release we will
+add a cached native build or a dynamic-link artifact path as a follow-up. The
+mesh-llm build script supports dynamic linking with:
+
+```bash
+export LLAMA_STAGE_LINK_MODE=dynamic
+export LLAMA_STAGE_LIB_DIR=/path/to/prebuilt/llama/libs
+```
+
+Do not use dynamic-link locally unless you already have compatible `llama`,
+`llama-common`, and `mtmd` dynamic libraries. The default static build is the
+supported local path for M1.
