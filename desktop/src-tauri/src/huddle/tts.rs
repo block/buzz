@@ -221,7 +221,7 @@ impl TtsPipeline {
     /// Returns `true` if the worker thread has exited (init failure, crash, or normal exit).
     /// Used by hot-start to detect dead pipelines and clear them for retry.
     pub fn is_finished(&self) -> bool {
-        self.thread.as_ref().map_or(true, |h| h.is_finished())
+        self.thread.as_ref().is_none_or(|h| h.is_finished())
     }
 }
 
@@ -317,7 +317,7 @@ fn tts_worker(
         let channels = NonZero::new(1u16).unwrap();
         let rate = NonZero::new(SAMPLE_RATE).unwrap();
         let silence = vec![0.0f32; SAMPLE_RATE as usize / 10]; // 100ms of silence
-        let player = Player::connect_new(&sink_handle.mixer());
+        let player = Player::connect_new(sink_handle.mixer());
         player.append(SamplesBuffer::new(channels, rate, silence));
         // Wait for the silent buffer to drain — this ensures the output stream
         // is fully initialized before the main loop creates its first Player.
@@ -387,7 +387,7 @@ fn tts_worker(
 
         // Single persistent Player — all sentences append here, rodio plays
         // them gaplessly without per-sentence device setup overhead.
-        let player = Player::connect_new(&sink_handle.mixer());
+        let player = Player::connect_new(sink_handle.mixer());
         // NOTE: tts_active is set AFTER the first player.append(), not before.
         // Setting it before synthesis would cause STT to discard user speech
         // during the synthesis window as "echo" even though no audio is

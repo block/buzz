@@ -1,7 +1,7 @@
 {
   "name": "sprout",
   "private": true,
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,7 @@
     "lint": "biome lint .",
     "check": "biome check . && pnpm check:file-sizes",
     "format": "biome format --write .",
-    "test": "node --test 'src/**/*.test.mjs'",
+    "test": "node --import ./test-loader.mjs --experimental-strip-types --test 'src/**/*.test.mjs'",
     "preview": "vite preview",
     "tauri": "tauri",
     "test:e2e": "pnpm build && playwright test",

@@ -279,7 +279,7 @@ pub async fn get_liked_notes(
         })],
     )
     .await?;
-    reactions.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    reactions.sort_by_key(|reaction| std::cmp::Reverse(reaction.created_at));
 
     let reaction_ids: Vec<String> = reactions.iter().map(|event| event.id.to_hex()).collect();
     let deletions = if reaction_ids.is_empty() {
@@ -395,7 +395,7 @@ pub async fn get_notes_timeline(
         .collect();
 
     // Sort newest-first.
-    notes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    notes.sort_by_key(|note| std::cmp::Reverse(note.created_at));
     notes.truncate(200);
 
     Ok(UserNotesResponse {

@@ -1,6 +1,8 @@
 import Picker from "@emoji-mart/react";
 import data from "@emoji-mart/data";
 import {
+  BellOff,
+  BellRing,
   Copy,
   CornerUpLeft,
   EllipsisVertical,
@@ -62,9 +64,12 @@ function MoreActionsMenu({
   message,
   onDelete,
   onEdit,
+  onFollowThread,
   onMarkUnread,
   onOpenChange,
+  onUnfollowThread,
   open,
+  isFollowingThread,
 }: {
   /** Channel UUID for the "Copy link" action. When null/undefined, the
    *  Copy link entry is hidden (e.g. inbox preview rows that don't have it). */
@@ -72,9 +77,12 @@ function MoreActionsMenu({
   message: TimelineMessage;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
+  onFollowThread?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onOpenChange: (open: boolean) => void;
+  onUnfollowThread?: (message: TimelineMessage) => void;
   open: boolean;
+  isFollowingThread?: boolean;
 }) {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
   // Set true the moment the user picks "Edit message". The
@@ -141,6 +149,25 @@ function MoreActionsMenu({
             >
               <MailOpen className="h-4 w-4" />
               Mark unread
+            </DropdownMenuItem>
+          ) : null}
+
+          {onFollowThread || onUnfollowThread ? (
+            <DropdownMenuItem
+              onClick={() => {
+                if (isFollowingThread) {
+                  onUnfollowThread?.(message);
+                } else {
+                  onFollowThread?.(message);
+                }
+              }}
+            >
+              {isFollowingThread ? (
+                <BellOff className="h-4 w-4" />
+              ) : (
+                <BellRing className="h-4 w-4" />
+              )}
+              {isFollowingThread ? "Unfollow thread" : "Follow thread"}
             </DropdownMenuItem>
           ) : null}
 
@@ -236,12 +263,15 @@ export function MessageActionBar({
   message,
   onDelete,
   onEdit,
+  onFollowThread,
   onMarkUnread,
   onReactionSelect,
   onReply,
+  onUnfollowThread,
   reactionErrorMessage = null,
   reactions,
   reactionPending = false,
+  isFollowingThread,
 }: {
   activeReplyTargetId?: string | null;
   /** Channel UUID — required for the "Copy link" action; when omitted the
@@ -250,12 +280,15 @@ export function MessageActionBar({
   message: TimelineMessage;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
+  onFollowThread?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onReactionSelect?: (emoji: string) => Promise<void>;
   onReply?: (message: TimelineMessage) => void;
+  onUnfollowThread?: (message: TimelineMessage) => void;
   reactionErrorMessage?: string | null;
   reactions: TimelineReaction[];
   reactionPending?: boolean;
+  isFollowingThread?: boolean;
 }) {
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
@@ -266,6 +299,8 @@ export function MessageActionBar({
     Boolean(onEdit) ||
     Boolean(onDelete) ||
     Boolean(onMarkUnread) ||
+    Boolean(onFollowThread) ||
+    Boolean(onUnfollowThread) ||
     !message.pending;
 
   if (!hasReplyAction && !hasReactionAction && !hasMoreMenuActions) {
@@ -386,9 +421,12 @@ export function MessageActionBar({
             message={message}
             onDelete={onDelete}
             onEdit={onEdit}
+            onFollowThread={onFollowThread}
             onMarkUnread={onMarkUnread}
             onOpenChange={setIsDropdownOpen}
+            onUnfollowThread={onUnfollowThread}
             open={isDropdownOpen}
+            isFollowingThread={isFollowingThread}
           />
         ) : null}
       </div>

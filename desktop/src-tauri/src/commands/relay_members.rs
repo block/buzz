@@ -67,7 +67,7 @@ pub async fn add_relay_member(
 ) -> Result<serde_json::Value, String> {
     let builder = events::build_relay_admin_add(&target_pubkey, &role)?;
     let result = submit_event(builder, &state).await?;
-    Ok(serde_json::to_value(result).map_err(|e| e.to_string())?)
+    serde_json::to_value(result).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -77,7 +77,7 @@ pub async fn remove_relay_member(
 ) -> Result<serde_json::Value, String> {
     let builder = events::build_relay_admin_remove(&target_pubkey)?;
     let result = submit_event(builder, &state).await?;
-    Ok(serde_json::to_value(result).map_err(|e| e.to_string())?)
+    serde_json::to_value(result).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -88,5 +88,5 @@ pub async fn change_relay_member_role(
 ) -> Result<serde_json::Value, String> {
     let builder = events::build_relay_admin_change_role(&target_pubkey, &new_role)?;
     let result = submit_event(builder, &state).await?;
-    Ok(serde_json::to_value(result).map_err(|e| e.to_string())?)
+    serde_json::to_value(result).map_err(|e| e.to_string())
 }

@@ -1,9 +1,15 @@
 import * as React from "react";
 import {
+  EMPTY_SET,
   useLiveChannelUpdates,
   type UseLiveChannelUpdatesOptions,
 } from "@/features/channels/useLiveChannelUpdates";
 import { useReadState } from "@/features/channels/readState/useReadState";
+import {
+  getThreadReference,
+  isBroadcastReply,
+} from "@/features/messages/lib/threading";
+import { shouldNotifyForEvent } from "@/features/notifications/lib/shouldNotify";
 import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import { CHANNEL_MESSAGE_EVENT_KINDS } from "@/shared/constants/kinds";
@@ -19,6 +25,175 @@ type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
 // filter to find one external trigger message. 1000 matches the live sub's
 // per-channel limit elsewhere in the app.
 const CATCH_UP_LIMIT = 1000;
+
+const PARTICIPATION_STORAGE_PREFIX = "sprout-thread-participation.v1";
+const MAX_PARTICIPATION_ENTRIES = 1000;
+
+function participationStorageKey(pubkey: string): string {
+  return `${PARTICIPATION_STORAGE_PREFIX}:${pubkey}`;
+}
+
+function readParticipationFromStorage(pubkey: string): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(participationStorageKey(pubkey));
+    if (!raw) {
+      return new Set();
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return new Set();
+    }
+    return new Set(parsed.filter((id): id is string => typeof id === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeParticipationToStorage(
+  pubkey: string,
+  rootIds: Set<string>,
+): void {
+  try {
+    const arr = [...rootIds];
+    const capped =
+      arr.length > MAX_PARTICIPATION_ENTRIES
+        ? arr.slice(arr.length - MAX_PARTICIPATION_ENTRIES)
+        : arr;
+    window.localStorage.setItem(
+      participationStorageKey(pubkey),
+      JSON.stringify(capped),
+    );
+  } catch {
+    // Ignore storage errors (private browsing, quota exceeded).
+  }
+}
+
+const AUTHORED_STORAGE_PREFIX = "sprout-thread-authored.v1";
+const MAX_AUTHORED_ENTRIES = 1000;
+
+function authoredStorageKey(pubkey: string): string {
+  return `${AUTHORED_STORAGE_PREFIX}:${pubkey}`;
+}
+
+function readAuthoredFromStorage(pubkey: string): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(authoredStorageKey(pubkey));
+    if (!raw) {
+      return new Set();
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return new Set();
+    }
+    return new Set(parsed.filter((id): id is string => typeof id === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeAuthoredToStorage(pubkey: string, rootIds: Set<string>): void {
+  try {
+    const arr = [...rootIds];
+    const capped =
+      arr.length > MAX_AUTHORED_ENTRIES
+        ? arr.slice(arr.length - MAX_AUTHORED_ENTRIES)
+        : arr;
+    window.localStorage.setItem(
+      authoredStorageKey(pubkey),
+      JSON.stringify(capped),
+    );
+  } catch {
+    // Ignore storage errors (private browsing, quota exceeded).
+  }
+}
+
+const MUTED_STORAGE_PREFIX = "sprout-thread-muted.v1";
+const MAX_MUTED_ENTRIES = 1000;
+
+function mutedStorageKey(pubkey: string): string {
+  return `${MUTED_STORAGE_PREFIX}:${pubkey}`;
+}
+
+function readMutedFromStorage(pubkey: string): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(mutedStorageKey(pubkey));
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((id): id is string => typeof id === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
+function writeMutedToStorage(pubkey: string, rootIds: Set<string>): void {
+  try {
+    const arr = [...rootIds];
+    const capped =
+      arr.length > MAX_MUTED_ENTRIES
+        ? arr.slice(arr.length - MAX_MUTED_ENTRIES)
+        : arr;
+    window.localStorage.setItem(
+      mutedStorageKey(pubkey),
+      JSON.stringify(capped),
+    );
+  } catch {
+    // Ignore storage errors (private browsing, quota exceeded).
+  }
+}
+
+export type ThreadActivityItem = {
+  id: string;
+  kind: number;
+  pubkey: string;
+  content: string;
+  createdAt: number;
+  channelId: string;
+  channelName: string;
+  tags: string[][];
+};
+
+const ACTIVITY_STORAGE_PREFIX = "sprout-thread-activity.v1";
+const MAX_ACTIVITY_ITEMS = 100;
+
+function activityStorageKey(pubkey: string): string {
+  return `${ACTIVITY_STORAGE_PREFIX}:${pubkey}`;
+}
+
+function readActivityFromStorage(pubkey: string): ThreadActivityItem[] {
+  try {
+    const raw = window.localStorage.getItem(activityStorageKey(pubkey));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is ThreadActivityItem =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof item.id === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeActivityToStorage(
+  pubkey: string,
+  items: ThreadActivityItem[],
+): void {
+  try {
+    const capped =
+      items.length > MAX_ACTIVITY_ITEMS
+        ? items.slice(items.length - MAX_ACTIVITY_ITEMS)
+        : items;
+    window.localStorage.setItem(
+      activityStorageKey(pubkey),
+      JSON.stringify(capped),
+    );
+  } catch {
+    // Ignore storage errors.
+  }
+}
 
 function parseTimestamp(value: string | null | undefined) {
   if (!value) {
@@ -74,6 +249,22 @@ export function useUnreadChannels(
   // against. Cleared when the user opens the channel.
   const forcedUnreadRef = React.useRef(new Set<string>());
 
+  // Root event IDs of threads where the current user has replied at least once.
+  // Used to determine if thread replies should trigger unread notifications.
+  const participatedRootIdsRef = React.useRef(new Set<string>());
+
+  // Root event IDs of top-level messages authored by the current user.
+  // Used to notify the author when someone replies to their posts.
+  const authoredRootIdsRef = React.useRef(new Set<string>());
+
+  // Root event IDs of threads the user has explicitly muted. Takes precedence
+  // over participation, follow, and authorship for notification suppression.
+  const mutedRootIdsRef = React.useRef(new Set<string>());
+
+  // Thread reply events that triggered notifications — surfaced in the Home
+  // activity feed as synthetic FeedItems.
+  const threadActivityRef = React.useRef<ThreadActivityItem[]>([]);
+
   // Tracks which channels we've already issued a catch-up REQ for this
   // session. Prevents re-fetching on every channels-list refetch, while still
   // letting newly-joined channels be caught up. Reset on identity change.
@@ -92,6 +283,14 @@ export function useUnreadChannels(
     latestByChannelRef.current = new Map();
     forcedUnreadRef.current = new Set();
     caughtUpChannelsRef.current = new Set();
+    participatedRootIdsRef.current = pubkey
+      ? readParticipationFromStorage(pubkey)
+      : new Set();
+    authoredRootIdsRef.current = pubkey
+      ? readAuthoredFromStorage(pubkey)
+      : new Set();
+    mutedRootIdsRef.current = pubkey ? readMutedFromStorage(pubkey) : new Set();
+    threadActivityRef.current = pubkey ? readActivityFromStorage(pubkey) : [];
     bumpLatestVersion();
   }, [pubkey, relayClient]);
 
@@ -165,9 +364,89 @@ export function useUnreadChannels(
     [callerOnChannelMessage],
   );
 
+  const handleSelfChannelMessage = React.useCallback(
+    (event: RelayEvent) => {
+      const ref = getThreadReference(event.tags);
+      if (ref.rootId !== null) {
+        participatedRootIdsRef.current.add(ref.rootId);
+        if (normalizedPubkey !== null) {
+          writeParticipationToStorage(
+            normalizedPubkey,
+            participatedRootIdsRef.current,
+          );
+        }
+      } else {
+        authoredRootIdsRef.current.add(event.id);
+        if (normalizedPubkey !== null) {
+          writeAuthoredToStorage(normalizedPubkey, authoredRootIdsRef.current);
+        }
+      }
+      bumpLatestVersion();
+    },
+    [normalizedPubkey],
+  );
+
+  const handleThreadReplyNotification = React.useCallback(
+    (channelId: string, event: RelayEvent) => {
+      const channelName =
+        channels.find((ch) => ch.id === channelId)?.name ?? "";
+      const item: ThreadActivityItem = {
+        id: event.id,
+        kind: event.kind,
+        pubkey: event.pubkey,
+        content: event.content,
+        createdAt: event.created_at,
+        channelId,
+        channelName,
+        tags: [...event.tags],
+      };
+      const existing = threadActivityRef.current;
+      if (existing.some((e) => e.id === item.id)) return;
+      const next = [...existing, item];
+      const capped =
+        next.length > MAX_ACTIVITY_ITEMS
+          ? next.slice(next.length - MAX_ACTIVITY_ITEMS)
+          : next;
+      threadActivityRef.current = capped;
+      if (normalizedPubkey !== null) {
+        writeActivityToStorage(normalizedPubkey, capped);
+      }
+      bumpLatestVersion();
+    },
+    [channels, normalizedPubkey],
+  );
+
+  const muteThread = React.useCallback(
+    (rootId: string) => {
+      mutedRootIdsRef.current.add(rootId);
+      if (normalizedPubkey !== null) {
+        writeMutedToStorage(normalizedPubkey, mutedRootIdsRef.current);
+      }
+      bumpLatestVersion();
+    },
+    [normalizedPubkey],
+  );
+
+  const unmuteThread = React.useCallback(
+    (rootId: string) => {
+      mutedRootIdsRef.current.delete(rootId);
+      if (normalizedPubkey !== null) {
+        writeMutedToStorage(normalizedPubkey, mutedRootIdsRef.current);
+      }
+      bumpLatestVersion();
+    },
+    [normalizedPubkey],
+  );
+
   useLiveChannelUpdates(channels, activeChannelId, {
     ...liveUpdateOptions,
     onChannelMessage: handleChannelMessage,
+    onThreadReplyNotification: handleThreadReplyNotification,
+    onSelfChannelMessage: handleSelfChannelMessage,
+    participatedRootIds: participatedRootIdsRef.current,
+    followedRootIds: liveUpdateOptions.followedRootIds,
+    authoredRootIds: authoredRootIdsRef.current,
+    mutedRootIds: mutedRootIdsRef.current,
   });
 
   // Effect-key the catch-up on the *set* of channel IDs, not the array
@@ -184,6 +463,7 @@ export function useUnreadChannels(
   // NIP-RS read marker?" If yes, advance latestByChannelRef so the unread
   // predicate fires. This is the only way historical unreads survive an
   // app restart now that we don't persist any client-side "latest" state.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: options.followedRootIds intentionally omitted — it's a Set reference that changes identity every render; the catch-up is a one-shot per-channel operation controlled by caughtUpChannelsRef, not reactive to follow changes
   React.useEffect(() => {
     if (!isReadStateReady) return;
     if (!relayClient) return;
@@ -205,7 +485,12 @@ export function useUnreadChannels(
     let isCancelled = false;
 
     type CatchUpResult =
-      | { channelId: string; ok: true; maxExternal: number }
+      | {
+          channelId: string;
+          ok: true;
+          maxExternal: number;
+          threadReplies: ThreadActivityItem[];
+        }
       | { channelId: string; ok: false };
 
     void Promise.all(
@@ -224,7 +509,38 @@ export function useUnreadChannels(
             limit: CATCH_UP_LIMIT,
           });
 
+          // Pass 1: build participation from self-authored thread replies
+          // and track self-authored top-level messages for author notifications
+          for (const event of events) {
+            if (
+              normalizedPubkey !== null &&
+              event.pubkey.toLowerCase() === normalizedPubkey
+            ) {
+              const ref = getThreadReference(event.tags);
+              if (ref.rootId !== null) {
+                participatedRootIdsRef.current.add(ref.rootId);
+              } else {
+                authoredRootIdsRef.current.add(event.id);
+              }
+            }
+          }
+
+          if (normalizedPubkey !== null) {
+            writeParticipationToStorage(
+              normalizedPubkey,
+              participatedRootIdsRef.current,
+            );
+            writeAuthoredToStorage(
+              normalizedPubkey,
+              authoredRootIdsRef.current,
+            );
+          }
+
+          // Pass 2: compute maxExternal and collect thread reply activity,
+          // applying the notification filter to both.
           let maxExternal = 0;
+          const threadReplies: ThreadActivityItem[] = [];
+          const chName = channels.find((ch) => ch.id === channelId)?.name ?? "";
           for (const event of events) {
             if (
               normalizedPubkey !== null &&
@@ -233,12 +549,37 @@ export function useUnreadChannels(
               continue;
             }
             if (readAt !== null && event.created_at <= readAt) continue;
+            if (
+              !shouldNotifyForEvent(
+                event,
+                normalizedPubkey ?? "",
+                participatedRootIdsRef.current,
+                options.followedRootIds ?? EMPTY_SET,
+                authoredRootIdsRef.current,
+                mutedRootIdsRef.current,
+              )
+            ) {
+              continue;
+            }
             if (event.created_at > maxExternal) {
               maxExternal = event.created_at;
             }
+            const evtRef = getThreadReference(event.tags);
+            if (evtRef.parentId !== null && !isBroadcastReply(event.tags)) {
+              threadReplies.push({
+                id: event.id,
+                kind: event.kind,
+                pubkey: event.pubkey,
+                content: event.content,
+                createdAt: event.created_at,
+                channelId,
+                channelName: chName,
+                tags: [...event.tags],
+              });
+            }
           }
 
-          return { channelId, ok: true, maxExternal };
+          return { channelId, ok: true, maxExternal, threadReplies };
         } catch {
           // Transient relay failure for this channel — release the claim
           // so we retry on the next effect run instead of staying stuck
@@ -249,16 +590,36 @@ export function useUnreadChannels(
     ).then((results) => {
       if (isCancelled) return;
       let didAdvance = false;
+      const allThreadReplies: ThreadActivityItem[] = [];
       for (const result of results) {
         if (!result.ok) {
           caughtUpChannelsRef.current.delete(result.channelId);
           continue;
         }
-        const { channelId, maxExternal } = result;
+        const { channelId, maxExternal, threadReplies } = result;
+        allThreadReplies.push(...threadReplies);
         if (maxExternal === 0) continue;
         const current = latestByChannelRef.current.get(channelId) ?? 0;
         if (maxExternal > current) {
           latestByChannelRef.current.set(channelId, maxExternal);
+          didAdvance = true;
+        }
+      }
+      if (allThreadReplies.length > 0) {
+        const existingIds = new Set(threadActivityRef.current.map((e) => e.id));
+        const newItems = allThreadReplies.filter(
+          (item) => !existingIds.has(item.id),
+        );
+        if (newItems.length > 0) {
+          const merged = [...threadActivityRef.current, ...newItems];
+          const capped =
+            merged.length > MAX_ACTIVITY_ITEMS
+              ? merged.slice(merged.length - MAX_ACTIVITY_ITEMS)
+              : merged;
+          threadActivityRef.current = capped;
+          if (normalizedPubkey) {
+            writeActivityToStorage(normalizedPubkey, capped);
+          }
           didAdvance = true;
         }
       }
@@ -342,5 +703,11 @@ export function useUnreadChannels(
     // should include in memo deps.
     getEffectiveTimestamp,
     readStateVersion,
+    participatedRootIds: participatedRootIdsRef.current as ReadonlySet<string>,
+    authoredRootIds: authoredRootIdsRef.current as ReadonlySet<string>,
+    threadActivityItems: threadActivityRef.current,
+    mutedRootIds: mutedRootIdsRef.current as ReadonlySet<string>,
+    muteThread,
+    unmuteThread,
   };
 }

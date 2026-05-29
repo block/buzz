@@ -30,23 +30,28 @@ export const MessageRow = React.memo(
     activeReplyTargetId = null,
     channelId = null,
     highlighted = false,
+    isFollowingThread,
     layoutVariant = "default",
     message,
     onDelete,
     onEdit,
+    onFollowThread,
     onMarkUnread,
     onToggleReaction,
     onReply,
+    onUnfollowThread,
     profiles,
     searchQuery,
   }: {
     activeReplyTargetId?: string | null;
     channelId?: string | null;
     highlighted?: boolean;
+    isFollowingThread?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
     onDelete?: (message: TimelineMessage) => void;
     onEdit?: (message: TimelineMessage) => void;
+    onFollowThread?: (message: TimelineMessage) => void;
     onMarkUnread?: (message: TimelineMessage) => void;
     onToggleReaction?: (
       message: TimelineMessage,
@@ -54,6 +59,7 @@ export const MessageRow = React.memo(
       remove: boolean,
     ) => Promise<void>;
     onReply?: (message: TimelineMessage) => void;
+    onUnfollowThread?: (message: TimelineMessage) => void;
     profiles?: UserProfileLookup;
     searchQuery?: string;
   }) {
@@ -201,14 +207,17 @@ export const MessageRow = React.memo(
         <MessageActionBar
           activeReplyTargetId={activeReplyTargetId}
           channelId={channelId}
+          isFollowingThread={isFollowingThread}
           message={message}
           onDelete={onDelete}
           onEdit={onEdit}
+          onFollowThread={onFollowThread}
           onMarkUnread={onMarkUnread}
           onReactionSelect={
             canToggleReactions ? handleReactionSelect : undefined
           }
           onReply={onReply}
+          onUnfollowThread={onUnfollowThread}
           reactionErrorMessage={reactionErrorMessage}
           reactionPending={reactionPending}
           reactions={reactions}
@@ -436,6 +445,7 @@ export const MessageRow = React.memo(
     prev.message.personaDisplayName === next.message.personaDisplayName &&
     prev.highlighted === next.highlighted &&
     prev.activeReplyTargetId === next.activeReplyTargetId &&
+    prev.isFollowingThread === next.isFollowingThread &&
     prev.layoutVariant === next.layoutVariant &&
     prev.profiles === next.profiles &&
     prev.searchQuery === next.searchQuery,

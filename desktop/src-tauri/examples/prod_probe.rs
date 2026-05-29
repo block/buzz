@@ -98,20 +98,22 @@ fn main() {
     let dir = PathBuf::from(&model_dir);
     let p = |name: &str| dir.join(name).to_string_lossy().into_owned();
 
-    let mut cfg = OfflineTtsConfig::default();
-    cfg.model = OfflineTtsModelConfig {
-        pocket: OfflineTtsPocketModelConfig {
-            lm_main: Some(p("lm_main.int8.onnx")),
-            lm_flow: Some(p("lm_flow.int8.onnx")),
-            encoder: Some(p("encoder.onnx")),
-            decoder: Some(p("decoder.int8.onnx")),
-            text_conditioner: Some(p("text_conditioner.onnx")),
-            vocab_json: Some(p("vocab.json")),
-            token_scores_json: Some(p("token_scores.json")),
-            voice_embedding_cache_capacity: 16,
+    let cfg = OfflineTtsConfig {
+        model: OfflineTtsModelConfig {
+            pocket: OfflineTtsPocketModelConfig {
+                lm_main: Some(p("lm_main.int8.onnx")),
+                lm_flow: Some(p("lm_flow.int8.onnx")),
+                encoder: Some(p("encoder.onnx")),
+                decoder: Some(p("decoder.int8.onnx")),
+                text_conditioner: Some(p("text_conditioner.onnx")),
+                vocab_json: Some(p("vocab.json")),
+                token_scores_json: Some(p("token_scores.json")),
+                voice_embedding_cache_capacity: 16,
+            },
+            num_threads: 1,
+            debug: false,
+            ..Default::default()
         },
-        num_threads: 1,
-        debug: false,
         ..Default::default()
     };
     let engine = OfflineTts::create(&cfg).expect("engine create");
@@ -199,8 +201,8 @@ fn find_gap(samples: &[f32], sr: u32, thresh: f32, min_ms: u32) -> String {
     let scan_start = (sr as usize * 30) / 1000;
     let min_samples = (sr as usize * min_ms as usize) / 1000;
     let mut silence_from: Option<usize> = None;
-    for i in scan_start..samples.len() {
-        if samples[i].abs() < thresh {
+    for (i, sample) in samples.iter().enumerate().skip(scan_start) {
+        if sample.abs() < thresh {
             silence_from.get_or_insert(i);
         } else if let Some(start) = silence_from {
             if i - start >= min_samples {

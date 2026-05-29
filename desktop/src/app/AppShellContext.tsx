@@ -1,4 +1,5 @@
 import * as React from "react";
+import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
 
 type AppShellContextValue = {
   markAllChannelsRead: () => void;
@@ -18,6 +19,11 @@ type AppShellContextValue = {
   // Bump-counter that invalidates whenever the read marker changes. Include
   // in memo deps that consume getChannelReadAt.
   readStateVersion: number;
+  followThread: (rootId: string) => void;
+  unfollowThread: (rootId: string) => void;
+  isFollowingThread: (rootId: string) => boolean;
+  isNotifiedForThread: (rootId: string) => boolean;
+  threadActivityItems: ThreadActivityItem[];
 };
 
 const AppShellContext = React.createContext<AppShellContextValue>({
@@ -27,6 +33,11 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   openChannelManagement: () => {},
   getChannelReadAt: () => null,
   readStateVersion: 0,
+  followThread: () => {},
+  unfollowThread: () => {},
+  isFollowingThread: () => false,
+  isNotifiedForThread: () => false,
+  threadActivityItems: [],
 });
 
 export function AppShellProvider({

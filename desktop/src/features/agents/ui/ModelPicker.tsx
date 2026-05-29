@@ -126,7 +126,16 @@ export function ModelPicker({
             </div>
           ) : !modelsData.supportsSwitching ? (
             <div className="px-3 py-2 text-sm text-muted-foreground">
-              This agent uses the runtime&apos;s default model.
+              {agent.model ? (
+                <>
+                  <p className="font-medium text-foreground">{agent.model}</p>
+                  <p className="mt-0.5 text-xs">
+                    This runtime does not support switching models.
+                  </p>
+                </>
+              ) : (
+                "This agent uses the runtime's default model."
+              )}
             </div>
           ) : (
             <DropdownMenuRadioGroup

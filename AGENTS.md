@@ -95,13 +95,15 @@ unit tests + builds. Clippy passing does not mean fmt passes; run both.
 Run `just test` for integration tests if you touched `sprout-relay`,
 `sprout-db`, or `sprout-auth` — these require a running Postgres and Redis.
 
-**Pre-commit and pre-push hooks** are installed automatically by `just setup`.
-Pre-commit runs 5 checks in parallel on every `git commit` (Rust fmt, Tauri Rust
-fmt, desktop lint, web lint, mobile fmt) — a commit will fail if any are dirty.
-Pre-push runs the full CI gate: all pre-commit checks plus clippy, unit tests,
-desktop build, Tauri check, web build, and mobile tests (~minutes). Run
-`just fmt-all` before committing to auto-fix all formatting in one shot. Run
-`just hooks` to re-install hooks after env changes.
+**Pre-commit hooks** are installed automatically by `just setup` and auto-fix
+formatting via `stage_fixed`. Pre-commit runs fix variants in parallel (Rust
+fmt, Tauri Rust fmt, desktop biome fix, web biome fix, mobile dart format).
+Auto-fixable issues are fixed and re-staged; unfixable lint issues block the
+commit. **Pre-push hooks** run clippy (workspace + Tauri) and fast unit tests
+in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter) — no overlap with
+pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix all formatting
+in one shot. Run `just ci` for the full local gate. Run `just hooks` to
+re-install hooks after env changes.
 
 Additional rules:
 - No `unsafe` code
@@ -206,7 +208,7 @@ See [TESTING.md](TESTING.md) for the full multi-agent E2E guide.
 3. **`messages search` must include `--kinds`** — an open-ended search (no kinds) hits the relay p-gate and returns 403. Pass at least `--kinds 9,45001,45003` to scope the query.
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
-6. **Desktop fmt check fails in worktrees and blocks commits** — the pre-commit hook runs `just desktop-tauri-fmt-check`, which fails in git worktrees because `cargo fmt` resolves workspace paths relative to the worktree root. Run `just desktop-tauri-fmt` from the main checkout to apply the fix, then re-stage and commit. CI is unaffected.
+6. **Desktop Tauri fmt fails in worktrees and blocks commits** — the pre-commit hook runs `just desktop-tauri-fmt`, which fails in git worktrees because `cargo fmt` resolves workspace paths relative to the worktree root. Run `just desktop-tauri-fmt` from the main checkout to apply the fix, then re-stage and commit. CI is unaffected.
 
 ---
 

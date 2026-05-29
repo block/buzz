@@ -21,6 +21,7 @@ import {
   useOpenDmMutation,
 } from "@/features/channels/hooks";
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
+import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
 import {
   useHomeFeedNotifications,
   useHomeFeedNotificationState,
@@ -268,12 +269,25 @@ export function AppShell() {
   );
 
   const {
+    followedRootIds,
+    isFollowing: isFollowingThread,
+    followThread,
+    unfollowThread,
+  } = useThreadFollows(identityQuery.data?.pubkey);
+
+  const {
     markAllChannelsRead,
     markChannelRead,
     markChannelUnread,
     unreadChannelIds,
     getEffectiveTimestamp: getChannelReadAt,
     readStateVersion,
+    participatedRootIds,
+    authoredRootIds,
+    threadActivityItems,
+    mutedRootIds,
+    muteThread,
+    unmuteThread,
   } = useUnreadChannels(
     sidebarChannels,
     activeChannel,
@@ -287,6 +301,7 @@ export function AppShell() {
       onChannelMessage: handleChannelNotification,
       onDmMessage: handleDmNotification,
       onLiveMention: refetchHomeFeedOnLiveMention,
+      followedRootIds,
     },
   );
 
@@ -304,6 +319,31 @@ export function AppShell() {
     getChannelReadAt,
     readStateVersion,
     feedProfilesQuery.data?.profiles,
+  );
+
+  const isNotifiedForThread = React.useCallback(
+    (rootId: string) =>
+      !mutedRootIds.has(rootId) &&
+      (followedRootIds.has(rootId) ||
+        participatedRootIds.has(rootId) ||
+        authoredRootIds.has(rootId)),
+    [followedRootIds, mutedRootIds, participatedRootIds, authoredRootIds],
+  );
+
+  const handleFollowThread = React.useCallback(
+    (rootId: string) => {
+      followThread(rootId);
+      unmuteThread(rootId);
+    },
+    [followThread, unmuteThread],
+  );
+
+  const handleUnfollowThread = React.useCallback(
+    (rootId: string) => {
+      unfollowThread(rootId);
+      muteThread(rootId);
+    },
+    [unfollowThread, muteThread],
   );
 
   const createChannelMutation = useCreateChannelMutation();
@@ -609,6 +649,11 @@ export function AppShell() {
             },
             getChannelReadAt,
             readStateVersion,
+            followThread: handleFollowThread,
+            unfollowThread: handleUnfollowThread,
+            isFollowingThread,
+            isNotifiedForThread,
+            threadActivityItems,
           }}
         >
           <HuddleProvider>

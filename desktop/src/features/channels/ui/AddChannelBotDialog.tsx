@@ -563,6 +563,11 @@ export function AddChannelBotDialog({
               </DropdownMenuRadioGroup>
             </DropdownMenuContent>
           </DropdownMenu>
+          <p className="text-xs text-muted-foreground">
+            {selectedPersonas.some((p) => p.provider)
+              ? "Personas with a preferred runtime will use their own instead of this selection."
+              : "Default runtime for all deployed agents."}
+          </p>
         </div>
 
         {teams.length > 0 ? (

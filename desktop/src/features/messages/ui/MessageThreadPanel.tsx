@@ -67,6 +67,9 @@ type MessageThreadPanelProps = {
   threadTypingPubkeys: string[];
   toolbarExtraActions?: React.ReactNode;
   widthPx: number;
+  isFollowingThread?: boolean;
+  onFollowThread?: () => void;
+  onUnfollowThread?: () => void;
 };
 
 function canManageMessage(
@@ -89,12 +92,14 @@ export function MessageThreadPanel({
   disabled = false,
   editTarget,
   isSending,
+  isFollowingThread,
   onCancelEdit,
   onCancelReply,
   onClose,
   onDelete,
   onEdit,
   onEditSave,
+  onFollowThread,
   onMarkUnread,
   onExpandReplies,
   onResetWidth,
@@ -103,6 +108,7 @@ export function MessageThreadPanel({
   onSelectReplyTarget,
   onSend,
   onToggleReaction,
+  onUnfollowThread,
   profiles,
   replyTargetId,
   replyTargetMessage,
@@ -228,6 +234,7 @@ export function MessageThreadPanel({
                 <MessageRow
                   activeReplyTargetId={replyTargetId}
                   channelId={channelId}
+                  isFollowingThread={isFollowingThread}
                   layoutVariant="thread-reply"
                   message={threadHead}
                   onDelete={
@@ -240,8 +247,14 @@ export function MessageThreadPanel({
                       ? onEdit
                       : undefined
                   }
+                  onFollowThread={
+                    onFollowThread ? (_msg) => onFollowThread() : undefined
+                  }
                   onMarkUnread={onMarkUnread}
                   onToggleReaction={onToggleReaction}
+                  onUnfollowThread={
+                    onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
+                  }
                   profiles={profiles}
                 />
               </div>

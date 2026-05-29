@@ -37,7 +37,7 @@ function matchesInboxFilter(
   filter: InboxFilter,
 ) {
   if (filter === "all") {
-    return item.categories.some((category) => category !== "activity");
+    return true;
   }
 
   return item.categories.includes(filter);

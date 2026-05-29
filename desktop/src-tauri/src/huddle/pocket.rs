@@ -38,7 +38,7 @@
 //! - `load_text_to_speech(model_dir)`              → `Result<Engine, String>`
 //! - `load_voice_style(path)`                      → `Result<VoiceStyle, String>`
 //! - `Engine::synth_chunk(&self, text, lang, &VoiceStyle, steps, speed)`
-//!                                                 → `Result<Vec<f32>, String>`
+//!   → `Result<Vec<f32>, String>`
 //!
 //! `lang` and `steps` are accepted for API compatibility with the previous
 //! Kokoro engine but are unused — Pocket TTS does its own language ID from
@@ -589,10 +589,12 @@ mod tests {
         assert_eq!(out.text, format!("{}Yep.", short_prefix()));
         assert!(out.is_short, "1-word input is short");
         assert_eq!(out.max_frames, Some(SHORT_PROMPT_MAX_FRAMES));
-        assert!(
-            SHORT_PROMPT_MAX_FRAMES < SHERPA_ONNX_MAX_FRAMES_DEFAULT,
-            "short cap must be tighter than the upstream default"
-        );
+        const {
+            assert!(
+                SHORT_PROMPT_MAX_FRAMES < SHERPA_ONNX_MAX_FRAMES_DEFAULT,
+                "short cap must be tighter than the upstream default"
+            );
+        }
     }
 
     #[test]
@@ -758,10 +760,14 @@ mod tests {
     #[test]
     fn short_prompt_max_frames_is_below_upstream_default() {
         // Sanity: the override only ever *lowers* the cap, never raises it.
-        assert!(SHORT_PROMPT_MAX_FRAMES < SHERPA_ONNX_MAX_FRAMES_DEFAULT);
+        const {
+            assert!(SHORT_PROMPT_MAX_FRAMES < SHERPA_ONNX_MAX_FRAMES_DEFAULT);
+        }
         // …and is still large enough for a one-to-four-word reply. At Mimi's
         // 12.5 Hz frame rate, 100 frames = 8 s, which is roomy.
-        assert!(SHORT_PROMPT_MAX_FRAMES >= 50, "would risk truncation");
+        const {
+            assert!(SHORT_PROMPT_MAX_FRAMES >= 50, "would risk truncation");
+        }
     }
 
     // ── trim_leading_cold_start ──────────────────────────────────────────────

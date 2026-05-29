@@ -2,44 +2,33 @@ pre-commit:
   parallel: true
   commands:
     rust-fmt:
-      run: just fmt-check
+      run: just fmt
+      stage_fixed: true
     desktop-tauri-fmt:
-      run: just desktop-tauri-fmt-check
-    desktop-check:
-      run: just desktop-check
-    desktop-test:
-      run: just desktop-test
-    web-check:
-      run: just web-check
-    mobile-check:
-      run: just mobile-check
+      run: just desktop-tauri-fmt
+      stage_fixed: true
+    desktop-fix:
+      run: just desktop-fix
+      stage_fixed: true
+    web-fix:
+      run: just web-fix
+      stage_fixed: true
+    mobile-fix:
+      run: just mobile-fix
+      stage_fixed: true
 
 pre-push:
   parallel: true
   commands:
-    rust-fmt:
-      run: just fmt-check
     rust-clippy:
       run: just clippy
+    desktop-tauri-clippy:
+      run: just desktop-tauri-clippy
     rust-tests:
       run: just test-unit
-    desktop-check:
-      run: just desktop-check
     desktop-test:
       run: just desktop-test
-    desktop-tauri-fmt:
-      run: just desktop-tauri-fmt-check
-    desktop-build:
-      run: just desktop-build
-    desktop-tauri-check:
-      run: just desktop-tauri-check
     desktop-tauri-test:
       run: just desktop-tauri-test
-    web-check:
-      run: just web-check
-    web-build:
-      run: just web-build
-    mobile-check:
-      run: just mobile-check
     mobile-test:
       run: just mobile-test

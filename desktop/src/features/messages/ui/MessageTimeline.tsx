@@ -30,10 +30,13 @@ type MessageTimelineProps = {
   /** Map from lowercase pubkey → persona display name for bot members. */
   personaLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
+  followThreadById?: (rootId: string) => void;
+  isFollowingThreadById?: (rootId: string) => boolean;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
+  unfollowThreadById?: (rootId: string) => void;
   onToggleReaction?: (
     message: TimelineMessage,
     emoji: string,
@@ -60,6 +63,8 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   fetchOlder,
   hasOlderMessages = true,
   isFetchingOlder = false,
+  followThreadById,
+  isFollowingThreadById,
   messageFooters,
   personaLookup,
   profiles,
@@ -68,6 +73,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   onMarkUnread,
   onReply,
   onToggleReaction,
+  unfollowThreadById,
   scrollContainerRef: externalScrollRef,
   searchActiveMessageId = null,
   searchMatchingMessageIds,
@@ -186,7 +192,9 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                 activeReplyTargetId={activeReplyTargetId}
                 channelId={channelId}
                 currentPubkey={currentPubkey}
+                followThreadById={followThreadById}
                 highlightedMessageId={highlightedMessageId}
+                isFollowingThreadById={isFollowingThreadById}
                 messageFooters={messageFooters}
                 messages={messages}
                 onDelete={onDelete}
@@ -199,6 +207,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                 searchActiveMessageId={searchActiveMessageId}
                 searchMatchingMessageIds={searchMatchingMessageIds}
                 searchQuery={searchQuery}
+                unfollowThreadById={unfollowThreadById}
               />
             ) : null}
 

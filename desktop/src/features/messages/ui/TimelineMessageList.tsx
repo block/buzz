@@ -18,13 +18,16 @@ type TimelineMessageListProps = {
   activeReplyTargetId?: string | null;
   channelId?: string | null;
   currentPubkey?: string;
+  followThreadById?: (rootId: string) => void;
   highlightedMessageId?: string | null;
+  isFollowingThreadById?: (rootId: string) => boolean;
   messageFooters?: Record<string, React.ReactNode>;
   messages: TimelineMessage[];
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
+  unfollowThreadById?: (rootId: string) => void;
   onToggleReaction?: (
     message: TimelineMessage,
     emoji: string,
@@ -45,7 +48,9 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   activeReplyTargetId = null,
   channelId,
   currentPubkey,
+  followThreadById,
   highlightedMessageId = null,
+  isFollowingThreadById,
   messageFooters,
   messages,
   onDelete,
@@ -58,6 +63,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   searchActiveMessageId = null,
   searchMatchingMessageIds,
   searchQuery,
+  unfollowThreadById,
 }: TimelineMessageListProps) {
   const entries = React.useMemo(
     () => buildMainTimelineEntries(messages),
@@ -113,6 +119,11 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
             activeReplyTargetId={activeReplyTargetId}
             channelId={channelId}
             highlighted={false}
+            isFollowingThread={
+              isFollowingThreadById
+                ? isFollowingThreadById(message.id)
+                : undefined
+            }
             message={message}
             onDelete={
               onDelete && currentPubkey && message.pubkey === currentPubkey
@@ -124,9 +135,17 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
                 ? onEdit
                 : undefined
             }
+            onFollowThread={
+              followThreadById ? () => followThreadById(message.id) : undefined
+            }
             onMarkUnread={onMarkUnread}
             onToggleReaction={onToggleReaction}
             onReply={onReply}
+            onUnfollowThread={
+              unfollowThreadById
+                ? () => unfollowThreadById(message.id)
+                : undefined
+            }
             profiles={profiles}
           />
           <MessageThreadSummaryRow

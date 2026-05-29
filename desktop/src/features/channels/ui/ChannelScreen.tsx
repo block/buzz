@@ -81,8 +81,15 @@ export function ChannelScreen({
   targetMessageEvent,
   targetMessageId,
 }: ChannelScreenProps) {
-  const { markChannelRead, markChannelUnread, openChannelManagement } =
-    useAppShell();
+  const {
+    markChannelRead,
+    markChannelUnread,
+    openChannelManagement,
+    followThread,
+    unfollowThread,
+    isFollowingThread,
+    isNotifiedForThread,
+  } = useAppShell();
   const [profilePanelPubkey, setProfilePanelPubkey] = React.useState<
     string | null
   >(null);
@@ -90,6 +97,8 @@ export function ChannelScreen({
   const [openThreadHeadId, setOpenThreadHeadId] = React.useState<string | null>(
     null,
   );
+  const isNotifiedForCurrentThread =
+    openThreadHeadId != null ? isNotifiedForThread(openThreadHeadId) : false;
   const [expandedThreadReplyIds, setExpandedThreadReplyIds] = React.useState(
     () => new Set<string>(),
   );
@@ -490,11 +499,25 @@ export function ChannelScreen({
                         }
                       : null
                   }
+                  followThreadById={followThread}
+                  unfollowThreadById={unfollowThread}
+                  isFollowingThreadById={isFollowingThread}
+                  isFollowingThread={isNotifiedForCurrentThread}
                   isSending={sendMessageMutation.isPending}
                   isTimelineLoading={isTimelineLoading}
                   messages={timelineMessages}
                   onCancelEdit={handleCancelEdit}
                   onCancelThreadReply={handleCancelThreadReply}
+                  onFollowThread={
+                    openThreadHeadId != null && !isNotifiedForCurrentThread
+                      ? () => followThread(openThreadHeadId)
+                      : undefined
+                  }
+                  onUnfollowThread={
+                    openThreadHeadId != null && isNotifiedForCurrentThread
+                      ? () => unfollowThread(openThreadHeadId)
+                      : undefined
+                  }
                   onCloseAgentSession={handleCloseAgentSession}
                   onCloseThread={handleCloseThread}
                   onDelete={

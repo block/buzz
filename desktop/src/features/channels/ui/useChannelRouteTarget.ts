@@ -1,14 +1,8 @@
 import * as React from "react";
 
 import type { TimelineMessage } from "@/features/messages/types";
+import { isBroadcastReply } from "@/features/messages/lib/threading";
 import type { Channel } from "@/shared/api/types";
-
-function isBroadcastReply(message: TimelineMessage): boolean {
-  return (
-    message.tags?.some((tag) => tag[0] === "broadcast" && tag[1] === "1") ??
-    false
-  );
-}
 
 function getThreadRouteTarget(
   targetMessage: TimelineMessage,
@@ -50,7 +44,7 @@ function getRouteMainTimelineTargetId(
     return null;
   }
 
-  if (!targetMessage?.parentId || isBroadcastReply(targetMessage)) {
+  if (!targetMessage?.parentId || isBroadcastReply(targetMessage.tags ?? [])) {
     return targetMessageId;
   }
 
@@ -115,7 +109,10 @@ export function useChannelRouteTarget({
     }
 
     const targetMessage = timelineMessageById.get(targetMessageId) ?? null;
-    if (!targetMessage?.parentId || isBroadcastReply(targetMessage)) {
+    if (
+      !targetMessage?.parentId ||
+      isBroadcastReply(targetMessage.tags ?? [])
+    ) {
       return;
     }
 

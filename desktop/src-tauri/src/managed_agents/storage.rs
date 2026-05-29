@@ -188,7 +188,7 @@ pub fn read_log_tail(path: &Path, max_lines: usize) -> Result<String, String> {
     // Strip ANSI escapes here (not in the harness) so the desktop log view
     // renders cleanly while terminals and other tools still get the colors
     // sprout-acp emits.
-    let cleaned = strip_ansi_escapes::strip_str(&String::from_utf8_lossy(&buf));
+    let cleaned = strip_ansi_escapes::strip_str(String::from_utf8_lossy(&buf));
     let lines: Vec<&str> = cleaned.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     Ok(lines[start..].join("\n"))

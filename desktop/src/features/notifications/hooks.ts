@@ -379,6 +379,7 @@ export function useHomeFeedNotifications(pubkey: string | undefined) {
         ? [
             ...homeFeedQuery.data.feed.mentions,
             ...homeFeedQuery.data.feed.needsAction,
+            ...homeFeedQuery.data.feed.activity,
           ]
         : [],
     [homeFeedQuery.data],

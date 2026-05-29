@@ -7,6 +7,9 @@ use crate::util;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
 
+type SpawnResult = Result<(std::process::Child, std::path::PathBuf), String>;
+type AgentSpawnResult = (String, SpawnResult);
+
 /// Restore managed agents that were running before the app was closed.
 ///
 /// Split into three phases to minimise lock contention with the frontend:
@@ -94,10 +97,7 @@ pub fn restore_managed_agents_on_launch(
         .map(|k| k.public_key().to_hex());
 
     // ── Phase B (no locks): resolve commands and spawn processes in parallel ──
-    let spawn_results: Vec<(
-        String,
-        Result<(std::process::Child, std::path::PathBuf), String>,
-    )> = std::thread::scope(|scope| {
+    let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
         let owner_hex_ref = owner_hex.as_deref();
         let handles: Vec<_> = agents_to_start
             .iter()

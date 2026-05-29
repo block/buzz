@@ -65,7 +65,7 @@ pub async fn download_image(
         .ok()
         .and_then(|u| {
             u.path_segments()?
-                .last()
+                .next_back()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
         })
