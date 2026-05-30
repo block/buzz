@@ -30,8 +30,15 @@ binary artifact to fetch and no separate dylib path to configure.
 
 ## CI / release path
 
-CI should not rebuild llama.cpp from scratch on every job. For CI/release we will
-add a cached native build or a dynamic-link artifact path as a follow-up. The
+CI should not rebuild llama.cpp from scratch on every job. CI and release now
+prebuild the llama native libraries in a dedicated step (`prepare-llama.sh` +
+`build-llama.sh -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15`) and the Tauri build reuses
+them via `SKIPPY_LLAMA_AUTO_BUILD=0` + `LLAMA_STAGE_BUILD_DIR`. That build is
+cached with `actions/cache` keyed on the mesh-llm rev (resolved from
+`Cargo.lock`), so a cache hit skips the rebuild and a dependency bump
+invalidates the cache automatically — no workflow edit required.
+
+A dynamic-link artifact path remains a possible future optimization. The
 mesh-llm build script supports dynamic linking with:
 
 ```bash

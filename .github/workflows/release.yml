@@ -75,13 +75,30 @@ jobs:
           cargo build --release -p sprout-acp -p sprout-mcp -p sprout-agent -p sprout-dev-mcp -p git-credential-nostr -p sprout-cli
           ./scripts/bundle-sidecars.sh
 
+      # Mesh rev derived from Cargo.lock (no lockstep edit on dep bump); cache key tracks it.
+      - name: Resolve mesh-llm rev
+        id: mesh_rev
+        run: |
+          set -euo pipefail
+          REV=$(grep -oE 'mesh-llm\.git\?rev=[0-9a-f]{40}' Cargo.lock | head -1 | grep -oE '[0-9a-f]{40}')
+          [[ -n "$REV" ]] || { echo "::error::could not resolve mesh-llm rev from Cargo.lock"; exit 1; }
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
+          echo "short=${REV:0:7}" >> "$GITHUB_OUTPUT"
+      - name: Restore mesh llama build cache
+        id: llama_cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ github.workspace }}/.cache/mesh-llama
+          key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
       - name: Build mesh llama native libraries
+        if: steps.llama_cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           cargo fetch --manifest-path desktop/src-tauri/Cargo.toml
-          MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path '*/bd16da4' -type d -name bd16da4 | head -1)
+          SHORT='${{ steps.mesh_rev.outputs.short }}'
+          MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path "*/$SHORT" -type d -name "$SHORT" | head -1)
           if [[ -z "$MESH_ROOT" ]]; then
-            echo "::error::mesh-llm checkout for bd16da4 not found after cargo fetch"
+            echo "::error::mesh-llm checkout for $SHORT not found after cargo fetch"
             exit 1
           fi
           export LLAMA_STAGE_BACKEND=metal
@@ -89,6 +106,12 @@ jobs:
           export CMAKE_OSX_DEPLOYMENT_TARGET=10.15
           "$MESH_ROOT/scripts/prepare-llama.sh" pinned
           "$MESH_ROOT/scripts/build-llama.sh" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
+      - name: Save mesh llama build cache
+        if: steps.llama_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ github.workspace }}/.cache/mesh-llama
+          key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
 
       - name: Build unsigned Tauri app
         run: cd desktop && pnpm tauri build --verbose --no-sign --config src-tauri/tauri.release.conf.json
