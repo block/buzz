@@ -340,34 +340,14 @@ mobile-check:
 mobile-test:
     unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && flutter test
 
-# Run the mobile app on iOS simulator (starts infra + relay automatically)
+# Run the mobile app on iOS simulator
 mobile-dev:
     #!/usr/bin/env bash
     set -euo pipefail
-    just _ensure-migrations
-    # Start relay in background if not already running
-    RELAY_PID=""
-    if ! lsof -i :3000 -sTCP:LISTEN -t &>/dev/null; then
-        echo "Starting relay in background (log: /tmp/sprout-relay.log)..."
-        cargo run -p sprout-relay &>/tmp/sprout-relay.log &
-        RELAY_PID=$!
-        trap 'if [[ -n "$RELAY_PID" ]]; then kill "$RELAY_PID" 2>/dev/null || true; fi' EXIT
-        echo -n "Waiting for relay"
-        for _ in $(seq 1 30); do
-            lsof -i :3000 -sTCP:LISTEN -t &>/dev/null && break
-            echo -n "."
-            sleep 3
-        done
-        echo " ready"
-    else
-        echo "Relay already running on :3000"
-    fi
-    # Open iOS simulator if not already running
     if ! pgrep -x Simulator &>/dev/null; then
         open -a Simulator
         sleep 3
     fi
-    # Run Flutter
     cd {{mobile_dir}}
     unset GIT_DIR GIT_WORK_TREE
     flutter run
