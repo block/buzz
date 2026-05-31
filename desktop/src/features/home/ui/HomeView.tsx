@@ -354,7 +354,7 @@ export function HomeView({
 
         <button
           aria-label="Resize inbox list"
-          className="group absolute inset-y-0 z-[60] hidden w-3 -translate-x-1/2 cursor-col-resize lg:block"
+          className="group absolute inset-y-0 z-40 hidden w-3 -translate-x-1/2 cursor-col-resize lg:block"
           data-testid="home-inbox-list-resize-handle"
           onDoubleClick={
             canResetInboxListWidth ? handleInboxListWidthReset : undefined

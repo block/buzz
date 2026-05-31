@@ -23,7 +23,7 @@ function GlobalTopDivider() {
   return (
     <div
       aria-hidden="true"
-      className="pointer-events-none fixed right-0 top-10 z-50 h-px bg-border/35"
+      className="pointer-events-none fixed right-0 top-10 z-40 h-px bg-border/35"
       style={{ left: state === "expanded" ? "var(--sidebar-width)" : 0 }}
     />
   );
@@ -48,7 +48,7 @@ export function AppTopChrome({
         data-tauri-drag-region
       />
       <GlobalTopDivider />
-      <div className="fixed left-[80px] top-[9px] z-[80] flex items-center gap-0.5">
+      <div className="fixed left-[80px] top-[9px] z-40 flex items-center gap-0.5">
         <SidebarTrigger className="h-[22px] w-[22px] text-muted-foreground/70 hover:bg-muted/60 hover:text-foreground" />
         <Button
           aria-label="Go back"
@@ -75,7 +75,7 @@ export function AppTopChrome({
       </div>
       <TopbarSearch
         channels={channels}
-        className="fixed left-1/2 top-[7px] z-[80] hidden w-[300px] max-w-[34vw] -translate-x-1/2 md:block lg:w-[360px] lg:max-w-[38vw] xl:w-[420px] xl:max-w-[42vw] 2xl:w-[480px] 2xl:max-w-[44vw]"
+        className="fixed left-1/2 top-[7px] z-40 hidden w-[300px] max-w-[34vw] -translate-x-1/2 md:block lg:w-[360px] lg:max-w-[38vw] xl:w-[420px] xl:max-w-[42vw] 2xl:w-[480px] 2xl:max-w-[44vw]"
         currentPubkey={currentPubkey}
         focusRequest={searchFocusRequest}
         onOpenChannel={onOpenChannel}

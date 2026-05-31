@@ -172,7 +172,7 @@ export function MessageThreadPanel({
         {!isOverlay && (
           <button
             aria-label="Resize thread panel"
-            className="peer/thread-resize group/thread-resize absolute inset-y-0 left-0 z-[60] w-3 -translate-x-1/2 cursor-col-resize"
+            className="peer/thread-resize group/thread-resize absolute inset-y-0 left-0 z-40 w-3 -translate-x-1/2 cursor-col-resize"
             data-testid="message-thread-resize-handle"
             onDoubleClick={canResetWidth ? onResetWidth : undefined}
             onPointerDown={onResizeStart}

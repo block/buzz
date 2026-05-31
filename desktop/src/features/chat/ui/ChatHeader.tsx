@@ -19,6 +19,7 @@ import { cn } from "@/shared/lib/cn";
 type ChatHeaderProps = {
   actions?: React.ReactNode;
   actionsPlacement?: "inline" | "top-right";
+  actionsRightInsetPx?: number;
   belowSystemChrome?: boolean;
   density?: "default" | "compact";
   title: string;
@@ -80,6 +81,7 @@ function ChannelIcon({
 export function ChatHeader({
   actions,
   actionsPlacement = "inline",
+  actionsRightInsetPx = 0,
   belowSystemChrome = false,
   density = "default",
   title,
@@ -92,7 +94,14 @@ export function ChatHeader({
 }: ChatHeaderProps) {
   const trimmedDescription = description?.trim() ?? "";
   const topRightActions = (
-    <div className="fixed right-3 top-[9px] z-[70] flex shrink-0 items-center gap-1">
+    <div
+      className="fixed right-3 top-[9px] z-40 flex shrink-0 items-center gap-1"
+      style={
+        actionsRightInsetPx > 0
+          ? { right: `calc(${actionsRightInsetPx}px + 0.75rem)` }
+          : undefined
+      }
+    >
       <UpdateIndicator />
       {actions ? <div className="shrink-0">{actions}</div> : null}
     </div>

@@ -17,7 +17,6 @@ import {
 } from "@/features/channels/ui/BotActivityBar";
 import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
 import { Button } from "@/shared/ui/button";
-import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import type { useChannelFind } from "@/features/search/useChannelFind";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -44,6 +43,7 @@ type ChannelPaneProps = {
   isSending: boolean;
   isTimelineLoading: boolean;
   messages: TimelineMessage[];
+  canResetThreadPanelWidth: boolean;
   onCancelEdit?: () => void;
   onCancelThreadReply: () => void;
   onCloseAgentSession: () => void;
@@ -58,6 +58,7 @@ type ChannelPaneProps = {
   onOpenAgentSession: (pubkey: string) => void;
   onOpenDm?: (pubkeys: string[]) => void;
   onOpenThread: (message: TimelineMessage) => void;
+  onResetThreadPanelWidth: () => void;
   onSelectThreadReplyTarget: (message: TimelineMessage) => void;
   onSendMessage: (
     content: string,
@@ -76,6 +77,9 @@ type ChannelPaneProps = {
     remove: boolean,
   ) => Promise<void>;
   onThreadScrollTargetResolved: () => void;
+  onThreadPanelResizeStart: (
+    event: React.PointerEvent<HTMLButtonElement>,
+  ) => void;
   /** Map from lowercase pubkey → persona display name for bot members. */
   personaLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
@@ -84,6 +88,7 @@ type ChannelPaneProps = {
   profilePanelPubkey?: string | null;
   threadHeadMessage: TimelineMessage | null;
   threadMessages: MainTimelineEntry[];
+  threadPanelWidthPx: number;
   threadTypingPubkeys: string[];
   threadReplyTargetId: string | null;
   threadReplyTargetMessage: TimelineMessage | null;
@@ -116,6 +121,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   isSending,
   isTimelineLoading,
   messages,
+  canResetThreadPanelWidth,
   onCancelEdit,
   onCancelThreadReply,
   onCloseAgentSession,
@@ -131,10 +137,12 @@ export const ChannelPane = React.memo(function ChannelPane({
   onOpenAgentSession,
   onOpenDm,
   onOpenThread,
+  onResetThreadPanelWidth,
   onSelectThreadReplyTarget,
   onSendMessage,
   onSendThreadReply,
   onThreadScrollTargetResolved,
+  onThreadPanelResizeStart,
   onTargetReached,
   onToggleReaction,
   onUnfollowThread,
@@ -147,19 +155,13 @@ export const ChannelPane = React.memo(function ChannelPane({
   targetMessageId,
   threadHeadMessage,
   threadMessages,
+  threadPanelWidthPx,
   threadScrollTargetId,
   threadTypingPubkeys,
   threadReplyTargetId,
   threadReplyTargetMessage,
   typingPubkeys,
 }: ChannelPaneProps) {
-  const {
-    canReset: canResetThreadPanelWidth,
-    onResetWidth: handleThreadPanelWidthReset,
-    onResizeStart: handleThreadPanelResizeStart,
-    widthPx: threadPanelWidthPx,
-  } = useThreadPanelWidth();
-
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
   useComposerHeightPadding(timelineScrollRef, composerWrapperRef);
@@ -405,8 +407,8 @@ export const ChannelPane = React.memo(function ChannelPane({
           replyTargetMessage={threadReplyTargetMessage}
           scrollTargetId={threadScrollTargetId}
           canResetWidth={canResetThreadPanelWidth}
-          onResetWidth={handleThreadPanelWidthReset}
-          onResizeStart={handleThreadPanelResizeStart}
+          onResetWidth={onResetThreadPanelWidth}
+          onResizeStart={onThreadPanelResizeStart}
           threadHead={threadHeadMessage}
           widthPx={threadPanelWidthPx}
           threadReplies={threadMessages}
@@ -436,8 +438,8 @@ export const ChannelPane = React.memo(function ChannelPane({
               entry.pubkey.toLowerCase() === selectedAgent.pubkey.toLowerCase(),
           )}
           onClose={onCloseAgentSession}
-          onResetWidth={handleThreadPanelWidthReset}
-          onResizeStart={handleThreadPanelResizeStart}
+          onResetWidth={onResetThreadPanelWidth}
+          onResizeStart={onThreadPanelResizeStart}
           widthPx={threadPanelWidthPx}
         />
       ) : profilePanelPubkey ? (
@@ -446,8 +448,8 @@ export const ChannelPane = React.memo(function ChannelPane({
           currentPubkey={currentPubkey}
           onClose={onCloseProfilePanel}
           onOpenDm={onOpenDm}
-          onResetWidth={handleThreadPanelWidthReset}
-          onResizeStart={handleThreadPanelResizeStart}
+          onResetWidth={onResetThreadPanelWidth}
+          onResizeStart={onThreadPanelResizeStart}
           pubkey={profilePanelPubkey}
           widthPx={threadPanelWidthPx}
         />
