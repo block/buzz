@@ -722,7 +722,7 @@ export function AppSidebar({
           />
         ) : null}
 
-        <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 shadow-[0_-16px_40px_hsl(var(--sidebar)/0.55)] backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:shadow-[0_-16px_44px_rgba(0,0,0,0.42)] dark:supports-[backdrop-filter]:bg-sidebar/35">
+        <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
           <SidebarMenu>
             <SidebarMenuItem>
               <div

@@ -220,11 +220,11 @@ export function ChannelManagementSheet({
   return (
     <Sheet onOpenChange={handleSheetOpenChange} open={open}>
       <SheetContent
-        className="flex w-full flex-col gap-0 overflow-hidden border-l border-border/80 bg-background p-0 sm:max-w-xl"
+        className="flex w-full flex-col gap-0 overflow-hidden border-l border-border/80 bg-background/95 p-0 shadow-none backdrop-blur-xl supports-[backdrop-filter]:bg-background/90 dark:bg-background/85 dark:supports-[backdrop-filter]:bg-background/75 sm:max-w-xl"
         data-testid="channel-management-sheet"
         side="right"
       >
-        <SheetHeader className="relative z-10 space-y-4 bg-background/25 px-6 py-6 text-left shadow-[0_4px_24px_rgba(0,0,0,0.06)] backdrop-blur-xl supports-[backdrop-filter]:bg-background/20 dark:shadow-[0_4px_24px_rgba(0,0,0,0.25)]">
+        <SheetHeader className="relative z-10 space-y-4 bg-background/25 px-6 py-6 text-left shadow-none backdrop-blur-xl supports-[backdrop-filter]:bg-background/20">
           <SheetTitle className="pr-8">{channel.name}</SheetTitle>
           <SheetDescription className="sr-only">
             Channel settings

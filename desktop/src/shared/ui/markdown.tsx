@@ -348,7 +348,7 @@ function createMarkdownComponents(
           <ImageContextMenu src={src}>
             <DialogPrimitive.Root>
               <DialogPrimitive.Trigger asChild>
-                <div className="mt-1 max-w-sm cursor-pointer transition-opacity hover:opacity-90">
+                <div className="mt-1 max-w-sm cursor-pointer">
                   <img
                     alt={alt}
                     className="max-h-64 max-w-full rounded-xl object-contain"

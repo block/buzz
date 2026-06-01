@@ -45,6 +45,7 @@ import { useChannelFind } from "@/features/search/useChannelFind";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 import { AgentSessionProvider } from "@/shared/context/AgentSessionContext";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
+import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import {
   mergeAgentNamesIntoProfiles,
@@ -85,6 +86,7 @@ export function ChannelScreen({
     widthPx: threadPanelWidthPx,
   } = useThreadPanelWidth();
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
+  const isNarrowPanelViewport = useIsThreadPanelOverlay();
   const [openThreadHeadId, setOpenThreadHeadId] = React.useState<string | null>(
     null,
   );
@@ -111,7 +113,6 @@ export function ChannelScreen({
   const activeReadAt = latestActiveMessage
     ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
     : (activeChannel?.lastMessageAt ?? null);
-
   React.useEffect(() => {
     if (!activeChannelId || activeChannel?.isMember === false) {
       return;
@@ -258,15 +259,12 @@ export function ChannelScreen({
     (messageId: string) => {
       const descendantIds: string[] = [];
       const pendingIds = [...(directReplyIdsByParentId.get(messageId) ?? [])];
-
       while (pendingIds.length > 0) {
         const currentId = pendingIds.pop();
         if (!currentId) continue;
-
         descendantIds.push(currentId);
         pendingIds.push(...(directReplyIdsByParentId.get(currentId) ?? []));
       }
-
       return descendantIds;
     },
     [directReplyIdsByParentId],
@@ -438,6 +436,12 @@ export function ChannelScreen({
   ]);
 
   useLoadMissingAncestors(activeChannel, resolvedMessages);
+  const isSinglePanelView =
+    isNarrowPanelViewport &&
+    activeChannel?.channelType !== "forum" &&
+    Boolean(
+      openThreadHeadMessage || openAgentSessionPubkey || profilePanelPubkey,
+    );
 
   return (
     <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>
@@ -452,6 +456,7 @@ export function ChannelScreen({
           onJoinChannel={joinChannelMutation.mutateAsync}
           onManageChannel={openChannelManagement}
           onToggleMembers={() => setIsMembersSidebarOpen((prev) => !prev)}
+          showHeaderContent={!isSinglePanelView}
         />
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -496,6 +501,7 @@ export function ChannelScreen({
                   isFollowingThreadById={isFollowingThread}
                   isFollowingThread={isNotifiedForCurrentThread}
                   isSending={sendMessageMutation.isPending}
+                  isSinglePanelView={isSinglePanelView}
                   isTimelineLoading={isTimelineLoading}
                   messages={timelineMessages}
                   onCancelEdit={handleCancelEdit}

@@ -26,6 +26,7 @@ type AgentSessionThreadPanelProps = {
   channel: Channel;
   canInterruptTurn: boolean;
   isWorking: boolean;
+  isSinglePanelView?: boolean;
   onClose: () => void;
   onResetWidth: () => void;
   onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
@@ -38,6 +39,7 @@ export function AgentSessionThreadPanel({
   canInterruptTurn,
   channel,
   isWorking,
+  isSinglePanelView = false,
   onClose,
   onResetWidth,
   onResizeStart,
@@ -45,7 +47,8 @@ export function AgentSessionThreadPanel({
 }: AgentSessionThreadPanelProps) {
   const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
-  useEscapeKey(onClose, isOverlay);
+  const isFloatingOverlay = isOverlay && !isSinglePanelView;
+  useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
 
@@ -66,13 +69,17 @@ export function AgentSessionThreadPanel({
 
   return (
     <>
-      {isOverlay && <OverlayPanelBackdrop onClose={onClose} />}
+      {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
       <aside
-        className={cn(PANEL_BASE_CLASS, isOverlay && PANEL_OVERLAY_CLASS)}
+        className={cn(
+          PANEL_BASE_CLASS,
+          isSinglePanelView && "border-l-0",
+          isFloatingOverlay && PANEL_OVERLAY_CLASS,
+        )}
         data-testid="agent-session-thread-panel"
-        style={{ width: `${widthPx}px` }}
+        style={{ width: isSinglePanelView ? "100%" : `${widthPx}px` }}
       >
-        {!isOverlay && (
+        {!isOverlay && !isSinglePanelView && (
           <button
             aria-label="Resize agent session panel"
             className="group absolute inset-y-0 left-0 z-20 w-3 -translate-x-1/2 cursor-col-resize"
@@ -99,10 +106,12 @@ export function AgentSessionThreadPanel({
 
         <div
           className={cn(
-            "z-50 cursor-default select-none px-4",
-            isOverlay
-              ? "relative min-h-[56px] shrink-0 border-b border-border/70 bg-background/80 py-2.5 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
-              : "absolute inset-x-0 top-10 min-h-[44px] py-[4px]",
+            "cursor-default select-none px-4",
+            isSinglePanelView
+              ? "relative z-30 min-h-[88px] shrink-0 border-b border-border/70 bg-background/80 pb-2.5 pt-[42px] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
+              : isOverlay
+                ? "relative z-50 min-h-[56px] shrink-0 border-b border-border/70 bg-background/80 py-2.5 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
+                : "absolute inset-x-0 top-10 z-50 min-h-[44px] py-[4px]",
           )}
           data-tauri-drag-region
         >

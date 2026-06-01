@@ -20,7 +20,7 @@ export function HomeChannelActions({
   }
 
   return createPortal(
-    <div className="fixed right-3 top-[9px] z-40 flex shrink-0 items-center gap-1">
+    <div className="fixed right-3 top-[9px] z-[45] flex shrink-0 items-center gap-1">
       <UpdateIndicator />
       <ChannelMembersBar
         channel={channel}

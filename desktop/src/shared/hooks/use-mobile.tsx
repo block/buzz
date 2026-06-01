@@ -1,7 +1,7 @@
 import * as React from "react";
 
 const MOBILE_BREAKPOINT = 768;
-const THREAD_PANEL_OVERLAY_BREAKPOINT = 1024;
+const THREAD_PANEL_OVERLAY_BREAKPOINT = 860;
 
 /**
  * Returns `true` when the viewport is narrower than `breakpointPx`.

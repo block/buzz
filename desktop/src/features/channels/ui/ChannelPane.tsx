@@ -40,6 +40,7 @@ type ChannelPaneProps = {
   hasOlderMessages?: boolean;
   isFetchingOlder?: boolean;
   isJoining?: boolean;
+  isSinglePanelView?: boolean;
   isSending: boolean;
   isTimelineLoading: boolean;
   messages: TimelineMessage[];
@@ -118,6 +119,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   isFollowingThread,
   isFollowingThreadById,
   isJoining = false,
+  isSinglePanelView = false,
   isSending,
   isTimelineLoading,
   messages,
@@ -164,7 +166,11 @@ export const ChannelPane = React.memo(function ChannelPane({
 }: ChannelPaneProps) {
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
-  useComposerHeightPadding(timelineScrollRef, composerWrapperRef);
+  useComposerHeightPadding(
+    timelineScrollRef,
+    composerWrapperRef,
+    isSinglePanelView,
+  );
 
   // Scope the edit target to the correct composer: if the message being edited
   // lives inside the open thread (thread head or a reply), show the editing UI
@@ -240,143 +246,144 @@ export const ChannelPane = React.memo(function ChannelPane({
         : null,
     [agentSessionAgents, openAgentSessionPubkey],
   );
-
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-row overflow-hidden">
-      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-        {channelFind.isOpen ? (
-          <ChannelFindBar
-            matchCount={channelFind.matchCount}
-            matchIndex={channelFind.activeIndex}
-            onClose={channelFind.close}
-            onNext={channelFind.goToNext}
-            onPrevious={channelFind.goToPrevious}
-            onQueryChange={channelFind.setQuery}
-            query={channelFind.query}
+      {!isSinglePanelView ? (
+        <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          {channelFind.isOpen ? (
+            <ChannelFindBar
+              matchCount={channelFind.matchCount}
+              matchIndex={channelFind.activeIndex}
+              onClose={channelFind.close}
+              onNext={channelFind.goToNext}
+              onPrevious={channelFind.goToPrevious}
+              onQueryChange={channelFind.setQuery}
+              query={channelFind.query}
+            />
+          ) : null}
+          <MessageTimeline
+            channelId={activeChannel?.id}
+            activeReplyTargetId={openThreadHeadId}
+            scrollContainerRef={timelineScrollRef}
+            currentPubkey={currentPubkey}
+            fetchOlder={fetchOlder}
+            followThreadById={followThreadById}
+            hasOlderMessages={hasOlderMessages}
+            isFetchingOlder={isFetchingOlder}
+            isFollowingThreadById={isFollowingThreadById}
+            personaLookup={personaLookup}
+            profiles={profiles}
+            unfollowThreadById={unfollowThreadById}
+            emptyDescription={
+              activeChannel?.channelType === "forum"
+                ? "Select a stream or DM to load real message history in this first integration pass."
+                : "Messages and sub-replies will appear here once the relay has history for this channel."
+            }
+            emptyTitle={
+              activeChannel
+                ? activeChannel.channelType === "forum"
+                  ? "Forum channels are next"
+                  : "No messages yet"
+                : "No channel selected"
+            }
+            isLoading={isTimelineLoading}
+            messages={messages}
+            onDelete={onDelete}
+            onEdit={onEdit}
+            onMarkUnread={onMarkUnread}
+            onReply={activeChannel?.archivedAt ? undefined : onOpenThread}
+            onTargetReached={onTargetReached}
+            onToggleReaction={onToggleReaction}
+            searchActiveMessageId={channelFind.activeMatch?.messageId ?? null}
+            searchMatchingMessageIds={channelFind.matchingMessageIds}
+            searchQuery={channelFind.query}
+            targetMessageId={targetMessageId}
           />
-        ) : null}
-        <MessageTimeline
-          channelId={activeChannel?.id}
-          activeReplyTargetId={openThreadHeadId}
-          scrollContainerRef={timelineScrollRef}
-          currentPubkey={currentPubkey}
-          fetchOlder={fetchOlder}
-          followThreadById={followThreadById}
-          hasOlderMessages={hasOlderMessages}
-          isFetchingOlder={isFetchingOlder}
-          isFollowingThreadById={isFollowingThreadById}
-          personaLookup={personaLookup}
-          profiles={profiles}
-          unfollowThreadById={unfollowThreadById}
-          emptyDescription={
-            activeChannel?.channelType === "forum"
-              ? "Select a stream or DM to load real message history in this first integration pass."
-              : "Messages and sub-replies will appear here once the relay has history for this channel."
-          }
-          emptyTitle={
-            activeChannel
-              ? activeChannel.channelType === "forum"
-                ? "Forum channels are next"
-                : "No messages yet"
-              : "No channel selected"
-          }
-          isLoading={isTimelineLoading}
-          messages={messages}
-          onDelete={onDelete}
-          onEdit={onEdit}
-          onMarkUnread={onMarkUnread}
-          onReply={activeChannel?.archivedAt ? undefined : onOpenThread}
-          onTargetReached={onTargetReached}
-          onToggleReaction={onToggleReaction}
-          searchActiveMessageId={channelFind.activeMatch?.messageId ?? null}
-          searchMatchingMessageIds={channelFind.matchingMessageIds}
-          searchQuery={channelFind.query}
-          targetMessageId={targetMessageId}
-        />
-        {isNonMemberView ? (
-          <div
-            data-testid="join-banner"
-            className="flex items-center gap-3 border-t border-border/80 bg-card/50 px-4 py-3"
-          >
-            <div className="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted-foreground">
-              <Hash className="h-4 w-4 shrink-0" />
-              <span className="truncate">
-                Viewing{" "}
-                <span className="font-medium text-foreground">
-                  #{activeChannel?.name}
-                </span>
-              </span>
-            </div>
-            <Button
-              disabled={isJoining}
-              onClick={() => {
-                void onJoinChannel?.();
-              }}
-              size="sm"
-              variant="default"
+          {isNonMemberView ? (
+            <div
+              data-testid="join-banner"
+              className="flex items-center gap-3 border-t border-border/80 bg-card/50 px-4 py-3"
             >
-              <LogIn className="mr-1.5 h-3.5 w-3.5" />
-              {isJoining ? "Joining..." : "Join to participate"}
-            </Button>
-          </div>
-        ) : (
-          <div
-            className="pointer-events-none absolute inset-x-0 bottom-0 z-10"
-            ref={composerWrapperRef}
-          >
-            <div className="pointer-events-auto">
-              <MessageComposer
-                channelId={activeChannel?.id ?? null}
-                channelName={activeChannel?.name ?? "channel"}
-                disabled={isComposerDisabled}
-                editTarget={mainEditTarget}
-                isSending={isSending}
-                onCancelEdit={onCancelEdit}
-                onEditSave={onEditSave}
-                onSend={onSendMessage}
-                profiles={profiles}
-                placeholder={
-                  activeChannel?.archivedAt
-                    ? "Archived channels are read-only."
-                    : activeChannel?.channelType === "forum"
-                      ? "Forum posting is not wired in this pass."
-                      : activeChannel
-                        ? `Message #${activeChannel.name}`
-                        : "Select a channel"
-                }
-                showTopBorder={false}
-              />
-              <div className="h-7 bg-background px-4 pb-1 pt-0 sm:px-6 -mt-1">
-                <div className="flex h-full w-full items-center gap-2">
-                  {hasComposerBotActivity ? (
-                    <div className="shrink-0">
-                      <BotActivityComposerAction
-                        agents={activityAgents}
-                        channelId={activeChannel?.id ?? null}
-                        onOpenAgentSession={onOpenAgentSession}
-                        openAgentSessionPubkey={openAgentSessionPubkey}
+              <div className="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted-foreground">
+                <Hash className="h-4 w-4 shrink-0" />
+                <span className="truncate">
+                  Viewing{" "}
+                  <span className="font-medium text-foreground">
+                    #{activeChannel?.name}
+                  </span>
+                </span>
+              </div>
+              <Button
+                disabled={isJoining}
+                onClick={() => {
+                  void onJoinChannel?.();
+                }}
+                size="sm"
+                variant="default"
+              >
+                <LogIn className="mr-1.5 h-3.5 w-3.5" />
+                {isJoining ? "Joining..." : "Join to participate"}
+              </Button>
+            </div>
+          ) : (
+            <div
+              className="pointer-events-none absolute inset-x-0 bottom-0 z-10"
+              ref={composerWrapperRef}
+            >
+              <div className="pointer-events-auto">
+                <MessageComposer
+                  channelId={activeChannel?.id ?? null}
+                  channelName={activeChannel?.name ?? "channel"}
+                  disabled={isComposerDisabled}
+                  editTarget={mainEditTarget}
+                  isSending={isSending}
+                  onCancelEdit={onCancelEdit}
+                  onEditSave={onEditSave}
+                  onSend={onSendMessage}
+                  profiles={profiles}
+                  placeholder={
+                    activeChannel?.archivedAt
+                      ? "Archived channels are read-only."
+                      : activeChannel?.channelType === "forum"
+                        ? "Forum posting is not wired in this pass."
+                        : activeChannel
+                          ? `Message #${activeChannel.name}`
+                          : "Select a channel"
+                  }
+                  showTopBorder={false}
+                />
+                <div className="h-7 bg-background px-4 pb-1 pt-0 sm:px-6 -mt-1">
+                  <div className="flex h-full w-full items-center gap-2">
+                    {hasComposerBotActivity ? (
+                      <div className="shrink-0">
+                        <BotActivityComposerAction
+                          agents={activityAgents}
+                          channelId={activeChannel?.id ?? null}
+                          onOpenAgentSession={onOpenAgentSession}
+                          openAgentSessionPubkey={openAgentSessionPubkey}
+                          profiles={profiles}
+                          typingBotPubkeys={composerBotTypingPubkeys}
+                          variant="inline"
+                        />
+                      </div>
+                    ) : null}
+                    {hasTypingActivity ? (
+                      <TypingIndicatorRow
+                        channel={activeChannel}
+                        className="min-w-0 flex-1 px-0 py-0"
+                        currentPubkey={currentPubkey}
                         profiles={profiles}
-                        typingBotPubkeys={composerBotTypingPubkeys}
-                        variant="inline"
+                        typingPubkeys={typingPubkeys}
+                        variant="activity"
                       />
-                    </div>
-                  ) : null}
-                  {hasTypingActivity ? (
-                    <TypingIndicatorRow
-                      channel={activeChannel}
-                      className="min-w-0 flex-1 px-0 py-0"
-                      currentPubkey={currentPubkey}
-                      profiles={profiles}
-                      typingPubkeys={typingPubkeys}
-                      variant="activity"
-                    />
-                  ) : null}
+                    ) : null}
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      ) : null}
 
       {threadHeadMessage ? (
         <MessageThreadPanel
@@ -388,6 +395,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           editTarget={threadEditTarget}
           isFollowingThread={isFollowingThread}
           isSending={isSending}
+          isSinglePanelView={isSinglePanelView}
           onCancelEdit={onCancelEdit}
           onCancelReply={onCancelThreadReply}
           onClose={onCloseThread}
@@ -437,6 +445,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             (entry) =>
               entry.pubkey.toLowerCase() === selectedAgent.pubkey.toLowerCase(),
           )}
+          isSinglePanelView={isSinglePanelView}
           onClose={onCloseAgentSession}
           onResetWidth={onResetThreadPanelWidth}
           onResizeStart={onThreadPanelResizeStart}
@@ -446,6 +455,7 @@ export const ChannelPane = React.memo(function ChannelPane({
         <UserProfilePanel
           canResetWidth={canResetThreadPanelWidth}
           currentPubkey={currentPubkey}
+          isSinglePanelView={isSinglePanelView}
           onClose={onCloseProfilePanel}
           onOpenDm={onOpenDm}
           onResetWidth={onResetThreadPanelWidth}
