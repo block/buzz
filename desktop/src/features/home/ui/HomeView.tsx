@@ -30,6 +30,7 @@ import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
 import type { HomeFeedResponse, RelayEvent } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
 import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
+import { useMediaBreakpoint } from "@/shared/hooks/use-mobile";
 import { Button } from "@/shared/ui/button";
 
 function matchesInboxFilter(
@@ -92,6 +93,7 @@ export function HomeView({
   onOpenContext,
   onRefresh,
 }: HomeViewProps) {
+  const isNarrowHomeViewport = useMediaBreakpoint(1024);
   const [filter, setFilter] = React.useState<InboxFilter>("all");
   const [selectedItemId, setSelectedItemId] = React.useState<string | null>(
     null,
@@ -256,9 +258,11 @@ export function HomeView({
     }
 
     if (!filteredItems.some((item) => item.id === selectedItemId)) {
-      setSelectedItemId(filteredItems[0]?.id ?? null);
+      setSelectedItemId(
+        isNarrowHomeViewport ? null : (filteredItems[0]?.id ?? null),
+      );
     }
-  }, [filteredItems, selectedItemId]);
+  }, [filteredItems, isNarrowHomeViewport, selectedItemId]);
 
   React.useEffect(() => {
     void selectedItemId;
@@ -323,6 +327,10 @@ export function HomeView({
     selectedItem !== null &&
     currentPubkey?.trim().toLowerCase() ===
       selectedItem.item.pubkey.trim().toLowerCase();
+  const isSinglePanelDetailView =
+    isNarrowHomeViewport && selectedItemId !== null;
+  const showListPane = !isSinglePanelDetailView;
+  const showDetailPane = !isNarrowHomeViewport || isSinglePanelDetailView;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -340,17 +348,19 @@ export function HomeView({
           } as React.CSSProperties
         }
       >
-        <InboxListPane
-          doneSet={effectiveDoneSet}
-          filter={filter}
-          items={filteredItems}
-          onFilterChange={setFilter}
-          onSelect={(itemId) => {
-            setSelectedItemId(itemId);
-            markItemRead(itemId);
-          }}
-          selectedId={selectedItemId}
-        />
+        {showListPane ? (
+          <InboxListPane
+            doneSet={effectiveDoneSet}
+            filter={filter}
+            items={filteredItems}
+            onFilterChange={setFilter}
+            onSelect={(itemId) => {
+              setSelectedItemId(itemId);
+              markItemRead(itemId);
+            }}
+            selectedId={selectedItemId}
+          />
+        ) : null}
 
         <button
           aria-label="Resize inbox list"
@@ -371,107 +381,120 @@ export function HomeView({
           <span className="absolute bottom-0 left-1/2 top-10 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border/80 group-focus-visible:bg-border/80" />
         </button>
 
-        <InboxDetailPane
-          canDelete={canDelete}
-          canOpenChannel={Boolean(
-            selectedItem?.item.channelId &&
-              availableChannelIds.has(selectedItem.item.channelId),
-          )}
-          canReply={canReply}
-          disabledReplyReason={disabledReplyReason}
-          isDone={selectedItem ? effectiveDoneSet.has(selectedItem.id) : false}
-          isDeletingMessage={isDeletingMessage}
-          isSendingReply={isSendingReply}
-          isThreadContextLoading={threadContext.isLoading}
-          item={selectedItem}
-          messages={contextMessages}
-          replies={selectedItemReplies}
-          contextChannelName={selectedChannel?.name ?? null}
-          onDelete={() => {
-            if (!selectedItem || !canDelete) {
-              return;
+        {showDetailPane ? (
+          <InboxDetailPane
+            canDelete={canDelete}
+            canOpenChannel={Boolean(
+              selectedItem?.item.channelId &&
+                availableChannelIds.has(selectedItem.item.channelId),
+            )}
+            canReply={canReply}
+            contextChannelName={selectedChannel?.name ?? null}
+            disabledReplyReason={disabledReplyReason}
+            isDeletingMessage={isDeletingMessage}
+            isDone={
+              selectedItem ? effectiveDoneSet.has(selectedItem.id) : false
             }
+            isSendingReply={isSendingReply}
+            isThreadContextLoading={threadContext.isLoading}
+            item={selectedItem}
+            messages={contextMessages}
+            onBack={
+              isSinglePanelDetailView
+                ? () => {
+                    setSelectedItemId(null);
+                  }
+                : undefined
+            }
+            onDelete={() => {
+              if (!selectedItem || !canDelete) {
+                return;
+              }
 
-            setIsDeletingMessage(true);
-            void deleteMessage(selectedItem.id)
-              .then(() => {
-                onRefresh();
-              })
-              .finally(() => {
-                setIsDeletingMessage(false);
-              });
-          }}
-          onOpenContext={onOpenContext}
-          onSendReply={async ({
-            content,
-            mediaTags,
-            mentionPubkeys,
-            parentEventId,
-          }) => {
-            const channelId = selectedItem?.item.channelId;
-            if (!selectedItem || !channelId || !canReply) {
-              throw new Error("Replies are not available for this item.");
-            }
-
-            const itemToReply = selectedItem;
-            setIsSendingReply(true);
-            try {
-              const result = await sendChannelMessage(
-                channelId,
-                content,
-                parentEventId,
-                mediaTags,
-                mentionPubkeys,
-              );
-              const authorPubkey = currentPubkey ?? itemToReply.item.pubkey;
-              const reply: InboxReply = {
-                authorLabel: currentPubkey
-                  ? resolveUserLabel({
-                      currentPubkey,
-                      profiles: feedProfiles,
-                      pubkey: authorPubkey,
-                    })
-                  : "You",
-                avatarUrl:
-                  currentPubkey && feedProfiles
-                    ? (feedProfiles[currentPubkey.trim().toLowerCase()]
-                        ?.avatarUrl ?? null)
-                    : null,
-                content,
-                depth: result.depth,
-                fullTimestampLabel: formatInboxFullTimestamp(result.createdAt),
-                id: result.eventId,
-                parentId: result.parentEventId,
-                rootId: result.rootEventId,
-              };
-              setLocalRepliesByItemId((current) => ({
-                ...current,
-                [itemToReply.id]: [...(current[itemToReply.id] ?? []), reply],
-              }));
-              onRefresh();
-            } finally {
-              setIsSendingReply(false);
-            }
-          }}
-          onToggleReaction={
-            canReact
-              ? async (message, emoji, remove) => {
-                  await toggleReactionMutation.mutateAsync({
-                    emoji,
-                    eventId: message.id,
-                    remove,
-                  });
-                  await channelMessagesQuery.refetch();
+              setIsDeletingMessage(true);
+              void deleteMessage(selectedItem.id)
+                .then(() => {
                   onRefresh();
-                }
-              : undefined
-          }
-          onToggleDone={() => {
-            if (selectedItem) {
-              handleToggleDone(selectedItem.id);
+                })
+                .finally(() => {
+                  setIsDeletingMessage(false);
+                });
+            }}
+            onOpenContext={onOpenContext}
+            onSendReply={async ({
+              content,
+              mediaTags,
+              mentionPubkeys,
+              parentEventId,
+            }) => {
+              const channelId = selectedItem?.item.channelId;
+              if (!selectedItem || !channelId || !canReply) {
+                throw new Error("Replies are not available for this item.");
+              }
+
+              const itemToReply = selectedItem;
+              setIsSendingReply(true);
+              try {
+                const result = await sendChannelMessage(
+                  channelId,
+                  content,
+                  parentEventId,
+                  mediaTags,
+                  mentionPubkeys,
+                );
+                const authorPubkey = currentPubkey ?? itemToReply.item.pubkey;
+                const reply: InboxReply = {
+                  authorLabel: currentPubkey
+                    ? resolveUserLabel({
+                        currentPubkey,
+                        profiles: feedProfiles,
+                        pubkey: authorPubkey,
+                      })
+                    : "You",
+                  avatarUrl:
+                    currentPubkey && feedProfiles
+                      ? (feedProfiles[currentPubkey.trim().toLowerCase()]
+                          ?.avatarUrl ?? null)
+                      : null,
+                  content,
+                  depth: result.depth,
+                  fullTimestampLabel: formatInboxFullTimestamp(
+                    result.createdAt,
+                  ),
+                  id: result.eventId,
+                  parentId: result.parentEventId,
+                  rootId: result.rootEventId,
+                };
+                setLocalRepliesByItemId((current) => ({
+                  ...current,
+                  [itemToReply.id]: [...(current[itemToReply.id] ?? []), reply],
+                }));
+                onRefresh();
+              } finally {
+                setIsSendingReply(false);
+              }
+            }}
+            onToggleDone={() => {
+              if (selectedItem) {
+                handleToggleDone(selectedItem.id);
+              }
+            }}
+            onToggleReaction={
+              canReact
+                ? async (message, emoji, remove) => {
+                    await toggleReactionMutation.mutateAsync({
+                      emoji,
+                      eventId: message.id,
+                      remove,
+                    });
+                    await channelMessagesQuery.refetch();
+                    onRefresh();
+                  }
+                : undefined
             }
-          }}
-        />
+            replies={selectedItemReplies}
+          />
+        ) : null}
       </div>
     </div>
   );
