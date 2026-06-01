@@ -1104,7 +1104,15 @@ let mockWebsocketSendMutexWedged = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
 
-// Mesh-compute mock state. Default: admitted, one model available.
+// Mesh-compute mock state — TEST-ONLY.
+//
+// This entire module (e2eBridge.ts) is loaded only when `window.__SPROUT_E2E__`
+// is set by the Playwright harness; it never runs in a shipped build. These
+// handlers stub the `mesh_*` Tauri commands with the SHAPES the UI expects
+// (availability, node status, preset) so the desktop UI flow can be exercised
+// in a browser. They deliberately do NOT model real admission, real inference,
+// or real mesh routing — those are proven by the Rust layer-2 tests and the
+// on-hardware layer-1 example. Do not port any of this into production code.
 const mockMeshState: {
   admitted: boolean;
   models: Array<{ id: string; name: string | null }>;

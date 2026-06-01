@@ -91,8 +91,13 @@ coverage into three layers and are explicit about what is real vs mocked.
   relay at the pinned rev — see the STUN limitation above.
 - **Layer 2 proves the auth invariant without faking it.** The policy mapping
   (`MembershipDecision` → admit/deny) is exercised directly: member → allow,
-  non-member → deny, owner-delegation → deny (v1), error → deny. A valid NIP-98
-  identity or possession of dial metadata is, by itself, never sufficient.
+  open relay → allow, non-member → deny, owner-delegation → deny (v1),
+  error → deny. A valid NIP-98 identity or possession of dial metadata is, by
+  itself, never sufficient. The membership-only gate is what matters **when
+  membership enforcement is enabled** (`require_relay_membership = true`); an
+  open relay (`OpenRelay`) intentionally admits any valid NIP-98 signer, so
+  `open relay → allow` is the deliberate disabled-enforcement case, not a
+  contradiction of the membership gate.
 - **Layer 3 proves the UI contract, not inference.** The mesh Tauri commands
   are mocked, but the assertions are on real UI behavior and real command
   *ordering* (`mesh_ensure_client_node` is recorded before `create_managed_agent`),

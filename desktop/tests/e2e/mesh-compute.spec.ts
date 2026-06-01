@@ -111,16 +111,25 @@ test("Run-on-relay-mesh ensures the client node BEFORE spawning the agent", asyn
   await expect(page.getByTestId("create-agent-submit")).toBeEnabled({
     timeout: 10_000,
   });
+
+  // Snapshot the command log length right before the click so we assert the
+  // ensure→spawn ordering WITHIN this user action's fresh slice, not merely
+  // that ensure appeared somewhere earlier (e.g. an availability probe).
+  const before = (await commands(page)).length;
   await page.getByTestId("create-agent-submit").click();
 
-  // The invariant: ensure runs, and it runs BEFORE the agent is created.
   await expect
-    .poll(async () => await commands(page))
+    .poll(async () => (await commands(page)).slice(before))
     .toContain("create_managed_agent");
-  const seq = await commands(page);
-  const ensureIdx = seq.indexOf("mesh_ensure_client_node");
-  const createIdx = seq.indexOf("create_managed_agent");
-  expect(ensureIdx).toBeGreaterThanOrEqual(0);
+
+  // The invariant: within the Create action, ensure runs BEFORE create.
+  const slice = (await commands(page)).slice(before);
+  const ensureIdx = slice.indexOf("mesh_ensure_client_node");
+  const createIdx = slice.indexOf("create_managed_agent");
+  expect(
+    ensureIdx,
+    "ensure must occur in the Create action",
+  ).toBeGreaterThanOrEqual(0);
   expect(ensureIdx).toBeLessThan(createIdx);
 });
 
