@@ -74,6 +74,15 @@ Write commands are unaffected. `--format json` (default) returns full fields.
 
 Other kind values are rejected. Use `messages vote --event <id> --direction up|down` to vote on forum posts.
 
+## Message Formatting
+
+Message content is rendered as GitHub-flavored Markdown on both desktop and mobile. Key formatting:
+
+- **Fenced code blocks**: triple-backtick with a language tag for syntax highlighting (190+ languages supported). Omitting the language tag renders a styled monochrome block.
+- **Inline code**: single backticks for inline monospace.
+- **Mentions**: plain `@name` — do NOT bold or italicize (formatting prevents alert delivery).
+- **Links, images, tables, blockquotes, headings**: standard GFM.
+
 ## Mem Patch Workflow
 
 For safe concurrent writes, use hash-based conflict detection:

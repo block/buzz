@@ -170,7 +170,8 @@ async fn resolve_content_mentions(
 pub struct SendMessageParams {
     /// UUID of the channel to post to.
     pub channel_id: String,
-    /// Message body text.
+    /// Message body text. Supports GitHub-flavored Markdown including fenced code
+    /// blocks with syntax highlighting.
     pub content: String,
     /// Nostr event kind. Defaults to KIND_STREAM_MESSAGE (NIP-29 group chat message).
     #[serde(default = "default_kind")]
@@ -890,7 +891,9 @@ impl SproutMcpServer {
     /// Send a message to a Sprout channel.
     #[tool(
         name = "send_message",
-        description = "Send a message to a Sprout channel. Include `parent_event_id` to reply in a thread. \
+        description = "Send a message to a Sprout channel. Content supports GitHub-flavored Markdown — \
+use fenced code blocks with a language tag for syntax-highlighted rendering. \
+Include `parent_event_id` to reply in a thread. \
 Set `broadcast_to_channel` to also surface the reply in the main channel timeline. \
 For forum channels, set `kind` to 45001 (post) or 45003 (comment with `parent_event_id`). \
 Default kind is 9 (stream message)."
