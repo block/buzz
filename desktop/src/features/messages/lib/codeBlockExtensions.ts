@@ -23,7 +23,20 @@ export function handleCodeFenceEnter(ed: Editor): boolean | undefined {
     "￼",
   );
 
-  if (FENCE_AT_START.test(textBefore)) return false;
+  const startMatch = textBefore.match(FENCE_AT_START);
+  if (startMatch) {
+    const { tr, schema } = ed.state;
+    const attrs = startMatch[1] ? { language: startMatch[1] } : {};
+    tr.delete($cursor.start(), $cursor.pos);
+    tr.setBlockType(
+      tr.mapping.map($cursor.start()),
+      tr.mapping.map($cursor.start()),
+      schema.nodes.codeBlock,
+      attrs,
+    );
+    ed.view.dispatch(tr);
+    return true;
+  }
 
   const m = textBefore.match(FENCE_AFTER_BREAK);
   if (!m) return undefined;
