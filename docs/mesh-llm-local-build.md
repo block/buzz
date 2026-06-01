@@ -63,3 +63,37 @@ host's public IP (`stun.l.google.com`, `stun.cloudflare.com`, or
 That behavior is inside mesh-llm's host runtime and is not currently exposed as
 an SDK option. Treat it as a v1 limitation until mesh exposes a disable-public-
 STUN / relay-only-addressing knob.
+
+## Mesh-compute e2e acceptance matrix
+
+"Full e2e" for mesh-compute is necessarily layered: the Playwright harness
+drives the **web build** of the desktop UI through a bridge, so it cannot
+execute real Tauri mesh commands or real GGUF inference. We therefore split
+coverage into three layers and are explicit about what is real vs mocked.
+
+| # | What it proves | Where | Real / Mocked | Runs in CI? | How to run |
+|---|----------------|-------|---------------|-------------|------------|
+| 1 | serve node + client node + mesh routing + **real inference** | `crates/sprout-relay/examples/mesh_serve_client_smoke.rs` | **REAL** (loads a model, runs inference, joins a real mesh) | No — hardware-gated | `just mesh-e2e-hardware` (or `cargo run -p sprout-relay --example mesh_serve_client_smoke`) |
+| 2 | admission **invariant**: relay membership is the only factor | `crates/sprout-relay/src/iroh_relay.rs` (`admission_from_membership` tests) | REAL policy logic, no I/O | **Yes** | `cargo test -p sprout-relay iroh_relay::tests::admission` |
+| 2b | live db-membership admission + member/non-member status reads | `crates/sprout-test-client/tests/e2e_mesh_llm.rs` (`trust_*`) | REAL relay over ws | No — env-gated (`MEMBER_NSEC`/`STRANGER_NSEC`, live relay) | see that file's module docs |
+| 3 | desktop UI contract: Share-compute start/stop, Run-on-relay-mesh preset, **ensure-before-spawn** order, membership-gated toggle | `desktop/tests/e2e/mesh-compute.spec.ts` | UI REAL, Tauri mesh commands MOCKED via the e2e bridge | **Yes** | `cd desktop && pnpm test:e2e:integration -- mesh-compute.spec.ts` |
+
+`just mesh-e2e` runs the two CI-safe layers (2 + 3). Layer 1 is run on hardware.
+
+### What "real" means per layer
+
+- **Layer 1 is the only layer that proves inference.** It starts a real serve
+  node on the GPU, a real client node that joins via the serve node's invite
+  token, and asserts a chat completion *routed through the client* returns
+  `finish_reason=stop` with non-empty content. Verified locally with
+  SmolLM2-135M; point `MESH_SMOKE_MODEL` at a larger `.gguf` for scale.
+  Note: even with mDNS discovery the join bootstraps through mesh's public iroh
+  relay at the pinned rev — see the STUN limitation above.
+- **Layer 2 proves the auth invariant without faking it.** The policy mapping
+  (`MembershipDecision` → admit/deny) is exercised directly: member → allow,
+  non-member → deny, owner-delegation → deny (v1), error → deny. A valid NIP-98
+  identity or possession of dial metadata is, by itself, never sufficient.
+- **Layer 3 proves the UI contract, not inference.** The mesh Tauri commands
+  are mocked, but the assertions are on real UI behavior and real command
+  *ordering* (`mesh_ensure_client_node` is recorded before `create_managed_agent`),
+  and on the membership gate (a non-member cannot enable relay-mesh at all).

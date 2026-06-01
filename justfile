@@ -198,6 +198,15 @@ desktop-e2e-smoke:
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
+# Mesh-compute e2e: the CI-safe layers (admission invariant + Playwright UI)
+mesh-e2e:
+    cargo test -p sprout-relay iroh_relay::tests::admission
+    cd {{desktop_dir}} && pnpm test:e2e:integration -- mesh-compute.spec.ts
+
+# Mesh-compute Layer 1: REAL serve->client->inference on this machine (not CI)
+mesh-e2e-hardware:
+    cargo run -p sprout-relay --example mesh_serve_client_smoke
+
 # Run all checks suitable for CI / pre-push (no infra needed)
 ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
