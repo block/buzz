@@ -8,6 +8,7 @@ export type SearchHitDestination =
       kind: "channel";
       channelId: string;
       messageId?: string;
+      threadRootId?: string | null;
     }
   | {
       kind: "forum-post";
@@ -68,5 +69,6 @@ export async function resolveSearchHitDestination(
     kind: "channel",
     channelId: hit.channelId,
     messageId: hit.eventId,
+    threadRootId: hit.threadRootId ?? null,
   };
 }

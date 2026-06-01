@@ -7,6 +7,7 @@ import {
 } from "@/features/home/lib/inbox";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Markdown } from "@/shared/ui/markdown";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -47,7 +48,7 @@ export function InboxListPane({
     <section className="relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-background/60">
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[76px] bg-background/45 backdrop-blur-xl supports-[backdrop-filter]:bg-background/35"
+        className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[76px] bg-background/75 backdrop-blur-md supports-[backdrop-filter]:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/35"
       />
       <div className="absolute inset-x-0 top-[42px] z-50 min-h-[32px] px-5 py-[4px]">
         <div className="flex min-w-0 items-center justify-between gap-3">
@@ -159,16 +160,22 @@ export function InboxListPane({
                       </span>
                     </div>
 
-                    <p
+                    <div
                       className={cn(
-                        "mt-0.5 line-clamp-2 text-sm leading-5",
+                        "mt-0.5 line-clamp-2 text-sm leading-5 [&_*]:inline [&_a]:font-medium [&_a]:text-current [&_br]:hidden [&_p]:inline",
                         isDone
                           ? "font-normal text-muted-foreground"
                           : "font-semibold text-foreground",
                       )}
                     >
-                      {item.preview}
-                    </p>
+                      <Markdown
+                        className="inline max-w-full text-inherit"
+                        content={item.preview}
+                        interactive={false}
+                        mentionNames={item.mentionNames}
+                        tight
+                      />
+                    </div>
 
                     <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                       <span

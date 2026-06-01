@@ -21,6 +21,7 @@ import {
   useOpenDmMutation,
 } from "@/features/channels/hooks";
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
 import {
   useHomeFeedNotifications,
@@ -107,6 +108,7 @@ function toSearchHit(target: DesktopNotificationTarget): SearchHit | null {
     channelName: target.channelName ?? null,
     createdAt: target.createdAt ?? Math.floor(Date.now() / 1_000),
     score: 0,
+    threadRootId: target.threadRootId ?? null,
   };
 }
 
@@ -228,6 +230,8 @@ export function AppShell() {
             : content
           : "New message";
 
+      const threadRootId = getThreadReference(event.tags).rootId ?? null;
+
       void sendDesktopNotification({
         title: channelName,
         body,
@@ -239,6 +243,7 @@ export function AppShell() {
           eventId: event.id,
           kind: event.kind,
           pubkey: event.pubkey,
+          threadRootId,
         },
       }).then((didSend) => {
         if (!didSend) return;

@@ -198,7 +198,7 @@ export function MessageThreadPanel({
           className={cn(
             "z-50 flex cursor-default select-none items-center gap-3 px-3",
             isOverlay
-              ? "relative min-h-[44px] shrink-0 bg-background/70 py-[6px] backdrop-blur-xl supports-[backdrop-filter]:bg-background/55"
+              ? "relative min-h-[44px] shrink-0 bg-background/80 py-[6px] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
               : "absolute inset-x-0 top-11 min-h-[32px] py-[4px]",
           )}
           data-tauri-drag-region

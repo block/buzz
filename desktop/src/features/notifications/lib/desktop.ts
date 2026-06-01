@@ -18,6 +18,7 @@ export type DesktopNotificationTarget = {
   eventId: string | null;
   kind: number | null;
   pubkey?: string;
+  threadRootId?: string | null;
 };
 
 type DesktopNotificationPayload = {
@@ -73,6 +74,8 @@ function parseNotificationTarget(
   const kind = typeof candidate.kind === "number" ? candidate.kind : null;
   const pubkey =
     typeof candidate.pubkey === "string" ? candidate.pubkey : undefined;
+  const threadRootId =
+    typeof candidate.threadRootId === "string" ? candidate.threadRootId : null;
 
   if (!channelId && !eventId) {
     return null;
@@ -86,6 +89,7 @@ function parseNotificationTarget(
     eventId,
     kind,
     pubkey,
+    threadRootId,
   };
 }
 

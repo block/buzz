@@ -600,7 +600,7 @@ export function AppSidebar({
         </SidebarMenu>
       </SidebarHeader>
 
-      <div className="relative flex min-h-0 flex-1 flex-col">
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {unreadAboveCount > 0 ? (
           <MoreUnreadButton
             count={unreadAboveCount}
@@ -610,7 +610,7 @@ export function AppSidebar({
             testId="sidebar-more-unread-above"
           />
         ) : null}
-        <SidebarContent ref={scrollRef}>
+        <SidebarContent className="pb-32" ref={scrollRef}>
           {isLoading ? (
             <SidebarGroup>
               <SidebarGroupLabel>Channels</SidebarGroupLabel>
@@ -713,6 +713,7 @@ export function AppSidebar({
 
         {unreadBelowCount > 0 ? (
           <MoreUnreadButton
+            bottomClassName="bottom-28"
             count={unreadBelowCount}
             icon={<ArrowDown />}
             onClick={scrollToNextBelow}
@@ -720,88 +721,88 @@ export function AppSidebar({
             testId="sidebar-more-unread-below"
           />
         ) : null}
-      </div>
 
-      <SidebarFooter>
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <div
-              className="rounded-xl px-2 py-2 transition-colors hover:bg-sidebar-accent/70 focus-within:bg-sidebar-accent/70"
-              data-testid="sidebar-profile-card"
-            >
-              <div className="flex min-w-0 items-center gap-3">
-                <div className="relative shrink-0">
-                  <ProfileAvatar
-                    avatarUrl={profile?.avatarUrl ?? null}
-                    className="h-10 w-10 rounded-2xl text-sm"
-                    iconClassName="h-5 w-5"
-                    label={resolvedDisplayName}
-                    testId="sidebar-profile-avatar"
-                  />
-                  <span
-                    aria-label={getPresenceLabel(selfPresenceStatus)}
-                    className="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-sidebar"
-                    data-testid="self-presence-badge"
-                    role="img"
-                  >
-                    <PresenceDot
-                      className="h-2.5 w-2.5"
-                      status={selfPresenceStatus}
+        <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 shadow-[0_-16px_40px_hsl(var(--sidebar)/0.55)] backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:shadow-[0_-16px_44px_rgba(0,0,0,0.42)] dark:supports-[backdrop-filter]:bg-sidebar/35">
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <div
+                className="rounded-xl px-2 py-2 transition-colors hover:bg-sidebar-accent/35 focus-within:bg-sidebar-accent/35 dark:hover:bg-sidebar-accent/25 dark:focus-within:bg-sidebar-accent/25"
+                data-testid="sidebar-profile-card"
+              >
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="relative shrink-0">
+                    <ProfileAvatar
+                      avatarUrl={profile?.avatarUrl ?? null}
+                      className="h-10 w-10 rounded-2xl text-sm"
+                      iconClassName="h-5 w-5"
+                      label={resolvedDisplayName}
+                      testId="sidebar-profile-avatar"
                     />
-                  </span>
-                </div>
-                <div className="min-w-0 flex-1">
-                  <ProfilePopover
-                    open={profilePopoverOpen}
-                    onOpenChange={setProfilePopoverOpen}
-                    displayName={resolvedDisplayName}
-                    nip05={profile?.nip05Handle}
-                    avatarUrl={profile?.avatarUrl ?? null}
-                    currentStatus={selfPresenceStatus}
-                    isStatusPending={isPresencePending}
-                    userStatusText={selfUserStatus?.text}
-                    userStatusEmoji={selfUserStatus?.emoji}
-                    onSetStatus={onSetPresenceStatus ?? (() => {})}
-                    onSetUserStatus={onSetUserStatus}
-                    onClearUserStatus={onClearUserStatus}
-                    onOpenSettings={onSelectSettings}
-                  >
-                    <button
-                      className="block w-full min-w-0 text-left text-sidebar-foreground"
-                      data-testid="open-settings"
-                      type="button"
+                    <span
+                      aria-label={getPresenceLabel(selfPresenceStatus)}
+                      className="absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-sidebar"
+                      data-testid="self-presence-badge"
+                      role="img"
                     >
-                      <p
-                        className="truncate text-sm font-semibold text-current"
-                        data-testid="sidebar-profile-name"
+                      <PresenceDot
+                        className="h-2.5 w-2.5"
+                        status={selfPresenceStatus}
+                      />
+                    </span>
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <ProfilePopover
+                      open={profilePopoverOpen}
+                      onOpenChange={setProfilePopoverOpen}
+                      displayName={resolvedDisplayName}
+                      nip05={profile?.nip05Handle}
+                      avatarUrl={profile?.avatarUrl ?? null}
+                      currentStatus={selfPresenceStatus}
+                      isStatusPending={isPresencePending}
+                      userStatusText={selfUserStatus?.text}
+                      userStatusEmoji={selfUserStatus?.emoji}
+                      onSetStatus={onSetPresenceStatus ?? (() => {})}
+                      onSetUserStatus={onSetUserStatus}
+                      onClearUserStatus={onClearUserStatus}
+                      onOpenSettings={onSelectSettings}
+                    >
+                      <button
+                        className="block w-full min-w-0 text-left text-sidebar-foreground"
+                        data-testid="open-settings"
+                        type="button"
                       >
-                        {resolvedDisplayName}
+                        <p
+                          className="truncate text-sm font-semibold text-current"
+                          data-testid="sidebar-profile-name"
+                        >
+                          {resolvedDisplayName}
+                        </p>
+                      </button>
+                    </ProfilePopover>
+                    <WorkspaceSwitcher
+                      activeWorkspace={activeWorkspace}
+                      onAddWorkspace={onOpenAddWorkspace}
+                      onRemoveWorkspace={onRemoveWorkspace}
+                      onSwitchWorkspace={onSwitchWorkspace}
+                      onUpdateWorkspace={onUpdateWorkspace}
+                      variant="profile"
+                      workspaces={workspaces}
+                    />
+                    {selfUserStatus?.text || selfUserStatus?.emoji ? (
+                      <p className="mt-0.5 truncate text-xs text-sidebar-foreground/50">
+                        {selfUserStatus.emoji ? (
+                          <span className="mr-1">{selfUserStatus.emoji}</span>
+                        ) : null}
+                        {selfUserStatus.text}
                       </p>
-                    </button>
-                  </ProfilePopover>
-                  <WorkspaceSwitcher
-                    activeWorkspace={activeWorkspace}
-                    onAddWorkspace={onOpenAddWorkspace}
-                    onRemoveWorkspace={onRemoveWorkspace}
-                    onSwitchWorkspace={onSwitchWorkspace}
-                    onUpdateWorkspace={onUpdateWorkspace}
-                    variant="profile"
-                    workspaces={workspaces}
-                  />
-                  {selfUserStatus?.text || selfUserStatus?.emoji ? (
-                    <p className="mt-0.5 truncate text-xs text-sidebar-foreground/50">
-                      {selfUserStatus.emoji ? (
-                        <span className="mr-1">{selfUserStatus.emoji}</span>
-                      ) : null}
-                      {selfUserStatus.text}
-                    </p>
-                  ) : null}
+                    ) : null}
+                  </div>
                 </div>
               </div>
-            </div>
-          </SidebarMenuItem>
-        </SidebarMenu>
-      </SidebarFooter>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </SidebarFooter>
+      </div>
 
       <CreateChannelDialog
         channelKind={createDialogKind}

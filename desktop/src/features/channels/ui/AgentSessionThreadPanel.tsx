@@ -93,7 +93,7 @@ export function AgentSessionThreadPanel({
         {!isOverlay ? (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[76px] bg-background/45 backdrop-blur-xl after:absolute after:bottom-0 after:left-0 after:top-10 after:w-px after:bg-border/80 supports-[backdrop-filter]:bg-background/35"
+            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[76px] bg-background/75 backdrop-blur-md after:absolute after:bottom-0 after:left-0 after:top-10 after:w-px after:bg-border/80 supports-[backdrop-filter]:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/35"
           />
         ) : null}
 
@@ -101,7 +101,7 @@ export function AgentSessionThreadPanel({
           className={cn(
             "z-50 flex cursor-default select-none items-center gap-3 px-4",
             isOverlay
-              ? "relative min-h-[44px] shrink-0 border-b border-border/70 bg-background/70 py-2.5 backdrop-blur-xl supports-[backdrop-filter]:bg-background/55"
+              ? "relative min-h-[44px] shrink-0 border-b border-border/70 bg-background/80 py-2.5 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
               : "absolute inset-x-0 top-11 min-h-[32px] py-[4px]",
           )}
           data-tauri-drag-region
