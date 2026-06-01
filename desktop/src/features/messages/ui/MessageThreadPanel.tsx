@@ -42,6 +42,7 @@ type MessageThreadPanelProps = {
   onClose: () => void;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
+  onEditLastOwnMessage?: () => boolean;
   onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
   onMarkUnread?: (message: TimelineMessage) => void;
   onExpandReplies: (message: TimelineMessage) => void;
@@ -100,6 +101,7 @@ export function MessageThreadPanel({
   onClose,
   onDelete,
   onEdit,
+  onEditLastOwnMessage,
   onEditSave,
   onFollowThread,
   onMarkUnread,
@@ -388,6 +390,7 @@ export function MessageThreadPanel({
               isSending={isSending}
               onCancelEdit={onCancelEdit}
               onCancelReply={composerReplyTarget ? onCancelReply : undefined}
+              onEditLastOwnMessage={onEditLastOwnMessage}
               onEditSave={onEditSave}
               onSend={onSend}
               placeholder={`Reply in thread to ${threadHead.author}`}

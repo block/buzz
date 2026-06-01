@@ -24,7 +24,10 @@ export function useMessageDeepLinks() {
     let cancelled = false;
     const unlistenPromise = listenForMessageDeepLinks((payload) => {
       if (cancelled) return;
-      void goChannel(payload.channelId, { messageId: payload.messageId });
+      void goChannel(payload.channelId, {
+        messageId: payload.messageId,
+        threadRootId: payload.threadRootId,
+      });
     });
     return () => {
       cancelled = true;

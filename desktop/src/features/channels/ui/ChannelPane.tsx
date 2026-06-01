@@ -183,6 +183,50 @@ export const ChannelPane = React.memo(function ChannelPane({
   const mainEditTarget = editTarget && !isEditInThread ? editTarget : null;
   const threadEditTarget = editTarget && isEditInThread ? editTarget : null;
 
+  // ↑-to-edit resolvers. Find the most recent message authored by the current
+  // user in the relevant scope and enter edit mode via `onEdit`. Editability
+  // mirrors the action bar's gate (`message.pubkey === currentPubkey`); we
+  // also skip optimistic `pending` messages, which have no persisted event id
+  // to target. Both scopes are passed in chronological (oldest→newest) order,
+  // so we select by newest `createdAt` and break ties toward the later array
+  // position (`>=`) — `createdAt` is second-granularity, so a reply sent in
+  // the same second as the message before it must still win. Returns true when
+  // a target was found so MessageComposer can swallow the ArrowUp.
+  const findLastOwnEditable = React.useCallback(
+    (candidates: TimelineMessage[]): TimelineMessage | null => {
+      if (!onEdit || !currentPubkey) return null;
+      let best: TimelineMessage | null = null;
+      for (const message of candidates) {
+        if (message.pubkey !== currentPubkey || message.pending) continue;
+        if (!best || message.createdAt >= best.createdAt) {
+          best = message;
+        }
+      }
+      return best;
+    },
+    [onEdit, currentPubkey],
+  );
+
+  const handleEditLastOwnMainMessage = React.useCallback((): boolean => {
+    const target = findLastOwnEditable(messages);
+    if (!target || !onEdit) return false;
+    onEdit(target);
+    return true;
+  }, [findLastOwnEditable, messages, onEdit]);
+
+  const handleEditLastOwnThreadMessage = React.useCallback((): boolean => {
+    if (!onEdit) return false;
+    // Thread scope = the open thread head plus its replies, in chronological
+    // order. The head is oldest, so append it first.
+    const scope: TimelineMessage[] = [];
+    if (threadHeadMessage) scope.push(threadHeadMessage);
+    for (const entry of threadMessages) scope.push(entry.message);
+    const target = findLastOwnEditable(scope);
+    if (!target) return false;
+    onEdit(target);
+    return true;
+  }, [findLastOwnEditable, onEdit, threadHeadMessage, threadMessages]);
+
   const isNonMemberView =
     activeChannel !== null &&
     !activeChannel.isMember &&
@@ -338,6 +382,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   editTarget={mainEditTarget}
                   isSending={isSending}
                   onCancelEdit={onCancelEdit}
+                  onEditLastOwnMessage={handleEditLastOwnMainMessage}
                   onEditSave={onEditSave}
                   onSend={onSendMessage}
                   profiles={profiles}
@@ -374,7 +419,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                         currentPubkey={currentPubkey}
                         profiles={profiles}
                         typingPubkeys={typingPubkeys}
-                        variant="activity"
                       />
                     ) : null}
                   </div>
@@ -401,6 +445,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           onClose={onCloseThread}
           onDelete={onDelete}
           onEdit={onEdit}
+          onEditLastOwnMessage={handleEditLastOwnThreadMessage}
           onEditSave={onEditSave}
           onFollowThread={onFollowThread}
           onMarkUnread={onMarkUnread}

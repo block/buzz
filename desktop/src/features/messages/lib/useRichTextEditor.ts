@@ -41,6 +41,20 @@ export type RichTextEditorOptions = {
   /** Called on plain Enter (submit). Handled inside Tiptap's extension system
    *  so it fires *before* ProseMirror's default splitBlock behaviour. */
   onSubmit?: () => void;
+  /**
+   * Called on ArrowUp in an empty composer (Slack parity: edit your last
+   * message). Handled inside ProseMirror's `editorProps.handleKeyDown` — the
+   * raw DOM keydown hook that runs before any command/caret logic — so it
+   * fires deterministically even immediately after a send while the editor
+   * still holds DOM focus (where the keymap plugin and a wrapper-level
+   * `onKeyDown` both fail to see the event because the WebView's
+   * vertical-arrow handling consumes it first). The owner should locate the
+   * most recent message authored by the current user within this composer's
+   * scope and enter edit mode. Return `true` if a target was found and edit
+   * mode was entered, so the keystroke is swallowed; return `false` to let
+   * ArrowUp fall through to normal caret movement.
+   */
+  onEditLastOwnMessage?: () => boolean;
   /** When true, plain Enter is passed through (e.g. to select an autocomplete item). */
   isAutocompleteOpen?: React.RefObject<boolean>;
 };
@@ -61,6 +75,7 @@ export function useRichTextEditor({
   mentionNames,
   channelNames,
   onSubmit,
+  onEditLastOwnMessage,
   isAutocompleteOpen,
 }: RichTextEditorOptions) {
   const onUpdateRef = React.useRef(onUpdate);
@@ -68,6 +83,9 @@ export function useRichTextEditor({
 
   const onSubmitRef = React.useRef(onSubmit);
   onSubmitRef.current = onSubmit;
+
+  const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
+  onEditLastOwnMessageRef.current = onEditLastOwnMessage;
 
   const placeholderRef = React.useRef(placeholder);
   placeholderRef.current = placeholder;
@@ -286,6 +304,44 @@ export function useRichTextEditor({
             "min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-6 md:leading-6 shadow-none focus-visible:ring-0 caret-foreground outline-hidden prose-sm max-w-none",
           "data-testid": "message-input",
         },
+        // ArrowUp in an empty composer → edit your last message (Slack
+        // parity). Handled here in ProseMirror's own DOM `keydown` hook —
+        // NOT via `addKeyboardShortcuts` (the keymap plugin) and NOT via a
+        // wrapper-level React `onKeyDown`.
+        //
+        // Why this layer specifically: immediately after a send the editor
+        // still holds DOM focus and the doc was just cleared. In the app's
+        // WebView, ProseMirror's keymap/vertical-arrow path does not reliably
+        // route ArrowUp to our binding in that state — the keystroke is
+        // effectively swallowed until the user clicks out and back (which is
+        // exactly the reported bug). `handleKeyDown` is the first, lowest hook
+        // ProseMirror exposes: it runs on the raw DOM keydown before any
+        // command/caret logic, fires regardless of selection state, and works
+        // the same across browser engines. Returning `true` consumes the key.
+        handleKeyDown: (view, event) => {
+          if (event.key !== "ArrowUp") return false;
+          // Respect the same guards as before: no modifiers (let ⌥↑/⇧↑/etc.
+          // through), autocomplete closed, a handler exists, and the composer
+          // is empty (never steal the arrow from drafted text or an in-flight
+          // edit, whose loaded body makes the doc non-empty).
+          if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey)
+            return false;
+          if (isAutocompleteOpen?.current) return false;
+          const handler = onEditLastOwnMessageRef.current;
+          if (!handler) return false;
+          // Emptiness is read straight off the live ProseMirror doc rather
+          // than a captured `editor` ref — the `editor` instance isn't in
+          // scope at config time (useEditor deps are `[]`), and the view's
+          // state is always current. Empty = a single empty textblock with
+          // no text content (mirrors Tiptap's `editor.isEmpty`).
+          const { doc } = view.state;
+          const isEmptyDoc =
+            doc.childCount <= 1 && doc.textContent.length === 0;
+          if (!isEmptyDoc) return false;
+          // Consume only if a target was found and edit mode was entered;
+          // otherwise let ArrowUp fall through to normal caret movement.
+          return handler();
+        },
       },
       onUpdate: ({ editor: ed }) => {
         const markdown = getMarkdownFromEditor(ed);
@@ -301,9 +357,33 @@ export function useRichTextEditor({
   );
 
   // Toggle editable without destroying the editor instance.
+  //
+  // When the composer is disabled mid-send (`isSending` flips the `disabled`
+  // prop true), ProseMirror sets the underlying element `contenteditable=false`
+  // and the browser BLURS it — focus jumps to `document.body`. When the send
+  // completes and the editor becomes editable again, focus does NOT return on
+  // its own. That left the just-emptied composer focus-less, so the very next
+  // ArrowUp (edit-last-message) never reached the editor's keydown hook and
+  // did nothing until the user clicked back in. We restore focus here, scoped
+  // to *this* editor instance (we only refocus if this editor was the one that
+  // lost focus to the disable), so it can't steal focus from another composer.
+  const hadFocusBeforeDisableRef = React.useRef(false);
   React.useEffect(() => {
-    if (editor && editor.isEditable !== editable) {
-      editor.setEditable(editable);
+    if (!editor || editor.isEditable === editable) return;
+    if (!editable) {
+      // About to disable: remember whether we currently hold focus so we know
+      // whether to restore it when re-enabled.
+      hadFocusBeforeDisableRef.current = editor.isFocused;
+      editor.setEditable(false);
+    } else {
+      editor.setEditable(true);
+      // Re-enabled: if we owned focus before the disable blurred us, take it
+      // back (preserving the current selection — `focus()` with no arg keeps
+      // the existing selection rather than jumping to the end).
+      if (hadFocusBeforeDisableRef.current) {
+        hadFocusBeforeDisableRef.current = false;
+        editor.commands.focus();
+      }
     }
   }, [editor, editable]);
 

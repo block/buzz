@@ -57,7 +57,7 @@ pub fn restore_managed_agents_on_launch(
         // agent binaries not tracked by this session. Catches orphans whose
         // PID files were already cleaned up (e.g. agent workers in their own
         // process group whose parent harness exited).
-        super::sweep_system_agent_processes(&tracked_pids);
+        super::sweep_system_agent_processes(&super::current_instance_id(app), &tracked_pids);
 
         let candidates: Vec<String> = records
             .iter()

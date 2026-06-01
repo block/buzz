@@ -13,6 +13,6 @@ export type ChannelScreenProps = {
   onSelectForumPost: (postId: string) => void;
   selectedForumPostId: string | null;
   targetForumReplyId: string | null;
-  targetMessageEvent: RelayEvent | null;
+  targetMessageEvents: RelayEvent[];
   targetMessageId: string | null;
 };

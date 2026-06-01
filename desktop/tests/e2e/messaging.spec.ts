@@ -718,3 +718,98 @@ test("thread composer keeps focus after sending a thread reply", async ({
 
   await expect(threadInput).toBeFocused();
 });
+
+test("ArrowUp in an empty composer edits your last message right after sending", async ({
+  page,
+}) => {
+  // Regression: after a send, the composer keeps DOM focus and ProseMirror
+  // would consume ArrowUp before it reached the edit-last-message handler,
+  // so ↑ did nothing until you clicked out and back. The handler now lives
+  // in the editor keymap, so ↑ must work with no intermediate click.
+  const message = `Edit-last via arrow up ${Date.now()}`;
+  const input = page.getByTestId("message-input");
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await input.fill(message);
+  await input.press("Enter");
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+
+  // Composer stays focused after send — no click, just press ↑.
+  await expect(input).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+
+  // Edit mode is entered for the just-sent message.
+  const editBanner = page.getByTestId("edit-target");
+  await expect(editBanner).toBeVisible();
+  await expect(editBanner).toContainText(message);
+  await expect(input).toHaveText(message);
+});
+
+test("ArrowUp does not edit when the composer has draft text", async ({
+  page,
+}) => {
+  // Guard: ↑ must only hijack to edit when the composer is empty, so it
+  // never steals the arrow key from someone navigating drafted text.
+  const sent = `Sent before draft ${Date.now()}`;
+  const draft = `Half-typed draft ${Date.now()}`;
+  const input = page.getByTestId("message-input");
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await input.fill(sent);
+  await input.press("Enter");
+  await expect(page.getByTestId("message-timeline")).toContainText(sent);
+
+  await input.fill(draft);
+  await expect(input).toHaveText(draft);
+  await page.keyboard.press("ArrowUp");
+
+  // No edit mode; the draft is untouched.
+  await expect(page.getByTestId("edit-target")).toHaveCount(0);
+  await expect(input).toHaveText(draft);
+});
+
+test("ArrowUp edits your last thread reply right after sending it", async ({
+  page,
+}) => {
+  // Same fix must hold in the thread composer (shares MessageComposer).
+  const seed = `Thread arrow-up seed ${Date.now()}`;
+  const reply = `Thread reply to edit ${Date.now()}`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-input").fill(seed);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(seed);
+
+  const rootMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  const threadInput = threadPanel.getByTestId("message-input");
+  await expect(threadInput).toBeFocused();
+
+  await page.keyboard.type(reply);
+  await page.keyboard.press("Enter");
+  await expect(threadPanel).toContainText(reply);
+
+  // No click — press ↑ in the still-focused thread composer.
+  await page.keyboard.press("ArrowUp");
+
+  const editBanner = threadPanel.getByTestId("edit-target");
+  await expect(editBanner).toBeVisible();
+  await expect(editBanner).toContainText(reply);
+  await expect(threadInput).toHaveText(reply);
+});

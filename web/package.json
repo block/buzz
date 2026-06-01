@@ -25,7 +25,7 @@
     "buffer": "^6.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "isomorphic-git": "^1.37.6",
+    "isomorphic-git": "^1.38.3",
     "lucide-react": "^1.0.0",
     "nostr-tools": "^2.23.3",
     "react": "^19.1.0",

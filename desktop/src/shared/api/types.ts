@@ -231,6 +231,7 @@ export type SearchHit = {
   channelName: string | null;
   createdAt: number;
   score: number;
+  threadRootId?: string | null;
 };
 
 export type SearchMessagesResponse = {

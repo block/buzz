@@ -15,6 +15,7 @@ type ChannelRouteScreenProps = {
   selectedPostId: string | null;
   targetMessageId: string | null;
   targetReplyId: string | null;
+  targetThreadRootId: string | null;
 };
 
 export function ChannelRouteScreen({
@@ -22,6 +23,7 @@ export function ChannelRouteScreen({
   selectedPostId,
   targetMessageId,
   targetReplyId,
+  targetThreadRootId,
 }: ChannelRouteScreenProps) {
   const { closeForumPost, goForumPost } = useAppNavigation();
   const channelsQuery = useChannelsQuery();
@@ -30,42 +32,61 @@ export function ChannelRouteScreen({
   const channels = channelsQuery.data ?? [];
   const activeChannel =
     channels.find((channel) => channel.id === channelId) ?? null;
-  const [targetMessageEvent, setTargetMessageEvent] =
-    React.useState<RelayEvent | null>(() =>
-      getCachedSearchHitEvent(targetMessageId),
-    );
+  const [targetMessageEvents, setTargetMessageEvents] = React.useState<
+    RelayEvent[]
+  >(() => {
+    const cachedTarget = getCachedSearchHitEvent(targetMessageId);
+    return cachedTarget ? [cachedTarget] : [];
+  });
 
   React.useEffect(() => {
     let isCancelled = false;
 
     if (!targetMessageId || selectedPostId) {
-      setTargetMessageEvent(null);
+      setTargetMessageEvents([]);
       return () => {
         isCancelled = true;
       };
     }
 
-    setTargetMessageEvent(getCachedSearchHitEvent(targetMessageId));
-    void getEventById(targetMessageId)
-      .then((event) => {
-        if (!isCancelled) {
-          setTargetMessageEvent(event);
+    const cachedTarget = getCachedSearchHitEvent(targetMessageId);
+    setTargetMessageEvents(cachedTarget ? [cachedTarget] : []);
+
+    const eventIds = [
+      targetMessageId,
+      targetThreadRootId && targetThreadRootId !== targetMessageId
+        ? targetThreadRootId
+        : null,
+    ].filter((eventId): eventId is string => eventId !== null);
+
+    void Promise.all(
+      eventIds.map(async (eventId) => {
+        try {
+          return await getEventById(eventId);
+        } catch (error) {
+          console.error("Failed to load route event", eventId, error);
+          return null;
         }
-      })
-      .catch((error) => {
-        if (!isCancelled) {
-          console.error(
-            "Failed to load route target event",
-            targetMessageId,
-            error,
+      }),
+    ).then((events) => {
+      if (!isCancelled) {
+        setTargetMessageEvents((currentEvents) => {
+          const fetchedEvents = events.filter(
+            (event): event is RelayEvent => event !== null,
           );
-        }
-      });
+          const eventsById = new Map<string, RelayEvent>();
+          for (const event of [...currentEvents, ...fetchedEvents]) {
+            eventsById.set(event.id, event);
+          }
+          return Array.from(eventsById.values());
+        });
+      }
+    });
 
     return () => {
       isCancelled = true;
     };
-  }, [selectedPostId, targetMessageId]);
+  }, [selectedPostId, targetMessageId, targetThreadRootId]);
 
   if (channelsQuery.isPending && !activeChannel) {
     return (
@@ -89,7 +110,7 @@ export function ChannelRouteScreen({
       }}
       selectedForumPostId={selectedPostId}
       targetForumReplyId={targetReplyId}
-      targetMessageEvent={targetMessageEvent}
+      targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}
     />
   );

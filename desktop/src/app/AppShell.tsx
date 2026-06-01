@@ -21,6 +21,7 @@ import {
   useOpenDmMutation,
 } from "@/features/channels/hooks";
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
 import {
   useHomeFeedNotifications,
@@ -107,6 +108,7 @@ function toSearchHit(target: DesktopNotificationTarget): SearchHit | null {
     channelName: target.channelName ?? null,
     createdAt: target.createdAt ?? Math.floor(Date.now() / 1_000),
     score: 0,
+    threadRootId: target.threadRootId ?? null,
   };
 }
 
@@ -173,6 +175,7 @@ export function AppShell() {
   const [browseDialogType, setBrowseDialogType] =
     React.useState<BrowseDialogType>(null);
   const [isNewDmOpen, setIsNewDmOpen] = React.useState(false);
+  const [isCreateChannelOpen, setIsCreateChannelOpen] = React.useState(false);
   const location = useLocation();
   const queryClient = useQueryClient();
   const {
@@ -228,6 +231,8 @@ export function AppShell() {
             : content
           : "New message";
 
+      const threadRootId = getThreadReference(event.tags).rootId ?? null;
+
       void sendDesktopNotification({
         title: channelName,
         body,
@@ -239,6 +244,7 @@ export function AppShell() {
           eventId: event.id,
           kind: event.kind,
           pubkey: event.pubkey,
+          threadRootId,
         },
       }).then((didSend) => {
         if (!didSend) return;
@@ -517,6 +523,10 @@ export function AppShell() {
     setIsNewDmOpen(true);
   }, []);
 
+  const handleOpenCreateChannel = React.useCallback(() => {
+    setIsCreateChannelOpen(true);
+  }, []);
+
   React.useLayoutEffect(() => {
     if (settingsOpen) {
       return;
@@ -540,6 +550,12 @@ export function AppShell() {
         return;
       }
 
+      if (key === "n" && event.shiftKey) {
+        event.preventDefault();
+        handleOpenCreateChannel();
+        return;
+      }
+
       if (key === "o" && event.shiftKey) {
         event.preventDefault();
         handleOpenBrowseChannels();
@@ -560,6 +576,7 @@ export function AppShell() {
   }, [
     handleOpenBrowseChannels,
     handleOpenNewDm,
+    handleOpenCreateChannel,
     handleOpenSearch,
     goHome,
     settingsOpen,
@@ -683,6 +700,7 @@ export function AppShell() {
                   isLoading={channelsQuery.isLoading}
                   isOpeningDm={openDmMutation.isPending}
                   isNewDmOpen={isNewDmOpen}
+                  isCreateChannelOpen={isCreateChannelOpen}
                   isPresencePending={presenceSession.isPending}
                   onAddWorkspace={(workspace) => {
                     const id = workspacesHook.addWorkspace(workspace);
@@ -690,6 +708,7 @@ export function AppShell() {
                   }}
                   onAddWorkspaceOpenChange={setIsAddWorkspaceOpen}
                   onNewDmOpenChange={setIsNewDmOpen}
+                  onCreateChannelOpenChange={setIsCreateChannelOpen}
                   onOpenAddWorkspace={() => setIsAddWorkspaceOpen(true)}
                   onUpdateWorkspace={workspacesHook.updateWorkspace}
                   onRemoveWorkspace={workspacesHook.removeWorkspace}

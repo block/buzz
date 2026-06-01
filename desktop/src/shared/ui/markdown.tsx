@@ -603,7 +603,10 @@ function MarkdownInner({
           // "the thread root is a forum post" up front would require an
           // event lookup we don't currently have synchronously; the brief
           // explicitly allows skipping that detection and falling through.
-          void goChannel(link.channelId, { messageId: link.messageId });
+          void goChannel(link.channelId, {
+            messageId: link.messageId,
+            threadRootId: link.threadRootId,
+          });
         },
         imetaByUrl,
         mentionPubkeysByName,

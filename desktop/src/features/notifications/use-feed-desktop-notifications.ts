@@ -5,6 +5,7 @@ import {
   truncatePubkey,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import {
   collectHomeAlertItems,
@@ -99,6 +100,7 @@ export function useFeedDesktopNotifications(
 
   const deliverFeedNotification = React.useEffectEvent(
     async (item: FeedItem, senderName?: string) => {
+      const threadRootId = getThreadReference(item.tags).rootId ?? null;
       const didSend = await sendDesktopNotification({
         body: notificationBody(item),
         target: {
@@ -109,6 +111,7 @@ export function useFeedDesktopNotifications(
           eventId: item.id,
           kind: item.kind,
           pubkey: item.pubkey,
+          threadRootId,
         },
         title: notificationTitle(item, senderName),
       });

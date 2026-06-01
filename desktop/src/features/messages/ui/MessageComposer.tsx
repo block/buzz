@@ -63,6 +63,15 @@ type MessageComposerProps = {
   isSending?: boolean;
   onCancelEdit?: () => void;
   onCancelReply?: () => void;
+  /**
+   * Invoked when the user presses ↑ in an empty composer that is not already
+   * in edit mode. The owner should locate the most recent message authored by
+   * the current user within this composer's scope (main timeline, DM, or
+   * thread) and enter edit mode for it. Return `true` if a target was found
+   * and edit mode was entered, so the composer can swallow the keystroke;
+   * return `false` to let the arrow key fall through normally.
+   */
+  onEditLastOwnMessage?: () => boolean;
   onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
   onSend: (
     content: string,
@@ -92,6 +101,7 @@ export function MessageComposer({
   isSending = false,
   onCancelEdit,
   onCancelReply,
+  onEditLastOwnMessage,
   onEditSave,
   onSend,
   placeholder,
@@ -145,12 +155,14 @@ export function MessageComposer({
   const isUploadingRef = React.useRef(media.isUploading);
   const onSendRef = React.useRef(onSend);
   const onEditSaveRef = React.useRef(onEditSave);
+  const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
   const editTargetRef = React.useRef(editTarget);
   disabledRef.current = disabled;
   isSendingRef.current = isSending;
   isUploadingRef.current = media.isUploading;
   onSendRef.current = onSend;
   onEditSaveRef.current = onEditSave;
+  onEditLastOwnMessageRef.current = onEditLastOwnMessage;
   editTargetRef.current = editTarget;
 
   const isAutocompleteOpenRef = React.useRef(false);
@@ -183,6 +195,13 @@ export function MessageComposer({
     mentionNames: mentions.knownNames,
     channelNames: channelLinks.knownChannelNames,
     onSubmit: () => submitMessageRef.current(),
+    onEditLastOwnMessage: () => {
+      // Never re-enter edit from an empty edit (e.g. image-only edit whose
+      // text body is empty) — `editTarget` means we're already editing.
+      if (editTargetRef.current) return false;
+      const handler = onEditLastOwnMessageRef.current;
+      return handler ? handler() : false;
+    },
     isAutocompleteOpen: isAutocompleteOpenRef,
     onUpdate: ({ markdown, text }) => {
       setContent(markdown);

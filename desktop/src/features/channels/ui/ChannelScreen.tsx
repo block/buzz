@@ -64,7 +64,7 @@ export function ChannelScreen({
   onSelectForumPost,
   selectedForumPostId,
   targetForumReplyId,
-  targetMessageEvent,
+  targetMessageEvents,
   targetMessageId,
 }: ChannelScreenProps) {
   const {
@@ -136,9 +136,11 @@ export function ChannelScreen({
 
   const resolvedMessages = React.useMemo(() => {
     const currentMessages = messagesQuery.data ?? [];
-    if (!activeChannel || !targetMessageEvent) return currentMessages;
-    return mergeMessages(currentMessages, targetMessageEvent);
-  }, [activeChannel, messagesQuery.data, targetMessageEvent]);
+    if (!activeChannel || targetMessageEvents.length === 0) {
+      return currentMessages;
+    }
+    return targetMessageEvents.reduce(mergeMessages, currentMessages);
+  }, [activeChannel, messagesQuery.data, targetMessageEvents]);
   const messageAuthorPubkeys = React.useMemo(
     () => collectMessageAuthorPubkeys(resolvedMessages),
     [resolvedMessages],

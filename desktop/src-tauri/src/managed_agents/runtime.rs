@@ -118,11 +118,32 @@ pub(crate) fn process_belongs_to_us(_pid: u32) -> bool {
     false
 }
 
-/// Check if a running process has `SPROUT_MANAGED_AGENT=1` in its environment,
-/// distinguishing Sprout-spawned agent trees from independently-launched ones.
+/// The value stamped into the `SPROUT_MANAGED_AGENT` env var of every agent we
+/// spawn, identifying *which* desktop instance owns it. We use the app's bundle
+/// identifier (`xyz.block.sprout.app` for release, `xyz.block.sprout.app.dev`
+/// for `just dev`) because it is stable across restarts — a relaunched dev
+/// instance still recognizes its own previously-spawned agents as reclaimable,
+/// while never matching another instance's (e.g. a dev build never reaps a DMG
+/// build's agents, and vice versa). This is what lets two Sprouts coexist on
+/// one machine without one's cleanup nuking the other's agents.
+pub(crate) fn current_instance_id(app: &AppHandle) -> String {
+    app.config().identifier.clone()
+}
+
+/// Build the full `SPROUT_MANAGED_AGENT=<instance-id>` env entry we match
+/// against when scanning processes. Kept here so the spawn stamp and the sweep
+/// matcher can never drift apart.
+fn sprout_marker_entry(instance_id: &str) -> Vec<u8> {
+    format!("SPROUT_MANAGED_AGENT={instance_id}").into_bytes()
+}
+
+/// Check if a running process is one of *our* managed agents: it must carry
+/// `SPROUT_MANAGED_AGENT=<instance_id>` in its environment, where `instance_id`
+/// is this desktop instance's id. A process stamped with a *different* instance
+/// id belongs to another live Sprout app and must never be reaped here.
 #[cfg(target_os = "macos")]
-fn process_has_sprout_marker(pid: u32) -> bool {
-    const MARKER: &[u8] = b"SPROUT_MANAGED_AGENT=1";
+fn process_has_sprout_marker(pid: u32, instance_id: &str) -> bool {
+    let marker = sprout_marker_entry(instance_id);
 
     let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
     let mut buf_size: libc::size_t = 0;
@@ -192,20 +213,20 @@ fn process_has_sprout_marker(pid: u32) -> bool {
         args_remaining -= 1;
     }
     // Remaining bytes are null-delimited environment strings.
-    buf[pos..].split(|&b| b == 0).any(|entry| entry == MARKER)
+    buf[pos..].split(|&b| b == 0).any(|entry| entry == marker)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn process_has_sprout_marker(pid: u32) -> bool {
+fn process_has_sprout_marker(pid: u32, instance_id: &str) -> bool {
+    let marker = sprout_marker_entry(instance_id);
     let Ok(data) = std::fs::read(format!("/proc/{pid}/environ")) else {
         return false;
     };
-    data.split(|&b| b == 0)
-        .any(|entry| entry == b"SPROUT_MANAGED_AGENT=1")
+    data.split(|&b| b == 0).any(|entry| entry == marker)
 }
 
 #[cfg(not(unix))]
-fn process_has_sprout_marker(_pid: u32) -> bool {
+fn process_has_sprout_marker(_pid: u32, _instance_id: &str) -> bool {
     false
 }
 
@@ -347,12 +368,13 @@ pub(crate) fn sweep_orphaned_agent_processes(app: &AppHandle, _skip_pids: &[u32]
 }
 
 /// Enumerate all processes on the system owned by the current user and kill any
-/// that match `KNOWN_AGENT_BINARIES` but aren't in `skip_pids`. This catches
-/// orphans that escaped PID-file-based cleanup (e.g. agent workers spawned with
-/// their own process group whose parent harness already exited and had its PID
-/// file removed).
+/// agent binary stamped with *this* instance's `SPROUT_MANAGED_AGENT` marker
+/// (`instance_id`) that isn't in `skip_pids`. This catches orphans that escaped
+/// PID-file-based cleanup (e.g. agent workers spawned with their own process
+/// group whose parent harness already exited and had its PID file removed),
+/// while leaving another live Sprout instance's agents untouched.
 #[cfg(target_os = "macos")]
-pub(crate) fn sweep_system_agent_processes(skip_pids: &[u32]) {
+pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32]) {
     extern "C" {
         fn proc_listallpids(buffer: *mut libc::c_int, buffersize: libc::c_int) -> libc::c_int;
         fn proc_pidinfo(
@@ -426,7 +448,7 @@ pub(crate) fn sweep_system_agent_processes(skip_pids: &[u32]) {
         if info.pbi_uid != my_uid {
             continue;
         }
-        if !process_has_sprout_marker(upid) {
+        if !process_has_sprout_marker(upid, instance_id) {
             continue;
         }
         orphans.push(pid);
@@ -442,7 +464,7 @@ pub(crate) fn sweep_system_agent_processes(skip_pids: &[u32]) {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-pub(crate) fn sweep_system_agent_processes(skip_pids: &[u32]) {
+pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32]) {
     let my_uid = unsafe { libc::getuid() };
     let mut orphans: Vec<i32> = Vec::new();
     let my_pid = std::process::id() as i32;
@@ -473,7 +495,7 @@ pub(crate) fn sweep_system_agent_processes(skip_pids: &[u32]) {
         if meta.uid() != my_uid {
             continue;
         }
-        if process_belongs_to_us(upid) && process_has_sprout_marker(upid) {
+        if process_belongs_to_us(upid) && process_has_sprout_marker(upid, instance_id) {
             orphans.push(pid);
         }
     }
@@ -488,7 +510,7 @@ pub(crate) fn sweep_system_agent_processes(skip_pids: &[u32]) {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn sweep_system_agent_processes(_skip_pids: &[u32]) {}
+pub(crate) fn sweep_system_agent_processes(_instance_id: &str, _skip_pids: &[u32]) {}
 
 /// Kill stale agent processes from a previous session whose PID is still alive
 /// but not tracked in the current `runtimes` map. Updates the record fields and
@@ -982,11 +1004,13 @@ pub fn spawn_agent_child(
         command.env(key, value);
     }
 
-    // Mark as Sprout-managed so the system-wide orphan sweep can
-    // distinguish our processes from independently-launched agent binaries.
-    // Propagates automatically through the full tree (sprout-acp → goose →
-    // MCP servers) because neither sprout-acp nor goose calls env_clear().
-    command.env("SPROUT_MANAGED_AGENT", "1");
+    // Mark as Sprout-managed *and* which desktop instance owns us, so the
+    // system-wide orphan sweep only reaps this instance's own agents and never
+    // another live Sprout's (e.g. a `just dev` build won't kill a DMG build's
+    // agents). Propagates automatically through the full tree (sprout-acp →
+    // goose → MCP servers) because neither sprout-acp nor goose calls
+    // env_clear().
+    command.env("SPROUT_MANAGED_AGENT", current_instance_id(app));
 
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.
@@ -1124,6 +1148,22 @@ pub fn stop_managed_agent_process(
 #[cfg(test)]
 mod tests {
     use crate::managed_agents::known_acp_provider;
+
+    #[test]
+    fn marker_entry_is_namespaced_by_instance_id() {
+        // The spawn stamp and the sweep matcher must produce identical bytes;
+        // both go through sprout_marker_entry, so this pins the on-the-wire
+        // format and guards against a dev build (`...app.dev`) matching a
+        // release build's (`...app`) agents.
+        assert_eq!(
+            super::sprout_marker_entry("xyz.block.sprout.app"),
+            b"SPROUT_MANAGED_AGENT=xyz.block.sprout.app".to_vec()
+        );
+        assert_ne!(
+            super::sprout_marker_entry("xyz.block.sprout.app"),
+            super::sprout_marker_entry("xyz.block.sprout.app.dev")
+        );
+    }
 
     #[test]
     fn sprout_agent_has_mcp_hooks() {

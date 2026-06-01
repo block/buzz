@@ -161,6 +161,8 @@ type AppSidebarProps = {
   isPresencePending?: boolean;
   isNewDmOpen?: boolean;
   onNewDmOpenChange?: (open: boolean) => void;
+  isCreateChannelOpen?: boolean;
+  onCreateChannelOpenChange?: (open: boolean) => void;
 };
 
 // ---------------------------------------------------------------------------
@@ -410,6 +412,8 @@ export function AppSidebar({
   isPresencePending,
   isNewDmOpen: isNewDmOpenProp,
   onNewDmOpenChange,
+  isCreateChannelOpen: isCreateChannelOpenProp,
+  onCreateChannelOpenChange,
 }: AppSidebarProps) {
   const skeletonRows = ["first", "second", "third", "fourth", "fifth", "sixth"];
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
@@ -420,6 +424,17 @@ export function AppSidebar({
   const [profilePopoverOpen, setProfilePopoverOpen] = React.useState(false);
   const [createDialogKind, setCreateDialogKind] =
     React.useState<CreateChannelKind | null>(null);
+
+  // Allow the create-channel dialog to be opened from outside (e.g. the
+  // ⌘⇧N global shortcut in AppShell), mirroring the controlled new-DM lift.
+  // When the external flag flips on, open the "stream" create dialog; the
+  // close direction is reported back via `onCreateChannelOpenChange` in the
+  // dialog's `onOpenChange` below.
+  React.useEffect(() => {
+    if (isCreateChannelOpenProp) {
+      setCreateDialogKind("stream");
+    }
+  }, [isCreateChannelOpenProp]);
   const [collapsedGroups, setCollapsedGroups] = React.useState<
     Record<CollapsibleSidebarGroup, boolean>
   >({
@@ -808,7 +823,14 @@ export function AppSidebar({
         channelKind={createDialogKind}
         isCreating={isCreatingAny}
         onOpenChange={(open) => {
-          if (!open) setCreateDialogKind(null);
+          if (!open) {
+            // If a "stream" dialog driven by the external controller is
+            // closing, report it back so AppShell's open state resets.
+            if (createDialogKind === "stream") {
+              onCreateChannelOpenChange?.(false);
+            }
+            setCreateDialogKind(null);
+          }
         }}
         onCreate={handleCreateFromDialog}
       />

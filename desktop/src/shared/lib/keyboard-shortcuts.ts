@@ -42,6 +42,14 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
     category: "Navigation",
   },
   {
+    id: "new-channel",
+    label: "New channel",
+    description: "Open the create channel dialog",
+    keys: "⇧⌘N",
+    keysWindows: "Shift+Ctrl+N",
+    category: "Navigation",
+  },
+  {
     id: "open-settings",
     label: "Settings",
     description: "Open or close settings",
