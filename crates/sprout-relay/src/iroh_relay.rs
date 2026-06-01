@@ -46,7 +46,24 @@ pub async fn decide_admission(
         Err(reason) => return IrohAdmissionDecision::Deny(reason),
     };
 
-    match crate::api::relay_members::check_relay_membership(state, &pubkey.to_bytes(), None).await {
+    let membership =
+        crate::api::relay_members::check_relay_membership(state, &pubkey.to_bytes(), None).await;
+    admission_from_membership(membership, pubkey)
+}
+
+/// Map a relay-membership outcome to an iroh admission decision.
+///
+/// This is the mesh admission *invariant*, isolated from any I/O so it can be
+/// asserted directly: relay membership is the only thing that admits. A direct
+/// member (or an open relay) is allowed; everything else — non-members,
+/// NIP-OA owner-delegated agents (denied in v1), and membership-check errors —
+/// is denied. Possession of dial metadata or a valid NIP-98 bearer is by itself
+/// never sufficient; only membership flips this to `Allow`.
+pub fn admission_from_membership(
+    membership: Result<MembershipDecision, String>,
+    pubkey: PublicKey,
+) -> IrohAdmissionDecision {
+    match membership {
         Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => {
             IrohAdmissionDecision::Allow { pubkey }
         }
@@ -160,5 +177,60 @@ mod tests {
 
         let error = verify_bearer(url, Some(&token)).unwrap_err();
         assert!(error.contains("window"), "{error}");
+    }
+    // ── Admission invariant: relay membership is the ONLY factor ──────────────
+    //
+    // These assert the policy mapping directly (no db/AppState needed). The
+    // bearer-proof layer is covered by the verify_bearer tests above; here we
+    // pin that a *proven* identity is admitted iff it is a relay member.
+
+    fn any_pubkey() -> PublicKey {
+        Keys::generate().public_key()
+    }
+
+    #[test]
+    fn admission_allows_direct_relay_member() {
+        let pk = any_pubkey();
+        let decision = admission_from_membership(Ok(MembershipDecision::Member), pk);
+        assert_eq!(decision, IrohAdmissionDecision::Allow { pubkey: pk });
+    }
+
+    #[test]
+    fn admission_allows_when_relay_is_open() {
+        // require_relay_membership disabled → OpenRelay → admitted.
+        let pk = any_pubkey();
+        let decision = admission_from_membership(Ok(MembershipDecision::OpenRelay), pk);
+        assert_eq!(decision, IrohAdmissionDecision::Allow { pubkey: pk });
+    }
+
+    #[test]
+    fn admission_denies_non_member() {
+        // A valid Nostr identity that is not a relay member gets nothing.
+        let pk = any_pubkey();
+        let decision = admission_from_membership(Ok(MembershipDecision::Denied), pk);
+        assert!(matches!(decision, IrohAdmissionDecision::Deny(_)));
+    }
+
+    #[test]
+    fn admission_denies_owner_delegation_in_v1() {
+        // NIP-OA owner-delegated agents are explicitly NOT admitted to the mesh
+        // in v1, even though HTTP endpoints accept the same delegation.
+        let pk = any_pubkey();
+        let owner = any_pubkey();
+        let decision = admission_from_membership(Ok(MembershipDecision::ViaOwner(owner)), pk);
+        match decision {
+            IrohAdmissionDecision::Deny(reason) => {
+                assert!(reason.contains("owner-delegated"), "{reason}");
+            }
+            other => panic!("owner delegation must be denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn admission_denies_on_membership_check_error() {
+        // Fail closed: an errored membership lookup denies, never admits.
+        let pk = any_pubkey();
+        let decision = admission_from_membership(Err("db down".to_string()), pk);
+        assert!(matches!(decision, IrohAdmissionDecision::Deny(_)));
     }
 }
