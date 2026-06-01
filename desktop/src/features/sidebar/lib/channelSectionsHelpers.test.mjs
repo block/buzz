@@ -20,9 +20,9 @@ test("move up succeeds: middle section swaps order with the one above", () => {
   const result = swapSectionOrder(store, "b", "up");
   assert.notEqual(result, null);
   const byId = Object.fromEntries(result.sections.map((s) => [s.id, s.order]));
-  assert.equal(byId["b"], 0);
-  assert.equal(byId["a"], 1);
-  assert.equal(byId["c"], 2);
+  assert.equal(byId.b, 0);
+  assert.equal(byId.a, 1);
+  assert.equal(byId.c, 2);
 });
 
 test("move down succeeds: middle section swaps order with the one below", () => {
@@ -34,9 +34,9 @@ test("move down succeeds: middle section swaps order with the one below", () => 
   const result = swapSectionOrder(store, "b", "down");
   assert.notEqual(result, null);
   const byId = Object.fromEntries(result.sections.map((s) => [s.id, s.order]));
-  assert.equal(byId["b"], 2);
-  assert.equal(byId["c"], 1);
-  assert.equal(byId["a"], 0);
+  assert.equal(byId.b, 2);
+  assert.equal(byId.c, 1);
+  assert.equal(byId.a, 0);
 });
 
 test("move up at top boundary returns null", () => {
@@ -73,7 +73,7 @@ test("non-contiguous orders: swap uses actual order values not indices", () => {
   const result = swapSectionOrder(store, "b", "up");
   assert.notEqual(result, null);
   const byId = Object.fromEntries(result.sections.map((s) => [s.id, s.order]));
-  assert.equal(byId["b"], 0);
-  assert.equal(byId["a"], 5);
-  assert.equal(byId["c"], 10);
+  assert.equal(byId.b, 0);
+  assert.equal(byId.a, 5);
+  assert.equal(byId.c, 10);
 });

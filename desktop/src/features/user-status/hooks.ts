@@ -90,7 +90,7 @@ export function useUserStatusSubscription() {
     function handleStatusEvent(event: RelayEvent) {
       if (isCancelled) return;
       const dTag = event.tags.find((t) => t[0] === "d");
-      if (!dTag || dTag[1] !== "general") return;
+      if (dTag?.[1] !== "general") return;
       const parsed = parseUserStatusEvent(event);
       const status: UserStatus | null =
         parsed.text || parsed.emoji

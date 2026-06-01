@@ -4298,7 +4298,7 @@ function resolveMockUploadDescriptors(
   if (configured !== undefined) return configured;
   return [
     {
-      url: "https://mock.relay/media/" + "a".repeat(64) + ".pdf",
+      url: `https://mock.relay/media/${"a".repeat(64)}.pdf`,
       sha256: "a".repeat(64),
       size: 12345,
       type: "application/pdf",

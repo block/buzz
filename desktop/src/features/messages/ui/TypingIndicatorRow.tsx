@@ -18,7 +18,7 @@ type TypingIndicatorRowProps = {
 };
 
 function resolveFallbackName(channel: Channel | null, pubkey: string) {
-  if (!channel || channel.channelType !== "dm") {
+  if (channel?.channelType !== "dm") {
     return null;
   }
 

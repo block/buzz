@@ -11,7 +11,7 @@ export function useActiveChannelHeader(
   currentPubkey?: string,
 ) {
   const activeDmParticipantPubkeys = React.useMemo(() => {
-    if (!activeChannel || activeChannel.channelType !== "dm") {
+    if (activeChannel?.channelType !== "dm") {
       return [];
     }
 
