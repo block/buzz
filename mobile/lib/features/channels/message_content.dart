@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 import 'package:highlight/highlight.dart' show highlight, Node;
@@ -505,36 +506,31 @@ class _MediaPreviewFallback extends StatelessWidget {
   }
 }
 
-class _MessageCodeBlock extends StatefulWidget {
+class _MessageCodeBlock extends HookWidget {
   final String name;
   final String code;
 
   const _MessageCodeBlock({required this.name, required this.code});
 
   @override
-  State<_MessageCodeBlock> createState() => _MessageCodeBlockState();
-}
-
-class _MessageCodeBlockState extends State<_MessageCodeBlock> {
-  bool _copied = false;
-
-  Future<void> _handleCopy() async {
-    await Clipboard.setData(ClipboardData(text: widget.code));
-    if (!mounted) return;
-    setState(() => _copied = true);
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Copied code to clipboard'),
-        duration: Duration(seconds: 2),
-      ),
-    );
-    Future.delayed(const Duration(seconds: 2), () {
-      if (mounted) setState(() => _copied = false);
-    });
-  }
-
-  @override
   Widget build(BuildContext context) {
+    final isCopied = useState(false);
+
+    Future<void> handleCopy() async {
+      await Clipboard.setData(ClipboardData(text: code));
+      if (!context.mounted) return;
+      isCopied.value = true;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Copied code to clipboard'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      Future.delayed(const Duration(seconds: 2), () {
+        if (context.mounted) isCopied.value = false;
+      });
+    }
+
     final codeBaseStyle = TextStyle(
       fontFamily: 'GeistMono',
       fontSize: 13,
@@ -543,12 +539,7 @@ class _MessageCodeBlockState extends State<_MessageCodeBlock> {
     );
     final isDark = context.theme.brightness == Brightness.dark;
     final codeTheme = isDark ? _highlightDarkTheme : _highlightLightTheme;
-    final codeSpans = _highlightCode(
-      widget.code,
-      widget.name,
-      codeTheme,
-      codeBaseStyle,
-    );
+    final codeSpans = _highlightCode(code, name, codeTheme, codeBaseStyle);
     return Container(
       margin: const EdgeInsets.only(top: Grid.half),
       decoration: BoxDecoration(
@@ -562,14 +553,14 @@ class _MessageCodeBlockState extends State<_MessageCodeBlock> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (widget.name.isNotEmpty)
+          if (name.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(
                 left: Grid.twelve,
                 top: Grid.half + Grid.quarter,
               ),
               child: Text(
-                widget.name,
+                name,
                 style: context.textTheme.labelSmall?.copyWith(
                   color: context.colors.onSurfaceVariant,
                 ),
@@ -580,7 +571,7 @@ class _MessageCodeBlockState extends State<_MessageCodeBlock> {
               Padding(
                 padding: EdgeInsets.fromLTRB(
                   Grid.twelve,
-                  widget.name.isEmpty ? Grid.half + Grid.quarter : Grid.quarter,
+                  name.isEmpty ? Grid.half + Grid.quarter : Grid.quarter,
                   44,
                   Grid.half + Grid.quarter,
                 ),
@@ -599,16 +590,16 @@ class _MessageCodeBlockState extends State<_MessageCodeBlock> {
                   width: 28,
                   height: 28,
                   child: IconButton(
-                    onPressed: _handleCopy,
+                    onPressed: handleCopy,
                     padding: EdgeInsets.zero,
                     visualDensity: VisualDensity.compact,
                     style: IconButton.styleFrom(
                       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
                     icon: Icon(
-                      _copied ? LucideIcons.check : LucideIcons.copy,
+                      isCopied.value ? LucideIcons.check : LucideIcons.copy,
                       size: 14,
-                      color: _copied
+                      color: isCopied.value
                           ? context.colors.primary
                           : context.colors.onSurfaceVariant,
                     ),
