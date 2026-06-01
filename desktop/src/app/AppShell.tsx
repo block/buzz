@@ -320,17 +320,18 @@ export function AppShell() {
   // ReadStateManager mounted via useUnreadChannels above. Channel-backed
   // feed items contribute to the badge iff strictly newer than that
   // channel's read marker; non-channel items keep their seen-set fallback.
-  const homeBadgeCount = useHomeFeedNotificationState(
-    homeFeedQuery.data,
-    identityQuery.data?.pubkey,
-    notificationSettings.settings,
-    notificationSettings.setDesktopEnabled,
-    selectedView === "home",
-    getChannelReadAt,
-    readStateVersion,
-    highPriorityUnreadChannelIds,
-    feedProfilesQuery.data?.profiles,
-  );
+  const { homeBadgeCount, homeBadgeCountExcludingHighPriority } =
+    useHomeFeedNotificationState(
+      homeFeedQuery.data,
+      identityQuery.data?.pubkey,
+      notificationSettings.settings,
+      notificationSettings.setDesktopEnabled,
+      selectedView === "home",
+      getChannelReadAt,
+      readStateVersion,
+      highPriorityUnreadChannelIds,
+      feedProfilesQuery.data?.profiles,
+    );
 
   const isNotifiedForThread = React.useCallback(
     (rootId: string) =>
@@ -494,7 +495,8 @@ export function AppShell() {
   }, []);
 
   React.useEffect(() => {
-    const numericCount = highPriorityUnreadChannelIds.size + homeBadgeCount;
+    const numericCount =
+      highPriorityUnreadChannelIds.size + homeBadgeCountExcludingHighPriority;
     if (numericCount > 0) {
       void setDesktopAppBadge({ kind: "count", count: numericCount });
     } else if (unreadChannelIds.size > 0) {
@@ -503,7 +505,7 @@ export function AppShell() {
       void setDesktopAppBadge({ kind: "none" });
     }
   }, [
-    homeBadgeCount,
+    homeBadgeCountExcludingHighPriority,
     highPriorityUnreadChannelIds.size,
     unreadChannelIds.size,
   ]);
