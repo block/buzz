@@ -1019,6 +1019,26 @@ fn child_rust_log_filter() -> String {
     }
 }
 
+/// Returns the relay-mesh model id for agents whose provider env points at the
+/// local mesh client endpoint. The caller is responsible for ensuring that
+/// endpoint is alive before spawning the agent process.
+pub fn relay_mesh_model_id(record: &ManagedAgentRecord) -> Option<String> {
+    let base_url = record.env_vars.get("OPENAI_COMPAT_BASE_URL")?.trim();
+    if base_url.trim_end_matches('/') != "http://127.0.0.1:9337/v1" {
+        return None;
+    }
+    let provider = record.env_vars.get("SPROUT_AGENT_PROVIDER")?.trim();
+    if provider != "openai" {
+        return None;
+    }
+    record
+        .env_vars
+        .get("OPENAI_COMPAT_MODEL")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 pub fn start_managed_agent_process(
     app: &AppHandle,
     record: &mut ManagedAgentRecord,
@@ -1125,6 +1145,7 @@ pub fn stop_managed_agent_process(
 
 #[cfg(test)]
 mod tests {
+    use super::relay_mesh_model_id;
     use crate::managed_agents::known_acp_provider;
 
     #[test]
@@ -1198,6 +1219,36 @@ mod tests {
             respond_to,
             respond_to_allowlist: allowlist,
         }
+    }
+
+    #[test]
+    fn relay_mesh_model_id_detects_mesh_preset_env() {
+        let mut rec = fixture(RespondTo::OwnerOnly, vec![], Some("tag".into()));
+        rec.env_vars = std::collections::BTreeMap::from([
+            ("SPROUT_AGENT_PROVIDER".to_string(), "openai".to_string()),
+            (
+                "OPENAI_COMPAT_BASE_URL".to_string(),
+                "http://127.0.0.1:9337/v1/".to_string(),
+            ),
+            ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
+        ]);
+
+        assert_eq!(relay_mesh_model_id(&rec).as_deref(), Some("Qwen3"));
+    }
+
+    #[test]
+    fn relay_mesh_model_id_ignores_non_mesh_openai_env() {
+        let mut rec = fixture(RespondTo::OwnerOnly, vec![], Some("tag".into()));
+        rec.env_vars = std::collections::BTreeMap::from([
+            ("SPROUT_AGENT_PROVIDER".to_string(), "openai".to_string()),
+            (
+                "OPENAI_COMPAT_BASE_URL".to_string(),
+                "https://api.openai.com/v1".to_string(),
+            ),
+            ("OPENAI_COMPAT_MODEL".to_string(), "gpt-5".to_string()),
+        ]);
+
+        assert_eq!(relay_mesh_model_id(&rec), None);
     }
 
     #[test]

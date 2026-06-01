@@ -46,7 +46,14 @@ pub async fn mesh_ensure_client_node(
     state: State<'_, AppState>,
     request: mesh_llm::EnsureMeshClientRequest,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
-    let requested_model = request.model_id.trim();
+    ensure_client_node_for_model(&state, request.model_id).await
+}
+
+pub(crate) async fn ensure_client_node_for_model(
+    state: &AppState,
+    model_id: impl AsRef<str>,
+) -> CmdResult<mesh_llm::MeshNodeStatus> {
+    let requested_model = model_id.as_ref().trim();
     if requested_model.is_empty() {
         return Err("modelId is required".to_string());
     }

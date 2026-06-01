@@ -7,13 +7,13 @@ use crate::{
         build_managed_agent_summary, discover_provider_candidates, ensure_persona_is_active,
         find_managed_agent_mut, invoke_provider, load_managed_agents, load_personas,
         managed_agent_avatar_url, managed_agent_log_path, managed_agents_base_dir,
-        normalize_agent_args, provider_deploy, read_log_tail, resolve_provider_binary,
-        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
-        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
-        BackendProviderInfo, CreateManagedAgentRequest, CreateManagedAgentResponse,
-        ManagedAgentLogResponse, ManagedAgentRecord, ManagedAgentSummary, DEFAULT_ACP_COMMAND,
-        DEFAULT_AGENT_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
-        DEFAULT_MCP_COMMAND,
+        normalize_agent_args, provider_deploy, read_log_tail, relay_mesh_model_id,
+        resolve_provider_binary, save_managed_agents, start_managed_agent_process,
+        stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
+        validate_provider_config, BackendKind, BackendProviderInfo, CreateManagedAgentRequest,
+        CreateManagedAgentResponse, ManagedAgentLogResponse, ManagedAgentRecord,
+        ManagedAgentSummary, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_COMMAND, DEFAULT_AGENT_PARALLELISM,
+        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS, DEFAULT_MCP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -25,6 +25,64 @@ use crate::{
 fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;
     Ok(keys.public_key().to_hex())
+}
+
+async fn ensure_relay_mesh_for_record(
+    state: &AppState,
+    record: &ManagedAgentRecord,
+) -> Result<(), String> {
+    let Some(model_id) = relay_mesh_model_id(record) else {
+        return Ok(());
+    };
+    crate::commands::mesh_llm::ensure_client_node_for_model(state, model_id).await?;
+    Ok(())
+}
+
+async fn start_local_agent_with_preflight(
+    app: &AppHandle,
+    state: &AppState,
+    pubkey: &str,
+    owner_hex: &str,
+) -> Result<ManagedAgentSummary, String> {
+    let record_snapshot = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let records = load_managed_agents(app)?;
+        records
+            .iter()
+            .find(|record| record.pubkey == pubkey)
+            .cloned()
+            .ok_or_else(|| format!("agent {pubkey} not found"))?
+    };
+
+    if record_snapshot.backend != BackendKind::Local {
+        return Err(format!("agent {pubkey} is not a local agent"));
+    }
+
+    ensure_relay_mesh_for_record(state, &record_snapshot).await?;
+
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let mut records = load_managed_agents(app)?;
+    let mut runtimes = state
+        .managed_agent_processes
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let record = find_managed_agent_mut(&mut records, pubkey)?;
+    if record.backend != BackendKind::Local {
+        return Err(format!("agent {pubkey} is no longer a local agent"));
+    }
+    start_managed_agent_process(app, record, &mut runtimes, Some(owner_hex))?;
+    save_managed_agents(app, &records)?;
+    let record = records
+        .iter()
+        .find(|record| record.pubkey == pubkey)
+        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+    build_managed_agent_summary(app, record, &runtimes)
 }
 
 /// Build the standard agent JSON payload for provider deploy calls.
@@ -287,8 +345,8 @@ pub async fn create_managed_agent(
         Some(tag)
     };
 
-    // ── Phase 3: save record and optionally spawn (sync lock) ─────────────────
-    let (agent, spawn_error) = {
+    // ── Phase 3: save record (sync lock) ───────────────────────────────────────
+    let agent = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -438,17 +496,6 @@ pub async fn create_managed_agent(
 
         records.push(record);
 
-        let mut spawn_error = None;
-        if input.spawn_after_create && input.backend == BackendKind::Local {
-            let record = find_managed_agent_mut(&mut records, &pubkey)?;
-            if let Err(error) =
-                start_managed_agent_process(&app, record, &mut runtimes, Some(&owner_hex))
-            {
-                record.updated_at = now_iso();
-                record.last_error = Some(error.clone());
-                spawn_error = Some(error);
-            }
-        }
         save_managed_agents(&app, &records)?;
 
         let record = records
@@ -457,7 +504,38 @@ pub async fn create_managed_agent(
             .ok_or_else(|| "created agent disappeared unexpectedly".to_string())?;
         let agent = build_managed_agent_summary(&app, record, &runtimes)?;
 
-        (agent, spawn_error)
+        agent
+    };
+
+    // ── Phase 3b: local spawn (async preflight outside store lock) ───────────
+    let mut spawn_error = None;
+    let agent = if input.spawn_after_create && input.backend == BackendKind::Local {
+        match start_local_agent_with_preflight(&app, &state, &pubkey, &owner_hex).await {
+            Ok(agent) => agent,
+            Err(error) => {
+                let _store_guard = state
+                    .managed_agents_store_lock
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                let mut records = load_managed_agents(&app)?;
+                let runtimes = state
+                    .managed_agent_processes
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                let record = find_managed_agent_mut(&mut records, &pubkey)?;
+                record.updated_at = now_iso();
+                record.last_error = Some(error.clone());
+                save_managed_agents(&app, &records)?;
+                spawn_error = Some(error);
+                let record = records
+                    .iter()
+                    .find(|record| record.pubkey == pubkey)
+                    .ok_or_else(|| "created agent disappeared unexpectedly".to_string())?;
+                build_managed_agent_summary(&app, record, &runtimes)?
+            }
+        }
+    } else {
+        agent
     };
 
     try_regenerate_nest(&app);
@@ -566,8 +644,17 @@ pub async fn start_managed_agent(
     // Snapshot the workspace owner pubkey for the legacy auth_tag fallback.
     // Read outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;
-    // Collect backend info and handle local vs provider under lock.
-    let (backend, cached_binary_path, agent_json) = {
+    enum StartTarget {
+        Local,
+        Provider {
+            backend: BackendKind,
+            cached_binary_path: Option<String>,
+            agent_json: serde_json::Value,
+        },
+    }
+
+    // Collect backend info under lock; async preflight/spawn happens below.
+    let target = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -585,55 +672,56 @@ pub async fn start_managed_agent(
         let record = find_managed_agent_mut(&mut records, &pubkey)?;
 
         if record.backend == BackendKind::Local {
-            // Local: spawn in-process and return immediately.
-            start_managed_agent_process(&app, record, &mut runtimes, Some(&owner_hex))?;
-            save_managed_agents(&app, &records)?;
+            StartTarget::Local
+        } else {
+            StartTarget::Provider {
+                backend: record.backend.clone(),
+                cached_binary_path: record.provider_binary_path.clone(),
+                agent_json: build_deploy_payload(&app, record)?,
+            }
+        }
+    };
+
+    match target {
+        StartTarget::Local => {
+            start_local_agent_with_preflight(&app, &state, &pubkey, &owner_hex).await
+        }
+        StartTarget::Provider {
+            backend: BackendKind::Provider { id, config },
+            cached_binary_path,
+            agent_json,
+        } => {
+            deploy_to_provider(
+                &app,
+                &state,
+                &pubkey,
+                &id,
+                &config,
+                agent_json,
+                cached_binary_path.as_deref(),
+            )
+            .await?;
+
+            // Return updated summary.
+            let _store_guard = state
+                .managed_agents_store_lock
+                .lock()
+                .map_err(|e| e.to_string())?;
+            let records = load_managed_agents(&app)?;
+            let runtimes = state
+                .managed_agent_processes
+                .lock()
+                .map_err(|e| e.to_string())?;
             let record = records
                 .iter()
                 .find(|r| r.pubkey == pubkey)
                 .ok_or_else(|| format!("agent {pubkey} not found"))?;
-            return build_managed_agent_summary(&app, record, &runtimes);
+            build_managed_agent_summary(&app, record, &runtimes)
         }
-
-        let payload = build_deploy_payload(&app, record)?;
-        (
-            record.backend.clone(),
-            record.provider_binary_path.clone(),
-            payload,
-        )
-    };
-
-    // Provider backend: deploy via shared helper (async, outside lock).
-    if let BackendKind::Provider { ref id, ref config } = backend {
-        deploy_to_provider(
-            &app,
-            &state,
-            &pubkey,
-            id,
-            config,
-            agent_json,
-            cached_binary_path.as_deref(),
-        )
-        .await?;
-
-        // Return updated summary.
-        let _store_guard = state
-            .managed_agents_store_lock
-            .lock()
-            .map_err(|e| e.to_string())?;
-        let records = load_managed_agents(&app)?;
-        let runtimes = state
-            .managed_agent_processes
-            .lock()
-            .map_err(|e| e.to_string())?;
-        let record = records
-            .iter()
-            .find(|r| r.pubkey == pubkey)
-            .ok_or_else(|| format!("agent {pubkey} not found"))?;
-        return build_managed_agent_summary(&app, record, &runtimes);
+        StartTarget::Provider { backend, .. } => Err(format!(
+            "agent {pubkey} has unsupported backend kind: {backend:?}"
+        )),
     }
-
-    Err(format!("agent {pubkey} has unsupported backend kind"))
 }
 
 #[tauri::command]

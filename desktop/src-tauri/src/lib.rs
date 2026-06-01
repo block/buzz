@@ -492,9 +492,9 @@ pub fn run() {
 
             // Keep launch-time agent restoration off the synchronous setup path
             // so the frontend can mount and reveal the window promptly.
-            tauri::async_runtime::spawn_blocking(move || {
+            tauri::async_runtime::spawn(async move {
                 if let Err(error) =
-                    restore_managed_agents_on_launch(&app_handle, shutdown_started.as_ref())
+                    restore_managed_agents_on_launch(&app_handle, shutdown_started.as_ref()).await
                 {
                     eprintln!("sprout-desktop: failed to restore managed agents: {error}");
                 }

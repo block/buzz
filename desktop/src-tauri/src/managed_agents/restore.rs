@@ -1,6 +1,7 @@
 use super::{
-    find_managed_agent_mut, kill_stale_tracked_processes, load_managed_agents, save_managed_agents,
-    spawn_agent_child, sync_managed_agent_processes, BackendKind, ManagedAgentProcess,
+    find_managed_agent_mut, kill_stale_tracked_processes, load_managed_agents, relay_mesh_model_id,
+    save_managed_agents, spawn_agent_child, sync_managed_agent_processes, BackendKind,
+    ManagedAgentProcess,
 };
 use crate::app_state::AppState;
 use crate::util;
@@ -16,7 +17,7 @@ type AgentSpawnResult = (String, SpawnResult);
 ///   A (under lock): sync process state, cleanup, collect agents to start
 ///   B (no locks):   resolve commands and spawn processes in parallel
 ///   C (re-lock):    write back PIDs and status to records on disk
-pub fn restore_managed_agents_on_launch(
+pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
     shutdown_started: &AtomicBool,
 ) -> Result<(), String> {
@@ -102,6 +103,24 @@ pub fn restore_managed_agents_on_launch(
         .ok()
         .map(|k| k.public_key().to_hex());
 
+    let mut mesh_preflight_failures = std::collections::HashSet::new();
+    for record in &agents_to_start {
+        let Some(model_id) = relay_mesh_model_id(record) else {
+            continue;
+        };
+        if let Err(error) = crate::commands::ensure_client_node_for_model(&state, model_id).await {
+            persist_restore_error(app, &state, &record.pubkey, error)?;
+            mesh_preflight_failures.insert(record.pubkey.clone());
+        }
+    }
+    let agents_to_start: Vec<_> = agents_to_start
+        .into_iter()
+        .filter(|record| !mesh_preflight_failures.contains(&record.pubkey))
+        .collect();
+    if agents_to_start.is_empty() {
+        return Ok(());
+    }
+
     // ── Phase B (no locks): resolve commands and spawn processes in parallel ──
     let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
         let owner_hex_ref = owner_hex.as_deref();
@@ -162,4 +181,21 @@ pub fn restore_managed_agents_on_launch(
     save_managed_agents(app, &records)?;
 
     Ok(())
+}
+
+fn persist_restore_error(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    pubkey: &str,
+    error: String,
+) -> Result<(), String> {
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut records = load_managed_agents(app)?;
+    let record = find_managed_agent_mut(&mut records, pubkey)?;
+    record.updated_at = util::now_iso();
+    record.last_error = Some(error);
+    save_managed_agents(app, &records)
 }
