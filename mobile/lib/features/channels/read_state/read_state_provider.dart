@@ -121,6 +121,10 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     _manager?.markContextRead(contextId, unixTimestamp);
   }
 
+  void markContextUnread(String contextId, int lastMessageTimestamp) {
+    _manager?.markContextUnread(contextId, lastMessageTimestamp);
+  }
+
   void seedContextRead(String contextId, int unixTimestamp) {
     _manager?.seedContextRead(contextId, unixTimestamp);
   }

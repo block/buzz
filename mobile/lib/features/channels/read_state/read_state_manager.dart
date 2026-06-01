@@ -107,6 +107,16 @@ class ReadStateManager {
     _advanceContext(contextId, unixTimestamp, publishable: true);
   }
 
+  void markContextUnread(String contextId, int lastMessageTimestamp) {
+    if (_disposed || lastMessageTimestamp <= 0) return;
+    final rollbackTo = lastMessageTimestamp - 1;
+    _effectiveState[contextId] = rollbackTo;
+    _publishableContextIds.add(contextId);
+    _persistLocalState();
+    _onChanged();
+    _schedulePublish();
+  }
+
   void seedContextRead(String contextId, int unixTimestamp) {
     _advanceContext(contextId, unixTimestamp, publishable: false);
   }

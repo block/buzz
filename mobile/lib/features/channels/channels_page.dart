@@ -980,21 +980,28 @@ class _ChannelTile extends ConsumerWidget {
                     await _showMoveSectionSheet(context, ref, sections);
                   },
                 ),
-                if (isUnread)
-                  ListTile(
-                    leading: const Icon(LucideIcons.checkCheck),
-                    title: const Text('Mark as read'),
-                    onTap: () {
-                      Navigator.of(sheetContext).pop();
-                      onMarkRead?.call();
-                      final ts = dateTimeToUnixSeconds(channel.lastMessageAt);
-                      if (ts != null) {
+                ListTile(
+                  leading: Icon(
+                    isUnread ? LucideIcons.checkCheck : LucideIcons.circleDot,
+                  ),
+                  title: Text(isUnread ? 'Mark as read' : 'Mark as unread'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    final ts = dateTimeToUnixSeconds(channel.lastMessageAt);
+                    if (ts != null) {
+                      if (isUnread) {
+                        onMarkRead?.call();
                         ref
                             .read(readStateProvider.notifier)
                             .markContextRead(channel.id, ts);
+                      } else {
+                        ref
+                            .read(readStateProvider.notifier)
+                            .markContextUnread(channel.id, ts);
                       }
-                    },
-                  ),
+                    }
+                  },
+                ),
               ],
             ),
           ),
