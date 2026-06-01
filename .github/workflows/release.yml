@@ -92,10 +92,12 @@ jobs:
           key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
       - name: Build mesh llama native libraries
         if: steps.llama_cache.outputs.cache-hit != 'true'
+        env:
+          MESH_REV_SHORT: ${{ steps.mesh_rev.outputs.short }}
         run: |
           set -euo pipefail
           cargo fetch --manifest-path desktop/src-tauri/Cargo.toml
-          SHORT='${{ steps.mesh_rev.outputs.short }}'
+          SHORT="$MESH_REV_SHORT"
           MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path "*/$SHORT" -type d -name "$SHORT" | head -1)
           if [[ -z "$MESH_ROOT" ]]; then
             echo "::error::mesh-llm checkout for $SHORT not found after cargo fetch"
