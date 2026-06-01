@@ -1,14 +1,14 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
-import 'package:highlight/highlight.dart' show highlight, Node;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../shared/clipboard_utils.dart';
+import '../../shared/syntax_highlight.dart';
 import '../../shared/theme/theme.dart';
 import 'media_viewer_page.dart';
 import 'message_media.dart';
@@ -16,67 +16,9 @@ import 'message_media.dart';
 const _messageMediaMaxInlineWidth = 320.0;
 const _messageMediaMaxImageHeight = 240.0;
 
-const _highlightLightTheme = <String, TextStyle>{
-  'keyword': TextStyle(color: Color(0xFFa626a4)),
-  'built_in': TextStyle(color: Color(0xFF0184bc)),
-  'type': TextStyle(color: Color(0xFF0184bc)),
-  'literal': TextStyle(color: Color(0xFF0184bc)),
-  'number': TextStyle(color: Color(0xFF986801)),
-  'string': TextStyle(color: Color(0xFF50a14f)),
-  'symbol': TextStyle(color: Color(0xFF50a14f)),
-  'comment': TextStyle(color: Color(0xFFa0a1a7), fontStyle: FontStyle.italic),
-  'doctag': TextStyle(color: Color(0xFFa0a1a7), fontStyle: FontStyle.italic),
-  'meta': TextStyle(color: Color(0xFF986801)),
-  'attr': TextStyle(color: Color(0xFF986801)),
-  'attribute': TextStyle(color: Color(0xFF986801)),
-  'title': TextStyle(color: Color(0xFF4078f2)),
-  'title.class_': TextStyle(color: Color(0xFFc18401)),
-  'title.function_': TextStyle(color: Color(0xFF4078f2)),
-  'name': TextStyle(color: Color(0xFFe45649)),
-  'tag': TextStyle(color: Color(0xFFe45649)),
-  'selector-tag': TextStyle(color: Color(0xFFe45649)),
-  'params': TextStyle(color: Color(0xFF383a42)),
-  'variable': TextStyle(color: Color(0xFFe45649)),
-  'subst': TextStyle(color: Color(0xFFe45649)),
-  'section': TextStyle(color: Color(0xFF4078f2)),
-  'bullet': TextStyle(color: Color(0xFF4078f2)),
-  'link': TextStyle(color: Color(0xFF4078f2)),
-  'addition': TextStyle(color: Color(0xFF50a14f)),
-  'deletion': TextStyle(color: Color(0xFFe45649)),
-};
-
-const _highlightDarkTheme = <String, TextStyle>{
-  'keyword': TextStyle(color: Color(0xFFc678dd)),
-  'built_in': TextStyle(color: Color(0xFF56b6c2)),
-  'type': TextStyle(color: Color(0xFF56b6c2)),
-  'literal': TextStyle(color: Color(0xFF56b6c2)),
-  'number': TextStyle(color: Color(0xFFd19a66)),
-  'string': TextStyle(color: Color(0xFF98c379)),
-  'symbol': TextStyle(color: Color(0xFF98c379)),
-  'comment': TextStyle(color: Color(0xFF5c6370), fontStyle: FontStyle.italic),
-  'doctag': TextStyle(color: Color(0xFF5c6370), fontStyle: FontStyle.italic),
-  'meta': TextStyle(color: Color(0xFFd19a66)),
-  'attr': TextStyle(color: Color(0xFFd19a66)),
-  'attribute': TextStyle(color: Color(0xFFd19a66)),
-  'title': TextStyle(color: Color(0xFF61afef)),
-  'title.class_': TextStyle(color: Color(0xFFe5c07b)),
-  'title.function_': TextStyle(color: Color(0xFF61afef)),
-  'name': TextStyle(color: Color(0xFFe06c75)),
-  'tag': TextStyle(color: Color(0xFFe06c75)),
-  'selector-tag': TextStyle(color: Color(0xFFe06c75)),
-  'params': TextStyle(color: Color(0xFFabb2bf)),
-  'variable': TextStyle(color: Color(0xFFe06c75)),
-  'subst': TextStyle(color: Color(0xFFe06c75)),
-  'section': TextStyle(color: Color(0xFF61afef)),
-  'bullet': TextStyle(color: Color(0xFF61afef)),
-  'link': TextStyle(color: Color(0xFF61afef)),
-  'addition': TextStyle(color: Color(0xFF98c379)),
-  'deletion': TextStyle(color: Color(0xFFe06c75)),
-};
-
 /// Renders message content with markdown formatting, @mentions, #channel links,
 /// and media-aware markdown images/videos.
-class MessageContent extends StatelessWidget {
+class MessageContent extends HookWidget {
   final String content;
 
   /// Display names for mentioned pubkeys, extracted from event p-tags.
@@ -112,70 +54,73 @@ class MessageContent extends StatelessWidget {
         context.textTheme.bodyMedium?.copyWith(color: context.colors.onSurface);
     final imetaByUrl = parseImetaTags(tags);
 
-    // Convert autolinks and bare URLs to standard markdown links,
-    // but skip content inside backticks (inline code / fenced blocks).
-    final buffer = StringBuffer();
-    final parts = content.split('`');
-    for (var i = 0; i < parts.length; i++) {
-      if (i.isOdd) {
-        // Inside backticks — preserve as-is.
-        buffer.write('`${parts[i]}`');
-      } else {
-        // 1. Angle-bracket autolinks: <https://...>
-        var segment = parts[i].replaceAllMapped(
-          RegExp(r'<(https?://[^>]+)>'),
-          (m) => '[${m[1]}](${m[1]})',
-        );
-        // 2. Bare URLs not already inside markdown link/image syntax.
-        //    Negative lookbehind avoids matching URLs preceded by ]( or =
-        //    which are already part of markdown links or imeta tags.
-        segment = segment.replaceAllMapped(
-          RegExp(r'(?<![(\]=])https?://[^\s)>\]]+'),
-          (m) {
-            final url = m[0]!;
-            // Skip if this URL is already a markdown link label that equals
-            // the URL (produced by step 1 or authored as [url](url)).
-            final start = m.start;
-            if (start >= 1 && segment[start - 1] == '[') return url;
-            return '[$url]($url)';
-          },
-        );
-        buffer.write(segment);
-      }
-    }
-    final processed = buffer.toString();
-
-    // Replace spaces with non-breaking spaces inside known mention names
-    // so the gpt_markdown combined regex can match multi-word names
-    // even when caseSensitive is not preserved.
-    // Skip content inside backticks to avoid altering inline code.
-    final mentionParts = processed.split('`');
-    final mentionBuf = StringBuffer();
-    for (var i = 0; i < mentionParts.length; i++) {
-      if (i.isOdd) {
-        mentionBuf.write('`${mentionParts[i]}`');
-      } else {
-        var segment = mentionParts[i];
-        for (final name in mentionNames.values) {
-          if (name.contains(' ')) {
-            final nbspName = name.replaceAll(' ', '\u00A0');
-            segment = segment.replaceAllMapped(
-              RegExp('@${RegExp.escape(name)}', caseSensitive: false),
-              (m) => '@$nbspName',
-            );
-          }
+    final finalContent = useMemoized(() {
+      // Convert autolinks and bare URLs to standard markdown links,
+      // but skip content inside backticks (inline code / fenced blocks).
+      final buffer = StringBuffer();
+      final parts = content.split('`');
+      for (var i = 0; i < parts.length; i++) {
+        if (i.isOdd) {
+          // Inside backticks — preserve as-is.
+          buffer.write('`${parts[i]}`');
+        } else {
+          // 1. Angle-bracket autolinks: <https://...>
+          var segment = parts[i].replaceAllMapped(
+            RegExp(r'<(https?://[^>]+)>'),
+            (m) => '[${m[1]}](${m[1]})',
+          );
+          // 2. Bare URLs not already inside markdown link/image syntax.
+          //    Negative lookbehind avoids matching URLs preceded by ]( or =
+          //    which are already part of markdown links or imeta tags.
+          segment = segment.replaceAllMapped(
+            RegExp(r'(?<![(\]=])https?://[^\s)>\]]+'),
+            (m) {
+              final url = m[0]!;
+              // Skip if this URL is already a markdown link label that equals
+              // the URL (produced by step 1 or authored as [url](url)).
+              final start = m.start;
+              if (start >= 1 && segment[start - 1] == '[') return url;
+              return '[$url]($url)';
+            },
+          );
+          buffer.write(segment);
         }
-        mentionBuf.write(segment);
       }
-    }
-    final mentionProcessed = mentionBuf.toString();
+      final processed = buffer.toString();
 
-    // Ensure channel links at the very start of content don't get
-    // swallowed by markdown processing.
-    var finalContent = mentionProcessed;
-    if (RegExp(r'^#[A-Za-z0-9_]').hasMatch(finalContent)) {
-      finalContent = '\u200B$finalContent';
-    }
+      // Replace spaces with non-breaking spaces inside known mention names
+      // so the gpt_markdown combined regex can match multi-word names
+      // even when caseSensitive is not preserved.
+      // Skip content inside backticks to avoid altering inline code.
+      final mentionParts = processed.split('`');
+      final mentionBuf = StringBuffer();
+      for (var i = 0; i < mentionParts.length; i++) {
+        if (i.isOdd) {
+          mentionBuf.write('`${mentionParts[i]}`');
+        } else {
+          var segment = mentionParts[i];
+          for (final name in mentionNames.values) {
+            if (name.contains(' ')) {
+              final nbspName = name.replaceAll(' ', '\u00A0');
+              segment = segment.replaceAllMapped(
+                RegExp('@${RegExp.escape(name)}', caseSensitive: false),
+                (m) => '@$nbspName',
+              );
+            }
+          }
+          mentionBuf.write(segment);
+        }
+      }
+      final mentionProcessed = mentionBuf.toString();
+
+      // Ensure channel links at the very start of content don't get
+      // swallowed by markdown processing.
+      var result = mentionProcessed;
+      if (RegExp(r'^#[A-Za-z0-9_]').hasMatch(result)) {
+        result = '\u200B$result';
+      }
+      return result;
+    }, [content, mentionNames]);
 
     return GptMarkdown(
       finalContent,
@@ -517,15 +462,9 @@ class _MessageCodeBlock extends HookWidget {
     final isCopied = useState(false);
 
     Future<void> handleCopy() async {
-      await Clipboard.setData(ClipboardData(text: code));
+      await copyToClipboard(context, code, message: 'Copied code to clipboard');
       if (!context.mounted) return;
       isCopied.value = true;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Copied code to clipboard'),
-          duration: Duration(seconds: 2),
-        ),
-      );
       Future.delayed(const Duration(seconds: 2), () {
         if (context.mounted) isCopied.value = false;
       });
@@ -538,8 +477,11 @@ class _MessageCodeBlock extends HookWidget {
       color: context.colors.onSurface,
     );
     final isDark = context.theme.brightness == Brightness.dark;
-    final codeTheme = isDark ? _highlightDarkTheme : _highlightLightTheme;
-    final codeSpans = _highlightCode(code, name, codeTheme, codeBaseStyle);
+    final codeTheme = isDark ? highlightDarkTheme : highlightLightTheme;
+    final codeSpans = useMemoized(
+      () => highlightCode(code, name, codeTheme, codeBaseStyle),
+      [code, name, isDark],
+    );
     return Container(
       margin: const EdgeInsets.only(top: Grid.half),
       decoration: BoxDecoration(
@@ -612,45 +554,6 @@ class _MessageCodeBlock extends HookWidget {
       ),
     );
   }
-}
-
-List<InlineSpan> _highlightCode(
-  String code,
-  String language,
-  Map<String, TextStyle> theme,
-  TextStyle baseStyle,
-) {
-  try {
-    final result = language.isNotEmpty
-        ? highlight.parse(code, language: language)
-        : highlight.parse(code, autoDetection: true);
-    if (result.nodes == null) return [TextSpan(text: code, style: baseStyle)];
-    return _buildSpans(result.nodes!, theme, baseStyle);
-  } catch (_) {
-    return [TextSpan(text: code, style: baseStyle)];
-  }
-}
-
-List<InlineSpan> _buildSpans(
-  List<Node> nodes,
-  Map<String, TextStyle> theme,
-  TextStyle baseStyle,
-) {
-  final spans = <InlineSpan>[];
-  for (final node in nodes) {
-    if (node.children != null && node.children!.isNotEmpty) {
-      final childStyle = node.className != null
-          ? baseStyle.merge(theme[node.className])
-          : baseStyle;
-      spans.addAll(_buildSpans(node.children!, theme, childStyle));
-    } else if (node.value != null) {
-      final style = node.className != null
-          ? baseStyle.merge(theme[node.className])
-          : baseStyle;
-      spans.add(TextSpan(text: node.value, style: style));
-    }
-  }
-  return spans;
 }
 
 class _MentionMd extends InlineMd {

@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../shared/clipboard_utils.dart';
 import '../../shared/theme/theme.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
@@ -182,10 +182,11 @@ class NoteCard extends HookConsumerWidget {
                     ),
                     _ActionButton(
                       icon: LucideIcons.share,
-                      onTap: () {
-                        Clipboard.setData(ClipboardData(text: _shareUri(note)));
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Copied note URI')),
+                      onTap: () async {
+                        await copyToClipboard(
+                          context,
+                          _shareUri(note),
+                          message: 'Copied note URI',
                         );
                       },
                     ),

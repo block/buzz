@@ -293,52 +293,23 @@ class ComposeBar extends HookConsumerWidget {
       final sel = controller.selection;
       if (!sel.isValid) return;
 
-      if (sel.isCollapsed) {
-        final offset = sel.baseOffset;
-        final updated =
-            '${text.substring(0, offset)}$prefix$suffix${text.substring(offset)}';
-        controller.text = updated;
-        controller.selection = TextSelection.collapsed(
-          offset: offset + prefix.length,
-        );
-      } else {
-        final selected = text.substring(sel.start, sel.end);
-        final updated =
-            '${text.substring(0, sel.start)}$prefix$selected$suffix${text.substring(sel.end)}';
-        controller.text = updated;
-        controller.selection = TextSelection.collapsed(
-          offset: sel.start + prefix.length + selected.length + suffix.length,
-        );
-      }
-      focusNode.requestFocus();
-    }
-
-    void applyCodeBlock() {
-      final text = controller.text;
-      final sel = controller.selection;
-      if (!sel.isValid) return;
-
       isModifyingText.value = true;
       try {
         if (sel.isCollapsed) {
           final offset = sel.baseOffset;
-          const open = '```\n';
-          const close = '\n```';
           final updated =
-              '${text.substring(0, offset)}$open$close${text.substring(offset)}';
+              '${text.substring(0, offset)}$prefix$suffix${text.substring(offset)}';
           controller.text = updated;
           controller.selection = TextSelection.collapsed(
-            offset: offset + open.length,
+            offset: offset + prefix.length,
           );
         } else {
           final selected = text.substring(sel.start, sel.end);
-          const open = '```\n';
-          const close = '\n```';
           final updated =
-              '${text.substring(0, sel.start)}$open$selected$close${text.substring(sel.end)}';
+              '${text.substring(0, sel.start)}$prefix$selected$suffix${text.substring(sel.end)}';
           controller.text = updated;
           controller.selection = TextSelection.collapsed(
-            offset: sel.start + open.length + selected.length + close.length,
+            offset: sel.start + prefix.length + selected.length + suffix.length,
           );
         }
       } finally {
@@ -401,10 +372,7 @@ class ComposeBar extends HookConsumerWidget {
             children: [
               // Formatting toolbar (toggled via Aa button).
               if (showFormatting.value)
-                _FormattingToolbar(
-                  onFormat: applyFormat,
-                  onCodeBlock: applyCodeBlock,
-                ),
+                _FormattingToolbar(onFormat: applyFormat),
 
               if (hasAttachments || hasPendingUploads) ...[
                 _AttachmentStrip(
@@ -859,9 +827,8 @@ class _ChannelSuggestions extends StatelessWidget {
 
 class _FormattingToolbar extends StatelessWidget {
   final void Function(String prefix, [String? suffix]) onFormat;
-  final VoidCallback onCodeBlock;
 
-  const _FormattingToolbar({required this.onFormat, required this.onCodeBlock});
+  const _FormattingToolbar({required this.onFormat});
 
   @override
   Widget build(BuildContext context) {
@@ -892,7 +859,7 @@ class _FormattingToolbar extends StatelessWidget {
           _FormatButton(
             icon: LucideIcons.squareCode,
             tooltip: 'Code block',
-            onTap: onCodeBlock,
+            onTap: () => onFormat('```\n', '\n```'),
           ),
         ],
       ),

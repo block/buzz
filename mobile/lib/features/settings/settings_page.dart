@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -7,6 +6,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../shared/auth/auth.dart';
+import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
@@ -76,13 +76,11 @@ class SettingsPage extends HookConsumerWidget {
                   ),
                   trailing: IconButton(
                     icon: const Icon(LucideIcons.copy, size: 16),
-                    onPressed: () {
-                      Clipboard.setData(ClipboardData(text: pubkey));
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Pubkey copied'),
-                          duration: Duration(seconds: 2),
-                        ),
+                    onPressed: () async {
+                      await copyToClipboard(
+                        context,
+                        pubkey,
+                        message: 'Pubkey copied',
                       );
                     },
                   ),
