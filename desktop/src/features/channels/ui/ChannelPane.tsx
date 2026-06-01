@@ -397,10 +397,10 @@ export const ChannelPane = React.memo(function ChannelPane({
                   }
                   showTopBorder={false}
                 />
-                <div className="h-7 bg-background px-4 pb-1 pt-0 sm:px-6 -mt-1">
-                  <div className="flex h-full w-full items-center gap-2">
+                <div className="h-7 overflow-visible bg-background px-4 pb-1 pt-0 sm:px-6">
+                  <div className="flex h-full w-full items-center gap-2 overflow-visible">
                     {hasComposerBotActivity ? (
-                      <div className="shrink-0">
+                      <div className="shrink-0 overflow-visible">
                         <BotActivityComposerAction
                           agents={activityAgents}
                           channelId={activeChannel?.id ?? null}

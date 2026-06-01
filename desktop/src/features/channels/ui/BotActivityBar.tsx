@@ -162,7 +162,7 @@ export function BotActivityComposerAction({
           className={cn(
             "inline-flex items-center justify-center rounded-full border border-border/60 bg-background font-medium text-muted-foreground transition-colors hover:border-primary/30 hover:bg-primary/5 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring data-[state=open]:border-primary/40 data-[state=open]:bg-primary/10 data-[state=open]:text-primary",
             isInline
-              ? "h-7 min-w-0 gap-2 border-transparent bg-transparent px-0 text-xs font-semibold leading-none shadow-none hover:border-transparent hover:bg-transparent data-[state=open]:border-transparent data-[state=open]:bg-transparent"
+              ? "h-7 min-w-0 gap-2 overflow-visible border-transparent bg-transparent px-0 text-xs font-semibold leading-none shadow-none hover:border-transparent hover:bg-transparent data-[state=open]:border-transparent data-[state=open]:bg-transparent"
               : "h-9 min-w-9 gap-1.5 px-2 text-xs",
           )}
           data-testid="bot-activity-composer-trigger"
@@ -176,7 +176,7 @@ export function BotActivityComposerAction({
           onMouseLeave={closeWithDelay}
           type="button"
         >
-          <span className="flex -space-x-1">
+          <span className="flex items-center overflow-visible py-px -space-x-1">
             {typingAgents.slice(0, 2).map((agent) => (
               <UserAvatar
                 avatarUrl={agentAvatarUrl(agent)}

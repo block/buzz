@@ -1,8 +1,13 @@
 import * as React from "react";
 import { Bot, Brain, ChevronDown, Radio, TerminalSquare } from "lucide-react";
 
+import {
+  resolveUserLabel,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
 import { Markdown } from "@/shared/ui/markdown";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type { TranscriptItem } from "./agentSessionTypes";
 import { ToolItem } from "./AgentSessionToolItem";
 import { formatTranscriptTime } from "./agentSessionUtils";
@@ -12,10 +17,12 @@ export function AgentSessionTranscriptList({
   agentName,
   emptyDescription,
   items,
+  profiles,
 }: {
   agentName: string;
   emptyDescription: string;
   items: TranscriptItem[];
+  profiles?: UserProfileLookup;
 }) {
   if (items.length === 0) {
     return (
@@ -31,12 +38,16 @@ export function AgentSessionTranscriptList({
     <div
       aria-label="Live ACP transcript"
       aria-live="polite"
-      className="mx-auto w-full max-w-3xl py-1"
+      className="w-full py-1"
       role="log"
     >
       {items.map((item) => (
         <div className="mt-4 first:mt-0" key={item.id}>
-          <TranscriptItemView agentName={agentName} item={item} />
+          <TranscriptItemView
+            agentName={agentName}
+            item={item}
+            profiles={profiles}
+          />
         </div>
       ))}
     </div>
@@ -46,12 +57,16 @@ export function AgentSessionTranscriptList({
 const TranscriptItemView = React.memo(function TranscriptItemView({
   agentName,
   item,
+  profiles,
 }: {
   agentName: string;
   item: TranscriptItem;
+  profiles?: UserProfileLookup;
 }) {
   if (item.type === "message") {
-    return <MessageItem agentName={agentName} item={item} />;
+    return (
+      <MessageItem agentName={agentName} item={item} profiles={profiles} />
+    );
   }
   if (item.type === "tool") {
     return <ToolItem item={item} />;
@@ -68,24 +83,44 @@ const TranscriptItemView = React.memo(function TranscriptItemView({
 function MessageItem({
   agentName,
   item,
+  profiles,
 }: {
   agentName: string;
   item: Extract<TranscriptItem, { type: "message" }>;
+  profiles?: UserProfileLookup;
 }) {
   const isAssistant = item.role === "assistant";
   const text = item.text.trim();
+  const authorProfile = item.authorPubkey
+    ? profiles?.[item.authorPubkey.toLowerCase()]
+    : null;
+  const authorLabel = item.authorPubkey
+    ? resolveUserLabel({
+        pubkey: item.authorPubkey,
+        fallbackName: item.title,
+        profiles,
+      })
+    : item.title || "User";
+
   return (
     <div
       className={cn(
-        "flex px-1 py-1 animate-in fade-in duration-200 motion-reduce:animate-none",
-        isAssistant ? "flex-row" : "ml-auto flex-row-reverse",
+        "flex flex-row px-1 py-1 animate-in fade-in duration-200 motion-reduce:animate-none",
       )}
       data-role={isAssistant ? "assistant-message" : "user-message"}
     >
+      {!isAssistant ? (
+        <UserAvatar
+          avatarUrl={authorProfile?.avatarUrl ?? null}
+          className="mr-2 mt-1 h-5 w-5 shrink-0 rounded-full text-[8px]"
+          displayName={authorLabel}
+          size="xs"
+        />
+      ) : null}
       <div
         className={cn(
-          "group relative min-w-0 flex flex-col gap-1",
-          isAssistant ? "w-full items-start" : "max-w-[85%] items-end",
+          "group relative min-w-0 flex flex-col items-start gap-1",
+          isAssistant ? "w-full" : "max-w-[85%]",
         )}
       >
         {isAssistant ? (
@@ -182,7 +217,7 @@ function LifecycleItem({
   return (
     <div
       className={cn(
-        "flex items-center justify-center gap-1.5 px-4 py-2 text-center text-xs",
+        "flex items-center justify-start gap-1.5 px-1 py-2 text-left text-xs",
         isError ? "text-destructive" : "text-muted-foreground",
       )}
     >

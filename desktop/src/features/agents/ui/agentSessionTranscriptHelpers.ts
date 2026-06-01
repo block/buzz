@@ -17,10 +17,16 @@ export function parsePromptText(text: string): {
   sections: PromptSection[];
   userText: string;
   userTitle: string;
+  userPubkey: string | null;
 } {
   const sections = parsePromptSections(text);
   if (sections.length === 0) {
-    return { sections: [], userText: text.trim(), userTitle: "Prompt" };
+    return {
+      sections: [],
+      userText: text.trim(),
+      userTitle: "Prompt",
+      userPubkey: null,
+    };
   }
 
   const eventSection = sections.find((section) =>
@@ -29,12 +35,16 @@ export function parsePromptText(text: string): {
   const eventContent = eventSection
     ? extractEventContent(eventSection.body)
     : "";
+  const eventAuthorPubkey = eventSection
+    ? extractEventAuthorPubkey(eventSection.body)
+    : null;
   const eventKind = eventSection?.title.split(":").slice(1).join(":").trim();
 
   return {
     sections,
     userText: eventContent,
     userTitle: eventKind ? titleCase(eventKind) : "Sprout event",
+    userPubkey: eventAuthorPubkey,
   };
 }
 
@@ -77,6 +87,11 @@ function parsePromptSections(text: string): PromptSection[] {
 function extractEventContent(body: string): string {
   const contentMatch = body.match(/^Content:\s*(.*)$/m);
   return contentMatch?.[1]?.trim() ?? "";
+}
+
+function extractEventAuthorPubkey(body: string): string | null {
+  const fromMatch = body.match(/^From:.*\bhex:\s*([0-9a-fA-F]{64})/m);
+  return fromMatch?.[1]?.toLowerCase() ?? null;
 }
 
 export function extractContentText(value: unknown): string {

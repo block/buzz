@@ -206,6 +206,7 @@ export function AgentSessionThreadPanel({
             channelId={channel.id}
             className="border-0 bg-transparent p-0 shadow-none"
             emptyDescription={`Mention ${agent.name} in the channel to see its work here.`}
+            profiles={profiles}
             showHeader={false}
             showRaw={false}
           />
