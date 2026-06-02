@@ -292,6 +292,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn d_tag_is_per_reporter_so_members_never_clobber() {
+        let a = "aa".repeat(32);
+        let b = "bb".repeat(32);
+        let d_a = mesh_status_d_tag(&a);
+        let d_b = mesh_status_d_tag(&b);
+        // Two different members → two different d-tags → isolated 30621 notes
+        // (NIP-33 keys on (kind, pubkey, d); the relay is always the author, so
+        // the d-tag is the only thing distinguishing reporters).
+        assert_ne!(d_a, d_b, "distinct reporters must get distinct d-tags");
+        assert!(d_a.starts_with(MESH_STATUS_D_TAG_PREFIX));
+        assert!(d_a.ends_with(&a));
+        // Same reporter → same d-tag → its later report replaces its own note.
+        assert_eq!(d_a, mesh_status_d_tag(&a));
+    }
+
+    #[test]
     fn sanitizer_projects_models_and_endpoint_addr_without_raw_runtime() {
         let payload = serde_json::json!({
             "token": "endpoint-token-a",
