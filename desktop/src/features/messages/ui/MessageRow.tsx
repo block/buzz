@@ -10,6 +10,7 @@ import { cn } from "@/shared/lib/cn";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
+import { customEmojiFromTags } from "@/shared/api/customEmoji";
 import {
   resolveMentionNames,
   resolveMentionPubkeysByName,
@@ -87,6 +88,11 @@ export const MessageRow = React.memo(
       [message.tags],
     );
 
+    const customEmoji = React.useMemo(
+      () => (message.tags ? customEmojiFromTags(message.tags) : undefined),
+      [message.tags],
+    );
+
     const { channels } = useChannelNavigation();
     const channelNames = React.useMemo(
       () => channels.filter((c) => c.channelType !== "dm").map((c) => c.name),
@@ -144,6 +150,7 @@ export const MessageRow = React.memo(
               channelNames={channelNames}
               className="max-w-full"
               content={message.body}
+              customEmoji={customEmoji}
               imetaByUrl={imetaByUrl}
               mentionNames={mentionNames}
               mentionPubkeysByName={mentionPubkeysByName}

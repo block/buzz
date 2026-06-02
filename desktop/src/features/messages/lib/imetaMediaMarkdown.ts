@@ -188,3 +188,16 @@ export function buildOutgoingMessage(
     pendingImeta.length > 0 ? buildImetaTags(pendingImeta) : undefined;
   return { content, mediaTags };
 }
+
+/**
+ * Merge optional imeta media tags with NIP-30 custom-emoji tags into the final
+ * outgoing tag set. Returns `undefined` when there are no tags of either kind
+ * (the publish path treats `undefined` as "no extra tags").
+ */
+export function mergeOutgoingTags(
+  mediaTags: string[][] | undefined,
+  emojiTags: string[][],
+): string[][] | undefined {
+  if (!mediaTags && emojiTags.length === 0) return undefined;
+  return [...(mediaTags ?? []), ...emojiTags];
+}

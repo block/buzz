@@ -56,7 +56,16 @@ export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
             tabIndex={-1}
             type="button"
           >
-            <span className="text-lg leading-none">{suggestion.native}</span>
+            {suggestion.url ? (
+              <img
+                alt={`:${suggestion.id}:`}
+                src={suggestion.url}
+                className="h-5 w-5 object-contain"
+                draggable={false}
+              />
+            ) : (
+              <span className="text-lg leading-none">{suggestion.native}</span>
+            )}
             <span className="truncate text-muted-foreground">
               :{suggestion.id}:
             </span>

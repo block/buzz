@@ -8,9 +8,12 @@ import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks"
 import { useDrafts } from "@/features/messages/lib/useDrafts";
 import { useEmojiAutocomplete } from "@/features/messages/lib/useEmojiAutocomplete";
 import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
+import { useCustomEmoji } from "@/features/custom-emoji/hooks";
+import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
   buildOutgoingMessage,
   type ImetaMedia,
+  mergeOutgoingTags,
   stripImetaMediaLines,
 } from "@/features/messages/lib/imetaMediaMarkdown";
 
@@ -136,7 +139,8 @@ export function MessageComposer({
   } | null>(null);
   const mentions = useMentions(channelId, undefined, profiles);
   const channelLinks = useChannelLinks();
-  const emojiAutocomplete = useEmojiAutocomplete();
+  const customEmoji = useCustomEmoji();
+  const emojiAutocomplete = useEmojiAutocomplete(customEmoji);
   const notifyTyping = useTypingBroadcast(
     channelId,
     typingParentEventId,
@@ -467,6 +471,13 @@ export function MessageComposer({
       currentPendingImeta,
     );
 
+    // NIP-30: attach ["emoji", shortcode, url] tags for custom emoji in the
+    // final content, so the event is self-contained.
+    const outgoingTags = mergeOutgoingTags(
+      mediaTags,
+      buildCustomEmojiTags(finalContent, customEmoji),
+    );
+
     const savedContent = trimmed;
     const savedImeta = [...currentPendingImeta];
 
@@ -481,7 +492,7 @@ export function MessageComposer({
 
     const sentDraftKey = effectiveDraftKeyRef.current;
     try {
-      await onSendRef.current(finalContent, pubkeys, mediaTags);
+      await onSendRef.current(finalContent, pubkeys, outgoingTags);
       if (sentDraftKey) {
         drafts.clearDraft(sentDraftKey);
       }
@@ -493,6 +504,7 @@ export function MessageComposer({
     }
   }, [
     drafts.clearDraft,
+    customEmoji,
     media.pendingImetaRef,
     media.setPendingImeta,
     mentions.extractMentionPubkeys,
@@ -792,6 +804,7 @@ export function MessageComposer({
 
           <MessageComposerToolbar
             composerDisabled={disabled}
+            customEmoji={customEmoji}
             editor={richText.editor}
             extraActions={toolbarExtraActions}
             formattingDisabled={disabled}

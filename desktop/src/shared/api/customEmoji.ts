@@ -44,12 +44,13 @@ const SHORTCODE_RE = /^[a-z0-9_+-]+$/i;
  * tags are `["emoji", shortcode, url]`. Malformed/duplicate entries are skipped
  * (first writer wins on a shortcode collision within the single set).
  */
-export function customEmojiFromEvent(event: RelayEvent | null): CustomEmoji[] {
-  if (!event) return [];
+export function customEmojiFromTags(
+  tags: ReadonlyArray<ReadonlyArray<string>>,
+): CustomEmoji[] {
   const seen = new Set<string>();
   const emoji: CustomEmoji[] = [];
 
-  for (const tag of event.tags) {
+  for (const tag of tags) {
     const [name, shortcode, url] = tag;
     if (name !== "emoji") continue;
     if (!shortcode || !url) continue;
@@ -60,6 +61,11 @@ export function customEmojiFromEvent(event: RelayEvent | null): CustomEmoji[] {
   }
 
   return emoji;
+}
+
+export function customEmojiFromEvent(event: RelayEvent | null): CustomEmoji[] {
+  if (!event) return [];
+  return customEmojiFromTags(event.tags);
 }
 
 async function fetchEmojiSetEvent(): Promise<RelayEvent | null> {
