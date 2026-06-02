@@ -8,7 +8,7 @@ use nostr::{Event, PublicKey};
 use sprout_core::event::StoredEvent;
 use sprout_core::kind::{
     event_kind_u32, is_ephemeral, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP,
-    KIND_MESH_CONNECT_REQUEST, KIND_PRESENCE_UPDATE,
+    KIND_MESH_CONNECT_REQUEST, KIND_MESH_STATUS_REPORT, KIND_PRESENCE_UPDATE,
 };
 use sprout_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -382,6 +382,23 @@ async fn handle_ephemeral_event(
         }
 
         conn.send(RelayMessage::ok(event_id_hex, true, ""));
+        return;
+    }
+
+    // Mesh status report (kind:24620). An authenticated relay member reports its
+    // current mesh serve availability; the relay projects it into a relay-signed,
+    // per-reporter kind:30621 discovery note. The report is ephemeral input; the
+    // 30621 is the durable, relay-owned record.
+    if event_kind_u32(&event) == KIND_MESH_STATUS_REPORT {
+        let reporter_hex = auth_pubkey.to_hex();
+        match super::mesh_signaling::handle_status_report(&state, &reporter_hex, &event).await {
+            Ok(()) => {
+                conn.send(RelayMessage::ok(event_id_hex, true, ""));
+            }
+            Err(reason) => {
+                conn.send(RelayMessage::ok(event_id_hex, false, &reason));
+            }
+        }
         return;
     }
 

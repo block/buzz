@@ -201,6 +201,31 @@ async fn publish_channelless_ephemeral(state: &Arc<AppState>, event: &nostr::Eve
     }
 }
 
+/// Handle a verified KIND_MESH_STATUS_REPORT (24620) from an authenticated relay
+/// member. The member reports its current mesh `/api/status` JSON; the relay
+/// sanitizes it and republishes a relay-signed kind:30621 discovery note keyed
+/// to the reporter (so members' notes never clobber each other). The report
+/// itself is ephemeral — only the relay's projection is durable. Membership is
+/// already enforced (the reporter is authenticated on a member-gated WS).
+pub async fn handle_status_report(
+    state: &Arc<AppState>,
+    reporter_pubkey_hex: &str,
+    event: &nostr::Event,
+) -> Result<(), String> {
+    let payload: serde_json::Value = serde_json::from_str(&event.content)
+        .map_err(|e| format!("invalid: mesh status report content is not JSON ({e})"))?;
+    crate::mesh_status_publisher::publish_mesh_status_from_payload(
+        state,
+        reporter_pubkey_hex,
+        &payload,
+    )
+    .await
+    .map_err(|e| {
+        tracing::warn!("mesh status report publish failed: {e}");
+        "error: failed to publish mesh status".to_string()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

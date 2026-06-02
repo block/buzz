@@ -17,8 +17,18 @@ use tracing::info;
 use crate::handlers::event::dispatch_persistent_event;
 use crate::state::AppState;
 
-/// Stable d-tag for the relay's mesh status event.
-pub const MESH_STATUS_D_TAG: &str = "sprout-relay-mesh";
+/// d-tag prefix for the relay's mesh status events. The full d-tag is
+/// `"<prefix>:<reporter_pubkey_hex>"` so each reporting member gets an isolated,
+/// independently-replaceable kind:30621 note (NIP-33 keys on `(kind, pubkey,
+/// d_tag)`, and the author is always the relay key here). This avoids two
+/// members' reports clobbering each other and sidesteps any read-modify-write
+/// race on a single shared note. Discovery reads all notes with the `k` tag.
+pub const MESH_STATUS_D_TAG_PREFIX: &str = "sprout-relay-mesh";
+
+/// Build the per-reporter d-tag for a mesh status note.
+pub fn mesh_status_d_tag(reporter_pubkey_hex: &str) -> String {
+    format!("{MESH_STATUS_D_TAG_PREFIX}:{reporter_pubkey_hex}")
+}
 
 /// Content schema discriminator.
 pub const MESH_STATUS_TYPE: &str = "sprout-mesh-status";
@@ -178,26 +188,29 @@ pub fn sanitize_mesh_status(payload: &Value, now_unix: u64) -> SproutMeshStatus 
     }
 }
 
-/// Publish sanitized mesh status as a relay-signed kind:30621 event.
+/// Publish sanitized mesh status as a relay-signed kind:30621 event, keyed to
+/// the reporting member's pubkey so each member's note is isolated.
 pub async fn publish_mesh_status_from_payload(
     state: &Arc<AppState>,
+    reporter_pubkey_hex: &str,
     payload: &Value,
 ) -> anyhow::Result<()> {
     let now_unix = chrono::Utc::now().timestamp().max(0) as u64;
     let status = sanitize_mesh_status(payload, now_unix);
-    publish_mesh_status(state, &status).await
+    publish_mesh_status(state, reporter_pubkey_hex, &status).await
 }
 
 /// Publish a pre-sanitized mesh status. Exposed for tests and integration seams.
 pub async fn publish_mesh_status(
     state: &Arc<AppState>,
+    reporter_pubkey_hex: &str,
     status: &SproutMeshStatus,
 ) -> anyhow::Result<()> {
     let content = serde_json::to_string(status)?;
+    let d_tag = mesh_status_d_tag(reporter_pubkey_hex);
     let tags = vec![
         Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?,
-        Tag::parse(["d", MESH_STATUS_D_TAG])
-            .map_err(|e| anyhow::anyhow!("failed to build d tag: {e}"))?,
+        Tag::parse(["d", &d_tag]).map_err(|e| anyhow::anyhow!("failed to build d tag: {e}"))?,
         Tag::parse(["k", MESH_STATUS_TYPE])
             .map_err(|e| anyhow::anyhow!("failed to build k tag: {e}"))?,
     ];
@@ -209,7 +222,7 @@ pub async fn publish_mesh_status(
 
     let (stored, was_inserted) = state
         .db
-        .replace_parameterized_event(&event, MESH_STATUS_D_TAG, None)
+        .replace_parameterized_event(&event, &d_tag, None)
         .await?;
     if was_inserted {
         let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
