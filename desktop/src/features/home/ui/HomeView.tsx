@@ -230,12 +230,18 @@ export function HomeView({
       return;
     }
 
+    // Don't default-select before the width is measured: at width 0
+    // isNarrowHomeViewport is false, so narrow Home would cold-load into detail.
+    if (homeInboxWidthPx === 0) {
+      return;
+    }
+
     if (!filteredItems.some((item) => item.id === selectedItemId)) {
       setSelectedItemId(
         isNarrowHomeViewport ? null : (filteredItems[0]?.id ?? null),
       );
     }
-  }, [filteredItems, isNarrowHomeViewport, selectedItemId]);
+  }, [filteredItems, homeInboxWidthPx, isNarrowHomeViewport, selectedItemId]);
 
   React.useEffect(() => {
     void selectedItemId;

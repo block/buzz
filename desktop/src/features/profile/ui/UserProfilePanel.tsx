@@ -53,6 +53,14 @@ type UserProfilePanelProps = {
   onResetWidth: () => void;
   onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
   pubkey: string;
+  /**
+   * When true, the panel sits beside a sibling pane managed by a single-panel
+   * width controller (ChannelScreen). The width is clamped so the sibling keeps
+   * at least THREAD_PANEL_MIN_WIDTH_PX. Standalone/floating mounts (e.g. Pulse)
+   * have no such sibling, so they omit this and use the configured width
+   * directly — otherwise `calc(100% - 300px)` would wrongly shrink the panel.
+   */
+  splitPaneClamp?: boolean;
   widthPx: number;
 };
 
@@ -92,6 +100,7 @@ export function UserProfilePanel({
   onResetWidth,
   onResizeStart,
   pubkey,
+  splitPaneClamp = false,
   widthPx,
 }: UserProfilePanelProps) {
   const isOverlay = useIsThreadPanelOverlay();
@@ -203,7 +212,9 @@ export function UserProfilePanel({
         style={{
           width: isSinglePanelView
             ? "100%"
-            : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
+            : splitPaneClamp
+              ? `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`
+              : `${widthPx}px`,
         }}
       >
         {!isOverlay && !isSinglePanelView && (

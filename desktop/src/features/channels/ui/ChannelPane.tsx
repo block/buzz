@@ -507,6 +507,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           onResetWidth={onResetThreadPanelWidth}
           onResizeStart={onThreadPanelResizeStart}
           pubkey={profilePanelPubkey}
+          splitPaneClamp
           widthPx={threadPanelWidthPx}
         />
       ) : null}

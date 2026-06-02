@@ -204,7 +204,10 @@ export function AgentSessionThreadPanel({
           onScroll={onScroll}
           className={cn(
             "min-h-0 flex-1 overflow-y-auto px-3 pb-4",
-            isOverlay ? "pt-4" : "pt-[76px]",
+            // Match MessageThreadPanel: single-panel mode has a 76px header
+            // (min-h-[76px] with -mb-[76px]), so the body must clear it. Only
+            // the floating overlay (44px header) uses the smaller pt-4.
+            isSinglePanelView ? "pt-[76px]" : isOverlay ? "pt-4" : "pt-[76px]",
           )}
         >
           <ManagedAgentSessionPanel

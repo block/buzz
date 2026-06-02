@@ -13,9 +13,13 @@ export const PANEL_BASE_CLASS =
  * Starts below the fixed top chrome (window drag region + global search and
  * channel actions, ~44px tall) so the panel header doesn't collide with it at
  * narrow widths. Matches the inline layout where the header sits below chrome.
+ *
+ * `h-auto` overrides the base `h-full`: with `fixed top-11 bottom-0`, height is
+ * driven by the top/bottom insets. Without it, `h-full` resolves to 100vh and
+ * the panel hangs below the viewport (100vh tall, but starting 44px down).
  */
 export const PANEL_OVERLAY_CLASS =
-  "fixed bottom-0 right-0 top-11 z-40 shadow-xl max-w-[calc(100vw-2rem)]";
+  "fixed bottom-0 right-0 top-11 z-40 h-auto shadow-xl max-w-[calc(100vw-2rem)]";
 
 /**
  * Single-column panel headers should render above the local panel backdrop
