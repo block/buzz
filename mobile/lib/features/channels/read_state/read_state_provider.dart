@@ -55,7 +55,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     _isInitialized = false;
 
     final relayConfig = ref.watch(relayConfigProvider);
-    final sessionState = ref.watch(relaySessionProvider);
+    ref.watch(relaySessionProvider);
     final activeWorkspace = ref.watch(activeWorkspaceProvider).value;
 
     final nsec = relayConfig.nsec?.trim();
@@ -87,7 +87,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       crypto: crypto,
       relaySession: ref.read(relaySessionProvider.notifier),
       signedEventRelay: signedRelay,
-      remoteEnabled: sessionState.status == SessionStatus.connected,
+      remoteEnabled: true,
       onChanged: () => _emitManagerState(manager),
     );
     _manager = manager;
@@ -104,6 +104,13 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
           next == AppLifecycleState.detached ||
           next == AppLifecycleState.hidden) {
         unawaited(manager.flush());
+      }
+    });
+
+    ref.listen(relaySessionProvider, (prev, next) {
+      if (prev?.status != SessionStatus.connected &&
+          next.status == SessionStatus.connected) {
+        unawaited(manager.reinitializeRemote());
       }
     });
 

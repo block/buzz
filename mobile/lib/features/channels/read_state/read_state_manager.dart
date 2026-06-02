@@ -128,6 +128,18 @@ class ReadStateManager {
     await _publish();
   }
 
+  Future<void> reinitializeRemote() async {
+    if (_disposed || !_remoteEnabled) return;
+    _unsubscribeLive?.call();
+    _unsubscribeLive = null;
+    await _fetchAndMerge();
+    await _startLiveSubscription();
+    if (!_isIdenticalToLastPublished(_currentContexts())) {
+      _schedulePublish();
+    }
+    _onChanged();
+  }
+
   void dispose({bool flushPending = true}) {
     if (_disposed) return;
     _disposed = true;
