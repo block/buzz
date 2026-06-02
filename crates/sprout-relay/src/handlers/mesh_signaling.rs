@@ -415,7 +415,6 @@ mod tests {
         assert_eq!(extract_target_pubkey(&event), None);
     }
 
-
     fn p_tag() -> nostr::SingleLetterTag {
         nostr::SingleLetterTag::lowercase(nostr::Alphabet::P)
     }
@@ -470,7 +469,10 @@ mod tests {
         state: &AppState,
         recipient_hex: &str,
         sub_id: &str,
-    ) -> (uuid::Uuid, tokio::sync::mpsc::Receiver<axum::extract::ws::Message>) {
+    ) -> (
+        uuid::Uuid,
+        tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+    ) {
         let conn_id = uuid::Uuid::new_v4();
         let (tx, rx) = tokio::sync::mpsc::channel(10);
         state.conn_manager.register(
@@ -522,7 +524,8 @@ mod tests {
         let target_hex = nostr::Keys::generate().public_key().to_hex();
         let (_requester_conn, mut requester_rx) =
             register_call_me_now_sub(&state, &requester_hex, "mesh_requester");
-        let (_target_conn, mut target_rx) = register_call_me_now_sub(&state, &target_hex, "mesh_target");
+        let (_target_conn, mut target_rx) =
+            register_call_me_now_sub(&state, &target_hex, "mesh_target");
 
         handle_connect_request(&state, &requester_hex, &connect_request_event(&target_hex))
             .await
@@ -533,20 +536,34 @@ mod tests {
                 .try_recv()
                 .expect("requester receives call-me-now"),
         );
-        let target_event = event_from_ws_message(
-            target_rx.try_recv().expect("target receives call-me-now"),
+        let target_event =
+            event_from_ws_message(target_rx.try_recv().expect("target receives call-me-now"));
+        assert!(
+            requester_rx.try_recv().is_err(),
+            "requester gets exactly one event"
         );
-        assert!(requester_rx.try_recv().is_err(), "requester gets exactly one event");
-        assert!(target_rx.try_recv().is_err(), "target gets exactly one event");
+        assert!(
+            target_rx.try_recv().is_err(),
+            "target gets exactly one event"
+        );
 
         for event in [&requester_event, &target_event] {
-            assert_eq!(event.kind, nostr::Kind::Custom(KIND_MESH_CALL_ME_NOW as u16));
+            assert_eq!(
+                event.kind,
+                nostr::Kind::Custom(KIND_MESH_CALL_ME_NOW as u16)
+            );
             assert_eq!(event.pubkey, state.relay_keypair.public_key());
             event.verify().expect("relay-signed event verifies");
         }
 
-        assert_eq!(extract_target_pubkey(&requester_event).as_deref(), Some(requester_hex.as_str()));
-        assert_eq!(extract_target_pubkey(&target_event).as_deref(), Some(target_hex.as_str()));
+        assert_eq!(
+            extract_target_pubkey(&requester_event).as_deref(),
+            Some(requester_hex.as_str())
+        );
+        assert_eq!(
+            extract_target_pubkey(&target_event).as_deref(),
+            Some(target_hex.as_str())
+        );
 
         let requester_content: serde_json::Value =
             serde_json::from_str(&requester_event.content).expect("requester content JSON");
@@ -562,7 +579,10 @@ mod tests {
         assert_eq!(target_content["peer_endpoint_addr"], "SELF_ADDR");
         assert_eq!(target_content["peer_endpoint_id"], "SELF_ID");
         assert_eq!(target_content["attempt_id"], "attempt-1");
-        assert_eq!(target_content["expires_at"], requester_content["expires_at"]);
+        assert_eq!(
+            target_content["expires_at"],
+            requester_content["expires_at"]
+        );
     }
 
     #[tokio::test]
@@ -572,13 +592,21 @@ mod tests {
         let target_hex = nostr::Keys::generate().public_key().to_hex();
         let (_requester_conn, mut requester_rx) =
             register_call_me_now_sub(&state, &requester_hex, "mesh_requester");
-        let (_target_conn, mut target_rx) = register_call_me_now_sub(&state, &target_hex, "mesh_target");
+        let (_target_conn, mut target_rx) =
+            register_call_me_now_sub(&state, &target_hex, "mesh_target");
 
-        let err = handle_connect_request(&state, &requester_hex, &connect_request_event(&requester_hex))
-            .await
-            .expect_err("self-target is rejected before emitting");
+        let err = handle_connect_request(
+            &state,
+            &requester_hex,
+            &connect_request_event(&requester_hex),
+        )
+        .await
+        .expect_err("self-target is rejected before emitting");
         assert!(err.contains("self"), "unexpected error: {err}");
-        assert!(requester_rx.try_recv().is_err(), "requester receives no event");
+        assert!(
+            requester_rx.try_recv().is_err(),
+            "requester receives no event"
+        );
         assert!(target_rx.try_recv().is_err(), "target receives no event");
     }
 }
