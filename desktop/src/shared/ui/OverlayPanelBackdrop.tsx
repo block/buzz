@@ -17,6 +17,12 @@ export const PANEL_BASE_CLASS =
 export const PANEL_OVERLAY_CLASS =
   "fixed bottom-0 right-0 top-11 z-40 shadow-xl max-w-[calc(100vw-2rem)]";
 
+/**
+ * Single-column panel headers should render above the local panel backdrop
+ * (z-40) but stay below global top chrome controls (z-[45]).
+ */
+export const PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS = "z-[41]";
+
 type OverlayPanelBackdropProps = {
   onClose: () => void;
 };

@@ -42,22 +42,41 @@ export function useElementWidth<T extends HTMLElement>(): [
   const [widthPx, setWidthPx] = React.useState(0);
 
   React.useEffect(() => {
-    const element = ref.current;
-    if (!element) return;
-    const updateWidth = () => {
-      setWidthPx(element.getBoundingClientRect().width);
+    let frameId: number | null = null;
+    let cleanup: (() => void) | null = null;
+
+    const attach = () => {
+      const element = ref.current;
+      if (!element) {
+        frameId = window.requestAnimationFrame(attach);
+        return;
+      }
+
+      const updateWidth = () => {
+        setWidthPx(element.getBoundingClientRect().width);
+      };
+
+      updateWidth();
+
+      if (typeof ResizeObserver === "undefined") {
+        window.addEventListener("resize", updateWidth);
+        cleanup = () => window.removeEventListener("resize", updateWidth);
+        return;
+      }
+
+      const observer = new ResizeObserver(updateWidth);
+      observer.observe(element);
+      cleanup = () => observer.disconnect();
     };
 
-    updateWidth();
+    attach();
 
-    if (typeof ResizeObserver === "undefined") {
-      window.addEventListener("resize", updateWidth);
-      return () => window.removeEventListener("resize", updateWidth);
-    }
-
-    const observer = new ResizeObserver(updateWidth);
-    observer.observe(element);
-    return () => observer.disconnect();
+    return () => {
+      if (frameId !== null) {
+        window.cancelAnimationFrame(frameId);
+      }
+      cleanup?.();
+    };
   }, []);
 
   return [ref, widthPx];
