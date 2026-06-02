@@ -25,6 +25,9 @@ import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import rehypeImageGallery from "@/shared/lib/rehypeImageGallery";
 import rehypeSearchHighlight from "@/shared/lib/rehypeSearchHighlight";
 import remarkChannelLinks from "@/shared/lib/remarkChannelLinks";
+import remarkCustomEmoji, {
+  type CustomEmoji,
+} from "@/shared/lib/remarkCustomEmoji";
 import remarkMentions from "@/shared/lib/remarkMentions";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import { Button } from "@/shared/ui/button";
@@ -67,6 +70,7 @@ type MarkdownProps = {
   className?: string;
   compact?: boolean;
   content: string;
+  customEmoji?: CustomEmoji[];
   imetaByUrl?: ImetaLookup;
   interactive?: boolean;
   mentionNames?: string[];
@@ -574,6 +578,23 @@ function createMarkdownComponents(
         mentionNode
       );
     },
+    emoji: ({ src, alt }: { src?: string; alt?: string }) => {
+      const resolvedSrc = src ? rewriteRelayUrl(src) : src;
+      if (!resolvedSrc) {
+        return <span>{alt}</span>;
+      }
+      // Inline custom emoji: sized to the line, baseline-aligned with text.
+      return (
+        <img
+          alt={alt}
+          src={resolvedSrc}
+          data-custom-emoji=""
+          className="mx-px inline-block h-[1.25em] w-auto max-w-none align-text-bottom"
+          draggable={false}
+          onContextMenu={(e) => e.preventDefault()}
+        />
+      );
+    },
     "channel-link": ({ children }: { children?: React.ReactNode }) => {
       const text = String(children ?? "");
       const channelName = text.startsWith("#") ? text.slice(1) : text;
@@ -653,6 +674,7 @@ function MarkdownInner({
   className,
   compact = false,
   content,
+  customEmoji,
   imetaByUrl,
   interactive = true,
   mentionNames,
@@ -711,8 +733,9 @@ function MarkdownInner({
       remarkMessageLinks,
       [remarkMentions, { mentionNames }],
       [remarkChannelLinks, { channelNames }],
+      [remarkCustomEmoji, { customEmoji }],
     ],
-    [mentionNames, channelNames],
+    [mentionNames, channelNames, customEmoji],
   );
 
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
@@ -809,6 +832,7 @@ export const Markdown = React.memo(
     prev.content === next.content &&
     prev.className === next.className &&
     prev.compact === next.compact &&
+    prev.customEmoji === next.customEmoji &&
     prev.interactive === next.interactive &&
     prev.tight === next.tight &&
     prev.mentionPubkeysByName === next.mentionPubkeysByName &&
