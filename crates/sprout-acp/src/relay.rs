@@ -3796,4 +3796,99 @@ mod tests {
         );
         assert_eq!(extract_h_tag_uuid(&event), Some(channel));
     }
+
+    /// Live end-to-end test of the agent's serverless encrypted-receive path
+    /// against a real public relay (default `wss://relay.damus.io`, override
+    /// with `RELAY_URL`). Proves that a `HarnessRelay` running in serverless
+    /// mode — exactly as a managed agent does — receives a NIP-17 gift-wrapped
+    /// message addressed to it, unwraps it, and surfaces the inner channel
+    /// message via `next_event()`.
+    ///
+    /// `#[ignore]` because it hits the network. Run with:
+    ///   cargo test -p sprout-acp --lib agent_serverless_encrypted_receive -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "network: hits a live public relay (RELAY_URL, default damus)"]
+    async fn agent_serverless_encrypted_receive_live() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let relay_url =
+            std::env::var("RELAY_URL").unwrap_or_else(|_| "wss://relay.damus.io".to_string());
+
+        // The "agent" identity — connects in serverless mode like a managed agent.
+        let agent = Keys::generate();
+        let agent_pubkey_hex = agent.public_key().to_hex();
+        // The "sender" — a member who DMs / posts in a private channel.
+        let sender = Keys::generate();
+        let channel = uuid::Uuid::new_v4();
+        let secret = format!("live-encrypted-{}", &channel.to_string()[..8]);
+
+        // 1. Agent connects serverless (no AUTH) and brings up its inbox.
+        //    subscribe_membership_notifications() also subscribes the gift-wrap
+        //    inbox (kind 1059, #p = agent) — see RelayCommand::SubscribeMembership.
+        let mut relay = HarnessRelay::connect_with_mode(
+            &relay_url,
+            &agent,
+            &agent_pubkey_hex,
+            None,
+            true, // serverless
+        )
+        .await
+        .expect("agent connect (serverless)");
+        relay
+            .subscribe_membership_notifications()
+            .await
+            .expect("subscribe membership + gift-wrap inbox");
+
+        // Give the REQ time to register on the relay before publishing.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // 2. Sender gift-wraps a kind-9 channel message addressed to the agent
+        //    and publishes it over a plain WS (independent of the harness).
+        let rumor = EventBuilder::new(Kind::Custom(9), secret.clone())
+            .tags([Tag::parse(vec!["h", &channel.to_string()]).unwrap()])
+            .build(sender.public_key());
+        let wrap = EventBuilder::gift_wrap(&sender, &agent.public_key(), rumor, [])
+            .await
+            .expect("gift wrap");
+
+        {
+            use futures_util::SinkExt;
+            use tokio_tungstenite::{connect_async, tungstenite::Message};
+            let (ws, _) = connect_async(&relay_url).await.expect("sender connect");
+            let (mut write, _read) = ws.split();
+            let ev = serde_json::json!(["EVENT", wrap]).to_string();
+            write
+                .send(Message::Text(ev.into()))
+                .await
+                .expect("publish gift wrap");
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let _ = write.close().await;
+        }
+
+        // 3. The agent's harness must surface the DECRYPTED inner message as a
+        //    normal SproutEvent on the right channel.
+        let deadline = std::time::Duration::from_secs(20);
+        let got = tokio::time::timeout(deadline, async {
+            loop {
+                match relay.next_event().await {
+                    Some(ev) if ev.event.content == secret => return Some(ev),
+                    Some(_) => continue, // unrelated event — keep waiting
+                    None => return None, // connection lost
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for decrypted message");
+
+        let got = got.expect("connection lost before message arrived");
+        assert_eq!(got.channel_id, channel, "routed to the right channel");
+        assert_eq!(got.event.content, secret);
+        assert_eq!(
+            got.event.pubkey,
+            sender.public_key(),
+            "verified sender preserved through unwrap"
+        );
+        eprintln!("✅ agent received + decrypted encrypted message over {relay_url}");
+    }
 }

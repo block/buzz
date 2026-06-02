@@ -188,7 +188,9 @@ mod tests {
         let c = Keys::generate();
         let channel = uuid::Uuid::new_v4().to_string();
         let secret = format!("encrypted-{}", &channel[..8]);
-        let relay = "wss://relay.damus.io";
+        let relay =
+            std::env::var("RELAY_URL").unwrap_or_else(|_| "wss://relay.damus.io".to_string());
+        let relay = relay.as_str();
 
         // A builds + publishes one gift wrap per member.
         let wraps = build_gift_wraps(

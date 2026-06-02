@@ -121,7 +121,8 @@ async fn serverless_create_join_roundtrip() {
     let joiner_pk = joiner_keys.public_key().to_hex();
     eprintln!("creator={creator_pk}\njoiner={joiner_pk}");
 
-    let relay = "wss://relay.damus.io";
+    let relay = std::env::var("RELAY_URL").unwrap_or_else(|_| "wss://relay.damus.io".to_string());
+    let relay = relay.as_str();
 
     // Build a serverless AppState for the CREATOR.
     let creator_state = build_app_state();
@@ -283,7 +284,9 @@ async fn serverless_multi_relay_fanout() {
     let pk = keys.public_key().to_hex();
 
     // Two relays. Publish fans out to both; reads merge+dedup from both.
-    let relays = "wss://relay.damus.io,wss://nos.lol";
+    let relays = std::env::var("RELAY_URL")
+        .unwrap_or_else(|_| "wss://relay.damus.io,wss://nos.lol".to_string());
+    let relays = relays.as_str();
 
     let state = build_app_state();
     *state.keys.lock().unwrap() = keys.clone();
