@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use nostr::Event;
 use sprout_core::kind::{KIND_EMOJI_SET, KIND_EMOJI_SET_D_TAG, KIND_RELAY_EMOJI_COMMAND};
-use sprout_core::StoredEvent;
 use sprout_sdk::{build_custom_emoji_set, normalize_custom_emoji_shortcode, CustomEmoji};
 use tracing::{info, warn};
 
@@ -111,27 +110,9 @@ fn validate_emoji_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn fetch_current_emojis(state: &Arc<AppState>) -> Result<Vec<CustomEmoji>, String> {
-    let relay_pubkey = state.relay_keypair.public_key().to_bytes().to_vec();
-    let events = state
-        .db
-        .query_events(&sprout_db::event::EventQuery {
-            kinds: Some(vec![KIND_EMOJI_SET as i32]),
-            pubkey: Some(relay_pubkey),
-            d_tag: Some(KIND_EMOJI_SET_D_TAG.to_string()),
-            global_only: true,
-            limit: Some(1),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| format!("database error: {e}"))?;
-
-    let Some(event) = events.first() else {
-        return Ok(vec![]);
-    };
-
+fn parse_emojis_from_event(event: &Event) -> Result<Vec<CustomEmoji>, String> {
     let mut emojis = Vec::new();
-    for tag in event.event.tags.iter() {
+    for tag in event.tags.iter() {
         let parts = tag.as_slice();
         if parts.first().map(|s| s.as_str()) != Some("emoji") {
             continue;
@@ -147,43 +128,73 @@ async fn fetch_current_emojis(state: &Arc<AppState>) -> Result<Vec<CustomEmoji>,
     Ok(emojis)
 }
 
-async fn next_emoji_set_timestamp(state: &Arc<AppState>) -> u64 {
-    let relay_pubkey = state.relay_keypair.public_key().to_bytes().to_vec();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let min_ts = state
-        .db
-        .query_events(&sprout_db::event::EventQuery {
-            kinds: Some(vec![KIND_EMOJI_SET as i32]),
-            pubkey: Some(relay_pubkey),
-            d_tag: Some(KIND_EMOJI_SET_D_TAG.to_string()),
-            global_only: true,
-            limit: Some(1),
-            ..Default::default()
-        })
-        .await
-        .ok()
-        .and_then(|events| events.first().map(|e| e.event.created_at.as_secs() + 1))
-        .unwrap_or(now);
-    now.max(min_ts)
+fn apply_emoji_command(
+    mut emojis: Vec<CustomEmoji>,
+    command: &EmojiCommand,
+) -> Result<Vec<CustomEmoji>, String> {
+    match command.action {
+        EmojiCommandAction::Set => {
+            let url = command
+                .url
+                .clone()
+                .expect("set command parser must provide url");
+            let mut updated = false;
+            for emoji in &mut emojis {
+                if emoji.shortcode == command.shortcode {
+                    emoji.url = url.clone();
+                    updated = true;
+                    break;
+                }
+            }
+            if !updated {
+                emojis.push(CustomEmoji {
+                    shortcode: command.shortcode.clone(),
+                    url,
+                });
+            }
+            emojis.sort_by(|a, b| a.shortcode.cmp(&b.shortcode));
+            Ok(emojis)
+        }
+        EmojiCommandAction::Remove => {
+            let before = emojis.len();
+            emojis.retain(|emoji| emoji.shortcode != command.shortcode);
+            if emojis.len() == before {
+                return Err(format!("emoji not found: {}", command.shortcode));
+            }
+            Ok(emojis)
+        }
+    }
 }
 
-async fn publish_emoji_set(
+async fn publish_emoji_set_from_command(
     state: &Arc<AppState>,
-    emojis: &[CustomEmoji],
-) -> Result<StoredEvent, String> {
-    let ts = next_emoji_set_timestamp(state).await;
-    let event = build_custom_emoji_set(emojis)
-        .map_err(|e| e.to_string())?
-        .custom_created_at(nostr::Timestamp::from(ts))
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| format!("failed to sign emoji set: {e}"))?;
-
+    command: &EmojiCommand,
+) -> Result<(), String> {
+    let relay_pubkey = state.relay_keypair.public_key().to_bytes().to_vec();
     let (stored, was_inserted) = state
         .db
-        .replace_parameterized_event(&event, KIND_EMOJI_SET_D_TAG, None)
+        .transform_parameterized_event(
+            KIND_EMOJI_SET as i32,
+            &relay_pubkey,
+            KIND_EMOJI_SET_D_TAG,
+            None,
+            |existing, next_ts| {
+                let current = match existing {
+                    Some(event) => parse_emojis_from_event(&event.event)
+                        .map_err(sprout_db::DbError::InvalidData)?,
+                    None => vec![],
+                };
+                let updated = apply_emoji_command(current, command)
+                    .map_err(sprout_db::DbError::InvalidData)?;
+                build_custom_emoji_set(&updated)
+                    .map_err(|e| sprout_db::DbError::InvalidData(e.to_string()))?
+                    .custom_created_at(nostr::Timestamp::from(next_ts))
+                    .sign_with_keys(&state.relay_keypair)
+                    .map_err(|e| {
+                        sprout_db::DbError::InvalidData(format!("failed to sign emoji set: {e}"))
+                    })
+            },
+        )
         .await
         .map_err(|e| format!("database error: {e}"))?;
 
@@ -191,10 +202,10 @@ async fn publish_emoji_set(
         let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
         dispatch_persistent_event(state, &stored, KIND_EMOJI_SET, &relay_pubkey_hex).await;
     } else {
-        warn!("relay emoji set update was rejected as stale/duplicate");
+        warn!("relay emoji set update was rejected as duplicate");
     }
 
-    Ok(stored)
+    Ok(())
 }
 
 /// Validate and execute a relay-global custom emoji command (kind:9037).
@@ -232,36 +243,13 @@ pub async fn handle_custom_emoji_command(
     }
 
     let command = parse_emoji_command(event)?;
-    let mut emojis = fetch_current_emojis(state).await?;
+    publish_emoji_set_from_command(state, &command).await?;
 
     match command.action {
         EmojiCommandAction::Set => {
-            let url = command.url.expect("set command parser must provide url");
-            let mut updated = false;
-            for emoji in &mut emojis {
-                if emoji.shortcode == command.shortcode {
-                    emoji.url = url.clone();
-                    updated = true;
-                    break;
-                }
-            }
-            if !updated {
-                emojis.push(CustomEmoji {
-                    shortcode: command.shortcode.clone(),
-                    url,
-                });
-                emojis.sort_by(|a, b| a.shortcode.cmp(&b.shortcode));
-            }
-            publish_emoji_set(state, &emojis).await?;
             info!(sender = %sender_hex, shortcode = %command.shortcode, "custom emoji set");
         }
         EmojiCommandAction::Remove => {
-            let before = emojis.len();
-            emojis.retain(|emoji| emoji.shortcode != command.shortcode);
-            if emojis.len() == before {
-                return Err(format!("emoji not found: {}", command.shortcode));
-            }
-            publish_emoji_set(state, &emojis).await?;
             info!(sender = %sender_hex, shortcode = %command.shortcode, "custom emoji removed");
         }
     }
@@ -336,5 +324,75 @@ mod tests {
         assert!(parse_emoji_command(&event)
             .unwrap_err()
             .contains("shortcode"));
+    }
+    #[test]
+    fn apply_set_adds_and_sorts() {
+        let command = EmojiCommand {
+            action: EmojiCommandAction::Set,
+            shortcode: "alpha".to_string(),
+            url: Some("https://example.com/a.png".to_string()),
+        };
+        let emojis = vec![CustomEmoji {
+            shortcode: "zulu".to_string(),
+            url: "https://example.com/z.png".to_string(),
+        }];
+        let updated = apply_emoji_command(emojis, &command).expect("apply");
+        assert_eq!(
+            updated
+                .iter()
+                .map(|emoji| emoji.shortcode.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "zulu"]
+        );
+    }
+
+    #[test]
+    fn apply_set_updates_existing() {
+        let command = EmojiCommand {
+            action: EmojiCommandAction::Set,
+            shortcode: "party".to_string(),
+            url: Some("https://example.com/new.png".to_string()),
+        };
+        let emojis = vec![CustomEmoji {
+            shortcode: "party".to_string(),
+            url: "https://example.com/old.png".to_string(),
+        }];
+        let updated = apply_emoji_command(emojis, &command).expect("apply");
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].url, "https://example.com/new.png");
+    }
+
+    #[test]
+    fn apply_remove_deletes_existing() {
+        let command = EmojiCommand {
+            action: EmojiCommandAction::Remove,
+            shortcode: "party".to_string(),
+            url: None,
+        };
+        let emojis = vec![
+            CustomEmoji {
+                shortcode: "party".to_string(),
+                url: "https://example.com/party.png".to_string(),
+            },
+            CustomEmoji {
+                shortcode: "zulu".to_string(),
+                url: "https://example.com/z.png".to_string(),
+            },
+        ];
+        let updated = apply_emoji_command(emojis, &command).expect("apply");
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].shortcode, "zulu");
+    }
+
+    #[test]
+    fn apply_remove_rejects_missing() {
+        let command = EmojiCommand {
+            action: EmojiCommandAction::Remove,
+            shortcode: "missing".to_string(),
+            url: None,
+        };
+        assert!(apply_emoji_command(vec![], &command)
+            .unwrap_err()
+            .contains("emoji not found"));
     }
 }

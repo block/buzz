@@ -1758,6 +1758,158 @@ impl Db {
             true,
         ))
     }
+
+    /// Atomically transform a NIP-33 parameterized replaceable event under its
+    /// replacement-key advisory lock.
+    ///
+    /// The closure receives the current live event, if any, and a timestamp that
+    /// is strictly greater than the current head's `created_at` (or `now` when
+    /// no head exists). It must return a signed event for the same
+    /// `(kind, pubkey, d_tag)`. This is for read-modify-write command handlers
+    /// that cannot safely fetch the head before acquiring the replacement lock.
+    pub async fn transform_parameterized_event<F>(
+        &self,
+        kind_i32: i32,
+        pubkey_bytes: &[u8],
+        d_tag: &str,
+        channel_id: Option<Uuid>,
+        build_event: F,
+    ) -> Result<(StoredEvent, bool)>
+    where
+        F: FnOnce(Option<&StoredEvent>, u64) -> Result<nostr::Event>,
+    {
+        // Stable advisory-lock key: FNV-1a over (kind, pubkey, d_tag).
+        // Must match replace_parameterized_event so both paths serialize.
+        let lock_key = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for b in kind_i32.to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            for b in pubkey_bytes {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            for b in d_tag.as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h as i64
+        };
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        let existing_row = sqlx::query(
+            "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
+             FROM events \
+             WHERE kind = $1 AND pubkey = $2 AND d_tag = $3 AND deleted_at IS NULL \
+             ORDER BY created_at DESC, id ASC LIMIT 1",
+        )
+        .bind(kind_i32)
+        .bind(pubkey_bytes)
+        .bind(d_tag)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let existing = match existing_row {
+            Some(row) => crate::event::row_to_stored_event(row)?,
+            None => None,
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let next_ts = existing
+            .as_ref()
+            .map(|event| event.event.created_at.as_secs() + 1)
+            .unwrap_or(now)
+            .max(now);
+
+        let event = build_event(existing.as_ref(), next_ts)?;
+        if sprout_core::kind::event_kind_i32(&event) != kind_i32 {
+            return Err(DbError::InvalidData(format!(
+                "transform built wrong kind: expected {kind_i32}, got {}",
+                sprout_core::kind::event_kind_i32(&event)
+            )));
+        }
+        if event.pubkey.to_bytes().as_slice() != pubkey_bytes {
+            return Err(DbError::InvalidData(
+                "transform built event with wrong pubkey".to_string(),
+            ));
+        }
+        if crate::event::extract_d_tag(&event).as_deref() != Some(d_tag) {
+            return Err(DbError::InvalidData(
+                "transform built event with wrong d tag".to_string(),
+            ));
+        }
+
+        let created_at_secs = event.created_at.as_secs() as i64;
+        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
+            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+        if let Some(existing) = existing.as_ref() {
+            if event.created_at <= existing.event.created_at {
+                return Err(DbError::InvalidData(
+                    "transform built stale parameterized event".to_string(),
+                ));
+            }
+        }
+
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE kind = $1 AND pubkey = $2 AND d_tag = $3 AND deleted_at IS NULL",
+        )
+        .bind(kind_i32)
+        .bind(pubkey_bytes)
+        .bind(d_tag)
+        .execute(&mut *tx)
+        .await?;
+
+        let sig_bytes = event.sig.serialize();
+        let tags_json = serde_json::to_value(&event.tags)?;
+        let received_at = chrono::Utc::now();
+        let insert_result = sqlx::query(
+            "INSERT INTO events (id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(event.id.as_bytes().as_slice())
+        .bind(pubkey_bytes)
+        .bind(created_at)
+        .bind(kind_i32)
+        .bind(&tags_json)
+        .bind(&event.content)
+        .bind(sig_bytes.as_slice())
+        .bind(received_at)
+        .bind(channel_id)
+        .bind(d_tag)
+        .execute(&mut *tx)
+        .await?;
+
+        let was_inserted = insert_result.rows_affected() > 0;
+        if !was_inserted {
+            tx.rollback().await?;
+            return Ok((
+                StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+                false,
+            ));
+        }
+
+        tx.commit().await?;
+
+        if let Err(e) = crate::insert_mentions(&self.pool, &event, channel_id).await {
+            tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+        }
+
+        Ok((
+            StoredEvent::with_received_at(event, received_at, channel_id, true),
+            true,
+        ))
+    }
 }
 
 /// A full API token record.
