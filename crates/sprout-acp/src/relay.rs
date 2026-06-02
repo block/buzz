@@ -575,6 +575,7 @@ const GIFT_WRAP_SUB_ID: &str = "agent-gift-wrap-inbox";
 const KIND_GIFT_WRAP: u16 = 1059;
 
 /// Commands sent from `HarnessRelay` to the background WebSocket task.
+#[derive(Clone)]
 enum RelayCommand {
     /// Subscribe to a channel (sends a NIP-01 REQ) with the given filter.
     Subscribe {
@@ -629,10 +630,14 @@ pub struct HarnessRelay {
     auth_tag: Option<nostr::Tag>,
     /// Serverless mode: generic relay, plain-WS reads/writes, AUTH optional.
     serverless: bool,
-    /// Handle to the background task (for clean shutdown).
-    /// Wrapped in `Option` so `shutdown()` can take ownership without conflicting
-    /// with `Drop` (which only has `&mut self`).
-    bg_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Recently-seen event ids for cross-relay dedup. The same event arrives
+    /// from every relay it's stored on (standard Nostr — relays don't gossip,
+    /// so clients publish-to-many + read-from-many + dedup, like damus's
+    /// `RelayPool.seenEvents`). Bounded ring buffer.
+    seen_event_ids: std::collections::VecDeque<nostr::EventId>,
+    /// Handles to all background tasks (one per relay + the command fan-out),
+    /// for clean shutdown.
+    bg_handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 /// Cloneable publisher handle for signed events on the relay background socket.
@@ -670,43 +675,94 @@ impl HarnessRelay {
         serverless: bool,
     ) -> Result<Self, RelayError> {
         // Serverless workspaces pass a comma-separated relay LIST
-        // (`wss://a,wss://b,...`). The harness is single-relay: connect to the
-        // first (primary) relay — connecting to the raw comma string fails DNS
-        // ("nodename nor servname provided"). The desktop client uses the same
-        // first-relay convention for its live subscription.
-        let relay_url = relay_url.split(',').next().unwrap_or(relay_url).trim();
-
-        // Perform the initial connection and auth handshake.
-        // Finding #8: capture the handshake buffer and pass it to the background
-        // task so buffered messages aren't silently discarded.
-        let (ws, handshake_buffer) =
-            do_connect(relay_url, keys, auth_tag.as_ref(), serverless).await?;
+        // (`wss://a,wss://b,...`). Connect to ALL of them and merge — this is
+        // the standard Nostr client pattern (damus `RelayPool`, nostr-tools
+        // `SimplePool`): relays don't gossip, so a client must subscribe to
+        // every relay and dedup, otherwise a message stored on relay B is
+        // invisible to a subscriber on relay A. Server mode passes a single URL.
+        let relay_urls: Vec<String> = relay_url
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let primary = relay_urls
+            .first()
+            .cloned()
+            .unwrap_or_else(|| relay_url.to_string());
 
         let (event_tx, event_rx) = mpsc::channel::<Option<SproutEvent>>(event_channel_capacity());
         let (observer_control_tx, observer_control_rx) =
             mpsc::channel::<Event>(event_channel_capacity());
-        let (cmd_tx, cmd_rx) = mpsc::channel::<RelayCommand>(CMD_CHANNEL_CAPACITY);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<RelayCommand>(CMD_CHANNEL_CAPACITY);
 
-        let bg_keys = keys.clone();
-        let bg_relay_url = relay_url.to_string();
-        let bg_agent_pubkey_hex = agent_pubkey_hex.to_string();
-        let bg_auth_tag = auth_tag.clone();
+        // Connect to each relay; spawn one background task per relay sharing the
+        // same `event_tx` (events merge into one stream). Each task gets its own
+        // command channel; a fan-out task clones every command to all relays.
+        let mut per_relay_cmd_tx: Vec<mpsc::Sender<RelayCommand>> = Vec::new();
+        let mut bg_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        let mut connected_any = false;
+        let mut last_err: Option<RelayError> = None;
 
-        let bg_handle = tokio::spawn(async move {
-            run_background_task(
-                ws,
-                handshake_buffer,
-                event_tx,
-                observer_control_tx,
-                cmd_rx,
-                bg_keys,
-                bg_relay_url,
-                bg_agent_pubkey_hex,
-                bg_auth_tag,
-                serverless,
-            )
-            .await;
+        for url in &relay_urls {
+            let (ws, handshake_buffer) =
+                match do_connect(url, keys, auth_tag.as_ref(), serverless).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("relay {url}: connect failed: {e}");
+                        last_err = Some(e);
+                        continue;
+                    }
+                };
+            connected_any = true;
+
+            let (task_cmd_tx, task_cmd_rx) = mpsc::channel::<RelayCommand>(CMD_CHANNEL_CAPACITY);
+            per_relay_cmd_tx.push(task_cmd_tx);
+
+            // Only the primary relay forwards observer-control frames (they're
+            // addressed to the agent and identical across relays; dedup keeps
+            // one). Secondary relays use a throwaway sender.
+            let obs_tx = observer_control_tx.clone();
+            let bg_keys = keys.clone();
+            let bg_relay_url = url.clone();
+            let bg_agent_pubkey_hex = agent_pubkey_hex.to_string();
+            let bg_auth_tag = auth_tag.clone();
+            let bg_event_tx = event_tx.clone();
+
+            let handle = tokio::spawn(async move {
+                run_background_task(
+                    ws,
+                    handshake_buffer,
+                    bg_event_tx,
+                    obs_tx,
+                    task_cmd_rx,
+                    bg_keys,
+                    bg_relay_url,
+                    bg_agent_pubkey_hex,
+                    bg_auth_tag,
+                    serverless,
+                )
+                .await;
+            });
+            bg_handles.push(handle);
+        }
+
+        if !connected_any {
+            return Err(last_err.unwrap_or(RelayError::ConnectionClosed));
+        }
+
+        // Command fan-out: clone each command to every relay's task.
+        let fanout_handle = tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                let is_shutdown = matches!(cmd, RelayCommand::Shutdown);
+                for tx in &per_relay_cmd_tx {
+                    let _ = tx.send(cmd.clone()).await;
+                }
+                if is_shutdown {
+                    break;
+                }
+            }
         });
+        bg_handles.push(fanout_handle);
 
         Ok(Self {
             event_rx,
@@ -717,11 +773,12 @@ impl HarnessRelay {
                 .connect_timeout(std::time::Duration::from_secs(5))
                 .build()
                 .map_err(|e| RelayError::Http(format!("failed to build HTTP client: {e}")))?,
-            relay_url: relay_url.to_string(),
+            relay_url: primary,
             keys: keys.clone(),
             auth_tag,
             serverless,
-            bg_handle: Some(bg_handle),
+            seen_event_ids: std::collections::VecDeque::new(),
+            bg_handles,
         })
     }
 
@@ -915,8 +972,22 @@ impl HarnessRelay {
     /// Reads from the background task's event channel. Returns `None` on
     /// connection loss — the caller should call [`reconnect`](Self::reconnect).
     pub async fn next_event(&mut self) -> Option<SproutEvent> {
-        // The background task sends `None` to signal connection loss.
-        self.event_rx.recv().await.flatten()
+        // The background tasks send `None` to signal connection loss. With
+        // multiple relays the same event arrives from each relay it's stored on,
+        // so dedup by event id (bounded ring, like damus's `seenEvents`).
+        const SEEN_CAP: usize = 4096;
+        loop {
+            let ev = self.event_rx.recv().await.flatten()?;
+            let id = ev.event.id;
+            if self.seen_event_ids.contains(&id) {
+                continue; // duplicate from another relay — skip
+            }
+            self.seen_event_ids.push_back(id);
+            if self.seen_event_ids.len() > SEEN_CAP {
+                self.seen_event_ids.pop_front();
+            }
+            return Some(ev);
+        }
     }
 
     /// Publish a signed event to the relay via the background WebSocket task.
@@ -1006,7 +1077,8 @@ impl HarnessRelay {
     /// relying on `Drop` (which aborts immediately).
     pub async fn shutdown(mut self) {
         let _ = self.cmd_tx.send(RelayCommand::Shutdown).await;
-        if let Some(handle) = self.bg_handle.take() {
+        let handles = std::mem::take(&mut self.bg_handles);
+        for handle in handles {
             let abort_handle = handle.abort_handle();
             if tokio::time::timeout(Duration::from_secs(5), handle)
                 .await
@@ -1023,7 +1095,7 @@ impl Drop for HarnessRelay {
     fn drop(&mut self) {
         // Best-effort shutdown signal; ignore errors (task may already be done).
         let _ = self.cmd_tx.try_send(RelayCommand::Shutdown);
-        if let Some(handle) = self.bg_handle.take() {
+        for handle in self.bg_handles.drain(..) {
             handle.abort();
         }
     }
@@ -3902,5 +3974,83 @@ mod tests {
             "verified sender preserved through unwrap"
         );
         eprintln!("✅ agent received + decrypted encrypted message over {relay_url}");
+    }
+
+    /// The split-brain fix: agent subscribes to MULTIPLE relays; a plaintext
+    /// kind-9 message published to a SECONDARY relay (not the primary) must
+    /// still reach the agent, because it subscribes to all relays and dedups —
+    /// exactly like damus's RelayPool. Without multi-relay subscribe, a message
+    /// that landed on nos.lol (because damus rate-limited the write) is invisible
+    /// to a damus-only agent.
+    #[tokio::test]
+    #[ignore = "network: hits live public relays"]
+    async fn agent_multi_relay_subscribe_no_split_brain() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        // Primary = damus, secondary = nos.lol. We publish ONLY to nos.lol.
+        let primary = "wss://relay.damus.io";
+        let secondary = "wss://nos.lol";
+        let relay_list = format!("{primary},{secondary}");
+
+        let agent_keys = Keys::generate();
+        let sender = Keys::generate();
+        let channel = uuid::Uuid::new_v4();
+        let secret = format!("split-brain-{}", &channel.to_string()[..8]);
+
+        let mut relay = HarnessRelay::connect_with_mode(
+            &relay_list,
+            &agent_keys,
+            &agent_keys.public_key().to_hex(),
+            None,
+            true,
+        )
+        .await
+        .expect("agent connect to all relays");
+
+        let filter = crate::config::ChannelFilter {
+            kinds: Some(vec![9]),
+            require_mention: false,
+        };
+        relay
+            .subscribe_channel(channel, filter)
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Publish a kind-9 message ONLY to the secondary relay.
+        let event = EventBuilder::new(Kind::Custom(9), secret.clone())
+            .tags(vec![nostr::Tag::parse(["h", &channel.to_string()]).unwrap()])
+            .sign_with_keys(&sender)
+            .expect("sign");
+        {
+            use futures_util::SinkExt;
+            use tokio_tungstenite::{connect_async, tungstenite::Message};
+            let (ws, _) = connect_async(secondary).await.expect("sender connect");
+            let (mut write, _read) = ws.split();
+            let msg = serde_json::json!(["EVENT", event]).to_string();
+            write.send(Message::Text(msg.into())).await.expect("send");
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let _ = write.close().await;
+        }
+        eprintln!("published kind-9 to SECONDARY relay only ({secondary})");
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                match relay.next_event().await {
+                    Some(ev) if ev.event.content == secret => return Some(ev),
+                    Some(_) => continue,
+                    None => return None,
+                }
+            }
+        })
+        .await
+        .expect("timed out — agent did not receive message from secondary relay (split-brain)");
+
+        let got = got.expect("connection lost");
+        assert_eq!(got.channel_id, channel);
+        assert_eq!(got.event.content, secret);
+        eprintln!(
+            "✅ agent received message published to SECONDARY relay — multi-relay subscribe works, no split-brain"
+        );
     }
 }
