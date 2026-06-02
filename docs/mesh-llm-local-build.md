@@ -50,19 +50,26 @@ Do not use dynamic-link locally unless you already have compatible `llama`,
 `llama-common`, and `mtmd` dynamic libraries. The default static build is the
 supported local path for M1.
 
-## Current privacy limitation: public STUN
+## Connectivity model: public iroh relays off, raw STUN on (WAN)
 
-Sprout Desktop now refuses to start an embedded mesh node unless the active relay
-advertises a Sprout-owned `iroh_relay_url`, and it passes a fresh NIP-98 bearer
-to that relay. This prevents mesh-llm's empty-relay fallback to public iroh relay
-URLs.
+Sprout Desktop starts the embedded mesh node with `disable_iroh_relays(true)`
+(mesh-llm fork rev `bc2f1106`, `RelayPolicy::ExplicitlyDisabled`): **no public
+iroh relays** (no `*.iroh.link` traffic, no relay transport), so there is no
+empty-relay fallback to public infrastructure.
 
-mesh-llm `bd16da4` still performs raw public STUN on startup to discover the
-host's public IP (`stun.l.google.com`, `stun.cloudflare.com`, or
-`stun.stunprotocol.org`) and may include that public address in its invite token.
-That behavior is inside mesh-llm's host runtime and is not currently exposed as
-an SDK option. Treat it as a v1 limitation until mesh exposes a disable-public-
-STUN / relay-only-addressing knob.
+Raw STUN **remains on** under this policy: the node discovers its public address
+(via `stun.l.google.com` / `stun.cloudflare.com`) and injects it into the invite
+token / `EndpointAddr`. That address rides the relay-signed `24621`/`24622`
+call-me-now exchange, and peers hole-punch directly over UDP — so this works over
+**WAN**, not just LAN. STUN is a "what's my public IP" lookup, not a relay or a
+data path; the Sprout relay performs the address-exchange coordination.
+
+Residual limit (intentional v1): with iroh relays off there is **no relay
+transport fallback**, so two peers both behind **symmetric NATs** may fail to
+hole-punch. Works for the common cases (≥1 side cone-NAT / port-forwarded /
+server). A hosted private-iroh-relay fallback (relay advertises an
+`iroh_relay_url` + NIP-98 auth) is the planned follow-up once the relay side is
+wired end-to-end.
 
 ## Mesh-compute e2e acceptance matrix
 
@@ -74,7 +81,7 @@ coverage into three layers and are explicit about what is real vs mocked.
 | # | What it proves | Where | Real / Mocked | Runs in CI? | How to run |
 |---|----------------|-------|---------------|-------------|------------|
 | 1 | serve node + client node + mesh routing + **real inference** | `crates/sprout-relay/examples/mesh_serve_client_smoke.rs` | **REAL** (loads a model, runs inference, joins a real mesh) | No — hardware-gated | `just mesh-e2e-hardware` (or `cargo run -p sprout-relay --example mesh_serve_client_smoke`) |
-| 2 | admission **invariant**: relay membership is the only factor | `crates/sprout-relay/src/iroh_relay.rs` (`admission_from_membership` tests) | REAL policy logic, no I/O | **Yes** | `cargo test -p sprout-relay iroh_relay::tests::admission` |
+| 2 | admission **invariant**: relay membership is the only factor | `crates/sprout-relay/src/handlers/mesh_signaling.rs` (`*_admitted` / `denied_is_not_admitted` tests) | REAL policy logic, no I/O | **Yes** | `cargo test -p sprout-relay mesh_signaling` |
 | 2b | live db-membership admission + member/non-member status reads | `crates/sprout-test-client/tests/e2e_mesh_llm.rs` (`trust_*`) | REAL relay over ws | No — env-gated (`MEMBER_NSEC`/`STRANGER_NSEC`, live relay) | see that file's module docs |
 | 3 | desktop UI contract: Share-compute start/stop, Run-on-relay-mesh preset, **ensure-before-spawn** order, membership-gated toggle | `desktop/tests/e2e/mesh-compute.spec.ts` | UI REAL, Tauri mesh commands MOCKED via the e2e bridge | **Yes** | `cd desktop && pnpm test:e2e:integration -- mesh-compute.spec.ts` |
 
@@ -87,8 +94,9 @@ coverage into three layers and are explicit about what is real vs mocked.
   token, and asserts a chat completion *routed through the client* returns
   `finish_reason=stop` with non-empty content. Verified locally with
   SmolLM2-135M; point `MESH_SMOKE_MODEL` at a larger `.gguf` for scale.
-  Note: even with mDNS discovery the join bootstraps through mesh's public iroh
-  relay at the pinned rev — see the STUN limitation above.
+  Note: with `disable_iroh_relays(true)` the join bootstraps via STUN-discovered
+  public addresses + relay-signed call-me-now (no public iroh relay) — see the
+  connectivity model above.
 - **Layer 2 proves the auth invariant without faking it.** The policy mapping
   (`MembershipDecision` → admit/deny) is exercised directly: member → allow,
   open relay → allow, non-member → deny, owner-delegation → deny (v1),

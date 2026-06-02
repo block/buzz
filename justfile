@@ -198,9 +198,9 @@ desktop-e2e-smoke:
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
-# Mesh-compute e2e: the CI-safe layers (admission invariant + Playwright UI)
+# Mesh-compute e2e: the CI-safe layers (relay mesh signaling invariants + Playwright UI)
 mesh-e2e:
-    cargo test -p sprout-relay iroh_relay::tests::admission
+    cargo test -p sprout-relay mesh_signaling
     cd {{desktop_dir}} && pnpm test:e2e:integration -- mesh-compute.spec.ts
 
 # Mesh-compute Layer 1: REAL serve->client->inference on this machine (not CI)
