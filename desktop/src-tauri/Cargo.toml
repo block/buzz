@@ -61,7 +61,7 @@ url = "2"
 sprout-core = { path = "../../crates/sprout-core" }
 sprout-persona = { path = "../../crates/sprout-persona" }
 sprout-sdk = { path = "../../crates/sprout-sdk" }
-mesh-llm-sdk = { git = "https://github.com/tlongwell-block/mesh-llm.git", rev = "999e394e10d977fe1eef34f24fa530881f7e39b1", package = "mesh-llm-sdk", default-features = false, features = ["client", "serve"], optional = true }
+mesh-llm-sdk = { git = "https://github.com/tlongwell-block/mesh-llm.git", rev = "bc2f110625ccad2c3f8557b125c063bdc030fd21", package = "mesh-llm-sdk", default-features = false, features = ["client", "serve"], optional = true }
 base64 = "0.22"
 sha2 = "0.11"
 tar = "0.4"
