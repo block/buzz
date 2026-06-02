@@ -67,25 +67,6 @@ pub enum VoteDirection {
     Down,
 }
 
-/// Custom emoji action for relay-global emoji commands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CustomEmojiAction {
-    /// Add or update a custom emoji shortcode.
-    Set,
-    /// Remove a custom emoji shortcode.
-    Remove,
-}
-
-impl CustomEmojiAction {
-    /// Return the wire tag value for this action.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Set => "set",
-            Self::Remove => "remove",
-        }
-    }
-}
-
 /// A NIP-30 custom emoji tag payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomEmoji {

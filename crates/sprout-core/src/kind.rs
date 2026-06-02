@@ -43,12 +43,13 @@ pub const KIND_FOLLOW_SET: u32 = 30000;
 pub const KIND_BOOKMARK_SET: u32 = 30003;
 /// NIP-51 / NIP-30: Emoji set (parameterized replaceable).
 ///
-/// Sprout's relay-global custom emoji set is relay-owned and keyed by
-/// `KIND_EMOJI_SET_D_TAG`. Members mutate it via `KIND_RELAY_EMOJI_COMMAND`;
-/// direct client submissions of kind:30030 are not allowlisted by ingest.
+/// User-owned, keyed by `(pubkey, kind, d_tag)`. Each member publishes their own
+/// kind:30030 set (signed as themselves); the workspace emoji "palette" is the
+/// client-side union of everyone's sets — a view computed on read, not stored
+/// state. Ingest allowlists member-authored kind:30030/10030 (see
+/// `required_scope_for_kind`), and the generic NIP-33 replace path keeps only the
+/// latest per `(pubkey, d_tag)`.
 pub const KIND_EMOJI_SET: u32 = 30030;
-/// D-tag for Sprout's canonical relay-owned custom emoji set.
-pub const KIND_EMOJI_SET_D_TAG: &str = "sprout:relay-emoji";
 /// NIP-01: Channel metadata (replaceable). Not used by Sprout today.
 pub const KIND_CHANNEL_METADATA: u32 = 41;
 /// NIP-09: Event deletion request.
@@ -117,12 +118,6 @@ pub const RELAY_ADMIN_ADD_MEMBER: u32 = 9030;
 pub const RELAY_ADMIN_REMOVE_MEMBER: u32 = 9031;
 /// NIP-43: Change the role of an existing relay member.
 pub const RELAY_ADMIN_CHANGE_ROLE: u32 = 9032;
-/// Sprout: Relay-global custom emoji add/remove command.
-///
-/// User-signed command processed by the relay. The relay validates that the actor
-/// is a relay member, then updates the relay-owned kind:30030 emoji set.
-pub const KIND_RELAY_EMOJI_COMMAND: u32 = 9037;
-
 // NIP-43 relay membership announcement events (relay-signed)
 /// NIP-43: Relay membership list snapshot (relay-signed, replaceable by convention).
 pub const KIND_NIP43_MEMBERSHIP_LIST: u32 = 13534;
@@ -362,7 +357,6 @@ pub const ALL_KINDS: &[u32] = &[
     RELAY_ADMIN_ADD_MEMBER,
     RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_CHANGE_ROLE,
-    KIND_RELAY_EMOJI_COMMAND,
     KIND_NIP43_MEMBERSHIP_LIST,
     KIND_NIP43_MEMBER_ADDED,
     KIND_NIP43_MEMBER_REMOVED,

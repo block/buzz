@@ -46,6 +46,7 @@ import {
   useUserStatusQuery,
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
+import { useWorkspaceEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
 import { useProfileQuery } from "@/features/profile/hooks";
 import {
   DEFAULT_SETTINGS_SECTION,
@@ -201,6 +202,7 @@ export function AppShell() {
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
   usePresenceSubscription();
   useUserStatusSubscription();
+  useWorkspaceEmojiLiveUpdates();
   const presenceSession = usePresenceSession(deferredPubkey);
   const selfStatusQuery = useUserStatusQuery(
     deferredPubkey ? [deferredPubkey] : [],

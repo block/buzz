@@ -9,9 +9,10 @@ import { installMockBridge } from "../helpers/bridge";
 // still serializing to `:shortcode:` on send. The message timeline renders the
 // same shortcode as `img[data-custom-emoji]` via remarkCustomEmoji.
 //
-// The `:sprout:` shortcode is seeded into the relay-owned kind:30030 set by
-// scripts/setup-desktop-test-data.sh (driven through the real kind:9037
-// command path). `listCustomEmoji` reads that set over the relay WS — which is
+// The `:sprout:` shortcode lives in a member-authored kind:30030 set
+// (d=`sprout:custom-emoji`) served by the mock bridge from two distinct
+// pubkeys. `listCustomEmoji` reads every member's set over the relay WS and
+// unions them (deduped by shortcode+url) into the workspace palette — which is
 // live even in mock-bridge mode (the mock only intercepts Tauri commands), so
 // this spec uses the simpler mock-bridge setup like messaging.spec.ts.
 const SHORTCODE = "sprout";

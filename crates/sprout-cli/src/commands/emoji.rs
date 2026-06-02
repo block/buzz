@@ -1,5 +1,10 @@
 use crate::client::{normalize_write_response, SproutClient};
 use crate::error::CliError;
+use sprout_sdk::CustomEmoji;
+
+/// d-tag for a member's own custom emoji set (kind:30030). Mirrors the SDK
+/// constant; the workspace palette is the union of every member's own set.
+const CUSTOM_EMOJI_SET_D_TAG: &str = sprout_sdk::CUSTOM_EMOJI_SET_D_TAG;
 
 /// Custom emoji entry in CLI output.
 #[derive(Debug, serde::Serialize)]
@@ -8,10 +13,8 @@ struct EmojiEntry {
     url: String,
 }
 
-fn parse_custom_emoji_set(events: &[serde_json::Value]) -> Vec<EmojiEntry> {
-    let Some(event) = events.first() else {
-        return vec![];
-    };
+/// Parse `["emoji", shortcode, url]` tags from one event into entries.
+fn emoji_tags_of(event: &serde_json::Value) -> Vec<EmojiEntry> {
     let Some(tags) = event.get("tags").and_then(|v| v.as_array()) else {
         return vec![];
     };
@@ -23,10 +26,10 @@ fn parse_custom_emoji_set(events: &[serde_json::Value]) -> Vec<EmojiEntry> {
         if parts.first().and_then(|v| v.as_str()) != Some("emoji") {
             continue;
         }
-        let Some(shortcode) = parts.get(1).and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(url) = parts.get(2).and_then(|v| v.as_str()) else {
+        let (Some(shortcode), Some(url)) = (
+            parts.get(1).and_then(|v| v.as_str()),
+            parts.get(2).and_then(|v| v.as_str()),
+        ) else {
             continue;
         };
         out.push(EmojiEntry {
@@ -34,41 +37,106 @@ fn parse_custom_emoji_set(events: &[serde_json::Value]) -> Vec<EmojiEntry> {
             url: url.to_string(),
         });
     }
-    out.sort_by(|a, b| a.shortcode.cmp(&b.shortcode));
     out
 }
 
+/// Union every member's kind:30030 set, deduped by `(shortcode, url)`.
+/// Stable, sorted by shortcode then url, so identical input yields identical output.
+fn union_custom_emoji(events: &[serde_json::Value]) -> Vec<EmojiEntry> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<EmojiEntry> = Vec::new();
+    for event in events {
+        for entry in emoji_tags_of(event) {
+            if seen.insert((entry.shortcode.clone(), entry.url.clone())) {
+                out.push(entry);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.shortcode.cmp(&b.shortcode).then(a.url.cmp(&b.url)));
+    out
+}
+
+/// List the workspace custom emoji palette: the union of every member's
+/// own kind:30030 set (d=`sprout:custom-emoji`).
 async fn cmd_list(client: &SproutClient) -> Result<(), CliError> {
     let filter = serde_json::json!({
         "kinds": [sprout_sdk::kind::KIND_EMOJI_SET],
-        "#d": [sprout_sdk::kind::KIND_EMOJI_SET_D_TAG],
-        "limit": 1
+        "#d": [CUSTOM_EMOJI_SET_D_TAG],
     });
     let raw = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("failed to parse emoji set query: {e}")))?;
-    let emojis = parse_custom_emoji_set(&events);
+    let emojis = union_custom_emoji(&events);
     let output = serde_json::json!({ "emojis": emojis });
     println!("{}", serde_json::to_string(&output).unwrap_or_default());
     Ok(())
 }
 
-async fn cmd_set(client: &SproutClient, shortcode: &str, url: &str) -> Result<(), CliError> {
-    let builder = sprout_sdk::build_set_custom_emoji(shortcode, url)
-        .map_err(|e| CliError::Other(format!("build_set_custom_emoji failed: {e}")))?;
+/// Fetch the caller's own current custom emoji set (latest kind:30030 under
+/// the d-tag, authored by the caller). Empty when none published yet.
+async fn fetch_own_emoji(client: &SproutClient) -> Result<Vec<CustomEmoji>, CliError> {
+    let me = client.keys().public_key().to_hex();
+    let filter = serde_json::json!({
+        "kinds": [sprout_sdk::kind::KIND_EMOJI_SET],
+        "#d": [CUSTOM_EMOJI_SET_D_TAG],
+        "authors": [me],
+        "limit": 1,
+    });
+    let raw = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse own emoji set: {e}")))?;
+    // The relay keeps only the latest per (pubkey, d_tag), but be defensive.
+    let Some(event) = events.last() else {
+        return Ok(vec![]);
+    };
+    Ok(emoji_tags_of(event)
+        .into_iter()
+        .map(|e| CustomEmoji {
+            shortcode: e.shortcode,
+            url: e.url,
+        })
+        .collect())
+}
+
+/// Publish the caller's own (replaced) kind:30030 set, signed as the caller.
+async fn publish_own_set(client: &SproutClient, emojis: &[CustomEmoji]) -> Result<(), CliError> {
+    let builder = sprout_sdk::build_custom_emoji_set(emojis)
+        .map_err(|e| CliError::Other(format!("build_custom_emoji_set failed: {e}")))?;
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
 }
 
+/// Add/update a shortcode in the caller's own set (read-modify-write).
+async fn cmd_set(client: &SproutClient, shortcode: &str, url: &str) -> Result<(), CliError> {
+    let normalized = sprout_sdk::normalize_custom_emoji_shortcode(shortcode)
+        .map_err(|e| CliError::Other(format!("invalid shortcode: {e}")))?;
+    let mut emojis = fetch_own_emoji(client).await?;
+    emojis.retain(|e| e.shortcode != normalized);
+    emojis.push(CustomEmoji {
+        shortcode: normalized,
+        url: url.to_string(),
+    });
+    publish_own_set(client, &emojis).await
+}
+
+/// Remove a shortcode from the caller's own set (read-modify-write).
 async fn cmd_rm(client: &SproutClient, shortcode: &str) -> Result<(), CliError> {
-    let builder = sprout_sdk::build_remove_custom_emoji(shortcode)
-        .map_err(|e| CliError::Other(format!("build_remove_custom_emoji failed: {e}")))?;
-    let event = client.sign_event(builder)?;
-    let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
-    Ok(())
+    let normalized = sprout_sdk::normalize_custom_emoji_shortcode(shortcode)
+        .map_err(|e| CliError::Other(format!("invalid shortcode: {e}")))?;
+    let mut emojis = fetch_own_emoji(client).await?;
+    let before = emojis.len();
+    emojis.retain(|e| e.shortcode != normalized);
+    if emojis.len() == before {
+        // Nothing to remove; avoid republishing an unchanged set.
+        println!(
+            "{}",
+            serde_json::json!({"accepted": true, "message": "not present"})
+        );
+        return Ok(());
+    }
+    publish_own_set(client, &emojis).await
 }
 
 // ---------------------------------------------------------------------------
@@ -89,17 +157,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_custom_emoji_set_extracts_emoji_tags() {
-        let events = vec![serde_json::json!({
-            "tags": [
-                ["d", "sprout:relay-emoji"],
-                ["emoji", "zort", "https://example.com/zort.png"],
-                ["emoji", "narf", "https://example.com/narf.png"]
+    fn union_dedups_by_shortcode_and_url_across_members() {
+        let events = vec![
+            serde_json::json!({
+                "tags": [
+                    ["d", "sprout:custom-emoji"],
+                    ["emoji", "zort", "https://example.com/zort.png"],
+                    ["emoji", "narf", "https://example.com/narf.png"]
+                ]
+            }),
+            serde_json::json!({
+                "tags": [
+                    ["d", "sprout:custom-emoji"],
+                    // exact duplicate (same shortcode+url) — collapses
+                    ["emoji", "narf", "https://example.com/narf.png"],
+                    // same shortcode, different url — both kept (distinct pair)
+                    ["emoji", "zort", "https://example.com/zort2.png"]
+                ]
+            }),
+        ];
+        let emojis = union_custom_emoji(&events);
+        let pairs: Vec<(&str, &str)> = emojis
+            .iter()
+            .map(|e| (e.shortcode.as_str(), e.url.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("narf", "https://example.com/narf.png"),
+                ("zort", "https://example.com/zort.png"),
+                ("zort", "https://example.com/zort2.png"),
             ]
-        })];
-        let emojis = parse_custom_emoji_set(&events);
-        assert_eq!(emojis.len(), 2);
-        assert_eq!(emojis[0].shortcode, "narf");
-        assert_eq!(emojis[1].shortcode, "zort");
+        );
     }
 }

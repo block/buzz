@@ -179,7 +179,7 @@ enum Cmd {
     /// Add, remove, and list emoji reactions
     #[command(subcommand)]
     Reactions(ReactionsCmd),
-    /// Manage relay-global custom emoji
+    /// Manage your custom emoji set (workspace palette is the union of all members' sets)
     #[command(subcommand)]
     Emoji(EmojiCmd),
     /// List, open, and manage direct messages
@@ -572,9 +572,9 @@ pub enum ReactionsCmd {
 
 #[derive(Subcommand)]
 pub enum EmojiCmd {
-    /// List relay-global custom emoji
+    /// List the workspace custom emoji palette (union of every member's set)
     List,
-    /// Add or update a relay-global custom emoji
+    /// Add or update a custom emoji in your own set
     Set {
         /// Emoji shortcode, without surrounding colons
         #[arg(long)]
@@ -583,7 +583,7 @@ pub enum EmojiCmd {
         #[arg(long)]
         url: String,
     },
-    /// Remove a relay-global custom emoji
+    /// Remove a custom emoji from your own set
     Rm {
         /// Emoji shortcode, without surrounding colons
         #[arg(long)]

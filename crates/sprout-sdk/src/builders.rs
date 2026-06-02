@@ -7,9 +7,8 @@ use nostr::{EventBuilder, Kind, Tag};
 use sprout_core::{
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
-        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_EMOJI_SET_D_TAG,
-        KIND_GIT_REPO_ANNOUNCEMENT, KIND_PRESENCE_UPDATE, KIND_RELAY_EMOJI_COMMAND,
-        KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_REPO_ANNOUNCEMENT,
+        KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -19,8 +18,7 @@ use sprout_core::{
 use uuid::Uuid;
 
 use crate::{
-    ChannelKind, CustomEmoji, CustomEmojiAction, DiffMeta, MemberRole, SdkError, ThreadRef,
-    Visibility, VoteDirection,
+    ChannelKind, CustomEmoji, DiffMeta, MemberRole, SdkError, ThreadRef, Visibility, VoteDirection,
 };
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
@@ -422,16 +420,23 @@ pub fn build_remove_reaction(reaction_event_id: nostr::EventId) -> Result<EventB
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
 }
 
-// ── Builder: custom emoji relay commands and set ─────────────────────────────
+// ── Builder: per-user custom emoji set ───────────────────────────────────────
 
-/// Build the relay-global custom emoji set event (kind:30030).
+/// d-tag for a member's own custom emoji set. Each member publishes one
+/// user-signed kind:30030 under this d-tag; the workspace palette is the
+/// client-side union of every member's set.
+pub const CUSTOM_EMOJI_SET_D_TAG: &str = "sprout:custom-emoji";
+
+/// Build a member's own custom emoji set event (kind:30030, NIP-30/NIP-51).
 ///
-/// This builder is intended for relay-side use. The caller signs with the relay
-/// keypair and stores the event globally with `channel_id = NULL`.
+/// User-signed and parameterized-replaceable, keyed by `(pubkey, 30030,
+/// "sprout:custom-emoji")`. Replaces the caller's prior set. The workspace
+/// palette shown in clients is the union of every member's set, deduped by
+/// `(shortcode, url)` on read. Add/remove is read-own-set → mutate → rebuild.
 pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, SdkError> {
     let mut seen = std::collections::HashSet::with_capacity(emojis.len());
     let mut tags = Vec::with_capacity(emojis.len() + 1);
-    tags.push(tag(&["d", KIND_EMOJI_SET_D_TAG])?);
+    tags.push(tag(&["d", CUSTOM_EMOJI_SET_D_TAG])?);
     for emoji in emojis {
         let shortcode = normalize_custom_emoji_shortcode(&emoji.shortcode)?;
         check_custom_emoji_url(&emoji.url)?;
@@ -443,27 +448,6 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
         tags.push(tag(&["emoji", &shortcode, &emoji.url])?);
     }
     Ok(EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "").tags(tags))
-}
-
-/// Build a relay-global custom emoji add/update command (kind:9037).
-pub fn build_set_custom_emoji(shortcode: &str, url: &str) -> Result<EventBuilder, SdkError> {
-    let shortcode = normalize_custom_emoji_shortcode(shortcode)?;
-    check_custom_emoji_url(url)?;
-    let tags = vec![
-        tag(&["action", CustomEmojiAction::Set.as_str()])?,
-        tag(&["emoji", &shortcode, url])?,
-    ];
-    Ok(EventBuilder::new(Kind::Custom(KIND_RELAY_EMOJI_COMMAND as u16), "").tags(tags))
-}
-
-/// Build a relay-global custom emoji remove command (kind:9037).
-pub fn build_remove_custom_emoji(shortcode: &str) -> Result<EventBuilder, SdkError> {
-    let shortcode = normalize_custom_emoji_shortcode(shortcode)?;
-    let tags = vec![
-        tag(&["action", CustomEmojiAction::Remove.as_str()])?,
-        tag(&["emoji", &shortcode])?,
-    ];
-    Ok(EventBuilder::new(Kind::Custom(KIND_RELAY_EMOJI_COMMAND as u16), "").tags(tags))
 }
 
 // ── Builder 11: build_set_canvas ─────────────────────────────────────────────
@@ -1501,22 +1485,6 @@ mod tests {
     }
 
     #[test]
-    fn custom_emoji_command_set_happy_path() {
-        let ev = sign(build_set_custom_emoji("Party", "https://example.com/party.png").unwrap());
-        assert_eq!(ev.kind.as_u16(), 9037);
-        assert!(has_tag(&ev, "action", "set"));
-        assert!(has_tag(&ev, "emoji", "party"));
-    }
-
-    #[test]
-    fn custom_emoji_command_remove_happy_path() {
-        let ev = sign(build_remove_custom_emoji(":party:").unwrap());
-        assert_eq!(ev.kind.as_u16(), 9037);
-        assert!(has_tag(&ev, "action", "remove"));
-        assert!(has_tag(&ev, "emoji", "party"));
-    }
-
-    #[test]
     fn custom_emoji_set_happy_path() {
         let ev = sign(
             build_custom_emoji_set(&[CustomEmoji {
@@ -1526,7 +1494,7 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(ev.kind.as_u16(), 30030);
-        assert!(has_tag(&ev, "d", KIND_EMOJI_SET_D_TAG));
+        assert!(has_tag(&ev, "d", CUSTOM_EMOJI_SET_D_TAG));
         assert!(has_tag(&ev, "emoji", "party"));
     }
 

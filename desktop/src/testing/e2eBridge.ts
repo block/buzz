@@ -5,8 +5,8 @@ import { parse as yamlParse } from "yaml";
 
 import type { RelayEvent } from "@/shared/api/types";
 import {
+  CUSTOM_EMOJI_SET_D_TAG,
   KIND_EMOJI_SET,
-  RELAY_EMOJI_SET_D_TAG,
 } from "@/shared/api/customEmoji";
 import type {
   RawAcpProviderCatalogEntry,
@@ -403,21 +403,36 @@ function createMockRelayMembershipEvent(): RelayEvent {
 }
 
 /**
- * Relay-owned custom emoji set (kind:30030) the mock WS serves for
- * `listCustomEmoji` REQs. Mirrors the real relay-signed canonical set: one
- * `["d", sprout:relay-emoji]` tag plus `["emoji", shortcode, url]` entries.
- * `:sprout:` is the stable shortcode exercised by custom-emoji.spec.ts.
+ * Per-user custom emoji sets (kind:30030) the mock WS serves for
+ * `listCustomEmoji` REQs. The workspace palette is the client-side UNION of
+ * every member's own set (d=`sprout:custom-emoji`). We serve TWO member-authored
+ * sets from distinct pubkeys so the e2e exercises the union/dedup path, not a
+ * single relay-owned set. `:sprout:` is the stable shortcode exercised by
+ * custom-emoji.spec.ts; `:narf:` proves a second member's emoji unions in.
  */
-function createMockCustomEmojiSetEvent(): RelayEvent {
-  return createMockEvent(
-    KIND_EMOJI_SET,
-    "",
-    [
-      ["d", RELAY_EMOJI_SET_D_TAG],
-      ["emoji", "sprout", "https://example.com/e2e/sprout.png"],
-    ],
-    "e".repeat(64),
-  );
+function createMockCustomEmojiSetEvents(): RelayEvent[] {
+  return [
+    createMockEvent(
+      KIND_EMOJI_SET,
+      "",
+      [
+        ["d", CUSTOM_EMOJI_SET_D_TAG],
+        ["emoji", "sprout", "https://example.com/e2e/sprout.png"],
+      ],
+      "a".repeat(64),
+    ),
+    createMockEvent(
+      KIND_EMOJI_SET,
+      "",
+      [
+        ["d", CUSTOM_EMOJI_SET_D_TAG],
+        ["emoji", "narf", "https://example.com/e2e/narf.png"],
+        // duplicate of member A's :sprout: (same shortcode+url) — must dedup
+        ["emoji", "sprout", "https://example.com/e2e/sprout.png"],
+      ],
+      "b".repeat(64),
+    ),
+  ];
 }
 
 function updateMockRelayMembershipFromAdminEvent(event: RelayEvent): boolean {
@@ -4759,11 +4774,9 @@ function sendToMockSocket(args: {
     }
 
     if (filter.kinds?.includes(KIND_EMOJI_SET)) {
-      sendWsText(socket.handler, [
-        "EVENT",
-        subId,
-        createMockCustomEmojiSetEvent(),
-      ]);
+      for (const emojiEvent of createMockCustomEmojiSetEvents()) {
+        sendWsText(socket.handler, ["EVENT", subId, emojiEvent]);
+      }
       sendWsText(socket.handler, ["EOSE", subId]);
       return;
     }

@@ -1,40 +1,32 @@
 /**
- * Relay-global custom emoji set (NIP-30, relay-owned).
+ * Workspace custom emoji (NIP-30, per-user sets).
  *
- * The authoritative emoji set is a single kind:30030 parameterized-replaceable
- * event signed by the *relay* keypair (channel_id = NULL, one canonical set —
- * the "workspace" emoji list, Slack-style). Members add/remove emoji by sending
- * a member-signed kind:9037 command; the relay validates membership and
- * re-signs the set. Clients only ever read the set and emit commands — they
- * never author the kind:30030 directly (relay ingest rejects member-authored
- * 30030).
+ * Each member publishes their OWN kind:30030 parameterized-replaceable event,
+ * signed as themselves, keyed by `(pubkey, 30030, "sprout:custom-emoji")`. The
+ * "workspace palette" shown in the picker/renderer is the client-side UNION of
+ * every member's set, deduped by `(shortcode, url)` — a view computed on read,
+ * not stored state. Adding an emoji is a read-my-own-set → mutate → republish
+ * of my own 30030 (relay ingest allowlists member-authored 30030/10030 as
+ * UsersWrite, and the generic NIP-33 replace path keeps only the latest per
+ * `(pubkey, d_tag)`).
  *
- * Contract locked with Pinky (Rust side) 2026-06-01 — see
- * PLANS/CUSTOM_EMOJI_DESKTOP.md "LOCKED CONTRACT".
+ * Replaces the earlier relay-owned single-set + kind:9037 command model.
  */
 
 import { relayClient } from "@/shared/api/relayClient";
-import { signRelayEvent } from "@/shared/api/tauri";
+import { getIdentity, signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
-/** NIP-30 emoji set (parameterized-replaceable), relay-owned. */
+/** NIP-30 emoji set (parameterized-replaceable). */
 export const KIND_EMOJI_SET = 30030;
 
-/** d-tag of the single canonical relay-owned set. */
-export const RELAY_EMOJI_SET_D_TAG = "sprout:relay-emoji";
-
-/**
- * Member-signed command to mutate the relay-owned set. Relay-processed (not
- * stored): the relay validates membership, applies the op, and re-signs the
- * kind:30030. Tags: `["action","set"]` + `["emoji", shortcode, url]` to
- * add/update; `["action","remove"]` + `["emoji", shortcode]` to remove.
- */
-export const KIND_RELAY_EMOJI_COMMAND = 9037;
+/** d-tag for a member's own custom emoji set. */
+export const CUSTOM_EMOJI_SET_D_TAG = "sprout:custom-emoji";
 
 /**
  * Resolve the image URL for a reaction whose content is a custom-emoji
- * `:shortcode:`, from the relay-owned set. Returns undefined for unicode
+ * `:shortcode:`, from the workspace set. Returns undefined for unicode
  * reactions or unknown shortcodes (the kind:7 then carries no emoji tag).
  */
 export function reactionEmojiUrl(
@@ -60,9 +52,9 @@ export function normalizeShortcode(raw: string): string | null {
 }
 
 /**
- * Parse NIP-30 `["emoji", shortcode, url]` tags into a custom-emoji list.
- * Shortcodes are normalized (lowercase, no colons). Malformed/duplicate
- * entries are skipped (first wins on a collision).
+ * Parse NIP-30 `["emoji", shortcode, url]` tags from a single event into a
+ * custom-emoji list. Shortcodes are normalized; malformed/duplicate entries
+ * within the one event are skipped (first wins).
  */
 export function customEmojiFromTags(
   tags: ReadonlyArray<ReadonlyArray<string>>,
@@ -89,26 +81,83 @@ export function customEmojiFromEvent(event: RelayEvent | null): CustomEmoji[] {
   return customEmojiFromTags(event.tags);
 }
 
-async function fetchEmojiSetEvent(): Promise<RelayEvent | null> {
-  const events = await relayClient.fetchEvents({
-    kinds: [KIND_EMOJI_SET],
-    "#d": [RELAY_EMOJI_SET_D_TAG],
-    limit: 1,
-  });
-  return events[events.length - 1] ?? null;
+/**
+ * Union every member's kind:30030 set into the workspace palette, deduped by
+ * `(shortcode, url)`. Stable order: sorted by shortcode then url, so the same
+ * set of events always yields the same list (no picker reshuffle).
+ */
+export function unionCustomEmoji(
+  events: ReadonlyArray<RelayEvent>,
+): CustomEmoji[] {
+  const seen = new Set<string>();
+  const out: CustomEmoji[] = [];
+  for (const event of events) {
+    for (const { shortcode, url } of customEmojiFromTags(event.tags)) {
+      const key = `${shortcode}\u0000${url}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ shortcode, url });
+    }
+  }
+  out.sort(
+    (a, b) =>
+      a.shortcode.localeCompare(b.shortcode) || a.url.localeCompare(b.url),
+  );
+  return out;
 }
 
-/** Fetch the relay-owned custom emoji set. Empty list when none published. */
+/** Fetch every member's 30030 set (catch-up). */
+export async function fetchWorkspaceEmojiEvents(): Promise<RelayEvent[]> {
+  return relayClient.fetchEvents({
+    kinds: [KIND_EMOJI_SET],
+    "#d": [CUSTOM_EMOJI_SET_D_TAG],
+    // One 30030 per member; a workspace has far fewer than this. The relay
+    // already keeps only the latest per (pubkey, d_tag), so this is the member
+    // count, not history depth.
+    limit: 500,
+  });
+}
+
+/** Fetch the workspace custom emoji palette (union). Empty when none. */
 export async function listCustomEmoji(): Promise<CustomEmoji[]> {
-  const event = await fetchEmojiSetEvent();
-  return customEmojiFromEvent(event);
+  const events = await fetchWorkspaceEmojiEvents();
+  return unionCustomEmoji(events);
+}
+
+/** Fetch the caller's OWN current set (latest 30030 under the d-tag). */
+async function fetchOwnEmoji(): Promise<CustomEmoji[]> {
+  const { pubkey: me } = await getIdentity();
+  if (!me) return [];
+  const events = await relayClient.fetchEvents({
+    kinds: [KIND_EMOJI_SET],
+    "#d": [CUSTOM_EMOJI_SET_D_TAG],
+    authors: [me],
+    limit: 1,
+  });
+  return customEmojiFromEvent(events[events.length - 1] ?? null);
+}
+
+/** Publish the caller's (replaced) own 30030 set, signed as the caller. */
+async function publishOwnSet(
+  emojis: ReadonlyArray<CustomEmoji>,
+  timeoutMessage: string,
+  errorMessage: string,
+): Promise<void> {
+  const tags: string[][] = [["d", CUSTOM_EMOJI_SET_D_TAG]];
+  for (const { shortcode, url } of emojis) {
+    tags.push(["emoji", shortcode, url]);
+  }
+  const event = await signRelayEvent({
+    kind: KIND_EMOJI_SET,
+    content: "",
+    tags,
+  });
+  await relayClient.publishEvent(event, timeoutMessage, errorMessage);
 }
 
 /**
- * Add/update a custom emoji in the relay-owned set. Emits a kind:9037 command;
- * the relay validates membership and re-signs the canonical set. `url` should
- * be a Blossom blob URL (uploaded via the existing upload path). Returns the
- * normalized (lowercase) shortcode the relay will store.
+ * Add/update a custom emoji in the caller's OWN set (read-modify-write).
+ * `url` should be a Blossom blob URL. Returns the normalized shortcode.
  */
 export async function setCustomEmoji(
   shortcode: string,
@@ -120,36 +169,26 @@ export async function setCustomEmoji(
       "Invalid emoji name. Use letters, numbers, hyphen, or underscore.",
     );
   }
-  const event = await signRelayEvent({
-    kind: KIND_RELAY_EMOJI_COMMAND,
-    content: "",
-    tags: [
-      ["action", "set"],
-      ["emoji", normalized, url],
-    ],
-  });
-  await relayClient.publishEvent(
-    event,
+  const own = await fetchOwnEmoji();
+  const next = own.filter((e) => e.shortcode !== normalized);
+  next.push({ shortcode: normalized, url });
+  await publishOwnSet(
+    next,
     "Timed out while adding emoji.",
     "Failed to add emoji.",
   );
   return normalized;
 }
 
-/** Remove a custom emoji from the relay-owned set by shortcode. */
+/** Remove a custom emoji from the caller's OWN set by shortcode. */
 export async function removeCustomEmoji(shortcode: string): Promise<void> {
   const normalized = normalizeShortcode(shortcode);
   if (!normalized) return;
-  const event = await signRelayEvent({
-    kind: KIND_RELAY_EMOJI_COMMAND,
-    content: "",
-    tags: [
-      ["action", "remove"],
-      ["emoji", normalized],
-    ],
-  });
-  await relayClient.publishEvent(
-    event,
+  const own = await fetchOwnEmoji();
+  const next = own.filter((e) => e.shortcode !== normalized);
+  if (next.length === own.length) return; // not present — nothing to republish
+  await publishOwnSet(
+    next,
     "Timed out while removing emoji.",
     "Failed to remove emoji.",
   );

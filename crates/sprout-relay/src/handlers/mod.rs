@@ -6,8 +6,6 @@ pub mod close;
 pub mod command_executor;
 /// NIP-45 COUNT handler.
 pub mod count;
-/// Relay-global custom emoji command handler (kind 9037).
-pub mod custom_emoji;
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 pub mod event;
 /// NIP-IA identity archive request handler (kinds 9035–9036).
