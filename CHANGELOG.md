@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.3.7
+
+2349421304d feat: custom emoji — user-owned NIP-30 sets with a client-side union (#816)
+7a12e50518e Install sprout-cli skill at repo root + fix desktop clippy (#818)
+2ea3fd88d23 fix(desktop): use public re-export path for ensure_client_node_for_model (#824)
+fb514c8918d refactor(desktop): feature-gate mesh-llm-sdk behind optional Cargo feature (#823)
+b72eee365f0 fix(desktop): align workflow read/save commands to the frontend contract (#820)
+5b572d6f5e9 fix(desktop): disable mesh-llm auto-build to prevent git config corruption (#819)
+192388a3cbf fix(desktop): clear clippy lints in agents/mesh_llm commands (#817)
+41a3fc1589b fix(desktop): let channel members add members and bots without admin (#815)
+a25ca5d1bfb Desktop #806 follow-ups: panel/inbox fixes + top-bar backdrop (#814)
+5bed17a1173 Fix desktop right-side panel chrome overlap (#806)
+ede8ddb425c Sprout × mesh-llm: in-process mesh node (serve/consume) + relay admission (#798)
+6481428e2b9 fix(desktop): resolve flaky integration tests via project-level assertion timeout (#812)
+
+
 ## v0.3.6
 
 5cbedb180af feat(mobile): add channel sections with relay sync (#800)
