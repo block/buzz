@@ -34,6 +34,18 @@ pub struct RunCtx<'a> {
     /// `cfg.stop_max_rejections` we stop calling `_Stop` for that
     /// session — a runaway hook can't burn rejections on every prompt.
     pub stop_rejections: &'a mut u32,
+    /// Cache-summed input tokens reported by the provider on this session's
+    /// most recent request (persists across `session/prompt` calls), or `None`
+    /// before the first response and immediately after a handoff resets the
+    /// context. The handoff gate reads this to compare against the token
+    /// budget; falls back to the byte heuristic when `None`.
+    pub last_request_input_tokens: &'a mut Option<u64>,
+    /// History byte size at the moment `last_request_input_tokens` was
+    /// measured. Paired with it so the gate can add a conservative token
+    /// estimate of history that has grown since (tool results, next prompt),
+    /// which the exact-but-stale token count would otherwise miss. Cleared and
+    /// preserved in lockstep with `last_request_input_tokens`.
+    pub last_request_history_bytes: &'a mut Option<usize>,
 }
 
 impl RunCtx<'_> {
@@ -63,7 +75,15 @@ impl RunCtx<'_> {
             }
             match self.maybe_handoff().await {
                 HandoffOutcome::Cancelled => return Ok(StopReason::Cancelled),
-                HandoffOutcome::Performed => {}
+                // Context was just reset — the prior request's token count no
+                // longer describes the (now much smaller) history. Clear both
+                // the token count and its byte baseline so a stale over-
+                // threshold reading can't immediately re-fire the handoff
+                // before the next response reports fresh usage.
+                HandoffOutcome::Performed => {
+                    *self.last_request_input_tokens = None;
+                    *self.last_request_history_bytes = None;
+                }
                 HandoffOutcome::Skipped => {
                     truncate_history(self.history, self.cfg.max_history_bytes)
                 }
@@ -76,6 +96,21 @@ impl RunCtx<'_> {
                 _ = self.cancel.changed() => return Ok(StopReason::Cancelled),
                 r = self.llm.complete(self.cfg, self.system_prompt, self.history, &tools) => r?,
             };
+
+            // Record provider-reported input usage so the next loop iteration's
+            // handoff gate can compare it against the token budget. We capture
+            // it together with the history byte size AT THIS MOMENT — which is
+            // exactly the history that was just sent to `complete()` (the
+            // assistant response is appended below, after this point). Pairing
+            // them lets the gate add a conservative estimate for any history
+            // appended before the next request. Preserve both when a response
+            // omits usage (`None`) rather than clobbering — a one-off missing
+            // field shouldn't blind the gate or zero the growth baseline.
+            if let Some(tokens) = response.input_tokens {
+                *self.last_request_input_tokens = Some(tokens);
+                *self.last_request_history_bytes =
+                    Some(self.history.iter().map(HistoryItem::estimated_bytes).sum());
+            }
 
             if !response.text.is_empty() {
                 wire::send(

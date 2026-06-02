@@ -568,10 +568,12 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         Some("completed") => ProviderStop::EndTurn,
         _ => ProviderStop::Other,
     };
+    let input_tokens = sum_usage(&v, &["input_tokens"]);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
+        input_tokens,
     })
 }
 
@@ -583,6 +585,54 @@ fn map_stop(s: Option<&str>) -> ProviderStop {
         Some("refusal" | "content_filter") => ProviderStop::Refusal,
         _ => ProviderStop::Other,
     }
+}
+
+/// Sum a set of `usage` token fields, returning `None` only when the `usage`
+/// object is absent or carries none of the requested fields. A field that is
+/// present is added; a field that is missing contributes 0. This keeps the
+/// result an inclusive total (so cached tokens are never silently dropped)
+/// while still distinguishing "no usage reported" from "usage was zero".
+fn sum_usage(v: &Value, fields: &[&str]) -> Option<u64> {
+    let usage = v.get("usage")?;
+    let mut total: u64 = 0;
+    let mut saw_any = false;
+    for f in fields {
+        if let Some(n) = usage.get(*f).and_then(Value::as_u64) {
+            total = total.saturating_add(n);
+            saw_any = true;
+        }
+    }
+    saw_any.then_some(total)
+}
+
+/// Input-token total for Anthropic / Databricks (Anthropic-style) responses.
+/// `input_tokens` alone EXCLUDES cached tokens, so we sum it with the two
+/// cache fields to get the inclusive total the context budget must gate on.
+fn anthropic_input_tokens(v: &Value) -> Option<u64> {
+    sum_usage(
+        v,
+        &[
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ],
+    )
+}
+
+/// Input-token total for OpenAI Chat Completions and Databricks responses.
+/// OpenAI's `prompt_tokens` is already inclusive. Databricks uses the same
+/// `prompt_tokens` wire field but ALSO reports Anthropic-style cache fields
+/// alongside it, so we sum them; the cache fields are simply absent (and
+/// contribute 0) for vanilla OpenAI.
+fn openai_chat_input_tokens(v: &Value) -> Option<u64> {
+    sum_usage(
+        v,
+        &[
+            "prompt_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ],
+    )
 }
 
 fn str_field(v: &Value, key: &str) -> String {
@@ -610,10 +660,12 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
             }
         }
     }
+    let input_tokens = anthropic_input_tokens(&v);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
+        input_tokens,
     })
 }
 
@@ -644,10 +696,12 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
             )?);
         }
     }
+    let input_tokens = openai_chat_input_tokens(&v);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
+        input_tokens,
     })
 }
 
@@ -870,6 +924,7 @@ mod tests {
             max_sessions: 1,
             max_line_bytes: 1024 * 1024,
             max_history_bytes: 16 * 1024 * 1024,
+            max_context_tokens: 128_000,
             max_handoffs: 1,
             max_parallel_tools: 1,
             hook_timeout: Duration::from_secs(1),
@@ -1296,5 +1351,113 @@ mod tests {
             "server should have seen at least 2 connection attempts, saw {}",
             accepts.load(Ordering::SeqCst)
         );
+    }
+
+    // ---- usage / input-token extraction -------------------------------------
+
+    #[test]
+    fn parse_anthropic_sums_input_and_cache_tokens() {
+        // input_tokens alone excludes cached tokens; the inclusive total must
+        // sum all three so a cache-heavy turn can't undercount the budget.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": 100,
+                "cache_read_input_tokens": 900,
+                "cache_creation_input_tokens": 50,
+                "output_tokens": 7
+            }
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, Some(1050));
+    }
+
+    #[test]
+    fn parse_anthropic_input_tokens_only() {
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {"input_tokens": 42, "output_tokens": 3}
+        });
+        assert_eq!(parse_anthropic(v).unwrap().input_tokens, Some(42));
+    }
+
+    #[test]
+    fn parse_anthropic_missing_usage_is_none() {
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}]
+        });
+        assert_eq!(parse_anthropic(v).unwrap().input_tokens, None);
+    }
+
+    #[test]
+    fn parse_openai_uses_prompt_tokens() {
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 123, "completion_tokens": 4, "total_tokens": 127}
+        });
+        assert_eq!(parse_openai(v).unwrap().input_tokens, Some(123));
+    }
+
+    #[test]
+    fn parse_openai_databricks_sums_cache_fields() {
+        // Databricks uses the OpenAI chat wire format (prompt_tokens) but also
+        // reports Anthropic-style cache fields; the inclusive total sums them.
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}],
+            "usage": {
+                "prompt_tokens": 200,
+                "completion_tokens": 4,
+                "total_tokens": 204,
+                "cache_read_input_tokens": 800,
+                "cache_creation_input_tokens": 0
+            }
+        });
+        assert_eq!(parse_openai(v).unwrap().input_tokens, Some(1000));
+    }
+
+    #[test]
+    fn parse_openai_missing_usage_is_none() {
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}]
+        });
+        assert_eq!(parse_openai(v).unwrap().input_tokens, None);
+    }
+
+    #[test]
+    fn parse_responses_uses_input_tokens() {
+        let v = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}]
+            }],
+            "usage": {"input_tokens": 321, "output_tokens": 9, "total_tokens": 330}
+        });
+        assert_eq!(parse_responses(v).unwrap().input_tokens, Some(321));
+    }
+
+    #[test]
+    fn parse_responses_missing_usage_is_none() {
+        let v = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}]
+            }]
+        });
+        assert_eq!(parse_responses(v).unwrap().input_tokens, None);
+    }
+
+    #[test]
+    fn sum_usage_empty_object_is_none() {
+        // A `usage` object present but carrying none of the requested fields
+        // is "no usable reading" -> None, not Some(0).
+        let v = serde_json::json!({"usage": {"output_tokens": 5}});
+        assert_eq!(sum_usage(&v, &["input_tokens", "prompt_tokens"]), None);
     }
 }

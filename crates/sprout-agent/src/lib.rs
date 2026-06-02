@@ -42,6 +42,14 @@ struct Session {
     original_task: Option<String>,
     handoff_count: usize,
     stop_rejections: u32,
+    /// Cache-summed input tokens the provider reported for this session's most
+    /// recent request, or `None` before the first response (or after a handoff
+    /// resets the context). Drives the token-based handoff gate; see
+    /// [`RunCtx::should_handoff`].
+    last_request_input_tokens: Option<u64>,
+    /// History byte size when `last_request_input_tokens` was measured, paired
+    /// with it so the gate can account for history appended since.
+    last_request_history_bytes: Option<usize>,
     effective_system_prompt: Arc<str>,
 }
 
@@ -296,6 +304,8 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             original_task: None,
             handoff_count: 0,
             stop_rejections: 0,
+            last_request_input_tokens: None,
+            last_request_history_bytes: None,
             effective_system_prompt,
         },
     );
@@ -335,6 +345,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         mut original_task,
         mut handoff_count,
         mut stop_rejections,
+        mut last_request_input_tokens,
+        mut last_request_history_bytes,
         mut cancel_rx,
         effective_system_prompt,
     ) = match acquire_session(&app, &p.session_id).await {
@@ -361,6 +373,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         original_task: &mut original_task,
         handoff_count: &mut handoff_count,
         stop_rejections: &mut stop_rejections,
+        last_request_input_tokens: &mut last_request_input_tokens,
+        last_request_history_bytes: &mut last_request_history_bytes,
     };
     let result = ctx.run(p.prompt).await;
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
@@ -369,6 +383,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         s.original_task = original_task;
         s.handoff_count = handoff_count;
         s.stop_rejections = stop_rejections;
+        s.last_request_input_tokens = last_request_input_tokens;
+        s.last_request_history_bytes = last_request_history_bytes;
     }
     match result {
         Ok(stop) => {
@@ -393,6 +409,8 @@ async fn acquire_session(
         Option<String>,
         usize,
         u32,
+        Option<u64>,
+        Option<usize>,
         watch::Receiver<bool>,
         Arc<str>,
     ),
@@ -413,6 +431,8 @@ async fn acquire_session(
         s.original_task.take(),
         s.handoff_count,
         s.stop_rejections,
+        s.last_request_input_tokens,
+        s.last_request_history_bytes,
         rx,
         Arc::clone(&s.effective_system_prompt),
     ))

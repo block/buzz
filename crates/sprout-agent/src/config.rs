@@ -6,9 +6,6 @@ pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 64;
 
-/// Leaves headroom for the summary call.
-pub const HANDOFF_THRESHOLD: f64 = 0.75;
-
 pub const HANDOFF_MAX_OUTPUT_TOKENS: u32 = 8192;
 
 pub const HANDOFF_TAIL_ITEMS: usize = 5;
@@ -59,6 +56,12 @@ pub struct Config {
     pub max_sessions: usize,
     pub max_line_bytes: usize,
     pub max_history_bytes: usize,
+    /// Provider context window in tokens used to gate handoff. The handoff
+    /// fires when the previous request's (cache-summed) input tokens cross a
+    /// fraction of this budget, before the next request can exceed the window
+    /// and 400. Default 128_000 — a safe common floor; operators raise it for
+    /// larger windows (e.g. 200_000/1M). Set via `SPROUT_AGENT_MAX_CONTEXT_TOKENS`.
+    pub max_context_tokens: u64,
     pub max_handoffs: usize,
     pub max_parallel_tools: usize,
     pub hook_timeout: Duration,
@@ -149,6 +152,7 @@ impl Config {
             max_sessions: parse_env("SPROUT_AGENT_MAX_SESSIONS", usize::MAX)?,
             max_line_bytes: parse_env("SPROUT_AGENT_MAX_LINE_BYTES", 4 * 1024 * 1024)?,
             max_history_bytes: parse_env("SPROUT_AGENT_MAX_HISTORY_BYTES", 16 * 1024 * 1024)?,
+            max_context_tokens: parse_env("SPROUT_AGENT_MAX_CONTEXT_TOKENS", 128_000u64)?,
             max_handoffs: parse_env("SPROUT_AGENT_MAX_HANDOFFS", 5)?,
             max_parallel_tools: parse_env("SPROUT_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
             hook_timeout: Duration::from_millis(parse_env(
@@ -170,6 +174,12 @@ impl Config {
 
         if self.max_output_tokens < 1 {
             return Err("config: SPROUT_AGENT_MAX_OUTPUT_TOKENS must be >= 1".into());
+        }
+        if self.max_context_tokens <= u64::from(self.max_output_tokens) {
+            return Err(format!(
+                "config: SPROUT_AGENT_MAX_CONTEXT_TOKENS ({}) must be > SPROUT_AGENT_MAX_OUTPUT_TOKENS ({}) — the context window must leave room for the response",
+                self.max_context_tokens, self.max_output_tokens
+            ));
         }
         if self.max_history_bytes < MIN_HISTORY_BYTES {
             return Err(format!(

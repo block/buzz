@@ -186,6 +186,19 @@ fn openai_text(content: &str) -> Value {
     })
 }
 
+/// Like [`openai_text`] but attaches a `usage` block so tests can drive the
+/// token-based handoff gate. `prompt_tokens` is the input-token count the
+/// agent will read and compare against the configured context budget.
+fn openai_text_with_usage(content: &str, prompt_tokens: u64) -> Value {
+    let mut v = openai_text(content);
+    v["usage"] = json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": 1,
+        "total_tokens": prompt_tokens + 1,
+    });
+    v
+}
+
 fn openai_tool_call(id: &str, name: &str, args: Value) -> Value {
     json!({
         "id": "cc-2", "object": "chat.completion", "model": "fake-model",
@@ -1108,6 +1121,150 @@ async fn hook_post_compact_injects_after_handoff() {
     assert!(
         post_compact_visible,
         "_PostCompact tool result not visible to LLM after handoff"
+    );
+    h.shutdown().await;
+}
+
+/// Regression for the original bug: context fills, the provider 400s on the
+/// next request, and the handoff never fires because the old gate measured
+/// BYTES (16 MiB threshold) while the limit is in TOKENS. The fix gates on
+/// provider-reported input tokens. Here the prompts are tiny (bytes nowhere
+/// near any byte threshold), but the fake LLM reports `usage.prompt_tokens`
+/// over the configured token budget — so the handoff MUST fire on the token
+/// signal alone, before the next normal `complete()`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn token_usage_over_budget_triggers_handoff() {
+    // Context window 1000 tokens, output 100 -> threshold = min(750, 900) = 750.
+    // First response reports 800 input tokens (> 750). The agent stores that;
+    // the next prompt's pre-flight gate sees 800 >= 750 and hands off, which
+    // inserts an extra summarize() call we didn't issue.
+    //   req 1: prompt #0  -> text + usage(800)
+    //   req 2: summarize() (the handoff) -> summary text
+    //   req 3: prompt #1's actual complete() -> done
+    let llm = spawn_capturing_llm(vec![
+        openai_text_with_usage("ack-0", 800),
+        openai_text("handoff summary text"),
+        openai_text_with_usage("done", 10),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("SPROUT_AGENT_MAX_CONTEXT_TOKENS", "1000"),
+            ("SPROUT_AGENT_MAX_OUTPUT_TOKENS", "100"),
+            ("SPROUT_AGENT_MAX_HANDOFFS", "3"),
+            // Huge byte budget so the byte path can NOT be what fires — only
+            // the token gate can explain a handoff on these tiny prompts.
+            (
+                "SPROUT_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    // Prompt #0: small body; response carries usage(800) -> over threshold.
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"hello 0"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p0)).await;
+    assert_eq!(
+        llm.captured.lock().await.len(),
+        1,
+        "first prompt should produce exactly one LLM request (no handoff yet)"
+    );
+
+    // Prompt #1: also small. The pre-flight gate sees the stored 800 tokens
+    // and hands off BEFORE issuing this prompt's complete() -> an extra
+    // summarize request appears (3 total, not 2).
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"hello 1"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p1)).await;
+    let captured = llm.captured.lock().await.len();
+    assert_eq!(
+        captured, 3,
+        "expected handoff summarize() between the two prompts (3 reqs), saw {captured} — \
+         token gate did not fire on usage over budget"
+    );
+    h.shutdown().await;
+}
+
+/// Regression for the stale-usage gap (caught in review): the exact token
+/// count describes the PREVIOUS request, but history grows afterward (tool
+/// results, next prompt). If the gate trusted only the stale `Some(tokens)`
+/// and skipped the byte signal, a previously-under-threshold session could
+/// still 400 once a large tool result lands. The fix adds a conservative
+/// token estimate of the bytes grown since the measurement. Here usage is
+/// reported UNDER threshold, then a large tool result grows history enough
+/// that the projection crosses — so the handoff must fire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_usage_plus_history_growth_triggers_handoff() {
+    // window 10_000, output 1_000 -> threshold = min(7_500, 9_000) = 7_500.
+    // req1 reports usage 7_000 (UNDER 7_500). Its response is a tool_call;
+    // the fake MCP returns a ~6 KB result, appended to history. At 2 bytes/
+    // token that's ~3_000 estimated tokens, so projected ~10_000 >= 7_500 ->
+    // the next loop iteration hands off before the follow-up complete().
+    //   req1: tool_call + usage(7000)
+    //   (tool result ~6KB appended)
+    //   req2: summarize() (handoff)
+    //   req3: final text
+    let llm = spawn_capturing_llm(vec![
+        {
+            let mut v = openai_tool_call("tc1", "fake__tool_0", json!({}));
+            v["usage"] =
+                json!({"prompt_tokens": 7000, "completion_tokens": 1, "total_tokens": 7001});
+            v
+        },
+        openai_text("handoff summary text"),
+        openai_text("done"),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("SPROUT_AGENT_MAX_CONTEXT_TOKENS", "10000"),
+            ("SPROUT_AGENT_MAX_OUTPUT_TOKENS", "1000"),
+            ("SPROUT_AGENT_MAX_HANDOFFS", "3"),
+            // Huge byte budget so the None-path byte fallback can't be what
+            // fires — only the token-mode growth estimate can explain it.
+            (
+                "SPROUT_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+        ],
+    )
+    .await;
+    let sid = init_session_with_fake_mcp(
+        &mut h,
+        &[
+            ("FAKE_MCP_TOOL_COUNT", "1"),
+            ("FAKE_MCP_RESULT_SIZE", "6000"),
+        ],
+    )
+    .await;
+
+    let p = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"go"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p)).await;
+    // req1 (tool_call) + summarize (handoff) + req2 (done) = 3. Without the
+    // growth estimate we'd see only 2 (stale 7000 < 7500, no handoff).
+    let captured = llm.captured.lock().await.len();
+    assert_eq!(
+        captured, 3,
+        "expected handoff after history grew past threshold (3 reqs), saw {captured} — \
+         stale under-threshold usage skipped the growth estimate"
     );
     h.shutdown().await;
 }
