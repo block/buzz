@@ -502,9 +502,7 @@ pub async fn create_managed_agent(
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| "created agent disappeared unexpectedly".to_string())?;
-        let agent = build_managed_agent_summary(&app, record, &runtimes)?;
-
-        agent
+        build_managed_agent_summary(&app, record, &runtimes)?
     };
 
     // ── Phase 3b: local spawn (async preflight outside store lock) ───────────

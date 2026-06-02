@@ -73,7 +73,7 @@ pub(crate) async fn ensure_client_node_for_model(
         }
     }
 
-    let availability = match relay::query_relay(&state, &[mesh_llm::mesh_status_filter()]).await {
+    let availability = match relay::query_relay(state, &[mesh_llm::mesh_status_filter()]).await {
         Ok(events) => mesh_llm::availability_from_events(events),
         Err(error) => return Err(format!("failed to read relay mesh status: {error}")),
     };
@@ -96,7 +96,7 @@ pub(crate) async fn ensure_client_node_for_model(
         iroh_relay_url: None,
         iroh_relay_auth: None,
     };
-    hydrate_private_relay_config(&state, &mut start).await?;
+    hydrate_private_relay_config(state, &mut start).await?;
 
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if runtime.is_some() {
