@@ -16,6 +16,8 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
+import { useCustomEmoji } from "@/features/custom-emoji/hooks";
+import { buildCustomEmojiCategory } from "@/features/custom-emoji/emojiMartCategory";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import type {
   TimelineMessage,
@@ -292,6 +294,11 @@ export function MessageActionBar({
 }) {
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
+  const customEmoji = useCustomEmoji();
+  const customEmojiCategory = React.useMemo(
+    () => buildCustomEmojiCategory(customEmoji),
+    [customEmoji],
+  );
   const hasReplyAction = Boolean(onReply);
   const hasReactionAction = Boolean(onReactionSelect);
 
@@ -372,12 +379,19 @@ export function MessageActionBar({
               ) : null}
               <Picker
                 data={data}
-                onEmojiSelect={(emoji: { native: string }) => {
+                custom={customEmojiCategory}
+                onEmojiSelect={(emoji: { native?: string; id?: string }) => {
                   if (!onReactionSelect) {
                     return;
                   }
-
-                  void onReactionSelect(emoji.native).finally(() => {
+                  // Custom emoji have no `native`; react with `:shortcode:`
+                  // (id == shortcode). The toggle mutation resolves the URL.
+                  const value =
+                    emoji.native ?? (emoji.id ? `:${emoji.id}:` : "");
+                  if (!value) {
+                    return;
+                  }
+                  void onReactionSelect(value).finally(() => {
                     setIsReactionPickerOpen(false);
                   });
                 }}

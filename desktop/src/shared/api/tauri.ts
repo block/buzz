@@ -805,8 +805,9 @@ export async function deleteMessage(eventId: string): Promise<void> {
 export async function addReaction(
   eventId: string,
   emoji: string,
+  emojiUrl?: string,
 ): Promise<void> {
-  await invokeTauri("add_reaction", { eventId, emoji });
+  await invokeTauri("add_reaction", { eventId, emoji, emojiUrl });
 }
 
 export async function removeReaction(

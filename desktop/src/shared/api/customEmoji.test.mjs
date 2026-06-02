@@ -87,3 +87,18 @@ test("customEmojiFromTags normalizes shortcodes (case-fold)", () => {
   const out = customEmojiFromTags([["emoji", "ShipIt", "https://relay/s.png"]]);
   assert.deepEqual(out, [{ shortcode: "shipit", url: "https://relay/s.png" }]);
 });
+
+import { reactionEmojiUrl } from "./customEmoji.ts";
+
+const SET = [{ shortcode: "shipit", url: "https://relay/s.png" }];
+
+test("reactionEmojiUrl resolves :shortcode: against the set (case-insensitive)", () => {
+  assert.equal(reactionEmojiUrl(":shipit:", SET), "https://relay/s.png");
+  assert.equal(reactionEmojiUrl(":ShipIt:", SET), "https://relay/s.png");
+});
+
+test("reactionEmojiUrl returns undefined for unicode / unknown / no set", () => {
+  assert.equal(reactionEmojiUrl("👍", SET), undefined);
+  assert.equal(reactionEmojiUrl(":nope:", SET), undefined);
+  assert.equal(reactionEmojiUrl(":shipit:", undefined), undefined);
+});

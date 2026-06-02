@@ -32,6 +32,20 @@ export const RELAY_EMOJI_SET_D_TAG = "sprout:relay-emoji";
  */
 export const KIND_RELAY_EMOJI_COMMAND = 9037;
 
+/**
+ * Resolve the image URL for a reaction whose content is a custom-emoji
+ * `:shortcode:`, from the relay-owned set. Returns undefined for unicode
+ * reactions or unknown shortcodes (the kind:7 then carries no emoji tag).
+ */
+export function reactionEmojiUrl(
+  emoji: string,
+  set: ReadonlyArray<CustomEmoji> | undefined,
+): string | undefined {
+  if (!set || !emoji.startsWith(":") || !emoji.endsWith(":")) return undefined;
+  const shortcode = emoji.slice(1, -1).toLowerCase();
+  return set.find((e) => e.shortcode === shortcode)?.url;
+}
+
 /** NIP-30 shortcode chars. Matches the relay's `[A-Za-z0-9_-]` validation. */
 const SHORTCODE_RE = /^[a-z0-9_-]+$/;
 

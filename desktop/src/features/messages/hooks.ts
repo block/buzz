@@ -13,6 +13,9 @@ import {
   resolveReplyRootId,
 } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
+import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
+import { reactionEmojiUrl } from "@/shared/api/customEmoji";
+import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import {
   addReaction,
   deleteMessage,
@@ -415,6 +418,7 @@ export function useSendMessageMutation(
 }
 
 export function useToggleReactionMutation() {
+  const queryClient = useQueryClient();
   return useMutation<
     void,
     Error,
@@ -430,7 +434,14 @@ export function useToggleReactionMutation() {
         return;
       }
 
-      await addReaction(eventId, emoji);
+      // Custom-emoji reaction: emoji is `:shortcode:`. Resolve its image URL
+      // from the cached relay-owned set so the kind:7 carries the NIP-30
+      // `["emoji", shortcode, url]` tag. Unicode reactions resolve to no URL.
+      const emojiUrl = reactionEmojiUrl(
+        emoji,
+        queryClient.getQueryData<CustomEmoji[]>(customEmojiQueryKey),
+      );
+      await addReaction(eventId, emoji, emojiUrl);
     },
   });
 }

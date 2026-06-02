@@ -3,8 +3,8 @@ import Picker from "@emoji-mart/react";
 import data from "@emoji-mart/data";
 import { SmilePlus } from "lucide-react";
 
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
+import { buildCustomEmojiCategory } from "@/features/custom-emoji/emojiMartCategory";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -18,27 +18,6 @@ type ComposerEmojiPickerProps = {
   open: boolean;
 };
 
-/**
- * emoji-mart custom-category shape. A selected custom emoji has no `native`
- * field — only `id`/`src` — so the select handler inserts `:shortcode:`
- * (which renders via remarkCustomEmoji and emits an `emoji` tag on send).
- */
-function buildCustomCategory(customEmoji: CustomEmoji[]) {
-  if (customEmoji.length === 0) return undefined;
-  return [
-    {
-      id: "sprout-custom",
-      name: "Custom",
-      emojis: customEmoji.map((e) => ({
-        id: e.shortcode,
-        name: e.shortcode,
-        keywords: [e.shortcode],
-        skins: [{ src: rewriteRelayUrl(e.url) }],
-      })),
-    },
-  ];
-}
-
 export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
   customEmoji = [],
   disabled = false,
@@ -48,7 +27,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
   open,
 }: ComposerEmojiPickerProps) {
   const custom = React.useMemo(
-    () => buildCustomCategory(customEmoji),
+    () => buildCustomEmojiCategory(customEmoji),
     [customEmoji],
   );
   return (
