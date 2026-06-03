@@ -833,7 +833,6 @@ export function MessageComposer({
 
           <MessageComposerToolbar
             composerDisabled={disabled}
-            customEmoji={customEmoji}
             editor={richText.editor}
             extraActions={toolbarExtraActions}
             formattingDisabled={disabled}

@@ -1,5 +1,3 @@
-import Picker from "@emoji-mart/react";
-import data from "@emoji-mart/data";
 import {
   BellOff,
   BellRing,
@@ -16,8 +14,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
-import { useCustomEmoji } from "@/features/custom-emoji/hooks";
-import { buildCustomEmojiCategory } from "@/features/custom-emoji/emojiMartCategory";
+import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import type {
   TimelineMessage,
@@ -294,11 +291,6 @@ export function MessageActionBar({
 }) {
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
-  const customEmoji = useCustomEmoji();
-  const customEmojiCategory = React.useMemo(
-    () => buildCustomEmojiCategory(customEmoji),
-    [customEmoji],
-  );
   const hasReplyAction = Boolean(onReply);
   const hasReactionAction = Boolean(onReactionSelect);
 
@@ -377,31 +369,18 @@ export function MessageActionBar({
                   </p>
                 </div>
               ) : null}
-              <Picker
+              <EmojiPicker
                 autoFocus
-                data={data}
-                custom={customEmojiCategory}
-                onEmojiSelect={(emoji: { native?: string; id?: string }) => {
+                onSelect={(value) => {
                   if (!onReactionSelect) {
                     return;
                   }
-                  // Custom emoji have no `native`; react with `:shortcode:`
-                  // (id == shortcode). The toggle mutation resolves the URL.
-                  const value =
-                    emoji.native ?? (emoji.id ? `:${emoji.id}:` : "");
-                  if (!value) {
-                    return;
-                  }
+                  // `value` is already a `native` glyph or a `:shortcode:` for
+                  // custom emoji; the toggle mutation resolves the URL.
                   void onReactionSelect(value).finally(() => {
                     setIsReactionPickerOpen(false);
                   });
                 }}
-                theme="auto"
-                previewPosition="none"
-                skinTonePosition="search"
-                set="native"
-                maxFrequentRows={2}
-                perLine={8}
               />
             </PopoverContent>
           </Popover>

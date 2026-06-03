@@ -21,6 +21,7 @@ import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { ProfilePopover } from "@/features/profile/ui/ProfilePopover";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import {
   useChannelSections,
   type ChannelSection,
@@ -730,7 +731,10 @@ export function AppSidebar({
                     {selfUserStatus?.text || selfUserStatus?.emoji ? (
                       <p className="mt-0.5 truncate text-xs text-sidebar-foreground/50">
                         {selfUserStatus.emoji ? (
-                          <span className="mr-1">{selfUserStatus.emoji}</span>
+                          <StatusEmoji
+                            className="mr-1 h-3.5 w-3.5"
+                            value={selfUserStatus.emoji}
+                          />
                         ) : null}
                         {selfUserStatus.text}
                       </p>

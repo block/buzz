@@ -28,6 +28,7 @@ import {
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { PresenceBadge } from "@/features/presence/ui/PresenceBadge";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
@@ -330,7 +331,10 @@ export function UserProfilePanel({
             {userStatus ? (
               <p className="text-center text-sm text-muted-foreground">
                 {userStatus.emoji ? (
-                  <span className="mr-1">{userStatus.emoji}</span>
+                  <StatusEmoji
+                    className="mr-1 h-3.5 w-3.5"
+                    value={userStatus.emoji}
+                  />
                 ) : null}
                 {userStatus.text}
               </p>

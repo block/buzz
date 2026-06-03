@@ -8,6 +8,7 @@ import {
 } from "@/features/agents/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { PresenceBadge } from "@/features/presence/ui/PresenceBadge";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
@@ -217,7 +218,10 @@ export function UserProfilePopover({
               data-testid="user-profile-status"
             >
               {userStatus.emoji ? (
-                <span className="mr-1">{userStatus.emoji}</span>
+                <StatusEmoji
+                  className="mr-1 h-3.5 w-3.5"
+                  value={userStatus.emoji}
+                />
               ) : null}
               {userStatus.text}
             </p>

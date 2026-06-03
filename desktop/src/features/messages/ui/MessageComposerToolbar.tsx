@@ -4,7 +4,6 @@ import { AnimatePresence, motion } from "motion/react";
 import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
-import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -21,7 +20,6 @@ const presenceSpring = {
 export const MessageComposerToolbar = React.memo(
   function MessageComposerToolbar({
     composerDisabled,
-    customEmoji,
     editor,
     extraActions,
     formattingDisabled,
@@ -38,7 +36,6 @@ export const MessageComposerToolbar = React.memo(
     sendDisabled,
   }: {
     composerDisabled: boolean;
-    customEmoji?: CustomEmoji[];
     editor: Editor | null;
     extraActions?: React.ReactNode;
     formattingDisabled: boolean;
@@ -200,7 +197,6 @@ export const MessageComposerToolbar = React.memo(
                   <TooltipContent>Attach image</TooltipContent>
                 </Tooltip>
                 <ComposerEmojiPicker
-                  customEmoji={customEmoji}
                   disabled={composerDisabled}
                   onEmojiSelect={onEmojiSelect}
                   onOpenChange={onEmojiPickerOpenChange}

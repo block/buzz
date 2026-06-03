@@ -6,6 +6,7 @@ import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { SetStatusDialog } from "@/features/user-status/ui/SetStatusDialog";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { PresenceStatus } from "@/shared/api/types";
 
 // ---------------------------------------------------------------------------
@@ -152,7 +153,10 @@ export function ProfilePopover({
                     data-testid="profile-popover-user-status"
                   >
                     {userStatusEmoji ? (
-                      <span className="mr-1">{userStatusEmoji}</span>
+                      <StatusEmoji
+                        className="mr-1 h-3.5 w-3.5"
+                        value={userStatusEmoji}
+                      />
                     ) : null}
                     {userStatusText}
                   </p>

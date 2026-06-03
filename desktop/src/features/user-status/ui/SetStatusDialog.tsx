@@ -1,8 +1,8 @@
 import * as React from "react";
-import Picker from "@emoji-mart/react";
-import data from "@emoji-mart/data";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 
+import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import {
   Dialog,
   DialogContent,
@@ -65,8 +65,8 @@ export function SetStatusDialog({
     setEmoji(preset.emoji);
   }
 
-  function handleEmojiSelect(selectedEmoji: { native: string }) {
-    setEmoji(selectedEmoji.native);
+  function handleEmojiSelect(selectedEmoji: string) {
+    setEmoji(selectedEmoji);
     setPickerOpen(false);
   }
 
@@ -110,7 +110,11 @@ export function SetStatusDialog({
                     className="flex h-9 w-9 items-center justify-center rounded-md border border-input text-lg transition-colors hover:bg-accent"
                     type="button"
                   >
-                    {emoji || "\uD83D\uDCAC"}
+                    {emoji ? (
+                      <StatusEmoji className="h-5 w-5" value={emoji} />
+                    ) : (
+                      "\uD83D\uDCAC"
+                    )}
                   </button>
                 </PopoverTrigger>
                 {emoji ? (
@@ -132,16 +136,7 @@ export function SetStatusDialog({
                 sideOffset={4}
                 className="z-50 w-auto overflow-hidden rounded-2xl shadow-md outline-hidden data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95"
               >
-                <Picker
-                  data={data}
-                  maxFrequentRows={2}
-                  onEmojiSelect={handleEmojiSelect}
-                  perLine={8}
-                  previewPosition="none"
-                  set="native"
-                  skinTonePosition="search"
-                  theme="auto"
-                />
+                <EmojiPicker autoFocus onSelect={handleEmojiSelect} />
               </PopoverPrimitive.Content>
             </Popover>
             <Input

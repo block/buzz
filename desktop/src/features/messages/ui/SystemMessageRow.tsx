@@ -1,8 +1,7 @@
 import { SmilePlus } from "lucide-react";
-import Picker from "@emoji-mart/react";
-import data from "@emoji-mart/data";
 import * as React from "react";
 
+import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import type { TimelineMessage } from "@/features/messages/types";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
@@ -415,19 +414,12 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
                         </p>
                       </div>
                     ) : null}
-                    <Picker
-                      data={data}
-                      onEmojiSelect={(emoji: { native: string }) => {
-                        void handleReactionSelect(emoji.native).finally(() => {
+                    <EmojiPicker
+                      onSelect={(value) => {
+                        void handleReactionSelect(value).finally(() => {
                           setIsReactionPickerOpen(false);
                         });
                       }}
-                      theme="auto"
-                      previewPosition="none"
-                      skinTonePosition="search"
-                      set="native"
-                      maxFrequentRows={2}
-                      perLine={8}
                     />
                   </PopoverContent>
                 </Popover>
