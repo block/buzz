@@ -166,6 +166,11 @@ test("mark-as-read via context menu clears channel unread indicator", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "random");
 
+  // Wait for catch-up to settle, then record baseline badge state
+  // (other mock channels may have pre-existing unreads from seeded history)
+  await page.waitForTimeout(2000);
+  const baselineBadge = await getBadgeState(page);
+
   await page.evaluate(
     ({ pubkey }) => {
       window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -184,7 +189,7 @@ test("mark-as-read via context menu clears channel unread indicator", async ({
   await page.getByText("Mark as read").click();
 
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
-  await waitForBadgeState(page, { state: "none" });
+  await waitForBadgeState(page, { state: baselineBadge.state });
 });
 
 test("mark-as-unread via context menu shows dot badge", async ({ page }) => {

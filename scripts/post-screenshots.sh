@@ -35,6 +35,10 @@ NEW_ENTRIES=""
 IMAGE_URLS=()
 for PNG in "${PNGS[@]}"; do
   FILENAME=$(basename "$PNG")
+  if ! [[ "$FILENAME" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+    echo "error: invalid PNG filename (must be alphanumeric, dots, hyphens, underscores): $FILENAME" >&2
+    exit 1
+  fi
   BLOB=$(git hash-object -w "$PNG")
   TREE_PATH="pr-${PR}--${FILENAME}"
   NEW_ENTRIES+="$(printf '100644 blob %s\t%s' "$BLOB" "$TREE_PATH")"$'\n'

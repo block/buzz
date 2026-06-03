@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -7,6 +8,7 @@ import '../../shared/relay/relay.dart';
 import '../../shared/utils/string_utils.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart' show channelDetailsProvider;
+import 'read_state/read_state_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
@@ -351,6 +353,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     if (myPk == null) return;
 
     final session = ref.read(relaySessionProvider.notifier);
+    final readState = ref.read(readStateProvider);
     final futures = <Future<void>>[];
 
     for (final channel in channels) {
@@ -366,10 +369,17 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         continue;
       }
 
-      futures.add(_backfillHighPriorityForChannel(session, channel, myPk));
+      final readAt = readState.effectiveTimestamp(channel.id);
+      futures.add(
+        _backfillHighPriorityForChannel(session, channel, myPk, readAt),
+      );
     }
 
-    await Future.wait(futures);
+    // Batch into groups of 5 to avoid saturating the relay.
+    const batchSize = 5;
+    for (var i = 0; i < futures.length; i += batchSize) {
+      await Future.wait(futures.sublist(i, min(i + batchSize, futures.length)));
+    }
 
     // Trigger unreadBadgeProvider to re-evaluate now that the map is populated.
     state = state.whenData((channels) => List<Channel>.of(channels));
@@ -379,8 +389,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     RelaySessionNotifier session,
     Channel channel,
     String myPk,
+    int? readAt,
   ) async {
-    // For non-DM channels, fetch recent events and scan for high-priority ones.
+    // For non-DM channels, fetch events since the last read timestamp and scan
+    // for high-priority ones. Using `since` avoids fetching messages the user
+    // has already seen, and `limit: 200` covers deep mention backfills.
     try {
       final events = await session.fetchHistory(
         NostrFilter(
@@ -388,7 +401,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           tags: {
             '#h': [channel.id],
           },
-          limit: 50,
+          since: readAt ?? 0,
+          limit: 200,
         ),
       );
 

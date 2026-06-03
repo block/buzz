@@ -212,6 +212,14 @@ function toUnixSeconds(isoOrMs: string | null | undefined): number | null {
   return ms === null ? null : Math.floor(ms / 1_000);
 }
 
+function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const item of a) {
+    if (!b.has(item)) return false;
+  }
+  return true;
+}
+
 export function useUnreadChannels(
   channels: Channel[],
   activeChannel: Channel | null,
@@ -729,7 +737,7 @@ export function useUnreadChannels(
   // than the read marker. Forced-unread channels are dot tier only (not
   // high-priority). Both sets share identical deps and always invalidate
   // together, so they are computed in a single memo.
-  const { unreadChannelIds, highPriorityUnreadChannelIds } =
+  const rawUnread =
     // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion and latestVersion are intentional invalidation signals
     React.useMemo(() => {
       if (!isReadStateReady) {
@@ -788,6 +796,27 @@ export function useUnreadChannels(
       latestVersion,
       readStateVersion,
     ]);
+
+  // Stabilize Set references: only replace when contents actually change,
+  // so downstream memos don't re-run on every render when sets are equal.
+  const prevUnreadRef = React.useRef<ReadonlySet<string>>(new Set());
+  const prevHighPriorityRef = React.useRef<ReadonlySet<string>>(new Set());
+
+  const unreadChannelIds = setsEqual(
+    rawUnread.unreadChannelIds,
+    prevUnreadRef.current,
+  )
+    ? prevUnreadRef.current
+    : rawUnread.unreadChannelIds;
+  prevUnreadRef.current = unreadChannelIds;
+
+  const highPriorityUnreadChannelIds = setsEqual(
+    rawUnread.highPriorityUnreadChannelIds,
+    prevHighPriorityRef.current,
+  )
+    ? prevHighPriorityRef.current
+    : rawUnread.highPriorityUnreadChannelIds;
+  prevHighPriorityRef.current = highPriorityUnreadChannelIds;
 
   const unreadChannelIdsRef = React.useRef(unreadChannelIds);
   unreadChannelIdsRef.current = unreadChannelIds;

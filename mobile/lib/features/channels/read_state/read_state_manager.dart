@@ -59,6 +59,7 @@ class ReadStateManager {
   bool _initialized = false;
   bool _disposed = false;
   bool _isPublishing = false;
+  Completer<void>? _publishCompleter;
   bool _remoteUnsupported = false;
   int _maxFetchedCreatedAt = 0;
   final Set<String> _forcedContextIds = {};
@@ -138,6 +139,9 @@ class ReadStateManager {
 
   Future<void> reinitializeRemote() async {
     if (_disposed || !_remoteEnabled) return;
+    if (_isPublishing) {
+      await _publishCompleter?.future;
+    }
     _unsubscribeLive?.call();
     _unsubscribeLive = null;
     await _fetchAndMerge();
@@ -362,6 +366,8 @@ class ReadStateManager {
     }
     if (_isPublishing) return;
 
+    final completer = Completer<void>();
+    _publishCompleter = completer;
     _isPublishing = true;
     try {
       await _fetchOwnBlobBeforePublish();
@@ -406,6 +412,10 @@ class ReadStateManager {
       debugPrint('[ReadStateManager] publish failed: $error');
     } finally {
       _isPublishing = false;
+      completer.complete();
+      if (_publishCompleter == completer) {
+        _publishCompleter = null;
+      }
     }
   }
 
@@ -466,6 +476,9 @@ class ReadStateManager {
     _forcedContextIds
       ..clear()
       ..addAll(stored.forcedContextIds);
+    _contextSourceCreatedAt
+      ..clear()
+      ..addAll(stored.sourceCreatedAt);
     _persistLocalState();
   }
 
@@ -475,6 +488,7 @@ class ReadStateManager {
       _effectiveState,
       _publishableContextIds,
       _forcedContextIds,
+      _contextSourceCreatedAt,
     );
   }
 

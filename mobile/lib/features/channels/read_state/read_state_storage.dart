@@ -20,6 +20,9 @@ String localPublishableContextKey(String pubkey) =>
 String localForcedContextKey(String pubkey) =>
     'sprout.channel-read-state.forced.v1:$pubkey';
 
+String localSourceCreatedAtKey(String pubkey) =>
+    'sprout.channel-read-state.source-created-at.v1:$pubkey';
+
 String clientIdKey(String pubkey) => '$_clientIdKeyPrefix:$pubkey';
 
 String slotIdKey(String pubkey) => '$_slotIdKeyPrefix:$pubkey';
@@ -28,14 +31,17 @@ class StoredReadState {
   final Map<String, int> contexts;
   final Set<String> publishableContextIds;
   final Set<String> forcedContextIds;
+  final Map<String, int> sourceCreatedAt;
 
   StoredReadState({
     required Map<String, int> contexts,
     required Set<String> publishableContextIds,
     required Set<String> forcedContextIds,
+    required Map<String, int> sourceCreatedAt,
   }) : contexts = Map.unmodifiable(contexts),
        publishableContextIds = Set.unmodifiable(publishableContextIds),
-       forcedContextIds = Set.unmodifiable(forcedContextIds);
+       forcedContextIds = Set.unmodifiable(forcedContextIds),
+       sourceCreatedAt = Map.unmodifiable(sourceCreatedAt);
 }
 
 class ReadStateStorage {
@@ -76,6 +82,7 @@ class ReadStateStorage {
       contexts: _readContexts(pubkey),
       publishableContextIds: _readPublishableContextIds(pubkey),
       forcedContextIds: _readForcedContextIds(pubkey),
+      sourceCreatedAt: _readSourceCreatedAt(pubkey),
     );
   }
 
@@ -84,6 +91,7 @@ class ReadStateStorage {
     Map<String, int> contexts,
     Set<String> publishableContextIds,
     Set<String> forcedContextIds,
+    Map<String, int> sourceCreatedAt,
   ) {
     final state = <String, String>{};
     for (final entry in contexts.entries) {
@@ -98,6 +106,10 @@ class ReadStateStorage {
     _prefs.setString(
       localForcedContextKey(pubkey),
       jsonEncode(forcedContextIds.toList()),
+    );
+    _prefs.setString(
+      localSourceCreatedAtKey(pubkey),
+      jsonEncode(sourceCreatedAt.map((k, v) => MapEntry(k, v.toString()))),
     );
   }
 
@@ -176,6 +188,33 @@ class ReadStateStorage {
       for (final value in parsed)
         if (value is String) value,
     };
+  }
+
+  Map<String, int> _readSourceCreatedAt(String pubkey) {
+    final raw = _prefs.getString(localSourceCreatedAtKey(pubkey));
+    if (raw == null || raw.isEmpty) return {};
+
+    final Object? parsed;
+    try {
+      parsed = jsonDecode(raw);
+    } catch (_) {
+      return {};
+    }
+
+    final record = asStringObjectMap(parsed);
+    if (record == null) return {};
+
+    final result = <String, int>{};
+    for (final entry in record.entries) {
+      final value = entry.value;
+      if (value is int) {
+        result[entry.key] = value;
+      } else if (value is String) {
+        final parsed = int.tryParse(value);
+        if (parsed != null) result[entry.key] = parsed;
+      }
+    }
+    return result;
   }
 }
 
