@@ -146,6 +146,9 @@ type AppSidebarProps = {
   onNewDmOpenChange?: (open: boolean) => void;
   isCreateChannelOpen?: boolean;
   onCreateChannelOpenChange?: (open: boolean) => void;
+  mutedChannelIds?: ReadonlySet<string>;
+  onMuteChannel?: (channelId: string) => void;
+  onUnmuteChannel?: (channelId: string) => void;
 };
 
 // ---------------------------------------------------------------------------
@@ -201,6 +204,9 @@ export function AppSidebar({
   onNewDmOpenChange,
   isCreateChannelOpen: isCreateChannelOpenProp,
   onCreateChannelOpenChange,
+  mutedChannelIds,
+  onMuteChannel,
+  onUnmuteChannel,
 }: AppSidebarProps) {
   const skeletonRows = ["first", "second", "third", "fourth", "fifth", "sixth"];
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
@@ -549,6 +555,9 @@ export function AppSidebar({
                     onDeleteSection={() => setDeleteSectionTarget(section)}
                     onMoveSectionUp={() => moveSectionUp(section.id)}
                     onMoveSectionDown={() => moveSectionDown(section.id)}
+                    mutedChannelIds={mutedChannelIds}
+                    onMuteChannel={onMuteChannel}
+                    onUnmuteChannel={onUnmuteChannel}
                   />
                 ))}
                 <ChannelGroupSection
@@ -579,6 +588,9 @@ export function AppSidebar({
                   onAssignChannel={assignChannel}
                   onUnassignChannel={unassignChannel}
                   onCreateSectionForChannel={handleCreateSectionForChannel}
+                  mutedChannelIds={mutedChannelIds}
+                  onMuteChannel={onMuteChannel}
+                  onUnmuteChannel={onUnmuteChannel}
                 />
               </SidebarDndContext>
               <ChannelGroupSection
@@ -600,6 +612,9 @@ export function AppSidebar({
                 selectedChannelId={selectedChannelId}
                 title="Forums"
                 unreadChannelIds={unreadChannelIds}
+                mutedChannelIds={mutedChannelIds}
+                onMuteChannel={onMuteChannel}
+                onUnmuteChannel={onUnmuteChannel}
               />
               <SidebarSection
                 action={
@@ -634,6 +649,9 @@ export function AppSidebar({
                 testId="dm-list"
                 title="Direct Messages"
                 unreadChannelIds={unreadChannelIds}
+                mutedChannelIds={mutedChannelIds}
+                onMuteChannel={onMuteChannel}
+                onUnmuteChannel={onUnmuteChannel}
               />
             </>
           ) : null}

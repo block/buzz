@@ -270,6 +270,7 @@ export function useHomeFeedNotificationState(
   readStateVersion: number,
   highPriorityChannelIds: ReadonlySet<string>,
   profiles?: UserProfileLookup,
+  mutedChannelIds?: ReadonlySet<string>,
 ) {
   useFeedDesktopNotifications(
     feed,
@@ -277,6 +278,7 @@ export function useHomeFeedNotificationState(
     settings,
     setDesktopEnabled,
     profiles,
+    mutedChannelIds,
   );
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
   const [seenFeedIds, setSeenFeedIds] = React.useState<string[]>(() =>
@@ -327,6 +329,9 @@ export function useHomeFeedNotificationState(
     let total = 0;
     let excludingHighPriority = 0;
     for (const item of currentFeedItems) {
+      if (item.channelId && mutedChannelIds?.has(item.channelId)) {
+        continue;
+      }
       let isUnread: boolean;
       if (item.channelId) {
         const readAt = getChannelReadAt(item.channelId);
@@ -352,6 +357,7 @@ export function useHomeFeedNotificationState(
     getChannelReadAt,
     highPriorityChannelIds,
     isHomeActive,
+    mutedChannelIds,
     readStateVersion,
     seenFeedIds,
     settings.homeBadgeEnabled,

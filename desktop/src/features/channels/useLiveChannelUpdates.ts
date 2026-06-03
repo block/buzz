@@ -34,6 +34,7 @@ export type UseLiveChannelUpdatesOptions = {
   followedRootIds?: ReadonlySet<string>;
   authoredRootIds?: ReadonlySet<string>;
   mutedRootIds?: ReadonlySet<string>;
+  mutedChannelIds?: ReadonlySet<string>;
 };
 
 const LIVE_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
@@ -182,6 +183,8 @@ export function useLiveChannelUpdates(
         options.followedRootIds ?? EMPTY_SET,
         options.authoredRootIds ?? EMPTY_SET,
         options.mutedRootIds ?? EMPTY_SET,
+        options.mutedChannelIds ?? EMPTY_SET,
+        channelId,
       )
     ) {
       options.onChannelMessage?.(channelId, event);

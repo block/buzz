@@ -4,6 +4,18 @@ import {
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 
+export function hasMentionForEvent(
+  event: RelayEvent,
+  currentPubkey: string,
+): boolean {
+  return (
+    currentPubkey.length > 0 &&
+    event.tags.some(
+      (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === currentPubkey,
+    )
+  );
+}
+
 export function shouldNotifyForEvent(
   event: RelayEvent,
   currentPubkey: string,
@@ -11,23 +23,24 @@ export function shouldNotifyForEvent(
   followedRootIds: ReadonlySet<string>,
   authoredRootIds: ReadonlySet<string>,
   mutedRootIds: ReadonlySet<string> = new Set(),
+  mutedChannelIds: ReadonlySet<string> = new Set(),
+  channelId: string | null = null,
 ): boolean {
   const { parentId, rootId } = getThreadReference(event.tags);
-
-  if (parentId === null) {
-    return true;
-  }
 
   if (isBroadcastReply(event.tags)) {
     return true;
   }
 
-  if (
-    currentPubkey.length > 0 &&
-    event.tags.some(
-      (tag) => tag[0] === "p" && tag[1]?.toLowerCase() === currentPubkey,
-    )
-  ) {
+  if (hasMentionForEvent(event, currentPubkey)) {
+    return true;
+  }
+
+  if (channelId !== null && mutedChannelIds.has(channelId)) {
+    return false;
+  }
+
+  if (parentId === null) {
     return true;
   }
 

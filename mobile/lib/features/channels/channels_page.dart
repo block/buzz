@@ -21,6 +21,7 @@ import '../pairing/pairing_provider.dart';
 import 'channel.dart';
 import 'channel_detail_page.dart';
 import 'channel_management_provider.dart';
+import 'channel_mutes/channel_mutes_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_sections/channel_sections_storage.dart';
 import 'channels_provider.dart';
@@ -275,6 +276,11 @@ class _SliverChannelsList extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final readState = ref.watch(readStateProvider);
     final sectionsState = ref.watch(channelSectionsProvider);
+    final mutesState = ref.watch(channelMutesProvider);
+    final mutedChannelIds = {
+      for (final entry in mutesState.store.channels.entries)
+        if (entry.value.muted) entry.key,
+    };
     final visibleChannels = channels
         .where((channel) => channel.isMember && !channel.isArchived)
         .toList();
@@ -331,7 +337,8 @@ class _SliverChannelsList extends HookConsumerWidget {
             for (final channel in visibleChannels)
               if ((seedCompleteForPubkey ||
                       readState.effectiveTimestamp(channel.id) != null) &&
-                  _isUnread(channel, readState))
+                  _isUnread(channel, readState) &&
+                  !mutedChannelIds.contains(channel.id))
                 channel.id,
           }
         : const <String>{};
@@ -378,6 +385,7 @@ class _SliverChannelsList extends HookConsumerWidget {
                     .where((c) => sectionAssignments[c.id] == section.id)
                     .toList(),
                 unreadChannelIds: unreadChannelIds,
+                mutedChannelIds: mutedChannelIds,
                 currentPubkey: currentPubkey,
                 expanded: sectionExpanded(section.id),
                 isFirst: userSections.first.id == section.id,
@@ -452,6 +460,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               onToggle: () => channelsExpanded.value = !channelsExpanded.value,
               channels: ungroupedStreamChannels,
               unreadChannelIds: unreadChannelIds,
+              mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No stream channels yet',
               onSelectChannel: onSelectChannel,
@@ -463,6 +472,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               onToggle: () => forumsExpanded.value = !forumsExpanded.value,
               channels: forumChannels,
               unreadChannelIds: unreadChannelIds,
+              mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No forums yet',
               onSelectChannel: onSelectChannel,
@@ -474,6 +484,7 @@ class _SliverChannelsList extends HookConsumerWidget {
               onToggle: () => dmsExpanded.value = !dmsExpanded.value,
               channels: dmChannels,
               unreadChannelIds: unreadChannelIds,
+              mutedChannelIds: mutedChannelIds,
               currentPubkey: currentPubkey,
               emptyLabel: 'No direct messages yet',
               onSelectChannel: onSelectChannel,
@@ -493,6 +504,7 @@ class _CustomChannelSection extends StatelessWidget {
   final ChannelSection section;
   final List<Channel> channels;
   final Set<String> unreadChannelIds;
+  final Set<String> mutedChannelIds;
   final String? currentPubkey;
   final bool expanded;
   final bool isFirst;
@@ -509,6 +521,7 @@ class _CustomChannelSection extends StatelessWidget {
     required this.section,
     required this.channels,
     required this.unreadChannelIds,
+    required this.mutedChannelIds,
     required this.currentPubkey,
     required this.expanded,
     required this.isFirst,
@@ -543,6 +556,7 @@ class _CustomChannelSection extends StatelessWidget {
             _ChannelTile(
               channel: channel,
               isUnread: unreadChannelIds.contains(channel.id),
+              isMuted: mutedChannelIds.contains(channel.id),
               currentPubkey: currentPubkey,
               onTap: () => onSelectChannel(channel),
               onMarkRead: () => onMarkChannelRead(channel),
@@ -716,6 +730,7 @@ class _ChannelSection extends StatelessWidget {
   final VoidCallback onToggle;
   final List<Channel> channels;
   final Set<String> unreadChannelIds;
+  final Set<String> mutedChannelIds;
   final String? currentPubkey;
   final String emptyLabel;
   final Future<void> Function(Channel channel) onSelectChannel;
@@ -727,6 +742,7 @@ class _ChannelSection extends StatelessWidget {
     required this.onToggle,
     required this.channels,
     required this.unreadChannelIds,
+    required this.mutedChannelIds,
     required this.currentPubkey,
     required this.emptyLabel,
     required this.onSelectChannel,
@@ -764,6 +780,7 @@ class _ChannelSection extends StatelessWidget {
               _ChannelTile(
                 channel: channel,
                 isUnread: unreadChannelIds.contains(channel.id),
+                isMuted: mutedChannelIds.contains(channel.id),
                 currentPubkey: currentPubkey,
                 onTap: () => onSelectChannel(channel),
                 onMarkRead: null,
@@ -858,6 +875,7 @@ class _SectionHeader extends StatelessWidget {
 class _ChannelTile extends ConsumerWidget {
   final Channel channel;
   final bool isUnread;
+  final bool isMuted;
   final String? currentPubkey;
   final VoidCallback onTap;
 
@@ -873,6 +891,7 @@ class _ChannelTile extends ConsumerWidget {
     required this.isUnread,
     required this.currentPubkey,
     required this.onTap,
+    this.isMuted = false,
     this.onMarkRead,
     this.sectionId,
   });
@@ -885,84 +904,96 @@ class _ChannelTile extends ConsumerWidget {
       borderRadius: BorderRadius.circular(Radii.md),
       onTap: onTap,
       onLongPress: () => _showChannelActions(context, ref),
-      child: Padding(
-        padding: const EdgeInsets.only(
-          left: Grid.xs + Grid.xxs,
-          right: Grid.xs,
-          top: Grid.xxs + Grid.quarter,
-          bottom: Grid.xxs + Grid.quarter,
-        ),
-        child: Row(
-          children: [
-            if (channel.isDm)
-              _DmAvatar(channel: channel, currentPubkey: currentPubkey)
-            else
-              Icon(
-                channelIcon(channel),
-                size: 18,
-                color: hasActivity
-                    ? context.colors.onSurface
-                    : context.colors.onSurfaceVariant,
-              ),
-            const SizedBox(width: Grid.xxs),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    channel.displayLabel(currentPubkey: currentPubkey),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: context.textTheme.bodyMedium?.copyWith(
-                      color: isUnread
-                          ? context.colors.onSurface
-                          : hasActivity
-                          ? context.colors.onSurface
-                          : context.colors.onSurfaceVariant,
-                      fontWeight: isUnread ? FontWeight.w700 : null,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (isUnread) ...[
+      child: Opacity(
+        opacity: isMuted ? 0.5 : 1.0,
+        child: Padding(
+          padding: const EdgeInsets.only(
+            left: Grid.xs + Grid.xxs,
+            right: Grid.xs,
+            top: Grid.xxs + Grid.quarter,
+            bottom: Grid.xxs + Grid.quarter,
+          ),
+          child: Row(
+            children: [
+              if (channel.isDm)
+                _DmAvatar(channel: channel, currentPubkey: currentPubkey)
+              else
+                Icon(
+                  channelIcon(channel),
+                  size: 18,
+                  color: hasActivity
+                      ? context.colors.onSurface
+                      : context.colors.onSurfaceVariant,
+                ),
               const SizedBox(width: Grid.xxs),
-              Container(
-                key: Key('channel-unread-${channel.id}'),
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: context.colors.primary,
-                  shape: BoxShape.circle,
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      channel.displayLabel(currentPubkey: currentPubkey),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.textTheme.bodyMedium?.copyWith(
+                        color: isUnread
+                            ? context.colors.onSurface
+                            : hasActivity
+                            ? context.colors.onSurface
+                            : context.colors.onSurfaceVariant,
+                        fontWeight: isUnread && !isMuted
+                            ? FontWeight.w700
+                            : null,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ],
-            if (!channel.isMember && !channel.isDm)
-              Padding(
-                padding: const EdgeInsets.only(right: Grid.xxs),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: Grid.half + 2,
-                    vertical: 3,
-                  ),
+              if (isMuted) ...[
+                const SizedBox(width: Grid.xxs),
+                Icon(
+                  LucideIcons.bellOff,
+                  size: 12,
+                  color: context.colors.onSurfaceVariant,
+                ),
+              ] else if (isUnread) ...[
+                const SizedBox(width: Grid.xxs),
+                Container(
+                  key: Key('channel-unread-${channel.id}'),
+                  width: 8,
+                  height: 8,
                   decoration: BoxDecoration(
-                    color: context.colors.primary.withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(Radii.sm),
+                    color: context.colors.primary,
+                    shape: BoxShape.circle,
                   ),
-                  child: Text(
-                    'Open',
-                    style: context.textTheme.labelSmall?.copyWith(
-                      color: context.colors.primary,
-                      fontWeight: FontWeight.w600,
+                ),
+              ],
+              if (!channel.isMember && !channel.isDm)
+                Padding(
+                  padding: const EdgeInsets.only(right: Grid.xxs),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Grid.half + 2,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: context.colors.primary.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(Radii.sm),
+                    ),
+                    child: Text(
+                      'Open',
+                      style: context.textTheme.labelSmall?.copyWith(
+                        color: context.colors.primary,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
                 ),
-              ),
-            if (channel.isEphemeral) ...[
-              const SizedBox(width: Grid.xxs),
-              _EphemeralBadge(channel: channel),
+              if (channel.isEphemeral) ...[
+                const SizedBox(width: Grid.xxs),
+                _EphemeralBadge(channel: channel),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );
@@ -988,6 +1019,24 @@ class _ChannelTile extends ConsumerWidget {
                   onTap: () async {
                     Navigator.of(sheetContext).pop();
                     await _showMoveSectionSheet(context, ref, sections);
+                  },
+                ),
+                ListTile(
+                  leading: Icon(
+                    isMuted ? LucideIcons.bell : LucideIcons.bellOff,
+                  ),
+                  title: Text(isMuted ? 'Unmute channel' : 'Mute channel'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    if (isMuted) {
+                      ref
+                          .read(channelMutesProvider.notifier)
+                          .unmuteChannel(channel.id);
+                    } else {
+                      ref
+                          .read(channelMutesProvider.notifier)
+                          .muteChannel(channel.id);
+                    }
                   },
                 ),
                 ListTile(

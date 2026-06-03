@@ -10,8 +10,9 @@ import {
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 import {
-  shouldNotifyForEvent,
+  hasMentionForEvent,
   isHighPriorityEventForUser,
+  shouldNotifyForEvent,
 } from "@/features/notifications/lib/shouldNotify";
 import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { Channel, RelayEvent } from "@/shared/api/types";
@@ -20,6 +21,7 @@ import { CHANNEL_MESSAGE_EVENT_KINDS } from "@/shared/constants/kinds";
 type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
   pubkey?: string;
   relayClient?: RelayClient;
+  mutedChannelIds?: ReadonlySet<string>;
 };
 
 // Per-channel cap on the catch-up REQ. We only consume the *max matching*
@@ -226,7 +228,12 @@ export function useUnreadChannels(
   activeReadAt?: string | null,
   options: UseUnreadChannelsOptions = {},
 ) {
-  const { pubkey, relayClient, ...liveUpdateOptions } = options;
+  const {
+    pubkey,
+    relayClient,
+    mutedChannelIds: mutedChannelIdsOption,
+    ...liveUpdateOptions
+  } = options;
   const activeChannelId = activeChannel?.id ?? null;
   const activeChannelLastMessageAt = activeChannel?.lastMessageAt ?? null;
   const normalizedPubkey = pubkey?.toLowerCase() ?? null;
@@ -277,6 +284,16 @@ export function useUnreadChannels(
   // Root event IDs of threads the user has explicitly muted. Takes precedence
   // over participation, follow, and authorship for notification suppression.
   const mutedRootIdsRef = React.useRef(new Set<string>());
+
+  // Stable ref for the caller-supplied muted channel IDs. Updated every render
+  // so the catch-up loop always reads the latest set without being a dep.
+  const mutedChannelIdsRef = React.useRef<ReadonlySet<string>>(new Set());
+  mutedChannelIdsRef.current = mutedChannelIdsOption ?? new Set();
+
+  // Channel IDs that are muted but received a @mention notification this
+  // session. Surfaced to callers so they can show a mention badge even on
+  // muted channels.
+  const mentionedMutedChannelIdsRef = React.useRef(new Set<string>());
 
   // Thread reply events that triggered notifications — surfaced in the Home
   // activity feed as synthetic FeedItems.
@@ -496,6 +513,7 @@ export function useUnreadChannels(
     followedRootIds: liveUpdateOptions.followedRootIds,
     authoredRootIds: authoredRootIdsRef.current,
     mutedRootIds: mutedRootIdsRef.current,
+    mutedChannelIds: mutedChannelIdsRef.current,
   });
 
   // Effect-key the catch-up on the *set* of channel IDs, not the array
@@ -602,6 +620,8 @@ export function useUnreadChannels(
               continue;
             }
             if (readAt !== null && event.created_at <= readAt) continue;
+            const eventChannelId =
+              event.tags.find((t) => t[0] === "h")?.[1] ?? null;
             if (
               !shouldNotifyForEvent(
                 event,
@@ -610,9 +630,18 @@ export function useUnreadChannels(
                 options.followedRootIds ?? EMPTY_SET,
                 authoredRootIdsRef.current,
                 mutedRootIdsRef.current,
+                mutedChannelIdsRef.current,
+                eventChannelId,
               )
             ) {
               continue;
+            }
+            if (
+              eventChannelId !== null &&
+              mutedChannelIdsRef.current.has(eventChannelId) &&
+              hasMentionForEvent(event, normalizedPubkey ?? "")
+            ) {
+              mentionedMutedChannelIdsRef.current.add(eventChannelId);
             }
             if (event.created_at > maxExternal) {
               maxExternal = event.created_at;
@@ -855,5 +884,7 @@ export function useUnreadChannels(
     mutedRootIds: mutedRootIdsRef.current as ReadonlySet<string>,
     muteThread,
     unmuteThread,
+    mentionedMutedChannelIds:
+      mentionedMutedChannelIdsRef.current as ReadonlySet<string>,
   };
 }

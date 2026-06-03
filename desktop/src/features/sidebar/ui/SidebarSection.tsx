@@ -1,5 +1,7 @@
 import type * as React from "react";
 import {
+  Bell,
+  BellOff,
   CheckCircle2,
   ChevronDown,
   CircleDot,
@@ -13,6 +15,7 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/shared/ui/context-menu";
 
@@ -148,6 +151,7 @@ export function ChannelMenuButton({
   label,
   isActive,
   hasUnread,
+  isMuted,
   dmParticipants,
   presenceStatus,
   onSelectChannel,
@@ -156,6 +160,7 @@ export function ChannelMenuButton({
   label?: string;
   isActive: boolean;
   hasUnread: boolean;
+  isMuted?: boolean;
   dmParticipants?: SidebarDmParticipant[];
   presenceStatus?: PresenceStatus;
   onSelectChannel: (channelId: string) => void;
@@ -168,7 +173,9 @@ export function ChannelMenuButton({
       className={cn(
         !isActive &&
           hasUnread &&
+          !isMuted &&
           "font-semibold text-sidebar-foreground hover:text-sidebar-foreground",
+        !isActive && isMuted && "opacity-50",
       )}
       data-channel-id={channel.id}
       data-testid={`channel-${channel.name}`}
@@ -190,7 +197,10 @@ export function ChannelMenuButton({
           variant="sidebar"
         />
       ) : null}
-      {hasUnread && !isActive && channel.channelType !== "dm" ? (
+      {isMuted && !isActive ? (
+        <BellOff className="ml-auto h-3 w-3 shrink-0 text-sidebar-foreground/40" />
+      ) : null}
+      {hasUnread && !isActive && channel.channelType !== "dm" && !isMuted ? (
         <span
           aria-hidden="true"
           className="ml-auto h-2.5 w-2.5 shrink-0 rounded-full bg-primary"
@@ -219,6 +229,9 @@ export function SidebarSection({
   onMarkChannelUnread,
   onSelectChannel,
   onToggleCollapsed,
+  mutedChannelIds,
+  onMuteChannel,
+  onUnmuteChannel,
 }: {
   action?: React.ReactNode;
   dmParticipantsByChannelId?: Record<string, SidebarDmParticipant[]>;
@@ -243,6 +256,9 @@ export function SidebarSection({
   ) => void;
   onSelectChannel: (channelId: string) => void;
   onToggleCollapsed?: () => void;
+  mutedChannelIds?: ReadonlySet<string>;
+  onMuteChannel?: (channelId: string) => void;
+  onUnmuteChannel?: (channelId: string) => void;
 }) {
   if (items.length === 0 && !action && !emptyState) {
     return null;
@@ -292,6 +308,7 @@ export function SidebarSection({
                       channel={channel}
                       dmParticipants={dmParticipantsByChannelId?.[channel.id]}
                       hasUnread={unreadChannelIds.has(channel.id)}
+                      isMuted={mutedChannelIds?.has(channel.id)}
                       isActive={
                         isActiveChannel && selectedChannelId === channel.id
                       }
@@ -323,7 +340,8 @@ export function SidebarSection({
 
                 const hasContextAction =
                   (unreadChannelIds.has(channel.id) && onMarkChannelRead) ||
-                  (!unreadChannelIds.has(channel.id) && onMarkChannelUnread);
+                  (!unreadChannelIds.has(channel.id) && onMarkChannelUnread) ||
+                  (onMuteChannel && onUnmuteChannel);
 
                 return hasContextAction ? (
                   <ContextMenu key={channel.id}>
@@ -350,6 +368,26 @@ export function SidebarSection({
                           <CircleDot className="h-4 w-4" />
                           Mark unread
                         </ContextMenuItem>
+                      ) : null}
+                      {onMuteChannel && onUnmuteChannel ? (
+                        <>
+                          <ContextMenuSeparator />
+                          {mutedChannelIds?.has(channel.id) ? (
+                            <ContextMenuItem
+                              onClick={() => onUnmuteChannel(channel.id)}
+                            >
+                              <Bell className="h-4 w-4" />
+                              Unmute channel
+                            </ContextMenuItem>
+                          ) : (
+                            <ContextMenuItem
+                              onClick={() => onMuteChannel(channel.id)}
+                            >
+                              <BellOff className="h-4 w-4" />
+                              Mute channel
+                            </ContextMenuItem>
+                          )}
+                        </>
                       ) : null}
                     </ContextMenuContent>
                   </ContextMenu>
