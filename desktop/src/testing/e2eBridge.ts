@@ -8,6 +8,10 @@ import {
   CUSTOM_EMOJI_SET_D_TAG,
   KIND_EMOJI_SET,
 } from "@/shared/api/customEmoji";
+import {
+  KIND_STREAM_MESSAGE_EDIT,
+  KIND_SYSTEM_MESSAGE,
+} from "@/shared/constants/kinds";
 import type {
   RawAcpProviderCatalogEntry,
   RawInstallRuntimeResult,
@@ -545,6 +549,10 @@ const REACTION_EMOJI_URL = `${DEFAULT_RELAY_HTTP_URL}/media/${REACTION_EMOJI_SHA
 // test locates its row without relying on seed ordering.
 const REACTION_TARGET_EVENT_ID = "d".repeat(64);
 const REACTION_TARGET_CONTENT = "React to me with a custom emoji";
+// System-message reaction target id (kind:40099 join event). Distinct 64-hex
+// id so it is a valid reaction target and never collides with the regular
+// REACTION_TARGET_EVENT_ID.
+const SYSTEM_REACTION_TARGET_EVENT_ID = "e".repeat(64);
 const E2E_IDENTITY_OVERRIDE_STORAGE_KEY = "sprout:e2e-identity-override.v1";
 const DEFAULT_MOCK_IDENTITY = {
   pubkey: "deadbeef".repeat(8),
@@ -1823,6 +1831,25 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
             kind: 9,
             tags: [["h", channelId]],
             content: REACTION_TARGET_CONTENT,
+            sig: "mocksig".repeat(20).slice(0, 128),
+          },
+          // System-message reaction target. A kind:40099 join event renders via
+          // SystemMessageRow (testid `system-message-row`, NOT `message-row`),
+          // so it never displaces the `message-row` index assertions other
+          // specs rely on. Real 64-hex id so getReactionTargetId() accepts it
+          // as a reaction target — this is the surface the original "react to a
+          // system message" bug lived on. Backdated like the other seeds.
+          {
+            id: SYSTEM_REACTION_TARGET_EVENT_ID,
+            pubkey: ALICE_PUBKEY,
+            created_at: Math.floor(Date.now() / 1000) - 30,
+            kind: KIND_SYSTEM_MESSAGE,
+            tags: [["h", channelId]],
+            content: JSON.stringify({
+              type: "member_joined",
+              actor: ALICE_PUBKEY,
+              target: ALICE_PUBKEY,
+            }),
             sig: "mocksig".repeat(20).slice(0, 128),
           },
         ]
@@ -4613,6 +4640,51 @@ async function handleSendChannelMessage(
   };
 }
 
+/**
+ * Mock the `edit_message` Tauri command. Mirrors the real Rust command
+ * (`build_message_edit`): emit a kind:40003 edit event carrying `["e", target]`
+ * plus the new content, media (imeta) tags, and NIP-30 emoji tags. The timeline
+ * (`formatTimelineMessages`) scans for these edit events and overlays the new
+ * content + media/emoji tags onto the original via `applyEditTagOverlay`, so
+ * recording + emitting the edit event is all the bridge needs to do — the same
+ * path the real relay drives. `null`/empty tag args → no extra tags.
+ */
+async function handleEditMessage(
+  args: {
+    channelId: string;
+    eventId: string;
+    content: string;
+    mediaTags?: string[][] | null;
+    emojiTags?: string[][] | null;
+  },
+  config: E2eConfig | undefined,
+): Promise<void> {
+  const mediaTags = args.mediaTags ?? [];
+  const emojiTags = args.emojiTags ?? [];
+  const extraTags = [...mediaTags, ...emojiTags];
+  const tags = [["h", args.channelId], ["e", args.eventId], ...extraTags];
+  const content = args.content.trim();
+  const identity = getIdentity(config);
+
+  if (!identity) {
+    const editEvent = createMockEvent(
+      KIND_STREAM_MESSAGE_EDIT,
+      content,
+      tags,
+      getMockMemberPubkey(config),
+    );
+    recordMockMessage(args.channelId, editEvent);
+    emitMockLiveEvent(args.channelId, editEvent);
+    return;
+  }
+
+  await submitSignedEvent(config, {
+    kind: KIND_STREAM_MESSAGE_EDIT,
+    content,
+    tags,
+  });
+}
+
 /** Locate the channel a stored mock event lives in (reactions carry no channel arg). */
 function findMockEventChannel(eventId: string): string | undefined {
   for (const [channelId, events] of mockMessages) {
@@ -5473,6 +5545,11 @@ export function maybeInstallE2eTauriMocks() {
       case "send_channel_message":
         return handleSendChannelMessage(
           payload as Parameters<typeof handleSendChannelMessage>[0],
+          activeConfig,
+        );
+      case "edit_message":
+        return handleEditMessage(
+          payload as Parameters<typeof handleEditMessage>[0],
           activeConfig,
         );
       case "add_reaction":

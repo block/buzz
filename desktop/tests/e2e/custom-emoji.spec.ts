@@ -164,3 +164,125 @@ test("reacting with a custom emoji renders via the localhost media proxy", async
   await row.getByLabel(`Toggle :${REACTION_SHORTCODE}: reaction`).click();
   await expect(reactionImg).toHaveCount(0);
 });
+
+// Edit-flow regression guards.
+//
+// Two bugs lived on the edit path and were invisible to the send-only specs
+// above:
+//   Bug 1 — opening a message that contains a custom emoji for editing showed
+//     the literal `:shortcode:` text in the composer instead of the inline
+//     image. The node only materialized via the live input rule; loading via
+//     `setContent` (how edit-open seeds the composer) left it as text because
+//     the customEmoji node had no markdown parse rule.
+//   Bug 2 — adding a custom emoji while editing, then saving, shipped a bare
+//     `:shortcode:` because the edit-save path didn't attach NIP-30 emoji tags
+//     (the send path does). Without those tags the renderer can't resolve the
+//     shortcode → literal text in the timeline.
+//
+// These drive the real interactive edit flow (More actions → Edit message →
+// save) so they exercise the `edit_message` Tauri command end to end. The mock
+// bridge mirrors the real relay: it emits a kind:40003 edit event carrying the
+// emoji tags, and the timeline overlays it via applyEditTagOverlay.
+
+async function openMessageEditor(
+  page: import("@playwright/test").Page,
+  rowText: string,
+) {
+  const row = page
+    .getByTestId("message-row")
+    .filter({ hasText: rowText })
+    .last();
+  await expect(row).toBeVisible();
+  await row.hover();
+  await row.getByLabel("More actions").click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+  // The composer enters edit mode (shows the edit-target banner).
+  await expect(page.getByTestId("edit-target")).toBeVisible();
+}
+
+test("editing a message with a custom emoji shows the image, not the shortcode (Bug 1)", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  // Send our own message containing a custom emoji so it is editable.
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await input.pressSequentially(`edit-bug1 :${SHORTCODE}:`);
+  await expect(input.locator("img[data-custom-emoji]")).toHaveCount(1);
+  await page.getByTestId("send-message").click();
+  await expect(
+    page
+      .getByTestId("message-timeline")
+      .locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`)
+      .last(),
+  ).toBeVisible();
+
+  // Open it for editing. The composer loads via setContent — the path the
+  // markdown parse rule fixes. The known shortcode must render as the inline
+  // node, NOT as literal `:sprout:` text.
+  await openMessageEditor(page, "edit-bug1");
+  await expect(input.locator("img[data-custom-emoji]")).toHaveCount(1);
+  await expect(input.locator("img[data-custom-emoji]")).toHaveAttribute(
+    "alt",
+    `:${SHORTCODE}:`,
+  );
+  // The raw shortcode text must NOT linger in the editor.
+  await expect(input).not.toContainText(`:${SHORTCODE}:`);
+});
+
+test("adding a custom emoji while editing keeps the image after save (Bug 2)", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  // Send a plain message we'll edit to add an emoji to.
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await input.pressSequentially("edit-bug2 plain");
+  await page.getByTestId("send-message").click();
+  const row = page
+    .getByTestId("message-row")
+    .filter({ hasText: "edit-bug2" })
+    .last();
+  await expect(row).toBeVisible();
+  // No emoji yet.
+  await expect(row.locator("img[data-custom-emoji]")).toHaveCount(0);
+
+  // Edit it: append a custom emoji, then save.
+  await openMessageEditor(page, "edit-bug2");
+  await input.click();
+  await input.pressSequentially(` :${SHORTCODE}:`);
+  await expect(input.locator("img[data-custom-emoji]")).toHaveCount(1);
+  await page.getByTestId("send-message").click();
+
+  // After the edit round-trips through edit_message → kind:40003 (with emoji
+  // tags) → applyEditTagOverlay, the timeline must render the emoji as an
+  // <img>, not a bare `:sprout:`. The pre-fix edit path shipped no emoji tags,
+  // so this row would show literal text and fail here.
+  await expect(
+    row.locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`),
+  ).toBeVisible();
+  await expect(row).not.toContainText(`:${SHORTCODE}:`);
+});
+
+// System-message reaction guard. The original bug in this PR: system messages
+// (joins, topic changes, etc.) couldn't take reactions. The seeded kind:40099
+// join event renders via SystemMessageRow, which now carries the reaction
+// affordance. This drives the real react flow on a system row and asserts the
+// pill appears — the surface the fix targeted.
+test("a system message accepts a custom-emoji reaction", async ({ page }) => {
+  await openGeneral(page);
+
+  const row = page.getByTestId("system-message-row").first();
+  await expect(row).toBeVisible();
+  await row.hover();
+  await row.getByLabel("Open reactions").click();
+
+  const picker = page.locator("em-emoji-picker");
+  await picker.locator("input[type='search']").fill(REACTION_SHORTCODE);
+  await picker.locator(`button[title='${REACTION_SHORTCODE}']`).first().click();
+
+  const reactionImg = row.locator(`img[alt=':${REACTION_SHORTCODE}:']`);
+  await expect(reactionImg).toBeVisible();
+});
