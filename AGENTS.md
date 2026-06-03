@@ -268,8 +268,8 @@ captures. Channel names must match `[a-z0-9-]+`. Available mock channels:
 
 #### Posting screenshots to a PR
 
-`scripts/post-screenshots.sh` hosts PNGs on a shared `agent-screenshots` orphan
-branch and posts them as a PR comment:
+`scripts/post-screenshots.sh` hosts PNGs on a per-developer orphan branch
+(`agent-screenshots/<github-username>`) and posts them as a PR comment:
 
 ```bash
 # Take screenshots, then post them
@@ -281,10 +281,10 @@ just desktop-screenshot --name feature-demo --messages /tmp/msgs.json --outdir t
 ```
 
 The orphan branch accumulates images across PRs, namespaced as `pr-<N>--`. Re-runs
-for the same PR overwrite previous images. Concurrent runs for different PRs may
-conflict (the push uses `--force-with-lease` and will fail if the branch was
-updated since fetch; retry if needed). Delete the branch when no longer needed:
-`git push origin --delete agent-screenshots`.
+for the same PR overwrite previous images. Concurrent runs by the same developer's
+agents may conflict (the push uses `--force-with-lease`; retry if needed). Delete
+the branch when no longer needed:
+`git push origin --delete agent-screenshots/<username>`.
 
 The Playwright MCP browser (`@playwright/mcp`) is also configured but cannot
 drive the desktop app directly because it evaluates JS after page load — too

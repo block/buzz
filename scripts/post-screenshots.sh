@@ -15,7 +15,8 @@ if ! [[ "$PR" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-BRANCH="agent-screenshots"
+GH_USER=$(gh api user --jq .login)
+BRANCH="agent-screenshots/${GH_USER}"
 REPO="block/sprout"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}"
 
