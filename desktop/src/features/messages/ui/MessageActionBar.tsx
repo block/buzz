@@ -378,6 +378,7 @@ export function MessageActionBar({
                 </div>
               ) : null}
               <Picker
+                autoFocus
                 data={data}
                 custom={customEmojiCategory}
                 onEmojiSelect={(emoji: { native?: string; id?: string }) => {
