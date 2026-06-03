@@ -1,4 +1,5 @@
 import { MessageSquare } from "lucide-react";
+import { useMemo } from "react";
 
 import {
   resolveUserLabel,
@@ -44,6 +45,13 @@ export function ForumPostCard({
   });
   const avatarUrl = profiles?.[post.pubkey.toLowerCase()]?.avatarUrl ?? null;
   const mentionNames = resolveMentionNames(post.tags, profiles);
+  // Memoize the imeta map: `parseImetaTags` builds a fresh object each render,
+  // and the `Markdown` memo compares `imetaByUrl` by reference. Without this,
+  // the post's Markdown (and the FileCard <button> it renders) is rebuilt on
+  // every ForumPostCard render, swapping the live DOM node. A click that lands
+  // across one of those swaps splits mousedown/mouseup onto different nodes, so
+  // the browser never fires `click` and a file download is silently dropped.
+  const imetaByUrl = useMemo(() => parseImetaTags(post.tags), [post.tags]);
   const summary = post.threadSummary;
   const previewContent =
     post.content.length > 200
@@ -110,7 +118,7 @@ export function ForumPostCard({
         <Markdown
           compact
           content={previewContent}
-          imetaByUrl={parseImetaTags(post.tags)}
+          imetaByUrl={imetaByUrl}
           mentionNames={mentionNames}
         />
       </div>
