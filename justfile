@@ -198,6 +198,19 @@ desktop-e2e-smoke:
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
+# Take desktop screenshots using the mock bridge
+desktop-screenshot *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{desktop_dir}}
+    [[ -d dist ]] || { cd ..; just desktop-build; cd {{desktop_dir}}; }
+    if ! curl -sf http://127.0.0.1:4173/ >/dev/null 2>&1; then
+        python3 -m http.server 4173 -d dist >/dev/null 2>&1 &
+        trap "kill $! 2>/dev/null || true" EXIT
+        for i in $(seq 1 20); do curl -sf http://127.0.0.1:4173/ >/dev/null && break; sleep 0.5; done
+    fi
+    node tests/helpers/screenshot.mjs {{ARGS}}
+
 # Mesh-compute e2e: the CI-safe layers (relay mesh signaling invariants + Playwright UI)
 mesh-e2e:
     cargo test -p sprout-relay mesh_signaling

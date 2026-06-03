@@ -230,18 +230,58 @@ E2E mock bridge. A standalone screenshot helper at
 tests use (`addInitScript` + `window.__SPROUT_E2E__`) into a CLI tool.
 
 ```bash
-just desktop-build   # build the frontend first
-cd desktop
-node tests/helpers/screenshot.mjs --name home
-node tests/helpers/screenshot.mjs --name channel --route /channels/general
-node tests/helpers/screenshot.mjs --name search --click open-search
-node tests/helpers/screenshot.mjs --name settings --click open-settings
+just desktop-screenshot --name home
+just desktop-screenshot --name channel --route /channels/general
+just desktop-screenshot --name search --click open-search
+just desktop-screenshot --name settings --click open-settings
 ```
 
 Options: `--name` (filename), `--route` (client route), `--click` (data-testid
 or CSS selector), `--wait` (ms, default 2000), `--viewport` (WxH, default
-1280x720), `--outdir` (default `test-results/screenshots`). Screenshots are
-saved as PNGs and the path is printed to stdout.
+1280x720), `--outdir` (default `test-results/screenshots`),
+`--messages` (JSON file path). Screenshots are saved as PNGs and the path is
+printed to stdout. The `just desktop-screenshot` target handles building the
+frontend and starting the preview server automatically.
+
+#### Injecting messages
+
+Use `--messages` to inject content into the channel timeline before screenshotting.
+The JSON file contains an array of messages to inject:
+
+```bash
+cat > /tmp/msgs.json << 'EOF'
+[
+  { "channelName": "general", "content": "```typescript\nconst x: number = 42;\n```" },
+  { "channelName": "general", "content": "plain text message" }
+]
+EOF
+just desktop-screenshot --name code-blocks --messages /tmp/msgs.json
+```
+
+Each message requires `channelName` and `content`; optional fields are `pubkey`
+and `kind`. When `--messages` is provided, the script navigates to the channel
+from the first message (ignoring `--route`), waits for the live subscription,
+injects all messages, then captures. Available mock channels: `general`,
+`random`, `design`, `sales`, `engineering`, `agents`, `watercooler`,
+`announcements`, `alice-tyler`, `bob-tyler`.
+
+#### Posting screenshots to a PR
+
+`scripts/post-screenshots.sh` hosts PNGs on a shared `agent-screenshots` orphan
+branch and posts them as a PR comment:
+
+```bash
+# Take screenshots, then post them
+just desktop-screenshot --name feature-demo --messages /tmp/msgs.json --outdir test-results/screenshots
+./scripts/post-screenshots.sh 803 test-results/screenshots
+
+# Or provide a custom comment body (images are appended)
+./scripts/post-screenshots.sh 803 test-results/screenshots body.md
+```
+
+The orphan branch accumulates images across PRs, namespaced as `pr-<N>/`. Re-runs
+for the same PR overwrite previous images. Delete the branch when no longer
+needed: `git push origin --delete agent-screenshots`.
 
 The Playwright MCP browser (`@playwright/mcp`) is also configured but cannot
 drive the desktop app directly because it evaluates JS after page load — too
