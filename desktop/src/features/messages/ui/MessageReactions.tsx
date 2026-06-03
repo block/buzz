@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type { TimelineReaction } from "@/features/messages/types";
 import { cn } from "@/shared/lib/cn";
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -10,7 +11,9 @@ const MAX_VISIBLE_REACTORS = 10;
 /**
  * Render a reaction's emoji: a custom (image) emoji when `emojiUrl` is set,
  * otherwise the unicode/text glyph. `className` sizes the image to match the
- * surrounding text.
+ * surrounding text. The relay URL is rewritten through the localhost media
+ * proxy (like every other relay-hosted <img>) — WKWebView bypasses WARP, so a
+ * direct relay URL gets a Cloudflare Access 403 and renders as a broken image.
  */
 function EmojiGlyph({
   reaction,
@@ -23,7 +26,7 @@ function EmojiGlyph({
     return (
       <img
         alt={reaction.emoji}
-        src={reaction.emojiUrl}
+        src={rewriteRelayUrl(reaction.emojiUrl)}
         className={cn(
           "inline-block object-contain align-text-bottom",
           className,
