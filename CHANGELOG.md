@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.9
+
+82ae85f79a9 fix: native arbitrary-file download + image context-menu flash (#830)
+7797ae77f64 fix(desktop): custom emoji reaction rendering + picker autofocus (#831)
+33cfc852932 Mesh-LLM v1: relay-gated direct-iroh inference between users (WAN) (#822)
+
+
 ## v0.3.8
 
 

@@ -1,7 +1,7 @@
 name: sprout_mobile
 description: Sprout mobile client
 publish_to: 'none'
-version: 0.3.8+1
+version: 0.3.9+1
 
 environment:
   sdk: ^3.11.4
