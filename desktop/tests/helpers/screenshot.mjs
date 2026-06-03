@@ -10,13 +10,16 @@
 //   node tests/helpers/screenshot.mjs [options]
 //
 // Options:
-//   --name <name>        Screenshot filename without extension (default: screenshot)
-//   --route <path>       Client-side route to navigate to (default: /)
-//   --click <selector>   CSS selector or data-testid to click before capture
-//   --wait <ms>          Milliseconds to wait before capture (default: 2000)
-//   --viewport <WxH>     Viewport dimensions (default: 1280x720)
-//   --outdir <path>      Output directory (default: test-results/screenshots)
-//   --messages <path>    JSON file with messages to inject before capture
+//   --name <name>              Screenshot filename without extension (default: screenshot)
+//   --route <path>             Client-side route to navigate to (default: /)
+//   --active-channel <name>    Channel to navigate to and view (channel-aware navigation)
+//   --click <selector>         CSS selector or data-testid to click before capture
+//   --right-click <selector>   Right-click a selector (for context menus)
+//   --hover <selector>         Hover over a selector before capture
+//   --wait <ms>                Milliseconds to wait before capture (default: 2000)
+//   --viewport <WxH>           Viewport dimensions (default: 1280x720)
+//   --outdir <path>            Output directory (default: test-results/screenshots)
+//   --messages <path>          JSON file with messages to inject before capture
 
 import { parseArgs } from "node:util";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -27,7 +30,10 @@ const { values: args } = parseArgs({
   options: {
     name: { type: "string", default: "screenshot" },
     route: { type: "string", default: "/" },
+    "active-channel": { type: "string" },
     click: { type: "string" },
+    "right-click": { type: "string" },
+    hover: { type: "string" },
     wait: { type: "string", default: "2000" },
     viewport: { type: "string", default: "1280x720" },
     outdir: { type: "string", default: "test-results/screenshots" },
@@ -36,12 +42,25 @@ const { values: args } = parseArgs({
   strict: true,
 });
 
+const activeChannel = args["active-channel"];
+const rightClick = args["right-click"];
+
 const [vpWidth, vpHeight] = args.viewport.split("x").map(Number);
 const waitMs = Number(args.wait);
 const outdir = resolve(args.outdir);
 
 if (!existsSync(outdir)) {
   mkdirSync(outdir, { recursive: true });
+}
+
+function resolveSelector(value) {
+  return value.startsWith("[") ? value : `[data-testid="${value}"]`;
+}
+
+function bail(msg) {
+  console.error(msg);
+  process.exitCode = 1;
+  throw new Error(msg);
 }
 
 const BASE_URL = "http://127.0.0.1:4173";
@@ -114,7 +133,7 @@ await page.addInitScript(() => {
 
 try {
   if (args.messages) {
-    if (args.route !== "/") {
+    if (args.route !== "/" && !activeChannel) {
       console.warn("warning: --route is ignored when --messages is provided");
     }
 
@@ -122,9 +141,7 @@ try {
     try {
       messages = JSON.parse(readFileSync(resolve(args.messages), "utf8"));
     } catch (err) {
-      console.error(`Failed to read messages file: ${err.message}`);
-      process.exitCode = 1;
-      throw err;
+      bail(`Failed to read messages file: ${err.message}`);
     }
 
     if (
@@ -135,60 +152,64 @@ try {
           typeof m.channelName !== "string" || typeof m.content !== "string",
       )
     ) {
-      const msg =
-        "messages file must be a non-empty array of { channelName: string, content: string, pubkey?: string, kind?: number }";
-      console.error(msg);
-      process.exitCode = 1;
-      throw new Error(msg);
+      bail(
+        "messages file must be a non-empty array of { channelName, content, pubkey?, kind?, mentionPubkeys?, extraTags?, parentEventId? }",
+      );
     }
 
-    const channels = new Set(messages.map((m) => m.channelName));
-    if (channels.size > 1) {
-      const msg =
-        "All messages must target the same channelName for a single screenshot";
-      console.error(msg);
-      process.exitCode = 1;
-      throw new Error(msg);
+    const targetChannels = new Set(messages.map((m) => m.channelName));
+
+    if (!activeChannel && targetChannels.size > 1) {
+      bail(
+        "All messages must target the same channelName, or use --active-channel to specify the viewing channel",
+      );
     }
 
-    const channelName = messages[0].channelName;
+    const viewChannel = activeChannel ?? [...targetChannels][0];
 
-    if (!/^[a-z0-9-]+$/.test(channelName)) {
-      const msg = `Invalid channel name: ${channelName}`;
-      console.error(msg);
-      process.exitCode = 1;
-      throw new Error(msg);
+    for (const ch of [...targetChannels, viewChannel]) {
+      if (!/^[a-z0-9-]+$/.test(ch)) {
+        bail(`Invalid channel name: ${ch}`);
+      }
     }
 
     await page.goto(BASE_URL);
-    await page.waitForSelector(`[data-testid="channel-${channelName}"]`, {
+    await page.waitForSelector(`[data-testid="channel-${viewChannel}"]`, {
       timeout: 10000,
     });
-    await page.click(`[data-testid="channel-${channelName}"]`);
+    await page.click(`[data-testid="channel-${viewChannel}"]`);
 
-    await page.waitForFunction(
-      (name) =>
-        window.__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
-          channelName: name,
-        }) ?? false,
-      channelName,
-      { timeout: 10000 },
-    );
+    for (const ch of targetChannels) {
+      await page.waitForFunction(
+        (name) =>
+          window.__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: name,
+          }) ?? false,
+        ch,
+        { timeout: 10000 },
+      );
+    }
 
     for (const msg of messages) {
       await page.evaluate(
         (m) => {
           window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.(m);
         },
-        {
-          channelName: msg.channelName,
-          content: msg.content,
-          pubkey: msg.pubkey ?? DEFAULT_MOCK_PUBKEY,
-          kind: msg.kind,
-        },
+        { ...msg, pubkey: msg.pubkey ?? DEFAULT_MOCK_PUBKEY },
       );
     }
 
+    await page.waitForTimeout(waitMs);
+  } else if (activeChannel) {
+    if (!/^[a-z0-9-]+$/.test(activeChannel)) {
+      bail(`Invalid channel name: ${activeChannel}`);
+    }
+
+    await page.goto(BASE_URL);
+    await page.waitForSelector(`[data-testid="channel-${activeChannel}"]`, {
+      timeout: 10000,
+    });
+    await page.click(`[data-testid="channel-${activeChannel}"]`);
     await page.waitForTimeout(waitMs);
   } else {
     const url = args.route === "/" ? BASE_URL : `${BASE_URL}/#${args.route}`;
@@ -196,11 +217,16 @@ try {
     await page.waitForTimeout(waitMs);
   }
 
+  if (args.hover) {
+    await page.hover(resolveSelector(args.hover));
+    await page.waitForTimeout(500);
+  }
+
   if (args.click) {
-    const selector = args.click.startsWith("[")
-      ? args.click
-      : `[data-testid="${args.click}"]`;
-    await page.click(selector);
+    await page.click(resolveSelector(args.click));
+    await page.waitForTimeout(500);
+  } else if (rightClick) {
+    await page.click(resolveSelector(rightClick), { button: "right" });
     await page.waitForTimeout(500);
   }
 
