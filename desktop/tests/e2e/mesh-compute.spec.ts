@@ -9,9 +9,15 @@ import { openSettings } from "../helpers/settings";
 // invariant and the membership-denial copy.
 
 type E2eWindow = Window & {
+  __SPROUT_E2E__?: { mock?: { meshReporterPubkey?: string } };
   __SPROUT_E2E_INVOKE_MOCK_COMMAND__?: unknown;
   __TAURI_INTERNALS__?: { invoke?: unknown };
   __SPROUT_E2E_COMMANDS__?: string[];
+  __SPROUT_E2E_SIGNED_EVENTS__?: Array<{
+    content: string;
+    kind: number;
+    tags: string[][];
+  }>;
   __SPROUT_E2E_SET_MESH__?: (mesh: {
     admitted?: boolean;
     models?: Array<{ id: string; name: string | null }>;
@@ -41,6 +47,13 @@ async function gotoApp(page: import("@playwright/test").Page) {
 async function commands(page: import("@playwright/test").Page) {
   return page.evaluate(
     () => (window as E2eWindow).__SPROUT_E2E_COMMANDS__ ?? [],
+  );
+}
+
+/** Signed event templates the bridge recorded so far. */
+async function signedEvents(page: import("@playwright/test").Page) {
+  return page.evaluate(
+    () => (window as E2eWindow).__SPROUT_E2E_SIGNED_EVENTS__ ?? [],
   );
 }
 
@@ -155,6 +168,51 @@ test("Run-on-relay-mesh ensures the client node BEFORE spawning the agent", asyn
     "ensure must occur in the Create action",
   ).toBeGreaterThanOrEqual(0);
   expect(ensureIdx).toBeLessThan(createIdx);
+});
+
+test("Run-on-relay-mesh canonicalizes the mesh connect #p target", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const w = window as E2eWindow;
+    w.__SPROUT_E2E__ = {
+      ...(w.__SPROUT_E2E__ ?? {}),
+      mock: {
+        ...(w.__SPROUT_E2E__?.mock ?? {}),
+        meshReporterPubkey:
+          "  DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF  ",
+      },
+    };
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByRole("button", { name: "New" }).click();
+  await page.getByText("Custom Agent").click();
+  await page.getByTestId("agent-name-input").fill("Mesh Agent");
+
+  const toggle = page.getByTestId("agent-relay-mesh-toggle");
+  await expect(toggle).toBeEnabled({ timeout: 10_000 });
+  await toggle.click();
+  await page
+    .getByTestId("agent-relay-mesh-model")
+    .selectOption({ label: "SmolLM2 135M — Mock desktop" });
+
+  await page.getByTestId("create-agent-submit").click();
+  await expect
+    .poll(async () =>
+      (await signedEvents(page)).find((event) => event.kind === 24621),
+    )
+    .toMatchObject({
+      tags: [
+        [
+          "p",
+          "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        ],
+      ],
+    });
+  await expect
+    .poll(async () => await commands(page))
+    .toContain("create_managed_agent");
 });
 
 test("a non-member cannot enable relay-mesh — membership is the gate", async ({

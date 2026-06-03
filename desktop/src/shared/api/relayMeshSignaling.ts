@@ -23,6 +23,11 @@ export async function publishMeshStatusReport(
   );
 }
 
+function normalizePubkey(value: string): string | null {
+  const trimmed = value.trim().toLowerCase();
+  return /^[0-9a-f]{64}$/.test(trimmed) ? trimmed : null;
+}
+
 export async function publishMeshConnectRequest(input: {
   targetPubkey: string;
   selfEndpointAddr: string;
@@ -40,10 +45,17 @@ export async function publishMeshConnectRequest(input: {
   };
   if (input.selfEndpointId) content.self_endpoint_id = input.selfEndpointId;
   if (input.peerEndpointId) content.peer_endpoint_id = input.peerEndpointId;
+  const targetPubkey = normalizePubkey(input.targetPubkey);
+  if (!targetPubkey) {
+    throw new Error(
+      "Selected relay mesh target has an invalid reporter pubkey.",
+    );
+  }
+
   const event = await signRelayEvent({
     kind: KIND_MESH_CONNECT_REQUEST,
     content: JSON.stringify(content),
-    tags: [["p", input.targetPubkey]],
+    tags: [["p", targetPubkey]],
   });
   await relayClient.publishEvent(
     event,
