@@ -4981,10 +4981,23 @@ function sendToMockSocket(args: {
 
     // Mesh control events (24620 status report, 24621 connect request) are not
     // channel messages — they carry a `p` tag, not an `h` tag. The real relay
-    // accepts them after membership/shape checks; the mock just ACKs so the
-    // desktop mesh flow (publishMeshConnectRequest) can proceed. We do not model
-    // the paired 24622 here; that belongs in a dedicated call-me-now test.
+    // accepts them after membership/shape checks; the mock mirrors the one shape
+    // check that matters for regression coverage: a 24621 MUST carry a `#p`
+    // target, else the real relay rejects it with "missing #p target". ACKing a
+    // tagless 24621 here would hide exactly that bug, so reject it instead.
     if (event.kind === 24620 || event.kind === 24621) {
+      if (
+        event.kind === 24621 &&
+        !event.tags.some((tag) => tag[0] === "p" && tag[1])
+      ) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "invalid: mesh connect request missing #p target",
+        ]);
+        return;
+      }
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }

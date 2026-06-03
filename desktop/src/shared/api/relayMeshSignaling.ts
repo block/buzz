@@ -1,6 +1,7 @@
 import { signRelayEvent } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
 import { relayClient } from "@/shared/api/relayClient";
+import { canonicalPubkeyOrThrow } from "@/shared/lib/pubkey";
 import {
   KIND_MESH_CALL_ME_NOW,
   KIND_MESH_CONNECT_REQUEST,
@@ -43,7 +44,7 @@ export async function publishMeshConnectRequest(input: {
   const event = await signRelayEvent({
     kind: KIND_MESH_CONNECT_REQUEST,
     content: JSON.stringify(content),
-    tags: [["p", input.targetPubkey]],
+    tags: [["p", canonicalPubkeyOrThrow(input.targetPubkey)]],
   });
   await relayClient.publishEvent(
     event,
