@@ -691,7 +691,7 @@ async fn handle_workflow_trigger(
     };
 
     // 4. Execute: create workflow run
-    let trigger_ctx = TriggerContext {
+    let mut trigger_ctx = TriggerContext {
         channel_id: workflow
             .channel_id
             .map(|id| id.to_string())
@@ -699,6 +699,17 @@ async fn handle_workflow_trigger(
         author: hex::encode(&self_bytes),
         ..Default::default()
     };
+    if !event.content.is_empty() {
+        if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&event.content) {
+            for (k, v) in map {
+                let val_str = match v {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                };
+                trigger_ctx.webhook_fields.insert(k, val_str);
+            }
+        }
+    }
     let trigger_ctx_json = serde_json::to_value(&trigger_ctx).ok();
 
     let event_id_bytes = event.id.as_bytes().to_vec();
