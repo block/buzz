@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.11
+
+269b35e8de7 fix(mobile+desktop): cross-device read state sync + diagnostic logging (#843)
+3ddfe5fcc25 feat(mobile): star channels (Slack-style favorites) (#863)
+36d7dbd7cae feat: desktop-screenshot skill to stop agents uploading relay media to PRs (#862)
+c10b4f8f5c6 feat(desktop): star channels (Slack-style favorites) (#860)
+f748f71268e fix(desktop): handle symlinked persona pack directories (#859)
+1fe7bf28725 feat: channel muting for desktop and mobile (#838)
+4ead7de4630 feat(acp): default SPROUT_ACP_MEMORY to on (#854)
+759e5cd9235 fix(desktop): eliminate image-hover layout jump in messages (#813)
+
+
 ## v0.3.10
 
 34ac3ba1d18 fix(desktop): harden relay mesh connect p-tag (#834)
