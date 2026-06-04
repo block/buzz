@@ -266,7 +266,8 @@ pub async fn query_events(
 
     // ── NIP-50 search: route to Typesense if any filter has a `search` field ──
     if filters.iter().any(|f| f.search.is_some()) {
-        return handle_bridge_search(&state, &filters, &accessible_channels).await;
+        return handle_bridge_search(&state, &filters, &accessible_channels, &authed_pubkey_hex)
+            .await;
     }
 
     // ── Presence: synthesize kind:20001 from Redis (ephemeral, never in DB) ──
@@ -438,6 +439,14 @@ pub async fn query_events(
                     if !sprout_core::filter::filters_match(std::slice::from_ref(filter), &se) {
                         continue;
                     }
+                    // Result-level read auth: never hand a viewer-private snapshot
+                    // (kind:30622) to anyone but its owner, even via kindless `ids`.
+                    if !sprout_core::filter::reader_authorized_for_event(
+                        &se.event,
+                        &authed_pubkey_hex,
+                    ) {
+                        continue;
+                    }
                     if let Ok(v) = serde_json::to_value(&se.event) {
                         events.push(v);
                     }
@@ -596,6 +605,7 @@ fn search_hit_accepted(
     filter: &nostr::Filter,
     stored: &sprout_core::StoredEvent,
     accessible_channels: &[uuid::Uuid],
+    reader_pubkey_hex: &str,
 ) -> bool {
     if !sprout_core::filter::filters_match(std::slice::from_ref(filter), stored) {
         return false;
@@ -604,6 +614,9 @@ fn search_hit_accepted(
         if !accessible_channels.contains(&ch_id) {
             return false;
         }
+    }
+    if !sprout_core::filter::reader_authorized_for_event(&stored.event, reader_pubkey_hex) {
+        return false;
     }
     true
 }
@@ -614,6 +627,7 @@ async fn handle_bridge_search(
     state: &AppState,
     filters: &[nostr::Filter],
     accessible_channels: &[uuid::Uuid],
+    reader_pubkey_hex: &str,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     // Bridge always includes global (non-channel) events — same as WS with full scopes.
     let channel_scope = match crate::handlers::req::build_search_channel_scope_filter(
@@ -727,7 +741,7 @@ async fn handle_bridge_search(
                 Some(ev) => ev,
                 None => continue,
             };
-            if !search_hit_accepted(filter, stored, accessible_channels) {
+            if !search_hit_accepted(filter, stored, accessible_channels, reader_pubkey_hex) {
                 continue;
             }
             // Dedup across filters.
@@ -1004,12 +1018,14 @@ mod tests {
             .kind(Kind::Custom(30174))
             .custom_tags(p_tag, [&owner_a]);
 
+        // 30174 is not owner-gated, so any reader hex is fine here.
+        let reader = Keys::generate().public_key().to_hex();
         assert!(
-            search_hit_accepted(&filter, &env_for_a, &[]),
+            search_hit_accepted(&filter, &env_for_a, &[], &reader),
             "envelope addressed to owner_a must be returned"
         );
         assert!(
-            !search_hit_accepted(&filter, &env_for_b, &[]),
+            !search_hit_accepted(&filter, &env_for_b, &[], &reader),
             "envelope addressed to owner_b must NOT be returned for a #p=[owner_a] search"
         );
     }
@@ -1031,9 +1047,10 @@ mod tests {
             .kind(Kind::Custom(30174))
             .author(agent_a.public_key());
 
-        assert!(search_hit_accepted(&filter, &env_a, &[]));
+        let reader = Keys::generate().public_key().to_hex();
+        assert!(search_hit_accepted(&filter, &env_a, &[], &reader));
         assert!(
-            !search_hit_accepted(&filter, &env_b, &[]),
+            !search_hit_accepted(&filter, &env_b, &[], &reader),
             "authors=[agent_a] search must not return events authored by agent_b"
         );
     }
@@ -1053,12 +1070,13 @@ mod tests {
             .kind(Kind::Custom(30174))
             .custom_tags(p_tag, [&owner]);
 
+        let reader = Keys::generate().public_key().to_hex();
         assert!(
-            !search_hit_accepted(&filter, &stored, &[]),
+            !search_hit_accepted(&filter, &stored, &[], &reader),
             "channel-scoped hit must be rejected when caller has no channel access"
         );
         assert!(
-            search_hit_accepted(&filter, &stored, &[scoped_channel]),
+            search_hit_accepted(&filter, &stored, &[scoped_channel], &reader),
             "channel-scoped hit must be accepted when caller has access to that channel"
         );
     }
@@ -1215,5 +1233,46 @@ mod tests {
         let mut se = sprout_core::StoredEvent::new(ev, None);
         se.channel_id = Some(ch);
         assert!(!event_in_accessible_channel(&se, &[other]));
+    }
+
+    /// NIP-DV regression: a relay-signed kind:30622 snapshot must not leak via
+    /// search through a kindless `ids:[snapshot_id]` filter that carries no #p.
+    /// `filters_match` passes (id matches), channel check passes (channel_id =
+    /// None), so only the result-level `reader_authorized_for_event` check
+    /// stands between a third party and the owner's private hide set.
+    #[test]
+    fn search_hit_rejects_dm_visibility_for_kindless_ids_third_party() {
+        let relay = Keys::generate();
+        let viewer = Keys::generate().public_key().to_hex();
+        let third_party = Keys::generate().public_key().to_hex();
+
+        let d_tag = Tag::custom(
+            nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::D)),
+            [&viewer],
+        );
+        let p_tag = Tag::custom(
+            nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P)),
+            [&viewer],
+        );
+        let ev = EventBuilder::new(
+            Kind::Custom(sprout_core::kind::KIND_DM_VISIBILITY as u16),
+            "",
+        )
+        .tags([d_tag, p_tag])
+        .sign_with_keys(&relay)
+        .expect("sign snapshot");
+        let stored = sprout_core::StoredEvent::new(ev.clone(), None);
+
+        // Kindless filter — the exact bypass shape: no #p, just the id.
+        let filter = nostr::Filter::new().id(ev.id);
+
+        assert!(
+            !search_hit_accepted(&filter, &stored, &[], &third_party),
+            "third party must not receive a DM-visibility snapshot via kindless ids search"
+        );
+        assert!(
+            search_hit_accepted(&filter, &stored, &[], &viewer),
+            "owner must still receive their own snapshot"
+        );
     }
 }

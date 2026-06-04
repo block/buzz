@@ -412,6 +412,32 @@ pub async fn unhide_dm(pool: &PgPool, channel_id: Uuid, pubkey: &[u8]) -> Result
     Ok(())
 }
 
+/// Return the channel IDs of all DMs the given user currently has hidden
+/// (`hidden_at IS NOT NULL`) while still being an active member. Used to build
+/// the relay-signed NIP-DV visibility snapshot.
+pub async fn list_hidden_dms(pool: &PgPool, pubkey: &[u8]) -> Result<Vec<Uuid>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT cm.channel_id
+        FROM channel_members cm
+        JOIN channels c ON c.id = cm.channel_id
+        WHERE cm.pubkey = $1
+          AND cm.removed_at IS NULL
+          AND cm.hidden_at IS NOT NULL
+          AND c.channel_type = 'dm'
+          AND c.deleted_at IS NULL
+        ORDER BY cm.channel_id
+        "#,
+    )
+    .bind(pubkey)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|r| r.try_get::<Uuid, _>("channel_id").map_err(Into::into))
+        .collect()
+}
+
 // -- Row mapping --------------------------------------------------------------
 
 fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {

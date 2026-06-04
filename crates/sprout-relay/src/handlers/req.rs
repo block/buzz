@@ -9,8 +9,8 @@ use hex;
 use nostr::Filter;
 use sprout_core::filter::filters_match;
 use sprout_core::kind::{
-    KIND_AGENT_ENGRAM, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_AGENT_ENGRAM, KIND_AGENT_OBSERVER_FRAME, KIND_DM_VISIBILITY, KIND_GIFT_WRAP,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
 };
 use sprout_db::EventQuery;
 
@@ -22,11 +22,12 @@ use crate::state::AppState;
 
 const MAX_HISTORICAL_LIMIT: i64 = 10_000;
 const MAX_SUBSCRIPTIONS: usize = 1024;
-const P_GATED_KINDS: [u32; 4] = [
+const P_GATED_KINDS: [u32; 5] = [
     KIND_AGENT_OBSERVER_FRAME,
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_GIFT_WRAP,
+    KIND_DM_VISIBILITY,
 ];
 
 /// Handle a REQ message: register the subscription, deliver historical events, then send EOSE.
@@ -136,6 +137,7 @@ pub async fn handle_req(
             &filters,
             &accessible_channels,
             token_channel_ids.is_none(),
+            &hex::encode(&pubkey_bytes),
             &conn,
             &state,
         )
@@ -171,6 +173,7 @@ pub async fn handle_req(
     // per-filter limits or non-overlapping time windows.
     let mut seen_ids: HashSet<nostr::EventId> = HashSet::new();
     let mut total_sent: usize = 0;
+    let viewer_hex = hex::encode(&pubkey_bytes);
 
     for filter in &filters {
         // Use per-filter #h channel scope when available, falling back to the
@@ -216,6 +219,13 @@ pub async fn handle_req(
                 if !accessible_channels.contains(&ch_id) {
                     continue;
                 }
+            }
+
+            // Result-level read auth: a viewer-private snapshot (kind:30622) is
+            // delivered only to its owner, even if reached via a kindless
+            // `ids:[…]` subscription that skips the filter-level `#p` gate.
+            if !sprout_core::filter::reader_authorized_for_event(&stored.event, &viewer_hex) {
+                continue;
             }
 
             // Dedup AFTER acceptance — an event that fails filter A's constraints
@@ -278,6 +288,7 @@ async fn handle_search_req(
     filters: &[Filter],
     accessible_channels: &[uuid::Uuid],
     include_global: bool,
+    reader_pubkey_hex: &str,
     conn: &ConnectionState,
     state: &AppState,
 ) {
@@ -429,6 +440,12 @@ async fn handle_search_req(
                         if !accessible_channels.contains(&ch_id) {
                             continue;
                         }
+                    }
+                    if !sprout_core::filter::reader_authorized_for_event(
+                        &stored.event,
+                        reader_pubkey_hex,
+                    ) {
+                        continue;
                     }
                     // Dedup AFTER acceptance — an event that fails filter A's constraints
                     // must remain eligible for filter B (NIP-01 OR semantics).
@@ -709,18 +726,25 @@ fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
 pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
     filters.iter().all(|filter| {
-        // Filters with explicit `ids` are targeting specific known events — they
-        // can't be used to fish for p-gated events you don't own because the
-        // caller already knows the event ID. Skip the p-gate check.
-        if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
-            return true;
-        }
-
         let can_match_p_gated = filter.kinds.as_ref().is_none_or(|ks| {
             ks.iter()
                 .any(|kind| P_GATED_KINDS.contains(&(kind.as_u16() as u32)))
         });
         if !can_match_p_gated {
+            return true;
+        }
+
+        // The `ids` exemption ("knowing the id implies authorization") is only
+        // safe for kinds whose id is author-bound or whose content is encrypted.
+        // KIND_DM_VISIBILITY is relay-signed (id not author-bound) and exposes
+        // plaintext private hide choices, so its `#p` owner check MUST hold even
+        // when `ids` is present. Only filters that explicitly name the kind lose
+        // the exemption — a kindless `ids` lookup is unaffected.
+        let explicitly_dm_visibility = filter.kinds.as_ref().is_some_and(|ks| {
+            ks.iter()
+                .any(|kind| kind.as_u16() as u32 == KIND_DM_VISIBILITY)
+        });
+        if !explicitly_dm_visibility && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
             return true;
         }
 
@@ -842,6 +866,40 @@ mod tests {
         let search_filter = Filter::new().search("hello world");
         let filters = [search_filter];
         assert!(filters.iter().any(|f| f.search.is_some()));
+    }
+
+    #[test]
+    fn dm_visibility_requires_p_tag_even_with_ids() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let authed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let snapshot_id = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let dm_vis = nostr::Kind::Custom(sprout_core::kind::KIND_DM_VISIBILITY as u16);
+
+        // Knowing another viewer's snapshot id must NOT authorize reading it:
+        // ids alone, or ids + someone else's #p, are both rejected.
+        let ids_only = Filter::new()
+            .kind(dm_vis)
+            .id(nostr::EventId::from_hex(snapshot_id).unwrap());
+        assert!(!p_gated_filters_authorized(&[ids_only], authed));
+
+        let ids_wrong_p = Filter::new()
+            .kind(dm_vis)
+            .id(nostr::EventId::from_hex(snapshot_id).unwrap())
+            .custom_tags(p_tag, [other]);
+        assert!(!p_gated_filters_authorized(&[ids_wrong_p], authed));
+
+        // The owner querying their own snapshot (by #p) is allowed, ids or not.
+        let owner = Filter::new().kind(dm_vis).custom_tags(p_tag, [authed]);
+        assert!(p_gated_filters_authorized(&[owner], authed));
+
+        // The ids exemption still applies to other p-gated kinds (member notifs).
+        let member_notif_ids = Filter::new()
+            .kind(nostr::Kind::Custom(
+                sprout_core::kind::KIND_MEMBER_ADDED_NOTIFICATION as u16,
+            ))
+            .id(nostr::EventId::from_hex(snapshot_id).unwrap());
+        assert!(p_gated_filters_authorized(&[member_notif_ids], authed));
     }
 
     #[test]

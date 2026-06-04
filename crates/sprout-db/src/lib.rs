@@ -657,6 +657,11 @@ impl Db {
         dm::unhide_dm(&self.pool, channel_id, pubkey).await
     }
 
+    /// List the channel IDs of all DMs the given user currently has hidden.
+    pub async fn list_hidden_dms(&self, pubkey: &[u8]) -> Result<Vec<Uuid>> {
+        dm::list_hidden_dms(&self.pool, pubkey).await
+    }
+
     // ── Threads ──────────────────────────────────────────────────────────────
 
     /// Insert thread metadata.

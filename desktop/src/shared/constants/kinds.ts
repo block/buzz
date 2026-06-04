@@ -28,6 +28,9 @@ export const KIND_MESH_STATUS_REPORT = 24620;
 export const KIND_MESH_CONNECT_REQUEST = 24621;
 export const KIND_MESH_CALL_ME_NOW = 24622;
 export const KIND_REPO_ANNOUNCEMENT = 30617;
+// NIP-DV: relay-signed per-viewer DM visibility snapshot (d=viewer pubkey,
+// h-tags = currently-hidden DM channel ids).
+export const KIND_DM_VISIBILITY = 30622;
 
 // Human-visible "new content" message kinds. Used as the unread trigger set
 // (sidebar badges, catch-up queries) and as the Home-feed mention query.

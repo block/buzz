@@ -9,6 +9,7 @@ import {
   KIND_EMOJI_SET,
 } from "@/shared/api/customEmoji";
 import {
+  KIND_DM_VISIBILITY,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
   KIND_USER_STATUS,
@@ -2484,44 +2485,67 @@ async function handleGetChannels(config: E2eConfig | undefined) {
   const memberSet = new Set(channelIds);
   const metaEvents = allMetaEvents;
 
+  // NIP-DV: query the viewer's latest DM visibility snapshot (kind:30622).
+  // The snapshot is `#p`-gated to its owner, so we query by `#p`=my pubkey.
+  // Its `h` tags are the DM channel ids to hide from the sidebar.
+  const visibilityEvents = await relayQuery(config, [
+    { kinds: [KIND_DM_VISIBILITY], "#p": [identity.pubkey], limit: 1 },
+  ]);
+  const latestVisibility = visibilityEvents.reduce<RelayEvent | null>(
+    (latest, ev) =>
+      !latest || ev.created_at > latest.created_at ? ev : latest,
+    null,
+  );
+  const hiddenDms = new Set(
+    ((latestVisibility?.tags ?? []) as string[][])
+      .filter((t) => t[0] === "h")
+      .map((t) => t[1]),
+  );
+
   // Convert kind:39000 events to the RawChannel shape the frontend expects.
-  return metaEvents.map((ev) => {
-    const tags = (ev.tags ?? []) as string[][];
-    const getTag = (name: string) =>
-      tags.find((t) => t[0] === name)?.[1] ?? null;
-    const channelId = getTag("d") ?? "";
-    const channelType = getTag("t") ?? "stream";
-    const isPrivate = tags.some((t) => t[0] === "private");
-    const isArchived = tags.some((t) => t[0] === "archived" && t[1] === "true");
+  return metaEvents
+    .map((ev) => {
+      const tags = (ev.tags ?? []) as string[][];
+      const getTag = (name: string) =>
+        tags.find((t) => t[0] === name)?.[1] ?? null;
+      const channelId = getTag("d") ?? "";
+      const channelType = getTag("t") ?? "stream";
+      const isPrivate = tags.some((t) => t[0] === "private");
+      const isArchived = tags.some(
+        (t) => t[0] === "archived" && t[1] === "true",
+      );
 
-    // Get participant pubkeys from the membership event for this channel
-    const memberEvent = memberEvents.find((me) =>
-      (me.tags ?? []).some((t: string[]) => t[0] === "d" && t[1] === channelId),
-    );
-    const pTags = memberEvent
-      ? ((memberEvent.tags ?? []) as string[][])
-          .filter((t) => t[0] === "p")
-          .map((t) => t[1])
-      : [];
+      // Get participant pubkeys from the membership event for this channel
+      const memberEvent = memberEvents.find((me) =>
+        (me.tags ?? []).some(
+          (t: string[]) => t[0] === "d" && t[1] === channelId,
+        ),
+      );
+      const pTags = memberEvent
+        ? ((memberEvent.tags ?? []) as string[][])
+            .filter((t) => t[0] === "p")
+            .map((t) => t[1])
+        : [];
 
-    return {
-      id: channelId,
-      name: getTag("name") ?? "",
-      description: getTag("about") ?? "",
-      channel_type: channelType as "stream" | "forum" | "dm",
-      visibility: (isPrivate ? "private" : "open") as "open" | "private",
-      topic: getTag("topic") ?? null,
-      purpose: getTag("purpose") ?? null,
-      member_count: pTags.length,
-      last_message_at: null,
-      archived_at: isArchived ? new Date().toISOString() : null,
-      participants: pTags,
-      participant_pubkeys: pTags,
-      ttl_seconds: getTag("ttl") ? Number(getTag("ttl")) : null,
-      ttl_deadline: getTag("ttl_deadline") ?? null,
-      is_member: memberSet.has(channelId),
-    };
-  });
+      return {
+        id: channelId,
+        name: getTag("name") ?? "",
+        description: getTag("about") ?? "",
+        channel_type: channelType as "stream" | "forum" | "dm",
+        visibility: (isPrivate ? "private" : "open") as "open" | "private",
+        topic: getTag("topic") ?? null,
+        purpose: getTag("purpose") ?? null,
+        member_count: pTags.length,
+        last_message_at: null,
+        archived_at: isArchived ? new Date().toISOString() : null,
+        participants: pTags,
+        participant_pubkeys: pTags,
+        ttl_seconds: getTag("ttl") ? Number(getTag("ttl")) : null,
+        ttl_deadline: getTag("ttl_deadline") ?? null,
+        is_member: memberSet.has(channelId),
+      };
+    })
+    .filter((c) => c.channel_type !== "dm" || !hiddenDms.has(c.id));
 }
 
 async function handleGetProfile(config: E2eConfig | undefined) {

@@ -27,6 +27,7 @@ use crate::webhook_secret;
 use super::ingest::{extract_channel_id, IngestAuth, IngestError, IngestResult};
 use super::side_effects::{
     emit_group_discovery_events, emit_membership_notification, emit_system_message,
+    publish_dm_visibility_snapshot,
 };
 
 /// Route a command-kind event to the appropriate handler.
@@ -330,6 +331,12 @@ async fn handle_dm_open(
                 warn!("DM open: membership notification failed: {e}");
             }
         }
+    } else {
+        // Re-open of an existing DM cleared the caller's hidden_at; refresh
+        // their NIP-DV snapshot so the DM reappears in the sidebar.
+        if let Err(e) = publish_dm_visibility_snapshot(state, &self_bytes).await {
+            warn!("DM re-open: visibility snapshot failed: {e}");
+        }
     }
 
     // 6. Return response
@@ -532,7 +539,13 @@ async fn handle_dm_hide(
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
-    // 5. Return response
+    // 5. Side effect (post-commit, best-effort): refresh the caller's NIP-DV
+    // visibility snapshot so clients can filter this DM out of the sidebar.
+    if let Err(e) = publish_dm_visibility_snapshot(state, &self_bytes).await {
+        warn!("DM hide: visibility snapshot failed: {e}");
+    }
+
+    // 6. Return response
     Ok(IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,

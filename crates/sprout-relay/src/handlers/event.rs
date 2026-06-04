@@ -80,8 +80,30 @@ pub(crate) async fn dispatch_persistent_event(
 
     let event_json = serde_json::to_string(&stored_event.event)
         .expect("nostr::Event serialization is infallible for well-formed events");
+    // For viewer-private snapshots (kind:30622), live fan-out must reach only the
+    // owner — a kindless `ids:[…]` subscription can otherwise match it. Pull paths
+    // (HTTP /query, WS historical) are gated separately by reader_authorized_for_event.
+    let dm_visibility_owner: Option<String> = (kind_u32 == sprout_core::kind::KIND_DM_VISIBILITY)
+        .then(|| {
+            let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+            stored_event
+                .event
+                .tags
+                .filter(nostr::TagKind::SingleLetter(p))
+                .find_map(|t| t.content().map(|s| s.to_string()))
+        })
+        .flatten();
     let mut drop_count = 0u32;
     for (target_conn_id, sub_id) in &matches {
+        if let Some(ref owner_hex) = dm_visibility_owner {
+            let is_owner = state
+                .conn_manager
+                .pubkey_for(*target_conn_id)
+                .is_some_and(|pk| hex::encode(pk) == *owner_hex);
+            if !is_owner {
+                continue;
+            }
+        }
         let msg = format!(r#"["EVENT","{}",{}]"#, sub_id, event_json);
         if !state.conn_manager.send_to(*target_conn_id, msg) {
             drop_count += 1;
@@ -95,8 +117,10 @@ pub(crate) async fn dispatch_persistent_event(
         );
     }
 
-    // Skip search indexing for NIP-17 gift wraps — content is ciphertext.
+    // Skip search indexing for NIP-17 gift wraps (ciphertext) and NIP-DV
+    // visibility snapshots (per-viewer private hide state, owner-gated reads).
     if kind_u32 != KIND_GIFT_WRAP
+        && kind_u32 != sprout_core::kind::KIND_DM_VISIBILITY
         && state
             .search_index_tx
             .try_send(stored_event.clone())

@@ -128,6 +128,34 @@ async fn create_dm(requester_keys: &Keys, other_pubkey_hex: &str) -> String {
     body["channel_id"].as_str().expect("channel_id").to_string()
 }
 
+/// Submit a signed command event via REST and assert it was accepted.
+async fn post_signed_event(keys: &Keys, kind: u16, tags: Vec<Tag>) {
+    let client = reqwest::Client::new();
+    let pubkey_hex = keys.public_key().to_hex();
+    let event = EventBuilder::new(Kind::Custom(kind), "")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .unwrap();
+    let resp = client
+        .post(format!("{}/api/events", relay_http_url()))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&event).unwrap())
+        .send()
+        .await
+        .expect("submit signed event");
+    assert!(
+        resp.status().is_success(),
+        "event kind:{kind} failed: {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse event response");
+    assert!(
+        body["accepted"].as_bool().unwrap_or(false),
+        "event kind:{kind} not accepted: {body}"
+    );
+}
+
 // ── Phase 1: NIP-50 Search ────────────────────────────────────────────────────
 
 /// Send a message with unique content, then search for it.
@@ -1087,4 +1115,436 @@ async fn test_empty_kinds_returns_zero_events() {
     );
 
     client.disconnect().await.expect("disconnect");
+}
+
+// ── Phase 6: NIP-DV DM Visibility ─────────────────────────────────────────────
+
+/// Helper: read the viewer's latest relay-signed NIP-DV snapshot event
+/// (kind:30622, queried by `#p` since snapshots are `#p`-gated to their owner).
+/// Returns `None` if no snapshot exists yet.
+async fn read_snapshot_event(
+    client: &mut SproutTestClient,
+    viewer_hex: &str,
+) -> Option<nostr::Event> {
+    let sid = sub_id("nipdv-snapshot");
+    let filter = Filter::new()
+        .kind(Kind::Custom(30622))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), viewer_hex);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe nip-dv snapshot");
+    let events = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("nip-dv snapshot EOSE");
+    client
+        .close_subscription(&sid)
+        .await
+        .expect("close nip-dv sub");
+
+    // Parameterized-replaceable: at most one current event, but take the
+    // newest defensively.
+    events.into_iter().max_by_key(|e| e.created_at.as_secs())
+}
+
+/// Helper: the set of hidden DM channel ids from the viewer's latest snapshot.
+async fn read_hidden_dms(client: &mut SproutTestClient, viewer_hex: &str) -> Vec<String> {
+    match read_snapshot_event(client, viewer_hex).await {
+        None => Vec::new(),
+        Some(ev) => ev
+            .tags
+            .iter()
+            .filter_map(|t| {
+                let s = t.as_slice();
+                (s.len() >= 2 && s[0] == "h").then(|| s[1].to_string())
+            })
+            .collect(),
+    }
+}
+
+/// NIP-DV regression: hiding a DM must surface it in the viewer's relay-signed
+/// visibility snapshot, and re-opening it must drop it back out — newest-wins.
+///
+/// This is the fix for "hidden DMs come back": the client filters its DM list
+/// against this snapshot, so the snapshot must be the authoritative hidden set.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_hide_then_reopen_updates_snapshot() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    // A opens a DM with B.
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+
+    let mut client_a = SproutTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+
+    // Baseline: no DMs hidden.
+    let before = read_hidden_dms(&mut client_a, &a_pubkey_hex).await;
+    assert!(
+        !before.contains(&channel_id),
+        "DM should not be hidden before hide; snapshot h tags: {before:?}"
+    );
+
+    // A hides the DM (kind:41012, h = channel).
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+
+    // Snapshot must now list the DM as hidden.
+    let after_hide = read_hidden_dms(&mut client_a, &a_pubkey_hex).await;
+    assert!(
+        after_hide.contains(&channel_id),
+        "DM must appear in snapshot after hide; snapshot h tags: {after_hide:?}"
+    );
+
+    // A re-opens the DM (kind:41010, p = the other participant) — this clears
+    // hidden_at and must refresh the snapshot.
+    post_signed_event(
+        &keys_a,
+        41010,
+        vec![Tag::parse(["p", &b_pubkey_hex]).unwrap()],
+    )
+    .await;
+
+    // Snapshot must drop the DM back out — proving re-open is reflected, the
+    // exact asymmetry a client-side filter could not handle on its own.
+    let after_reopen = read_hidden_dms(&mut client_a, &a_pubkey_hex).await;
+    assert!(
+        !after_reopen.contains(&channel_id),
+        "DM must be dropped from snapshot after re-open; snapshot h tags: {after_reopen:?}"
+    );
+
+    client_a.disconnect().await.expect("disconnect");
+}
+
+/// NIP-DV privacy: a third party MUST NOT be able to read another viewer's
+/// DM visibility snapshot. The snapshot is `#p`-gated to its owner, so a
+/// `#p`=<someone-else> query is rejected by the relay's read-auth gate.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_snapshot_is_private_to_owner() {
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    // A opens a DM with B and hides it, producing a NIP-DV snapshot for A.
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+
+    // B queries A's snapshot via REST (#p = A). The relay's #p-gate must reject
+    // this — B may only read snapshots addressed to B.
+    let client = reqwest::Client::new();
+    let filters = serde_json::json!([{
+        "kinds": [30622],
+        "#p": [a_pubkey_hex],
+        "limit": 1,
+    }]);
+    let resp = client
+        .post(format!("{}/api/query", relay_http_url()))
+        .header("X-Pubkey", &b_pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("submit cross-viewer query");
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "B querying A's NIP-DV snapshot must be forbidden, got {}",
+        resp.status()
+    );
+}
+
+/// NIP-DV regression for the per-viewer replacement key: two viewers with
+/// independent hidden sets must NOT clobber each other's snapshot. This is the
+/// case that breaks if the snapshot is stored keyed by (kind, relay_pubkey)
+/// alone instead of by the viewer's `d` tag — B's write would tombstone A's,
+/// and A's hidden DM would reappear.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_two_viewers_independent_snapshots() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let keys_c = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+    let c_pubkey_hex = keys_c.public_key().to_hex();
+
+    // A hides a DM with C; then B hides a (different) DM with C.
+    let dm_a = create_dm(&keys_a, &c_pubkey_hex).await;
+    post_signed_event(&keys_a, 41012, vec![Tag::parse(["h", &dm_a]).unwrap()]).await;
+
+    let dm_b = create_dm(&keys_b, &c_pubkey_hex).await;
+    post_signed_event(&keys_b, 41012, vec![Tag::parse(["h", &dm_b]).unwrap()]).await;
+
+    // A's snapshot must still list A's hidden DM (B's write must not clobber it).
+    let mut client_a = SproutTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+    let a_hidden = read_hidden_dms(&mut client_a, &a_pubkey_hex).await;
+    assert!(
+        a_hidden.contains(&dm_a),
+        "A's snapshot lost its hidden DM after B wrote; A sees: {a_hidden:?}"
+    );
+    assert!(
+        !a_hidden.contains(&dm_b),
+        "A's snapshot leaked B's hidden DM; A sees: {a_hidden:?}"
+    );
+    client_a.disconnect().await.expect("disconnect A");
+
+    // B's snapshot lists only B's hidden DM.
+    let mut client_b = SproutTestClient::connect(&url, &keys_b)
+        .await
+        .expect("client B connect");
+    let b_hidden = read_hidden_dms(&mut client_b, &b_pubkey_hex).await;
+    assert!(
+        b_hidden.contains(&dm_b),
+        "B's snapshot missing its hidden DM; B sees: {b_hidden:?}"
+    );
+    assert!(
+        !b_hidden.contains(&dm_a),
+        "B's snapshot leaked A's hidden DM; B sees: {b_hidden:?}"
+    );
+    client_b.disconnect().await.expect("disconnect B");
+}
+
+/// NIP-DV privacy via WebSocket REQ: a third party subscribing to another
+/// viewer's snapshot (`kind:30622 #p=A` as B) must be rejected with CLOSED, not
+/// served A's hidden set.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_ws_req_rejects_third_party() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+
+    // B subscribes for A's snapshot over WS — must be CLOSED, never EVENT.
+    let mut client_b = SproutTestClient::connect(&url, &keys_b)
+        .await
+        .expect("client B connect");
+    let sid = sub_id("nipdv-cross-ws");
+    let filter = Filter::new().kind(Kind::Custom(30622)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::P),
+        a_pubkey_hex.as_str(),
+    );
+    client_b
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("send REQ");
+
+    let msg = loop {
+        let m = client_b
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("recv message");
+        match &m {
+            RelayMessage::Event { .. } => {
+                panic!("relay served A's NIP-DV snapshot to B over WS REQ")
+            }
+            RelayMessage::Eose { .. } => continue,
+            _ => break m,
+        }
+    };
+    match msg {
+        RelayMessage::Closed {
+            subscription_id, ..
+        } => {
+            assert_eq!(subscription_id, sid, "CLOSED for wrong subscription");
+        }
+        other => panic!("expected CLOSED for third-party snapshot REQ, got {other:?}"),
+    }
+    client_b.disconnect().await.expect("disconnect B");
+}
+
+/// NIP-DV privacy via the `ids` escape hatch: even if a third party learns the
+/// event id of A's snapshot, querying `ids:[that_id]` must NOT return it. A
+/// kindless `ids` filter is intentionally exempt from the filter-level `#p`
+/// gate (so legitimate id-lookups of other kinds still work), so the
+/// result-level owner check is what holds the line — B's query succeeds (200)
+/// but returns an empty set. An *explicit* `kinds:[30622]` filter is rejected
+/// earlier, at the gate, with 403 (covered separately).
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_ids_query_rejects_third_party() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+
+    // A reads its own snapshot to learn its event id.
+    let mut client_a = SproutTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+    let snapshot = read_snapshot_event(&mut client_a, &a_pubkey_hex)
+        .await
+        .expect("A should have a snapshot after hiding");
+    let snapshot_id = snapshot.id.to_hex();
+    client_a.disconnect().await.expect("disconnect A");
+
+    // B queries by that id over REST with a kindless filter — passes the gate
+    // (ids exemption) but the result-level owner check yields an empty set.
+    let client = reqwest::Client::new();
+    let filters = serde_json::json!([{ "ids": [snapshot_id], "limit": 1 }]);
+    let resp = client
+        .post(format!("{}/api/query", relay_http_url()))
+        .header("X-Pubkey", &b_pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("submit ids query");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "kindless ids query is gate-exempt, expected 200, got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("parse query response");
+    let arr = body.as_array().expect("query response is an array");
+    assert!(
+        arr.is_empty(),
+        "B must not receive A's snapshot via kindless ids query, got {} event(s)",
+        arr.len()
+    );
+}
+
+/// NIP-DV privacy: an *explicit* `kinds:[30622]` query for another viewer is
+/// rejected at the filter-level gate with 403 — the explicit-kind path loses
+/// the `ids` exemption.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_explicit_kind_query_forbidden_for_third_party() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+
+    let mut client_a = SproutTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+    let snapshot = read_snapshot_event(&mut client_a, &a_pubkey_hex)
+        .await
+        .expect("A should have a snapshot after hiding");
+    let snapshot_id = snapshot.id.to_hex();
+    client_a.disconnect().await.expect("disconnect A");
+
+    let client = reqwest::Client::new();
+    let filters = serde_json::json!([{ "kinds": [30622], "ids": [snapshot_id], "limit": 1 }]);
+    let resp = client
+        .post(format!("{}/api/query", relay_http_url()))
+        .header("X-Pubkey", &b_pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).unwrap())
+        .send()
+        .await
+        .expect("submit explicit-kind query");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "explicit kinds:[30622] query for another viewer must be forbidden, got {}",
+        resp.status()
+    );
+}
+
+/// NIP-DV privacy via NIP-50 search: a third party must not harvest A's
+/// snapshot through a search query, even with a kindless `ids:[A_snapshot_id]`
+/// filter that slips the filter-level `#p` gate (the `ids` exemption applies to
+/// kindless filters). Two defenses must hold: 30622 is never search-indexed,
+/// and the search result loop applies the result-level owner check. Either way
+/// B sees zero results.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_search_rejects_third_party() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+
+    let mut client_a = SproutTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+    let snapshot = read_snapshot_event(&mut client_a, &a_pubkey_hex)
+        .await
+        .expect("A should have a snapshot after hiding");
+    let snapshot_id = snapshot.id.to_hex();
+    client_a.disconnect().await.expect("disconnect A");
+
+    // Give Typesense a beat (it must NOT have indexed the snapshot).
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // B issues a kindless search filter carrying A's snapshot id — the bypass
+    // shape. Must return zero results, not A's hidden set.
+    let mut client_b = SproutTestClient::connect(&url, &keys_b)
+        .await
+        .expect("client B connect");
+    let sid = sub_id("nipdv-search-bypass");
+    let id = nostr::EventId::from_hex(&snapshot_id).expect("parse snapshot id");
+    let filter = Filter::new().id(id).search("dm");
+    client_b
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    let events = client_b
+        .collect_until_eose(&sid, Duration::from_secs(10))
+        .await
+        .expect("collect until EOSE");
+    assert!(
+        events.is_empty(),
+        "B must not receive A's snapshot via search, got {} event(s)",
+        events.len()
+    );
 }

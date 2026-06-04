@@ -161,6 +161,13 @@ pub const KIND_WORKFLOW_DEF: u32 = 30620;
 /// of mesh status, including EndpointAddr dial pointers for serving nodes.
 pub const KIND_MESH_LLM_RELAY_STATUS: u32 = 30621;
 
+/// NIP-DV: per-viewer DM visibility snapshot (relay-signed, parameterized
+/// replaceable, d=viewer_pubkey). Carries one `h` tag per DM the viewer has
+/// hidden from their sidebar. Re-published by the relay on every hide/unhide so
+/// the latest event is always the authoritative hidden set. The relay knows
+/// `hidden_at` per viewer; this is the only Nostr-visible projection of it.
+pub const KIND_DM_VISIBILITY: u32 = 30622;
+
 /// Lower bound of the NIP-33 parameterized replaceable range (30000–39999).
 pub const PARAM_REPLACEABLE_KIND_MIN: u32 = 30000;
 /// Upper bound of the NIP-33 parameterized replaceable range (30000–39999).
@@ -408,6 +415,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_CHANNEL_SUMMARY,
     KIND_PRESENCE_SNAPSHOT,
     KIND_MESH_LLM_RELAY_STATUS,
+    KIND_DM_VISIBILITY,
     KIND_DM_OPEN,
     KIND_DM_ADD_MEMBER,
     KIND_DM_HIDE,
@@ -520,7 +528,10 @@ pub const fn is_command_kind(kind: u32) -> bool {
 pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
-        KIND_CHANNEL_SUMMARY | KIND_PRESENCE_SNAPSHOT | KIND_MESH_LLM_RELAY_STATUS
+        KIND_CHANNEL_SUMMARY
+            | KIND_PRESENCE_SNAPSHOT
+            | KIND_MESH_LLM_RELAY_STATUS
+            | KIND_DM_VISIBILITY
     )
 }
 
@@ -540,6 +551,7 @@ pub fn event_kind_i32(event: &nostr::Event) -> i32 {
 const _: () = assert!(is_replaceable(KIND_AGENT_PROFILE)); // 10100 ∈ 10000–19999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_MESH_LLM_RELAY_STATUS)); // 30621 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 
 // Compile-time: NIP-34 parameterized replaceable kinds are in the correct range.
 const _: () = assert!(

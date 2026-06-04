@@ -156,6 +156,41 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
         }
     }
 
+    // NIP-DV: drop DMs the viewer has hidden. The relay maintains a per-viewer
+    // parameterized-replaceable snapshot (kind:30622, d=my pubkey) whose `h`
+    // tags list currently-hidden DM channel ids. The snapshot also carries
+    // `p`=my pubkey so the relay's #p read-gate scopes it to me; we query by
+    // `#p` for that reason. Reading the latest one is the only way the client
+    // learns hide state, which the relay tracks privately.
+    let hidden_dms: std::collections::HashSet<String> = {
+        let events = query_relay(
+            &state,
+            &[serde_json::json!({
+                "kinds": [sprout_core::kind::KIND_DM_VISIBILITY],
+                "#p": [&my_pubkey],
+                "limit": 1,
+            })],
+        )
+        .await
+        .unwrap_or_default();
+        events
+            .iter()
+            .max_by_key(|e| e.created_at.as_secs())
+            .map(|e| {
+                e.tags
+                    .iter()
+                    .filter_map(|t| {
+                        let s = t.as_slice();
+                        (s.len() >= 2 && s[0] == "h").then(|| s[1].clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if !hidden_dms.is_empty() {
+        channels.retain(|c| c.channel_type != "dm" || !hidden_dms.contains(&c.id));
+    }
+
     Ok(channels)
 }
 

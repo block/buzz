@@ -11,6 +11,24 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
     filters.iter().any(|f| filter_match_one(f, event))
 }
 
+/// Result-level read authorization for relay-signed events whose content is
+/// private to a single viewer. Currently only `KIND_DM_VISIBILITY`: the reader
+/// MUST equal the snapshot's `#p` (owner). Returns `true` for every other kind.
+///
+/// This guards the delivery surfaces directly, so a query that bypasses the
+/// filter-level `#p` gate (e.g. a kindless `ids:[…]` lookup of a known snapshot
+/// id) still cannot read another viewer's hidden-DM set.
+pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str) -> bool {
+    if crate::kind::event_kind_u32(event) != crate::kind::KIND_DM_VISIBILITY {
+        return true;
+    }
+    let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+    event
+        .tags
+        .filter(nostr::TagKind::SingleLetter(p))
+        .any(|t| t.content() == Some(reader_pubkey_hex))
+}
+
 fn filter_match_one(f: &Filter, ev: &StoredEvent) -> bool {
     if let Some(kinds) = &f.kinds {
         if !kinds.contains(&ev.event.kind) {
@@ -212,5 +230,35 @@ mod tests {
             !filters_match(std::slice::from_ref(&h_filter), &stored_with_h),
             "explicit h-tag must be authoritative — channel_id fallback must not override it"
         );
+    }
+
+    #[test]
+    fn reader_authorized_for_event_gates_dm_visibility_by_p() {
+        let relay = Keys::generate();
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+        let snapshot = EventBuilder::new(Kind::Custom(crate::kind::KIND_DM_VISIBILITY as u16), "")
+            .tags([
+                Tag::parse(["d", owner]).unwrap(),
+                Tag::parse(["p", owner]).unwrap(),
+            ])
+            .sign_with_keys(&relay)
+            .expect("sign");
+
+        assert!(
+            reader_authorized_for_event(&snapshot, owner),
+            "owner must be authorized to read their own snapshot"
+        );
+        assert!(
+            !reader_authorized_for_event(&snapshot, other),
+            "a third party must NOT be authorized to read another viewer's snapshot"
+        );
+
+        // Non-DV events are unaffected by this gate.
+        let note = EventBuilder::new(Kind::TextNote, "hi")
+            .sign_with_keys(&relay)
+            .expect("sign");
+        assert!(reader_authorized_for_event(&note, other));
     }
 }

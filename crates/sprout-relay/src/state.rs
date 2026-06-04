@@ -114,6 +114,13 @@ impl ConnectionManager {
             .map(|entry| Arc::clone(&entry.subscriptions))
     }
 
+    /// Return the authenticated pubkey for a connection, if any.
+    pub fn pubkey_for(&self, conn_id: Uuid) -> Option<Vec<u8>> {
+        self.connections
+            .get(&conn_id)
+            .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
+    }
+
     /// Sends a text message to the given connection.
     ///
     /// Returns `false` if the connection is gone or the buffer is full.
