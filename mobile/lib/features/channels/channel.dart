@@ -113,7 +113,7 @@ class Channel {
     purpose: details.purpose,
     createdBy: details.createdBy,
     createdAt: details.createdAt,
-    memberCount: details.memberCount,
+    memberCount: memberCount,
     lastMessageAt: lastMessageAt,
     archivedAt: details.archivedAt,
     participants: participants,
