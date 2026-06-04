@@ -124,6 +124,9 @@ fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
 // Nostr filter JSON. nostr::Filter silently drops unknown fields during
 // deserialization, so we extract them from the raw JSON Value first.
 
+const BRIDGE_FEED_MAX_LIMIT: i64 = 100;
+const BRIDGE_THREAD_MAX_LIMIT: u32 = 500;
+
 fn extract_before_id(raw: &Value) -> Option<Vec<u8>> {
     let hex_str = raw.get("before_id")?.as_str()?;
     if hex_str.len() == 64 {
@@ -149,6 +152,13 @@ fn extract_feed_types(raw: &Value) -> Option<Vec<String>> {
         None
     } else {
         Some(types)
+    }
+}
+
+fn event_in_accessible_channel(se: &sprout_core::StoredEvent, accessible: &[uuid::Uuid]) -> bool {
+    match se.channel_id {
+        Some(ch_id) => accessible.contains(&ch_id),
+        None => true,
     }
 }
 
@@ -274,27 +284,44 @@ pub async fn query_events(
             None => continue,
         };
 
-        let limit = filter.limit.map(|l| (l as i64).min(100)).unwrap_or(20);
+        let limit = filter
+            .limit
+            .map(|l| (l as i64).min(BRIDGE_FEED_MAX_LIMIT))
+            .unwrap_or(20);
         let since = filter
             .since
             .and_then(|s| chrono::DateTime::from_timestamp(s.as_secs() as i64, 0));
 
+        let mut seen_types = std::collections::HashSet::new();
         let mut seen = std::collections::HashSet::new();
+        let mut feed_count = 0i64;
         for feed_type in &feed_types {
-            let type_events = match feed_type.as_str() {
+            let canonical = if feed_type == "agent_activity" {
+                "activity"
+            } else {
+                feed_type.as_str()
+            };
+            if !seen_types.insert(canonical) {
+                continue;
+            }
+            if feed_count >= limit {
+                break;
+            }
+            let remaining = limit - feed_count;
+            let type_events = match canonical {
                 "mentions" => state
                     .db
-                    .query_feed_mentions(&pubkey_bytes, &accessible_channels, since, limit)
+                    .query_feed_mentions(&pubkey_bytes, &accessible_channels, since, remaining)
                     .await
                     .map_err(|e| internal_error(&format!("feed mentions error: {e}")))?,
                 "needs_action" => state
                     .db
-                    .query_feed_needs_action(&pubkey_bytes, &accessible_channels, since, limit)
+                    .query_feed_needs_action(&pubkey_bytes, &accessible_channels, since, remaining)
                     .await
                     .map_err(|e| internal_error(&format!("feed needs_action error: {e}")))?,
-                "activity" | "agent_activity" => state
+                "activity" => state
                     .db
-                    .query_feed_activity(&accessible_channels, since, limit)
+                    .query_feed_activity(&accessible_channels, since, remaining)
                     .await
                     .map_err(|e| internal_error(&format!("feed activity error: {e}")))?,
                 _ => continue,
@@ -303,13 +330,12 @@ pub async fn query_events(
                 if !seen.insert(se.event.id) {
                     continue;
                 }
-                if let Some(ch_id) = se.channel_id {
-                    if !accessible_channels.contains(&ch_id) {
-                        continue;
-                    }
+                if !event_in_accessible_channel(&se, &accessible_channels) {
+                    continue;
                 }
                 if let Ok(v) = serde_json::to_value(&se.event) {
                     events.push(v);
+                    feed_count += 1;
                 }
             }
         }
@@ -319,6 +345,9 @@ pub async fn query_events(
     // ── depth_limit: route thread queries to get_thread_replies ──
     let e_tag_key = nostr::SingleLetterTag::lowercase(nostr::Alphabet::E);
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
+        if handled.contains(&idx) {
+            continue;
+        }
         let depth = match extract_depth_limit(raw) {
             Some(d) => d,
             None => continue,
@@ -343,7 +372,10 @@ pub async fn query_events(
             }
         }
 
-        let limit = filter.limit.unwrap_or(100).min(500) as u32;
+        let limit = filter
+            .limit
+            .unwrap_or(100)
+            .min(BRIDGE_THREAD_MAX_LIMIT as usize) as u32;
         let thread_replies = state
             .db
             .get_thread_replies(&root_bytes, Some(depth), limit, None)
@@ -360,10 +392,8 @@ pub async fn query_events(
                 .await
                 .map_err(|e| internal_error(&format!("thread fetch error: {e}")))?;
             for se in stored {
-                if let Some(ch_id) = se.channel_id {
-                    if !accessible_channels.contains(&ch_id) {
-                        continue;
-                    }
+                if !event_in_accessible_channel(&se, &accessible_channels) {
+                    continue;
                 }
                 if let Ok(v) = serde_json::to_value(&se.event) {
                     events.push(v);
@@ -390,18 +420,20 @@ pub async fn query_events(
                 .await;
 
         if let Some(bid) = extract_before_id(raw) {
-            if query.until.is_some() {
-                query.before_id = Some(bid);
+            if query.until.is_none() {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "before_id requires until to be set",
+                ));
             }
+            query.before_id = Some(bid);
         }
 
         match state.db.query_events(&query).await {
             Ok(stored_events) => {
                 for se in stored_events {
-                    if let Some(ch_id) = se.channel_id {
-                        if !accessible_channels.contains(&ch_id) {
-                            continue;
-                        }
+                    if !event_in_accessible_channel(&se, &accessible_channels) {
+                        continue;
                     }
                     if !sprout_core::filter::filters_match(std::slice::from_ref(filter), &se) {
                         continue;
@@ -1029,5 +1061,159 @@ mod tests {
             search_hit_accepted(&filter, &stored, &[scoped_channel]),
             "channel-scoped hit must be accepted when caller has access to that channel"
         );
+    }
+
+    // ── Custom filter field extractor tests ──
+
+    #[test]
+    fn extract_before_id_valid_hex() {
+        let hex = "a".repeat(64);
+        let raw = serde_json::json!({ "before_id": hex });
+        let result = extract_before_id(&raw);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().len(), 32);
+    }
+
+    #[test]
+    fn extract_before_id_short_hex() {
+        let raw = serde_json::json!({ "before_id": "a".repeat(63) });
+        assert!(extract_before_id(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_before_id_long_hex() {
+        let raw = serde_json::json!({ "before_id": "a".repeat(65) });
+        assert!(extract_before_id(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_before_id_invalid_hex_chars() {
+        let raw = serde_json::json!({ "before_id": "z".repeat(64) });
+        assert!(extract_before_id(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_before_id_absent() {
+        let raw = serde_json::json!({});
+        assert!(extract_before_id(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_before_id_non_string() {
+        let raw = serde_json::json!({ "before_id": 12345 });
+        assert!(extract_before_id(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_depth_limit_valid() {
+        let raw = serde_json::json!({ "depth_limit": 3 });
+        assert_eq!(extract_depth_limit(&raw), Some(3));
+    }
+
+    #[test]
+    fn extract_depth_limit_zero() {
+        let raw = serde_json::json!({ "depth_limit": 0 });
+        assert_eq!(extract_depth_limit(&raw), Some(0));
+    }
+
+    #[test]
+    fn extract_depth_limit_u32_max() {
+        let raw = serde_json::json!({ "depth_limit": u32::MAX });
+        assert_eq!(extract_depth_limit(&raw), Some(u32::MAX));
+    }
+
+    #[test]
+    fn extract_depth_limit_overflow() {
+        let raw = serde_json::json!({ "depth_limit": (u32::MAX as u64) + 1 });
+        assert!(extract_depth_limit(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_depth_limit_negative() {
+        let raw = serde_json::json!({ "depth_limit": -1 });
+        assert!(extract_depth_limit(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_depth_limit_absent() {
+        let raw = serde_json::json!({});
+        assert!(extract_depth_limit(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_depth_limit_float() {
+        let raw = serde_json::json!({ "depth_limit": 3.5 });
+        assert!(extract_depth_limit(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_feed_types_valid() {
+        let raw = serde_json::json!({ "feed_types": ["mentions", "activity"] });
+        assert_eq!(
+            extract_feed_types(&raw),
+            Some(vec!["mentions".to_string(), "activity".to_string()])
+        );
+    }
+
+    #[test]
+    fn extract_feed_types_empty_array() {
+        let raw = serde_json::json!({ "feed_types": [] });
+        assert!(extract_feed_types(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_feed_types_mixed_types() {
+        let raw = serde_json::json!({ "feed_types": ["mentions", 42, "activity"] });
+        assert_eq!(
+            extract_feed_types(&raw),
+            Some(vec!["mentions".to_string(), "activity".to_string()])
+        );
+    }
+
+    #[test]
+    fn extract_feed_types_absent() {
+        let raw = serde_json::json!({});
+        assert!(extract_feed_types(&raw).is_none());
+    }
+
+    #[test]
+    fn extract_feed_types_non_array() {
+        let raw = serde_json::json!({ "feed_types": "mentions" });
+        assert!(extract_feed_types(&raw).is_none());
+    }
+
+    #[test]
+    fn event_accessible_no_channel() {
+        let keys = Keys::generate();
+        let ev = EventBuilder::new(Kind::Custom(1), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let se = sprout_core::StoredEvent::new(ev, None);
+        assert!(event_in_accessible_channel(&se, &[]));
+    }
+
+    #[test]
+    fn event_accessible_matching_channel() {
+        let keys = Keys::generate();
+        let ev = EventBuilder::new(Kind::Custom(1), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let ch = uuid::Uuid::new_v4();
+        let mut se = sprout_core::StoredEvent::new(ev, None);
+        se.channel_id = Some(ch);
+        assert!(event_in_accessible_channel(&se, &[ch]));
+    }
+
+    #[test]
+    fn event_inaccessible_channel() {
+        let keys = Keys::generate();
+        let ev = EventBuilder::new(Kind::Custom(1), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let ch = uuid::Uuid::new_v4();
+        let other = uuid::Uuid::new_v4();
+        let mut se = sprout_core::StoredEvent::new(ev, None);
+        se.channel_id = Some(ch);
+        assert!(!event_in_accessible_channel(&se, &[other]));
     }
 }
