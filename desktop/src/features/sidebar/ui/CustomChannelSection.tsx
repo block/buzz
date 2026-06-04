@@ -12,6 +12,8 @@ import {
   Pencil,
   Plus,
   Search,
+  Star,
+  StarOff,
   Trash2,
 } from "lucide-react";
 
@@ -117,12 +119,15 @@ export function ChannelContextMenuItems({
   channel,
   hasUnread,
   isMuted,
+  isStarred,
   sections,
   assignments,
   onMarkChannelRead,
   onMarkChannelUnread,
   onMuteChannel,
   onUnmuteChannel,
+  onStarChannel,
+  onUnstarChannel,
   onAssignChannel,
   onUnassignChannel,
   onCreateSectionForChannel,
@@ -130,6 +135,7 @@ export function ChannelContextMenuItems({
   channel: Channel;
   hasUnread: boolean;
   isMuted?: boolean;
+  isStarred?: boolean;
   sections?: ChannelSection[];
   assignments?: Record<string, string>;
   onMarkChannelRead?: (
@@ -142,12 +148,32 @@ export function ChannelContextMenuItems({
   ) => void;
   onMuteChannel?: (channelId: string) => void;
   onUnmuteChannel?: (channelId: string) => void;
+  onStarChannel?: (channelId: string) => void;
+  onUnstarChannel?: (channelId: string) => void;
   onAssignChannel?: (channelId: string, sectionId: string) => void;
   onUnassignChannel?: (channelId: string) => void;
   onCreateSectionForChannel?: (channelId: string) => void;
 }) {
+  const showStar = Boolean(onStarChannel && onUnstarChannel);
+  const showReadToggle = hasUnread
+    ? Boolean(onMarkChannelRead)
+    : Boolean(onMarkChannelUnread);
   return (
     <>
+      {showStar ? (
+        isStarred ? (
+          <ContextMenuItem onClick={() => onUnstarChannel?.(channel.id)}>
+            <StarOff className="h-4 w-4" />
+            Unstar channel
+          </ContextMenuItem>
+        ) : (
+          <ContextMenuItem onClick={() => onStarChannel?.(channel.id)}>
+            <Star className="h-4 w-4" />
+            Star channel
+          </ContextMenuItem>
+        )
+      ) : null}
+      {showStar && showReadToggle ? <ContextMenuSeparator /> : null}
       {hasUnread && onMarkChannelRead ? (
         <ContextMenuItem
           onClick={() => onMarkChannelRead(channel.id, channel.lastMessageAt)}
@@ -219,8 +245,8 @@ function SectionHeaderActions({
   className?: string;
   createAriaLabel: string;
   hasUnread?: boolean;
-  onBrowse: () => void;
-  onCreateClick: () => void;
+  onBrowse?: () => void;
+  onCreateClick?: () => void;
   onMarkAllRead?: () => void;
 }) {
   return (
@@ -241,23 +267,27 @@ function SectionHeaderActions({
           <CheckCheck className="h-3.5 w-3.5" />
         </button>
       ) : null}
-      <button
-        aria-label={browseAriaLabel}
-        className={SECTION_ICON_BUTTON_CLASS}
-        data-testid={browseTestId}
-        onClick={onBrowse}
-        type="button"
-      >
-        <Search className="h-3.5 w-3.5" />
-      </button>
-      <button
-        aria-label={createAriaLabel}
-        className={SECTION_ICON_BUTTON_CLASS}
-        onClick={onCreateClick}
-        type="button"
-      >
-        <Plus className="h-4 w-4" />
-      </button>
+      {onBrowse ? (
+        <button
+          aria-label={browseAriaLabel}
+          className={SECTION_ICON_BUTTON_CLASS}
+          data-testid={browseTestId}
+          onClick={onBrowse}
+          type="button"
+        >
+          <Search className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+      {onCreateClick ? (
+        <button
+          aria-label={createAriaLabel}
+          className={SECTION_ICON_BUTTON_CLASS}
+          onClick={onCreateClick}
+          type="button"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -295,6 +325,9 @@ export function ChannelGroupSection({
   mutedChannelIds,
   onMuteChannel,
   onUnmuteChannel,
+  starredChannelIds,
+  onStarChannel,
+  onUnstarChannel,
 }: {
   browseAriaLabel: string;
   browseTestId?: string;
@@ -305,8 +338,8 @@ export function ChannelGroupSection({
   isActiveChannel: boolean;
   items: Channel[];
   listTestId: string;
-  onBrowse: () => void;
-  onCreateClick: () => void;
+  onBrowse?: () => void;
+  onCreateClick?: () => void;
   onMarkChannelRead: (
     channelId: string,
     lastMessageAt: string | null | undefined,
@@ -330,6 +363,9 @@ export function ChannelGroupSection({
   mutedChannelIds?: ReadonlySet<string>;
   onMuteChannel?: (channelId: string) => void;
   onUnmuteChannel?: (channelId: string) => void;
+  starredChannelIds?: ReadonlySet<string>;
+  onStarChannel?: (channelId: string) => void;
+  onUnstarChannel?: (channelId: string) => void;
 }) {
   const contentId = `sidebar-${listTestId}`;
 
@@ -370,12 +406,15 @@ export function ChannelGroupSection({
                 channel={channel}
                 hasUnread={unreadChannelIds.has(channel.id)}
                 isMuted={mutedChannelIds?.has(channel.id)}
+                isStarred={starredChannelIds?.has(channel.id)}
                 sections={sections}
                 assignments={assignments}
                 onMarkChannelRead={onMarkChannelRead}
                 onMarkChannelUnread={onMarkChannelUnread}
                 onMuteChannel={onMuteChannel}
                 onUnmuteChannel={onUnmuteChannel}
+                onStarChannel={onStarChannel}
+                onUnstarChannel={onUnstarChannel}
                 onAssignChannel={onAssignChannel}
                 onUnassignChannel={onUnassignChannel}
                 onCreateSectionForChannel={onCreateSectionForChannel}
@@ -462,6 +501,9 @@ export function CustomChannelSection({
   mutedChannelIds,
   onMuteChannel,
   onUnmuteChannel,
+  starredChannelIds,
+  onStarChannel,
+  onUnstarChannel,
 }: {
   section: ChannelSection;
   channels: Channel[];
@@ -495,6 +537,9 @@ export function CustomChannelSection({
   mutedChannelIds?: ReadonlySet<string>;
   onMuteChannel?: (channelId: string) => void;
   onUnmuteChannel?: (channelId: string) => void;
+  starredChannelIds?: ReadonlySet<string>;
+  onStarChannel?: (channelId: string) => void;
+  onUnstarChannel?: (channelId: string) => void;
 }) {
   const contentId = `sidebar-section-${section.id}`;
 
@@ -629,12 +674,15 @@ export function CustomChannelSection({
                             channel={channel}
                             hasUnread={unreadChannelIds.has(channel.id)}
                             isMuted={mutedChannelIds?.has(channel.id)}
+                            isStarred={starredChannelIds?.has(channel.id)}
                             sections={sections}
                             assignments={assignments}
                             onMarkChannelRead={onMarkChannelRead}
                             onMarkChannelUnread={onMarkChannelUnread}
                             onMuteChannel={onMuteChannel}
                             onUnmuteChannel={onUnmuteChannel}
+                            onStarChannel={onStarChannel}
+                            onUnstarChannel={onUnstarChannel}
                             onAssignChannel={onAssignChannel}
                             onUnassignChannel={onUnassignChannel}
                             onCreateSectionForChannel={

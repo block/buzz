@@ -17,10 +17,11 @@ export const KIND_FORUM_COMMENT = 45003;
 export const KIND_APPROVAL_REQUEST = 46010;
 export const KIND_TYPING_INDICATOR = 20002;
 // NIP-78 application-specific data. All use kind 30078; the relay
-// differentiates them by d-tag ("read-state:<slotId>", "channel-sections", "channel-mutes").
+// differentiates them by d-tag ("read-state:<slotId>", "channel-sections", "channel-mutes", "channel-stars").
 export const KIND_READ_STATE = 30078;
 export const KIND_CHANNEL_SECTIONS = 30078;
 export const KIND_CHANNEL_MUTES = 30078;
+export const KIND_CHANNEL_STARS = 30078;
 export const KIND_USER_STATUS = 30315;
 export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_MESH_STATUS_REPORT = 24620;

@@ -27,6 +27,7 @@ export default defineConfig({
         "**/custom-emoji.spec.ts",
         "**/custom-emoji-screenshots.spec.ts",
         "**/channel-mute-screenshots.spec.ts",
+        "**/channel-star-screenshots.spec.ts",
         "**/file-attachment.spec.ts",
         "**/mentions.spec.ts",
         "**/relay-reconnect.spec.ts",

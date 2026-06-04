@@ -57,6 +57,7 @@ import { HuddleBar, HuddleProvider } from "@/features/huddle";
 import { useMeshRelayOrchestrator } from "@/features/mesh-compute/hooks/useMeshRelayOrchestrator";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
+import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
@@ -206,6 +207,9 @@ export function AppShell() {
   const identityQuery = useIdentityQuery();
   useMeshRelayOrchestrator(identityQuery.data?.pubkey);
   const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
+    identityQuery.data?.pubkey,
+  );
+  const { starredChannelIds, starChannel, unstarChannel } = useChannelStars(
     identityQuery.data?.pubkey,
   );
   const profileQuery = useProfileQuery();
@@ -818,6 +822,9 @@ export function AppShell() {
                   mutedChannelIds={mutedChannelIds}
                   onMuteChannel={muteChannel}
                   onUnmuteChannel={unmuteChannel}
+                  starredChannelIds={starredChannelIds}
+                  onStarChannel={starChannel}
+                  onUnstarChannel={unstarChannel}
                 />
 
                 <SidebarInset className="min-h-0 min-w-0 overflow-hidden">
