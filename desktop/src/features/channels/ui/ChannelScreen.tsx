@@ -440,6 +440,8 @@ export function ChannelScreen({
     Boolean(
       openThreadHeadMessage || openAgentSessionPubkey || profilePanelPubkey,
     );
+  const headerActionsInsetRightPx =
+    !isSinglePanelView && openThreadHeadMessage ? threadPanelWidthPx : 0;
 
   return (
     <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>
@@ -449,6 +451,7 @@ export function ChannelScreen({
           activeChannelEphemeralDisplay={activeChannelEphemeralDisplay}
           activeChannelTitle={activeChannelTitle}
           activeDmPresenceStatus={activeDmPresenceStatus}
+          actionsInsetRightPx={headerActionsInsetRightPx}
           currentPubkey={currentPubkey}
           isJoining={joinChannelMutation.isPending}
           onJoinChannel={joinChannelMutation.mutateAsync}

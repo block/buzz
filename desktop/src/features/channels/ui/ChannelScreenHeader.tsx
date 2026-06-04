@@ -15,6 +15,7 @@ type ChannelScreenHeaderProps = {
   activeChannelEphemeralDisplay: EphemeralChannelDisplay | null;
   activeChannelTitle: string;
   activeDmPresenceStatus: PresenceStatus | null;
+  actionsInsetRightPx?: number;
   currentPubkey?: string;
   isJoining?: boolean;
   showHeaderContent?: boolean;
@@ -28,6 +29,7 @@ export function ChannelScreenHeader({
   activeChannelEphemeralDisplay,
   activeChannelTitle,
   activeDmPresenceStatus,
+  actionsInsetRightPx = 0,
   currentPubkey,
   isJoining = false,
   showHeaderContent = true,
@@ -79,6 +81,7 @@ export function ChannelScreenHeader({
 
   return (
     <ChatHeader
+      actionsInsetRightPx={actionsInsetRightPx}
       belowSystemChrome
       density="compact"
       actions={actions}

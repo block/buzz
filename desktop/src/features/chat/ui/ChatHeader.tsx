@@ -18,6 +18,7 @@ import { cn } from "@/shared/lib/cn";
 
 type ChatHeaderProps = {
   actions?: React.ReactNode;
+  actionsInsetRightPx?: number;
   actionsPlacement?: "inline" | "top-right";
   belowSystemChrome?: boolean;
   density?: "default" | "compact";
@@ -79,6 +80,7 @@ function ChannelIcon({
 
 export function ChatHeader({
   actions,
+  actionsInsetRightPx = 0,
   actionsPlacement = "inline",
   belowSystemChrome = false,
   density = "default",
@@ -98,6 +100,10 @@ export function ChatHeader({
           iconClassName: "h-3 w-3",
         }
       : {};
+  const inlineActionsStyle: React.CSSProperties | undefined =
+    actionsInsetRightPx > 0
+      ? { marginRight: `${actionsInsetRightPx}px` }
+      : undefined;
   const topRightActions = (
     <div className="fixed right-3 top-[9px] z-[45] flex shrink-0 items-center gap-1">
       <UpdateIndicator />
@@ -144,7 +150,10 @@ export function ChatHeader({
           createPortal(topRightActions, document.body)
         )
       ) : (
-        <div className="flex shrink-0 items-center gap-1">
+        <div
+          className="flex shrink-0 items-center gap-1"
+          style={inlineActionsStyle}
+        >
           <UpdateIndicator {...compactUpdateIndicatorProps} />
           {actions ? <div className="shrink-0">{actions}</div> : null}
         </div>
