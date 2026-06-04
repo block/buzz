@@ -207,7 +207,6 @@ export function ChannelContextMenuItems({
 function SectionHeaderActions({
   browseAriaLabel,
   browseTestId,
-  className,
   createAriaLabel,
   hasUnread,
   onBrowse,
@@ -216,7 +215,6 @@ function SectionHeaderActions({
 }: {
   browseAriaLabel: string;
   browseTestId?: string;
-  className?: string;
   createAriaLabel: string;
   hasUnread?: boolean;
   onBrowse: () => void;
@@ -224,16 +222,14 @@ function SectionHeaderActions({
   onMarkAllRead?: () => void;
 }) {
   return (
-    <div
-      className={cn(
-        "absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5",
-        className,
-      )}
-    >
+    <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
       {hasUnread && onMarkAllRead ? (
         <button
           aria-label="Mark all as read"
-          className={SECTION_ICON_BUTTON_CLASS}
+          className={cn(
+            SECTION_ICON_BUTTON_CLASS,
+            SECTION_ACTION_VISIBILITY_CLASS,
+          )}
           onClick={onMarkAllRead}
           title="Mark all as read"
           type="button"
@@ -410,7 +406,6 @@ export function ChannelGroupSection({
         <SectionHeaderActions
           browseAriaLabel={browseAriaLabel}
           browseTestId={browseTestId}
-          className={SECTION_ACTION_VISIBILITY_CLASS}
           createAriaLabel={createAriaLabel}
           hasUnread={hasUnread}
           onBrowse={onBrowse}
