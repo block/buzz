@@ -56,14 +56,17 @@ pub(crate) async fn dispatch_persistent_event(
 ) -> usize {
     let event_id_hex = stored_event.event.id.to_hex();
 
-    if let Some(ch_id) = stored_event.channel_id {
-        state.mark_local_event(&stored_event.event.id);
-        if let Err(e) = state.pubsub.publish_event(ch_id, &stored_event.event).await {
-            state
-                .local_event_ids
-                .invalidate(&stored_event.event.id.to_bytes());
-            warn!(event_id = %event_id_hex, "Redis publish failed: {e}");
-        }
+    let pubsub_channel = stored_event.channel_id.unwrap_or(uuid::Uuid::nil());
+    state.mark_local_event(&stored_event.event.id);
+    if let Err(e) = state
+        .pubsub
+        .publish_event(pubsub_channel, &stored_event.event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&stored_event.event.id.to_bytes());
+        warn!(event_id = %event_id_hex, "Redis publish failed: {e}");
     }
 
     let matches = state.sub_registry.fan_out(stored_event);

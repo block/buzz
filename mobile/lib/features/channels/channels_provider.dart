@@ -177,6 +177,33 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       channels.add(channel);
     }
 
+    // Batch-fetch member counts via kind:39002 membership events.
+    final memberEvents = await session.fetchHistory(
+      NostrFilter(
+        kinds: const [39002],
+        tags: {'#d': channelIds},
+        limit: channelIds.length,
+      ),
+    );
+    final memberCounts = <String, int>{};
+    for (final event in memberEvents) {
+      final chId = event.getTagValue('d');
+      if (chId == null) continue;
+      final pTags = <String>{};
+      for (final tag in event.tags) {
+        if (tag.isNotEmpty && tag[0] == 'p' && tag.length > 1) {
+          pTags.add(tag[1].toLowerCase());
+        }
+      }
+      memberCounts[chId] = pTags.length;
+    }
+    for (var i = 0; i < channels.length; i++) {
+      final count = memberCounts[channels[i].id];
+      if (count != null) {
+        channels[i] = channels[i].copyWith(memberCount: count);
+      }
+    }
+
     // Step 3: fetch the most recent message per channel to populate lastMessageAt.
     // kind:39000 metadata doesn't carry message timestamps, so channels load with
     // lastMessageAt: null. Without this, unread detection and badge computation
