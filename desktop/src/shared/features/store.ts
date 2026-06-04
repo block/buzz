@@ -16,23 +16,33 @@ const MIGRATED_KEY = "sprout-features-migrated-v1";
 export type FeatureOverrides = Record<string, boolean>;
 
 /**
- * One-time migration: if no overrides exist yet, seed experimental features
- * as enabled so existing users don't lose functionality on upgrade.
- * New installs (no prior localStorage at all) also get this — but that's fine
- * because new users will see the features as they always have.
+ * One-time migration: for existing users, seed experimental features as
+ * enabled so they don't lose functionality on upgrade. New installs get
+ * the clean opt-in experience (overrides stay empty).
+ *
+ * Existing user detection: presence of any prior Sprout localStorage key
+ * (theme or workspaces) proves this isn't a fresh install.
  */
 export function runMigrationIfNeeded(): void {
   try {
     if (window.localStorage.getItem(MIGRATED_KEY) === "true") return;
 
-    // Seed all desktop experimental features as enabled
-    const seed: FeatureOverrides = {};
-    for (const f of desktopFeatures) {
-      if (f.tier === "experimental") {
-        seed[f.id] = true;
+    const isExistingUser =
+      window.localStorage.getItem("sprout-theme") !== null ||
+      window.localStorage.getItem("sprout-workspaces") !== null;
+
+    if (isExistingUser) {
+      // Seed all desktop experimental features as enabled
+      const seed: FeatureOverrides = {};
+      for (const f of desktopFeatures) {
+        if (f.tier === "experimental") {
+          seed[f.id] = true;
+        }
       }
+      window.localStorage.setItem(OVERRIDES_KEY, JSON.stringify(seed));
     }
-    window.localStorage.setItem(OVERRIDES_KEY, JSON.stringify(seed));
+    // New installs: leave overrides empty — experimental features are opt-in
+
     window.localStorage.setItem(MIGRATED_KEY, "true");
   } catch {
     // localStorage unavailable — no-op
