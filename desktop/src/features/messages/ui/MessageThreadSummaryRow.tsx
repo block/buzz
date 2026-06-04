@@ -96,7 +96,7 @@ export function MessageThreadSummaryRow({
       ) : null}
 
       <button
-        className="group inline-flex w-fit max-w-full cursor-pointer items-center gap-1 text-left text-xs font-medium text-muted-foreground transition-[color,opacity] hover:text-foreground hover:opacity-90 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+        className="group relative inline-flex w-fit max-w-full cursor-pointer items-center gap-1 rounded-full text-left text-xs font-medium text-muted-foreground transition-[color,opacity] before:pointer-events-none before:absolute before:-inset-y-0.5 before:-left-0.5 before:-right-1.5 before:rounded-full before:content-[''] before:transition-shadow hover:text-foreground hover:opacity-90 hover:before:ring-1 hover:before:ring-border/70 focus-visible:outline-hidden focus-visible:before:ring-1 focus-visible:before:ring-ring"
         data-thread-head-id={message.id}
         data-testid="message-thread-summary"
         onClick={() => onOpenThread(message)}
