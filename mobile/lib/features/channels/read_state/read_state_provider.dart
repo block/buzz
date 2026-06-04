@@ -13,19 +13,22 @@ class ReadStateState {
   final String? pubkey;
   final Map<String, int> contexts;
   final int version;
+  final Set<String> syncedForcedChannelIds;
 
   const ReadStateState({
     required this.isReady,
     required this.pubkey,
     required this.contexts,
     required this.version,
+    this.syncedForcedChannelIds = const {},
   });
 
   const ReadStateState.inert()
     : isReady = false,
       pubkey = null,
       contexts = const {},
-      version = 0;
+      version = 0,
+      syncedForcedChannelIds = const {};
 
   int? effectiveTimestamp(String contextId) => contexts[contextId];
 
@@ -40,6 +43,7 @@ class ReadStateState {
       pubkey: pubkey,
       contexts: Map.unmodifiable({...contexts, contextId: timestamp}),
       version: version + 1,
+      syncedForcedChannelIds: syncedForcedChannelIds,
     );
   }
 }
@@ -47,12 +51,14 @@ class ReadStateState {
 class ReadStateNotifier extends Notifier<ReadStateState> {
   ReadStateManager? _manager;
   bool _isInitialized = false;
+  final Set<String> _syncedForcedChannelIds = {};
 
   @override
   ReadStateState build() {
     _manager?.dispose(flushPending: false);
     _manager = null;
     _isInitialized = false;
+    _syncedForcedChannelIds.clear();
 
     final relayConfig = ref.watch(relayConfigProvider);
     ref.watch(relaySessionProvider);
@@ -125,6 +131,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   }
 
   void markContextRead(String contextId, int unixTimestamp) {
+    _syncedForcedChannelIds.remove(contextId);
     _manager?.markContextRead(contextId, unixTimestamp);
   }
 
@@ -138,6 +145,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
 
   void _emitManagerState(ReadStateManager manager) {
     if (_manager != manager) return;
+    final rollbacks = manager.drainSyncedRollbacks();
+    _syncedForcedChannelIds.addAll(rollbacks);
     state = _stateFromManager(
       manager,
       isReady: _isInitialized,
@@ -155,6 +164,9 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       pubkey: manager.pubkey,
       contexts: manager.effectiveContexts,
       version: (previousVersion ?? 0) + 1,
+      syncedForcedChannelIds: Set.unmodifiable(
+        Set<String>.from(_syncedForcedChannelIds),
+      ),
     );
   }
 }

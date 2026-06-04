@@ -62,6 +62,7 @@ export class ReadStateManager {
   private maxFetchedCreatedAt = 0;
   private forcedContexts = new Set<string>();
   private contextSourceCreatedAt = new Map<string, number>();
+  private pendingSyncedRollbacks = new Set<string>();
 
   constructor(pubkey: string, relayClient: RelayClient) {
     this.pubkey = pubkey;
@@ -353,11 +354,14 @@ export class ReadStateManager {
       if (this.forcedContexts.has(ctx)) continue;
       const sourceCreatedAt = this.contextSourceCreatedAt.get(ctx) ?? 0;
       const current = this.effectiveState.get(ctx) ?? 0;
-      console.debug(
-        `[ReadStateManager] LWW ctx=${ctx.substring(0, 12)}… event.created_at=${event.created_at} sourceCreatedAt=${sourceCreatedAt} current=${current} incoming=${ts}`,
-      );
       if (event.created_at > sourceCreatedAt) {
         if (this.effectiveState.get(ctx) !== ts) {
+          if (ts < current && current > 0) {
+            this.pendingSyncedRollbacks.add(ctx);
+            console.debug(
+              `[ReadStateManager] synced rollback ctx=${ctx.substring(0, 12)}… from=${current} to=${ts}`,
+            );
+          }
           this.effectiveState.set(ctx, ts);
           anyAdvanced = true;
         }
@@ -522,6 +526,12 @@ export class ReadStateManager {
       this.publishableContextIds,
       this.contextSourceCreatedAt,
     );
+  }
+
+  drainSyncedRollbacks(): ReadonlySet<string> {
+    const drained = this.pendingSyncedRollbacks;
+    this.pendingSyncedRollbacks = new Set<string>();
+    return drained;
   }
 
   private notifyListeners(): void {

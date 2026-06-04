@@ -247,6 +247,7 @@ export function useUnreadChannels(
     isReady: isReadStateReady,
     markContextRead,
     markContextUnread,
+    drainSyncedRollbacks,
     readStateVersion,
   } = useReadState(pubkey, relayClient);
 
@@ -271,6 +272,23 @@ export function useUnreadChannels(
   // the case where we don't yet have an observed latest timestamp to compare
   // against. Cleared when the user opens the channel.
   const forcedUnreadRef = React.useRef(new Set<string>());
+
+  // When a synced event rolls back a read marker (cross-device mark-as-unread),
+  // merge into forcedUnreadRef so the badge appears immediately without waiting
+  // for a catch-up REQ that already ran with the old (higher) marker.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion is the intentional drain trigger
+  React.useEffect(() => {
+    const rolled = drainSyncedRollbacks();
+    if (rolled.size === 0) return;
+    let anyNew = false;
+    for (const channelId of rolled) {
+      if (!forcedUnreadRef.current.has(channelId)) {
+        forcedUnreadRef.current.add(channelId);
+        anyNew = true;
+      }
+    }
+    if (anyNew) bumpLatestVersion();
+  }, [readStateVersion, drainSyncedRollbacks]);
 
   // Root event IDs of threads where the current user has replied at least once.
   // Used to determine if thread replies should trigger unread notifications.
