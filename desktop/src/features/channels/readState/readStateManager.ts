@@ -398,8 +398,8 @@ export class ReadStateManager {
   }
 
   private async publish(): Promise<void> {
-    await this.fetchOwnBlobBeforePublish();
     console.debug(`[ReadStateManager] publish starting slotId=${this.slotId}`);
+    await this.fetchOwnBlobBeforePublish();
 
     // Build blob from contexts this client is allowed to publish.
     const contexts = this.currentContexts();
@@ -454,7 +454,7 @@ export class ReadStateManager {
       );
     } catch (error) {
       // Non-fatal: will retry on next debounce
-      console.debug("[ReadStateManager] publish failed:", error);
+      console.warn("[ReadStateManager] publish failed:", error);
     }
   }
 

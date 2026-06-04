@@ -241,12 +241,7 @@ class ReadStateManager {
         pubkey: pubkey,
         decrypt: _crypto.decrypt,
       );
-      if (decoded == null) {
-        debugPrint(
-          '[ReadStateManager] mergeEvents skipped event=${event.id.substring(0, 8)}…',
-        );
-        continue;
-      }
+      if (decoded == null) continue;
 
       if (_isPlausibleCreatedAt(event.createdAt)) {
         _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
@@ -314,10 +309,7 @@ class ReadStateManager {
       pubkey: pubkey,
       decrypt: _crypto.decrypt,
     );
-    if (decoded == null) {
-      debugPrint('[ReadStateManager] incoming event decode returned null');
-      return;
-    }
+    if (decoded == null) return;
 
     if (_isPlausibleCreatedAt(event.createdAt)) {
       _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
@@ -351,7 +343,7 @@ class ReadStateManager {
       }
     }
     debugPrint(
-      '[ReadStateManager] incoming result changed=$changed clientId=${decoded.blob.clientId.substring(0, 8)}…',
+      '[ReadStateManager] incoming result changed=$changed clientId=${decoded.blob.clientId.substring(0, min(8, decoded.blob.clientId.length))}…',
     );
 
     if (decoded.blob.clientId == _clientId) {
