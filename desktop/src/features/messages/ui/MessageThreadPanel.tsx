@@ -309,11 +309,16 @@ export function MessageThreadPanel({
                   {threadReplies.map((entry) => {
                     return (
                       <div
-                        className="flex flex-col gap-1"
+                        className={cn(
+                          "flex flex-col gap-1",
+                          entry.summary &&
+                            "group/message -mx-1 rounded-2xl px-1 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+                        )}
                         key={entry.message.id}
                       >
                         <MessageRow
                           channelId={channelId}
+                          hoverBackground={!entry.summary}
                           layoutVariant="thread-reply"
                           message={entry.message}
                           onDelete={
