@@ -41,7 +41,7 @@ The harness discovers channels by querying the relay with the agent's authentica
 
 By default, the harness discovers only channels the agent is a **member** of (`GET /api/channels?member=true`). When the agent is added to a new channel, the membership notification subscription auto-subscribes to it.
 
-**Private channels** require explicit membership. The relay doesn't yet have a REST/event API for managing channel members — this is a known gap. For now, use `create_channel` via the Sprout MCP tools to create new channels (the creator is automatically a member).
+**Private channels** require explicit membership. The relay doesn't yet have a REST/event API for managing channel members — this is a known gap. For now, use `create_channel` via the Sprout CLI to create new channels (the creator is automatically a member).
 
 ## Quick Start (goose)
 
@@ -53,7 +53,7 @@ export GOOSE_MODE=auto
 sprout-acp
 ```
 
-That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent, goose receives the message and can reply using the Sprout MCP tools that the harness configures automatically.
+That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent, goose receives the message and can reply using the Sprout CLI that the harness configures automatically.
 
 ## Running with Codex
 
@@ -236,7 +236,7 @@ Forum event kinds:
 2. **Channel discovery** — Queries the relay REST API for accessible channels, subscribes to each.
 3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue per channel.
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
-5. **Agent response** — The agent processes the prompt and uses Sprout MCP tools (`send_message`, `get_messages`, etc.) to interact with Sprout.
+5. **Agent response** — The agent processes the prompt and uses the Sprout CLI (`send_message`, `get_messages`, etc.) to interact with Sprout.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
 
 Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.
