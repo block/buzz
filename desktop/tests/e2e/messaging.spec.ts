@@ -403,7 +403,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   const siblingReply = `Sibling threaded reply ${timestamp}`;
   const nestedReply = `Nested threaded reply ${timestamp}`;
   const nestedReplyFromBob = `Nested reply from Bob ${timestamp}`;
-  const nestedReplyMaxTopOffsetPx = 280;
+  const nestedReplyVisibleTopMaxPx = 280;
   const fillerReplies = Array.from(
     { length: 14 },
     (_, index) => `Thread filler reply ${index} ${timestamp}`,
@@ -587,7 +587,7 @@ test("opens a single-level thread panel with inline expansion", async ({
         return rowRect.top - bodyRect.top;
       });
     })
-    .toBeLessThanOrEqual(nestedReplyMaxTopOffsetPx);
+    .toBeLessThanOrEqual(nestedReplyVisibleTopMaxPx);
 
   const firstReplyId = await firstReplyRow.getAttribute("data-message-id");
   if (!firstReplyId) {
@@ -641,7 +641,7 @@ test("opens a single-level thread panel with inline expansion", async ({
         return rowRect.top - bodyRect.top;
       });
     })
-    .toBeLessThanOrEqual(nestedReplyMaxTopOffsetPx);
+    .toBeLessThanOrEqual(nestedReplyVisibleTopMaxPx);
 
   await firstReplySummaryRow.click();
   await expect(
