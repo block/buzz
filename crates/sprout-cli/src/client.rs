@@ -313,6 +313,13 @@ impl SproutClient {
                         CliError::Other("connection closed before AUTH challenge".into())
                     })?
                     .map_err(|e| CliError::Other(format!("WebSocket recv error: {e}")))?;
+                if let Message::Ping(data) = &raw {
+                    let _ = ws.send(Message::Pong(data.clone())).await;
+                    continue;
+                }
+                if let Message::Close(_) = &raw {
+                    return Err(CliError::Other("connection closed by relay".into()));
+                }
                 if let Message::Text(text) = raw {
                     let arr: serde_json::Value = serde_json::from_str(&text)
                         .map_err(|e| CliError::Other(format!("invalid relay frame: {e}")))?;
@@ -321,14 +328,23 @@ impl SproutClient {
                             break c.to_string();
                         }
                     }
-                    // Skip non-AUTH frames (NOTICE, etc.) until the challenge arrives.
                 }
             };
+
+            if challenge.len() > 1024 {
+                return Err(CliError::Other("AUTH challenge exceeds 1024 bytes".into()));
+            }
 
             // Sign and send the NIP-42 AUTH event.
             let relay_url = RelayUrl::parse(&ws_url)
                 .map_err(|e| CliError::Other(format!("invalid relay URL: {e}")))?;
-            let auth_event = EventBuilder::auth(&challenge, relay_url)
+            let auth_builder = EventBuilder::auth(&challenge, relay_url);
+            let auth_builder = if let Some(ref tag) = self.auth_tag {
+                auth_builder.tags([tag.clone()])
+            } else {
+                auth_builder
+            };
+            let auth_event = auth_builder
                 .sign_with_keys(&self.keys)
                 .map_err(|e| CliError::Other(format!("AUTH signing failed: {e}")))?;
             let auth_id = auth_event.id.to_hex();
@@ -346,6 +362,13 @@ impl SproutClient {
                     .await
                     .ok_or_else(|| CliError::Other("connection closed waiting for AUTH OK".into()))?
                     .map_err(|e| CliError::Other(format!("WebSocket recv error: {e}")))?;
+                if let Message::Ping(data) = &raw {
+                    let _ = ws.send(Message::Pong(data.clone())).await;
+                    continue;
+                }
+                if let Message::Close(_) = &raw {
+                    return Err(CliError::Other("connection closed by relay".into()));
+                }
                 if let Message::Text(text) = raw {
                     let arr: serde_json::Value = serde_json::from_str(&text)
                         .map_err(|e| CliError::Other(format!("invalid relay frame: {e}")))?;
@@ -385,6 +408,13 @@ impl SproutClient {
                         CliError::Other("connection closed waiting for EVENT OK".into())
                     })?
                     .map_err(|e| CliError::Other(format!("WebSocket recv error: {e}")))?;
+                if let Message::Ping(data) = &raw {
+                    let _ = ws.send(Message::Pong(data.clone())).await;
+                    continue;
+                }
+                if let Message::Close(_) = &raw {
+                    return Err(CliError::Other("connection closed by relay".into()));
+                }
                 if let Message::Text(text) = raw {
                     let arr: serde_json::Value = serde_json::from_str(&text)
                         .map_err(|e| CliError::Other(format!("invalid relay frame: {e}")))?;
