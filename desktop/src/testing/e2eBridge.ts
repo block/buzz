@@ -114,11 +114,6 @@ type PresenceStatus = "online" | "away" | "offline";
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
 
-type RawSetPresenceResponse = {
-  status: PresenceStatus;
-  ttl_seconds: number;
-};
-
 type RawChannel = {
   id: string;
   name: string;
@@ -2821,7 +2816,7 @@ async function handleGetPresence(
     return {} satisfies RawPresenceLookup;
   }
 
-  // Presence is ephemeral (kind:20001) — query via bridge which synthesizes from Redis.
+  // Presence is ephemeral (kind:20001) — mock returns from in-memory map.
   const events = await relayQuery(config, [
     { kinds: [20001], authors: args.pubkeys, limit: args.pubkeys.length },
   ]);
@@ -2839,40 +2834,6 @@ async function handleGetPresence(
     }
   }
   return result;
-}
-
-async function handleSetPresence(
-  args: {
-    status: PresenceStatus;
-  },
-  config: E2eConfig | undefined,
-) {
-  const identity = getIdentity(config);
-  if (!identity) {
-    setMockPresenceStatus(getMockMemberPubkey(config), args.status);
-
-    return {
-      status: args.status,
-      ttl_seconds: args.status === "offline" ? 0 : MOCK_PRESENCE_TTL_SECONDS,
-    } satisfies RawSetPresenceResponse;
-  }
-
-  // Presence is ephemeral kind:20001 — submit via POST /events.
-  // Note: the relay may reject this with "kind 20001 is only accepted via WebSocket"
-  // in which case we just return the expected shape (presence is best-effort in e2e).
-  try {
-    await submitSignedEvent(config, {
-      kind: 20001,
-      content: args.status,
-      tags: [],
-    });
-  } catch {
-    // Expected: ephemeral events may be WS-only
-  }
-  return {
-    status: args.status,
-    ttl_seconds: args.status === "offline" ? 0 : 90,
-  };
 }
 
 async function handleCreateChannel(
@@ -5168,6 +5129,16 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (event.kind === 20001) {
+      const status = event.content;
+      if (status === "online" || status === "away" || status === "offline") {
+        setMockPresenceStatus(event.pubkey, status);
+      }
+      emitMockGlobalEvent(event);
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
     if (event.kind === KIND_USER_STATUS) {
       const hasGeneralDTag = event.tags.some(
         (tag) => tag[0] === "d" && tag[1] === "general",
@@ -5495,11 +5466,6 @@ export function maybeInstallE2eTauriMocks() {
           (payload as Parameters<typeof handleGetPresence>[0]) ?? {
             pubkeys: [],
           },
-          activeConfig,
-        );
-      case "set_presence":
-        return handleSetPresence(
-          payload as Parameters<typeof handleSetPresence>[0],
           activeConfig,
         );
       case "get_relay_ws_url":
