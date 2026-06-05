@@ -11,6 +11,7 @@ import {
 import {
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
+  KIND_USER_STATUS,
 } from "@/shared/constants/kinds";
 import type {
   RawAcpProviderCatalogEntry,
@@ -391,6 +392,13 @@ const GLOBAL_MOCK_SUBSCRIPTION = "*";
 type MockSubscription = {
   channelId: string;
   kinds: number[] | null;
+};
+
+type MockFilter = {
+  "#d"?: string[];
+  "#h"?: string[];
+  authors?: string[];
+  kinds?: number[];
 };
 
 type MockSocket = {
@@ -1230,6 +1238,7 @@ const mockChannels: MockChannel[] = [
 ];
 
 const mockMessages = new Map<string, RelayEvent[]>();
+const mockUserStatuses: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketSendMutexWedged = false;
@@ -1923,6 +1932,17 @@ function emitMockLiveEvent(channelId: string, event: RelayEvent) {
   }
 }
 
+function emitMockGlobalEvent(event: RelayEvent) {
+  for (const socket of mockSockets.values()) {
+    for (const [subId, subscription] of socket.subscriptions) {
+      if (subscription.kinds && !subscription.kinds.includes(event.kind)) {
+        continue;
+      }
+      sendWsText(socket.handler, ["EVENT", subId, event]);
+    }
+  }
+}
+
 function hasMockLiveSubscription(channelId: string, kind?: number) {
   for (const socket of mockSockets.values()) {
     for (const subscription of socket.subscriptions.values()) {
@@ -1952,6 +1972,46 @@ function recordMockMessage(channelId: string, event: RelayEvent) {
 
   channel.last_message_at = new Date(event.created_at * 1_000).toISOString();
   touchMockChannel(channel);
+}
+
+function resetMockUserStatuses() {
+  mockUserStatuses.length = 0;
+}
+
+function recordMockUserStatus(event: RelayEvent) {
+  const dTag = event.tags.find((tag) => tag[0] === "d")?.[1];
+  if (dTag) {
+    const index = mockUserStatuses.findIndex(
+      (stored) =>
+        stored.pubkey.toLowerCase() === event.pubkey.toLowerCase() &&
+        stored.tags.some((tag) => tag[0] === "d" && tag[1] === dTag),
+    );
+    if (index >= 0) {
+      mockUserStatuses.splice(index, 1);
+    }
+  }
+
+  mockUserStatuses.push(event);
+}
+
+function filterMockUserStatuses(filter: MockFilter) {
+  const authors = filter.authors?.map((author) => author.toLowerCase());
+  const dTags = filter["#d"];
+
+  return mockUserStatuses
+    .filter((event) => {
+      if (authors && !authors.includes(event.pubkey.toLowerCase())) {
+        return false;
+      }
+      if (
+        dTags &&
+        !event.tags.some((tag) => tag[0] === "d" && dTags.includes(tag[1]))
+      ) {
+        return false;
+      }
+      return true;
+    })
+    .sort((a, b) => b.created_at - a.created_at);
 }
 
 function emitMockChannelMessage(
@@ -5022,11 +5082,7 @@ function sendToMockSocket(args: {
       return;
     }
 
-    const filter = rest[1] as {
-      "#h"?: string[];
-      kinds?: number[];
-      authors?: string[];
-    };
+    const filter = rest[1] as MockFilter;
     if (filter.kinds?.includes(13534)) {
       sendWsText(socket.handler, [
         "EVENT",
@@ -5047,6 +5103,14 @@ function sendToMockSocket(args: {
           continue;
         }
         sendWsText(socket.handler, ["EVENT", subId, emojiEvent]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
+    if (filter.kinds?.includes(KIND_USER_STATUS)) {
+      for (const statusEvent of filterMockUserStatuses(filter)) {
+        sendWsText(socket.handler, ["EVENT", subId, statusEvent]);
       }
       sendWsText(socket.handler, ["EOSE", subId]);
       return;
@@ -5109,6 +5173,26 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (event.kind === KIND_USER_STATUS) {
+      const hasGeneralDTag = event.tags.some(
+        (tag) => tag[0] === "d" && tag[1] === "general",
+      );
+      if (!hasGeneralDTag) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "invalid: user status missing d tag.",
+        ]);
+        return;
+      }
+
+      recordMockUserStatus(event);
+      emitMockGlobalEvent(event);
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
     const channelId = getChannelIdFromTags(event.tags);
     if (!channelId) {
       sendWsText(socket.handler, [
@@ -5152,6 +5236,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockTeams();
   resetMockWorkflows();
   resetMockMesh();
+  resetMockUserStatuses();
   mockWebsocketSendMutexWedged = false;
   mockWindows("main");
   window.__SPROUT_E2E_COMMANDS__ = [];

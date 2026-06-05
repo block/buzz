@@ -6,6 +6,7 @@ import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { SetStatusDialog } from "@/features/user-status/ui/SetStatusDialog";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { PresenceStatus } from "@/shared/api/types";
 import { isMacPlatform } from "@/shared/lib/platform";
 
@@ -179,7 +180,10 @@ export function ProfilePopover({
                 {hasUserStatus ? (
                   <span className="flex min-w-0 flex-1 items-center gap-1 truncate text-popover-foreground">
                     {userStatusEmoji ? (
-                      <span className="shrink-0">{userStatusEmoji}</span>
+                      <StatusEmoji
+                        className="h-3.5 w-3.5 shrink-0"
+                        value={userStatusEmoji}
+                      />
                     ) : null}
                     <span className="truncate">{userStatusText}</span>
                   </span>

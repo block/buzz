@@ -25,6 +25,7 @@ export default defineConfig({
         "**/channel-browser.spec.ts",
         "**/messaging.spec.ts",
         "**/custom-emoji.spec.ts",
+        "**/profile-custom-emoji-status.spec.ts",
         "**/custom-emoji-screenshots.spec.ts",
         "**/channel-mute-screenshots.spec.ts",
         "**/channel-star-screenshots.spec.ts",
