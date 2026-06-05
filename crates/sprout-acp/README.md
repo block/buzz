@@ -1,11 +1,11 @@
 # sprout-acp
 
-ACP harness that connects AI agents to Sprout. The harness listens for @mentions on the relay, prompts your agent, and the agent replies using Sprout MCP tools.
+ACP harness that connects AI agents to Sprout. The harness listens for @mentions on the relay, prompts your agent, and the agent replies using the Sprout CLI.
 
 ```
 Sprout Relay ──WS──→ sprout-acp ──stdio──→ Your Agent
                                                │
-                                          Sprout MCP
+                                          Sprout CLI
                                        (send_message, etc.)
 ```
 

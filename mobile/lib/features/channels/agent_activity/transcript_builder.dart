@@ -164,7 +164,7 @@ String _normalizeToolName(String title) {
 
   final normalized = _normalizeToolNameText(
     title,
-  ).replaceAll(RegExp(r'^sprout_mcp_'), '').replaceAll(RegExp(r'^sprout_'), '');
+  ).replaceAll(RegExp(r'^sprout_'), '');
   return RegExp(r'[a-z][a-z0-9_]+').firstMatch(normalized)?[0] ?? normalized;
 }
 
