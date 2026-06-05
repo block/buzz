@@ -9,13 +9,19 @@
  * an open serverless workspace and previously caused an auth-required reconnect
  * storm in the agent. Keep only relays that allow anonymous read/write.
  *
+ * `relay.nostr.band` was dropped: it is an indexer/search relay optimized for
+ * its REST search API, and in practice never completes a plain client WebSocket
+ * handshake from the serverless pool (observed 0/10 connects), so it only ever
+ * cost connect timeouts. `relay.primal.net` replaces it — fast, free, and
+ * allows anonymous read/write.
+ *
  * These are only suggestions — users can type any relay URL. They apply only
  * to serverless workspaces; Sprout-server workspaces use their own relay.
  */
 export const DEFAULT_PUBLIC_RELAYS: readonly string[] = [
   "wss://relay.damus.io",
   "wss://nos.lol",
-  "wss://relay.nostr.band",
+  "wss://relay.primal.net",
 ] as const;
 
 /** The relays pre-filled (comma-joined) when a user first enables serverless mode. */

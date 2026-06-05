@@ -23,33 +23,84 @@ use crate::relay::SubmitEventResponse;
 /// Execute one or more filters as a single `REQ` and collect matching events
 /// until the relay sends `EOSE`. Mirrors `relay::query_relay` but over a plain
 /// WebSocket against a generic relay.
+/// Max extra time to wait for the remaining (slower) relays once at least one
+/// relay has returned its results. Bounds read tail-latency: a slow-but-alive
+/// relay can no longer drag every query out to the full per-relay
+/// `QUERY_TIMEOUT` (6s) via `join_all`. After this grace window we merge
+/// whatever arrived. Dead relays are already skipped via the pool's failure
+/// cooldown, so this only affects relays that connect but answer slowly.
+const QUERY_MERGE_GRACE: std::time::Duration = std::time::Duration::from_millis(800);
+
 /// Query a set of relays concurrently and merge results, deduplicating events
 /// by id. Succeeds if any relay responds; errors only if all fail.
+///
+/// Returns as soon as the first relay responds plus a short grace window for
+/// stragglers ([`QUERY_MERGE_GRACE`]) — so one slow relay does not hold up the
+/// whole read. The per-relay futures still run to their own `QUERY_TIMEOUT`;
+/// we just stop *waiting* on them once we have a result and the grace elapses.
 pub async fn query_relay_ws(
     state: &AppState,
     relay_urls: &[String],
     filters: &[serde_json::Value],
 ) -> Result<Vec<nostr::Event>, String> {
-    let futures = relay_urls
+    let mut futures: futures_util::stream::FuturesUnordered<_> = relay_urls
         .iter()
-        .map(|url| query_relay_ws_one(state, url, filters));
-    let results = futures_util::future::join_all(futures).await;
+        .map(|url| query_relay_ws_one(state, url, filters))
+        .collect();
 
     let mut by_id: std::collections::HashMap<String, nostr::Event> =
         std::collections::HashMap::new();
     let mut last_err = None;
     let mut any_ok = false;
-    for r in results {
+
+    // Phase 1: wait for the first relay to come back (success or error).
+    while let Some(r) = futures.next().await {
         match r {
             Ok(events) => {
                 any_ok = true;
                 for ev in events {
                     by_id.entry(ev.id.to_hex()).or_insert(ev);
                 }
+                break;
             }
             Err(e) => last_err = Some(e),
         }
     }
+
+    // Phase 2: give the remaining relays a short grace window to contribute,
+    // then merge whatever has arrived and stop waiting on slow stragglers.
+    if any_ok {
+        let grace = tokio::time::sleep(QUERY_MERGE_GRACE);
+        tokio::pin!(grace);
+        loop {
+            tokio::select! {
+                maybe = futures.next() => match maybe {
+                    Some(Ok(events)) => {
+                        for ev in events {
+                            by_id.entry(ev.id.to_hex()).or_insert(ev);
+                        }
+                    }
+                    Some(Err(e)) => last_err = Some(e),
+                    None => break, // all relays done
+                },
+                _ = &mut grace => break, // grace elapsed — merge what we have
+            }
+        }
+    } else {
+        // No relay succeeded yet; drain the rest (all likely failing fast).
+        while let Some(r) = futures.next().await {
+            match r {
+                Ok(events) => {
+                    any_ok = true;
+                    for ev in events {
+                        by_id.entry(ev.id.to_hex()).or_insert(ev);
+                    }
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+    }
+
     if !any_ok {
         return Err(last_err.unwrap_or_else(|| "all relays failed".to_string()));
     }
