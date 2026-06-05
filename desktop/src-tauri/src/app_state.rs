@@ -38,6 +38,11 @@ pub struct AppState {
     /// In-process mesh-llm node started by Sprout Desktop.
     #[cfg(feature = "mesh-llm")]
     pub mesh_llm_runtime: AsyncMutex<Option<crate::mesh_llm::DesktopMeshRuntime>>,
+    /// Runtime-owned relay-mesh control plane (call-me-now listener + connect
+    /// request publish/retry). Installed once at identity-set time so the
+    /// listener is up before any restore/create can request a connection.
+    #[cfg(feature = "mesh-llm")]
+    pub mesh_coordinator: AsyncMutex<Option<crate::mesh_llm::MeshCoordinator>>,
 }
 
 pub fn build_app_state() -> AppState {
@@ -85,6 +90,8 @@ pub fn build_app_state() -> AppState {
         )),
         #[cfg(feature = "mesh-llm")]
         mesh_llm_runtime: AsyncMutex::new(None),
+        #[cfg(feature = "mesh-llm")]
+        mesh_coordinator: AsyncMutex::new(None),
     }
 }
 

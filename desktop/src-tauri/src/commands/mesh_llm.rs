@@ -47,6 +47,53 @@ pub async fn mesh_ensure_client_node(
     ensure_client_node_for_model(&state, request.model_id, request.endpoint_addr).await
 }
 
+/// Join a peer by endpoint addr without naming a model. Used by the runtime
+/// coordinator's call-me-now responder and the initiator's same-attempt dial:
+/// the responder side of a hole-punch just needs both ends dialing, and the
+/// mesh-llm router resolves per-model routability per request afterward.
+///
+/// Dials into the running runtime if one exists; otherwise starts a client
+/// node with the addr as its join token. Model-agnostic on purpose.
+pub(crate) async fn ensure_client_node_for_model_dial_only(
+    state: &AppState,
+    endpoint_addr: &str,
+) -> CmdResult<()> {
+    let addr = endpoint_addr.trim();
+    if addr.is_empty() {
+        return Err("endpoint_addr is required to dial".to_string());
+    }
+    {
+        let runtime = state.mesh_llm_runtime.lock().await;
+        if let Some(runtime) = runtime.as_ref() {
+            return runtime
+                .dial_endpoint_addr(addr)
+                .await
+                .map_err(|error| format!("mesh dial failed: {error}"));
+        }
+    }
+    let start = mesh_llm::StartMeshNodeRequest {
+        mode: mesh_llm::MeshNodeMode::Client,
+        model_id: None,
+        max_vram_gb: None,
+        join_token: Some(addr.to_string()),
+    };
+    let mut runtime = state.mesh_llm_runtime.lock().await;
+    if runtime.is_some() {
+        // Lost a race; dial into the now-present runtime instead.
+        if let Some(runtime) = runtime.as_ref() {
+            return runtime
+                .dial_endpoint_addr(addr)
+                .await
+                .map_err(|error| format!("mesh dial failed: {error}"));
+        }
+    }
+    let started = mesh_llm::DesktopMeshRuntime::start(start)
+        .await
+        .map_err(|error| format!("mesh client failed to start: {error}"))?;
+    *runtime = Some(started);
+    Ok(())
+}
+
 pub(crate) async fn ensure_client_node_for_model(
     state: &AppState,
     model_id: impl AsRef<str>,
