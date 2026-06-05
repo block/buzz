@@ -266,8 +266,8 @@ fn estimate_tokens_from_bytes(bytes: usize) -> u64 {
 /// can't together exceed the window. Free function so the policy math is unit
 /// testable without constructing a [`RunCtx`].
 fn token_threshold(max_context_tokens: u64, max_output_tokens: u32) -> u64 {
-    // Integer math: HANDOFF_THRESHOLD is 0.75, i.e. window * 3 / 4.
-    let fractional = max_context_tokens / 4 * 3;
+    // Integer math: handoff threshold is 90%, i.e. window * 9 / 10.
+    let fractional = max_context_tokens / 10 * 9;
     let output_reserved = max_context_tokens.saturating_sub(u64::from(max_output_tokens));
     fractional.min(output_reserved)
 }
@@ -283,7 +283,7 @@ fn byte_fallback_threshold(
 ) -> usize {
     let derived = token_threshold(max_context_tokens, max_output_tokens)
         .saturating_mul(CONSERVATIVE_BYTES_PER_TOKEN);
-    let byte_cap = max_history_bytes / 4 * 3;
+    let byte_cap = max_history_bytes / 10 * 9;
     usize::try_from(derived).unwrap_or(usize::MAX).min(byte_cap)
 }
 
@@ -293,16 +293,16 @@ mod tests {
 
     #[test]
     fn token_threshold_uses_fraction_when_output_is_small() {
-        // 128k window, 32k output. fractional = 0.75*128000 = 96000;
-        // output_reserved = 128000-32768 = 95232; min = 95232.
-        assert_eq!(token_threshold(128_000, 32_768), 95_232);
+        // 200k window, 1k output. fractional = 0.9*200000 = 180000;
+        // output_reserved = 200000-1000 = 199000; min = 180000.
+        assert_eq!(token_threshold(200_000, 1_000), 180_000);
     }
 
     #[test]
     fn token_threshold_reserves_output_headroom() {
         // Large output relative to window: the output-reserve term dominates,
         // keeping input+output within the window.
-        // 100k window, 40k output: fractional=75k, reserved=60k -> 60k.
+        // 100k window, 40k output: fractional=90k, reserved=60k -> 60k.
         assert_eq!(token_threshold(100_000, 40_000), 60_000);
     }
 
@@ -316,13 +316,13 @@ mod tests {
     #[test]
     fn byte_fallback_is_conservative_and_capped() {
         // Derived = token_threshold * 1 (1 byte/token upper bound). For
-        // 128k/32k: 95232 bytes, well under a 16 MiB byte budget, so derived
+        // 200k/1k: 180000 bytes, well under a 16 MiB byte budget, so derived
         // wins (early handoff).
-        let t = byte_fallback_threshold(128_000, 32_768, 16 * 1024 * 1024);
-        assert_eq!(t, 95_232);
-        // With a tiny byte budget the cap wins -> never exceeds it (window*3/4).
-        let capped = byte_fallback_threshold(128_000, 32_768, 8192);
-        assert_eq!(capped, 8192 / 4 * 3);
+        let t = byte_fallback_threshold(200_000, 1_000, 16 * 1024 * 1024);
+        assert_eq!(t, 180_000);
+        // With a tiny byte budget the cap wins -> never exceeds it (window*90%).
+        let capped = byte_fallback_threshold(200_000, 1_000, 8192);
+        assert_eq!(capped, 8192 / 10 * 9);
     }
 
     #[test]

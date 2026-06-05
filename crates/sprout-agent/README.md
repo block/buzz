@@ -145,6 +145,8 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `SPROUT_AGENT_SYSTEM_PROMPT_FILE` | — | File path. Mutually exclusive with the above. |
 | `SPROUT_AGENT_MAX_ROUNDS` | `0` | Tool-loop iteration cap. 0 = unlimited. |
 | `SPROUT_AGENT_MAX_OUTPUT_TOKENS` | `32768` | Per LLM call. Headroom for large tool-call inputs (e.g. file writes via heredoc); Sonnet 4 / Opus 4 cap at 64K. |
+| `SPROUT_AGENT_MAX_CONTEXT_TOKENS` | `200000` | Provider context window used by the handoff gate. |
+| `SPROUT_AGENT_MAX_HANDOFFS` | `10` | Max context handoffs per session before falling back to truncation. |
 | `SPROUT_AGENT_LLM_TIMEOUT_SECS` | `120` | |
 | `SPROUT_AGENT_TOOL_TIMEOUT_SECS` | `660` | Per-tool call timeout in seconds |
 | `SPROUT_AGENT_MAX_PARALLEL_TOOLS` | `8` | Max concurrent tool calls per turn (1 = sequential) |

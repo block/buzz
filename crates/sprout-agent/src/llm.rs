@@ -924,7 +924,7 @@ mod tests {
             max_sessions: 1,
             max_line_bytes: 1024 * 1024,
             max_history_bytes: 16 * 1024 * 1024,
-            max_context_tokens: 128_000,
+            max_context_tokens: 200_000,
             max_handoffs: 1,
             max_parallel_tools: 1,
             hook_timeout: Duration::from_secs(1),

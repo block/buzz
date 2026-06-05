@@ -1028,7 +1028,7 @@ async fn hook_post_compact_injects_after_handoff() {
     // Sequence of canned LLM responses consumed in order:
     //   1-3. Three `session/prompt` rounds returning short text. Each
     //        prompt body is ~300 KB, so by the 4th prompt we'll be over
-    //        the 75% (= 768 KB) threshold of a 1 MB budget.
+    //        the 90% (= ~922 KB) threshold of a 1 MB budget.
     //   4.   Handoff `summarize()` call returns the summary text.
     //   5.   Next regular `complete()` call after the handoff returns
     //        a final "done" message; we inspect this request's body.
@@ -1040,7 +1040,7 @@ async fn hook_post_compact_injects_after_handoff() {
         openai_text("done"),
     ])
     .await;
-    // 1 MB budget = MIN allowed. Threshold = 768 KB. Each ~300 KB prompt
+    // 1 MB budget = MIN allowed. Threshold = ~922 KB. Each ~300 KB prompt
     // fills the budget on the 4th turn, triggering handoff.
     let mut h = Harness::spawn_with_env(
         &llm.url,
@@ -1134,15 +1134,15 @@ async fn hook_post_compact_injects_after_handoff() {
 /// signal alone, before the next normal `complete()`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn token_usage_over_budget_triggers_handoff() {
-    // Context window 1000 tokens, output 100 -> threshold = min(750, 900) = 750.
-    // First response reports 800 input tokens (> 750). The agent stores that;
-    // the next prompt's pre-flight gate sees 800 >= 750 and hands off, which
+    // Context window 1000 tokens, output 100 -> threshold = min(900, 900) = 900.
+    // First response reports 950 input tokens (> 900). The agent stores that;
+    // the next prompt's pre-flight gate sees 950 >= 900 and hands off, which
     // inserts an extra summarize() call we didn't issue.
-    //   req 1: prompt #0  -> text + usage(800)
+    //   req 1: prompt #0  -> text + usage(950)
     //   req 2: summarize() (the handoff) -> summary text
     //   req 3: prompt #1's actual complete() -> done
     let llm = spawn_capturing_llm(vec![
-        openai_text_with_usage("ack-0", 800),
+        openai_text_with_usage("ack-0", 950),
         openai_text("handoff summary text"),
         openai_text_with_usage("done", 10),
     ])
@@ -1164,7 +1164,7 @@ async fn token_usage_over_budget_triggers_handoff() {
     .await;
     let sid = init_session(&mut h, json!([])).await;
 
-    // Prompt #0: small body; response carries usage(800) -> over threshold.
+    // Prompt #0: small body; response carries usage(950) -> over threshold.
     let p0 = h
         .send(
             "session/prompt",
@@ -1207,13 +1207,13 @@ async fn token_usage_over_budget_triggers_handoff() {
 /// that the projection crosses — so the handoff must fire.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_usage_plus_history_growth_triggers_handoff() {
-    // window 10_000, output 1_000 -> threshold = min(7_500, 9_000) = 7_500.
-    // req1 reports usage 7_000 (UNDER 7_500). Its response is a tool_call;
+    // window 10_000, output 1_000 -> threshold = min(9_000, 9_000) = 9_000.
+    // req1 reports usage 8_500 (UNDER 9_000). Its response is a tool_call;
     // the fake MCP returns a ~6 KB result, appended to history. At the
     // conservative 1 byte/token estimate that's ~6_000 projected tokens, so
-    // projected ~13_000 >= 7_500 -> the next loop iteration hands off before
+    // projected ~14_500 >= 9_000 -> the next loop iteration hands off before
     // the follow-up complete().
-    //   req1: tool_call + usage(7000)
+    //   req1: tool_call + usage(8500)
     //   (tool result ~6KB appended)
     //   req2: summarize() (handoff)
     //   req3: final text
@@ -1221,7 +1221,7 @@ async fn stale_usage_plus_history_growth_triggers_handoff() {
         {
             let mut v = openai_tool_call("tc1", "fake__tool_0", json!({}));
             v["usage"] =
-                json!({"prompt_tokens": 7000, "completion_tokens": 1, "total_tokens": 7001});
+                json!({"prompt_tokens": 8500, "completion_tokens": 1, "total_tokens": 8501});
             v
         },
         openai_text("handoff summary text"),
@@ -1260,7 +1260,7 @@ async fn stale_usage_plus_history_growth_triggers_handoff() {
         .await;
     let _ = h.recv_until(|v| v["id"] == json!(p)).await;
     // req1 (tool_call) + summarize (handoff) + req2 (done) = 3. Without the
-    // growth estimate we'd see only 2 (stale 7000 < 7500, no handoff).
+    // growth estimate we'd see only 2 (stale 8500 < 9000, no handoff).
     let captured = llm.captured.lock().await.len();
     assert_eq!(
         captured, 3,

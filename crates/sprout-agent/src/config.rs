@@ -57,10 +57,11 @@ pub struct Config {
     pub max_line_bytes: usize,
     pub max_history_bytes: usize,
     /// Provider context window in tokens used to gate handoff. The handoff
-    /// fires when the previous request's (cache-summed) input tokens cross a
-    /// fraction of this budget, before the next request can exceed the window
-    /// and 400. Default 128_000 — a safe common floor; operators raise it for
-    /// larger windows (e.g. 200_000/1M). Set via `SPROUT_AGENT_MAX_CONTEXT_TOKENS`.
+    /// fires when the previous request's (cache-summed) input tokens cross the
+    /// handoff threshold for this budget, before the next request can exceed
+    /// the window and 400. Default 200_000 — matching Claude 4.x windows;
+    /// operators lower/raise it for other models. Set via
+    /// `SPROUT_AGENT_MAX_CONTEXT_TOKENS`.
     pub max_context_tokens: u64,
     pub max_handoffs: usize,
     pub max_parallel_tools: usize,
@@ -152,8 +153,8 @@ impl Config {
             max_sessions: parse_env("SPROUT_AGENT_MAX_SESSIONS", usize::MAX)?,
             max_line_bytes: parse_env("SPROUT_AGENT_MAX_LINE_BYTES", 4 * 1024 * 1024)?,
             max_history_bytes: parse_env("SPROUT_AGENT_MAX_HISTORY_BYTES", 16 * 1024 * 1024)?,
-            max_context_tokens: parse_env("SPROUT_AGENT_MAX_CONTEXT_TOKENS", 128_000u64)?,
-            max_handoffs: parse_env("SPROUT_AGENT_MAX_HANDOFFS", 5)?,
+            max_context_tokens: parse_env("SPROUT_AGENT_MAX_CONTEXT_TOKENS", 200_000u64)?,
+            max_handoffs: parse_env("SPROUT_AGENT_MAX_HANDOFFS", 10)?,
             max_parallel_tools: parse_env("SPROUT_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
             hook_timeout: Duration::from_millis(parse_env(
                 "SPROUT_AGENT_HOOK_TIMEOUT_MS",
