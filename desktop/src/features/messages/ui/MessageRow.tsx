@@ -370,7 +370,7 @@ export const MessageRow = React.memo(
                     </span>
                   ) : null}
                 </div>
-                <div className="-mt-0.5">{messageBodyNode}</div>
+                <div>{messageBodyNode}</div>
               </div>
             </>
           ) : (
@@ -420,7 +420,7 @@ export const MessageRow = React.memo(
                     </span>
                   ) : null}
                 </div>
-                <div className="-mt-0.5">{messageBodyNode}</div>
+                <div>{messageBodyNode}</div>
               </div>
             </>
           )}

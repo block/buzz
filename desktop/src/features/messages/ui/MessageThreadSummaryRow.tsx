@@ -6,7 +6,7 @@ import type { TimelineMessage } from "@/features/messages/types";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const MESSAGE_TEXT_OFFSET_PX = 54;
-const MESSAGE_BODY_OFFSET_PX = MESSAGE_TEXT_OFFSET_PX + 4;
+const MESSAGE_BODY_OFFSET_PX = MESSAGE_TEXT_OFFSET_PX - 1;
 const NESTED_REPLY_OFFSET_PX = 28;
 
 function formatLastReplyTime(unixSeconds: number): string {
@@ -40,7 +40,7 @@ function ParticipantAvatar({
     >
       <UserAvatar
         avatarUrl={participant.avatarUrl}
-        className="h-8 w-8 rounded-full border-2 border-background text-[10px]"
+        className="!h-[26px] !w-[26px] rounded-full border-2 border-background text-[9px]"
         displayName={participant.author}
         size="sm"
       />
@@ -81,7 +81,7 @@ export function MessageThreadSummaryRow({
         );
 
   return (
-    <div className="relative pb-1 pt-0.5">
+    <div className="relative pb-1 pt-1">
       {depthGuideOffsets.length > 0 ? (
         <div
           aria-hidden
@@ -103,7 +103,7 @@ export function MessageThreadSummaryRow({
 
       <button
         aria-label={summaryAriaLabel}
-        className="group relative isolate inline-flex h-8 w-fit max-w-full cursor-pointer items-center gap-1.5 rounded-full text-left text-xs font-medium text-muted-foreground transition-[color,opacity] before:pointer-events-none before:absolute before:inset-y-0 before:left-0 before:-right-2 before:-z-10 before:rounded-full before:content-[''] before:transition-[background-color,box-shadow] hover:text-foreground hover:opacity-90 hover:before:bg-background/95 hover:before:ring-1 hover:before:ring-border/70 focus-visible:outline-hidden focus-visible:before:bg-background/95 focus-visible:before:ring-1 focus-visible:before:ring-ring"
+        className="group relative isolate inline-flex h-8 w-fit max-w-full cursor-pointer items-center gap-1.5 rounded-full text-left text-xs font-medium text-muted-foreground transition-[color,opacity] before:pointer-events-none before:absolute before:inset-y-0 before:-left-0.5 before:-right-2.5 before:-z-10 before:rounded-full before:content-[''] before:transition-[background-color,box-shadow] hover:text-foreground hover:opacity-90 hover:before:bg-background/95 hover:before:ring-1 hover:before:ring-border/70 focus-visible:outline-hidden focus-visible:before:bg-background/95 focus-visible:before:ring-1 focus-visible:before:ring-ring"
         data-thread-head-id={message.id}
         data-testid="message-thread-summary"
         onClick={() => onOpenThread(message)}

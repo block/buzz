@@ -12,17 +12,15 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const MAX_VISIBLE_REACTORS = 10;
 const REACTION_PILL_BASE_CLASSES =
-  "inline-flex h-8 items-center rounded-full border text-xs font-medium leading-none transition-colors";
-const REACTION_GLYPH_CLASSES = "-translate-y-px h-3.5 w-3.5 text-sm";
+  "inline-flex h-[26px] items-center rounded-full border text-xs font-medium leading-none transition-colors";
+const REACTION_GLYPH_CLASSES = "-ml-0.5 h-[26px] w-3 text-xs";
 const REACTION_PILL_HOVER_CLASSES =
   "hover:bg-primary/10 hover:text-foreground focus-visible:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring";
 
 /**
- * Render a reaction's emoji: a custom (image) emoji when `emojiUrl` is set,
- * otherwise the unicode/text glyph. `className` sizes the image to match the
- * surrounding text. The relay URL is rewritten through the localhost media
- * proxy (like every other relay-hosted <img>) — WKWebView bypasses WARP, so a
- * direct relay URL gets a Cloudflare Access 403 and renders as a broken image.
+ * Render a reaction's emoji in a fixed centering frame. Unicode emoji fonts
+ * have uneven visual bounds, so the outer frame does the vertical alignment
+ * instead of relying on line-height.
  */
 function EmojiGlyph({
   reaction,
@@ -31,27 +29,26 @@ function EmojiGlyph({
   reaction: TimelineReaction;
   className?: string;
 }) {
+  const frameClassName = cn(
+    "inline-grid shrink-0 place-items-center leading-none",
+    className,
+  );
+
   if (reaction.emojiUrl) {
     return (
-      <img
-        alt={reaction.emoji}
-        src={rewriteRelayUrl(reaction.emojiUrl)}
-        className={cn(
-          "inline-block object-contain align-text-bottom",
-          className,
-        )}
-        draggable={false}
-      />
+      <span className={frameClassName}>
+        <img
+          alt={reaction.emoji}
+          src={rewriteRelayUrl(reaction.emojiUrl)}
+          className="block h-full w-full object-contain"
+          draggable={false}
+        />
+      </span>
     );
   }
   return (
-    <span
-      className={cn(
-        "inline-flex items-center justify-center leading-none",
-        className,
-      )}
-    >
-      {reaction.emoji}
+    <span className={frameClassName}>
+      <span className="block leading-none">{reaction.emoji}</span>
     </span>
   );
 }
@@ -114,7 +111,7 @@ export function MessageReactions({
   return (
     <div
       className={cn(
-        "group/reactions mt-1.5 flex flex-wrap items-center gap-1.5 pt-1",
+        "group/reactions mt-1 flex flex-wrap items-center gap-1.5 pt-1",
         className,
       )}
       data-testid="message-reactions"
@@ -166,7 +163,7 @@ function InlineReactionPicker({
                 "group-focus-within/reactions:pointer-events-auto group-focus-within/reactions:opacity-100",
                 open
                   ? "pointer-events-auto border-border/80 bg-background text-foreground opacity-100 shadow-xs"
-                  : "border-border/70 bg-muted/70",
+                  : "border-transparent bg-muted/70",
                 REACTION_PILL_HOVER_CLASSES,
               )}
               data-testid={`add-reaction-${messageId}`}
@@ -250,10 +247,10 @@ function ReactionPill({
 
   const pillClasses = cn(
     REACTION_PILL_BASE_CLASSES,
-    "min-w-12 justify-center gap-1.5 px-2",
+    "min-w-12 justify-center gap-2 px-2",
     reaction.reactedByCurrentUser
       ? "border-primary/40 bg-primary/10 text-primary"
-      : "border-border/70 bg-muted/70 text-foreground/90",
+      : "border-transparent bg-muted/70 text-foreground/90",
     canToggle
       ? reaction.reactedByCurrentUser
         ? "hover:bg-primary/10 hover:text-primary focus-visible:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
