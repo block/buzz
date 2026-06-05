@@ -368,6 +368,9 @@ pub async fn cmd_send_message(
     for m in &p.mentions {
         validate_hex64(m)?;
     }
+    if !p.mentions.is_empty() {
+        eprintln!("warning: --mention is deprecated and will be removed in a future release. Use @name in message content instead.");
+    }
 
     let channel_uuid = parse_uuid(&p.channel_id)?;
 
