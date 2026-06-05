@@ -10,7 +10,6 @@ export type {
 export {
   useFeatureEnabled,
   useFeatureToggle,
-  useDevToggle,
   useFeatureSnapshot,
   resolveEnabled,
 } from "./useFeatureEnabled";

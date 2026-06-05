@@ -16,20 +16,6 @@
       "platforms": ["desktop"]
     },
     {
-      "id": "workflows",
-      "name": "Workflows",
-      "description": "YAML-defined automations with approval gates",
-      "tier": "experimental",
-      "platforms": ["desktop"]
-    },
-    {
-      "id": "projects",
-      "name": "Projects",
-      "description": "Git repository browser and collaboration",
-      "tier": "experimental",
-      "platforms": ["desktop"]
-    },
-    {
       "id": "custom-emoji",
       "name": "Custom Emoji",
       "description": "Workspace emoji palette for reactions and messages",
@@ -37,52 +23,66 @@
       "platforms": ["desktop"]
     },
     {
-      "id": "huddles",
-      "name": "Huddles",
-      "description": "Voice sessions with humans and agents via TTS/STT",
-      "tier": "dev",
+      "id": "doctor",
+      "name": "Doctor",
+      "description": "Diagnostic and debug panel for troubleshooting",
+      "tier": "stable",
       "platforms": ["desktop"]
     },
     {
-      "id": "mesh-compute",
-      "name": "Mesh Compute",
-      "description": "Peer-to-peer inference sharing across workspace members",
-      "tier": "dev",
+      "id": "workflows",
+      "name": "Workflows",
+      "description": "YAML-defined automations with approval gates",
+      "tier": "preview",
       "platforms": ["desktop"]
     },
     {
-      "id": "identity-archive",
-      "name": "Identity Archive",
-      "description": "Archive and unarchive relay member identities",
-      "tier": "dev",
-      "platforms": ["desktop"]
-    },
-    {
-      "id": "relay-members",
-      "name": "Relay Members",
-      "description": "Relay membership administration panel",
-      "tier": "dev",
+      "id": "projects",
+      "name": "Projects",
+      "description": "Git repository browser and collaboration",
+      "tier": "preview",
       "platforms": ["desktop"]
     },
     {
       "id": "pulse",
       "name": "Pulse",
       "description": "Activity feed with notes, social posts, and agent activity",
-      "tier": "experimental",
+      "tier": "preview",
       "platforms": ["desktop"]
     },
     {
       "id": "forum",
       "name": "Forum Channels",
       "description": "Forum-style threaded channels for long-form discussions",
-      "tier": "experimental",
+      "tier": "preview",
       "platforms": ["desktop"]
     },
     {
-      "id": "doctor",
-      "name": "Doctor",
-      "description": "Diagnostic and debug panel for troubleshooting",
-      "tier": "stable",
+      "id": "huddles",
+      "name": "Huddles",
+      "description": "Voice sessions with humans and agents via TTS/STT",
+      "tier": "preview",
+      "platforms": ["desktop"]
+    },
+    {
+      "id": "mesh-compute",
+      "name": "Mesh Compute",
+      "description": "Peer-to-peer inference sharing across workspace members",
+      "tier": "unstable",
+      "platforms": ["desktop"]
+    },
+    {
+      "id": "identity-archive",
+      "name": "Identity Archive",
+      "description": "Archive and unarchive relay member identities",
+      "tier": "unstable",
+      "platforms": ["desktop"]
+    },
+    {
+      "id": "relay-members",
+      "name": "Relay Members",
+      "description": "Relay membership administration panel",
+      "tier": "unstable",
       "platforms": ["desktop"]
     }
   ]

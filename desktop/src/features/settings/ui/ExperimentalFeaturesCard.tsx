@@ -1,4 +1,4 @@
-import { desktopFeatures, useFeatureToggle, useDevToggle } from "@/shared/features";
+import { desktopFeatures, useFeatureToggle } from "@/shared/features";
 import type { FeatureDefinition } from "@/shared/features";
 import { Switch } from "@/shared/ui/switch";
 
@@ -21,19 +21,18 @@ function FeatureRow({ feature }: { feature: FeatureDefinition }) {
 }
 
 export function ExperimentalFeaturesCard() {
-  const [devEnabled, setDevEnabled] = useDevToggle();
-  const isDev = import.meta.env.DEV;
-
-  const experimentalFeatures = desktopFeatures.filter(
-    (f) => f.tier === "experimental",
+  const previewFeatures = desktopFeatures.filter(
+    (f) => f.tier === "preview",
   );
-  const devFeatures = desktopFeatures.filter((f) => f.tier === "dev");
+  const unstableFeatures = desktopFeatures.filter(
+    (f) => f.tier === "unstable",
+  );
 
   return (
     <section className="min-w-0" data-testid="settings-experimental">
       <div className="mb-3 min-w-0">
         <h2 className="text-sm font-semibold tracking-tight">
-          Experimental Features
+          Preview
         </h2>
         <p className="text-sm text-muted-foreground">
           These features are functional but still being refined. Enable them to
@@ -42,44 +41,28 @@ export function ExperimentalFeaturesCard() {
       </div>
 
       <div className="flex flex-col gap-2">
-        {experimentalFeatures.map((f) => (
+        {previewFeatures.map((f) => (
           <FeatureRow feature={f} key={f.id} />
         ))}
       </div>
 
-      {isDev && (
+      {unstableFeatures.length > 0 && (
         <>
           <div className="mb-3 mt-6 min-w-0">
             <h2 className="text-sm font-semibold tracking-tight">
-              Developer Features
+              Unstable
             </h2>
             <p className="text-sm text-muted-foreground">
-              Only visible in development builds. Toggle the master switch to
-              hide all dev features.
+              Here be dragons — these features might break or disappear. Enable
+              at your own risk.
             </p>
           </div>
 
-          <label className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-primary/30 bg-primary/5 px-4 py-3">
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium">Show developer features</p>
-              <p className="text-xs text-muted-foreground">
-                When off, all dev-tier features are hidden
-              </p>
-            </div>
-            <Switch
-              checked={devEnabled}
-              data-testid="feature-toggle-dev-global"
-              onCheckedChange={setDevEnabled}
-            />
-          </label>
-
-          {devEnabled && (
-            <div className="flex flex-col gap-2">
-              {devFeatures.map((f) => (
-                <FeatureRow feature={f} key={f.id} />
-              ))}
-            </div>
-          )}
+          <div className="flex flex-col gap-2">
+            {unstableFeatures.map((f) => (
+              <FeatureRow feature={f} key={f.id} />
+            ))}
+          </div>
         </>
       )}
     </section>

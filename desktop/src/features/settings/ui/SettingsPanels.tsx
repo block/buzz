@@ -100,7 +100,7 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   },
   {
     value: "experimental",
-    label: "Experimental",
+    label: "Preview & Unstable",
     icon: FlaskConical,
   },
   {

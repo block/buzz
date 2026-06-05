@@ -127,7 +127,7 @@ export function SettingsView({
       // Feature gate check
       if (s.featureGate) {
         const feature = getFeature(s.featureGate);
-        if (feature && !resolveEnabled(feature.tier, feature.id, featureState.o, featureState.d)) {
+        if (feature && !resolveEnabled(feature.tier, feature.id, featureState)) {
           return false;
         }
       }

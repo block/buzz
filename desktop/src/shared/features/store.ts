@@ -3,11 +3,9 @@
  *
  * localStorage keys (versioned to match manifest):
  *   sprout-feature-overrides-v1  — JSON object of { [featureId]: boolean }
- *   sprout-dev-features-v1       — "true" | "false" (global dev toggle)
  */
 
 const OVERRIDES_KEY = "sprout-feature-overrides-v1";
-const DEV_TOGGLE_KEY = "sprout-dev-features-v1";
 
 export type FeatureOverrides = Record<string, boolean>;
 
@@ -33,21 +31,4 @@ export function clearOverride(featureId: string): void {
   const overrides = getOverrides();
   delete overrides[featureId];
   window.localStorage.setItem(OVERRIDES_KEY, JSON.stringify(overrides));
-}
-
-/** Whether the global "Show developer features" toggle is on */
-export function getDevToggle(): boolean {
-  try {
-    const raw = window.localStorage.getItem(DEV_TOGGLE_KEY);
-    // Default to true in dev builds, false in prod
-    if (raw === null) return import.meta.env.DEV;
-    return raw === "true";
-  } catch {
-    return import.meta.env.DEV;
-  }
-}
-
-/** Set the global dev toggle */
-export function setDevToggle(enabled: boolean): void {
-  window.localStorage.setItem(DEV_TOGGLE_KEY, enabled ? "true" : "false");
 }
