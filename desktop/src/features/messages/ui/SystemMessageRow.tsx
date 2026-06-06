@@ -10,6 +10,10 @@ import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import {
+  MENTION_CHIP_BASE_CLASSES,
+  MENTION_CHIP_HOVER_CLASSES,
+} from "@/shared/ui/mentionChip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -78,10 +82,10 @@ function ProfileName({
   const node = (
     <span
       className={cn(
-        "rounded-xs transition-colors hover:text-foreground",
         pubkey && "cursor-pointer",
-        highlight &&
-          "rounded-[4px] bg-primary/15 px-1 py-0.5 font-medium text-primary hover:bg-primary/25 hover:text-primary/90",
+        highlight
+          ? cn(MENTION_CHIP_BASE_CLASSES, MENTION_CHIP_HOVER_CLASSES)
+          : "rounded-xs transition-colors hover:text-foreground",
       )}
     >
       {highlight ? "@" : null}
