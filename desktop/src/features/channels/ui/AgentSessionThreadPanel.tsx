@@ -55,6 +55,7 @@ export function AgentSessionThreadPanel({
   const avatarUrl = profiles?.[agent.pubkey.toLowerCase()]?.avatarUrl ?? null;
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
+  const usesChannelSplitChrome = !isOverlay && !isSinglePanelView;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
@@ -111,7 +112,10 @@ export function AgentSessionThreadPanel({
         {!isOverlay ? (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[76px] bg-background/75 backdrop-blur-md before:absolute before:left-0 before:right-0 before:top-10 before:h-px before:bg-border/35 after:absolute after:bottom-0 after:-left-px after:top-10 after:w-px after:bg-border/80 supports-[backdrop-filter]:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/35"
+            className={cn(
+              "pointer-events-none absolute inset-x-0 top-0 z-40 bg-background/75 backdrop-blur-md before:absolute before:left-0 before:right-0 before:top-10 before:h-px before:bg-border/35 after:absolute after:bottom-0 after:-left-px after:top-10 after:w-px after:bg-border/80 supports-[backdrop-filter]:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/35",
+              usesChannelSplitChrome ? "h-[92px]" : "h-[76px]",
+            )}
           />
         ) : null}
 
@@ -122,7 +126,7 @@ export function AgentSessionThreadPanel({
               ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[76px] min-h-[76px] shrink-0 gap-[10px] bg-background/80 pb-[4px] pl-[16px] pr-[8px] pt-[42px] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 sm:pl-[24px] sm:pr-[12px] dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55`
               : isOverlay
                 ? "relative z-50 min-h-[44px] shrink-0 gap-3 bg-background/80 px-3 py-[6px] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
-                : "absolute inset-x-0 top-[42px] z-50 min-h-[32px] gap-3 px-3 py-[4px]",
+                : "absolute inset-x-0 top-[48px] z-50 h-[32px] gap-[10px] py-0 pl-[16px] pr-[8px] sm:pr-[12px]",
           )}
           data-tauri-drag-region
         >
@@ -139,7 +143,14 @@ export function AgentSessionThreadPanel({
                 displayName={agent.name}
                 size="xs"
               />
-              <h2 className="min-w-0 flex-1 translate-y-px truncate text-sm font-semibold leading-5 tracking-tight">
+              <h2
+                className={cn(
+                  "min-w-0 flex-1 translate-y-px truncate font-semibold tracking-tight",
+                  usesChannelSplitChrome
+                    ? "text-base leading-6"
+                    : "text-sm leading-5",
+                )}
+              >
                 {agent.name}
               </h2>
             </div>
@@ -186,14 +197,22 @@ export function AgentSessionThreadPanel({
               ) : null}
               <Button
                 aria-label="Close activity panel"
-                className="h-6 w-6 text-foreground hover:bg-muted/60 hover:text-foreground"
+                className={cn(
+                  usesChannelSplitChrome
+                    ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
+                    : "h-6 w-6 text-foreground hover:bg-muted/60 hover:text-foreground",
+                )}
                 data-testid="agent-session-close"
                 onClick={onClose}
                 size="icon"
                 type="button"
                 variant="ghost"
               >
-                <X className="h-3.5 w-3.5" />
+                <X
+                  className={cn(
+                    usesChannelSplitChrome ? "size-5" : "h-3.5 w-3.5",
+                  )}
+                />
               </Button>
             </div>
           </div>
@@ -204,10 +223,13 @@ export function AgentSessionThreadPanel({
           onScroll={onScroll}
           className={cn(
             "min-h-0 flex-1 overflow-y-auto px-3 pb-4",
-            // Match MessageThreadPanel: single-panel mode has a 76px header
-            // (min-h-[76px] with -mb-[76px]), so the body must clear it. Only
-            // the floating overlay (44px header) uses the smaller pt-4.
-            isSinglePanelView ? "pt-[76px]" : isOverlay ? "pt-4" : "pt-[76px]",
+            // Single-panel mode keeps the 76px local header; split panes sit
+            // under the channel screen's 92px top chrome.
+            usesChannelSplitChrome
+              ? "pt-[92px]"
+              : isOverlay
+                ? "pt-4"
+                : "pt-[76px]",
           )}
         >
           <ManagedAgentSessionPanel

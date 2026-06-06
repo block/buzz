@@ -106,6 +106,8 @@ export function UserProfilePanel({
 }: UserProfilePanelProps) {
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
+  const usesChannelSplitChrome =
+    splitPaneClamp && !isOverlay && !isSinglePanelView;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const profileQuery = useUserProfileQuery(pubkey);
@@ -239,7 +241,10 @@ export function UserProfilePanel({
         {!isOverlay ? (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[76px] bg-background/80 backdrop-blur-md after:absolute after:left-0 after:right-0 after:top-10 after:h-px after:bg-border/35 supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
+            className={cn(
+              "pointer-events-none absolute inset-x-0 top-0 z-40 bg-background/80 backdrop-blur-md after:absolute after:left-0 after:right-0 after:top-10 after:h-px after:bg-border/35 supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55",
+              usesChannelSplitChrome ? "h-[92px]" : "h-[76px]",
+            )}
           />
         ) : null}
 
@@ -250,32 +255,52 @@ export function UserProfilePanel({
               ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[76px] min-h-[76px] shrink-0 gap-[10px] bg-transparent pb-[4px] pl-[16px] pr-[8px] pt-[42px] sm:pl-[24px] sm:pr-[12px]`
               : isOverlay
                 ? "relative z-50 min-h-[44px] shrink-0 gap-3 bg-background/80 px-3 py-[6px] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
-                : "absolute inset-x-0 top-[42px] z-50 min-h-[32px] gap-3 bg-transparent px-3 py-[4px] after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80",
+                : cn(
+                    "absolute inset-x-0 z-50 bg-transparent after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80",
+                    usesChannelSplitChrome
+                      ? "top-[48px] h-[32px] gap-[10px] py-0 pl-[16px] pr-[8px] sm:pr-[12px]"
+                      : "top-[42px] min-h-[32px] gap-3 px-3 py-[4px]",
+                  ),
           )}
           data-tauri-drag-region
         >
           <div className="flex min-w-0 items-center gap-1.5">
-            <h2 className="translate-y-px text-sm font-semibold leading-5 tracking-tight">
+            <h2
+              className={cn(
+                "translate-y-px font-semibold tracking-tight",
+                usesChannelSplitChrome
+                  ? "text-base leading-6"
+                  : "text-sm leading-5",
+              )}
+            >
               Profile
             </h2>
           </div>
           <Button
             aria-label="Close profile"
-            className="ml-auto h-4 w-4 rounded-full text-foreground hover:bg-muted/60 hover:text-foreground"
+            className={cn(
+              "ml-auto",
+              usesChannelSplitChrome
+                ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
+                : "h-4 w-4 rounded-full text-foreground hover:bg-muted/60 hover:text-foreground",
+            )}
             data-testid="user-profile-panel-close"
             onClick={onClose}
             size="icon"
             type="button"
             variant="ghost"
           >
-            <X className="h-2.5 w-2.5" />
+            <X
+              className={cn(usesChannelSplitChrome ? "size-5" : "h-2.5 w-2.5")}
+            />
           </Button>
         </div>
 
         <div
           className={cn(
             "min-h-0 flex-1 overflow-y-auto px-4 pb-6",
-            !isFloatingOverlay && "pt-[76px]",
+            !isFloatingOverlay &&
+              (usesChannelSplitChrome ? "pt-[92px]" : "pt-[76px]"),
           )}
         >
           <div className="flex flex-col items-center gap-4 pt-4">

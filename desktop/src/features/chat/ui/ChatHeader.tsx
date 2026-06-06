@@ -104,9 +104,7 @@ export function ChatHeader({
     <header
       className={cn(
         "relative z-30 flex min-w-0 shrink-0 cursor-default select-none items-center gap-[10px] bg-transparent pl-[16px] pr-[8px] transition-[margin,padding] duration-200 ease-linear sm:pl-[24px] sm:pr-[12px]",
-        density === "compact"
-          ? "h-[32px] py-0"
-          : "min-h-[44px] py-[6px]",
+        density === "compact" ? "h-[32px] py-0" : "min-h-[44px] py-[6px]",
         overlaysContent && !belowSystemChrome && "-mb-[44px]",
       )}
       data-testid="chat-header"
@@ -142,9 +140,7 @@ export function ChatHeader({
         <div
           className="flex shrink-0 items-center gap-1"
           style={
-            actionsRightInset
-              ? { marginRight: actionsRightInset }
-              : undefined
+            actionsRightInset ? { marginRight: actionsRightInset } : undefined
           }
         >
           <UpdateIndicator />
