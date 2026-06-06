@@ -116,7 +116,7 @@
 .rich-text-composer .tiptap .mention-highlight {
   border-radius: 4px;
   background: hsl(var(--primary) / 0.15);
-  padding: 2px 4px 1px;
+  padding: 2px 4px;
   color: hsl(var(--primary));
   font-weight: 600;
 }
