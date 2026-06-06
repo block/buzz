@@ -908,7 +908,7 @@ function createMarkdownComponents(
       const mentionNode = (
         <span
           data-mention=""
-          className="cursor-pointer rounded-[4px] bg-primary/15 px-1 pt-px pb-0 font-semibold text-primary transition-colors hover:bg-primary/25 hover:text-primary/90"
+          className="cursor-pointer rounded-[4px] bg-primary/15 px-1 py-px font-semibold text-primary transition-colors hover:bg-primary/25 hover:text-primary/90"
         >
           {children}
         </span>

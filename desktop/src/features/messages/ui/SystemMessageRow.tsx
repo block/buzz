@@ -81,7 +81,7 @@ function ProfileName({
         "rounded-xs transition-colors hover:text-foreground",
         pubkey && "cursor-pointer",
         highlight &&
-          "rounded-[4px] bg-primary/15 px-1 pt-px pb-0 font-medium text-primary hover:bg-primary/25 hover:text-primary/90",
+          "rounded-[4px] bg-primary/15 px-1 py-px font-medium text-primary hover:bg-primary/25 hover:text-primary/90",
       )}
     >
       {highlight ? "@" : null}
