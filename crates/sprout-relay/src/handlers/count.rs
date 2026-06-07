@@ -30,11 +30,25 @@ pub async fn handle_count(
     state: Arc<AppState>,
 ) {
     // Require auth
-    let (pubkey_bytes, token_channel_ids) = {
+    let (pubkey_bytes, token_channel_ids, is_public_viewer) = {
         let auth = conn.auth_state.read().await;
         match &*auth {
-            AuthState::Authenticated(ctx) => {
-                (ctx.pubkey.to_bytes().to_vec(), ctx.channel_ids.clone())
+            AuthState::Authenticated(ctx) => (
+                ctx.pubkey.to_bytes().to_vec(),
+                ctx.channel_ids.clone(),
+                false,
+            ),
+            // Unauthenticated public viewer: mint a synthetic read-only viewer
+            // scoped to the configured public channel allowlist, if any.
+            _ if !state.config.public_viewer_channel_ids.is_empty() => {
+                let ctx = sprout_auth::AuthContext::anonymous_viewer(
+                    state.config.public_viewer_channel_ids.clone(),
+                );
+                (
+                    ctx.pubkey.to_bytes().to_vec(),
+                    ctx.channel_ids.clone(),
+                    true,
+                )
             }
             _ => {
                 conn.send(RelayMessage::closed(
@@ -65,13 +79,18 @@ pub async fn handle_count(
     }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let mut accessible_channels = match state.get_accessible_channel_ids_cached(&pubkey_bytes).await
-    {
-        Ok(ids) => ids,
-        Err(e) => {
-            warn!(sub_id = %sub_id, "Failed to get accessible channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
-            return;
+    // Public viewers have no memberships; their accessible set IS the
+    // configured allowlist (see WS REQ handler for the rationale).
+    let mut accessible_channels = if is_public_viewer {
+        token_channel_ids.clone().unwrap_or_default()
+    } else {
+        match state.get_accessible_channel_ids_cached(&pubkey_bytes).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(sub_id = %sub_id, "Failed to get accessible channels: {e}");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
         }
     };
     if let Some(allowed) = token_channel_ids.as_deref() {

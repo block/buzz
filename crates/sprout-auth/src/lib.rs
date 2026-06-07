@@ -76,6 +76,42 @@ impl AuthContext {
     pub fn has_scope(&self, scope: &Scope) -> bool {
         self.scopes.contains(scope)
     }
+
+    /// Construct a synthetic read-only context for an *unauthenticated* public
+    /// viewer, scoped to exactly `channel_ids`.
+    ///
+    /// This grants no write capability (read scopes only) and pins access to
+    /// the given channels via [`Self::channel_ids`]. It is minted by the relay
+    /// — without any NIP-42 AUTH event — when a public-viewer channel allowlist
+    /// is configured.
+    ///
+    /// The `pubkey` is a fixed, reserved sentinel derived from a non-secret
+    /// seed. It exists only so the context has a valid identity field; it is
+    /// **never** authenticated against, looked up in `relay_members`, or used
+    /// for accounting. Callers that special-case public viewers must use the
+    /// supplied `channel_ids` directly, not a DB lookup keyed on this pubkey.
+    pub fn anonymous_viewer(channel_ids: Vec<uuid::Uuid>) -> Self {
+        AuthContext {
+            pubkey: public_viewer_sentinel_pubkey(),
+            scopes: Scope::relay_viewer_read_only(),
+            channel_ids: Some(channel_ids),
+            auth_method: AuthMethod::Nip42,
+            agent_owner_pubkey: None,
+        }
+    }
+}
+
+/// The reserved sentinel public key used by [`AuthContext::anonymous_viewer`].
+///
+/// Derived deterministically from a fixed, non-secret seed so it is a valid
+/// x-only Nostr point. It is a synthetic placeholder — never a real principal.
+fn public_viewer_sentinel_pubkey() -> nostr::PublicKey {
+    use sha2::{Digest, Sha256};
+    // Stable, namespaced, non-secret seed. Not used for signing or auth.
+    let hash: [u8; 32] = Sha256::digest(b"sprout-public-viewer-sentinel:v1").into();
+    let secret_key =
+        nostr::SecretKey::from_slice(&hash).expect("32-byte SHA-256 is a valid secret key");
+    nostr::Keys::new(secret_key).public_key()
 }
 
 /// Top-level authentication configuration, typically loaded from the relay's TOML config file.
@@ -186,6 +222,32 @@ mod tests {
         };
         assert!(ctx.has_scope(&Scope::MessagesRead));
         assert!(!ctx.has_scope(&Scope::MessagesWrite));
+    }
+
+    #[test]
+    fn anonymous_viewer_is_read_only_and_channel_scoped() {
+        let channels = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+        let ctx = AuthContext::anonymous_viewer(channels.clone());
+
+        // Pinned to exactly the supplied channels.
+        assert_eq!(ctx.channel_ids.as_deref(), Some(channels.as_slice()));
+
+        // Read-only: has the rendering reads, has NO write/admin scopes.
+        assert!(ctx.has_scope(&Scope::MessagesRead));
+        assert!(!ctx.has_scope(&Scope::MessagesWrite));
+        assert!(!ctx.has_scope(&Scope::ChannelsWrite));
+        assert!(ctx.scopes.iter().all(|sc| sc.as_str().ends_with(":read")));
+        assert_eq!(ctx.scopes, Scope::relay_viewer_read_only());
+
+        // No owner delegation; sentinel pubkey is stable and non-degenerate.
+        assert!(ctx.agent_owner_pubkey.is_none());
+        let again = AuthContext::anonymous_viewer(vec![]);
+        assert_eq!(ctx.pubkey, again.pubkey, "sentinel pubkey must be stable");
+        assert_ne!(
+            ctx.pubkey.to_bytes(),
+            [0u8; 32],
+            "sentinel must not be the all-zero key"
+        );
     }
 
     #[tokio::test]

@@ -89,6 +89,20 @@ pub struct Config {
     /// Default: `false`. Set via `SPROUT_ALLOW_NIP_OA_AUTH=true`.
     pub allow_nip_oa_auth: bool,
 
+    /// Channels that unauthenticated ("public") viewers may read.
+    ///
+    /// When non-empty, a WebSocket connection that has not completed NIP-42
+    /// AUTH is granted a synthetic read-only viewer context scoped to exactly
+    /// these channel IDs (read scopes only, no write). Empty (default) means
+    /// public read is disabled and unauthenticated REQ/COUNT are rejected as
+    /// before.
+    ///
+    /// This intentionally opts the listed channels *out* of the NIP-42 gate —
+    /// they become world-readable. Set via `SPROUT_PUBLIC_VIEWER_CHANNELS`
+    /// (comma-separated channel UUIDs). Per-IP abuse protection is assumed to
+    /// be handled by an upstream reverse proxy.
+    pub public_viewer_channel_ids: Vec<uuid::Uuid>,
+
     /// Media storage configuration (S3/MinIO).
     pub media: sprout_media::MediaConfig,
 
@@ -174,6 +188,25 @@ impl Config {
         let allow_nip_oa_auth = std::env::var("SPROUT_ALLOW_NIP_OA_AUTH")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
+
+        // Public (unauthenticated) viewer channel allowlist. Comma-separated
+        // channel UUIDs; malformed entries are rejected loudly (fail-closed:
+        // a typo must not silently widen or narrow public exposure).
+        let public_viewer_channel_ids = match std::env::var("SPROUT_PUBLIC_VIEWER_CHANNELS") {
+            Ok(raw) => raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    uuid::Uuid::parse_str(s).map_err(|e| {
+                        ConfigError::InvalidValue(format!(
+                            "SPROUT_PUBLIC_VIEWER_CHANNELS: invalid channel UUID {s:?}: {e}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            Err(_) => Vec::new(),
+        };
 
         // Note: intentionally not prefixed with SPROUT_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
@@ -375,6 +408,7 @@ impl Config {
             require_relay_membership,
             relay_owner_pubkey,
             allow_nip_oa_auth,
+            public_viewer_channel_ids,
             media,
             ephemeral_ttl_override,
             git_repo_path,
@@ -430,6 +464,41 @@ mod tests {
         let result = Config::from_env();
         std::env::remove_var("SPROUT_BIND_ADDR");
         assert!(matches!(result, Err(ConfigError::InvalidBindAddr(_))));
+    }
+
+    #[test]
+    fn public_viewer_channels_default_empty() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("SPROUT_PUBLIC_VIEWER_CHANNELS");
+        let config = Config::from_env().expect("default config");
+        assert!(
+            config.public_viewer_channel_ids.is_empty(),
+            "public viewer must be disabled by default"
+        );
+    }
+
+    #[test]
+    fn public_viewer_channels_parse_valid_uuids() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        // Mixed spacing + a trailing empty entry must be tolerated.
+        std::env::set_var("SPROUT_PUBLIC_VIEWER_CHANNELS", format!("{a}, {b} ,"));
+        let config = Config::from_env().expect("config");
+        std::env::remove_var("SPROUT_PUBLIC_VIEWER_CHANNELS");
+        assert_eq!(config.public_viewer_channel_ids, vec![a, b]);
+    }
+
+    #[test]
+    fn public_viewer_channels_reject_malformed() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("SPROUT_PUBLIC_VIEWER_CHANNELS", "not-a-uuid");
+        let result = Config::from_env();
+        std::env::remove_var("SPROUT_PUBLIC_VIEWER_CHANNELS");
+        assert!(
+            matches!(result, Err(ConfigError::InvalidValue(ref m)) if m.contains("SPROUT_PUBLIC_VIEWER_CHANNELS")),
+            "malformed UUID must fail-closed, got {result:?}"
+        );
     }
 
     #[test]

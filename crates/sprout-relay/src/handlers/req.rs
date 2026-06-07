@@ -14,6 +14,7 @@ use sprout_core::kind::{
 };
 use sprout_db::EventQuery;
 
+use sprout_auth::AuthContext;
 use sprout_auth::Scope;
 
 use crate::connection::{AuthState, ConnectionState};
@@ -36,7 +37,7 @@ pub async fn handle_req(
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
 ) {
-    let (conn_id, pubkey_bytes, token_channel_ids) = {
+    let (conn_id, pubkey_bytes, token_channel_ids, is_public_viewer) = {
         let auth = conn.auth_state.read().await;
         match &*auth {
             AuthState::Authenticated(ctx) => {
@@ -60,7 +61,30 @@ pub async fn handle_req(
                     return;
                 }
 
-                (conn.conn_id, pk_bytes, ctx.channel_ids.clone())
+                (conn.conn_id, pk_bytes, ctx.channel_ids.clone(), false)
+            }
+            // Unauthenticated connection. If the relay configures a public
+            // viewer channel allowlist, mint a synthetic read-only viewer
+            // scoped to those channels; otherwise reject as before.
+            _ if !state.config.public_viewer_channel_ids.is_empty() => {
+                let ctx =
+                    AuthContext::anonymous_viewer(state.config.public_viewer_channel_ids.clone());
+
+                let subs = conn.subscriptions.lock().await;
+                if !subs.contains_key(&sub_id) && subs.len() >= MAX_SUBSCRIPTIONS {
+                    conn.send(RelayMessage::closed(
+                        &sub_id,
+                        "error: too many subscriptions",
+                    ));
+                    return;
+                }
+
+                (
+                    conn.conn_id,
+                    ctx.pubkey.to_bytes().to_vec(),
+                    ctx.channel_ids.clone(),
+                    true,
+                )
             }
             _ => {
                 conn.send(RelayMessage::notice(
@@ -75,13 +99,20 @@ pub async fn handle_req(
         }
     };
 
-    let mut accessible_channels = match state.get_accessible_channel_ids_cached(&pubkey_bytes).await
-    {
-        Ok(ids) => ids,
-        Err(e) => {
-            warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
-            return;
+    // Public viewers have no relay/channel memberships and must not inherit
+    // the open-visibility UNION from the membership query (that would both
+    // under-grant non-open allowlisted channels and is unnecessary work).
+    // Their accessible set IS the configured allowlist, full stop.
+    let mut accessible_channels = if is_public_viewer {
+        token_channel_ids.clone().unwrap_or_default()
+    } else {
+        match state.get_accessible_channel_ids_cached(&pubkey_bytes).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
         }
     };
     if let Some(allowed) = token_channel_ids.as_deref() {
@@ -861,6 +892,46 @@ mod tests {
     #[test]
     fn filter_channel_scope_preserves_unrestricted_global_queries() {
         assert!(filter_has_allowed_channel_scope(&Filter::new(), &[], false));
+    }
+
+    #[test]
+    fn public_viewer_filter_gating_matches_allowlist() {
+        // A public (anonymous) viewer's channel_ids drive the same restricted
+        // filter gate as an authenticated viewer: allowlisted #h passes,
+        // everything else (global, disallowed, malformed) is rejected.
+        let allowed = uuid::Uuid::new_v4();
+        let disallowed = uuid::Uuid::new_v4();
+        let ctx = sprout_auth::AuthContext::anonymous_viewer(vec![allowed]);
+        let accessible = ctx
+            .channel_ids
+            .clone()
+            .expect("public viewer is channel-scoped");
+        // `restricted` is always true for a viewer (channel_ids = Some).
+        let restricted = ctx.channel_ids.is_some();
+        assert!(restricted);
+
+        assert!(filter_has_allowed_channel_scope(
+            &filter_with_channel(allowed),
+            &accessible,
+            restricted,
+        ));
+        assert!(!filter_has_allowed_channel_scope(
+            &filter_with_channel(disallowed),
+            &accessible,
+            restricted,
+        ));
+        // Global (no #h) and malformed #h are both rejected.
+        assert!(!filter_has_allowed_channel_scope(
+            &Filter::new(),
+            &accessible,
+            restricted
+        ));
+        let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+        assert!(!filter_has_allowed_channel_scope(
+            &Filter::new().custom_tag(h_tag, "not-a-uuid"),
+            &accessible,
+            restricted,
+        ));
     }
 
     #[test]
