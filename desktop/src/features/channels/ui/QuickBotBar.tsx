@@ -54,7 +54,7 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
                 <button
                   aria-label={`Add ${persona.displayName}`}
                   className={cn(
-                    "relative flex h-7 w-7 shrink-0 items-center justify-center rounded-full",
+                    "relative flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
                     "border border-border/50 shadow-xs",
                     "transition-transform duration-150 hover:scale-110",
                     "focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
@@ -70,7 +70,7 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
                   {persona.avatarUrl ? (
                     <img
                       alt={persona.displayName}
-                      className="h-full w-full rounded-full object-cover"
+                      className="h-full w-full rounded-lg object-cover"
                       referrerPolicy="no-referrer"
                       src={rewriteRelayUrl(persona.avatarUrl)}
                     />
@@ -80,7 +80,7 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
                     </span>
                   )}
                   {isThisPending ? (
-                    <div className="absolute inset-0 flex items-center justify-center rounded-full bg-background/70">
+                    <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-background/70">
                       <Spinner className="h-3.5 w-3.5 text-primary" />
                     </div>
                   ) : null}

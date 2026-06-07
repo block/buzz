@@ -82,7 +82,7 @@ function ReplyParentContext({
             >
               <UserAvatar
                 avatarUrl={parentAvatarUrl}
-                className="!h-4 !w-4 shrink-0 rounded-md"
+                className="!h-4 !w-4 shrink-0"
                 displayName={parentDisplayName ?? "Parent note author"}
               />
             </button>

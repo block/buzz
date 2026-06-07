@@ -105,7 +105,7 @@ export function InboxMessageRow({
         <div className="relative shrink-0">
           <UserAvatar
             avatarUrl={message.avatarUrl}
-            className="h-8 w-8 shrink-0 rounded-xl"
+            className="h-8 w-8 shrink-0"
             displayName={message.authorLabel}
             size="md"
           />

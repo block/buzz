@@ -158,7 +158,7 @@ export function AddChannelBotTeamsSection({
                           >
                             <ProfileAvatar
                               avatarUrl={persona.avatarUrl}
-                              className="h-4 w-4 rounded-full text-[8px] bg-primary-foreground/20 text-primary-foreground"
+                              className="h-4 w-4 text-[8px] bg-primary-foreground/20 text-primary-foreground"
                               label={persona.displayName}
                             />
                             <span className="text-[10px] text-primary-foreground">

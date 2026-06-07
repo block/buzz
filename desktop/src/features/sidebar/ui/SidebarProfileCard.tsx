@@ -99,7 +99,7 @@ export function SidebarProfileCard({
         >
           <ProfileAvatar
             avatarUrl={profile?.avatarUrl ?? null}
-            className="h-8 w-8 rounded-xl text-xs"
+            className="h-8 w-8 text-xs"
             iconClassName="h-4 w-4"
             label={resolvedDisplayName}
             testId="sidebar-profile-avatar"

@@ -133,7 +133,7 @@ export function InboxListPane({
                   <div className="relative">
                     <UserAvatar
                       avatarUrl={item.avatarUrl}
-                      className="h-8 w-8 rounded-xl"
+                      className="h-8 w-8"
                       displayName={item.senderLabel}
                       size="md"
                     />

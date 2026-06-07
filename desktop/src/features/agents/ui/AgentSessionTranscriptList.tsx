@@ -112,7 +112,7 @@ function MessageItem({
       {!isAssistant ? (
         <UserAvatar
           avatarUrl={authorProfile?.avatarUrl ?? null}
-          className="mr-2 mt-1 h-5 w-5 shrink-0 rounded-full text-[8px]"
+          className="mr-2 mt-1 h-5 w-5 shrink-0 text-[8px]"
           displayName={authorLabel}
           size="xs"
         />

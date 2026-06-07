@@ -52,7 +52,7 @@ export function PersonaCatalogDetailsSheet({
               <div className="flex items-start gap-3">
                 <ProfileAvatar
                   avatarUrl={persona.avatarUrl}
-                  className="h-12 w-12 rounded-xl text-sm"
+                  className="h-12 w-12 text-sm"
                   label={persona.displayName}
                 />
                 <div className="min-w-0 flex-1">

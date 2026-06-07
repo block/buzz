@@ -283,12 +283,12 @@ export function UserProfilePanel({
             {profile?.avatarUrl ? (
               <img
                 alt={displayName}
-                className="aspect-square w-full rounded-2xl object-cover shadow-xs"
+                className="aspect-square w-full rounded-lg object-cover shadow-xs"
                 referrerPolicy="no-referrer"
                 src={rewriteRelayUrl(profile.avatarUrl)}
               />
             ) : (
-              <div className="flex aspect-square w-full items-center justify-center rounded-2xl bg-secondary text-5xl font-semibold text-secondary-foreground shadow-xs">
+              <div className="flex aspect-square w-full items-center justify-center rounded-lg bg-secondary text-5xl font-semibold text-secondary-foreground shadow-xs">
                 {displayName.slice(0, 2).toUpperCase()}
               </div>
             )}

@@ -135,7 +135,7 @@ export function AgentSessionThreadPanel({
             >
               <UserAvatar
                 avatarUrl={avatarUrl}
-                className="h-5 w-5 shrink-0 rounded-full text-[8px]"
+                className="h-5 w-5 shrink-0 text-[8px]"
                 displayName={agent.name}
                 size="xs"
               />

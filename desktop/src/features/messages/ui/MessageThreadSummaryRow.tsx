@@ -26,9 +26,11 @@ function formatLastReplyTime(unixSeconds: number): string {
 }
 
 function ParticipantAvatar({
+  hasNextParticipant,
   participant,
   index,
 }: {
+  hasNextParticipant: boolean;
   participant: TimelineThreadSummaryParticipant;
   index: number;
 }) {
@@ -40,7 +42,7 @@ function ParticipantAvatar({
     >
       <UserAvatar
         avatarUrl={participant.avatarUrl}
-        className="h-8 w-8 rounded-full border-2 border-background text-[10px]"
+        className={`h-8 w-8 text-[10px] ${hasNextParticipant ? "ring-2 ring-background" : ""}`}
         displayName={participant.author}
         size="sm"
       />
@@ -103,7 +105,7 @@ export function MessageThreadSummaryRow({
 
       <button
         aria-label={summaryAriaLabel}
-        className="group relative isolate inline-flex h-8 w-fit max-w-full cursor-pointer items-center gap-1.5 rounded-full text-left text-xs font-medium text-muted-foreground transition-[color,opacity] before:pointer-events-none before:absolute before:inset-y-0 before:left-0 before:-right-2 before:-z-10 before:rounded-full before:content-[''] before:transition-[background-color,box-shadow] hover:text-foreground hover:opacity-90 hover:before:bg-background/95 hover:before:ring-1 hover:before:ring-border/70 focus-visible:outline-hidden focus-visible:before:bg-background/95 focus-visible:before:ring-1 focus-visible:before:ring-ring"
+        className="group relative isolate inline-flex h-8 w-fit max-w-full cursor-pointer items-center gap-1.5 rounded-[12px] text-left text-xs font-medium text-muted-foreground transition-[color,opacity] before:pointer-events-none before:absolute before:-bottom-0.5 before:-left-0.5 before:-right-2 before:-top-0.5 before:-z-10 before:rounded-[12px] before:content-[''] before:transition-[background-color,box-shadow] hover:text-foreground hover:opacity-90 hover:before:bg-background/95 hover:before:ring-1 hover:before:ring-border/70 focus-visible:outline-hidden focus-visible:before:bg-background/95 focus-visible:before:ring-1 focus-visible:before:ring-ring"
         data-thread-head-id={message.id}
         data-testid="message-thread-summary"
         onClick={() => onOpenThread(message)}
@@ -113,6 +115,7 @@ export function MessageThreadSummaryRow({
         <div className="flex shrink-0 items-center">
           {summary.participants.map((participant, index) => (
             <ParticipantAvatar
+              hasNextParticipant={index < summary.participants.length - 1}
               index={index}
               key={participant.id}
               participant={participant}

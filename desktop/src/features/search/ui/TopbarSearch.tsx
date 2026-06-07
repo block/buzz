@@ -251,7 +251,7 @@ export function TopbarSearch({
                         resultProfiles?.[result.hit.pubkey.toLowerCase()]
                           ?.avatarUrl ?? null
                       }
-                      className="h-7 w-7 rounded-md"
+                      className="h-7 w-7"
                       displayName={resolveUserLabel({
                         currentPubkey,
                         profiles: resultProfiles,

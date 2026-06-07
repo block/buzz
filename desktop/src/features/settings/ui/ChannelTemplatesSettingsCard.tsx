@@ -758,7 +758,7 @@ function ProviderRow({
         ) : (
           <ProfileAvatar
             avatarUrl={avatarUrl ?? null}
-            className="h-5 w-5 shrink-0 rounded-full text-[8px] bg-muted text-muted-foreground ring-1 ring-border/50"
+            className="h-5 w-5 shrink-0 text-[8px] bg-muted text-muted-foreground ring-1 ring-border/50"
             label={label}
           />
         )}

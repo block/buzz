@@ -143,7 +143,7 @@ export function ProfilePopover({
               <div className="relative shrink-0">
                 <ProfileAvatar
                   avatarUrl={avatarUrl}
-                  className="h-8 w-8 rounded-xl text-xs"
+                  className="h-8 w-8 text-xs"
                   iconClassName="h-4 w-4"
                   label={displayName}
                 />

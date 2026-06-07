@@ -49,7 +49,7 @@ function SelectionChipButton({
         <ProfileAvatar
           avatarUrl={avatarUrl}
           className={cn(
-            "h-6 w-6 rounded-full text-[10px]",
+            "h-6 w-6 text-[10px]",
             selected
               ? "bg-primary/20 text-primary ring-1 ring-primary/20"
               : "bg-background/80 text-muted-foreground ring-1 ring-border/70",
@@ -161,7 +161,7 @@ export function AddChannelBotPersonasSection({
                       <div className="flex items-center gap-2">
                         <ProfileAvatar
                           avatarUrl={persona.avatarUrl}
-                          className="h-7 w-7 rounded-full text-[10px] bg-primary-foreground/20 text-primary-foreground"
+                          className="h-7 w-7 text-[10px] bg-primary-foreground/20 text-primary-foreground"
                           iconClassName="h-3.5 w-3.5"
                           label={persona.displayName}
                         />

@@ -101,7 +101,7 @@ export function TypingIndicatorRow({
                 <div
                   key={pubkey}
                   className={cn(
-                    "relative shrink-0 rounded-full ring-1 ring-background",
+                    "relative shrink-0 rounded-lg ring-1 ring-background",
                     isActivityVariant ? "h-[18px] w-[18px]" : "h-5 w-5",
                     index > 0 && "-ml-1.5",
                   )}
@@ -111,7 +111,6 @@ export function TypingIndicatorRow({
                     avatarUrl={profile?.avatarUrl ?? null}
                     label={label}
                     className={cn(
-                      "rounded-full",
                       isActivityVariant
                         ? "h-[18px] w-[18px] text-[7px]"
                         : "h-5 w-5 text-[8px]",
