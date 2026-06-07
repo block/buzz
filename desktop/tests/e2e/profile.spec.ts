@@ -151,6 +151,19 @@ test("saves profile metadata from the block Done button", async ({ page }) => {
   await expect(page.getByTestId("profile-save")).toHaveCount(0);
 
   await page.getByTestId("profile-metadata-edit").click();
+  await page.getByTestId("profile-display-name").fill("");
+  await expect(
+    page.getByText("Clearing existing profile fields is not supported yet."),
+  ).toBeVisible();
+  await page.getByTestId("profile-metadata-edit").click();
+  await waitForReactEffects(page);
+  await expect(page.getByTestId("profile-display-name")).toHaveCount(0);
+  await expect(page.getByTestId("profile-display-name-value")).toHaveText(
+    "Save Button QA",
+  );
+  await expect(page.getByTestId("profile-metadata-edit")).toHaveText("Edit");
+
+  await page.getByTestId("profile-metadata-edit").click();
   await page.getByTestId("profile-display-name").fill("npub1mock...");
   await page.getByTestId("profile-metadata-edit").click();
   await expect(page.getByTestId("profile-save")).toHaveCount(0);

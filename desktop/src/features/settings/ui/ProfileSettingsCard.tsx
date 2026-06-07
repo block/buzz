@@ -306,14 +306,18 @@ export function ProfileSettingsCard({
     }
 
     if (!hasProfileChanges) {
-      if (!hasPendingClearRequest) {
-        setIsEditingProfileMetadata(false);
+      if (hasPendingClearRequest) {
+        setDisplayNameDraft(currentDisplayName);
+        setAvatarUrlDraft(currentAvatarUrl);
       }
+      setIsEditingProfileMetadata(false);
       return;
     }
 
     void saveProfile();
   }, [
+    currentAvatarUrl,
+    currentDisplayName,
     hasPendingClearRequest,
     hasProfileChanges,
     isEditingProfileMetadata,
