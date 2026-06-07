@@ -207,6 +207,130 @@ pub mod relay_members {
             assert_eq!(result, None);
         }
 
+        async fn test_pool() -> Option<sqlx::PgPool> {
+            let url = std::env::var("DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://sprout:sprout_dev@localhost:5432/sprout".into());
+            sqlx::PgPool::connect(&url).await.ok()
+        }
+
+        async fn test_state(pool: sqlx::PgPool) -> Option<crate::state::AppState> {
+            let db = sprout_db::Db::from_pool(pool.clone());
+            let mut config = crate::config::Config::from_env().ok()?;
+            config.require_relay_membership = true;
+            config.allow_nip_oa_auth = true;
+            config.redis_url = "redis://127.0.0.1:1".to_string();
+
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .ok()?;
+            let pubsub = std::sync::Arc::new(
+                sprout_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .ok()?,
+            );
+            let audit = sprout_audit::AuditService::new(pool);
+            let auth = sprout_auth::AuthService::new(config.auth.clone());
+            let search = sprout_search::SearchService::new(sprout_search::SearchConfig {
+                url: config.typesense_url.clone(),
+                api_key: config.typesense_key.clone(),
+                collection: "events".to_string(),
+            });
+            let workflow_engine = std::sync::Arc::new(sprout_workflow::WorkflowEngine::new(
+                db.clone(),
+                sprout_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage = sprout_media::MediaStorage::new(&config.media).ok()?;
+            let (state, _audit_shutdown) = crate::state::AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                nostr::Keys::generate(),
+                media_storage,
+            );
+            Some(state)
+        }
+
+        #[tokio::test]
+        async fn viewer_membership_admission_loads_db_backed_channel_allowlist() {
+            let Some(pool) = test_pool().await else {
+                eprintln!("skipping DB-backed viewer admission test: Postgres unavailable");
+                return;
+            };
+
+            let owner_keys = Keys::generate();
+            let viewer_keys = Keys::generate();
+            let agent_keys = Keys::generate();
+            let viewer_hex = viewer_keys.public_key().to_hex();
+            let owner_hex = owner_keys.public_key().to_hex();
+            let channel_owner = Keys::generate().public_key().to_bytes();
+
+            sprout_db::user::ensure_user(&pool, &channel_owner)
+                .await
+                .expect("ensure channel owner");
+            let channel = sprout_db::channel::create_channel(
+                &pool,
+                &format!("viewer-admission-{}", uuid::Uuid::new_v4()),
+                sprout_db::channel::ChannelType::Stream,
+                sprout_db::channel::ChannelVisibility::Private,
+                None,
+                &channel_owner,
+                None,
+            )
+            .await
+            .expect("create allowlisted channel");
+
+            sprout_db::relay_members::add_relay_member(
+                &pool,
+                &viewer_hex,
+                "viewer",
+                Some(&owner_hex),
+            )
+            .await
+            .expect("insert viewer relay member");
+            sprout_db::relay_members::add_relay_member_channel_allowlist(
+                &pool,
+                &viewer_hex,
+                channel.id,
+                Some(&owner_hex),
+            )
+            .await
+            .expect("insert viewer channel allowlist");
+
+            let state = test_state(pool.clone()).await.expect("build test state");
+
+            match check_relay_membership(&state, viewer_keys.public_key().as_bytes(), None)
+                .await
+                .expect("check direct viewer")
+            {
+                MembershipDecision::Viewer { channel_ids } => {
+                    assert_eq!(channel_ids, vec![channel.id]);
+                }
+                other => panic!("expected direct viewer decision, got {other:?}"),
+            }
+
+            let auth_tag = compute_auth_tag(&viewer_keys, &agent_keys.public_key(), "")
+                .expect("compute viewer owner auth tag");
+            match check_relay_membership(
+                &state,
+                agent_keys.public_key().as_bytes(),
+                Some(&auth_tag),
+            )
+            .await
+            .expect("check viewer owner delegation")
+            {
+                MembershipDecision::ViaViewerOwner { owner, channel_ids } => {
+                    assert_eq!(owner, viewer_keys.public_key());
+                    assert_eq!(channel_ids, vec![channel.id]);
+                }
+                other => panic!("expected viewer-owner decision, got {other:?}"),
+            }
+        }
+
         /// Invalid auth tag → returns None.
         #[test]
         fn invalid_auth_tag_returns_none() {
