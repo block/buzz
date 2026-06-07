@@ -33,7 +33,6 @@ pub(crate) fn not_found(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
 /// Moved here from the deleted `relay_members` module. Called by `media.rs`, `bridge.rs`,
 /// `git/transport.rs`, and `audio/handler.rs`.
 pub mod relay_members {
-    use axum::{http::StatusCode, response::Json};
     use tracing::{debug, info};
 
     use crate::state::AppState;
@@ -151,41 +150,6 @@ pub mod relay_members {
                 (Some(owner), Some(channel_ids))
             }
             MembershipDecision::Denied => (None, None),
-        }
-    }
-
-    /// Enforce relay membership for a pubkey, with NIP-OA agent delegation fallback.
-    ///
-    /// Returns `Ok(Some(owner_pubkey))` when the agent is not a direct member but
-    /// its NIP-OA owner *is* — access is granted via delegation.
-    ///
-    /// On open relays (`require_relay_membership = false`), returns `Ok(None)`
-    /// immediately — no membership check is performed. Callers that need NIP-OA
-    /// owner extraction on open relays should call [`extract_nip_oa_owner`] directly.
-    ///
-    /// Returns `Ok(None)` when the caller is a direct member (closed relay) or when
-    /// no NIP-OA tag is present/applicable (open relay without auth tag).
-    pub async fn enforce_relay_membership(
-        state: &AppState,
-        pubkey_bytes: &[u8],
-        auth_tag_header: Option<&str>,
-    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
-        match check_relay_membership(state, pubkey_bytes, auth_tag_header).await {
-            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
-            Ok(MembershipDecision::Viewer { .. }) => Ok(None),
-            Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
-            Ok(MembershipDecision::ViaViewerOwner { owner, .. }) => Ok(Some(owner)),
-            Ok(MembershipDecision::Denied) => Err((
-                StatusCode::FORBIDDEN,
-                Json(serde_json::json!({
-                    "error": "relay_membership_required",
-                    "message": "You must be a relay member to access this relay"
-                })),
-            )),
-            Err(e) => {
-                tracing::error!("relay membership check errored: {e}");
-                Err(super::internal_error(&e))
-            }
         }
     }
 
