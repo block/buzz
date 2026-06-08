@@ -368,6 +368,69 @@ fn parse_strict_json(bytes: &[u8]) -> Result<serde_json::Value, EngramError> {
     Ok(v)
 }
 
+// ── Reference extraction (`[[slug]]`) ───────────────────────────────────────
+
+/// Extract `[[slug]]` references from a body's free-form text field
+/// (`profile` for [`Body::Core`], `value` for [`Body::Memory`]).
+///
+/// Per *NIP-AE: References*, references are literal substrings of the form
+/// `[[<slug>]]` where `<slug>` matches the *Slugs* grammar. Bare slug-shaped
+/// strings without brackets are NOT references. The spec defines no escaping
+/// mechanism and no markup-aware exclusion, so this scan is purely textual.
+///
+/// Returns the slugs in **first-occurrence order**, deduplicated. Candidates
+/// that fail [`validate_slug`] are silently dropped: callers building a
+/// reachability graph want only well-formed targets, and an empty `[[]]` or
+/// a `[[bogus slug!]]` is treated the same as ordinary text.
+///
+/// This function performs no I/O and no allocation beyond the returned
+/// `Vec<String>`.
+pub fn extract_refs(body: &str) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        // Need at least `[[x]]` — 5 bytes — to contain a non-empty payload.
+        if bytes[i] == b'[' && bytes[i + 1] == b'[' {
+            let start = i + 2;
+            // Find the next `]]` after `start`. We do not allow nesting:
+            // the first `]]` closes the reference. If we hit another `[[`
+            // before `]]`, restart the scan from that inner `[[` so e.g.
+            // `[[outer [[mem/x]]` still surfaces `mem/x`.
+            let mut j = start;
+            let mut closed = false;
+            while j + 1 < bytes.len() {
+                if bytes[j] == b'[' && bytes[j + 1] == b'[' {
+                    // Inner `[[` — abandon the outer match, restart there.
+                    break;
+                }
+                if bytes[j] == b']' && bytes[j + 1] == b']' {
+                    closed = true;
+                    break;
+                }
+                j += 1;
+            }
+            if closed {
+                // SAFETY: `start` and `j` both sit on ASCII bracket
+                // boundaries; the slice between them is UTF-8 because the
+                // input is.
+                let candidate = &body[start..j];
+                if validate_slug(candidate).is_ok() && !out.iter().any(|s| s == candidate) {
+                    out.push(candidate.to_string());
+                }
+                i = j + 2;
+                continue;
+            }
+            // Either we hit an inner `[[` or ran off the end without a
+            // closing `]]`. Advance past the opening `[[` and keep looking.
+            i = start;
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
 // ── Envelope build / parse ──────────────────────────────────────────────────
 
 /// Build a signed `kind:30174` event for a given body.
@@ -830,5 +893,167 @@ mod tests {
         };
         let err = build_event(&agent, &owner.public_key(), &body, 1).unwrap_err();
         assert!(matches!(err, EngramError::BodyTooLarge(_)));
+    }
+
+    // ── extract_refs ────────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_refs_empty_body() {
+        assert!(extract_refs("").is_empty());
+    }
+
+    #[test]
+    fn extract_refs_no_refs() {
+        assert!(extract_refs("plain prose with no brackets").is_empty());
+        assert!(extract_refs("single [bracket] only").is_empty());
+        assert!(extract_refs("mem/example without brackets").is_empty());
+    }
+
+    #[test]
+    fn extract_refs_basic_memory() {
+        assert_eq!(
+            extract_refs("see [[mem/example]] for context"),
+            vec!["mem/example".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_refs_basic_core() {
+        assert_eq!(
+            extract_refs("rooted at [[core]] yo"),
+            vec!["core".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_refs_multiple_in_order() {
+        assert_eq!(
+            extract_refs("[[mem/a]] then [[mem/b]] then [[mem/c]]"),
+            vec![
+                "mem/a".to_string(),
+                "mem/b".to_string(),
+                "mem/c".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_refs_dedupes_preserving_first_occurrence() {
+        assert_eq!(
+            extract_refs("[[mem/a]] [[mem/b]] [[mem/a]] [[mem/c]] [[mem/b]]"),
+            vec![
+                "mem/a".to_string(),
+                "mem/b".to_string(),
+                "mem/c".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_refs_nested_segments() {
+        assert_eq!(
+            extract_refs("see [[mem/notes/2026-05-12]]"),
+            vec!["mem/notes/2026-05-12".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_refs_spec_fixture_core_profile() {
+        // Body 4 from the NIP-AE reference vectors.
+        assert_eq!(
+            extract_refs("test agent. see [[mem/example]] and [[mem/notes/2026-05-12]]."),
+            vec![
+                "mem/example".to_string(),
+                "mem/notes/2026-05-12".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_refs_drops_empty_brackets() {
+        assert!(extract_refs("[[]]").is_empty());
+        assert!(extract_refs("ends with [[]] yo").is_empty());
+    }
+
+    #[test]
+    fn extract_refs_drops_invalid_slugs() {
+        // Uppercase, spaces, leading dash, missing `mem/` — all rejected by validate_slug.
+        assert!(extract_refs("[[Mem/Example]]").is_empty());
+        assert!(extract_refs("[[mem/with spaces]]").is_empty());
+        assert!(extract_refs("[[mem/-leading-dash]]").is_empty());
+        assert!(extract_refs("[[example]]").is_empty());
+        assert!(extract_refs("[[mem/]]").is_empty());
+    }
+
+    #[test]
+    fn extract_refs_unclosed_brackets() {
+        assert!(extract_refs("[[mem/x with no closing").is_empty());
+        assert_eq!(
+            extract_refs("[[mem/x with no close, but [[mem/y]] is fine"),
+            vec!["mem/y".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_refs_single_brackets_dont_match() {
+        assert!(extract_refs("[mem/x]").is_empty());
+        assert!(extract_refs("[mem/x] and [mem/y]").is_empty());
+    }
+
+    #[test]
+    fn extract_refs_triple_brackets_match_inner() {
+        // `[[[mem/x]]]` — the outer `[[` at position 0 opens; the inner
+        // scan walks through `[mem/x` and finds `]]` at positions 8-9, so
+        // the candidate is `[mem/x` (with the leading `[`), which fails
+        // `validate_slug` and is dropped. Surplus opening brackets without
+        // matching `]]` boundaries are noise.
+        assert!(extract_refs("[[[mem/x]]]").is_empty());
+        // `[[mem/x]]]` — `mem/x` matches; trailing `]` is just text.
+        assert_eq!(extract_refs("[[mem/x]]]"), vec!["mem/x".to_string()]);
+    }
+
+    #[test]
+    fn extract_refs_handles_utf8_around_brackets() {
+        assert_eq!(
+            extract_refs("héllo [[mem/example]] wörld 🎉"),
+            vec!["mem/example".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_refs_long_slug_at_limit() {
+        // Build a slug that's exactly SLUG_MAX_LEN bytes — must extract.
+        let segment = "a".repeat(64);
+        // mem/ (4) + segment (64) = 68 — well under the limit, but exercises
+        // a long single-segment slug.
+        let slug = format!("mem/{segment}");
+        let body = format!("[[{slug}]]");
+        assert_eq!(extract_refs(&body), vec![slug]);
+    }
+
+    #[test]
+    fn extract_refs_oversized_slug_dropped() {
+        // mem/ + 256 bytes = 260 bytes total > SLUG_MAX_LEN (255).
+        let slug = format!("mem/{}", "a".repeat(64));
+        // Repeat enough segments to bust the cap; each segment is 64+1 = 65 bytes.
+        let oversized = format!(
+            "{slug}/{}/{}/{}",
+            "b".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64)
+        );
+        assert!(oversized.len() > SLUG_MAX_LEN);
+        let body = format!("[[{oversized}]]");
+        assert!(extract_refs(&body).is_empty());
+    }
+
+    #[test]
+    fn extract_refs_self_reference_is_allowed() {
+        // The function does not know "self"; consumers handle that. We just
+        // surface every well-formed `[[slug]]`.
+        assert_eq!(
+            extract_refs("I refer to [[mem/me]] from inside mem/me's value"),
+            vec!["mem/me".to_string()]
+        );
     }
 }
