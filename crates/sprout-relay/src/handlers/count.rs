@@ -82,7 +82,17 @@ pub async fn handle_count(
     // Public viewers have no memberships; their accessible set IS the
     // configured allowlist (see WS REQ handler for the rationale).
     let mut accessible_channels = if is_public_viewer {
-        token_channel_ids.clone().unwrap_or_default()
+        // Intersect the configured allowlist with live non-deleted channels so
+        // stale config can't count events in a soft-deleted channel. Fail closed.
+        let configured = token_channel_ids.clone().unwrap_or_default();
+        match state.db.filter_active_channel_ids(&configured).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(sub_id = %sub_id, "Failed to filter active public-viewer channels: {e}");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
+        }
     } else {
         match state.get_accessible_channel_ids_cached(&pubkey_bytes).await {
             Ok(ids) => ids,

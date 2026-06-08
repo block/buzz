@@ -104,7 +104,18 @@ pub async fn handle_req(
     // under-grant non-open allowlisted channels and is unnecessary work).
     // Their accessible set IS the configured allowlist, full stop.
     let mut accessible_channels = if is_public_viewer {
-        token_channel_ids.clone().unwrap_or_default()
+        // Public viewers' accessible set IS the configured allowlist, but stale
+        // config must never revive a soft-deleted channel, so intersect with
+        // live non-deleted channels. Fail closed on DB error / empty set.
+        let configured = token_channel_ids.clone().unwrap_or_default();
+        match state.db.filter_active_channel_ids(&configured).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(conn_id = %conn_id, "Failed to filter active public-viewer channels: {e}");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
+        }
     } else {
         match state.get_accessible_channel_ids_cached(&pubkey_bytes).await {
             Ok(ids) => ids,
@@ -195,6 +206,18 @@ pub async fn handle_req(
             ));
             return;
         }
+    } else if token_channel_ids.is_some() {
+        // Restricted viewers (public or authed read-only) must never register a
+        // global fan-out subscription. A REQ with filters that name distinct
+        // allowed channels (`{#h:[A]}` + `{#h:[B]}`) leaves channel_id == None,
+        // which would index globally and let a stray-`h`-tagged global event be
+        // live-delivered. Fail closed: require exactly one concrete channel.
+        // (Search filters are one-shot and already returned above.)
+        conn.send(RelayMessage::closed(
+            &sub_id,
+            "restricted: read-only viewers must scope each subscription to a single allowed channel",
+        ));
+        return;
     }
 
     {
@@ -949,6 +972,26 @@ mod tests {
             filter_with_channel(channel_a),
             filter_with_channel(channel_b),
         ];
+        assert_eq!(extract_channel_id_from_filters(&filters), None);
+    }
+
+    /// Invariant guarding the global-subscription reject in `handle_req`:
+    /// a restricted viewer's REQ that names two *distinct* allowed channels
+    /// across filters resolves to `None` (a global subscription). The handler
+    /// turns that `None` into a CLOSED for `token_channel_ids.is_some()`
+    /// viewers before `sub_registry.register`, so the sub never lands in the
+    /// global fan-out index. Proven end-to-end by the live breakout in TESTING.
+    #[test]
+    fn restricted_viewer_distinct_allowed_channel_filters_resolve_global() {
+        let allowed_a = uuid::Uuid::new_v4();
+        let allowed_b = uuid::Uuid::new_v4();
+        let filters = vec![
+            filter_with_channel(allowed_a),
+            filter_with_channel(allowed_b),
+        ];
+        // Both channels could be in the allowlist, yet the subscription is
+        // global — which is exactly why the handler must reject it, not
+        // register it.
         assert_eq!(extract_channel_id_from_filters(&filters), None);
     }
 

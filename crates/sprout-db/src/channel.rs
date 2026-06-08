@@ -572,6 +572,30 @@ pub async fn get_accessible_channel_ids(pool: &PgPool, pubkey: &[u8]) -> Result<
         .collect()
 }
 
+/// Filters a candidate set of channel IDs down to those that currently exist
+/// and are not soft-deleted. Used by the unauthenticated public-viewer path so
+/// stale config in `SPROUT_PUBLIC_VIEWER_CHANNELS` can never revive reads on a
+/// channel that has since been soft-deleted. Order and duplicates of the input
+/// are not preserved; callers treat the result as a set.
+pub async fn filter_active_channel_ids(pool: &PgPool, candidates: &[Uuid]) -> Result<Vec<Uuid>> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT id FROM channels WHERE id = ANY($1) AND deleted_at IS NULL ORDER BY id",
+    )
+    .bind(candidates)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|r| {
+            let id: Uuid = r.try_get("id")?;
+            Ok(id)
+        })
+        .collect()
+}
+
 /// Lists channels, optionally filtered by visibility string.
 pub async fn list_channels(pool: &PgPool, visibility: Option<&str>) -> Result<Vec<ChannelRecord>> {
     let rows = if let Some(vis) = visibility {
@@ -1197,6 +1221,61 @@ mod tests {
 
     fn random_pubkey() -> Vec<u8> {
         Keys::generate().public_key().to_bytes().to_vec()
+    }
+
+    /// `filter_active_channel_ids` keeps live channels, drops soft-deleted ones
+    /// and unknown IDs, and returns empty for empty input. This is the guard
+    /// that stops stale public-viewer config from reviving a deleted channel.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn filter_active_channel_ids_excludes_deleted_and_unknown() {
+        let pool = setup_pool().await;
+        let owner = random_pubkey();
+        ensure_user(&pool, &owner).await.expect("ensure owner");
+
+        let live = create_channel(
+            &pool,
+            "active-filter-live",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create live channel");
+
+        let deleted = create_channel(
+            &pool,
+            "active-filter-deleted",
+            ChannelType::Stream,
+            ChannelVisibility::Private,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel to delete");
+        soft_delete_channel(&pool, deleted.id)
+            .await
+            .expect("soft delete");
+
+        let unknown = Uuid::new_v4();
+
+        // Empty input → empty output, no query.
+        assert!(filter_active_channel_ids(&pool, &[])
+            .await
+            .expect("empty input")
+            .is_empty());
+
+        let got = filter_active_channel_ids(&pool, &[live.id, deleted.id, unknown])
+            .await
+            .expect("filter active");
+        assert_eq!(
+            got,
+            vec![live.id],
+            "only the live channel should survive; deleted and unknown dropped"
+        );
     }
 
     /// Agent owner (non-admin) can remove their own bot from a channel.

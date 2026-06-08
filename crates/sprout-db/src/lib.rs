@@ -442,6 +442,11 @@ impl Db {
         channel::get_accessible_channel_ids(&self.pool, pubkey).await
     }
 
+    /// Filters candidate channel IDs to those that exist and are not soft-deleted.
+    pub async fn filter_active_channel_ids(&self, candidates: &[Uuid]) -> Result<Vec<Uuid>> {
+        channel::filter_active_channel_ids(&self.pool, candidates).await
+    }
+
     /// Lists channels, optionally filtered by visibility.
     pub async fn list_channels(
         &self,
