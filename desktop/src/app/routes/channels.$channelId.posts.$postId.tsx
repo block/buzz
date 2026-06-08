@@ -1,6 +1,7 @@
 import * as React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 
+import { usePreviewFeatureWarning } from "@/shared/features";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ForumPostRouteSearch = {
@@ -29,6 +30,7 @@ const ChannelRouteScreen = React.lazy(async () => {
 });
 
 function ForumPostRouteComponent() {
+  usePreviewFeatureWarning("forum");
   const { channelId, postId } = Route.useParams();
   const search = Route.useSearch();
 

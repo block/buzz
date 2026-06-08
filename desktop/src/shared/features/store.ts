@@ -1,11 +1,15 @@
 /**
  * Persistence layer for feature flag overrides.
  *
- * localStorage keys (versioned to match manifest):
- *   sprout-feature-overrides-v1  — JSON object of { [featureId]: boolean }
+ * The localStorage key is derived from `manifest.version` so a schema bump
+ * naturally orphans the old key — clean reset, no migration logic.
+ *
+ *   sprout-feature-overrides-v${manifest.version}
+ *     → JSON object of { [featureId]: boolean }
  */
+import { manifest } from "./manifest";
 
-const OVERRIDES_KEY = "sprout-feature-overrides-v1";
+export const OVERRIDES_KEY = `sprout-feature-overrides-v${manifest.version}`;
 
 export type FeatureOverrides = Record<string, boolean>;
 

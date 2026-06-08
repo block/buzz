@@ -1,7 +1,7 @@
-import { useSyncExternalStore, useCallback } from "react";
+import { useSyncExternalStore, useCallback, useEffect } from "react";
 import { getFeature } from "./manifest";
 import { resolveEnabled } from "./resolveEnabled";
-import { getOverrides, setOverride } from "./store";
+import { getOverrides, setOverride, OVERRIDES_KEY } from "./store";
 
 // ---------------------------------------------------------------------------
 // Reactive store — components re-render when overrides change
@@ -12,7 +12,22 @@ const listeners = new Set<Listener>();
 
 function subscribe(listener: Listener): () => void {
   listeners.add(listener);
-  return () => listeners.delete(listener);
+
+  // Cross-window sync: another window writing the overrides key in
+  // localStorage fires a "storage" event in this window. Mirror the
+  // pattern used by useChannelSections / useChannelStars / useChannelMutes /
+  // useThreadFollows.
+  const handleStorage = (event: StorageEvent) => {
+    if (event.key === OVERRIDES_KEY) {
+      emitChange();
+    }
+  };
+  window.addEventListener("storage", handleStorage);
+
+  return () => {
+    listeners.delete(listener);
+    window.removeEventListener("storage", handleStorage);
+  };
 }
 
 /** Notify all subscribers that feature state changed */
@@ -24,7 +39,13 @@ export function emitChange(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Cached snapshot — avoids JSON.parse on every render per hook instance
+// Cached snapshot
+//
+// useSyncExternalStore requires getSnapshot to return a referentially stable
+// value when nothing has changed. Returning `JSON.stringify(getOverrides())`
+// fresh on every render would produce a new string each tick → infinite
+// re-render. We cache the serialized form and only mint a new parsed object
+// when the serialized form changes.
 // ---------------------------------------------------------------------------
 
 let cachedRaw: string | null = null;
@@ -38,6 +59,16 @@ function getSnapshot(): string {
   }
   return raw;
 }
+
+/**
+ * Server-side snapshot for useSyncExternalStore.
+ *
+ * Sprout is a Tauri desktop app and does not currently SSR. Returning an
+ * explicit empty-state snapshot is safer than omitting this argument: under
+ * any future test harness or SSR experiment, the hook returns "no overrides"
+ * instead of throwing.
+ */
+const getServerSnapshot = (): string => "{}";
 
 function getParsedSnapshot(): Record<string, boolean> {
   // Ensure snapshot is fresh
@@ -55,7 +86,7 @@ function getParsedSnapshot(): Record<string, boolean> {
  * Use this in components that need the full state (e.g. SettingsView filtering).
  */
 export function useFeatureSnapshot(): Record<string, boolean> {
-  useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   return getParsedSnapshot();
 }
 
@@ -98,6 +129,38 @@ export function useFeatureToggle(
   );
 
   return [enabled, toggle];
+}
+
+/**
+ * Fires a sonner toast.warning when a preview feature is currently disabled.
+ *
+ * Usage: drop in at the top of a route component to give users hitting a
+ * direct link to a disabled preview feature a hint about how to surface it.
+ *
+ *   function PulseRouteComponent() {
+ *     usePreviewFeatureWarning("pulse");
+ *     return <PulseScreen />;
+ *   }
+ *
+ * Stays a no-op for stable features and for preview features that ARE enabled.
+ */
+export function usePreviewFeatureWarning(featureId: string): void {
+  const enabled = useFeatureEnabled(featureId);
+  const feature = getFeature(featureId);
+
+  useEffect(() => {
+    if (feature?.tier !== "preview" || enabled) return;
+    let cancelled = false;
+    void import("sonner").then(({ toast }) => {
+      if (cancelled) return;
+      toast.warning(
+        `${feature.name} is a preview feature. Enable it in Settings → Experiments to surface it in your sidebar.`,
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [feature, enabled]);
 }
 
 // Re-export for consumers that imported from here

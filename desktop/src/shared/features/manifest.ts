@@ -1,7 +1,48 @@
 import manifestJson from "@features-manifest";
+import { z } from "zod";
 import type { FeatureDefinition, FeaturesManifest } from "./types";
 
-const manifest = manifestJson as FeaturesManifest;
+// ---------------------------------------------------------------------------
+// Schema — runtime-validates the bundled features.json at startup.
+//
+// On parse failure we fall back to an empty manifest and log a console warning.
+// The app keeps working; gated UI stays hidden; nothing accidentally leaks.
+// ---------------------------------------------------------------------------
+
+const FeatureTierSchema = z.enum(["stable", "preview"]);
+const FeaturePlatformSchema = z.enum(["desktop", "mobile"]);
+
+const FeatureDefinitionSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  description: z.string(),
+  tier: FeatureTierSchema,
+  platforms: z.array(FeaturePlatformSchema).optional(),
+});
+
+const FeaturesManifestSchema = z.object({
+  version: z.number().int().nonnegative(),
+  features: z.array(FeatureDefinitionSchema),
+});
+
+const EMPTY_MANIFEST: FeaturesManifest = { version: 1, features: [] };
+
+function loadManifest(): FeaturesManifest {
+  const result = FeaturesManifestSchema.safeParse(manifestJson);
+  if (!result.success) {
+    console.warn(
+      "[FeatureFlags] features.json failed schema validation; falling back to empty manifest.",
+      result.error.issues,
+    );
+    return EMPTY_MANIFEST;
+  }
+  return result.data;
+}
+
+const manifest = loadManifest();
+
+/** The validated manifest. Use `manifest.version` for cache/storage keys. */
+export { manifest };
 
 /** All features defined in the manifest */
 export const allFeatures: FeatureDefinition[] = manifest.features;

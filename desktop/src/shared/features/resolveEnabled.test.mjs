@@ -6,11 +6,8 @@ import { resolveEnabled } from "./resolveEnabled.ts";
 describe("resolveEnabled", () => {
   describe("stable tier", () => {
     it("always returns true regardless of overrides", () => {
-      assert.equal(resolveEnabled("stable", "channels", {}), true);
-      assert.equal(
-        resolveEnabled("stable", "channels", { channels: false }),
-        true,
-      );
+      assert.equal(resolveEnabled("stable", "doctor", {}), true);
+      assert.equal(resolveEnabled("stable", "doctor", { doctor: false }), true);
     });
   });
 
