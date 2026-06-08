@@ -1054,7 +1054,11 @@ pub async fn unarchive_channel(pool: &PgPool, channel_id: Uuid) -> Result<()> {
     }
 
     sqlx::query(
-        "UPDATE channels SET archived_at = NULL \
+        "UPDATE channels SET archived_at = NULL, \
+             ttl_deadline = CASE \
+                 WHEN ttl_seconds IS NOT NULL THEN NOW() + (ttl_seconds || ' seconds')::interval \
+                 ELSE ttl_deadline \
+             END \
          WHERE id = $1 AND deleted_at IS NULL AND archived_at IS NOT NULL",
     )
     .bind(channel_id)
@@ -1250,6 +1254,60 @@ mod tests {
                 .await
                 .expect("is_member check"),
             "agent should no longer be a member"
+        );
+    }
+
+    /// Unarchiving an expired ephemeral channel renews its TTL lease so the
+    /// reaper does not immediately archive it again.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_unarchive_expired_ephemeral_channel_renews_ttl_deadline() {
+        let pool = setup_pool().await;
+        let owner_pk = random_pubkey();
+        ensure_user(&pool, &owner_pk).await.expect("ensure owner");
+
+        let channel = create_channel(
+            &pool,
+            "test-unarchive-renews-ttl",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner_pk,
+            Some(60),
+        )
+        .await
+        .expect("create ephemeral channel");
+
+        sqlx::query(
+            "UPDATE channels SET archived_at = NOW(), ttl_deadline = NOW() - interval '1 second' WHERE id = $1",
+        )
+        .bind(channel.id)
+        .execute(&pool)
+        .await
+        .expect("expire and archive channel");
+
+        unarchive_channel(&pool, channel.id)
+            .await
+            .expect("unarchive expired ephemeral channel");
+
+        let channel = get_channel(&pool, channel.id)
+            .await
+            .expect("reload channel");
+        assert!(
+            channel.archived_at.is_none(),
+            "channel should be unarchived"
+        );
+        assert!(
+            channel.ttl_deadline.expect("ttl deadline") > Utc::now(),
+            "unarchive should renew ttl_deadline into the future"
+        );
+
+        let reaped = reap_expired_ephemeral_channels(&pool)
+            .await
+            .expect("run reaper");
+        assert!(
+            !reaped.contains(&channel.id),
+            "reaper should not immediately rearchive renewed channel"
         );
     }
 
