@@ -40,6 +40,10 @@ import remarkCustomEmoji, {
 import remarkMentions from "@/shared/lib/remarkMentions";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import { Button } from "@/shared/ui/button";
+import {
+  MENTION_CHIP_BASE_CLASSES,
+  MENTION_CHIP_HOVER_CLASSES,
+} from "@/shared/ui/mentionChip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -908,7 +912,11 @@ function createMarkdownComponents(
       const mentionNode = (
         <span
           data-mention=""
-          className="cursor-pointer rounded-md bg-primary/15 px-1 py-0.5 text-sm font-semibold text-primary transition-colors hover:bg-primary/25 hover:text-primary/90"
+          className={cn(
+            "cursor-pointer",
+            MENTION_CHIP_BASE_CLASSES,
+            MENTION_CHIP_HOVER_CLASSES,
+          )}
         >
           {children}
         </span>

@@ -19,6 +19,7 @@ import { cn } from "@/shared/lib/cn";
 type ChatHeaderProps = {
   actions?: React.ReactNode;
   actionsPlacement?: "inline" | "top-right";
+  actionsRightInset?: string;
   belowSystemChrome?: boolean;
   density?: "default" | "compact";
   title: string;
@@ -80,6 +81,7 @@ function ChannelIcon({
 export function ChatHeader({
   actions,
   actionsPlacement = "inline",
+  actionsRightInset,
   belowSystemChrome = false,
   density = "default",
   title,
@@ -101,10 +103,8 @@ export function ChatHeader({
   const header = (
     <header
       className={cn(
-        "relative z-30 flex min-w-0 shrink-0 cursor-default select-none items-center gap-[10px] bg-transparent pl-[16px] pr-[8px] transition-[margin,padding] duration-200 ease-linear sm:pl-[24px] sm:pr-[12px]",
-        density === "compact"
-          ? "min-h-[32px] py-[4px]"
-          : "min-h-[44px] py-[6px]",
+        "pointer-events-auto relative z-30 flex min-w-0 shrink-0 cursor-default select-none items-center gap-[10px] bg-transparent pl-[16px] pr-[8px] transition-[margin,padding] duration-200 ease-linear sm:pl-[24px] sm:pr-[12px]",
+        density === "compact" ? "h-[32px] py-0" : "min-h-[44px] py-[6px]",
         overlaysContent && !belowSystemChrome && "-mb-[44px]",
       )}
       data-testid="chat-header"
@@ -118,7 +118,7 @@ export function ChatHeader({
             visibility={visibility}
           />
           <h1
-            className="min-w-0 translate-y-px truncate text-sm font-semibold leading-5 tracking-tight"
+            className="min-w-0 translate-y-px truncate text-base font-semibold leading-6 tracking-tight"
             data-testid="chat-title"
             title={trimmedDescription || undefined}
           >
@@ -137,7 +137,12 @@ export function ChatHeader({
           createPortal(topRightActions, document.body)
         )
       ) : (
-        <div className="flex shrink-0 items-center gap-1">
+        <div
+          className="flex shrink-0 items-center gap-1"
+          style={
+            actionsRightInset ? { marginRight: actionsRightInset } : undefined
+          }
+        >
           <UpdateIndicator />
           {actions ? <div className="shrink-0">{actions}</div> : null}
         </div>
@@ -150,7 +155,7 @@ export function ChatHeader({
   }
 
   return (
-    <div className="relative z-30 h-[76px] -mb-[76px] bg-background/80 pt-[42px] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55">
+    <div className="pointer-events-none relative z-30 h-[92px] -mb-[92px] bg-background/80 pb-[9px] pt-[48px] backdrop-blur-md after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-border/35 after:content-[''] supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55">
       {header}
     </div>
   );

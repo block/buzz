@@ -230,15 +230,18 @@ export function HuddleIndicator({
       <>
         <Button
           aria-label="Start huddle"
-          className={cn("h-7 w-7 rounded-full", className)}
+          className={cn(
+            "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5",
+            className,
+          )}
           data-testid="channel-start-huddle-trigger"
           disabled={startDisabled || isStarting}
           onClick={() => headphonesGate.gate(() => onStart())}
           size="icon"
           type="button"
-          variant="outline"
+          variant="ghost"
         >
-          <Headphones className="h-3 w-3" />
+          <Headphones className="size-5" />
         </Button>
         {gateDialog}
       </>
@@ -270,15 +273,18 @@ export function HuddleIndicator({
         <TooltipTrigger asChild>
           <Button
             aria-label={`Join active huddle (${participantCount} participant${participantCount !== 1 ? "s" : ""})`}
-            className={cn("relative h-7 w-7 rounded-full", className)}
+            className={cn(
+              "relative h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5",
+              className,
+            )}
             disabled={isJoining || isStarting}
             onClick={() => headphonesGate.gate(() => void doJoin())}
             size="icon"
             type="button"
-            variant="outline"
+            variant="ghost"
           >
-            <Headphones className="h-3 w-3 text-muted-foreground" />
-            <span className="absolute inset-0 animate-pulse rounded-full ring-2 ring-border/70" />
+            <Headphones className="size-5 text-muted-foreground" />
+            <span className="absolute inset-0 animate-pulse rounded-lg ring-2 ring-border/70" />
             {/* Participant count badge */}
             {participantCount > 0 && (
               <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-border bg-background px-0.5 text-[9px] font-bold text-muted-foreground">

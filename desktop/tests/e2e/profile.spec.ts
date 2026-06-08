@@ -19,7 +19,12 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
   await page.goto("/");
 
   await openSettings(page, "profile");
-  await expect(page.getByTestId("settings-title")).toHaveText("Profile");
+  await expect(
+    page.getByTestId("settings-profile").getByRole("heading", {
+      exact: true,
+      name: "Profile",
+    }),
+  ).toBeVisible();
 
   await expect(page.getByTestId("profile-pubkey")).toContainText("deadbeef");
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
@@ -36,7 +41,7 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
   await expect(page.getByTestId("profile-avatar-url")).toHaveValue(avatarUrl);
   await expect(page.getByTestId("profile-about")).toHaveValue(about);
 
-  await page.getByTestId("settings-close").click();
+  await page.getByTestId("settings-back-to-app").click();
   await expectHomeView(page);
   await expect(page.getByTestId("open-settings")).toBeVisible();
 
@@ -72,15 +77,45 @@ test("updates presence from the profile menu", async ({ page }) => {
   ).toContainText("Offline");
 });
 
-test("disables sidebar resize while settings are open", async ({ page }) => {
+test("renders settings in the app shell with a back button", async ({
+  page,
+}) => {
   await page.goto("/");
 
-  const sidebarRail = page.locator('[data-sidebar="rail"]');
-  await expect(sidebarRail).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Home" })).toBeVisible();
 
-  await openSettings(page, "appearance");
-  await expect(sidebarRail).toBeDisabled();
-  await expect(sidebarRail).toHaveCSS("pointer-events", "none");
+  await openSettings(page);
+  await expect(page.getByTestId("settings-sidebar")).toBeVisible();
+  await expect(page.getByTestId("settings-back-to-app")).toBeVisible();
+  await expect(page.getByPlaceholder("Search everything")).toHaveCount(0);
+  await expect(page.getByText("Personal", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("settings-nav-profile")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByText("Workspaces", { exact: true })).toBeVisible();
+  await expect(
+    page.getByTestId("settings-nav-channel-templates"),
+  ).toBeVisible();
+  await expect(page.getByText("App", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("settings-nav-agents")).toBeVisible();
+  await expect(
+    page.getByTestId("settings-profile").getByRole("heading", {
+      exact: true,
+      name: "Profile",
+    }),
+  ).toBeVisible();
+  await page.getByTestId("settings-nav-appearance").click();
+  await expect(
+    page.getByTestId("settings-theme").getByRole("heading", {
+      name: "Appearance",
+    }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Home" })).toHaveCount(0);
+
+  await page.getByTestId("settings-back-to-app").click();
+  await expectHomeView(page);
+  await expect(page.getByRole("button", { name: "Home" })).toBeVisible();
 });
 
 test("notification settings drive the Home badge and desktop alerts", async ({
@@ -105,7 +140,7 @@ test("notification settings drive the Home badge and desktop alerts", async ({
     "On",
   );
 
-  await page.getByTestId("settings-close").click();
+  await page.getByTestId("settings-back-to-app").click();
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
@@ -201,14 +236,14 @@ test("notification settings drive the Home badge and desktop alerts", async ({
 
   await openSettings(page, "notifications");
   await page.getByTestId("notifications-home-badge-toggle").click();
-  await page.getByTestId("settings-close").click();
+  await page.getByTestId("settings-back-to-app").click();
   await expect(page.getByTestId("chat-title")).toHaveText("engineering");
   await expect(page.getByTestId("sidebar-home-count")).toHaveCount(0);
   await expect.poll(getAppBadgeCount).toBe(baseline);
 
   await openSettings(page, "notifications");
   await page.getByTestId("notifications-home-badge-toggle").click();
-  await page.getByTestId("settings-close").click();
+  await page.getByTestId("settings-back-to-app").click();
   await expect(page.getByTestId("sidebar-home-count")).toHaveText("1");
   await expect.poll(getAppBadgeCount).toBe(baseline + 1);
 
@@ -227,7 +262,7 @@ test("desktop notification clicks open the matching forum thread", async ({
   await expect(page.getByTestId("notifications-desktop-state")).toContainText(
     "On",
   );
-  await page.getByTestId("settings-close").click();
+  await page.getByTestId("settings-back-to-app").click();
   await expectHomeView(page);
 
   await page.evaluate(() => {
@@ -303,7 +338,16 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
   );
 
   await expect(page.getByTestId("settings-view")).toBeVisible();
-  await expect(page.getByTestId("settings-nav-appearance")).toBeVisible();
+  await expect(page.getByTestId("settings-nav-profile")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(
+    page.getByTestId("settings-profile").getByRole("heading", {
+      exact: true,
+      name: "Profile",
+    }),
+  ).toBeVisible();
   await page.getByTestId("settings-nav-appearance").click();
 
   // Default theme is catppuccin-macchiato (dark)
@@ -436,7 +480,5 @@ test("shows doctor checks for local sprout tooling", async ({ page }) => {
   await openSettings(page, "doctor");
 
   await expect(page.getByTestId("settings-doctor")).toBeVisible();
-  await expect(page.getByTestId("doctor-provider-goose")).toContainText(
-    "Goose",
-  );
+  await expect(page.getByTestId("doctor-runtime-goose")).toContainText("Goose");
 });

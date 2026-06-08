@@ -4,7 +4,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useHuddle } from "@/features/huddle";
 import { HuddleIndicator } from "@/features/huddle/components/HuddleIndicator";
 import {
-  useAvailableAcpProviders,
+  useAvailableAcpRuntimes,
   useBackendProvidersQuery,
   useManagedAgentsQuery,
   useRelayAgentsQuery,
@@ -32,7 +32,7 @@ export function ChannelMembersBar({
   const { startHuddle, isStarting: isStartingHuddle } = useHuddle();
   const queryClient = useQueryClient();
   const membersQuery = useChannelMembersQuery(channel.id);
-  const providersQuery = useAvailableAcpProviders();
+  const providersQuery = useAvailableAcpRuntimes();
   const backendProvidersQuery = useBackendProvidersQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -84,10 +84,10 @@ export function ChannelMembersBar({
 
   return (
     <React.Fragment>
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-[6px]">
         <Button
           aria-label="Add agent"
-          className="h-7 w-7 rounded-full"
+          className="h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
           data-testid="channel-add-bot-trigger"
           disabled={!canAddAgents}
           onClick={() => {
@@ -95,27 +95,27 @@ export function ChannelMembersBar({
           }}
           size="icon"
           type="button"
-          variant="outline"
+          variant="ghost"
         >
-          <Plus className="h-3 w-3" />
+          <Plus className="size-5" />
         </Button>
 
         <Button
           aria-label={`View channel members (${memberCount})`}
-          className="h-7 gap-1 rounded-full px-2"
+          className="h-8 gap-1 rounded-lg border border-border/40 px-2.5 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
           data-testid="channel-members-trigger"
           onClick={onToggleMembers}
           type="button"
-          variant="outline"
+          variant="ghost"
         >
-          <Users className="h-3 w-3" />
+          <Users className="size-5" />
           <span className="min-w-[1ch] text-[11px] font-medium tabular-nums">
             {memberCount}
           </span>
         </Button>
 
         <HuddleIndicator
-          className="h-7 w-7"
+          className="h-8 w-8"
           channelId={channel.id}
           onStart={async () => {
             try {
@@ -132,14 +132,14 @@ export function ChannelMembersBar({
 
         <Button
           aria-label="Manage channel"
-          className="h-7 w-7 rounded-full"
+          className="h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
           data-testid="channel-management-trigger"
           onClick={onManageChannel}
           size="icon"
           type="button"
-          variant="outline"
+          variant="ghost"
         >
-          <Settings2 className="h-3 w-3" />
+          <Settings2 className="size-5" />
         </Button>
       </div>
 

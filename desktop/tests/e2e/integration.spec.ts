@@ -41,7 +41,7 @@ async function assertDesktopNotificationsEnabled(
   await expect(page.getByTestId("notifications-desktop-state")).toContainText(
     "On",
   );
-  await page.getByTestId("settings-close").click();
+  await page.getByTestId("settings-back-to-app").click();
 }
 
 async function sendChannelMessage(

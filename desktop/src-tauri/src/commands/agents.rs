@@ -407,7 +407,7 @@ pub async fn create_managed_agent(
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .unwrap_or_else(
-                || match crate::managed_agents::known_acp_provider(&agent_command) {
+                || match crate::managed_agents::known_acp_runtime(&agent_command) {
                     Some(p) => p.mcp_command.unwrap_or("").to_string(),
                     None => String::new(),
                 },

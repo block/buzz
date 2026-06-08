@@ -164,10 +164,16 @@ export const ChannelPane = React.memo(function ChannelPane({
 }: ChannelPaneProps) {
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
+  const isNonMemberView =
+    activeChannel !== null &&
+    !activeChannel.isMember &&
+    activeChannel.visibility === "open" &&
+    !activeChannel.archivedAt;
+  const hasMainComposerOverlay = !isNonMemberView;
   useComposerHeightPadding(
     timelineScrollRef,
     composerWrapperRef,
-    isSinglePanelView,
+    `${isSinglePanelView}:${hasMainComposerOverlay}`,
   );
 
   // Scope the edit target to the correct composer: if the message being edited
@@ -224,12 +230,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     onEdit(target);
     return true;
   }, [findLastOwnEditable, onEdit, threadHeadMessage, threadMessages]);
-
-  const isNonMemberView =
-    activeChannel !== null &&
-    !activeChannel.isMember &&
-    activeChannel.visibility === "open" &&
-    !activeChannel.archivedAt;
 
   const isComposerDisabled =
     !activeChannel?.isMember ||
@@ -309,6 +309,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             currentPubkey={currentPubkey}
             fetchOlder={fetchOlder}
             followThreadById={followThreadById}
+            hasComposerOverlay={hasMainComposerOverlay}
             hasOlderMessages={hasOlderMessages}
             isFetchingOlder={isFetchingOlder}
             isFollowingThreadById={isFollowingThreadById}

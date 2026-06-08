@@ -1,6 +1,6 @@
 import { TerminalSquare } from "lucide-react";
 
-import { useAvailableAcpProviders } from "@/features/agents/hooks";
+import { useAvailableAcpRuntimes } from "@/features/agents/hooks";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import type { SetupStepActions, SetupStepState } from "./types";
@@ -15,7 +15,7 @@ type SetupStepContentProps = {
 };
 
 function useSetupStepState(): SetupStepState {
-  const providersQuery = useAvailableAcpProviders();
+  const providersQuery = useAvailableAcpRuntimes();
   const items = providersQuery.data ?? [];
   const isChecking = providersQuery.isLoading;
   const errorMessage =
@@ -57,7 +57,7 @@ function RuntimeProvidersSection({
           {items.map((provider) => (
             <div
               className="rounded-2xl border border-border/70 bg-background/85 px-4 py-3"
-              data-testid={`onboarding-provider-${provider.id}`}
+              data-testid={`onboarding-runtime-${provider.id}`}
               key={provider.id}
             >
               <div className="flex items-center justify-between gap-3">

@@ -37,8 +37,8 @@ pub struct TemplateAgentRoster {
 #[serde(rename_all = "camelCase")]
 pub struct TemplateAgentEntry {
     pub persona_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "provider")]
+    pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,8 +51,8 @@ pub struct TemplateAgentEntry {
 #[serde(rename_all = "camelCase")]
 pub struct TemplateTeamEntry {
     pub team_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "provider")]
+    pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

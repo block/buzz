@@ -17,7 +17,7 @@ const MESH_API_PORT_ENV: &str = "SPROUT_MESH_API_PORT";
 const MESH_CONSOLE_PORT_ENV: &str = "SPROUT_MESH_CONSOLE_PORT";
 const RELAY_MESH_API_KEY_PLACEHOLDER: &str = "sprout-mesh-local";
 /// ACP provider relay-mesh agents run on. Sources of truth for its command +
-/// MCP live in the provider catalog (`known_acp_provider_exact`); these are
+/// MCP live in the runtime catalog (`known_acp_runtime_exact`); these are
 /// only the fallbacks. `sprout-agent` reads the `SPROUT_AGENT_PROVIDER` /
 /// `OPENAI_COMPAT_*` env vars below — goose (the global default) does not.
 const MESH_AGENT_PROVIDER_ID: &str = "sprout-agent";

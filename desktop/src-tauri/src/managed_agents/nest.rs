@@ -941,7 +941,7 @@ mod tests {
             display_name: display_name.to_string(),
             avatar_url: None,
             system_prompt: String::new(),
-            provider: None,
+            runtime: None,
             model: None,
             name_pool: vec![],
             is_builtin: false,

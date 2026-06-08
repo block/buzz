@@ -174,14 +174,14 @@ mod tests {
             agents: TemplateAgentRoster {
                 personas: vec![TemplateAgentEntry {
                     persona_id: "builtin:kit".to_string(),
-                    provider: Some("claude".to_string()),
+                    runtime: Some("claude".to_string()),
                     model: Some("opus".to_string()),
                     role: Some("bot".to_string()),
                     backend: Some(TemplateBackend::Local),
                 }],
                 teams: vec![TemplateTeamEntry {
                     team_id: "team-1".to_string(),
-                    provider: None,
+                    runtime: None,
                     model: None,
                     backend: Some(TemplateBackend::Provider {
                         id: "provider-1".to_string(),
@@ -205,10 +205,7 @@ mod tests {
         assert_eq!(parsed.agents.personas.len(), 1);
         assert_eq!(parsed.agents.teams.len(), 1);
         assert_eq!(parsed.agents.personas[0].persona_id, "builtin:kit");
-        assert_eq!(
-            parsed.agents.personas[0].provider.as_deref(),
-            Some("claude")
-        );
+        assert_eq!(parsed.agents.personas[0].runtime.as_deref(), Some("claude"));
         assert_eq!(parsed.agents.teams[0].team_id, "team-1");
         assert!(!parsed.is_builtin);
     }
@@ -225,6 +222,19 @@ mod tests {
         assert!(parsed.canvas_template.is_none());
         assert!(parsed.agents.personas.is_empty());
         assert!(parsed.agents.teams.is_empty());
+    }
+
+    #[test]
+    fn deserialization_backward_compat_provider_alias() {
+        use crate::templates::{TemplateAgentEntry, TemplateTeamEntry};
+
+        let agent_json = r#"{"personaId":"builtin:kit","provider":"goose"}"#;
+        let agent: TemplateAgentEntry = serde_json::from_str(agent_json).unwrap();
+        assert_eq!(agent.runtime.as_deref(), Some("goose"));
+
+        let team_json = r#"{"teamId":"team-1","provider":"claude"}"#;
+        let team: TemplateTeamEntry = serde_json::from_str(team_json).unwrap();
+        assert_eq!(team.runtime.as_deref(), Some("claude"));
     }
 
     // -----------------------------------------------------------------------

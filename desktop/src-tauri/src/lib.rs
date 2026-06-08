@@ -499,6 +499,7 @@ pub fn run() {
             // restore_managed_agents_on_launch (which reads managed-agents.json).
             migration::sync_shared_agent_data(&app_handle);
             migration::reconcile_persona_pack_paths(&app_handle);
+            migration::migrate_persona_provider_to_runtime(&app_handle);
 
             // Resolve persisted identity key (env var → file → generate+save).
             // This is fatal — the app should not start with an ephemeral identity

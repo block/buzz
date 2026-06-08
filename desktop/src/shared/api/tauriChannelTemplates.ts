@@ -15,14 +15,14 @@ type RawChannelTemplate = {
   agents?: {
     personas?: Array<{
       personaId: string;
-      provider?: string | null;
+      runtime?: string | null;
       model?: string | null;
       role?: string | null;
       backend?: { type: "local" } | { type: "provider"; id: string } | null;
     }>;
     teams?: Array<{
       teamId: string;
-      provider?: string | null;
+      runtime?: string | null;
       model?: string | null;
       backend?: { type: "local" } | { type: "provider"; id: string } | null;
     }>;
@@ -43,14 +43,14 @@ function fromRawChannelTemplate(raw: RawChannelTemplate): ChannelTemplate {
     agents: {
       personas: (raw.agents?.personas ?? []).map((p) => ({
         personaId: p.personaId,
-        provider: p.provider ?? null,
+        runtime: p.runtime ?? null,
         model: p.model ?? null,
         role: p.role ?? null,
         backend: p.backend ?? null,
       })),
       teams: (raw.agents?.teams ?? []).map((t) => ({
         teamId: t.teamId,
-        provider: t.provider ?? null,
+        runtime: t.runtime ?? null,
         model: t.model ?? null,
         backend: t.backend ?? null,
       })),

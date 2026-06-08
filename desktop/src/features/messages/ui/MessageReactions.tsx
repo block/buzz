@@ -15,7 +15,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const REACTION_PILL_BASE_CLASSES =
   "inline-flex h-8 items-center rounded-full border text-xs font-medium leading-none transition-colors";
-const REACTION_GLYPH_CLASSES = "-translate-y-px h-3.5 w-3.5 text-sm";
+const REACTION_GLYPH_CLASSES = "h-3.5 w-3.5 translate-y-px text-sm";
 const REACTION_PILL_HOVER_CLASSES =
   "hover:bg-primary/10 hover:text-foreground focus-visible:bg-primary/10 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring";
 const BADGE_BURST_STABLE_FRAMES = 2;

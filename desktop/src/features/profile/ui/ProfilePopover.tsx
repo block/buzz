@@ -72,7 +72,7 @@ export function ProfilePopover({
   const [presenceMenuOpen, setPresenceMenuOpen] = React.useState(false);
   const presenceHoverTimer = React.useRef<number | null>(null);
   const hasUserStatus = Boolean(userStatusText || userStatusEmoji);
-  const preferencesShortcutLabel = isMacPlatform() ? "⌘," : "Ctrl+,";
+  const settingsShortcutLabel = isMacPlatform() ? "⌘," : "Ctrl+,";
 
   function clearPresenceHoverTimer() {
     if (presenceHoverTimer.current !== null) {
@@ -143,7 +143,7 @@ export function ProfilePopover({
               <div className="relative shrink-0">
                 <ProfileAvatar
                   avatarUrl={avatarUrl}
-                  className="h-8 w-8 rounded-xl text-xs"
+                  className="h-8 w-8 text-xs"
                   iconClassName="h-4 w-4"
                   label={displayName}
                 />
@@ -249,36 +249,22 @@ export function ProfilePopover({
 
             <hr className="my-1 h-px border-0 bg-border" />
 
-            {/* ── Profile / preferences ──────────────────────────── */}
-            <button
-              className={MENU_ITEM_CLASS}
-              data-testid="profile-popover-profile"
-              onClick={() => {
-                closePopover();
-                window.requestAnimationFrame(() => {
-                  onOpenSettings("profile");
-                });
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <span className="flex-1">Profile</span>
-            </button>
+            {/* ── Settings ───────────────────────────────────────── */}
             <button
               className={MENU_ITEM_CLASS}
               data-testid="profile-popover-settings"
               onClick={() => {
                 closePopover();
                 window.requestAnimationFrame(() => {
-                  onOpenSettings("appearance");
+                  onOpenSettings();
                 });
               }}
               role="menuitem"
               type="button"
             >
-              <span className="flex-1">Preferences</span>
+              <span className="flex-1">Settings</span>
               <kbd className="text-xs text-muted-foreground">
-                {preferencesShortcutLabel}
+                {settingsShortcutLabel}
               </kbd>
             </button>
 

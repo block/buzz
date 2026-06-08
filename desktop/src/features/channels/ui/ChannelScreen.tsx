@@ -44,8 +44,12 @@ import { useChannelFind } from "@/features/search/useChannelFind";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 import { AgentSessionProvider } from "@/shared/context/AgentSessionContext";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
-import { useElementWidthBreakpoint } from "@/shared/hooks/use-mobile";
 import {
+  useElementWidthBreakpoint,
+  useIsThreadPanelOverlay,
+} from "@/shared/hooks/use-mobile";
+import {
+  THREAD_PANEL_MIN_WIDTH_PX,
   THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX,
   useThreadPanelWidth,
 } from "@/shared/hooks/useThreadPanelWidth";
@@ -87,6 +91,7 @@ export function ChannelScreen({
     widthPx: threadPanelWidthPx,
   } = useThreadPanelWidth();
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
+  const isThreadPanelOverlay = useIsThreadPanelOverlay();
   const [channelContentRef, isNarrowPanelViewport] =
     useElementWidthBreakpoint<HTMLDivElement>(
       THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX,
@@ -435,6 +440,15 @@ export function ChannelScreen({
     Boolean(
       openThreadHeadMessage || openAgentSessionPubkey || profilePanelPubkey,
     );
+  const hasSplitRightPanel =
+    !isSinglePanelView &&
+    !isThreadPanelOverlay &&
+    Boolean(
+      openThreadHeadMessage || openAgentSessionPubkey || profilePanelPubkey,
+    );
+  const headerActionsRightInset = hasSplitRightPanel
+    ? `min(${threadPanelWidthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`
+    : undefined;
 
   return (
     <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>
@@ -443,6 +457,7 @@ export function ChannelScreen({
           activeChannel={activeChannel}
           activeChannelEphemeralDisplay={activeChannelEphemeralDisplay}
           activeChannelTitle={activeChannelTitle}
+          actionsRightInset={headerActionsRightInset}
           activeDmPresenceStatus={activeDmPresenceStatus}
           currentPubkey={currentPubkey}
           isJoining={joinChannelMutation.isPending}

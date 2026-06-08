@@ -139,6 +139,8 @@ export function ProfileSettingsCard({
   return (
     <section className="min-w-0" data-testid="settings-profile">
       <div className="space-y-6">
+        <h2 className="text-2xl font-semibold tracking-tight">Profile</h2>
+
         {profileQuery.error instanceof Error ? (
           <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             {profileQuery.error.message}

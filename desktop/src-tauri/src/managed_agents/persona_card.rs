@@ -13,7 +13,7 @@ pub struct ParsedPersonaPreview {
     pub display_name: String,
     pub system_prompt: String,
     pub avatar_data_url: Option<String>,
-    pub provider: Option<String>,
+    pub runtime: Option<String>,
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub name_pool: Vec<String>,
@@ -80,7 +80,7 @@ pub fn parse_png_persona(png_bytes: &[u8]) -> Result<ParsedPersonaPreview, Strin
         display_name: fields.display_name,
         system_prompt: fields.system_prompt,
         avatar_data_url,
-        provider: fields.provider,
+        runtime: fields.runtime,
         model: fields.model,
         name_pool: fields.name_pool,
         source_file: String::new(),
@@ -99,7 +99,7 @@ struct SproutPersonaFields {
     display_name: String,
     system_prompt: String,
     avatar_url: Option<String>,
-    provider: Option<String>,
+    runtime: Option<String>,
     model: Option<String>,
     name_pool: Vec<String>,
 }
@@ -135,8 +135,10 @@ fn extract_sprout_fields(v: &Value) -> Result<SproutPersonaFields, String> {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
-    let provider = v
-        .get("provider")
+    // Read "runtime" with backward-compat fallback to legacy "provider" key.
+    let runtime = v
+        .get("runtime")
+        .or_else(|| v.get("provider"))
         .and_then(|v| v.as_str())
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
@@ -162,7 +164,7 @@ fn extract_sprout_fields(v: &Value) -> Result<SproutPersonaFields, String> {
         display_name: name,
         system_prompt: prompt,
         avatar_url,
-        provider,
+        runtime,
         model,
         name_pool,
     })
@@ -206,7 +208,7 @@ fn parse_chara_payload(b64: &str) -> Result<SproutPersonaFields, String> {
         display_name: name,
         system_prompt: prompt,
         avatar_url: None,
-        provider: None,
+        runtime: None,
         model: None,
         name_pool: Vec::new(),
     })
@@ -224,7 +226,7 @@ pub fn parse_json_persona(json_bytes: &[u8]) -> Result<ParsedPersonaPreview, Str
         display_name: fields.display_name,
         system_prompt: fields.system_prompt,
         avatar_data_url: fields.avatar_url,
-        provider: fields.provider,
+        runtime: fields.runtime,
         model: fields.model,
         name_pool: fields.name_pool,
         source_file: String::new(),
@@ -235,7 +237,7 @@ pub fn encode_persona_json(
     display_name: &str,
     system_prompt: &str,
     avatar_url: Option<&str>,
-    provider: Option<&str>,
+    runtime: Option<&str>,
     model: Option<&str>,
     name_pool: &[String],
 ) -> Result<Vec<u8>, String> {
@@ -246,8 +248,8 @@ pub fn encode_persona_json(
     if let Some(url) = avatar_url {
         map.insert("avatarUrl".to_string(), serde_json::json!(url));
     }
-    if let Some(p) = provider {
-        map.insert("provider".to_string(), serde_json::json!(p));
+    if let Some(r) = runtime {
+        map.insert("runtime".to_string(), serde_json::json!(r));
     }
     if let Some(m) = model {
         map.insert("model".to_string(), serde_json::json!(m));
@@ -271,19 +273,19 @@ pub fn parse_md_persona(md_bytes: &[u8]) -> Result<ParsedPersonaPreview, String>
         .map_err(|e| format!("Failed to parse .persona.md: {e}"))?;
 
     // Split "provider:model" into separate fields for the preview.
-    let (provider, model) = match config.model.as_deref() {
+    let model = match config.model.as_deref() {
         Some(s) if !s.is_empty() => {
-            let (prov, id) = sprout_persona::persona::split_model(s);
-            (prov.map(str::to_owned), Some(id.to_owned()))
+            let (_prov, id) = sprout_persona::persona::split_model(s);
+            Some(id.to_owned())
         }
-        _ => (None, None),
+        _ => None,
     };
 
     Ok(ParsedPersonaPreview {
         display_name: config.display_name,
         system_prompt: config.prompt,
         avatar_data_url: None, // .persona.md avatars are paths, not data URIs
-        provider,
+        runtime: config.runtime,
         model,
         name_pool: Vec::new(),
         source_file: String::new(),
@@ -383,7 +385,7 @@ pub fn parse_zip_pack(zip_bytes: &[u8]) -> Result<ParsePersonaFilesResult, Strin
             display_name: p.display_name.clone(),
             system_prompt: p.system_prompt.clone(),
             avatar_data_url: None,
-            provider: p.provider.clone(),
+            runtime: p.runtime.clone(),
             model: p.model.clone(),
             name_pool: Vec::new(),
             source_file: format!("{} ({})", p.name, resolved.name),
@@ -832,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_json_round_trip_with_provider_and_model() {
+    fn parse_json_round_trip_with_runtime_and_model() {
         let bytes = encode_persona_json(
             "Agent Smith",
             "You are an agent.",
@@ -846,22 +848,22 @@ mod tests {
         assert_eq!(result.display_name, "Agent Smith");
         assert_eq!(result.system_prompt, "You are an agent.");
         assert!(result.avatar_data_url.is_none());
-        assert_eq!(result.provider.as_deref(), Some("goose"));
+        assert_eq!(result.runtime.as_deref(), Some("goose"));
         assert_eq!(result.model.as_deref(), Some("claude-sonnet-4"));
     }
 
     #[test]
-    fn parse_json_round_trip_without_provider_and_model() {
+    fn parse_json_round_trip_without_runtime_and_model() {
         let bytes = encode_persona_json("Bob", "You are Bob.", None, None, None, &[]).unwrap();
         let result = parse_json_persona(&bytes).unwrap();
         assert_eq!(result.display_name, "Bob");
-        assert!(result.provider.is_none());
+        assert!(result.runtime.is_none());
         assert!(result.model.is_none());
     }
 
     #[test]
-    fn parse_json_backward_compat_no_provider_model_fields() {
-        // Simulate a legacy persona JSON without provider/model fields
+    fn parse_json_backward_compat_no_runtime_model_fields() {
+        // Simulate a legacy persona JSON without runtime/model fields
         let json = serde_json::json!({
             "version": 1,
             "displayName": "Legacy Persona",
@@ -871,8 +873,22 @@ mod tests {
         let result = parse_json_persona(&bytes).unwrap();
         assert_eq!(result.display_name, "Legacy Persona");
         assert_eq!(result.system_prompt, "Old school prompt");
-        assert!(result.provider.is_none());
+        assert!(result.runtime.is_none());
         assert!(result.model.is_none());
+    }
+
+    #[test]
+    fn parse_json_backward_compat_legacy_provider_key() {
+        // A JSON card written with the old "provider" key should still parse.
+        let json = serde_json::json!({
+            "version": 1,
+            "displayName": "Legacy Agent",
+            "systemPrompt": "Old prompt",
+            "provider": "goose"
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+        let result = parse_json_persona(&bytes).unwrap();
+        assert_eq!(result.runtime.as_deref(), Some("goose"));
     }
 
     #[test]

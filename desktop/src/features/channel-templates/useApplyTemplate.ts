@@ -5,13 +5,13 @@ import {
   type CreateChannelManagedAgentInput,
 } from "@/features/agents/channelAgents";
 import {
-  useAvailableAcpProviders,
+  useAvailableAcpRuntimes,
   usePersonasQuery,
   useTeamsQuery,
 } from "@/features/agents/hooks";
-import { resolvePersonaProvider } from "@/features/agents/lib/resolvePersonaProvider";
+import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
-import { useLastRuntimeProvider } from "@/features/agents/lib/useLastRuntimeProvider";
+import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
 import { setCanvas } from "@/shared/api/tauri";
 import type { ChannelTemplate } from "@/shared/api/types";
@@ -29,10 +29,10 @@ function toManagedBackend(
 export function useApplyTemplate() {
   const queryClient = useQueryClient();
   const channelTemplatesQuery = useChannelTemplatesQuery();
-  const acpProvidersQuery = useAvailableAcpProviders();
+  const acpRuntimesQuery = useAvailableAcpRuntimes();
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
-  const { lastProviderId } = useLastRuntimeProvider();
+  const { lastRuntimeId } = useLastRuntime();
 
   async function applyCanvas(
     templateId: string | undefined,
@@ -69,12 +69,12 @@ export function useApplyTemplate() {
 
     const allPersonas = personasQuery.data ?? [];
     const allTeams = teamsQuery.data ?? [];
-    const providers = acpProvidersQuery.data ?? [];
-    if (providers.length === 0) return; // No runtimes — skip silently
+    const runtimes = acpRuntimesQuery.data ?? [];
+    if (runtimes.length === 0) return; // No runtimes — skip silently
 
     // Resolve default provider: user's last-used preference, or first available
     const defaultProvider =
-      providers.find((p) => p.id === lastProviderId) ?? providers[0] ?? null;
+      runtimes.find((p) => p.id === lastRuntimeId) ?? runtimes[0] ?? null;
     if (!defaultProvider) return;
 
     const seenPersonaIds = new Set<string>();
@@ -86,13 +86,13 @@ export function useApplyTemplate() {
       if (!persona) continue;
       if (seenPersonaIds.has(persona.id)) continue;
       seenPersonaIds.add(persona.id);
-      const resolved = resolvePersonaProvider(
-        entry.provider ?? persona.provider,
-        providers,
+      const resolved = resolvePersonaRuntime(
+        entry.runtime ?? persona.runtime,
+        runtimes,
         defaultProvider,
       );
       inputs.push({
-        provider: resolved.provider ?? defaultProvider,
+        runtime: resolved.runtime ?? defaultProvider,
         name: persona.displayName,
         personaId: persona.id,
         systemPrompt: persona.systemPrompt,
@@ -111,13 +111,13 @@ export function useApplyTemplate() {
       for (const persona of resolvedPersonas) {
         if (seenPersonaIds.has(persona.id)) continue;
         seenPersonaIds.add(persona.id);
-        const resolved = resolvePersonaProvider(
-          teamEntry.provider ?? persona.provider,
-          providers,
+        const resolved = resolvePersonaRuntime(
+          teamEntry.runtime ?? persona.runtime,
+          runtimes,
           defaultProvider,
         );
         inputs.push({
-          provider: resolved.provider ?? defaultProvider,
+          runtime: resolved.runtime ?? defaultProvider,
           name: persona.displayName,
           personaId: persona.id,
           systemPrompt: persona.systemPrompt,

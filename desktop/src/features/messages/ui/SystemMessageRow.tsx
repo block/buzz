@@ -11,6 +11,10 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
+import {
+  MENTION_CHIP_BASE_CLASSES,
+  MENTION_CHIP_HOVER_CLASSES,
+} from "@/shared/ui/mentionChip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -78,10 +82,10 @@ function ProfileName({
   const node = (
     <span
       className={cn(
-        "rounded-xs transition-colors hover:text-foreground",
         pubkey && "cursor-pointer",
-        highlight &&
-          "rounded-md bg-primary/15 px-1 py-0.5 font-medium text-primary hover:bg-primary/25 hover:text-primary/90",
+        highlight
+          ? cn(MENTION_CHIP_BASE_CLASSES, MENTION_CHIP_HOVER_CLASSES)
+          : "rounded-xs transition-colors hover:text-foreground",
       )}
     >
       {highlight ? "@" : null}
@@ -222,12 +226,7 @@ function describeSystemEvent(
       }
       return {
         title: actorName,
-        action: (
-          <>
-            added <span className="font-medium">{targetName}</span> to the
-            channel
-          </>
-        ),
+        action: <>added {targetName} to the channel</>,
       };
     }
     case "member_left":
@@ -238,12 +237,7 @@ function describeSystemEvent(
     case "member_removed":
       return {
         title: actorName,
-        action: (
-          <>
-            removed <span className="font-medium">{targetName}</span> from the
-            channel
-          </>
-        ),
+        action: <>removed {targetName} from the channel</>,
       };
     case "topic_changed":
       return {

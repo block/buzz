@@ -23,7 +23,7 @@ export function PubkeyAvatar({
     <Tooltip>
       <TooltipTrigger asChild>
         <div
-          className={`flex items-center justify-center rounded-full font-medium text-white ${sizeClasses}`}
+          className={`flex items-center justify-center rounded-lg font-medium text-white ${sizeClasses}`}
           style={{ backgroundColor: `hsl(${hue}, 55%, 45%)` }}
         >
           {pubkey.slice(0, 2)}

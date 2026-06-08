@@ -121,7 +121,7 @@ export function MembersSidebarMemberCard({
         <div className="relative shrink-0">
           <ProfileAvatar
             avatarUrl={profileAvatarUrl ?? null}
-            className="h-9 w-9 rounded-full text-[11px] shadow-none"
+            className="h-9 w-9 text-[11px] shadow-none"
             iconClassName="h-4 w-4"
             label={memberAvatarLabel}
           />

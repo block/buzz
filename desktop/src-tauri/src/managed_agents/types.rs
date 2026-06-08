@@ -19,12 +19,13 @@ pub struct PersonaRecord {
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub system_prompt: String,
-    /// Preferred ACP provider ID (e.g. "goose", "claude", "codex").
-    /// When deploying an agent from this persona, this provider is pre-selected.
+    /// Preferred ACP runtime ID (e.g., 'goose', 'claude', 'codex'). Determines which agent binary
+    /// Sprout spawns. When deploying from this persona, this runtime is pre-selected in the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    /// Preferred model ID (e.g. "gpt-4o", "claude-sonnet-4-20250514").
-    /// Passed to the agent at creation time when deploying from this persona.
+    pub runtime: Option<String>,
+    /// Opaque, harness-specific model identifier string. Format depends on the runtime and its LLM
+    /// provider (e.g., 'goose-claude-4-6-opus' for Databricks, 'claude-opus-4-7' for Anthropic
+    /// direct). Sprout stores and passes through without interpretation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Pool of short, thematic names for bot instances created from this persona.
@@ -44,9 +45,8 @@ pub struct PersonaRecord {
     /// Validated: `[a-zA-Z0-9_-]+`, max 64 chars (safe for env vars and paths).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_pack_persona_slug: Option<String>,
-    /// Environment variables injected when launching agents created from this
-    /// persona. Layered as: desktop parent env < persona `env_vars` <
-    /// individual agent `env_vars` (last wins on collision).
+    /// Harness-level configuration passed to the agent subprocess as environment variables.
+    /// Opaque to Sprout — keys and values are runtime-specific.
     ///
     /// Stored as a BTreeMap for deterministic on-disk ordering.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -236,7 +236,7 @@ pub struct CreatePersonaRequest {
     pub avatar_url: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
-    pub provider: Option<String>,
+    pub runtime: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -254,7 +254,7 @@ pub struct UpdatePersonaRequest {
     pub avatar_url: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
-    pub provider: Option<String>,
+    pub runtime: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -285,7 +285,7 @@ pub enum AcpAvailabilityStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct AcpProviderCatalogEntry {
+pub struct AcpRuntimeCatalogEntry {
     pub id: String,
     pub label: String,
     pub avatar_url: String,
@@ -550,7 +550,7 @@ mod tests {
 
         assert!(record.is_active);
         assert!(!record.is_builtin);
-        assert_eq!(record.provider, None);
+        assert_eq!(record.runtime, None);
         assert_eq!(record.model, None);
         assert!(record.name_pool.is_empty());
     }

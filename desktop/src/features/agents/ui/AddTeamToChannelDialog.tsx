@@ -2,7 +2,7 @@ import { AlertTriangle } from "lucide-react";
 import * as React from "react";
 
 import {
-  useAvailableAcpProviders,
+  useAvailableAcpRuntimes,
   useCreateChannelManagedAgentsMutation,
 } from "@/features/agents/hooks";
 import type { CreateChannelManagedAgentsResult } from "@/features/agents/channelAgents";
@@ -11,9 +11,9 @@ import {
   resolveTeamPersonas,
 } from "@/features/agents/lib/teamPersonas";
 import {
-  collectProviderWarnings,
-  resolvePersonaProvider,
-} from "@/features/agents/lib/resolvePersonaProvider";
+  collectRuntimeWarnings,
+  resolvePersonaRuntime,
+} from "@/features/agents/lib/resolvePersonaRuntime";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type {
@@ -50,7 +50,7 @@ export function AddTeamToChannelDialog({
   onDeployed,
 }: AddTeamToChannelDialogProps) {
   const channelsQuery = useChannelsQuery();
-  const providersQuery = useAvailableAcpProviders();
+  const providersQuery = useAvailableAcpRuntimes();
   const [channelId, setChannelId] = React.useState("");
   const [role, setRole] = React.useState<Exclude<ChannelRole, "owner">>("bot");
   const deployMutation = useCreateChannelManagedAgentsMutation(
@@ -76,11 +76,11 @@ export function AddTeamToChannelDialog({
   const resolved = teamPersonaResolution.resolvedPersonas;
   const missingPersonaCount = teamPersonaResolution.missingPersonaCount;
 
-  // Surface warnings when a persona's preferred provider is unavailable.
-  // This dialog has no provider selector, so the fallback is always
+  // Surface warnings when a persona's preferred runtime is unavailable.
+  // This dialog has no runtime selector, so the fallback is always
   // `defaultProvider` (the first available runtime).
-  const providerWarnings = React.useMemo(
-    () => collectProviderWarnings(resolved, providers, defaultProvider),
+  const runtimeWarnings = React.useMemo(
+    () => collectRuntimeWarnings(resolved, providers, defaultProvider),
     [resolved, providers, defaultProvider],
   );
 
@@ -115,24 +115,24 @@ export function AddTeamToChannelDialog({
     }
 
     try {
-      // Resolve each persona's preferred provider. This dialog has no
-      // provider selector, so the fallback is `defaultProvider` (first
+      // Resolve each persona's preferred runtime. This dialog has no
+      // runtime selector, so the fallback is `defaultProvider` (first
       // available runtime). Warnings are computed separately via the
-      // `providerWarnings` memo and rendered as inline alerts above.
+      // `runtimeWarnings` memo and rendered as inline alerts above.
       const inputs = resolved.map((persona) => {
-        const { provider: personaProvider } = resolvePersonaProvider(
-          persona.provider,
+        const { runtime: personaRuntime } = resolvePersonaRuntime(
+          persona.runtime,
           providers,
           defaultProvider,
         );
-        const providerToUse = personaProvider ?? defaultProvider;
+        const runtimeToUse = personaRuntime ?? defaultProvider;
         return {
-          provider: {
-            id: providerToUse.id,
-            label: providerToUse.label,
-            command: providerToUse.command,
-            defaultArgs: providerToUse.defaultArgs,
-            mcpCommand: providerToUse.mcpCommand,
+          runtime: {
+            id: runtimeToUse.id,
+            label: runtimeToUse.label,
+            command: runtimeToUse.command,
+            defaultArgs: runtimeToUse.defaultArgs,
+            mcpCommand: runtimeToUse.mcpCommand,
           },
           name: persona.displayName,
           systemPrompt: persona.systemPrompt,
@@ -178,7 +178,7 @@ export function AddTeamToChannelDialog({
                     >
                       <ProfileAvatar
                         avatarUrl={persona.avatarUrl}
-                        className="h-5 w-5 rounded-full text-[9px]"
+                        className="h-5 w-5 text-[9px]"
                         label={persona.displayName}
                       />
                       <span className="text-xs font-medium">
@@ -246,13 +246,13 @@ export function AddTeamToChannelDialog({
 
             {!defaultProvider && !providersQuery.isLoading ? (
               <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                No ACP providers found. Make sure an agent runtime (e.g. Goose)
+                No ACP runtimes found. Make sure an agent runtime (e.g. Goose)
                 is installed.
               </p>
             ) : null}
 
-            {providerWarnings.length > 0
-              ? providerWarnings.map((warning) => (
+            {runtimeWarnings.length > 0
+              ? runtimeWarnings.map((warning) => (
                   <div
                     className="flex gap-3 rounded-2xl border border-warning/30 bg-warning-bg px-4 py-3"
                     key={warning}

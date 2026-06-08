@@ -127,6 +127,7 @@ export function MessageThreadPanel({
   const threadComposerWrapperRef = React.useRef<HTMLDivElement>(null);
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
+  const usesChannelSplitChrome = !isOverlay && !isSinglePanelView;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
   useComposerHeightPadding(
     threadBodyRef,
@@ -207,7 +208,10 @@ export function MessageThreadPanel({
         {!isOverlay ? (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[76px] bg-transparent after:absolute after:bottom-0 after:-left-px after:top-10 after:w-px after:bg-border/45 after:transition-colors peer-hover/thread-resize:after:bg-border/80 peer-focus-visible/thread-resize:after:bg-border/80"
+            className={cn(
+              "pointer-events-none absolute inset-x-0 top-0 z-40 bg-transparent after:absolute after:bottom-0 after:-left-px after:top-10 after:w-px after:bg-border/45 after:transition-colors peer-hover/thread-resize:after:bg-border/80 peer-focus-visible/thread-resize:after:bg-border/80",
+              usesChannelSplitChrome ? "h-[92px]" : "h-[76px]",
+            )}
           />
         ) : null}
 
@@ -215,10 +219,10 @@ export function MessageThreadPanel({
           className={cn(
             "flex cursor-default select-none items-center",
             isSinglePanelView
-              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[76px] min-h-[76px] shrink-0 gap-[10px] bg-background/80 pb-[3px] pl-[16px] pr-[8px] pt-[43px] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 sm:pl-[24px] sm:pr-[12px] dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55`
+              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[76px] min-h-[76px] shrink-0 gap-[10px] bg-background/80 pb-[3px] pl-[16px] pr-[8px] pt-[43px] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 sm:pr-[12px] dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55`
               : isOverlay
                 ? "relative z-50 min-h-[44px] shrink-0 gap-3 bg-background/80 px-3 py-[6px] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
-                : "absolute inset-x-0 top-[42px] z-50 min-h-[32px] gap-3 px-3 py-[4px]",
+                : "absolute inset-x-0 top-[48px] z-50 h-[32px] gap-[10px] py-0 pl-[16px] pr-[8px] sm:pr-[12px]",
           )}
           data-tauri-drag-region
         >
@@ -243,27 +247,27 @@ export function MessageThreadPanel({
                 </Button>
               </div>
             ) : null}
-            <h2 className="translate-y-px text-sm font-semibold leading-5 tracking-tight">
+            <h2 className="translate-y-px text-base font-semibold leading-6 tracking-tight">
               Thread
             </h2>
           </div>
           <Button
             aria-label="Close thread"
-            className="ml-auto h-4 w-4 rounded-full text-foreground hover:bg-muted/60 hover:text-foreground"
+            className="ml-auto h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
             data-testid="message-thread-close"
             onClick={onClose}
             size="icon"
             type="button"
             variant="ghost"
           >
-            <X className="h-2.5 w-2.5" />
+            <X className="size-5" />
           </Button>
         </div>
 
         <div
           className={cn(
             "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24 [overflow-anchor:none]",
-            isSinglePanelView ? "pt-[76px]" : isOverlay ? "" : "pt-[76px]",
+            usesChannelSplitChrome ? "pt-[92px]" : isOverlay ? "" : "pt-[76px]",
           )}
           data-testid="message-thread-body"
           onScroll={syncScrollState}

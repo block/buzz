@@ -4,7 +4,7 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        command_availability, AcpProviderCatalogEntry, DiscoverManagedAgentPrereqsRequest,
+        command_availability, AcpRuntimeCatalogEntry, DiscoverManagedAgentPrereqsRequest,
         InstallRuntimeResult, InstallStepResult, ManagedAgentPrereqsInfo, RelayAgentInfo,
         DEFAULT_ACP_COMMAND,
     },
@@ -20,29 +20,29 @@ fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<Stri
 }
 
 #[tauri::command]
-pub fn discover_acp_providers() -> Vec<AcpProviderCatalogEntry> {
+pub fn discover_acp_providers() -> Vec<AcpRuntimeCatalogEntry> {
     crate::managed_agents::clear_resolve_cache();
-    crate::managed_agents::discover_acp_providers()
+    crate::managed_agents::discover_acp_runtimes()
 }
 
 #[tauri::command]
-pub async fn install_acp_runtime(provider_id: String) -> Result<InstallRuntimeResult, String> {
-    tokio::task::spawn_blocking(move || install_acp_runtime_blocking(&provider_id))
+pub async fn install_acp_runtime(runtime_id: String) -> Result<InstallRuntimeResult, String> {
+    tokio::task::spawn_blocking(move || install_acp_runtime_blocking(&runtime_id))
         .await
         .map_err(|e| format!("install task panicked: {e}"))?
 }
 
 /// Err(_) = infrastructure failure (panic, concurrency guard).
 /// Ok({success: false}) = an install step failed (stderr captured in steps).
-fn install_acp_runtime_blocking(provider_id: &str) -> Result<InstallRuntimeResult, String> {
-    // Prevent concurrent installs for the same provider.
+fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult, String> {
+    // Prevent concurrent installs for the same runtime.
     {
         let mut set = active_installs()
             .lock()
             .map_err(|_| "install lock poisoned".to_string())?;
-        if !set.insert(provider_id.to_string()) {
+        if !set.insert(runtime_id.to_string()) {
             return Err(format!(
-                "an install is already in progress for {provider_id}"
+                "an install is already in progress for {runtime_id}"
             ));
         }
     }
@@ -55,17 +55,17 @@ fn install_acp_runtime_blocking(provider_id: &str) -> Result<InstallRuntimeResul
             }
         }
     }
-    let _guard = Guard(provider_id.to_string());
+    let _guard = Guard(runtime_id.to_string());
 
-    let provider = crate::managed_agents::known_acp_provider_exact(provider_id)
-        .ok_or_else(|| format!("unknown provider: {provider_id}"))?;
+    let runtime = crate::managed_agents::known_acp_runtime_exact(runtime_id)
+        .ok_or_else(|| format!("unknown runtime: {runtime_id}"))?;
 
     let mut steps = Vec::new();
 
     // Phase 1: Install CLI if missing and commands are available.
-    if let Some(cli) = provider.underlying_cli {
+    if let Some(cli) = runtime.underlying_cli {
         if crate::managed_agents::resolve_command(cli).is_none() {
-            for cmd in provider.cli_install_commands {
+            for cmd in runtime.cli_install_commands {
                 let result = run_install_command("cli", cmd);
                 let success = result.success;
                 steps.push(result);
@@ -80,12 +80,12 @@ fn install_acp_runtime_blocking(provider_id: &str) -> Result<InstallRuntimeResul
     }
 
     // Phase 2: Install adapter if missing and commands are available.
-    let adapter_found = provider
+    let adapter_found = runtime
         .commands
         .iter()
         .any(|cmd| crate::managed_agents::resolve_command(cmd).is_some());
     if !adapter_found {
-        for cmd in provider.adapter_install_commands {
+        for cmd in runtime.adapter_install_commands {
             let result = run_install_command("adapter", cmd);
             let success = result.success;
             steps.push(result);

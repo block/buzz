@@ -15,7 +15,7 @@ function createPersona(id, displayName, overrides = {}) {
     displayName,
     avatarUrl: overrides.avatarUrl ?? null,
     systemPrompt: overrides.systemPrompt ?? `${displayName} prompt`,
-    provider: overrides.provider ?? null,
+    runtime: overrides.runtime ?? null,
     model: overrides.model ?? null,
     isBuiltIn: overrides.isBuiltIn ?? false,
     isActive: overrides.isActive ?? true,
