@@ -8,14 +8,20 @@ export function escapeRegExp(str: string): string {
 /**
  * Build a regex that matches a given prefix followed by known multi-word names
  * (longest-first to avoid partial matches). When known names are provided,
- * only those names are matched — no generic fallback. When no names are
- * available, returns a never-matching regex so that arbitrary prefix+word
- * patterns are not highlighted as if they were valid matches (e.g. @Will
- * should not render as a mention when only "Will Pfleger" is a real user).
+ * only those names are matched — no generic fallback.
+ *
+ * When no names are available:
+ * - If `options.fallbackToGeneric` is true, falls back to `prefix + \S+` so
+ *   that patterns like `#channel` still render while channel names are loading
+ *   asynchronously (used by remarkChannelLinks).
+ * - Otherwise returns a never-matching regex, preventing arbitrary `@word`
+ *   patterns from being highlighted as valid mentions when no p-tags are
+ *   present (used by remarkMentions / buildMentionPattern).
  */
 export function buildPrefixPattern(
   prefix: string,
   knownNames: string[],
+  options?: { fallbackToGeneric?: boolean },
 ): RegExp {
   const sorted = [...new Set(knownNames)]
     .filter((name) => name.trim().length > 0)
@@ -24,9 +30,11 @@ export function buildPrefixPattern(
   const escapedPrefix = escapeRegExp(prefix);
 
   if (sorted.length === 0) {
-    // No known names — don't highlight anything as a mention.
-    // Previously fell back to prefix+\S+ which created false positives for
-    // messages without p-tags or with unresolved multi-word display names.
+    if (options?.fallbackToGeneric) {
+      return new RegExp(`${escapedPrefix}\\S+`, "gi");
+    }
+    // No known names and no fallback requested — don't highlight anything.
+    // Prevents false-positive mention styling for messages without p-tags.
     return /(?!)/gi; // never matches
   }
 
