@@ -99,7 +99,7 @@ type BridgeOptions = {
   relayWsUrl?: string;
   skipOnboardingSeed?: boolean;
   /**
-   * When true (default), seed every preview feature in features.json as
+   * When true (default), seed every preview feature in preview-features.json as
    * enabled in localStorage so E2E tests can interact with gated UI without
    * clicking through the Experiments settings panel. Set to false in specs
    * that test the toggle behavior itself (e.g.

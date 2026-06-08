@@ -13,7 +13,7 @@ const repoRoot = path.resolve(
 
 export function resolve(specifier, context, nextResolve) {
   if (specifier === "@features-manifest") {
-    const resolved = path.join(repoRoot, "features.json");
+    const resolved = path.join(repoRoot, "preview-features.json");
     return nextResolve(resolved, context);
   }
   if (specifier.startsWith("@/")) {

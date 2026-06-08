@@ -5,7 +5,6 @@ export type {
   FeatureDefinition,
   FeaturesManifest,
   FeaturePlatform,
-  FeatureTier,
 } from "./types";
 export {
   useFeatureEnabled,

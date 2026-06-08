@@ -25,7 +25,7 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@": "/src",
-      "@features-manifest": path.resolve(__dirname, "../features.json"),
+      "@features-manifest": path.resolve(__dirname, "../preview-features.json"),
     },
   },
 

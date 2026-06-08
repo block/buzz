@@ -131,13 +131,12 @@ export function SettingsView({
     const membership = myMembershipQuery.data;
 
     return settingsSections.filter((s) => {
-      // Feature gate check
+      // Feature gate check. Manifest is preview-only — if the gate id is in
+      // the manifest, it's preview and needs an opt-in; if it's not, it's
+      // stable and renders unconditionally (fail-open).
       if (s.featureGate) {
         const feature = getFeature(s.featureGate);
-        if (
-          feature &&
-          !resolveEnabled(feature.tier, feature.id, featureState)
-        ) {
+        if (feature && !resolveEnabled(s.featureGate, featureState)) {
           return false;
         }
       }

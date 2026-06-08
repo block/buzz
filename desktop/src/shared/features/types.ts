@@ -1,15 +1,17 @@
-/** Feature visibility tiers */
-export type FeatureTier = "stable" | "preview";
-
 /** Platforms a feature is available on */
 export type FeaturePlatform = "desktop" | "mobile";
 
-/** A single feature definition from the manifest */
+/**
+ * A single feature definition from the manifest.
+ *
+ * The manifest (`preview-features.json`) lists ONLY preview features —
+ * membership signals "this needs gating." Anything not in the manifest is
+ * treated as stable and renders unconditionally (fail-open).
+ */
 export interface FeatureDefinition {
   id: string;
   name: string;
   description: string;
-  tier: FeatureTier;
   /** If omitted, feature is available on all platforms */
   platforms?: FeaturePlatform[];
 }

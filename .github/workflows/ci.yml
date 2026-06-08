@@ -170,6 +170,8 @@ jobs:
         run: just desktop-build
       - name: Desktop smoke e2e
         run: cd desktop && pnpm exec playwright test --project=smoke
+      - name: Desktop screenshot e2e
+        run: cd desktop && pnpm exec playwright test --config=playwright-screenshot.config.ts
       - name: Desktop Tauri check
         run: just desktop-tauri-check
         env:

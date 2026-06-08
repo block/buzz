@@ -25,7 +25,9 @@ function FeatureRow({ feature }: { feature: FeatureDefinition }) {
 }
 
 export function ExperimentalFeaturesCard() {
-  const previewFeatures = desktopFeatures.filter((f) => f.tier === "preview");
+  // Manifest is preview-only by definition; every desktop entry is a preview
+  // feature.
+  const previewFeatures = desktopFeatures;
 
   return (
     <section className="min-w-0" data-testid="settings-experimental">

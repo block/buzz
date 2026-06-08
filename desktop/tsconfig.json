@@ -7,7 +7,7 @@
     "skipLibCheck": true,
     "paths": {
       "@/*": ["./src/*"],
-      "@features-manifest": ["../features.json"]
+      "@features-manifest": ["../preview-features.json"]
     },
 
     /* Bundler mode */

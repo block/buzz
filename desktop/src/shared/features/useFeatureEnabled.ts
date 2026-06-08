@@ -91,29 +91,24 @@ export function useFeatureSnapshot(): Record<string, boolean> {
 }
 
 /**
- * Returns whether a feature is enabled given its tier and user overrides.
+ * Returns whether a feature is enabled.
  *
- * - stable: always true
- * - preview: true only if user opted in
- * - unknown id: fail-open (returns true). Manifest membership signals "this
- *   needs gating"; absence means "just render it." A stray `<FeatureGate>`
- *   pointing at a removed id should not hide UI. Dev mode still logs a
- *   `console.warn` so typos surface during development.
+ * The manifest (`preview-features.json`) lists ONLY preview features:
+ *
+ * - in manifest (preview): true only if the user opted in via overrides
+ * - NOT in manifest (stable): always true (fail-open)
+ *
+ * Membership in the manifest signals "this needs gating"; absence means
+ * "just render it." A stray `<FeatureGate feature="removed-id">` will never
+ * hide UI.
  */
 export function useFeatureEnabled(featureId: string): boolean {
   const overrides = useFeatureSnapshot();
 
   const feature = getFeature(featureId);
-  if (!feature) {
-    if (import.meta.env.DEV) {
-      console.warn(
-        `[FeatureFlags] Unknown feature id: "${featureId}". Check features.json.`,
-      );
-    }
-    return true;
-  }
+  if (!feature) return true;
 
-  return resolveEnabled(feature.tier, featureId, overrides);
+  return resolveEnabled(featureId, overrides);
 }
 
 /**
@@ -153,7 +148,9 @@ export function usePreviewFeatureWarning(featureId: string): void {
   const feature = getFeature(featureId);
 
   useEffect(() => {
-    if (feature?.tier !== "preview" || enabled) return;
+    // No-op for stable features (not in manifest) and preview features
+    // that ARE enabled. Manifest membership = preview by definition.
+    if (!feature || enabled) return;
     let cancelled = false;
     void import("sonner").then(({ toast }) => {
       if (cancelled) return;
