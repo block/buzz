@@ -377,8 +377,9 @@ test("shows your avatar on your own message when profile avatar is set", async (
 
   await page.goto("/");
   await openSettings(page, "profile");
+  await page.getByTestId("profile-avatar-edit").click();
   await page.getByTestId("profile-avatar-url").fill(avatarUrl);
-  await page.getByTestId("profile-save").click();
+  await page.getByTestId("profile-avatar-done").click();
   await page.getByTestId("settings-back-to-app").click();
 
   await page.getByTestId("channel-general").click();

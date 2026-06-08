@@ -2597,7 +2597,7 @@ async function handleUpdateProfile(
     if (nextAvatarUrl && nextAvatarUrl !== profile.avatar_url) {
       profile.avatar_url = nextAvatarUrl;
     }
-    if (nextAbout && nextAbout !== profile.about) {
+    if (typeof nextAbout === "string" && nextAbout !== profile.about) {
       profile.about = nextAbout;
     }
     if (

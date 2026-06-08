@@ -1,10 +1,54 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 import { openProfileMenu, openSettings } from "../helpers/settings";
 
 async function expectHomeView(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+}
+
+async function expandIdentity(page: import("@playwright/test").Page) {
+  const identity = page.getByTestId("profile-identity-card");
+  const isOpen = await identity.evaluate(
+    (element) => element instanceof HTMLDetailsElement && element.open,
+  );
+  if (!isOpen) {
+    await page.getByTestId("profile-identity-toggle").click();
+  }
+}
+
+async function selectFirstEmojiFromPicker(page: Page) {
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker).toBeVisible();
+  await expect
+    .poll(() =>
+      picker.evaluate((element) =>
+        Boolean(element.shadowRoot?.querySelector(".scroll button")),
+      ),
+    )
+    .toBe(true);
+  await picker.evaluate((element) => {
+    const button = element.shadowRoot?.querySelector(".scroll button");
+    if (!(button instanceof HTMLElement)) {
+      throw new Error("Emoji picker did not render an emoji button.");
+    }
+    button.click();
+  });
+}
+
+async function waitForAvatarEditorToClose(page: Page) {
+  await expect(page.getByTestId("profile-avatar-editor-shell")).toHaveCount(0);
+}
+
+async function waitForReactEffects(page: Page) {
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(resolve);
+        });
+      }),
+  );
 }
 
 test.beforeEach(async ({ page }) => {
@@ -26,32 +70,404 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
     }),
   ).toBeVisible();
 
+  await expect(page.getByTestId("profile-identity-details")).toBeHidden();
+  await expandIdentity(page);
   await expect(page.getByTestId("profile-pubkey")).toContainText("deadbeef");
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
 
+  await page.getByTestId("profile-metadata-edit").click();
+  await expect(page.getByTestId("profile-metadata-edit")).toHaveText("Done");
+  await expect(page.getByTestId("profile-about")).toBeVisible();
   await page.getByTestId("profile-display-name").fill(displayName);
-  await page.getByTestId("profile-avatar-url").fill(avatarUrl);
   await page.getByTestId("profile-about").fill(about);
-  await page.getByTestId("profile-save").click();
+  await page.getByTestId("profile-metadata-edit").click();
 
-  await expect(page.getByTestId("profile-display-name")).toHaveValue(
+  await expect(page.getByTestId("profile-display-name-value")).toHaveText(
+    displayName,
+  );
+  await expect(page.getByTestId("profile-about-value")).toHaveText(about);
+
+  await page.getByTestId("profile-avatar-edit").click();
+  await page.getByTestId("profile-avatar-url").fill(avatarUrl);
+  await page.getByTestId("profile-avatar-done").click();
+
+  await expect(page.getByTestId("profile-display-name-value")).toHaveText(
     displayName,
   );
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
+  await page.getByTestId("profile-avatar-edit").click();
   await expect(page.getByTestId("profile-avatar-url")).toHaveValue(avatarUrl);
-  await expect(page.getByTestId("profile-about")).toHaveValue(about);
+  await page.getByTestId("profile-avatar-done").click();
+  await expandIdentity(page);
 
   await page.getByTestId("settings-back-to-app").click();
   await expectHomeView(page);
   await expect(page.getByTestId("open-settings")).toBeVisible();
 
   await openSettings(page, "profile");
-  await expect(page.getByTestId("profile-display-name")).toHaveValue(
+  await expect(page.getByTestId("profile-display-name-value")).toHaveText(
     displayName,
   );
+  await expandIdentity(page);
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
+  await page.getByTestId("profile-avatar-edit").click();
   await expect(page.getByTestId("profile-avatar-url")).toHaveValue(avatarUrl);
-  await expect(page.getByTestId("profile-about")).toHaveValue(about);
+  await expect(page.getByTestId("profile-about-value")).toHaveText(about);
+});
+
+test("saves profile metadata from the block Done button", async ({ page }) => {
+  await page.goto("/");
+
+  await openSettings(page, "profile");
+  await expect(page.getByTestId("profile-display-name-value")).toHaveText(
+    "npub1mock...",
+  );
+  await expect(page.getByTestId("profile-save")).toHaveCount(0);
+
+  await page.getByTestId("profile-metadata-edit").click();
+  await expect(page.getByTestId("profile-metadata-edit")).toHaveText("Done");
+  await expect(page.getByTestId("profile-about")).toBeVisible();
+  await page.getByTestId("profile-display-name").fill("Save Button QA");
+  await page.getByTestId("profile-about").fill("Temporary profile note");
+  await expect(page.getByTestId("profile-save")).toHaveCount(0);
+
+  await page.getByTestId("profile-metadata-edit").click();
+  await waitForReactEffects(page);
+  await expect(page.getByTestId("profile-display-name")).toHaveCount(0);
+  await expect(page.getByTestId("profile-display-name-value")).toHaveText(
+    "Save Button QA",
+  );
+  await expect(page.getByTestId("profile-about-value")).toHaveText(
+    "Temporary profile note",
+  );
+  await expect(page.getByTestId("profile-metadata-edit")).toHaveText("Edit");
+  await expect(page.getByTestId("profile-save")).toHaveCount(0);
+
+  await page.getByTestId("profile-metadata-edit").click();
+  await page.getByTestId("profile-about").fill("");
+  await page.getByTestId("profile-metadata-edit").click();
+  await waitForReactEffects(page);
+  await expect(page.getByTestId("profile-about-value")).toHaveText("Not set");
+  await expect(page.getByTestId("profile-save")).toHaveCount(0);
+
+  await page.getByTestId("profile-metadata-edit").click();
+  await page.getByTestId("profile-display-name").fill("");
+  await expect(
+    page.getByText("Clearing existing profile fields is not supported yet."),
+  ).toBeVisible();
+  await page.getByTestId("profile-metadata-edit").click();
+  await waitForReactEffects(page);
+  await expect(page.getByTestId("profile-display-name")).toHaveCount(0);
+  await expect(page.getByTestId("profile-display-name-value")).toHaveText(
+    "Save Button QA",
+  );
+  await expect(page.getByTestId("profile-metadata-edit")).toHaveText("Edit");
+
+  await page.getByTestId("profile-metadata-edit").click();
+  await page.getByTestId("profile-display-name").fill("npub1mock...");
+  await page.getByTestId("profile-metadata-edit").click();
+  await expect(page.getByTestId("profile-save")).toHaveCount(0);
+});
+
+test("shows profile save feedback as a toast", async ({ page }) => {
+  await page.goto("/");
+
+  await openSettings(page, "profile");
+  await page.getByTestId("profile-metadata-edit").click();
+  await page.getByTestId("profile-display-name").fill("Toast QA");
+  await page.getByTestId("profile-metadata-edit").click();
+
+  await expect(
+    page.locator("[data-sonner-toast]").filter({ hasText: "Profile saved" }),
+  ).toBeVisible();
+  await expect(page.getByText("Profile saved.", { exact: true })).toHaveCount(
+    0,
+  );
+});
+
+test("nests the avatar edit button in a clipped notch", async ({ page }) => {
+  await page.goto("/");
+
+  await openSettings(page, "profile");
+
+  await expect(page.getByTestId("profile-avatar-preview-clip")).toHaveCSS(
+    "clip-path",
+    /url/,
+  );
+  const editShell = page.getByTestId("profile-avatar-edit-shell");
+  await expect(editShell).toHaveCSS("height", "54px");
+  await expect(editShell).toHaveCSS("width", "54px");
+
+  const editButton = page.getByTestId("profile-avatar-edit");
+  await expect(editButton).toHaveCSS("opacity", "1");
+
+  await expect(editButton).toHaveCSS(
+    "background-color",
+    await page
+      .getByTestId("settings-nav-profile")
+      .evaluate((element) => getComputedStyle(element).backgroundColor),
+  );
+  const transitionProperty = await editButton.evaluate(
+    (element) => getComputedStyle(element).transitionProperty,
+  );
+  expect(transitionProperty).toContain("opacity");
+  expect(transitionProperty).toContain("scale");
+});
+
+test("highlights the avatar drop target while dragging an image", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openSettings(page, "profile");
+  await page.getByTestId("profile-avatar-edit").click();
+
+  const uploadTarget = page.getByTestId("profile-avatar-upload");
+  await uploadTarget.evaluate((element) => {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(
+      new File(["avatar"], "avatar.png", { type: "image/png" }),
+    );
+
+    element.dispatchEvent(
+      new DragEvent("dragenter", {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+      }),
+    );
+  });
+
+  await expect(uploadTarget).toHaveAttribute("data-dragging", "true");
+  await expect(uploadTarget).toContainText("Drop image here");
+
+  await uploadTarget.evaluate((element) => {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(
+      new File(["avatar"], "avatar.png", { type: "image/png" }),
+    );
+
+    element.dispatchEvent(
+      new DragEvent("dragleave", {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+      }),
+    );
+  });
+
+  await expect(uploadTarget).not.toHaveAttribute("data-dragging", "true");
+
+  await uploadTarget.evaluate((element) => {
+    const dataTransfer = new DataTransfer();
+    dataTransfer.items.add(
+      new File(["avatar"], "avatar.png", { type: "image/png" }),
+    );
+
+    element.dispatchEvent(
+      new DragEvent("dragenter", {
+        bubbles: true,
+        cancelable: true,
+        dataTransfer,
+      }),
+    );
+  });
+
+  await expect(uploadTarget).toHaveAttribute("data-dragging", "true");
+
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new DragEvent("dragleave", {
+        bubbles: true,
+        cancelable: true,
+        clientX: -1,
+        clientY: 40,
+      }),
+    );
+  });
+
+  await expect(uploadTarget).not.toHaveAttribute("data-dragging", "true");
+});
+
+test("uploads local profile avatar files before saving", async ({ page }) => {
+  const uploadedAvatarUrl = "https://mock.relay/media/avatar-profile.png";
+  await installMockBridge(page, {
+    uploadDescriptors: [
+      {
+        filename: "avatar-profile.png",
+        sha256: "b".repeat(64),
+        size: 553432,
+        type: "image/png",
+        uploaded: 1_779_900_000,
+        url: uploadedAvatarUrl,
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await openSettings(page, "profile");
+  await page.getByTestId("profile-avatar-edit").click();
+  await page.getByTestId("profile-avatar-input").setInputFiles({
+    buffer: Buffer.from("large-avatar-bytes"),
+    mimeType: "image/png",
+    name: "avatar-profile.png",
+  });
+
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
+  await page.getByTestId("profile-avatar-done").click();
+  await waitForAvatarEditorToClose(page);
+  await page.getByTestId("profile-avatar-edit").click();
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
+
+  const pastedAvatarUrl = await page.evaluate(
+    () => new URL("/sprout.svg", window.location.href).href,
+  );
+  await page.getByTestId("profile-avatar-url").click();
+  await page.keyboard.insertText(pastedAvatarUrl);
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(
+    pastedAvatarUrl,
+  );
+  await page.getByTestId("profile-avatar-done").click();
+  await waitForAvatarEditorToClose(page);
+  await page.getByTestId("profile-avatar-edit").click();
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(
+    pastedAvatarUrl,
+  );
+  await page.getByTestId("profile-avatar-url").fill("");
+  await page.getByTestId("profile-avatar-done").click();
+  await expect(
+    page.getByTestId("profile-avatar-preview").locator("img"),
+  ).toHaveCount(1);
+  await waitForAvatarEditorToClose(page);
+  await page.getByTestId("profile-avatar-edit").click();
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(
+    pastedAvatarUrl,
+  );
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __SPROUT_E2E_COMMANDS__?: string[] })
+            .__SPROUT_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toEqual(expect.arrayContaining(["upload_media_bytes", "update_profile"]));
+});
+
+test("renders emoji avatars with a static background layer", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openSettings(page, "profile");
+  await page.getByTestId("profile-avatar-edit").click();
+  await page.getByRole("tab", { name: "Emoji" }).click();
+  await selectFirstEmojiFromPicker(page);
+  await page.getByRole("button", { name: "Use #FFE75C background" }).click();
+
+  const avatarPreview = page.getByTestId("profile-avatar-preview");
+  await expect(avatarPreview).toHaveCSS(
+    "background-color",
+    "rgb(255, 231, 92)",
+  );
+  await expect(avatarPreview).not.toHaveClass(/sprout-avatar-squish/);
+  await expect(page.getByTestId("profile-avatar-preview-emoji")).toHaveText(
+    "😀",
+  );
+  await expect(page.getByTestId("profile-avatar-preview-emoji")).toHaveCSS(
+    "font-size",
+    "96px",
+  );
+});
+
+test("reveals emoji background colors only after choosing an emoji", async ({
+  page,
+}) => {
+  const imageAvatarUrl = `https://example.com/avatar-color-controls-${Date.now()}.png`;
+  await page.goto("/");
+
+  await openSettings(page, "profile");
+  await page.getByTestId("profile-avatar-edit").click();
+  await page.getByTestId("profile-avatar-url").fill(imageAvatarUrl);
+  await page.getByTestId("profile-avatar-done").click();
+  await waitForAvatarEditorToClose(page);
+
+  await page.getByTestId("profile-avatar-edit").click();
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(
+    imageAvatarUrl,
+  );
+  await page.getByRole("tab", { name: "Emoji" }).click();
+
+  const colorGridShell = page.getByTestId("profile-avatar-color-grid-shell");
+  const doneButton = page.getByTestId("profile-avatar-done");
+  await expect(colorGridShell).toHaveAttribute("aria-hidden", "true");
+
+  const doneBeforeEmoji = await doneButton.boundingBox();
+  if (!doneBeforeEmoji) {
+    throw new Error("Avatar Done button did not render bounds.");
+  }
+
+  await selectFirstEmojiFromPicker(page);
+
+  await expect(colorGridShell).toHaveAttribute("aria-hidden", "false");
+  await expect(page.getByTestId("profile-avatar-color-grid")).toBeVisible();
+  await colorGridShell.evaluate((element) =>
+    Promise.all(
+      element
+        .getAnimations()
+        .map((animation) => animation.finished.catch(() => undefined)),
+    ),
+  );
+
+  const doneAfterEmoji = await doneButton.boundingBox();
+  if (!doneAfterEmoji) {
+    throw new Error("Avatar Done button did not render bounds.");
+  }
+  expect(doneAfterEmoji.y).toBeGreaterThan(doneBeforeEmoji.y + 8);
+});
+
+test("snaps custom avatar colors to the dot grid", async ({ page }) => {
+  await page.goto("/");
+
+  await openSettings(page, "profile");
+  await page.getByTestId("profile-avatar-edit").click();
+  await page.getByRole("tab", { name: "Emoji" }).click();
+  await selectFirstEmojiFromPicker(page);
+
+  const customColorSwatch = page.getByTestId("profile-avatar-custom-color");
+  await customColorSwatch.click();
+
+  const spectrum = page.getByTestId("profile-avatar-custom-color-spectrum");
+  await expect(spectrum).toBeVisible();
+  await expect(page.getByTestId("profile-avatar-done")).toHaveCount(0);
+  await expect(
+    page.getByTestId("profile-avatar-custom-color-done"),
+  ).toBeVisible();
+
+  const spectrumBox = await spectrum.boundingBox();
+  if (!spectrumBox) {
+    throw new Error("Custom color spectrum did not render bounds.");
+  }
+
+  await spectrum.click({
+    position: {
+      x: 24 + (spectrumBox.width - 48) * 0.33,
+      y: 24 + (spectrumBox.height - 48) * 0.44,
+    },
+  });
+  await expect(page.getByTestId("profile-avatar-preview")).toHaveCSS(
+    "background-color",
+    "rgb(145, 93, 93)",
+  );
+  await page.getByTestId("profile-avatar-custom-color-done").click();
+
+  await expect(customColorSwatch).toHaveAttribute("aria-pressed", "true");
+  await expect(customColorSwatch).toHaveCSS(
+    "background-color",
+    "rgb(145, 93, 93)",
+  );
+  await expect(page.getByTestId("profile-avatar-done")).toBeVisible();
 });
 
 test("updates presence from the profile menu", async ({ page }) => {

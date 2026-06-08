@@ -2,6 +2,101 @@
 @import "tw-animate-css";
 @config "../../../tailwind.config.js";
 
+.sprout-emoji-mart {
+  align-items: stretch;
+  display: flex;
+  justify-content: stretch;
+  overflow: hidden;
+  width: 100%;
+}
+
+.sprout-emoji-mart > div {
+  align-items: stretch;
+  display: flex;
+  height: 100%;
+  justify-content: stretch;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+.sprout-emoji-mart em-emoji-picker {
+  --border-radius: 12px;
+  --category-icon-size: 24px;
+  --color-border: transparent;
+  --color-border-over: rgb(255 255 255 / 0.1);
+  --font-family: inherit;
+  --font-size: 14px;
+  --rgb-accent: var(--sprout-emoji-picker-rgb-color, 245, 247, 255);
+  --rgb-background: var(--sprout-emoji-picker-rgb-background, 54, 58, 79);
+  --rgb-color: var(--sprout-emoji-picker-rgb-color, 245, 247, 255);
+  --rgb-input: var(--sprout-emoji-picker-rgb-input, 47, 51, 68);
+  --shadow: none;
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+@keyframes sprout-avatar-squish {
+  0% {
+    transform: translate(
+        var(--sprout-avatar-emoji-offset-x, 0px),
+        var(--sprout-avatar-emoji-offset-y, 0px)
+      )
+      scale(1);
+  }
+
+  42% {
+    transform: translate(
+        var(--sprout-avatar-emoji-offset-x, 0px),
+        var(--sprout-avatar-emoji-offset-y, 0px)
+      )
+      scaleX(0.96) scaleY(0.88);
+  }
+
+  100% {
+    transform: translate(
+        var(--sprout-avatar-emoji-offset-x, 0px),
+        var(--sprout-avatar-emoji-offset-y, 0px)
+      )
+      scale(1);
+  }
+}
+
+.sprout-avatar-emoji-glyph {
+  --sprout-avatar-emoji-offset-x: 1px;
+  --sprout-avatar-emoji-offset-y: 7px;
+  transform: translate(
+    var(--sprout-avatar-emoji-offset-x),
+    var(--sprout-avatar-emoji-offset-y)
+  );
+}
+
+.sprout-avatar-squish {
+  animation: sprout-avatar-squish 200ms ease-out;
+  transform-origin: center;
+}
+
+.sprout-avatar-hue-scrubber {
+  background: linear-gradient(
+    90deg,
+    #ff0000 0%,
+    #ffff00 16.67%,
+    #00ff00 33.33%,
+    #00ffff 50%,
+    #0000ff 66.67%,
+    #ff00ff 83.33%,
+    #ff0000 100%
+  );
+  outline: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 /* ── Tiptap rich-text composer ──────────────────────────────────────── */
 .rich-text-composer .tiptap {
   outline: none;
