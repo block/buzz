@@ -9,6 +9,7 @@ import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../profile/set_status_sheet.dart';
@@ -33,118 +34,148 @@ class SettingsPage extends HookConsumerWidget {
       body: ListView(
         padding: EdgeInsets.only(
           top: frostedAppBarHeight(context),
-          left: Grid.xs,
-          right: Grid.xs,
           bottom: Grid.xs,
         ),
         children: [
-          const SizedBox(height: Grid.twelve),
-          // Status
-          _StatusSection(),
+          const SizedBox(height: Grid.xxs),
+
+          // Status — flush header row, like Slack's profile/status block.
+          _StatusRow(),
 
           // Appearance
-          const _SectionHeader('Appearance'),
-
-          // Color scheme picker — navigates to dedicated page
-          ListTile(
-            leading: const Icon(LucideIcons.palette),
-            title: const Text('Color Scheme'),
-            subtitle: Text(
-              selectedScheme == null
-                  ? 'Default (Catppuccin)'
-                  : findTheme(selectedScheme)?.displayName ?? selectedScheme,
-              style: context.textTheme.bodySmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-            trailing: const Icon(LucideIcons.chevronRight, size: 18),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const ThemePickerPage()),
-            ),
-          ),
-
-          // Accent color picker
-          const _SectionHeader('Accent Color', topGap: Grid.twelve),
-          Wrap(
-            spacing: Grid.xxs,
-            runSpacing: Grid.xxs,
+          AppListSection(
+            label: 'Appearance',
             children: [
-              // Default (Mauve) swatch
-              _AccentSwatch(
-                color: context.colors.brightness == Brightness.light
-                    ? const Color(0xFF8839EF)
-                    : const Color(0xFFA875F5),
-                label: 'Mauve',
-                selected: selectedAccent == defaultAccentIndex,
-                onTap: () => ref
-                    .read(accentProvider.notifier)
-                    .setAccent(defaultAccentIndex),
-              ),
-              for (var i = 0; i < accentColors.length; i++)
-                _AccentSwatch(
-                  color: context.colors.brightness == Brightness.light
-                      ? accentColors[i].light
-                      : accentColors[i].dark,
-                  label: accentColors[i].name,
-                  selected: selectedAccent == i,
-                  onTap: () => ref.read(accentProvider.notifier).setAccent(i),
+              AppListRow(
+                icon: LucideIcons.palette,
+                title: 'Color Scheme',
+                subtitle: selectedScheme == null
+                    ? 'Default (Catppuccin)'
+                    : findTheme(selectedScheme)?.displayName ?? selectedScheme,
+                trailing: Icon(
+                  LucideIcons.chevronRight,
+                  size: 18,
+                  color: context.colors.onSurfaceVariant,
                 ),
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const ThemePickerPage(),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Grid.xs,
+                  Grid.xxs,
+                  Grid.xs,
+                  Grid.twelve,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Accent Color', style: context.textTheme.bodyLarge),
+                    const SizedBox(height: Grid.twelve),
+                    Wrap(
+                      spacing: Grid.xxs,
+                      runSpacing: Grid.xxs,
+                      children: [
+                        // Default (Mauve) swatch
+                        _AccentSwatch(
+                          color: context.colors.brightness == Brightness.light
+                              ? const Color(0xFF8839EF)
+                              : const Color(0xFFA875F5),
+                          label: 'Mauve',
+                          selected: selectedAccent == defaultAccentIndex,
+                          onTap: () => ref
+                              .read(accentProvider.notifier)
+                              .setAccent(defaultAccentIndex),
+                        ),
+                        for (var i = 0; i < accentColors.length; i++)
+                          _AccentSwatch(
+                            color: context.colors.brightness == Brightness.light
+                                ? accentColors[i].light
+                                : accentColors[i].dark,
+                            label: accentColors[i].name,
+                            selected: selectedAccent == i,
+                            onTap: () =>
+                                ref.read(accentProvider.notifier).setAccent(i),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
             ],
           ),
 
-          // Connection info
-          const _SectionHeader('Connection'),
-          ListTile(
-            leading: const Icon(LucideIcons.server),
-            title: const Text('Connected to'),
-            subtitle: Text(
-              config.baseUrl,
-              style: context.textTheme.bodySmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
+          // Connection
+          AppListSection(
+            label: 'Connection',
+            children: [
+              AppListRow(
+                icon: LucideIcons.server,
+                title: 'Connected to',
+                subtitle: config.baseUrl,
               ),
-            ),
-          ),
-          if (config.nsec != null && config.nsec!.isNotEmpty)
-            Builder(
-              builder: (context) {
-                final privHex = nostr.Nip19.decode(payload: config.nsec!).data;
-                final pubkey = privHex.isNotEmpty
-                    ? nostr.Keys(privHex).public
-                    : 'unknown';
-                return ListTile(
-                  leading: const Icon(LucideIcons.key),
-                  title: const Text('Identity (pubkey)'),
-                  subtitle: Text(
-                    pubkey,
-                    style: context.textTheme.bodySmall?.copyWith(
-                      color: context.colors.onSurfaceVariant,
-                      fontFamily: 'GeistMono',
-                      fontSize: 11,
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  trailing: IconButton(
-                    icon: const Icon(LucideIcons.copy, size: 16),
-                    onPressed: () async {
-                      await copyToClipboard(
-                        context,
+              if (config.nsec != null && config.nsec!.isNotEmpty)
+                Builder(
+                  builder: (context) {
+                    final privHex = nostr.Nip19.decode(
+                      payload: config.nsec!,
+                    ).data;
+                    final pubkey = privHex.isNotEmpty
+                        ? nostr.Keys(privHex).public
+                        : 'unknown';
+                    return AppListRowRaw(
+                      leading: Icon(
+                        LucideIcons.key,
+                        size: 22,
+                        color: context.colors.onSurfaceVariant,
+                      ),
+                      title: Text(
+                        'Identity (pubkey)',
+                        style: context.textTheme.bodyLarge,
+                      ),
+                      subtitle: Text(
                         pubkey,
-                        message: 'Pubkey copied',
-                      );
-                    },
+                        style: context.textTheme.bodySmall?.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                          fontFamily: 'GeistMono',
+                          fontSize: 11,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      trailing: IconButton(
+                        icon: const Icon(LucideIcons.copy, size: 16),
+                        onPressed: () async {
+                          await copyToClipboard(
+                            context,
+                            pubkey,
+                            message: 'Pubkey copied',
+                          );
+                        },
+                      ),
+                    );
+                  },
+                ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Grid.xs,
+                  Grid.xxs,
+                  Grid.xs,
+                  Grid.twelve,
+                ),
+                child: OutlinedButton.icon(
+                  onPressed: () => _confirmSignOut(context, ref),
+                  icon: const Icon(LucideIcons.logOut),
+                  label: const Text('Remove Workspace'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: context.colors.error,
                   ),
-                );
-              },
-            ),
-          const SizedBox(height: Grid.twelve),
-          OutlinedButton.icon(
-            onPressed: () => _confirmSignOut(context, ref),
-            icon: const Icon(LucideIcons.logOut),
-            label: const Text('Remove Workspace'),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: context.colors.error,
-            ),
+                ),
+              ),
+            ],
           ),
 
           if (packageInfo.hasData) ...[
@@ -196,63 +227,34 @@ class SettingsPage extends HookConsumerWidget {
   }
 }
 
-class _SectionHeader extends StatelessWidget {
-  const _SectionHeader(this.label, {this.topGap = Grid.sm});
-
-  final String label;
-  final double topGap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(top: topGap, bottom: Grid.xxs, left: Grid.xxs),
-      child: Text(
-        label.toUpperCase(),
-        style: context.textTheme.labelMedium?.copyWith(
-          color: context.colors.onSurfaceVariant,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.6,
-        ),
-      ),
-    );
-  }
-}
-
-class _StatusSection extends ConsumerWidget {
+class _StatusRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final statusAsync = ref.watch(userStatusProvider);
     final status = statusAsync.asData?.value;
+    final hasStatus = status != null && !status.isEmpty;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const _SectionHeader('Status', topGap: 0),
-        ListTile(
-          leading: _StatusEmojiIcon(emoji: status?.emoji ?? ''),
-          title: Text(
-            status != null && !status.isEmpty
-                ? status.text.isNotEmpty
-                      ? status.text
-                      : status.emoji
-                : 'Set a status',
-            style: status != null && !status.isEmpty
-                ? null
-                : context.textTheme.bodyMedium?.copyWith(
-                    color: context.colors.onSurfaceVariant,
-                  ),
-          ),
-          subtitle: status != null && !status.isEmpty
-              ? Text(
-                  'Tap to update',
-                  style: context.textTheme.bodySmall?.copyWith(
-                    color: context.colors.onSurfaceVariant,
-                  ),
-                )
-              : null,
-          onTap: () => showSetStatusSheet(context, currentStatus: status),
-        ),
-      ],
+    return AppListRowRaw(
+      leading: _StatusEmojiIcon(emoji: status?.emoji ?? ''),
+      title: Text(
+        hasStatus
+            ? (status.text.isNotEmpty ? status.text : status.emoji)
+            : 'Set a status',
+        style: hasStatus
+            ? context.textTheme.bodyLarge
+            : context.textTheme.bodyLarge?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+      ),
+      subtitle: hasStatus
+          ? Text(
+              'Tap to update',
+              style: context.textTheme.bodySmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            )
+          : null,
+      onTap: () => showSetStatusSheet(context, currentStatus: status),
     );
   }
 }
