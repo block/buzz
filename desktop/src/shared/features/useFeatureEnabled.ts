@@ -95,6 +95,10 @@ export function useFeatureSnapshot(): Record<string, boolean> {
  *
  * - stable: always true
  * - preview: true only if user opted in
+ * - unknown id: fail-open (returns true). Manifest membership signals "this
+ *   needs gating"; absence means "just render it." A stray `<FeatureGate>`
+ *   pointing at a removed id should not hide UI. Dev mode still logs a
+ *   `console.warn` so typos surface during development.
  */
 export function useFeatureEnabled(featureId: string): boolean {
   const overrides = useFeatureSnapshot();
@@ -106,7 +110,7 @@ export function useFeatureEnabled(featureId: string): boolean {
         `[FeatureFlags] Unknown feature id: "${featureId}". Check features.json.`,
       );
     }
-    return false;
+    return true;
   }
 
   return resolveEnabled(feature.tier, featureId, overrides);
