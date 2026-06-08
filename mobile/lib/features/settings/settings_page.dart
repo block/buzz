@@ -9,10 +9,13 @@ import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../profile/set_status_sheet.dart';
 import '../profile/user_status_provider.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
+import '../custom_emoji/custom_emoji_render.dart';
 import 'theme_picker_page.dart';
 
 class SettingsPage extends HookConsumerWidget {
@@ -28,151 +31,174 @@ class SettingsPage extends HookConsumerWidget {
 
     return FrostedScaffold(
       appBar: const FrostedAppBar(title: Text('Settings')),
-      body: ListView(
-        padding: EdgeInsets.only(
-          top: frostedAppBarHeight(context),
-          left: Grid.xs,
-          right: Grid.xs,
-          bottom: Grid.xs,
-        ),
+      body: Column(
         children: [
-          // Connection info
-          Text('Connection', style: context.textTheme.titleMedium),
-          const SizedBox(height: Grid.twelve),
-          ListTile(
-            leading: const Icon(LucideIcons.server),
-            title: const Text('Connected to'),
-            subtitle: Text(
-              config.baseUrl,
-              style: context.textTheme.bodySmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.only(
+                top: frostedAppBarHeight(context),
+                bottom: Grid.xs,
               ),
-            ),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(Radii.md),
-              side: BorderSide(color: context.colors.outlineVariant),
-            ),
-          ),
-          if (config.nsec != null && config.nsec!.isNotEmpty) ...[
-            const SizedBox(height: Grid.xxs),
-            Builder(
-              builder: (context) {
-                final privHex = nostr.Nip19.decode(payload: config.nsec!).data;
-                final pubkey = privHex.isNotEmpty
-                    ? nostr.Keys(privHex).public
-                    : 'unknown';
-                return ListTile(
-                  leading: const Icon(LucideIcons.key),
-                  title: const Text('Identity (pubkey)'),
-                  subtitle: Text(
-                    pubkey,
-                    style: context.textTheme.bodySmall?.copyWith(
-                      color: context.colors.onSurfaceVariant,
-                      fontFamily: 'GeistMono',
-                      fontSize: 11,
+              children: [
+                const SizedBox(height: Grid.xxs),
+
+                // Status — flush header row, like Slack's profile/status block.
+                _StatusRow(),
+
+                // Appearance
+                AppListSection(
+                  label: 'Appearance',
+                  children: [
+                    AppListRow(
+                      icon: LucideIcons.palette,
+                      title: 'Color Scheme',
+                      subtitle: selectedScheme == null
+                          ? 'Default (Catppuccin)'
+                          : findTheme(selectedScheme)?.displayName ??
+                                selectedScheme,
+                      trailing: Icon(
+                        LucideIcons.chevronRight,
+                        size: 18,
+                        color: context.colors.onSurfaceVariant,
+                      ),
+                      onTap: () => Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const ThemePickerPage(),
+                        ),
+                      ),
                     ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  trailing: IconButton(
-                    icon: const Icon(LucideIcons.copy, size: 16),
-                    onPressed: () async {
-                      await copyToClipboard(
-                        context,
-                        pubkey,
-                        message: 'Pubkey copied',
-                      );
-                    },
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(Radii.md),
-                    side: BorderSide(color: context.colors.outlineVariant),
-                  ),
-                );
-              },
-            ),
-          ],
-          const SizedBox(height: Grid.twelve),
-          OutlinedButton.icon(
-            onPressed: () => _confirmSignOut(context, ref),
-            icon: const Icon(LucideIcons.logOut),
-            label: const Text('Remove Workspace'),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: context.colors.error,
-            ),
-          ),
-
-          const SizedBox(height: Grid.sm),
-
-          // Status
-          _StatusSection(),
-
-          const SizedBox(height: Grid.sm),
-
-          // Appearance
-          Text('Appearance', style: context.textTheme.titleMedium),
-          const SizedBox(height: Grid.twelve),
-
-          // Color scheme picker — navigates to dedicated page
-          ListTile(
-            leading: const Icon(LucideIcons.palette),
-            title: const Text('Color Scheme'),
-            subtitle: Text(
-              selectedScheme == null
-                  ? 'Default (Catppuccin)'
-                  : findTheme(selectedScheme)?.displayName ?? selectedScheme,
-              style: context.textTheme.bodySmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-            trailing: const Icon(LucideIcons.chevronRight, size: 18),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(builder: (_) => const ThemePickerPage()),
-            ),
-          ),
-
-          const SizedBox(height: Grid.xs),
-
-          // Accent color picker
-          Text('Accent Color', style: context.textTheme.titleSmall),
-          const SizedBox(height: Grid.xxs),
-          Wrap(
-            spacing: Grid.xxs,
-            runSpacing: Grid.xxs,
-            children: [
-              // Default (Mauve) swatch
-              _AccentSwatch(
-                color: context.colors.brightness == Brightness.light
-                    ? const Color(0xFF8839EF)
-                    : const Color(0xFFA875F5),
-                label: 'Mauve',
-                selected: selectedAccent == defaultAccentIndex,
-                onTap: () => ref
-                    .read(accentProvider.notifier)
-                    .setAccent(defaultAccentIndex),
-              ),
-              for (var i = 0; i < accentColors.length; i++)
-                _AccentSwatch(
-                  color: context.colors.brightness == Brightness.light
-                      ? accentColors[i].light
-                      : accentColors[i].dark,
-                  label: accentColors[i].name,
-                  selected: selectedAccent == i,
-                  onTap: () => ref.read(accentProvider.notifier).setAccent(i),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        Grid.xs,
+                        Grid.xxs,
+                        Grid.xs,
+                        Grid.twelve,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Accent Color',
+                            style: context.textTheme.bodyMedium?.copyWith(
+                              color: context.colors.onSurfaceVariant,
+                            ),
+                          ),
+                          const SizedBox(height: Grid.twelve),
+                          Wrap(
+                            spacing: Grid.xxs,
+                            runSpacing: Grid.xxs,
+                            children: [
+                              // Default (Mauve) swatch
+                              _AccentSwatch(
+                                color:
+                                    context.colors.brightness ==
+                                        Brightness.light
+                                    ? const Color(0xFF8839EF)
+                                    : const Color(0xFFA875F5),
+                                label: 'Mauve',
+                                selected: selectedAccent == defaultAccentIndex,
+                                onTap: () => ref
+                                    .read(accentProvider.notifier)
+                                    .setAccent(defaultAccentIndex),
+                              ),
+                              for (var i = 0; i < accentColors.length; i++)
+                                _AccentSwatch(
+                                  color:
+                                      context.colors.brightness ==
+                                          Brightness.light
+                                      ? accentColors[i].light
+                                      : accentColors[i].dark,
+                                  label: accentColors[i].name,
+                                  selected: selectedAccent == i,
+                                  onTap: () => ref
+                                      .read(accentProvider.notifier)
+                                      .setAccent(i),
+                                ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-            ],
+
+                // Connection
+                AppListSection(
+                  label: 'Connection',
+                  children: [
+                    AppListRow(
+                      icon: LucideIcons.server,
+                      title: 'Connected to',
+                      subtitle: config.baseUrl,
+                    ),
+                    if (config.nsec != null && config.nsec!.isNotEmpty)
+                      Builder(
+                        builder: (context) {
+                          final privHex = nostr.Nip19.decode(
+                            payload: config.nsec!,
+                          ).data;
+                          final pubkey = privHex.isNotEmpty
+                              ? nostr.Keys(privHex).public
+                              : 'unknown';
+                          return AppListRow(
+                            icon: LucideIcons.key,
+                            title: 'Identity (pubkey)',
+                            subtitle: pubkey,
+                            subtitleStyle: context.textTheme.bodySmall
+                                ?.copyWith(
+                                  color: context.colors.onSurfaceVariant,
+                                  fontFamily: 'GeistMono',
+                                  fontSize: 11,
+                                ),
+                            subtitleMaxLines: 2,
+                            trailing: IconButton(
+                              icon: const Icon(LucideIcons.copy, size: 16),
+                              onPressed: () async {
+                                await copyToClipboard(
+                                  context,
+                                  pubkey,
+                                  message: 'Pubkey copied',
+                                );
+                              },
+                            ),
+                          );
+                        },
+                      ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+                      child: Center(
+                        child: TextButton.icon(
+                          onPressed: () => _confirmSignOut(context, ref),
+                          icon: const Icon(LucideIcons.logOut, size: 18),
+                          label: const Text('Remove Workspace'),
+                          style: TextButton.styleFrom(
+                            foregroundColor: context.colors.error,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
-          if (packageInfo.hasData) ...[
-            const SizedBox(height: Grid.sm),
-            Center(
-              child: Text(
-                'v${packageInfo.data!.version}',
-                style: context.textTheme.bodySmall?.copyWith(
-                  color: context.colors.onSurfaceVariant.withValues(alpha: 0.6),
+          if (packageInfo.hasData)
+            SafeArea(
+              top: false,
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: Grid.xs, top: Grid.xxs),
+                child: Center(
+                  child: Text(
+                    'v${packageInfo.data!.version}',
+                    style: context.textTheme.bodySmall?.copyWith(
+                      color: context.colors.onSurfaceVariant.withValues(
+                        alpha: 0.6,
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
-          ],
         ],
       ),
     );
@@ -211,52 +237,63 @@ class SettingsPage extends HookConsumerWidget {
   }
 }
 
-class _StatusSection extends ConsumerWidget {
+class _StatusRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final statusAsync = ref.watch(userStatusProvider);
     final status = statusAsync.asData?.value;
+    final hasStatus = status != null && !status.isEmpty;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('Status', style: context.textTheme.titleMedium),
-        const SizedBox(height: Grid.twelve),
-        ListTile(
-          leading: Text(
-            status != null && status.emoji.isNotEmpty
-                ? status.emoji
-                : '\u{1F4AC}',
-            style: const TextStyle(fontSize: 20),
-          ),
-          title: Text(
-            status != null && !status.isEmpty
-                ? status.text.isNotEmpty
-                      ? status.text
-                      : status.emoji
-                : 'Set a status',
-            style: status != null && !status.isEmpty
-                ? null
-                : context.textTheme.bodyMedium?.copyWith(
-                    color: context.colors.onSurfaceVariant,
-                  ),
-          ),
-          subtitle: status != null && !status.isEmpty
-              ? Text(
-                  'Tap to update',
-                  style: context.textTheme.bodySmall?.copyWith(
-                    color: context.colors.onSurfaceVariant,
-                  ),
-                )
-              : null,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(Radii.md),
-            side: BorderSide(color: context.colors.outlineVariant),
-          ),
-          onTap: () => showSetStatusSheet(context, currentStatus: status),
-        ),
-      ],
+    return AppListRowRaw(
+      leading: _StatusEmojiIcon(emoji: status?.emoji ?? ''),
+      title: Text(
+        hasStatus
+            ? (status.text.isNotEmpty ? status.text : status.emoji)
+            : 'Set a status',
+        style: hasStatus
+            ? context.textTheme.bodyLarge
+            : context.textTheme.bodyLarge?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+      ),
+      subtitle: hasStatus
+          ? Text(
+              'Tap to update',
+              style: context.textTheme.bodySmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            )
+          : null,
+      onTap: () => showSetStatusSheet(context, currentStatus: status),
     );
+  }
+}
+
+class _StatusEmojiIcon extends ConsumerWidget {
+  final String emoji;
+
+  const _StatusEmojiIcon({required this.emoji});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (emoji.isEmpty) {
+      return const Text('\u{1F4AC}', style: TextStyle(fontSize: 20));
+    }
+    final shortcode = emoji.startsWith(':') && emoji.endsWith(':')
+        ? emoji.substring(1, emoji.length - 1).toLowerCase()
+        : null;
+    if (shortcode != null) {
+      for (final entry in ref.watch(customEmojiListProvider)) {
+        if (entry.shortcode == shortcode) {
+          return CustomEmojiImage(
+            shortcode: shortcode,
+            url: entry.url,
+            size: 24,
+          );
+        }
+      }
+    }
+    return Text(emoji, style: const TextStyle(fontSize: 20));
   }
 }
 

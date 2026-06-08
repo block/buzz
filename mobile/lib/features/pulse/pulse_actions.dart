@@ -2,6 +2,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 import '../channels/channel_management_provider.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
 import 'pulse_models.dart';
 import 'pulse_provider.dart';
 
@@ -32,6 +34,7 @@ Future<void> publishNote(
     if (seen.add(normalized)) tags.add(['p', normalized]);
   }
   tags.addAll(mediaTags);
+  tags.addAll(buildCustomEmojiTags(text, ref.read(customEmojiListProvider)));
 
   await relay.submit(kind: EventKind.note, content: text, tags: tags);
   ref.invalidate(globalNotesProvider);
