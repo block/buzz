@@ -11,6 +11,8 @@ class AppListRow extends StatelessWidget {
     this.icon,
     required this.title,
     this.subtitle,
+    this.subtitleStyle,
+    this.subtitleMaxLines,
     this.trailing,
     this.titleColor,
     this.onTap,
@@ -19,6 +21,8 @@ class AppListRow extends StatelessWidget {
   final IconData? icon;
   final String title;
   final String? subtitle;
+  final TextStyle? subtitleStyle;
+  final int? subtitleMaxLines;
   final Widget? trailing;
   final Color? titleColor;
   final VoidCallback? onTap;
@@ -31,12 +35,16 @@ class AppListRow extends StatelessWidget {
         vertical: Grid.twelve,
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (icon != null) ...[
-            Icon(
-              icon,
-              size: 22,
-              color: titleColor ?? context.colors.onSurfaceVariant,
+            Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Icon(
+                icon,
+                size: 22,
+                color: titleColor ?? context.colors.onSurfaceVariant,
+              ),
             ),
             const SizedBox(width: Grid.xs),
           ],
@@ -55,9 +63,15 @@ class AppListRow extends StatelessWidget {
                   const SizedBox(height: Grid.quarter),
                   Text(
                     subtitle!,
-                    style: context.textTheme.bodySmall?.copyWith(
-                      color: context.colors.onSurfaceVariant,
-                    ),
+                    style:
+                        subtitleStyle ??
+                        context.textTheme.bodySmall?.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                    maxLines: subtitleMaxLines,
+                    overflow: subtitleMaxLines == null
+                        ? null
+                        : TextOverflow.ellipsis,
                   ),
                 ],
               ],

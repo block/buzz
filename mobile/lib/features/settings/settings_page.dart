@@ -73,7 +73,12 @@ class SettingsPage extends HookConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Accent Color', style: context.textTheme.bodyLarge),
+                    Text(
+                      'Accent Color',
+                      style: context.textTheme.bodyMedium?.copyWith(
+                        color: context.colors.onSurfaceVariant,
+                      ),
+                    ),
                     const SizedBox(height: Grid.twelve),
                     Wrap(
                       spacing: Grid.xxs,
@@ -126,26 +131,16 @@ class SettingsPage extends HookConsumerWidget {
                     final pubkey = privHex.isNotEmpty
                         ? nostr.Keys(privHex).public
                         : 'unknown';
-                    return AppListRowRaw(
-                      leading: Icon(
-                        LucideIcons.key,
-                        size: 22,
+                    return AppListRow(
+                      icon: LucideIcons.key,
+                      title: 'Identity (pubkey)',
+                      subtitle: pubkey,
+                      subtitleStyle: context.textTheme.bodySmall?.copyWith(
                         color: context.colors.onSurfaceVariant,
+                        fontFamily: 'GeistMono',
+                        fontSize: 11,
                       ),
-                      title: Text(
-                        'Identity (pubkey)',
-                        style: context.textTheme.bodyLarge,
-                      ),
-                      subtitle: Text(
-                        pubkey,
-                        style: context.textTheme.bodySmall?.copyWith(
-                          color: context.colors.onSurfaceVariant,
-                          fontFamily: 'GeistMono',
-                          fontSize: 11,
-                        ),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
+                      subtitleMaxLines: 2,
                       trailing: IconButton(
                         icon: const Icon(LucideIcons.copy, size: 16),
                         onPressed: () async {
@@ -159,21 +154,11 @@ class SettingsPage extends HookConsumerWidget {
                     );
                   },
                 ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  Grid.xs,
-                  Grid.xxs,
-                  Grid.xs,
-                  Grid.twelve,
-                ),
-                child: OutlinedButton.icon(
-                  onPressed: () => _confirmSignOut(context, ref),
-                  icon: const Icon(LucideIcons.logOut),
-                  label: const Text('Remove Workspace'),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: context.colors.error,
-                  ),
-                ),
+              AppListRow(
+                icon: LucideIcons.logOut,
+                title: 'Remove Workspace',
+                titleColor: context.colors.error,
+                onTap: () => _confirmSignOut(context, ref),
               ),
             ],
           ),
