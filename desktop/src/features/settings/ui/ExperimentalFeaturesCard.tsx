@@ -29,8 +29,9 @@ export function ExperimentalFeaturesCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-experimental">
-      <div className="mb-3 min-w-0">
-        <p className="text-sm text-muted-foreground">
+      <div className="mb-12 min-w-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Experiments</h2>
+        <p className="text-base font-normal text-muted-foreground">
           These features are functional but still being refined. Enable them to
           try new capabilities early.
         </p>

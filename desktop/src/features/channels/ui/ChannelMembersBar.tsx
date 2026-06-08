@@ -145,9 +145,7 @@ export function ChannelMembersBar({
               {memberCount}
             </span>
           </DropdownMenuItem>
-          <FeatureGate feature="huddles">
-            {huddleIndicator}
-          </FeatureGate>
+          <FeatureGate feature="huddles">{huddleIndicator}</FeatureGate>
           <DropdownMenuItem
             data-testid="channel-management-trigger"
             onSelect={onManageChannel}
@@ -188,9 +186,7 @@ export function ChannelMembersBar({
           </span>
         </Button>
 
-        <FeatureGate feature="huddles">
-          {huddleIndicator}
-        </FeatureGate>
+        <FeatureGate feature="huddles">{huddleIndicator}</FeatureGate>
 
         <Button
           aria-label="Manage channel"
