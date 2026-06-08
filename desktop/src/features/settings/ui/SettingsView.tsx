@@ -62,11 +62,7 @@ const settingsNavGroups: Array<{
   },
   {
     label: "App",
-    sections: ["agents", "compute", "mobile", "updates", "doctor"],
-  },
-  {
-    label: "Experiments",
-    sections: ["experimental"],
+    sections: ["agents", "compute", "experimental", "mobile", "updates", "doctor"],
   },
 ];
 
