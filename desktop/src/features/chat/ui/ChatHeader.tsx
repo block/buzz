@@ -26,6 +26,7 @@ type ChatHeaderProps = {
   description?: string;
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
+  leadingContent?: React.ReactNode;
   mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
   overlaysContent?: boolean;
   statusBadge?: React.ReactNode;
@@ -88,6 +89,7 @@ export function ChatHeader({
   description,
   channelType,
   visibility,
+  leadingContent,
   mode = "channel",
   overlaysContent = false,
   statusBadge,
@@ -103,8 +105,10 @@ export function ChatHeader({
   const header = (
     <header
       className={cn(
-        "pointer-events-auto relative z-30 flex min-w-0 shrink-0 cursor-default select-none items-center gap-[10px] bg-transparent pl-[16px] pr-[8px] transition-[margin,padding] duration-200 ease-linear sm:pl-[24px] sm:pr-[12px]",
-        density === "compact" ? "h-[32px] py-0" : "min-h-[44px] py-[6px]",
+        "pointer-events-auto relative z-30 flex min-w-0 shrink-0 cursor-default select-none items-center gap-[10px] bg-transparent pl-[16px] pr-[8px] transition-[margin,padding] duration-200 ease-linear sm:pr-[12px]",
+        density === "compact"
+          ? "h-[32px] py-0"
+          : "min-h-[44px] py-[6px] sm:pl-[24px]",
         overlaysContent && !belowSystemChrome && "-mb-[44px]",
       )}
       data-testid="chat-header"
@@ -112,11 +116,13 @@ export function ChatHeader({
     >
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 flex-wrap items-center gap-[4px]">
-          <ChannelIcon
-            channelType={channelType}
-            mode={mode}
-            visibility={visibility}
-          />
+          {leadingContent ?? (
+            <ChannelIcon
+              channelType={channelType}
+              mode={mode}
+              visibility={visibility}
+            />
+          )}
           <h1
             className="min-w-0 translate-y-px truncate text-base font-semibold leading-6 tracking-tight"
             data-testid="chat-title"

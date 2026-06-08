@@ -4,7 +4,7 @@ export function HomeLoadingState() {
   return (
     <div className="flex-1 overflow-hidden">
       <div className="grid h-full min-h-0 w-full lg:grid-cols-[320px_minmax(0,1fr)]">
-        <div className="overflow-hidden border-r border-border/70 bg-background/60">
+        <div className="relative overflow-hidden bg-background/60 after:absolute after:bottom-0 after:right-0 after:top-10 after:w-px after:bg-border/70 after:content-['']">
           <div className="border-b border-border/70 px-4 pb-4 pt-14">
             <Skeleton className="h-4 w-20" />
             <Skeleton className="mt-2 h-4 w-28" />

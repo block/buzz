@@ -20,7 +20,10 @@ import { Button } from "@/shared/ui/button";
 import type { useChannelFind } from "@/features/search/useChannelFind";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import {
+  resolveUserLabel,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
 
 type ChannelPaneProps = {
@@ -278,6 +281,43 @@ export const ChannelPane = React.memo(function ChannelPane({
   }, [botTypingEntries, openThreadHeadId]);
   const hasThreadComposerBotActivity =
     threadComposerBotTypingPubkeys.length > 0;
+  const directMessageIntro = React.useMemo(() => {
+    if (activeChannel?.channelType !== "dm") {
+      return null;
+    }
+
+    const participants = activeChannel.participantPubkeys.map(
+      (pubkey, index) => ({
+        fallbackName: activeChannel.participants[index] ?? null,
+        pubkey,
+      }),
+    );
+    const otherParticipants = currentPubkey
+      ? participants.filter(
+          (participant) =>
+            participant.pubkey.toLowerCase() !== currentPubkey.toLowerCase(),
+        )
+      : participants;
+    const [participant] =
+      otherParticipants.length > 0 ? otherParticipants : participants;
+
+    if (!participant) {
+      return null;
+    }
+
+    const profile = profiles?.[participant.pubkey.toLowerCase()] ?? null;
+    const displayName = resolveUserLabel({
+      currentPubkey,
+      fallbackName: participant.fallbackName,
+      profiles,
+      pubkey: participant.pubkey,
+    });
+
+    return {
+      avatarUrl: profile?.avatarUrl ?? null,
+      displayName,
+    };
+  }, [activeChannel, currentPubkey, profiles]);
 
   const selectedAgent = React.useMemo(
     () =>
@@ -305,6 +345,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           ) : null}
           <MessageTimeline
             channelId={activeChannel?.id}
+            directMessageIntro={directMessageIntro}
             scrollContainerRef={timelineScrollRef}
             currentPubkey={currentPubkey}
             fetchOlder={fetchOlder}

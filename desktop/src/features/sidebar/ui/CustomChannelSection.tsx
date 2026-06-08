@@ -41,6 +41,10 @@ import {
   DroppableUngroupedBody,
   SortableSectionShell,
 } from "@/features/sidebar/ui/SidebarDnd";
+import {
+  SECTION_ACTION_VISIBILITY_CLASS,
+  SECTION_ICON_BUTTON_CLASS,
+} from "@/features/sidebar/ui/sidebarSectionStyles";
 import type { ChannelSection } from "@/features/sidebar/lib/useChannelSections";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -49,10 +53,6 @@ import { cn } from "@/shared/lib/cn";
 // Shared styles
 // ---------------------------------------------------------------------------
 
-const SECTION_ICON_BUTTON_CLASS =
-  "flex size-6 items-center justify-center rounded-[4px] p-1 text-sidebar-foreground/50 transition-colors hover:bg-sidebar-border/35 hover:text-sidebar-foreground focus-visible:bg-sidebar-border/35 focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring [&>svg]:size-4 [&>svg]:shrink-0";
-export const SECTION_ACTION_VISIBILITY_CLASS =
-  "opacity-0 transition-opacity group-hover/sidebar-section:opacity-100 group-focus-within/sidebar-section:opacity-100";
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
 const SECTION_LABEL_CHEVRON_CLASS =

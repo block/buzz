@@ -52,7 +52,7 @@ export function InboxListPane({
       className={cn(
         "relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-background/60",
         showRightDivider &&
-          "after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:z-40 after:w-px after:bg-border/35 after:content-['']",
+          "after:pointer-events-none after:absolute after:bottom-0 after:right-0 after:top-10 after:z-40 after:w-px after:bg-border/35 after:content-['']",
       )}
     >
       <TopChromeBackdrop className="h-[76px]" />

@@ -3,9 +3,10 @@ import { ArrowDown } from "lucide-react";
 
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { Separator } from "@/shared/ui/separator";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { TimelineSkeleton } from "./TimelineSkeleton";
@@ -16,6 +17,10 @@ import { useTimelineScrollManager } from "./useTimelineScrollManager";
 type MessageTimelineProps = {
   channelId?: string | null;
   messages: TimelineMessage[];
+  directMessageIntro?: {
+    avatarUrl: string | null;
+    displayName: string;
+  } | null;
   isLoading?: boolean;
   emptyTitle?: string;
   emptyDescription?: string;
@@ -56,6 +61,7 @@ type MessageTimelineProps = {
 
 export const MessageTimeline = React.memo(function MessageTimeline({
   channelId,
+  directMessageIntro = null,
   messages,
   isLoading = false,
   emptyTitle = "No messages yet",
@@ -141,6 +147,16 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     sentinelRef: topSentinelRef,
   });
 
+  const hasConversationMessage = messages.some(
+    (message) => message.kind !== KIND_SYSTEM_MESSAGE,
+  );
+  const showDirectMessageIntro =
+    !isLoading && directMessageIntro !== null && !hasConversationMessage;
+  const showGenericEmpty =
+    !isLoading && messages.length === 0 && directMessageIntro === null;
+  const showMessageList =
+    !isLoading && messages.length > 0 && !showDirectMessageIntro;
+
   return (
     <TooltipProvider delayDuration={200}>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -155,7 +171,10 @@ export const MessageTimeline = React.memo(function MessageTimeline({
           ref={scrollContainerRef}
         >
           <div
-            className="flex w-full flex-col gap-2 pt-[92px]"
+            className={cn(
+              "flex w-full flex-col gap-2 pt-[92px]",
+              (showDirectMessageIntro || showGenericEmpty) && "min-h-full",
+            )}
             ref={contentRef}
           >
             <div ref={topSentinelRef} aria-hidden className="h-px" />
@@ -166,22 +185,34 @@ export const MessageTimeline = React.memo(function MessageTimeline({
               </div>
             ) : null}
 
-            {!hasOlderMessages && !isLoading && messages.length > 0 ? (
+            {isLoading ? <TimelineSkeleton /> : null}
+
+            {showDirectMessageIntro ? (
               <div
-                className="flex items-center gap-3 py-2"
-                data-testid="message-timeline-beginning"
+                className="mb-10 mt-auto flex w-full flex-col items-start text-left sm:-ml-2"
+                data-testid="message-dm-intro"
               >
-                <Separator className="flex-1" />
-                <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/75">
-                  Beginning of conversation
+                <ProfileAvatar
+                  avatarUrl={directMessageIntro.avatarUrl}
+                  className="h-[60px] w-[60px] text-base"
+                  iconClassName="h-6 w-6"
+                  label={directMessageIntro.displayName}
+                  testId="message-dm-intro-avatar"
+                />
+                <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
+                  {directMessageIntro.displayName}
                 </p>
-                <Separator className="flex-1" />
+                <p className="mt-1 max-w-full truncate whitespace-nowrap text-sm leading-5 text-muted-foreground">
+                  This is the beginning of your direct message with{" "}
+                  <span className="font-medium text-foreground">
+                    {directMessageIntro.displayName}
+                  </span>
+                  .
+                </p>
               </div>
             ) : null}
 
-            {isLoading ? <TimelineSkeleton /> : null}
-
-            {!isLoading && messages.length === 0 ? (
+            {showGenericEmpty ? (
               <div
                 className="rounded-3xl border border-dashed border-border/80 bg-card/70 px-6 py-10 text-center shadow-xs"
                 data-testid="message-empty"
@@ -195,7 +226,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
               </div>
             ) : null}
 
-            {!isLoading && messages.length > 0 ? (
+            {showMessageList ? (
               <TimelineMessageList
                 channelId={channelId}
                 currentPubkey={currentPubkey}

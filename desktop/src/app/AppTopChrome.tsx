@@ -2,6 +2,7 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import type { Channel, SearchHit } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { SidebarTrigger, useSidebar } from "@/shared/ui/sidebar";
 
@@ -27,6 +28,43 @@ function GlobalTopDivider() {
       className="pointer-events-none fixed right-0 top-10 z-40 h-px bg-border/35"
       style={{ left: state === "expanded" ? "var(--sidebar-width)" : 0 }}
     />
+  );
+}
+
+function CenterColumnTopbarSearch({
+  channels,
+  currentPubkey,
+  onOpenChannel,
+  onOpenResult,
+  searchFocusRequest,
+}: Pick<
+  AppTopChromeProps,
+  | "channels"
+  | "currentPubkey"
+  | "onOpenChannel"
+  | "onOpenResult"
+  | "searchFocusRequest"
+>) {
+  const { isResizing, state } = useSidebar();
+
+  return (
+    <div
+      className={cn(
+        "pointer-events-none fixed right-0 top-[7px] z-[45] flex justify-center px-24",
+        !isResizing && "transition-[left] duration-200 ease-linear",
+      )}
+      data-testid="topbar-search-column"
+      style={{ left: state === "expanded" ? "var(--sidebar-width)" : 0 }}
+    >
+      <TopbarSearch
+        channels={channels}
+        className="pointer-events-auto w-[220px] max-w-full md:w-[300px] lg:w-[360px] xl:w-[420px] 2xl:w-[480px]"
+        currentPubkey={currentPubkey}
+        focusRequest={searchFocusRequest}
+        onOpenChannel={onOpenChannel}
+        onOpenResult={onOpenResult}
+      />
+    </div>
   );
 }
 
@@ -79,13 +117,12 @@ export function AppTopChrome({
         </Button>
       </div>
       {searchHidden ? null : (
-        <TopbarSearch
+        <CenterColumnTopbarSearch
           channels={channels}
-          className="fixed left-1/2 top-[7px] z-[45] block w-[220px] max-w-[calc(100vw-11rem)] -translate-x-1/2 md:w-[300px] md:max-w-[34vw] lg:w-[360px] lg:max-w-[38vw] xl:w-[420px] xl:max-w-[42vw] 2xl:w-[480px] 2xl:max-w-[44vw]"
           currentPubkey={currentPubkey}
-          focusRequest={searchFocusRequest}
           onOpenChannel={onOpenChannel}
           onOpenResult={onOpenResult}
+          searchFocusRequest={searchFocusRequest}
         />
       )}
     </>

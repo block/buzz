@@ -5,6 +5,7 @@ import type { EphemeralChannelDisplay } from "@/features/channels/lib/ephemeralC
 import { getChannelDescription } from "@/features/channels/lib/channelDescription";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { Button } from "@/shared/ui/button";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 
@@ -14,6 +15,7 @@ type ChannelScreenHeaderProps = {
   activeChannelTitle: string;
   actionsRightInset?: string;
   actionsVariant?: "inline" | "compact";
+  activeDmAvatarUrl: string | null;
   activeDmPresenceStatus: PresenceStatus | null;
   currentPubkey?: string;
   isJoining?: boolean;
@@ -29,6 +31,7 @@ export function ChannelScreenHeader({
   activeChannelTitle,
   actionsRightInset,
   actionsVariant = "inline",
+  activeDmAvatarUrl,
   activeDmPresenceStatus,
   currentPubkey,
   isJoining = false,
@@ -78,6 +81,17 @@ export function ChannelScreenHeader({
       actionsRightInset={actionsRightInset}
       channelType={activeChannel?.channelType}
       description={getChannelDescription(activeChannel)}
+      leadingContent={
+        activeChannel?.channelType === "dm" ? (
+          <ProfileAvatar
+            avatarUrl={activeDmAvatarUrl}
+            className="h-6 w-6 rounded-md text-[10px]"
+            iconClassName="h-3.5 w-3.5"
+            label={activeChannelTitle}
+            testId="chat-header-dm-avatar"
+          />
+        ) : undefined
+      }
       statusBadge={
         <ChannelHeaderStatusBadge
           channelType={activeChannel?.channelType}

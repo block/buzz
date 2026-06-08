@@ -141,15 +141,15 @@ export function CustomEmojiSettingsCard() {
           }}
         >
           <SettingsOptionGroup>
-            <div className="flex flex-col gap-3 px-4 py-3 text-sm sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0">
+            <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-sm">
+              <div className="min-w-0 flex-[1_1_22rem]">
                 <h4 className="text-sm font-medium">Upload an image</h4>
                 <p className="text-sm font-normal text-muted-foreground">
                   Square images work best. GIF, PNG, JPEG, and WebP files are
                   supported.
                 </p>
               </div>
-              <div className="flex min-w-0 items-center gap-3">
+              <div className="flex min-w-0 flex-[1_1_16rem] items-center gap-3">
                 <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-md border bg-background">
                   {pendingUpload ? (
                     <img
@@ -163,9 +163,11 @@ export function CustomEmojiSettingsCard() {
                   )}
                 </div>
                 <div className="min-w-0 space-y-2">
-                  <p className="max-w-48 truncate text-sm font-normal text-muted-foreground">
-                    {pendingUpload?.filename ?? "No image selected"}
-                  </p>
+                  {pendingUpload?.filename ? (
+                    <p className="max-w-full truncate text-sm font-normal text-muted-foreground">
+                      {pendingUpload.filename}
+                    </p>
+                  ) : null}
                   <Button
                     type="button"
                     data-testid="custom-emoji-upload"
@@ -183,15 +185,15 @@ export function CustomEmojiSettingsCard() {
               </div>
             </div>
 
-            <div className="flex flex-col gap-3 px-4 py-3 text-sm sm:flex-row sm:items-start sm:justify-between">
-              <div className="min-w-0">
+            <div className="flex flex-wrap items-start justify-between gap-3 px-4 py-3 text-sm">
+              <div className="min-w-0 flex-[1_1_22rem]">
                 <h4 className="text-sm font-medium">Give it a name</h4>
                 <p className="text-sm font-normal text-muted-foreground">
                   This is what you’ll type to add this emoji to messages and
                   reactions.
                 </p>
               </div>
-              <div className="w-full min-w-0 max-w-sm space-y-2">
+              <div className="w-full min-w-0 max-w-sm flex-[1_1_20rem] space-y-2">
                 <div className="relative">
                   <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">
                     :

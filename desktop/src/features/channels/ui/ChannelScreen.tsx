@@ -133,6 +133,7 @@ export function ChannelScreen({
   }, [activeChannel?.isMember, activeChannelId, activeReadAt, markChannelRead]);
   const {
     activeChannelTitle,
+    activeDmAvatarUrl,
     activeDmPresenceStatus,
     activeChannelEphemeralDisplay,
   } = useActiveChannelHeader(activeChannel, currentPubkey);
@@ -164,14 +165,22 @@ export function ChannelScreen({
     currentPubkey,
     latestMessageEvent,
   );
+  const activeDmParticipantPubkeys = React.useMemo(
+    () =>
+      activeChannel?.channelType === "dm"
+        ? activeChannel.participantPubkeys
+        : [],
+    [activeChannel],
+  );
   const messageProfilePubkeys = React.useMemo(
     () => [
       ...new Set([
         ...messageAuthorPubkeys,
+        ...activeDmParticipantPubkeys,
         ...typingEntries.map((entry) => entry.pubkey),
       ]),
     ],
-    [messageAuthorPubkeys, typingEntries],
+    [activeDmParticipantPubkeys, messageAuthorPubkeys, typingEntries],
   );
   const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
     enabled: messageProfilePubkeys.length > 0,
@@ -473,6 +482,7 @@ export function ChannelScreen({
           activeChannelTitle={activeChannelTitle}
           actionsRightInset={headerActionsRightInset}
           actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
+          activeDmAvatarUrl={activeDmAvatarUrl}
           activeDmPresenceStatus={activeDmPresenceStatus}
           currentPubkey={currentPubkey}
           isJoining={joinChannelMutation.isPending}
