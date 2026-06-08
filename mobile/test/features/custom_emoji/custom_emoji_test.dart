@@ -33,21 +33,6 @@ void main() {
     });
   });
 
-  group('suggestShortcodeFromFilename', () {
-    test('strips path + extension, collapses invalid runs', () {
-      expect(
-        suggestShortcodeFromFilename('/tmp/Party Parrot!!.png'),
-        'party_parrot',
-      );
-      expect(suggestShortcodeFromFilename('meow.gif'), 'meow');
-      expect(suggestShortcodeFromFilename('a---b.png'), 'a---b');
-    });
-
-    test('returns null when nothing usable remains', () {
-      expect(suggestShortcodeFromFilename('!!!.png'), isNull);
-    });
-  });
-
   group('customEmojiFromTags', () {
     test('parses valid emoji tags, normalizing shortcodes', () {
       final result = customEmojiFromTags([

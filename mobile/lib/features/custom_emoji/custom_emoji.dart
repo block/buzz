@@ -44,21 +44,6 @@ String? normalizeShortcode(String raw) {
   return _shortcodeRe.hasMatch(lower) ? lower : null;
 }
 
-/// Suggest a valid shortcode from an uploaded filename (Slack-style): strip the
-/// extension, lowercase, collapse runs of invalid chars into one underscore.
-String? suggestShortcodeFromFilename(String filename) {
-  final basename = filename
-      .trim()
-      .replaceAll(RegExp(r'^.*[/\\]'), '')
-      .replaceFirst(RegExp(r'\.[^.]*$'), '');
-  final suggested = basename
-      .toLowerCase()
-      .replaceAll(RegExp(r'[^a-z0-9_-]+'), '_')
-      .replaceAll(RegExp(r'_+'), '_')
-      .replaceAll(RegExp(r'^[_-]+|[_-]+$'), '');
-  return normalizeShortcode(suggested);
-}
-
 /// Parse NIP-30 `["emoji", shortcode, url]` tags from one event's tags into a
 /// custom-emoji list. Shortcodes are normalized; malformed/duplicate entries
 /// within the one event are skipped (first wins).
@@ -80,12 +65,6 @@ List<CustomEmoji> customEmojiFromTags(List<List<String>> tags) {
   }
 
   return emoji;
-}
-
-/// Parse a single event's emoji set. Empty when null.
-List<CustomEmoji> customEmojiFromEvent(NostrEvent? event) {
-  if (event == null) return [];
-  return customEmojiFromTags(event.tags);
 }
 
 /// Union every member's kind:30030 set into the workspace palette, collapsed to

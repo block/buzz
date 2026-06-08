@@ -15,7 +15,6 @@ import '../profile/set_status_sheet.dart';
 import '../profile/user_status_provider.dart';
 import '../custom_emoji/custom_emoji_provider.dart';
 import '../custom_emoji/custom_emoji_render.dart';
-import 'custom_emoji_settings_page.dart';
 import 'theme_picker_page.dart';
 
 class SettingsPage extends HookConsumerWidget {
@@ -109,32 +108,6 @@ class SettingsPage extends HookConsumerWidget {
 
           // Status
           _StatusSection(),
-
-          const SizedBox(height: Grid.sm),
-
-          // Custom emoji
-          Text('Custom Emoji', style: context.textTheme.titleMedium),
-          const SizedBox(height: Grid.twelve),
-          ListTile(
-            leading: const Icon(LucideIcons.smilePlus),
-            title: const Text('Manage Custom Emoji'),
-            subtitle: Text(
-              'Upload images and name them to use anywhere',
-              style: context.textTheme.bodySmall?.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-            trailing: const Icon(LucideIcons.chevronRight, size: 18),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(Radii.md),
-              side: BorderSide(color: context.colors.outlineVariant),
-            ),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) => const CustomEmojiSettingsPage(),
-              ),
-            ),
-          ),
 
           const SizedBox(height: Grid.sm),
 
