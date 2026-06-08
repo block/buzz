@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "@/app/App";
+import "@fontsource-variable/inter/wght.css";
 import "@/shared/styles/globals.css";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyWorkspaceStorageBeforeRender } from "@/features/workspaces/legacyWorkspaceStorage";
