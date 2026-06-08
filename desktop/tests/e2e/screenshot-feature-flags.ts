@@ -6,7 +6,9 @@ const WATERCOLOR_CHANNEL_ID = "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11";
 const FORUM_POST_ID = "mock-forum-release-thread";
 
 test.beforeEach(async ({ page }) => {
-  await installMockBridge(page);
+  // This spec exercises the Experiments toggle flow itself (each preview
+  // feature is enabled via the settings UI), so don't pre-seed overrides.
+  await installMockBridge(page, undefined, { seedPreviewFeatures: false });
 });
 
 // Helper: enable a preview feature via settings, then close settings

@@ -97,11 +97,24 @@ type BridgeOptions = {
   relayHttpUrl?: string;
   relayWsUrl?: string;
   skipOnboardingSeed?: boolean;
+  /**
+   * When true (default), seed every preview feature in features.json as
+   * enabled in localStorage so E2E tests can interact with gated UI without
+   * clicking through the Experiments settings panel. Set to false in specs
+   * that test the toggle behavior itself (e.g.
+   * `screenshot-feature-flags.ts`).
+   */
+  seedPreviewFeatures?: boolean;
   user?: keyof typeof TEST_IDENTITIES;
 };
 
 const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX =
   "sprout-onboarding-complete.v1:";
+const FEATURE_OVERRIDES_STORAGE_KEY = "sprout-feature-overrides-v1";
+// Keep in sync with `tier: "preview"` entries in `/features.json`. E2E
+// tests opt into all preview features by default so gated UI is reachable
+// without clicking through Settings → Experiments on every spec.
+const PREVIEW_FEATURE_IDS = ["workflows", "projects", "pulse", "forum"];
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const DEFAULT_RELAY_WS_URL = "ws://localhost:3000";
 
@@ -140,6 +153,17 @@ async function seedDefaultWorkspace(page: Page, relayWsUrl?: string) {
   );
 }
 
+async function seedPreviewFeaturesEnabled(page: Page) {
+  await page.addInitScript(
+    ({ key, ids }) => {
+      const overrides: Record<string, boolean> = {};
+      for (const id of ids) overrides[id] = true;
+      window.localStorage.setItem(key, JSON.stringify(overrides));
+    },
+    { key: FEATURE_OVERRIDES_STORAGE_KEY, ids: PREVIEW_FEATURE_IDS },
+  );
+}
+
 export async function installBridge(page: Page, options: BridgeOptions) {
   const identity =
     options.mode === "relay"
@@ -151,6 +175,11 @@ export async function installBridge(page: Page, options: BridgeOptions) {
   await seedDefaultWorkspace(page, options.relayWsUrl);
   if (!options.skipOnboardingSeed) {
     await seedOnboardingCompletionForKnownIdentities(page);
+  }
+  // Default to opting every preview feature in. Specs that exercise the
+  // Experiments toggle UI itself pass `seedPreviewFeatures: false`.
+  if (options.seedPreviewFeatures !== false) {
+    await seedPreviewFeaturesEnabled(page);
   }
 
   await page.addInitScript(
@@ -240,18 +269,24 @@ export async function installBridge(page: Page, options: BridgeOptions) {
 export async function installMockBridge(
   page: Page,
   mock?: MockBridgeOptions,
-  options?: { skipOnboardingSeed?: boolean },
+  options?: { skipOnboardingSeed?: boolean; seedPreviewFeatures?: boolean },
 ) {
   await installBridge(page, {
     mode: "mock",
     mock,
     skipOnboardingSeed: options?.skipOnboardingSeed,
+    seedPreviewFeatures: options?.seedPreviewFeatures,
   });
 }
 
 export async function installRelayBridge(
   page: Page,
   user: keyof typeof TEST_IDENTITIES = "tyler",
+  options?: { seedPreviewFeatures?: boolean },
 ) {
-  await installBridge(page, { mode: "relay", user });
+  await installBridge(page, {
+    mode: "relay",
+    user,
+    seedPreviewFeatures: options?.seedPreviewFeatures,
+  });
 }
