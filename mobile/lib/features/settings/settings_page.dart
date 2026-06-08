@@ -38,14 +38,12 @@ class SettingsPage extends HookConsumerWidget {
           bottom: Grid.xs,
         ),
         children: [
+          const SizedBox(height: Grid.twelve),
           // Status
           _StatusSection(),
 
-          const SizedBox(height: Grid.sm),
-
           // Appearance
-          Text('Appearance', style: context.textTheme.titleMedium),
-          const SizedBox(height: Grid.twelve),
+          const _SectionHeader('Appearance'),
 
           // Color scheme picker — navigates to dedicated page
           ListTile(
@@ -65,11 +63,8 @@ class SettingsPage extends HookConsumerWidget {
             ),
           ),
 
-          const SizedBox(height: Grid.xs),
-
           // Accent color picker
-          Text('Accent Color', style: context.textTheme.titleSmall),
-          const SizedBox(height: Grid.xxs),
+          const _SectionHeader('Accent Color', topGap: Grid.twelve),
           Wrap(
             spacing: Grid.xxs,
             runSpacing: Grid.xxs,
@@ -97,11 +92,8 @@ class SettingsPage extends HookConsumerWidget {
             ],
           ),
 
-          const SizedBox(height: Grid.sm),
-
           // Connection info
-          Text('Connection', style: context.textTheme.titleMedium),
-          const SizedBox(height: Grid.twelve),
+          const _SectionHeader('Connection'),
           ListTile(
             leading: const Icon(LucideIcons.server),
             title: const Text('Connected to'),
@@ -204,6 +196,28 @@ class SettingsPage extends HookConsumerWidget {
   }
 }
 
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader(this.label, {this.topGap = Grid.sm});
+
+  final String label;
+  final double topGap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(top: topGap, bottom: Grid.xxs, left: Grid.xxs),
+      child: Text(
+        label.toUpperCase(),
+        style: context.textTheme.labelMedium?.copyWith(
+          color: context.colors.onSurfaceVariant,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.6,
+        ),
+      ),
+    );
+  }
+}
+
 class _StatusSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -213,8 +227,7 @@ class _StatusSection extends ConsumerWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('Status', style: context.textTheme.titleMedium),
-        const SizedBox(height: Grid.twelve),
+        const _SectionHeader('Status', topGap: 0),
         ListTile(
           leading: _StatusEmojiIcon(emoji: status?.emoji ?? ''),
           title: Text(
