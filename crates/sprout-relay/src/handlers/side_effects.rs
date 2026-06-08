@@ -2206,8 +2206,35 @@ pub async fn publish_dm_visibility_snapshot(
         );
     }
 
+    // Force created_at strictly past any prior snapshot for this viewer: a same-second
+    // replacement whose random event id sorts higher is rejected by stale-write
+    // protection, so a hide→re-open within one second could otherwise strand the stale
+    // snapshot. Same guard as emit_addressable_discovery_event.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let ts = {
+        let existing = state
+            .db
+            .query_events(&sprout_db::event::EventQuery {
+                kinds: Some(vec![KIND_DM_VISIBILITY as i32]),
+                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                d_tag: Some(viewer_hex.clone()),
+                limit: Some(1),
+                ..Default::default()
+            })
+            .await
+            .unwrap_or_default();
+        existing
+            .first()
+            .map(|e| (e.event.created_at.as_secs() + 1).max(now))
+            .unwrap_or(now)
+    };
+
     let event = EventBuilder::new(Kind::Custom(KIND_DM_VISIBILITY as u16), "")
         .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(ts))
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_DM_VISIBILITY}: {e}"))?;
 

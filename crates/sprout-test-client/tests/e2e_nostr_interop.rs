@@ -1226,6 +1226,72 @@ async fn test_nipdv_hide_then_reopen_updates_snapshot() {
     client_a.disconnect().await.expect("disconnect");
 }
 
+/// NIP-DV monotonicity regression: a hide immediately followed by a re-open
+/// within the same wall-clock second must still leave the re-open authoritative.
+///
+/// `created_at` is second-resolution; on a same-second tie `replace_parameterized_event`
+/// keeps whichever event id sorts lower (random), so without a monotonic guard the
+/// hide snapshot wins the tie ~50% of the time and the DM stays hidden forever — the
+/// exact "hidden DMs come back" symptom, narrowed to a double-action timing window.
+/// The publisher forces `created_at = max(now, prior + 1)`, so the re-open snapshot
+/// always supersedes. This test posts hide→reopen back-to-back (no sleep) to land in
+/// one second, then asserts the re-open is reflected and the snapshot strictly advanced.
+#[tokio::test]
+#[ignore]
+async fn test_nipdv_same_second_reopen_supersedes_hide() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let a_pubkey_hex = keys_a.public_key().to_hex();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+
+    let mut client_a = SproutTestClient::connect(&url, &keys_a)
+        .await
+        .expect("client A connect");
+
+    // Hide, then immediately re-open — no sleep, so both snapshots land in the
+    // same wall-clock second and collide on the second-resolution tiebreaker.
+    post_signed_event(
+        &keys_a,
+        41012,
+        vec![Tag::parse(["h", &channel_id]).unwrap()],
+    )
+    .await;
+    let hide_snapshot = read_snapshot_event(&mut client_a, &a_pubkey_hex)
+        .await
+        .expect("hide snapshot present");
+
+    post_signed_event(
+        &keys_a,
+        41010,
+        vec![Tag::parse(["p", &b_pubkey_hex]).unwrap()],
+    )
+    .await;
+    let reopen_snapshot = read_snapshot_event(&mut client_a, &a_pubkey_hex)
+        .await
+        .expect("reopen snapshot present");
+
+    // Monotonic guard: the re-open snapshot must strictly supersede the hide one,
+    // even when both were minted in the same second.
+    assert!(
+        reopen_snapshot.created_at.as_secs() > hide_snapshot.created_at.as_secs(),
+        "reopen snapshot created_at ({}) must advance past hide snapshot ({})",
+        reopen_snapshot.created_at.as_secs(),
+        hide_snapshot.created_at.as_secs(),
+    );
+
+    // And the re-open must actually be the authoritative state.
+    let after_reopen = read_hidden_dms(&mut client_a, &a_pubkey_hex).await;
+    assert!(
+        !after_reopen.contains(&channel_id),
+        "same-second re-open must win; DM still hidden: {after_reopen:?}"
+    );
+
+    client_a.disconnect().await.expect("disconnect");
+}
+
 /// NIP-DV privacy: a third party MUST NOT be able to read another viewer's
 /// DM visibility snapshot. The snapshot is `#p`-gated to its owner, so a
 /// `#p`=<someone-else> query is rejected by the relay's read-auth gate.
