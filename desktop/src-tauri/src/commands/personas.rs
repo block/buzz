@@ -5,12 +5,11 @@ use super::export_util::save_json_with_dialog;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        encode_persona_json, import_persona_pack, list_installed_packs, load_managed_agents,
-        load_personas, load_teams, parse_json_persona, parse_md_persona, parse_png_persona,
-        parse_zip_personas, save_managed_agents, save_personas, try_regenerate_nest,
-        uninstall_persona_pack as do_uninstall_persona_pack, validate_persona_activation_change,
-        validate_persona_deletion, CreatePersonaRequest, PackSummary, ParsePersonaFilesResult,
-        PersonaRecord, UpdatePersonaRequest,
+        encode_persona_json, load_managed_agents, load_personas, load_teams, parse_json_persona,
+        parse_md_persona, parse_png_persona, parse_zip_personas, save_managed_agents,
+        save_personas, try_regenerate_nest, validate_persona_activation_change,
+        validate_persona_deletion, CreatePersonaRequest, ParsePersonaFilesResult, PersonaRecord,
+        UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -77,8 +76,8 @@ pub fn create_persona(
         name_pool,
         is_builtin: false,
         is_active: true,
-        source_pack: None,
-        source_pack_persona_slug: None,
+        source_team: None,
+        source_team_persona_slug: None,
         env_vars: input.env_vars,
         created_at: now.clone(),
         updated_at: now,
@@ -367,45 +366,4 @@ pub async fn export_persona_to_json(
     let slug = crate::util::slugify(&display_name, "persona", 50);
     let filename = format!("{slug}.persona.json");
     save_json_with_dialog(&app, &filename, &json_bytes).await
-}
-
-// ── Pack management commands ──────────────────────────────────────────────────
-
-#[tauri::command]
-pub fn install_persona_pack(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<Vec<PersonaRecord>, String> {
-    let _lock = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let source = std::path::PathBuf::from(&path);
-    if !source.is_dir() {
-        return Err(format!("pack path is not a directory: {path}"));
-    }
-    let result = import_persona_pack(&app, &source)?;
-    try_regenerate_nest(&app);
-    Ok(result)
-}
-
-#[tauri::command]
-pub fn uninstall_persona_pack(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    pack_id: String,
-) -> Result<(), String> {
-    let _lock = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    do_uninstall_persona_pack(&app, &pack_id)?;
-    try_regenerate_nest(&app);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn list_persona_packs(app: AppHandle) -> Result<Vec<PackSummary>, String> {
-    list_installed_packs(&app)
 }

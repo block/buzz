@@ -24,7 +24,7 @@ const SHARED_AGENT_FILES: &[&str] = &[
 
 /// Directories symlinked from worktree data directories to the canonical
 /// dev data directory. Each entry becomes a single directory symlink.
-const SHARED_AGENT_DIRS: &[&str] = &["agents/packs"];
+const SHARED_AGENT_DIRS: &[&str] = &["agents/teams"];
 
 fn canonical_dev_data_dir(current: &Path) -> Option<PathBuf> {
     current.parent().map(|p| p.join(CANONICAL_DEV_IDENTIFIER))
@@ -259,51 +259,62 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
     }
 }
 
-fn reconcile_pack_paths_in_file(path: &Path, canonical_dir: &Path) {
-    let canonical_packs = canonical_dir.join("agents/packs");
+fn reconcile_team_dirs_in_file(path: &Path, canonical_dir: &Path) {
+    let canonical_teams = canonical_dir.join("agents/teams");
     patch_json_records(path, |obj| {
-        let pack_path = match obj.get("persona_pack_path").and_then(|v| v.as_str()) {
+        // Handle both old field name and new field name
+        let field_name = if obj.contains_key("persona_team_dir") {
+            "persona_team_dir"
+        } else if obj.contains_key("persona_pack_path") {
+            "persona_pack_path"
+        } else {
+            return false;
+        };
+        let team_path = match obj.get(field_name).and_then(|v| v.as_str()) {
             Some(p) => p,
             None => return false,
         };
-        let pack_path = Path::new(pack_path);
-        let mut found_packs = false;
-        let mut pack_id: Option<&std::ffi::OsStr> = None;
-        for component in pack_path.components() {
-            if found_packs {
-                pack_id = Some(component.as_os_str());
+        let team_path = Path::new(team_path);
+        // Extract the team ID from the path (component after "teams" or "packs")
+        let mut found_dir = false;
+        let mut team_id: Option<&std::ffi::OsStr> = None;
+        for component in team_path.components() {
+            if found_dir {
+                team_id = Some(component.as_os_str());
                 break;
             }
-            if component.as_os_str() == "packs" {
-                found_packs = true;
+            if component.as_os_str() == "teams" || component.as_os_str() == "packs" {
+                found_dir = true;
             }
         }
-        let Some(id) = pack_id else {
+        let Some(id) = team_id else {
             return false;
         };
-        let expected = canonical_packs.join(id);
-        if pack_path == expected {
+        let expected = canonical_teams.join(id);
+        if team_path == expected {
             return false;
         }
         eprintln!(
-            "sprout-desktop: pack-path-reconcile: {:?}: {:?} → {:?}",
+            "sprout-desktop: team-dir-reconcile: {:?}: {:?} → {:?}",
             obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-            pack_path,
+            team_path,
             expected,
         );
+        // Always write the canonical new field name
+        obj.remove("persona_pack_path");
         obj.insert(
-            "persona_pack_path".to_string(),
+            "persona_team_dir".to_string(),
             serde_json::Value::String(expected.to_string_lossy().into_owned()),
         );
         true
     });
 }
 
-/// Reconcile `persona_pack_path` values in managed-agents.json to point
-/// to the canonical dev data directory's `agents/packs/` prefix. Fixes
-/// stale paths left when agents were created from worktree instances
-/// whose data directories don't have local pack copies.
-pub fn reconcile_persona_pack_paths(app: &tauri::AppHandle) {
+/// Reconcile `persona_team_dir` (and legacy `persona_pack_path`) values in
+/// managed-agents.json to point to the canonical dev data directory's
+/// `agents/teams/` prefix. Fixes stale paths left when agents were created
+/// from worktree instances whose data directories don't have local team copies.
+pub fn reconcile_persona_team_dirs(app: &tauri::AppHandle) {
     let Ok(current_dir) = app.path().app_data_dir() else {
         return;
     };
@@ -315,7 +326,157 @@ pub fn reconcile_persona_pack_paths(app: &tauri::AppHandle) {
     if !path.exists() {
         return;
     }
-    reconcile_pack_paths_in_file(&path, &canonical_dir);
+    reconcile_team_dirs_in_file(&path, &canonical_dir);
+}
+
+/// One-time migration from packs to teams.
+///
+/// Runs on app launch if `agents/packs/` exists or if any record in
+/// `managed-agents.json` still uses the old `persona_pack_path` field name.
+/// Steps (in order, each individually idempotent):
+///
+/// 1. Rename `agents/packs/` → `agents/teams/` on disk
+/// 2. Rewrite `personas.json`: `source_pack` → `source_team`, `source_pack_persona_slug` → `source_team_persona_slug`
+/// 3. Rewrite `managed-agents.json`: `persona_pack_path` → `persona_team_dir` (with `/packs/` → `/teams/` path fix), `persona_name_in_pack` → `persona_name_in_team`
+pub fn migrate_packs_to_teams(app: &tauri::AppHandle) {
+    use crate::managed_agents::MigrationReport;
+
+    let Ok(current_dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let canonical_dir = match canonical_dev_data_dir(&current_dir) {
+        Some(dir) if dir.exists() => dir,
+        _ => current_dir,
+    };
+
+    let packs_dir = canonical_dir.join("agents/packs");
+    let teams_dir = canonical_dir.join("agents/teams");
+    let personas_path = canonical_dir.join("agents/personas.json");
+    let agents_path = canonical_dir.join("agents/managed-agents.json");
+
+    // Check if migration is needed: packs dir exists OR agents JSON has old field names
+    let packs_dir_exists = packs_dir.exists() && !packs_dir.is_symlink();
+    let has_old_fields = agents_path.exists()
+        && std::fs::read_to_string(&agents_path)
+            .map(|c| c.contains("persona_pack_path"))
+            .unwrap_or(false);
+    let personas_has_old_fields = personas_path.exists()
+        && std::fs::read_to_string(&personas_path)
+            .map(|c| c.contains("\"source_pack\""))
+            .unwrap_or(false);
+
+    if !packs_dir_exists && !has_old_fields && !personas_has_old_fields {
+        return;
+    }
+
+    let mut report = MigrationReport {
+        packs_migrated: 0,
+        personas_updated: 0,
+        agents_updated: 0,
+        errors: Vec::new(),
+    };
+
+    // Step 1: Rename directory agents/packs/ → agents/teams/
+    if packs_dir_exists {
+        if teams_dir.exists() {
+            // Merge: move contents from packs into teams, skip conflicts
+            if let Ok(entries) = std::fs::read_dir(&packs_dir) {
+                for entry in entries.flatten() {
+                    let dest = teams_dir.join(entry.file_name());
+                    if !dest.exists() {
+                        if let Err(e) = std::fs::rename(entry.path(), &dest) {
+                            report
+                                .errors
+                                .push(format!("failed to move {:?}: {e}", entry.file_name()));
+                        } else {
+                            report.packs_migrated += 1;
+                        }
+                    }
+                }
+            }
+            // Remove the now-empty packs dir
+            let _ = std::fs::remove_dir_all(&packs_dir);
+        } else {
+            // Simple rename
+            if let Some(parent) = teams_dir.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            match std::fs::rename(&packs_dir, &teams_dir) {
+                Ok(_) => {
+                    if let Ok(entries) = std::fs::read_dir(&teams_dir) {
+                        report.packs_migrated = entries.count();
+                    }
+                }
+                Err(e) => {
+                    report
+                        .errors
+                        .push(format!("failed to rename packs → teams: {e}"));
+                    eprintln!(
+                        "sprout-desktop: packs→teams migration: directory rename failed: {e}"
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    // Step 2: Rewrite personas.json field names
+    if personas_path.exists() {
+        patch_json_records(&personas_path, |obj| {
+            let mut changed = false;
+            if let Some(val) = obj.remove("source_pack") {
+                obj.insert("source_team".to_string(), val);
+                changed = true;
+            }
+            if let Some(val) = obj.remove("source_pack_persona_slug") {
+                obj.insert("source_team_persona_slug".to_string(), val);
+                changed = true;
+            }
+            if changed {
+                report.personas_updated += 1;
+            }
+            changed
+        });
+    }
+
+    // Step 3: Rewrite managed-agents.json field names and paths
+    if agents_path.exists() {
+        patch_json_records(&agents_path, |obj| {
+            let mut changed = false;
+            if let Some(val) = obj.remove("persona_pack_path") {
+                // Also fix the path: replace /packs/ with /teams/
+                let new_val = if let Some(s) = val.as_str() {
+                    serde_json::Value::String(s.replace("/packs/", "/teams/"))
+                } else {
+                    val
+                };
+                obj.insert("persona_team_dir".to_string(), new_val);
+                changed = true;
+            }
+            if let Some(val) = obj.remove("persona_name_in_pack") {
+                obj.insert("persona_name_in_team".to_string(), val);
+                changed = true;
+            }
+            if changed {
+                report.agents_updated += 1;
+            }
+            changed
+        });
+    }
+
+    if report.packs_migrated > 0 || report.personas_updated > 0 || report.agents_updated > 0 {
+        eprintln!(
+            "sprout-desktop: packs→teams migration complete: {} dirs, {} personas, {} agents{}",
+            report.packs_migrated,
+            report.personas_updated,
+            report.agents_updated,
+            if report.errors.is_empty() {
+                String::new()
+            } else {
+                format!(" ({} errors)", report.errors.len())
+            }
+        );
+    }
 }
 
 fn reconcile_mcp_commands_in_file(path: &Path) {
@@ -445,11 +606,11 @@ mod tests {
         .unwrap();
         std::fs::write(canonical.join("agents/teams.json"), r#"[{"id":"team-1"}]"#).unwrap();
 
-        // Packs installed from `.main` — canonical has no packs dir.
-        let pack_dir = main_instance.join("agents/packs/com.example.test-pack");
-        std::fs::create_dir_all(&pack_dir).unwrap();
-        std::fs::write(pack_dir.join("instructions.md"), "# Test pack").unwrap();
-        std::fs::write(pack_dir.join("solo.persona.md"), "# Solo").unwrap();
+        // Teams installed from `.main` — canonical has no teams dir.
+        let team_dir = main_instance.join("agents/teams/com.example.test-pack");
+        std::fs::create_dir_all(&team_dir).unwrap();
+        std::fs::write(team_dir.join("instructions.md"), "# Test pack").unwrap();
+        std::fs::write(team_dir.join("solo.persona.md"), "# Solo").unwrap();
 
         (parent, canonical, worktree)
     }
@@ -698,19 +859,19 @@ mod tests {
     }
 
     #[test]
-    fn sync_creates_packs_directory_symlink() {
+    fn sync_creates_teams_directory_symlink() {
         let (_parent, canonical, worktree) = setup_sync_layout();
         sync_files(&canonical, &worktree);
 
-        let packs_link = worktree.join("agents/packs");
-        assert!(packs_link.is_symlink());
+        let teams_link = worktree.join("agents/teams");
+        assert!(teams_link.is_symlink());
         assert_eq!(
-            std::fs::read_link(&packs_link).unwrap(),
-            canonical.join("agents/packs")
+            std::fs::read_link(&teams_link).unwrap(),
+            canonical.join("agents/teams")
         );
         assert_eq!(
             std::fs::read_to_string(
-                worktree.join("agents/packs/com.example.test-pack/instructions.md")
+                worktree.join("agents/teams/com.example.test-pack/instructions.md")
             )
             .unwrap(),
             "# Test pack"
@@ -718,50 +879,50 @@ mod tests {
     }
 
     #[test]
-    fn sync_migrates_packs_from_sibling_to_canonical() {
+    fn sync_migrates_teams_from_sibling_to_canonical() {
         let (_parent, canonical, worktree) = setup_sync_layout();
         let main_instance = canonical
             .parent()
             .unwrap()
             .join("xyz.block.sprout.app.dev.main");
 
-        // Before sync: canonical has no packs, .main has the real pack.
-        assert!(!canonical.join("agents/packs").exists());
+        // Before sync: canonical has no teams, .main has the real team dir.
+        assert!(!canonical.join("agents/teams").exists());
         assert!(main_instance
-            .join("agents/packs/com.example.test-pack")
+            .join("agents/teams/com.example.test-pack")
             .is_dir());
 
         sync_files(&canonical, &worktree);
 
-        // After sync: canonical has the pack, .main is now a symlink.
+        // After sync: canonical has the team, .main is now a symlink.
         assert!(canonical
-            .join("agents/packs/com.example.test-pack/instructions.md")
+            .join("agents/teams/com.example.test-pack/instructions.md")
             .exists());
-        assert!(main_instance.join("agents/packs").is_symlink());
+        assert!(main_instance.join("agents/teams").is_symlink());
         assert_eq!(
-            std::fs::read_link(main_instance.join("agents/packs")).unwrap(),
-            canonical.join("agents/packs")
+            std::fs::read_link(main_instance.join("agents/teams")).unwrap(),
+            canonical.join("agents/teams")
         );
     }
 
     #[test]
-    fn sync_replaces_real_packs_dir_with_symlink() {
+    fn sync_replaces_real_teams_dir_with_symlink() {
         let (_parent, canonical, worktree) = setup_sync_layout();
-        let real_packs = worktree.join("agents/packs");
-        std::fs::create_dir_all(&real_packs).unwrap();
-        std::fs::write(real_packs.join("stale-file.txt"), "stale").unwrap();
+        let real_teams = worktree.join("agents/teams");
+        std::fs::create_dir_all(&real_teams).unwrap();
+        std::fs::write(real_teams.join("stale-file.txt"), "stale").unwrap();
 
         sync_files(&canonical, &worktree);
 
-        assert!(worktree.join("agents/packs").is_symlink());
+        assert!(worktree.join("agents/teams").is_symlink());
         assert_eq!(
-            std::fs::read_link(worktree.join("agents/packs")).unwrap(),
-            canonical.join("agents/packs")
+            std::fs::read_link(worktree.join("agents/teams")).unwrap(),
+            canonical.join("agents/teams")
         );
     }
 
     #[test]
-    fn pack_path_reconcile_rewrites_worktree_path() {
+    fn team_dir_reconcile_rewrites_worktree_path() {
         let parent = tempfile::tempdir().unwrap();
         let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
         std::fs::create_dir_all(canonical.join("agents")).unwrap();
@@ -774,7 +935,7 @@ mod tests {
                 .display()
         );
         let expected_path = format!(
-            "{}/agents/packs/com.wpfleger.sietch-tabr",
+            "{}/agents/teams/com.wpfleger.sietch-tabr",
             canonical.display()
         );
 
@@ -786,20 +947,54 @@ mod tests {
             }]),
         );
 
-        reconcile_pack_paths_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
+        reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
 
         let records = read_agents_json(&canonical);
-        assert_eq!(records[0]["persona_pack_path"], expected_path);
+        assert_eq!(records[0]["persona_team_dir"], expected_path);
+        // Old field name should be removed
+        assert!(records[0].get("persona_pack_path").is_none());
     }
 
     #[test]
-    fn pack_path_reconcile_leaves_canonical_path_unchanged() {
+    fn team_dir_reconcile_rewrites_new_field_name() {
+        let parent = tempfile::tempdir().unwrap();
+        let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
+        std::fs::create_dir_all(canonical.join("agents")).unwrap();
+
+        let worktree_team_path = format!(
+            "{}/agents/teams/com.wpfleger.sietch-tabr",
+            parent
+                .path()
+                .join("xyz.block.sprout.app.dev.worktree-my-branch")
+                .display()
+        );
+        let expected_path = format!(
+            "{}/agents/teams/com.wpfleger.sietch-tabr",
+            canonical.display()
+        );
+
+        write_agents_json(
+            &canonical,
+            &serde_json::json!([{
+                "name": "Paul",
+                "persona_team_dir": worktree_team_path
+            }]),
+        );
+
+        reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
+
+        let records = read_agents_json(&canonical);
+        assert_eq!(records[0]["persona_team_dir"], expected_path);
+    }
+
+    #[test]
+    fn team_dir_reconcile_leaves_canonical_path_unchanged() {
         let parent = tempfile::tempdir().unwrap();
         let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
         std::fs::create_dir_all(canonical.join("agents")).unwrap();
 
         let canonical_path = format!(
-            "{}/agents/packs/com.wpfleger.sietch-tabr",
+            "{}/agents/teams/com.wpfleger.sietch-tabr",
             canonical.display()
         );
 
@@ -807,19 +1002,19 @@ mod tests {
             &canonical,
             &serde_json::json!([{
                 "name": "Duncan",
-                "persona_pack_path": canonical_path
+                "persona_team_dir": canonical_path
             }]),
         );
 
         let before = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
-        reconcile_pack_paths_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
+        reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
         let after = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
 
         assert_eq!(before, after);
     }
 
     #[test]
-    fn pack_path_reconcile_skips_records_without_pack_path() {
+    fn team_dir_reconcile_skips_records_without_team_dir() {
         let parent = tempfile::tempdir().unwrap();
         let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
         std::fs::create_dir_all(canonical.join("agents")).unwrap();
@@ -833,14 +1028,14 @@ mod tests {
         );
 
         let before = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
-        reconcile_pack_paths_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
+        reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
         let after = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
 
         assert_eq!(before, after);
     }
 
     #[test]
-    fn pack_path_reconcile_is_idempotent() {
+    fn team_dir_reconcile_is_idempotent() {
         let parent = tempfile::tempdir().unwrap();
         let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
         std::fs::create_dir_all(canonical.join("agents")).unwrap();
@@ -862,12 +1057,109 @@ mod tests {
         );
 
         let path = canonical.join("agents/managed-agents.json");
-        reconcile_pack_paths_in_file(&path, &canonical);
+        reconcile_team_dirs_in_file(&path, &canonical);
         let after_first = std::fs::read_to_string(&path).unwrap();
-        reconcile_pack_paths_in_file(&path, &canonical);
+        reconcile_team_dirs_in_file(&path, &canonical);
         let after_second = std::fs::read_to_string(&path).unwrap();
 
         assert_eq!(after_first, after_second);
+    }
+
+    // ── Packs → Teams migration tests ───────────────────────────────────
+
+    #[test]
+    fn migrate_packs_to_teams_renames_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
+        let packs_dir = canonical.join("agents/packs/com.example.test-pack");
+        std::fs::create_dir_all(&packs_dir).unwrap();
+        std::fs::write(packs_dir.join("plugin.json"), "{}").unwrap();
+
+        // No personas or agents JSON needed for directory rename
+        std::fs::create_dir_all(canonical.join("agents")).unwrap();
+
+        // Simulate calling the migration steps directly (no AppHandle needed)
+        let packs = canonical.join("agents/packs");
+        let teams = canonical.join("agents/teams");
+        std::fs::rename(&packs, &teams).unwrap();
+
+        assert!(!packs.exists());
+        assert!(teams.join("com.example.test-pack/plugin.json").exists());
+    }
+
+    #[test]
+    fn migrate_packs_to_teams_rewrites_personas_json() {
+        let dir = tempfile::tempdir().unwrap();
+        write_personas_json(
+            dir.path(),
+            &serde_json::json!([{
+                "id": "persona-1",
+                "display_name": "Test",
+                "source_pack": "com.example.my-pack",
+                "source_pack_persona_slug": "agent-one"
+            }]),
+        );
+
+        let path = dir.path().join("agents/personas.json");
+        patch_json_records(&path, |obj| {
+            let mut changed = false;
+            if let Some(val) = obj.remove("source_pack") {
+                obj.insert("source_team".to_string(), val);
+                changed = true;
+            }
+            if let Some(val) = obj.remove("source_pack_persona_slug") {
+                obj.insert("source_team_persona_slug".to_string(), val);
+                changed = true;
+            }
+            changed
+        });
+
+        let records = read_personas_json(dir.path());
+        assert_eq!(records[0]["source_team"], "com.example.my-pack");
+        assert_eq!(records[0]["source_team_persona_slug"], "agent-one");
+        assert!(records[0].get("source_pack").is_none());
+        assert!(records[0].get("source_pack_persona_slug").is_none());
+    }
+
+    #[test]
+    fn migrate_packs_to_teams_rewrites_agents_json() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agents_json(
+            dir.path(),
+            &serde_json::json!([{
+                "name": "Paul",
+                "persona_pack_path": "/data/agents/packs/com.example.my-pack",
+                "persona_name_in_pack": "agent-one"
+            }]),
+        );
+
+        let path = dir.path().join("agents/managed-agents.json");
+        patch_json_records(&path, |obj| {
+            let mut changed = false;
+            if let Some(val) = obj.remove("persona_pack_path") {
+                let new_val = if let Some(s) = val.as_str() {
+                    serde_json::Value::String(s.replace("/packs/", "/teams/"))
+                } else {
+                    val
+                };
+                obj.insert("persona_team_dir".to_string(), new_val);
+                changed = true;
+            }
+            if let Some(val) = obj.remove("persona_name_in_pack") {
+                obj.insert("persona_name_in_team".to_string(), val);
+                changed = true;
+            }
+            changed
+        });
+
+        let records = read_agents_json(dir.path());
+        assert_eq!(
+            records[0]["persona_team_dir"],
+            "/data/agents/teams/com.example.my-pack"
+        );
+        assert_eq!(records[0]["persona_name_in_team"], "agent-one");
+        assert!(records[0].get("persona_pack_path").is_none());
+        assert!(records[0].get("persona_name_in_pack").is_none());
     }
 
     fn write_personas_json(dir: &Path, records: &serde_json::Value) {

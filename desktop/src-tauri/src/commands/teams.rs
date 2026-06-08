@@ -5,9 +5,10 @@ use super::export_util::save_json_with_dialog;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        encode_team_json, ensure_persona_ids_are_active, load_personas, load_teams,
-        parse_team_json, save_teams, validate_team_deletion, CreateTeamRequest, ParsedTeamPreview,
-        TeamRecord, UpdateTeamRequest,
+        delete_team_with_cascade, encode_team_json, ensure_persona_ids_are_active,
+        import_team_from_directory as do_import_team, load_personas, load_teams, parse_team_json,
+        save_teams, sync_team_from_dir as do_sync_team, try_regenerate_nest, CreateTeamRequest,
+        ParsedTeamPreview, SyncResult, TeamRecord, UpdateTeamRequest,
     },
     util::now_iso,
 };
@@ -59,6 +60,10 @@ pub fn create_team(
         description,
         persona_ids: input.persona_ids,
         is_builtin: false,
+        source_dir: None,
+        is_symlink: false,
+        symlink_target: None,
+        version: None,
         created_at: now.clone(),
         updated_at: now,
     };
@@ -104,14 +109,51 @@ pub fn delete_team(id: String, app: AppHandle, state: State<'_, AppState>) -> Re
         .managed_agents_store_lock
         .lock()
         .map_err(|error| error.to_string())?;
-    let mut teams = load_teams(&app)?;
-    let team = teams
-        .iter()
-        .find(|record| record.id == id)
-        .ok_or_else(|| format!("team {id} not found"))?;
-    validate_team_deletion(team)?;
-    teams.retain(|record| record.id != id);
-    save_teams(&app, &teams)
+    delete_team_with_cascade(&app, &id)?;
+    try_regenerate_nest(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn install_team_from_directory(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+    symlink: Option<bool>,
+) -> Result<TeamRecord, String> {
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let source = std::path::PathBuf::from(&path);
+    if !source.is_dir() {
+        return Err(format!("team path is not a directory: {path}"));
+    }
+    let result = do_import_team(&app, &source, symlink.unwrap_or(false))?;
+    try_regenerate_nest(&app);
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn sync_team_directory(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    team_id: String,
+) -> Result<SyncResult, String> {
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let result = do_sync_team(&app, &team_id)?;
+    try_regenerate_nest(&app);
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn pick_team_directory(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = app.dialog().file().blocking_pick_folder();
+    Ok(path.map(|p| p.to_string()))
 }
 
 // ---------------------------------------------------------------------------

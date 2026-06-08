@@ -420,13 +420,13 @@ pub async fn create_managed_agent(
             requested_persona_id.as_deref().and_then(|pid| {
                 let personas = load_personas(&app).ok()?;
                 let persona = personas.iter().find(|p| p.id == pid)?;
-                let pack_id = persona.source_pack.as_deref()?;
-                let slug = persona.source_pack_persona_slug.as_deref()?;
+                let team_id = persona.source_team.as_deref()?;
+                let slug = persona.source_team_persona_slug.as_deref()?;
                 let base = managed_agents_base_dir(&app).ok()?;
-                let pack_path = base.join("packs").join(pack_id);
+                let team_path = base.join("teams").join(team_id);
                 // Use the validated slug stored during import — no need to
                 // re-resolve the pack. The slug is [a-zA-Z0-9_-]+ by construction.
-                Some((pack_path, slug.to_owned()))
+                Some((team_path, slug.to_owned()))
             });
 
         let record = crate::managed_agents::ManagedAgentRecord {
@@ -485,11 +485,11 @@ pub async fn create_managed_agent(
             backend: input.backend.clone(),
             backend_agent_id: None,
             provider_binary_path,
-            // Pack-backed personas: record path + internal slug so the runtime
-            // can resolve pack config at startup. Must be the slug (e.g., "lep"),
+            // Team-backed personas: record path + internal slug so the runtime
+            // can resolve team config at startup. Must be the slug (e.g., "lep"),
             // NOT the display_name — ACP's resolve_persona_by_name() matches slugs.
-            persona_pack_path: pack_metadata.as_ref().map(|(path, _)| path.clone()),
-            persona_name_in_pack: pack_metadata.as_ref().map(|(_, name)| name.clone()),
+            persona_team_dir: pack_metadata.as_ref().map(|(path, _)| path.clone()),
+            persona_name_in_team: pack_metadata.as_ref().map(|(_, name)| name.clone()),
             env_vars: input.env_vars.clone(),
             created_at: now_iso(),
             updated_at: now_iso(),

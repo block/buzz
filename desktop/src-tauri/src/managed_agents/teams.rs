@@ -67,6 +67,10 @@ fn built_in_team_records(now: &str) -> Vec<TeamRecord> {
             description: team.description.map(|s| s.to_string()),
             persona_ids: team.persona_ids.iter().map(|s| s.to_string()).collect(),
             is_builtin: true,
+            source_dir: None,
+            is_symlink: false,
+            symlink_target: None,
+            version: None,
             created_at: now.to_string(),
             updated_at: now.to_string(),
         })
@@ -154,6 +158,469 @@ pub fn save_teams(app: &AppHandle, records: &[TeamRecord]) -> Result<(), String>
     let payload = serde_json::to_vec_pretty(&sorted)
         .map_err(|error| format!("failed to serialize teams store: {error}"))?;
     crate::managed_agents::storage::atomic_write_json(&path, &payload)
+}
+
+// ---------------------------------------------------------------------------
+// Directory-backed team operations
+// ---------------------------------------------------------------------------
+
+/// Teams directory: `<AppDataDir>/agents/teams/`
+fn teams_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = managed_agents_base_dir(app)?.join("teams");
+    fs::create_dir_all(&dir).map_err(|e| format!("failed to create teams dir: {e}"))?;
+    Ok(dir)
+}
+
+/// Validate team/pack ID: only `[a-zA-Z0-9._-]+` allowed (zip-slip defense).
+pub(crate) fn validate_team_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("team ID is empty".into());
+    }
+    if id.len() > 128 {
+        return Err(format!("team ID too long: {} chars (max 128)", id.len()));
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "team ID contains invalid characters: \"{id}\". Only [a-zA-Z0-9._-] allowed."
+        ));
+    }
+    if id.starts_with('.') {
+        return Err(format!("team ID \"{id}\" must not start with '.'"));
+    }
+    if !id.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Err(format!(
+            "team ID \"{id}\" must contain at least one alphanumeric character"
+        ));
+    }
+    Ok(())
+}
+
+/// Copy a directory tree, skipping symlinks (zip-slip defense).
+fn copy_dir_no_symlinks(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    fs::create_dir_all(dst).map_err(|e| format!("failed to create {}: {e}", dst.display()))?;
+    for entry in fs::read_dir(src).map_err(|e| format!("failed to read {}: {e}", src.display()))? {
+        let entry = entry.map_err(|e| format!("dir entry error: {e}"))?;
+        let ft = entry
+            .file_type()
+            .map_err(|e| format!("file type error: {e}"))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if ft.is_symlink() {
+            continue;
+        } else if ft.is_dir() {
+            copy_dir_no_symlinks(&src_path, &dst_path)?;
+        } else if ft.is_file() {
+            fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("failed to copy {}: {e}", src_path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Import a team from a local directory in open plugin format.
+///
+/// Copies the directory into `<data>/agents/teams/<resolved.id>/`,
+/// creates PersonaRecords for each persona, creates a TeamRecord with source_dir set.
+pub fn import_team_from_directory(
+    app: &AppHandle,
+    source_dir: &std::path::Path,
+    symlink: bool,
+) -> Result<TeamRecord, String> {
+    use uuid::Uuid;
+
+    // 1. Validate + resolve at source
+    let resolved = sprout_persona::resolve::resolve_pack(source_dir)
+        .map_err(|e| format!("team directory validation failed: {e}"))?;
+
+    // 2. Sanitize team ID
+    validate_team_id(&resolved.id)?;
+
+    // 3. Check for existing team with same ID
+    let teams_base = teams_dir(app)?;
+    let dest = teams_base.join(&resolved.id);
+    if dest.exists() {
+        return Err(format!(
+            "Team \"{}\" is already installed. Delete it first or use sync.",
+            resolved.id
+        ));
+    }
+
+    // 4. Determine install mode: symlink or copy
+    let source_is_symlink = fs::symlink_metadata(source_dir)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false);
+    let use_symlink = symlink || source_is_symlink;
+
+    if use_symlink {
+        // Resolve the canonical target for symlink
+        let canonical = fs::canonicalize(source_dir)
+            .map_err(|e| format!("failed to resolve symlink target: {e}"))?;
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&canonical, &dest)
+                .map_err(|e| format!("failed to create symlink: {e}"))?;
+        }
+        #[cfg(not(unix))]
+        {
+            // Fallback to copy on non-unix
+            copy_dir_no_symlinks(source_dir, &dest)?;
+        }
+    } else {
+        copy_dir_no_symlinks(source_dir, &dest)?;
+    }
+
+    // 5. Re-validate the copy/symlink target (defense-in-depth)
+    let re_resolved = sprout_persona::resolve::resolve_pack(&dest).map_err(|e| {
+        // Clean up on failure
+        if use_symlink {
+            let _ = fs::remove_file(&dest);
+        } else {
+            let _ = fs::remove_dir_all(&dest);
+        }
+        format!("team re-validation failed after install: {e}")
+    })?;
+
+    // 6. Create PersonaRecords
+    let now = now_iso();
+    let new_personas: Vec<PersonaRecord> = re_resolved
+        .personas
+        .iter()
+        .map(|p| PersonaRecord {
+            id: Uuid::new_v4().to_string(),
+            display_name: p.display_name.clone(),
+            avatar_url: p.avatar.clone(),
+            system_prompt: p.system_prompt.clone(),
+            runtime: p.runtime.clone(),
+            model: p.model.clone(),
+            name_pool: Vec::new(),
+            is_builtin: false,
+            is_active: true,
+            source_team: Some(resolved.id.clone()),
+            source_team_persona_slug: Some(p.name.clone()),
+            env_vars: std::collections::BTreeMap::new(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        })
+        .collect();
+
+    let persona_ids: Vec<String> = new_personas.iter().map(|p| p.id.clone()).collect();
+
+    // 7. Save personas
+    let mut personas = super::load_personas(app)?;
+    personas.extend(new_personas);
+    super::save_personas(app, &personas)?;
+
+    // 8. Create and save TeamRecord
+    let symlink_target = if use_symlink {
+        fs::canonicalize(source_dir)
+            .ok()
+            .map(|p| p.display().to_string())
+    } else {
+        None
+    };
+
+    let team = TeamRecord {
+        id: resolved.id,
+        name: resolved.name,
+        description: if resolved.description.is_empty() {
+            None
+        } else {
+            Some(resolved.description)
+        },
+        persona_ids,
+        is_builtin: false,
+        source_dir: Some(dest),
+        is_symlink: use_symlink,
+        symlink_target,
+        version: Some(resolved.version),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+
+    let mut teams = load_teams(app)?;
+    teams.push(team.clone());
+    save_teams(app, &teams)?;
+
+    Ok(team)
+}
+
+/// Delete a team. For directory-backed teams, also removes the backing directory
+/// and all personas sourced from that team. For JSON-only teams, only removes
+/// the team record (personas are preserved).
+pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<(), String> {
+    let mut teams = load_teams(app)?;
+    let team = teams
+        .iter()
+        .find(|record| record.id == team_id)
+        .ok_or_else(|| format!("team {team_id} not found"))?;
+
+    validate_team_deletion(team)?;
+
+    if team.source_dir.is_some() {
+        // Directory-backed team: full cascade
+        // 1. Check no managed agents reference these personas
+        let agents = crate::managed_agents::load_managed_agents(app)?;
+        let referencing: Vec<&str> = agents
+            .iter()
+            .filter(|a| {
+                a.persona_team_dir
+                    .as_ref()
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    == Some(team_id)
+            })
+            .map(|a| a.name.as_str())
+            .collect();
+        if !referencing.is_empty() {
+            return Err(format!(
+                "Cannot delete team \"{team_id}\": {} agent(s) still reference it ({}). \
+                 Delete or reconfigure them first.",
+                referencing.len(),
+                referencing.join(", ")
+            ));
+        }
+
+        // 2. Remove all PersonaRecords where source_team == team_id
+        let mut personas = super::load_personas(app)?;
+        personas.retain(|p| p.source_team.as_deref() != Some(team_id));
+        super::save_personas(app, &personas)?;
+
+        // 3. Remove directory
+        if let Some(source_dir) = &team.source_dir {
+            if source_dir.exists() {
+                let is_symlink = fs::symlink_metadata(source_dir)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                if is_symlink {
+                    fs::remove_file(source_dir)
+                        .map_err(|e| format!("failed to remove team symlink: {e}"))?;
+                } else {
+                    fs::remove_dir_all(source_dir)
+                        .map_err(|e| format!("failed to remove team directory: {e}"))?;
+                }
+            }
+        }
+    }
+
+    // 4. Remove TeamRecord
+    teams.retain(|record| record.id != team_id);
+    save_teams(app, &teams)
+}
+
+/// Re-reads a directory-backed team and reconciles with stored records.
+pub fn sync_team_from_dir(
+    app: &AppHandle,
+    team_id: &str,
+) -> Result<crate::managed_agents::SyncResult, String> {
+    use uuid::Uuid;
+
+    let teams = load_teams(app)?;
+    let team = teams
+        .iter()
+        .find(|t| t.id == team_id)
+        .ok_or_else(|| format!("team {team_id} not found"))?;
+
+    let source_dir = team
+        .source_dir
+        .as_ref()
+        .ok_or_else(|| format!("team {team_id} is not directory-backed"))?;
+
+    if !source_dir.exists() {
+        return Err(format!(
+            "team directory does not exist: {}",
+            source_dir.display()
+        ));
+    }
+
+    // Resolve current state of the directory
+    let resolved = sprout_persona::resolve::resolve_pack(source_dir)
+        .map_err(|e| format!("failed to resolve team directory: {e}"))?;
+
+    let mut personas = super::load_personas(app)?;
+    let now = now_iso();
+
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut updated = Vec::new();
+
+    // Find existing personas for this team
+    let existing_slugs: Vec<(String, String)> = personas
+        .iter()
+        .filter(|p| p.source_team.as_deref() == Some(team_id))
+        .map(|p| {
+            (
+                p.source_team_persona_slug.clone().unwrap_or_default(),
+                p.id.clone(),
+            )
+        })
+        .collect();
+
+    // Check for new personas in directory
+    for dir_persona in &resolved.personas {
+        if let Some((_slug, persona_id)) = existing_slugs
+            .iter()
+            .find(|(slug, _)| slug == &dir_persona.name)
+        {
+            // Existing persona — check for content changes
+            if let Some(record) = personas.iter_mut().find(|p| p.id == *persona_id) {
+                let mut changed = false;
+                if record.display_name != dir_persona.display_name {
+                    record.display_name = dir_persona.display_name.clone();
+                    changed = true;
+                }
+                if record.system_prompt != dir_persona.system_prompt {
+                    record.system_prompt = dir_persona.system_prompt.clone();
+                    changed = true;
+                }
+                if record.avatar_url != dir_persona.avatar {
+                    record.avatar_url = dir_persona.avatar.clone();
+                    changed = true;
+                }
+                if record.runtime != dir_persona.runtime {
+                    record.runtime = dir_persona.runtime.clone();
+                    changed = true;
+                }
+                if record.model != dir_persona.model {
+                    record.model = dir_persona.model.clone();
+                    changed = true;
+                }
+                if changed {
+                    record.updated_at = now.clone();
+                    updated.push(persona_id.clone());
+                }
+            }
+        } else {
+            // New persona — create record
+            let new_persona = PersonaRecord {
+                id: Uuid::new_v4().to_string(),
+                display_name: dir_persona.display_name.clone(),
+                avatar_url: dir_persona.avatar.clone(),
+                system_prompt: dir_persona.system_prompt.clone(),
+                runtime: dir_persona.runtime.clone(),
+                model: dir_persona.model.clone(),
+                name_pool: Vec::new(),
+                is_builtin: false,
+                is_active: true,
+                source_team: Some(team_id.to_string()),
+                source_team_persona_slug: Some(dir_persona.name.clone()),
+                env_vars: std::collections::BTreeMap::new(),
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            };
+            added.push(new_persona.id.clone());
+            personas.push(new_persona);
+        }
+    }
+
+    // Check for personas removed from directory
+    let dir_slugs: Vec<&str> = resolved.personas.iter().map(|p| p.name.as_str()).collect();
+    let to_remove: Vec<String> = existing_slugs
+        .iter()
+        .filter(|(slug, _)| !dir_slugs.contains(&slug.as_str()))
+        .map(|(_, id)| id.clone())
+        .collect();
+
+    // Only remove if no active managed agent uses the persona
+    let agents = crate::managed_agents::load_managed_agents(app)?;
+    for persona_id in &to_remove {
+        let in_use = agents
+            .iter()
+            .any(|a| a.persona_id.as_deref() == Some(persona_id));
+        if !in_use {
+            personas.retain(|p| p.id != *persona_id);
+            removed.push(persona_id.clone());
+        }
+    }
+
+    // Update team metadata if changed
+    let mut teams = load_teams(app)?;
+    let mut metadata_changed = false;
+    if let Some(team_record) = teams.iter_mut().find(|t| t.id == team_id) {
+        if team_record.name != resolved.name {
+            team_record.name = resolved.name;
+            metadata_changed = true;
+        }
+        let new_desc = if resolved.description.is_empty() {
+            None
+        } else {
+            Some(resolved.description)
+        };
+        if team_record.description != new_desc {
+            team_record.description = new_desc;
+            metadata_changed = true;
+        }
+        let new_version = Some(resolved.version);
+        if team_record.version != new_version {
+            team_record.version = new_version;
+            metadata_changed = true;
+        }
+        // Update persona_ids to reflect current state
+        let current_ids: Vec<String> = personas
+            .iter()
+            .filter(|p| p.source_team.as_deref() == Some(team_id))
+            .map(|p| p.id.clone())
+            .collect();
+        if team_record.persona_ids != current_ids {
+            team_record.persona_ids = current_ids;
+            metadata_changed = true;
+        }
+        if metadata_changed {
+            team_record.updated_at = now;
+        }
+    }
+
+    super::save_personas(app, &personas)?;
+    save_teams(app, &teams)?;
+
+    Ok(crate::managed_agents::SyncResult {
+        personas_added: added,
+        personas_removed: removed,
+        personas_updated: updated,
+        metadata_changed,
+    })
+}
+
+/// List installed team directories (by scanning teams directory).
+pub fn list_installed_team_dirs(app: &AppHandle) -> Result<Vec<TeamDirSummary>, String> {
+    let teams_base = teams_dir(app)?;
+    let mut summaries = Vec::new();
+
+    if !teams_base.exists() {
+        return Ok(summaries);
+    }
+
+    for entry in fs::read_dir(&teams_base).map_err(|e| format!("failed to read teams dir: {e}"))? {
+        let entry = entry.map_err(|e| format!("dir entry error: {e}"))?;
+        let team_path = entry.path();
+        if !team_path.is_dir() {
+            continue;
+        }
+        if let Ok(resolved) = sprout_persona::resolve::resolve_pack(&team_path) {
+            summaries.push(TeamDirSummary {
+                id: resolved.id,
+                name: resolved.name,
+                version: resolved.version,
+                persona_count: resolved.personas.len(),
+                path: team_path,
+            });
+        }
+    }
+
+    Ok(summaries)
+}
+
+/// Summary of an installed team directory (for listing).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TeamDirSummary {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub persona_count: usize,
+    pub path: PathBuf,
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +756,10 @@ mod tests {
             description: None,
             persona_ids: Vec::new(),
             is_builtin: false,
+            source_dir: None,
+            is_symlink: false,
+            symlink_target: None,
+            version: None,
             created_at: "2026-03-20T00:00:00Z".to_string(),
             updated_at: "2026-03-20T00:00:00Z".to_string(),
         }
@@ -334,8 +805,8 @@ mod tests {
             name_pool: Vec::new(),
             is_builtin: false,
             is_active: true,
-            source_pack: None,
-            source_pack_persona_slug: None,
+            source_team: None,
+            source_team_persona_slug: None,
             env_vars: std::collections::BTreeMap::new(),
             created_at: "2026-03-20T00:00:00Z".to_string(),
             updated_at: "2026-03-20T00:00:00Z".to_string(),

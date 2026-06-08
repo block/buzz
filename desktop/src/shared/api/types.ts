@@ -464,8 +464,8 @@ export type AgentPersona = {
   namePool: string[];
   isBuiltIn: boolean;
   isActive: boolean;
-  /** Pack ID if this persona was imported from a persona pack. Pack personas are non-editable. */
-  sourcePack?: string | null;
+  /** Team ID if this persona was imported from a team directory. Team personas are non-editable. */
+  sourceTeam?: string | null;
   /** Environment variables injected for agents created from this persona.
    * Layered as: desktop parent env < persona envVars < agent envVars. */
   envVars: Record<string, string>;

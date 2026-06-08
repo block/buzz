@@ -892,19 +892,19 @@ pub fn spawn_agent_child(
             }
         }
     }
-    if let (Some(pack_path), Some(persona_name)) =
-        (&record.persona_pack_path, &record.persona_name_in_pack)
+    if let (Some(team_dir), Some(persona_name)) =
+        (&record.persona_team_dir, &record.persona_name_in_team)
     {
-        command.env("SPROUT_ACP_PERSONA_PACK", pack_path);
+        command.env("SPROUT_ACP_PERSONA_PACK", team_dir);
         command.env("SPROUT_ACP_PERSONA_NAME", persona_name);
     }
 
     // Resolve system prompt and model: prefer the persona definition (if a
-    // persona pack is configured and the persona matched), otherwise fall back
+    // team directory is configured and the persona matched), otherwise fall back
     // to the record-level overrides.
-    let has_persona_pack =
-        record.persona_pack_path.is_some() && record.persona_name_in_pack.is_some();
-    let persona_prompt_and_model: Option<(String, Option<String>)> = has_persona_pack
+    let has_persona_team =
+        record.persona_team_dir.is_some() && record.persona_name_in_team.is_some();
+    let persona_prompt_and_model: Option<(String, Option<String>)> = has_persona_team
         .then(|| {
             record
                 .persona_id
@@ -1272,8 +1272,8 @@ mod tests {
             backend: Default::default(),
             backend_agent_id: None,
             provider_binary_path: None,
-            persona_pack_path: None,
-            persona_name_in_pack: None,
+            persona_team_dir: None,
+            persona_name_in_team: None,
             created_at: "now".into(),
             updated_at: "now".into(),
             last_started_at: None,
