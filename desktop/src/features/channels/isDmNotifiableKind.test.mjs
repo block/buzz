@@ -20,7 +20,11 @@ test("human-visible message kinds fire DM notifications", () => {
 test("non-message kinds do NOT fire DM notifications", () => {
   assert.equal(isDmNotifiableKind(5), false, "kind:5 NIP-09 deletion");
   assert.equal(isDmNotifiableKind(7), false, "kind:7 reaction");
-  assert.equal(isDmNotifiableKind(9005), false, "kind:9005 Sprout-native delete");
+  assert.equal(
+    isDmNotifiableKind(9005),
+    false,
+    "kind:9005 Sprout-native delete",
+  );
   assert.equal(isDmNotifiableKind(40003), false, "kind:40003 message edit");
   assert.equal(isDmNotifiableKind(40008), false, "kind:40008 message diff");
   assert.equal(isDmNotifiableKind(40099), false, "kind:40099 system message");
