@@ -282,6 +282,50 @@ pub async fn sync_managed_agent_profile(
     Ok(())
 }
 
+// ── Agent profile query ─────────────────────────────────────────────────────
+
+/// Query the relay for an agent's kind:0 profile event.
+///
+/// Returns the parsed profile content (display_name, picture) if a kind:0 event
+/// exists for the given pubkey, or `None` if no profile is published.
+pub async fn query_agent_profile(
+    state: &AppState,
+    agent_pubkey: &str,
+) -> Result<Option<AgentProfileInfo>, String> {
+    let filter = serde_json::json!({
+        "authors": [agent_pubkey],
+        "kinds": [0],
+        "limit": 1
+    });
+
+    let events = query_relay(state, &[filter]).await?;
+
+    let Some(event) = events.first() else {
+        return Ok(None);
+    };
+
+    let content: serde_json::Value = serde_json::from_str(&event.content)
+        .map_err(|e| format!("failed to parse kind:0 content: {e}"))?;
+
+    Ok(Some(AgentProfileInfo {
+        display_name: content
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        picture: content
+            .get("picture")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    }))
+}
+
+/// Parsed fields from a kind:0 profile event.
+#[derive(Debug, Clone)]
+pub struct AgentProfileInfo {
+    pub display_name: Option<String>,
+    pub picture: Option<String>,
+}
+
 // ── Signed-event submission ─────────────────────────────────────────────────
 
 /// Response from `POST /events`.

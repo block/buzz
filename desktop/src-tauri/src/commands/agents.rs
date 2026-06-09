@@ -665,6 +665,16 @@ pub async fn create_managed_agent(
     })
 }
 
+/// Data needed for background profile reconciliation after agent start.
+struct ProfileReconcileData {
+    private_key_nsec: String,
+    name: String,
+    relay_url: String,
+    agent_command: String,
+    persona_id: Option<String>,
+    auth_tag: Option<String>,
+}
+
 #[tauri::command]
 pub async fn start_managed_agent(
     pubkey: String,
@@ -684,7 +694,8 @@ pub async fn start_managed_agent(
     }
 
     // Collect backend info under lock; async preflight/spawn happens below.
-    let target = {
+    // Also snapshot profile reconciliation data for the background task.
+    let (target, reconcile_data) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -701,7 +712,16 @@ pub async fn start_managed_agent(
 
         let record = find_managed_agent_mut(&mut records, &pubkey)?;
 
-        if record.backend == BackendKind::Local {
+        let reconcile = ProfileReconcileData {
+            private_key_nsec: record.private_key_nsec.clone(),
+            name: record.name.clone(),
+            relay_url: record.relay_url.clone(),
+            agent_command: record.agent_command.clone(),
+            persona_id: record.persona_id.clone(),
+            auth_tag: record.auth_tag.clone(),
+        };
+
+        let target = if record.backend == BackendKind::Local {
             StartTarget::Local
         } else {
             StartTarget::Provider {
@@ -709,10 +729,12 @@ pub async fn start_managed_agent(
                 cached_binary_path: record.provider_binary_path.clone(),
                 agent_json: build_deploy_payload(&app, record)?,
             }
-        }
+        };
+
+        (target, reconcile)
     };
 
-    match target {
+    let result = match target {
         StartTarget::Local => {
             start_local_agent_with_preflight(&app, &state, &pubkey, &owner_hex, false).await
         }
@@ -751,7 +773,97 @@ pub async fn start_managed_agent(
         StartTarget::Provider { backend, .. } => Err(format!(
             "agent {pubkey} has unsupported backend kind: {backend:?}"
         )),
+    };
+
+    // ── Profile reconciliation (fire-and-forget) ────────────────────────────
+    // On successful start, spawn a background task to ensure the agent's kind:0
+    // profile is published on the relay. This self-heals cases where the initial
+    // profile sync at creation time failed silently.
+    if result.is_ok() {
+        let reconcile_pubkey = pubkey.clone();
+        let reconcile_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            use tauri::Manager;
+            let state = reconcile_app.state::<AppState>();
+            if let Err(e) =
+                reconcile_agent_profile(&state, &reconcile_app, &reconcile_pubkey, &reconcile_data)
+                    .await
+            {
+                eprintln!(
+                    "sprout-desktop: profile reconciliation failed for agent {reconcile_pubkey}: {e}"
+                );
+            }
+        });
     }
+
+    result
+}
+
+/// Reconcile an agent's kind:0 profile on the relay.
+///
+/// Queries the relay for the agent's existing profile and re-publishes if missing
+/// or stale (display_name or picture mismatch). This is fire-and-forget — errors
+/// are returned to the caller for logging but never block agent startup.
+async fn reconcile_agent_profile(
+    state: &AppState,
+    app: &AppHandle,
+    agent_pubkey: &str,
+    data: &ProfileReconcileData,
+) -> Result<(), String> {
+    use crate::relay::{query_agent_profile, sync_managed_agent_profile};
+
+    // Derive the expected avatar URL from persona config or agent command fallback.
+    let expected_avatar = resolve_avatar_for_reconcile(app, data);
+
+    // Query the relay for the agent's current kind:0 profile.
+    let existing = query_agent_profile(state, agent_pubkey).await?;
+
+    let needs_sync = match existing {
+        None => true,
+        Some(ref info) => {
+            let name_matches = info.display_name.as_deref().is_some_and(|n| n == data.name);
+            let picture_matches = match (&info.picture, &expected_avatar) {
+                (Some(existing_pic), Some(expected_pic)) => existing_pic == expected_pic,
+                (None, None) => true,
+                _ => false,
+            };
+            !name_matches || !picture_matches
+        }
+    };
+
+    if !needs_sync {
+        return Ok(());
+    }
+
+    let agent_keys = Keys::parse(&data.private_key_nsec)
+        .map_err(|e| format!("failed to parse agent keys: {e}"))?;
+
+    sync_managed_agent_profile(
+        state,
+        &data.relay_url,
+        &agent_keys,
+        &data.name,
+        expected_avatar.as_deref(),
+        data.auth_tag.as_deref(),
+    )
+    .await
+}
+
+/// Resolve the expected avatar URL for profile reconciliation.
+///
+/// Checks the persona's avatar_url first, then falls back to the command-based
+/// avatar derivation (same logic as create_managed_agent).
+fn resolve_avatar_for_reconcile(app: &AppHandle, data: &ProfileReconcileData) -> Option<String> {
+    if let Some(ref persona_id) = data.persona_id {
+        if let Ok(personas) = load_personas(app) {
+            if let Some(persona) = personas.iter().find(|p| p.id == *persona_id) {
+                if persona.avatar_url.is_some() {
+                    return persona.avatar_url.clone();
+                }
+            }
+        }
+    }
+    managed_agent_avatar_url(&data.agent_command)
 }
 
 #[tauri::command]
