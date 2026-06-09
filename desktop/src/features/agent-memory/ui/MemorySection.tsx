@@ -32,7 +32,6 @@ import { Skeleton } from "@/shared/ui/skeleton";
  * `isFetching` is true).
  *
  * Layout:
- *   [ Memory                                     ↻ refetch ]
  *   ⚠ truncated relay banner (if applicable)
  *   ── tree rooted at `core` ──
  *   ── orphans list (if any) ──
@@ -54,6 +53,43 @@ export function MemorySection({
   return <MemorySectionForOwner agentPubkey={agentPubkey} />;
 }
 
+export function MemoryRefreshButton({
+  agentPubkey,
+  className,
+  iconClassName,
+}: {
+  agentPubkey: string;
+  className?: string;
+  iconClassName?: string;
+}): React.ReactElement | null {
+  const isOwner = useIsManagedAgent(agentPubkey);
+  const { query } = useAgentMemoryGraph(agentPubkey, {
+    enabled: isOwner === true,
+  });
+
+  if (isOwner !== true || !query.data) return null;
+
+  return (
+    <Button
+      aria-label="Refresh memory"
+      className={cn(className, query.isFetching && "cursor-wait")}
+      data-testid="agent-memory-refetch"
+      disabled={query.isFetching}
+      onClick={() => query.refetch()}
+      size="icon"
+      type="button"
+      variant="ghost"
+    >
+      <RefreshCw
+        className={cn(
+          iconClassName ?? "h-3.5 w-3.5",
+          query.isFetching && "animate-spin",
+        )}
+      />
+    </Button>
+  );
+}
+
 function MemorySectionForOwner({ agentPubkey }: { agentPubkey: string }) {
   const { query, graph } = useAgentMemoryGraph(agentPubkey);
 
@@ -68,30 +104,7 @@ function MemorySectionForOwner({ agentPubkey }: { agentPubkey: string }) {
   const showInitialError = query.isError && !query.data;
 
   return (
-    <section className="mt-4" data-testid="agent-memory-section">
-      <div className="mb-2 flex items-center justify-between">
-        <h4 className="text-xs font-medium uppercase tracking-wider text-muted-foreground/70">
-          Memory
-        </h4>
-        {query.data ? (
-          <button
-            aria-label="Refresh memory"
-            className={cn(
-              "rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground",
-              query.isFetching && "cursor-wait",
-            )}
-            data-testid="agent-memory-refetch"
-            disabled={query.isFetching}
-            onClick={() => query.refetch()}
-            type="button"
-          >
-            <RefreshCw
-              className={cn("h-3.5 w-3.5", query.isFetching && "animate-spin")}
-            />
-          </button>
-        ) : null}
-      </div>
-
+    <section data-testid="agent-memory-section">
       {showInitialSkeleton ? <MemorySkeleton /> : null}
 
       {showInitialError ? (
@@ -310,22 +323,21 @@ function EntryDisclosure({
   // Auto-expand the root (`core`) so the user always sees something on first
   // open. Everything else is collapsed by default to keep the panel tidy.
   const [open, setOpen] = React.useState(depth === 0 && entry.slug === "core");
-  const indent = Math.min(depth, 4); // cap visual nesting
 
   return (
-    <div className="text-xs" style={{ paddingLeft: `${indent * 12}px` }}>
+    <div className="text-sm">
       <button
-        className="flex w-full items-start gap-1 rounded-sm px-1 py-0.5 text-left hover:bg-muted/40"
+        className="flex w-full items-start gap-2 rounded-md py-1 text-left hover:bg-muted/40"
         onClick={() => setOpen((v) => !v)}
         type="button"
       >
         {open ? (
-          <ChevronDown className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+          <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
         ) : (
-          <ChevronRight className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
+          <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
         )}
         <span className="min-w-0 flex-1 truncate">
-          <span className="font-mono text-[11px] text-foreground">
+          <span className="font-mono text-sm text-foreground">
             {entry.slug}
           </span>
           {!open ? (
@@ -336,7 +348,7 @@ function EntryDisclosure({
         </span>
       </button>
       {open ? (
-        <div className="mt-1 ml-4 whitespace-pre-wrap break-words rounded-md bg-muted/30 p-2 text-[11px] leading-relaxed text-muted-foreground">
+        <div className="mt-2 whitespace-pre-wrap wrap-break-word rounded-xl bg-muted/30 px-4 py-3 text-base leading-7 text-foreground/90">
           {entry.body || (
             <span className="italic text-muted-foreground/60">(empty)</span>
           )}

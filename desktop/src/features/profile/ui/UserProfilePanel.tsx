@@ -2,7 +2,9 @@ import * as React from "react";
 import { ArrowLeft, X } from "lucide-react";
 import { toast } from "sonner";
 
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
+import { MemoryRefreshButton } from "@/features/agent-memory/ui/MemorySection";
 import {
   useRelayAgentsQuery,
   useManagedAgentsQuery,
@@ -33,7 +35,7 @@ import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
 import { cn } from "@/shared/lib/cn";
-import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
+import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
   OverlayPanelBackdrop,
@@ -71,32 +73,42 @@ function truncatePubkey(pubkey: string) {
   return `${pubkey.slice(0, 8)}…${pubkey.slice(-8)}`;
 }
 
-function deriveChannelNames(
+type ProfileChannelLink = {
+  id: string;
+  name: string;
+};
+
+function deriveProfileChannels(
   pubkeyLower: string,
   relayAgent: RelayAgent | undefined,
   managedAgent: ManagedAgent | undefined,
-  channels: { name: string; memberPubkeys: string[] }[] | undefined,
-): string[] {
-  const names: string[] = [];
+  channels: Channel[] | undefined,
+): ProfileChannelLink[] {
+  const links = new Map<string, ProfileChannelLink>();
+  const channelsByName = new Map(
+    channels?.map((channel) => [channel.name, channel]) ?? [],
+  );
 
-  for (const name of relayAgent?.channels ?? []) {
-    if (!names.includes(name)) {
-      names.push(name);
-    }
-  }
+  relayAgent?.channels.forEach((name, index) => {
+    const channel = channelsByName.get(name);
+    const id = relayAgent.channelIds[index] ?? channel?.id ?? name;
+    links.set(id, { id, name });
+  });
 
   if (managedAgent && channels) {
     for (const channel of channels) {
       const isMember = channel.memberPubkeys.some(
         (memberPubkey) => memberPubkey.toLowerCase() === pubkeyLower,
       );
-      if (isMember && !names.includes(channel.name)) {
-        names.push(channel.name);
+      if (isMember) {
+        links.set(channel.id, { id: channel.id, name: channel.name });
       }
     }
   }
 
-  return names.sort((left, right) => left.localeCompare(right));
+  return [...links.values()].sort((left, right) =>
+    left.name.localeCompare(right.name),
+  );
 }
 
 export function UserProfilePanel({
@@ -145,6 +157,7 @@ export function UserProfilePanel({
   const archiveMutation = useArchiveIdentityMutation();
   const unarchiveMutation = useUnarchiveIdentityMutation();
   const { onOpenAgentSession } = useAgentSession();
+  const { goChannel } = useAppNavigation();
 
   const profile = profileQuery.data;
   const pubkeyLower = pubkey.toLowerCase();
@@ -174,9 +187,9 @@ export function UserProfilePanel({
   const isOaOwnerOfViewee = oaOwnerQuery.data?.isMe === true;
   const canArchive = isSelf || isRelayAdminOrOwner || isOaOwnerOfViewee;
 
-  const channelNames = React.useMemo(
+  const profileChannels = React.useMemo(
     () =>
-      deriveChannelNames(
+      deriveProfileChannels(
         pubkeyLower,
         relayAgent,
         managedAgent,
@@ -226,6 +239,13 @@ export function UserProfilePanel({
     onClose();
     onOpenAgentSession?.(pubkey);
   }, [onClose, onOpenAgentSession, pubkey]);
+
+  const handleOpenChannel = React.useCallback(
+    (channelId: string) => {
+      void goChannel(channelId);
+    },
+    [goChannel],
+  );
 
   const displayName = profile?.displayName ?? truncatePubkey(pubkey);
   const panelTitle = VIEW_TITLES[view];
@@ -324,24 +344,40 @@ export function UserProfilePanel({
               {panelTitle}
             </h2>
           </div>
-          <Button
-            aria-label="Close profile"
-            className={cn(
-              "ml-auto",
-              usesChannelSplitChrome
-                ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
-                : "h-4 w-4 rounded-full text-foreground hover:bg-muted/60 hover:text-foreground",
-            )}
-            data-testid="user-profile-panel-close"
-            onClick={onClose}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            <X
-              className={cn(usesChannelSplitChrome ? "size-5" : "h-2.5 w-2.5")}
-            />
-          </Button>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            {view === "memories" && isOwner === true ? (
+              <MemoryRefreshButton
+                agentPubkey={pubkey}
+                className={cn(
+                  usesChannelSplitChrome
+                    ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
+                    : "h-4 w-4 rounded-full text-foreground hover:bg-muted/60 hover:text-foreground",
+                )}
+                iconClassName={cn(
+                  usesChannelSplitChrome ? "size-4" : "h-2.5 w-2.5",
+                )}
+              />
+            ) : null}
+            <Button
+              aria-label="Close profile"
+              className={cn(
+                usesChannelSplitChrome
+                  ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
+                  : "h-4 w-4 rounded-full text-foreground hover:bg-muted/60 hover:text-foreground",
+              )}
+              data-testid="user-profile-panel-close"
+              onClick={onClose}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <X
+                className={cn(
+                  usesChannelSplitChrome ? "size-5" : "h-2.5 w-2.5",
+                )}
+              />
+            </Button>
+          </div>
         </div>
 
         <div
@@ -355,7 +391,7 @@ export function UserProfilePanel({
             <ProfileSummaryView
               canArchive={canArchive}
               canViewActivity={canViewActivity}
-              channelCount={channelNames.length}
+              channelCount={profileChannels.length}
               channelsLoading={channelsQuery.isLoading}
               displayName={displayName}
               followMutation={followMutation}
@@ -389,8 +425,9 @@ export function UserProfilePanel({
 
           {view === "channels" ? (
             <ChannelsFocusedView
-              channelNames={channelNames}
+              channels={profileChannels}
               isLoading={channelsQuery.isLoading}
+              onOpenChannel={handleOpenChannel}
             />
           ) : null}
         </div>

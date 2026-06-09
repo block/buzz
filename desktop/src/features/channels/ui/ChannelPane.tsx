@@ -61,6 +61,7 @@ type ChannelPaneProps = {
   onJoinChannel?: () => Promise<void>;
   onOpenAgentSession: (pubkey: string) => void;
   onOpenDm?: (pubkeys: string[]) => void;
+  onOpenProfilePanel: (pubkey: string) => void;
   onOpenThread: (message: TimelineMessage) => void;
   onResetThreadPanelWidth: () => void;
   onSelectThreadReplyTarget: (message: TimelineMessage) => void;
@@ -140,6 +141,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onJoinChannel,
   onOpenAgentSession,
   onOpenDm,
+  onOpenProfilePanel,
   onOpenThread,
   onResetThreadPanelWidth,
   onSelectThreadReplyTarget,
@@ -530,6 +532,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           )}
           isSinglePanelView={isSinglePanelView}
           profiles={profiles}
+          onBackToProfile={() => onOpenProfilePanel(selectedAgent.pubkey)}
           onClose={onCloseAgentSession}
           onResetWidth={onResetThreadPanelWidth}
           onResizeStart={onThreadPanelResizeStart}

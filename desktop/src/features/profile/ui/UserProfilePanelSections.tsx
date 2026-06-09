@@ -2,6 +2,7 @@ import * as React from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   Activity,
+  ArrowUpRight,
   Archive,
   ArchiveRestore,
   Brain,
@@ -748,23 +749,32 @@ export function MemoryFocusedView({
   );
 }
 
+type ProfileChannelLink = {
+  id: string;
+  name: string;
+};
+
 export function ChannelsFocusedView({
-  channelNames,
+  channels,
   isLoading,
+  onOpenChannel,
 }: {
-  channelNames: string[];
+  channels: ProfileChannelLink[];
   isLoading: boolean;
+  onOpenChannel: (channelId: string) => void;
 }) {
   if (isLoading) {
     return (
-      <p className="pt-4 text-sm text-muted-foreground">Loading channels…</p>
+      <p className="pt-4 text-base leading-7 text-muted-foreground">
+        Loading channels…
+      </p>
     );
   }
 
-  if (channelNames.length === 0) {
+  if (channels.length === 0) {
     return (
       <p
-        className="pt-4 text-sm italic text-muted-foreground"
+        className="pt-4 text-base leading-7 italic text-muted-foreground"
         data-testid="user-profile-channels-empty"
       >
         No visible channel memberships.
@@ -774,12 +784,24 @@ export function ChannelsFocusedView({
 
   return (
     <ul
-      className="mt-4 overflow-hidden rounded-2xl bg-muted/20"
+      className="overflow-hidden rounded-2xl bg-muted/20"
       data-testid="user-profile-channels-list"
     >
-      {channelNames.map((name) => (
-        <li className="px-4 py-3 text-sm text-foreground" key={name}>
-          #{name}
+      {channels.map((channel) => (
+        <li key={channel.id}>
+          <button
+            aria-label={`Open #${channel.name}`}
+            className="group flex w-full items-center gap-3 px-4 py-3 text-left text-base leading-7 text-foreground transition-colors hover:bg-muted/40"
+            data-testid={`user-profile-channel-link-${channel.name}`}
+            onClick={() => onOpenChannel(channel.id)}
+            type="button"
+          >
+            <span className="min-w-0 flex-1 truncate">#{channel.name}</span>
+            <ArrowUpRight
+              aria-hidden="true"
+              className="h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
+            />
+          </button>
         </li>
       ))}
     </ul>

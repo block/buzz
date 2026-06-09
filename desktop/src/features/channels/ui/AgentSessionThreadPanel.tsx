@@ -1,5 +1,5 @@
 import type * as React from "react";
-import { CircleDot, Octagon, X } from "lucide-react";
+import { ArrowLeft, CircleDot, Octagon, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
@@ -13,7 +13,6 @@ import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   OverlayPanelBackdrop,
   PANEL_BASE_CLASS,
@@ -32,6 +31,7 @@ type AgentSessionThreadPanelProps = {
   isWorking: boolean;
   isSinglePanelView?: boolean;
   profiles?: UserProfileLookup;
+  onBackToProfile: () => void;
   onClose: () => void;
   onResetWidth: () => void;
   onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
@@ -46,13 +46,13 @@ export function AgentSessionThreadPanel({
   isWorking,
   isSinglePanelView = false,
   profiles,
+  onBackToProfile,
   onClose,
   onResetWidth,
   onResizeStart,
   widthPx,
 }: AgentSessionThreadPanelProps) {
   const isLive = isManagedAgentActive(agent);
-  const avatarUrl = profiles?.[agent.pubkey.toLowerCase()]?.avatarUrl ?? null;
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const usesChannelSplitChrome = !isOverlay && !isSinglePanelView;
@@ -94,7 +94,7 @@ export function AgentSessionThreadPanel({
         {!isOverlay && !isSinglePanelView && (
           <button
             aria-label="Resize agent session panel"
-            className="group absolute inset-y-0 left-0 z-20 w-3 -translate-x-1/2 cursor-col-resize"
+            className="peer/agent-session-resize group/agent-session-resize absolute inset-y-0 left-0 z-40 w-3 -translate-x-1/2 cursor-col-resize"
             data-testid="agent-session-resize-handle"
             onDoubleClick={canResetWidth ? onResetWidth : undefined}
             onPointerDown={onResizeStart}
@@ -105,7 +105,7 @@ export function AgentSessionThreadPanel({
             }
             type="button"
           >
-            <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border/80" />
+            <span className="absolute bottom-0 left-1/2 top-10 w-px -translate-x-1/2 bg-transparent transition-colors group-hover/agent-session-resize:bg-border/80 group-focus-visible/agent-session-resize:bg-border/80" />
           </button>
         )}
 
@@ -113,7 +113,7 @@ export function AgentSessionThreadPanel({
           <div
             aria-hidden="true"
             className={cn(
-              "pointer-events-none absolute inset-x-0 top-0 z-40 bg-background/75 backdrop-blur-md before:absolute before:left-0 before:right-0 before:top-10 before:h-px before:bg-border/35 after:absolute after:bottom-0 after:-left-px after:top-10 after:w-px after:bg-border/80 supports-[backdrop-filter]:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/35",
+              "pointer-events-none absolute inset-x-0 top-0 z-40 bg-background/80 backdrop-blur-md after:absolute after:left-0 after:right-0 after:top-10 after:h-px after:bg-border/35 supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
               usesChannelSplitChrome ? "h-[92px]" : "h-[76px]",
             )}
           />
@@ -123,40 +123,45 @@ export function AgentSessionThreadPanel({
           className={cn(
             "flex cursor-default select-none items-center",
             isSinglePanelView
-              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[76px] min-h-[76px] shrink-0 gap-[10px] bg-background/80 pb-[4px] pl-[16px] pr-[8px] pt-[42px] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 sm:pl-[24px] sm:pr-[12px] dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55`
+              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} mb-[-76px] min-h-[76px] shrink-0 gap-[10px] bg-transparent pb-[4px] pl-[16px] pr-[8px] pt-[42px] sm:pl-[24px] sm:pr-[12px]`
               : isOverlay
-                ? "relative z-50 min-h-[44px] shrink-0 gap-3 bg-background/80 px-3 py-[6px] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
-                : "absolute inset-x-0 top-[48px] z-50 h-[32px] gap-[10px] py-0 pl-[16px] pr-[8px] sm:pr-[12px]",
+                ? "relative z-50 min-h-[44px] shrink-0 gap-3 bg-background/80 px-3 py-[6px] backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55"
+                : "absolute inset-x-0 top-[48px] z-50 h-[32px] gap-[10px] bg-transparent py-0 pl-[16px] pr-[8px] after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/agent-session-resize:after:bg-border/80 peer-focus-visible/agent-session-resize:after:bg-border/80 sm:pr-[12px]",
           )}
           data-tauri-drag-region
         >
-          <div className="flex min-w-0 flex-1 items-center gap-2">
-            <div
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            <Button
+              aria-label="Back from activity"
               className={cn(
-                "flex min-w-0 flex-1 items-center gap-2",
-                isSinglePanelView && "translate-y-px",
+                "shrink-0",
+                usesChannelSplitChrome
+                  ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
+                  : "h-7 w-7 rounded-full text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+              )}
+              data-testid="agent-session-back"
+              onClick={onBackToProfile}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <ArrowLeft
+                className={cn(usesChannelSplitChrome ? "size-4" : "size-3.5")}
+              />
+            </Button>
+            <h2
+              className={cn(
+                "min-w-0 translate-y-px truncate font-semibold tracking-tight",
+                usesChannelSplitChrome
+                  ? "text-base leading-6"
+                  : "text-sm leading-5",
               )}
             >
-              <UserAvatar
-                avatarUrl={avatarUrl}
-                className="h-5 w-5 shrink-0 text-[8px]"
-                displayName={agent.name}
-                size="xs"
-              />
-              <h2
-                className={cn(
-                  "min-w-0 flex-1 translate-y-px truncate font-semibold tracking-tight",
-                  usesChannelSplitChrome
-                    ? "text-base leading-6"
-                    : "text-sm leading-5",
-                )}
-              >
-                {agent.name}
-              </h2>
-            </div>
+              Activity
+            </h2>
             <div
               className={cn(
-                "flex shrink-0 items-center gap-2",
+                "ml-auto flex shrink-0 items-center gap-2",
                 isSinglePanelView && "translate-y-px",
               )}
             >
@@ -200,7 +205,7 @@ export function AgentSessionThreadPanel({
                 className={cn(
                   usesChannelSplitChrome
                     ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
-                    : "h-6 w-6 text-foreground hover:bg-muted/60 hover:text-foreground",
+                    : "h-4 w-4 rounded-full text-foreground hover:bg-muted/60 hover:text-foreground",
                 )}
                 data-testid="agent-session-close"
                 onClick={onClose}
@@ -210,7 +215,7 @@ export function AgentSessionThreadPanel({
               >
                 <X
                   className={cn(
-                    usesChannelSplitChrome ? "size-5" : "h-3.5 w-3.5",
+                    usesChannelSplitChrome ? "size-5" : "h-2.5 w-2.5",
                   )}
                 />
               </Button>
