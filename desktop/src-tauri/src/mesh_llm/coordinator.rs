@@ -86,6 +86,12 @@ impl MeshCoordinator {
 /// Start the runtime-owned relay-mesh coordinator if it is not already running.
 /// Idempotent: a second call with a coordinator already present is a no-op.
 ///
+/// Known limitation: the listener subscribes with the identity active at spawn
+/// time and is never restarted. If the workspace identity changes mid-session
+/// the subscription keeps filtering on the old pubkey; an app restart picks up
+/// the new one. Acceptable for now — identity changes are rare and already
+/// disruptive — but revisit if identity switching becomes a first-class flow.
+///
 /// Spawned at identity-set time from `lib.rs` setup, *before* any restore or
 /// create attempt can enqueue a connect-request. Holds the `AppHandle` and
 /// fetches `AppState` per session (the codebase manages `AppState` by value;

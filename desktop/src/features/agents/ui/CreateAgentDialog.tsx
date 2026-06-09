@@ -102,6 +102,10 @@ export function CreateAgentDialog({
   const [meshClientError, setMeshClientError] = React.useState<string | null>(
     null,
   );
+  // True while the relay-mesh client preflight (connect-request + dial) runs
+  // inside handleSubmit. That await can take tens of seconds and happens
+  // before createMutation fires, so isPending alone leaves the button live.
+  const [meshPreparing, setMeshPreparing] = React.useState(false);
 
   const runtimes = providersQuery.data ?? [];
   const allProviders = allProvidersQuery.data ?? [];
@@ -323,6 +327,7 @@ export function CreateAgentDialog({
     // Relay-mesh mode requires a concrete serve target, not just a model name.
     !(useMesh && (meshModelId.trim().length === 0 || meshTarget == null)) &&
     respondToValid &&
+    !meshPreparing &&
     !createMutation.isPending;
 
   async function handleSubmit() {
@@ -336,7 +341,12 @@ export function CreateAgentDialog({
             );
             return;
           }
-          await meshPrepareRelayMeshClient(meshModelId.trim(), meshTarget);
+          setMeshPreparing(true);
+          try {
+            await meshPrepareRelayMeshClient(meshModelId.trim(), meshTarget);
+          } finally {
+            setMeshPreparing(false);
+          }
         } catch (err) {
           setMeshClientError(err instanceof Error ? err.message : String(err));
           return;
@@ -667,7 +677,11 @@ export function CreateAgentDialog({
               size="sm"
               type="button"
             >
-              {createMutation.isPending ? "Creating..." : "Create agent"}
+              {meshPreparing
+                ? "Connecting to mesh..."
+                : createMutation.isPending
+                  ? "Creating..."
+                  : "Create agent"}
             </Button>
           </div>
         </div>
