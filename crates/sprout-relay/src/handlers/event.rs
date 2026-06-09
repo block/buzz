@@ -47,6 +47,50 @@ fn bounded_kind_label(kind: u32) -> String {
     }
 }
 
+/// Drop recipients without access before fan-out on a private channel.
+///
+/// Open and channel-less events skip membership filtering (open channel-scoped
+/// events pay one visibility lookup; see `channel_visibility_cached`). For a
+/// private channel, each recipient is kept only if its connection's
+/// authenticated pubkey is a current member; unknown/unauthenticated recipients
+/// fail closed. This is the cluster-wide backstop: even if a stale subscription
+/// survives on another node after an open->private flip, its events are not
+/// delivered here.
+pub async fn filter_fanout_by_access(
+    state: &Arc<AppState>,
+    stored_event: &StoredEvent,
+    matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
+) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
+    let Some(channel_id) = stored_event.channel_id else {
+        return matches;
+    };
+    match state.channel_visibility_cached(channel_id).await {
+        Ok(v) if v != "private" => return matches,
+        Ok(_) => {}
+        Err(e) => {
+            // Fail closed: if we cannot determine visibility, do not leak a
+            // possibly-private channel's events.
+            warn!(%channel_id, "fan-out access filter: visibility lookup failed: {e}");
+            return Vec::new();
+        }
+    }
+
+    let mut allowed = Vec::with_capacity(matches.len());
+    for (conn_id, sub_id) in matches {
+        let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
+            continue;
+        };
+        match state.is_member_cached(channel_id, &pubkey).await {
+            Ok(true) => allowed.push((conn_id, sub_id)),
+            Ok(false) => {}
+            Err(e) => {
+                warn!(%channel_id, "fan-out access filter: membership lookup failed: {e}");
+            }
+        }
+    }
+    allowed
+}
+
 /// Publish a stored event to subscribers and kick off async side effects.
 pub(crate) async fn dispatch_persistent_event(
     state: &Arc<AppState>,
@@ -70,6 +114,7 @@ pub(crate) async fn dispatch_persistent_event(
     }
 
     let matches = state.sub_registry.fan_out(stored_event);
+    let matches = filter_fanout_by_access(state, stored_event, matches).await;
     metrics::histogram!("sprout_fanout_recipients").record(matches.len() as f64);
     debug!(
         event_id = %event_id_hex,
@@ -922,5 +967,147 @@ mod tests {
 
         let err = super::agent_observer_route(&event).expect_err("route should reject plaintext");
         assert!(err.contains("NIP-44"));
+    }
+
+    mod fanout_access {
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicU8;
+        use std::sync::Arc;
+
+        use nostr::{EventBuilder, Keys, Kind};
+        use sprout_core::StoredEvent;
+        use tokio::sync::{mpsc, Mutex};
+        use tokio_util::sync::CancellationToken;
+        use uuid::Uuid;
+
+        use crate::handlers::event::filter_fanout_by_access;
+        use crate::state::AppState;
+
+        fn test_config() -> crate::config::Config {
+            let mut config = crate::config::Config::from_env().expect("default config loads");
+            config.require_relay_membership = false;
+            config.redis_url = "redis://127.0.0.1:1".to_string();
+            config
+        }
+
+        async fn test_state() -> Arc<AppState> {
+            let config = test_config();
+            let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+            let db = sprout_db::Db::from_pool(pool.clone());
+            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .expect("redis pool");
+            let pubsub = Arc::new(
+                sprout_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                    .await
+                    .expect("pubsub manager"),
+            );
+            let audit = sprout_audit::AuditService::new(pool);
+            let auth = sprout_auth::AuthService::new(config.auth.clone());
+            let search = sprout_search::SearchService::new(sprout_search::SearchConfig {
+                url: config.typesense_url.clone(),
+                api_key: config.typesense_key.clone(),
+                collection: "events".to_string(),
+            });
+            let workflow_engine = Arc::new(sprout_workflow::WorkflowEngine::new(
+                db.clone(),
+                sprout_workflow::WorkflowConfig::default(),
+            ));
+            let media_storage =
+                sprout_media::MediaStorage::new(&config.media).expect("media storage");
+            let (state, _audit_shutdown) = AppState::new(
+                config,
+                db,
+                redis_pool,
+                audit,
+                pubsub,
+                auth,
+                search,
+                workflow_engine,
+                Keys::generate(),
+                media_storage,
+            );
+            Arc::new(state)
+        }
+
+        fn register_conn(state: &AppState, pubkey: Option<Vec<u8>>) -> Uuid {
+            let conn_id = Uuid::new_v4();
+            let (tx, _rx) = mpsc::channel(1);
+            state.conn_manager.register(
+                conn_id,
+                tx,
+                CancellationToken::new(),
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+            );
+            if let Some(pk) = pubkey {
+                state.conn_manager.set_authenticated_pubkey(conn_id, pk);
+            }
+            conn_id
+        }
+
+        fn channel_event(channel_id: Option<Uuid>) -> StoredEvent {
+            let event = EventBuilder::new(Kind::Custom(9), "{}")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign event");
+            StoredEvent::new(event, channel_id)
+        }
+
+        #[tokio::test]
+        async fn channel_less_event_passes_through() {
+            let state = test_state().await;
+            let conn = register_conn(&state, Some(vec![1u8; 32]));
+            let matches = vec![(conn, "s".to_string())];
+            let out = filter_fanout_by_access(&state, &channel_event(None), matches.clone()).await;
+            assert_eq!(out, matches);
+        }
+
+        #[tokio::test]
+        async fn open_channel_event_passes_through_unfiltered() {
+            let state = test_state().await;
+            let channel_id = Uuid::new_v4();
+            state
+                .channel_visibility_cache
+                .insert(channel_id, "open".to_string());
+            // A connection with no authenticated pubkey would be dropped on a
+            // private channel; on open it must pass untouched.
+            let conn = register_conn(&state, None);
+            let matches = vec![(conn, "s".to_string())];
+            let out =
+                filter_fanout_by_access(&state, &channel_event(Some(channel_id)), matches.clone())
+                    .await;
+            assert_eq!(out, matches);
+        }
+
+        #[tokio::test]
+        async fn private_channel_keeps_member_drops_non_member_and_unknown() {
+            let state = test_state().await;
+            let channel_id = Uuid::new_v4();
+            state
+                .channel_visibility_cache
+                .insert(channel_id, "private".to_string());
+
+            let member_pk = vec![1u8; 32];
+            let non_member_pk = vec![2u8; 32];
+            state
+                .membership_cache
+                .insert((channel_id, member_pk.clone()), true);
+            state
+                .membership_cache
+                .insert((channel_id, non_member_pk.clone()), false);
+
+            let member = register_conn(&state, Some(member_pk));
+            let non_member = register_conn(&state, Some(non_member_pk));
+            let unauthed = register_conn(&state, None);
+
+            let matches = vec![
+                (member, "m".to_string()),
+                (non_member, "n".to_string()),
+                (unauthed, "u".to_string()),
+            ];
+            let out =
+                filter_fanout_by_access(&state, &channel_event(Some(channel_id)), matches).await;
+            assert_eq!(out, vec![(member, "m".to_string())]);
+        }
     }
 }

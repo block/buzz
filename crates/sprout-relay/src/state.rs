@@ -211,6 +211,9 @@ pub struct AppState {
     /// Short TTL (10s) — invalidated on membership or channel visibility changes.
     /// Multi-pod: other pods rely on TTL expiry; only local caches are invalidated.
     pub accessible_channels_cache: Arc<moka::sync::Cache<Vec<u8>, Vec<Uuid>>>,
+    /// Per-channel visibility string, used to gate the private-channel fan-out
+    /// access check so open channels stay zero-cost. Invalidated on a flip.
+    pub channel_visibility_cache: Arc<moka::sync::Cache<Uuid, String>>,
 
     /// Bounded channel for search indexing — prevents OOM if Typesense is slow/down.
     /// Capacity 1000: at ~1KB/event that's ~1MB of backlog before we start dropping.
@@ -374,7 +377,12 @@ impl AppState {
                     .time_to_live(std::time::Duration::from_secs(10))
                     .build(),
             ),
-
+            channel_visibility_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
+                    .time_to_live(std::time::Duration::from_secs(10))
+                    .build(),
+            ),
             search_index_tx,
             audit_tx,
             media_storage: Arc::new(media_storage),
@@ -441,6 +449,11 @@ impl AppState {
         self.accessible_channels_cache.invalidate_all();
     }
 
+    /// Invalidate the cached visibility for a single channel (e.g. after a flip).
+    pub fn invalidate_channel_visibility(&self, channel_id: Uuid) {
+        self.channel_visibility_cache.invalidate(&channel_id);
+    }
+
     /// Invalidate all caches after a channel is deleted.
     ///
     /// Channel deletion is a rare admin operation. We clear the entire membership
@@ -450,6 +463,7 @@ impl AppState {
     pub fn invalidate_channel_deleted(&self) {
         self.membership_cache.invalidate_all();
         self.accessible_channels_cache.invalidate_all();
+        self.channel_visibility_cache.invalidate_all();
     }
 
     /// Get accessible channel IDs with a 10-second cache. Falls back to DB on miss.
@@ -466,6 +480,30 @@ impl AppState {
         let result = self.db.get_accessible_channel_ids(pubkey).await?;
         self.accessible_channels_cache.insert(key, result.clone());
         Ok(result)
+    }
+
+    /// Channel visibility string. Caches only `private` (10s); never caches a
+    /// non-private value.
+    ///
+    /// The fan-out access gate fails open on a non-private result, so a stale
+    /// cached `open` on another node would mask the filter for the whole TTL
+    /// after an open->private flip (no cross-node cache invalidation). Caching
+    /// only `private` keeps the cache fail-safe: the worst stale entry is an
+    /// over-restrictive `private` (drops non-members on a now-open channel for
+    /// <=10s), never a leak.
+    pub async fn channel_visibility_cached(
+        &self,
+        channel_id: Uuid,
+    ) -> Result<String, sprout_db::DbError> {
+        if let Some(cached) = self.channel_visibility_cache.get(&channel_id) {
+            return Ok(cached);
+        }
+        let visibility = self.db.get_channel(channel_id).await?.visibility;
+        if visibility == "private" {
+            self.channel_visibility_cache
+                .insert(channel_id, visibility.clone());
+        }
+        Ok(visibility)
     }
 }
 

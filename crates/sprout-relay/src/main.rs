@@ -408,6 +408,12 @@ async fn main() -> anyhow::Result<()> {
                         }
 
                         let matches = state_for_sub.sub_registry.fan_out(&stored);
+                        let matches = sprout_relay::handlers::event::filter_fanout_by_access(
+                            &state_for_sub,
+                            &stored,
+                            matches,
+                        )
+                        .await;
                         metrics::counter!("sprout_multinode_fanout_total").increment(1);
                         if matches.is_empty() {
                             continue;

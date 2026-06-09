@@ -1077,11 +1077,13 @@ async fn handle_edit_metadata(event: &Event, state: &Arc<AppState>) -> anyhow::R
                         )
                         .await?;
                     // A visibility flip changes who can see the channel, so the
-                    // accessible-channels cache must be cleared.
+                    // accessible-channels and visibility caches must be cleared
+                    // before any later event for this channel fans out.
                     state.invalidate_all_accessible_channels();
-                    // On open -> private, revoke live subscriptions held by
-                    // non-members; fan-out does not re-check access per event,
-                    // so a non-member's existing sub would keep receiving events.
+                    state.invalidate_channel_visibility(channel_id);
+                    // On open -> private, eagerly close non-members' live subs
+                    // for an immediate CLOSED on this node. The fan-out access
+                    // filter is the cluster-wide correctness backstop.
                     if was_open && val == "private" {
                         evict_non_member_channel_subscriptions(state, channel_id).await?;
                     }
