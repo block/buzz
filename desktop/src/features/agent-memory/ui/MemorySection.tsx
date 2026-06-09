@@ -1,10 +1,5 @@
 import * as React from "react";
-import {
-  AlertTriangle,
-  ChevronDown,
-  ChevronRight,
-  RefreshCw,
-} from "lucide-react";
+import { AlertTriangle, ChevronDown, RefreshCw } from "lucide-react";
 
 import {
   useAgentMemoryGraph,
@@ -18,6 +13,8 @@ import type { EngramEntry } from "@/shared/api/tauriEngrams";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Skeleton } from "@/shared/ui/skeleton";
+
+const MEMORY_LIST_PREVIEW_LIMIT = 3;
 
 /**
  * Memory section — IXI-7 phase 1 read-only viewer.
@@ -229,6 +226,7 @@ function MemoryGraphView({
   graph: NonNullable<ReturnType<typeof useAgentMemoryGraph>["graph"]>;
 }) {
   const { rootedTree, orphans, dangling } = graph;
+  const [showAllEntries, setShowAllEntries] = React.useState(false);
 
   const isEmpty = !rootedTree && orphans.length === 0 && dangling.length === 0;
   if (isEmpty) {
@@ -242,19 +240,20 @@ function MemoryGraphView({
     );
   }
 
+  const core = rootedTree?.entry ?? null;
+  const memories = [
+    ...(rootedTree ? flattenTreeDescendants(rootedTree) : []),
+    ...orphans,
+  ];
+  const entries = [...(core ? [core] : []), ...memories];
+  const hasMoreEntries = entries.length > MEMORY_LIST_PREVIEW_LIMIT;
+  const visibleEntries = showAllEntries
+    ? entries
+    : entries.slice(0, MEMORY_LIST_PREVIEW_LIMIT);
+
   return (
     <div className="space-y-3">
-      {rootedTree ? (
-        <div data-testid="agent-memory-tree">
-          <TreeNode node={rootedTree} depth={0} />
-        </div>
-      ) : // No `core` but there are memories. Surface a small note so the
-      // user understands why the orphans-only view looks the way it does.
-      // This branch only fires when `orphans.length > 0` by design: the
-      // `isEmpty` short-circuit above (line ~220) catches the
-      // zero-memories-and-zero-core case with the empty-state copy, so we
-      // don't need a redundant `orphans.length === 0` branch here.
-      orphans.length > 0 ? (
+      {!core && memories.length > 0 ? (
         <p
           className="text-xs italic text-muted-foreground"
           data-testid="agent-memory-no-core"
@@ -264,47 +263,46 @@ function MemoryGraphView({
         </p>
       ) : null}
 
-      {orphans.length > 0 ? (
-        <div data-testid="agent-memory-orphans">
-          <h5 className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
-            Unreferenced ({orphans.length})
-          </h5>
-          <div className="space-y-1">
-            {orphans.map((entry) => (
-              <EntryDisclosure depth={0} entry={entry} key={entry.eventId} />
-            ))}
-          </div>
-        </div>
+      <div className="space-y-2" data-testid="agent-memory-list">
+        {visibleEntries.map((entry) => (
+          <MemoryEntryAccordion entry={entry} key={entry.eventId} />
+        ))}
+      </div>
+
+      {hasMoreEntries && !showAllEntries ? (
+        <button
+          className="flex w-full justify-center rounded-2xl bg-muted/40 px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
+          data-testid="agent-memory-show-more"
+          onClick={() => setShowAllEntries(true)}
+          type="button"
+        >
+          View all ({entries.length})
+        </button>
+      ) : null}
+
+      {hasMoreEntries && showAllEntries ? (
+        <button
+          className="flex w-full justify-center rounded-2xl bg-muted/40 px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
+          data-testid="agent-memory-show-less"
+          onClick={() => setShowAllEntries(false)}
+          type="button"
+        >
+          Show less
+        </button>
       ) : null}
 
       {dangling.length > 0 ? (
-        <div data-testid="agent-memory-dangling">
-          <h5 className="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
+        <div className="space-y-2" data-testid="agent-memory-dangling">
+          <h5 className="px-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
             Broken references ({dangling.length})
           </h5>
-          <ul className="space-y-1 text-xs">
-            {dangling.map((d) => (
-              <DanglingRefRow danglingRef={d} key={d.slug} />
-            ))}
-          </ul>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function TreeNode({ node, depth }: { node: MemoryTreeNode; depth: number }) {
-  return (
-    <div className="space-y-1">
-      <EntryDisclosure depth={depth} entry={node.entry} />
-      {node.children.length > 0 ? (
-        <div className="space-y-1">
-          {node.children.map((child) => (
-            <TreeNode
-              depth={depth + 1}
-              key={child.entry.eventId}
-              node={child}
-            />
+          {dangling.map((d) => (
+            <div
+              className="overflow-hidden rounded-2xl bg-muted/40 px-4 py-3"
+              key={d.slug}
+            >
+              <DanglingRefRow danglingRef={d} />
+            </div>
           ))}
         </div>
       ) : null}
@@ -312,68 +310,186 @@ function TreeNode({ node, depth }: { node: MemoryTreeNode; depth: number }) {
   );
 }
 
-/** A single engram, click to expand body. */
-function EntryDisclosure({
-  depth,
-  entry,
-}: {
-  depth: number;
-  entry: EngramEntry;
-}) {
-  // Auto-expand the root (`core`) so the user always sees something on first
-  // open. Everything else is collapsed by default to keep the panel tidy.
-  const [open, setOpen] = React.useState(depth === 0 && entry.slug === "core");
+function flattenTreeDescendants(node: MemoryTreeNode): EngramEntry[] {
+  const entries: EngramEntry[] = [];
+  for (const child of node.children) {
+    entries.push(child.entry);
+    entries.push(...flattenTreeDescendants(child));
+  }
+  return entries;
+}
+
+const MEMORY_REF_PATTERN = /\[\[([^\]]+)\]\]/g;
+
+function MemoryBodyText({ body }: { body: string }) {
+  const parts: React.ReactNode[] = [];
+  let lastIndex = 0;
+
+  for (const match of body.matchAll(MEMORY_REF_PATTERN)) {
+    const index = match.index ?? 0;
+    if (index > lastIndex) {
+      parts.push(body.slice(lastIndex, index));
+    }
+    parts.push(
+      <span
+        className="wrap-break-word break-all text-foreground"
+        key={`${index}-${match[1]}`}
+      >
+        [[{match[1]}]]
+      </span>,
+    );
+    lastIndex = index + match[0].length;
+  }
+
+  if (lastIndex < body.length) {
+    parts.push(body.slice(lastIndex));
+  }
+
+  return <>{parts}</>;
+}
+
+function MemorySlugTitle({ slug }: { slug: string }) {
+  const segments = slug.split("/").filter((segment) => segment.length > 0);
+  if (segments.length === 0) return null;
+
+  if (segments.length === 1) {
+    return (
+      <span
+        className={segments[0] === "mem" ? "text-foreground/40" : undefined}
+      >
+        {segments[0]}
+      </span>
+    );
+  }
 
   return (
-    <div className="text-sm">
-      <button
-        className="flex w-full items-start gap-2 rounded-md py-1 text-left hover:bg-muted/40"
-        onClick={() => setOpen((v) => !v)}
-        type="button"
-      >
-        {open ? (
-          <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-        )}
-        <span className="min-w-0 flex-1 truncate">
-          <span className="font-mono text-sm text-foreground">
-            {entry.slug}
-          </span>
-          {!open ? (
-            <span className="ml-2 text-muted-foreground/70">
-              {bodyPreview(entry.body)}
+    <span className="inline-flex flex-wrap items-baseline">
+      {segments.map((segment, index) => {
+        const segmentPath = segments.slice(0, index + 1).join("/");
+        return (
+          <React.Fragment key={segmentPath}>
+            {index > 0 ? (
+              <span className="px-0.5 text-foreground/40">/</span>
+            ) : null}
+            <span
+              className={cn(
+                segment === "mem" ? "text-foreground/40" : "text-foreground",
+              )}
+            >
+              {segment}
             </span>
-          ) : null}
-        </span>
-      </button>
-      {open ? (
-        <div className="mt-2 whitespace-pre-wrap wrap-break-word rounded-xl bg-muted/30 px-4 py-3 text-base leading-7 text-foreground/90">
-          {entry.body || (
-            <span className="italic text-muted-foreground/60">(empty)</span>
+          </React.Fragment>
+        );
+      })}
+    </span>
+  );
+}
+
+function elementExceedsLines(element: HTMLElement, lines: number): boolean {
+  const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight);
+  if (!Number.isFinite(lineHeight) || lineHeight <= 0) {
+    return element.scrollHeight > element.clientHeight + 1;
+  }
+  return element.scrollHeight > lineHeight * lines + 1;
+}
+
+/** A single engram accordion — collapsed preview truncates to two lines. */
+function MemoryEntryAccordion({ entry }: { entry: EngramEntry }) {
+  const [open, setOpen] = React.useState(false);
+  const [showCaret, setShowCaret] = React.useState(false);
+  const articleRef = React.useRef<HTMLElement>(null);
+  const titleRef = React.useRef<HTMLDivElement>(null);
+  const bodyRef = React.useRef<HTMLDivElement>(null);
+  const isEmpty = entry.body.trim().length === 0;
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: remeasure when accordion clamping changes
+  React.useLayoutEffect(() => {
+    const measure = () => {
+      const titleEl = titleRef.current;
+      const bodyEl = bodyRef.current;
+      if (!titleEl || !bodyEl) return;
+
+      setShowCaret(
+        elementExceedsLines(titleEl, 2) || elementExceedsLines(bodyEl, 2),
+      );
+    };
+
+    measure();
+    const root = articleRef.current;
+    if (!root) return undefined;
+
+    const observer = new ResizeObserver(measure);
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, [open]);
+
+  const content = (
+    <>
+      <div className="min-w-0 flex-1">
+        <div
+          className={cn(
+            "text-sm font-semibold text-foreground",
+            !open && "line-clamp-2",
+          )}
+          ref={titleRef}
+        >
+          <MemorySlugTitle slug={entry.slug} />
+        </div>
+        <div
+          className={cn(
+            "mt-1 text-xs leading-5 text-foreground/70",
+            open ? "whitespace-pre-wrap wrap-break-word" : "line-clamp-2",
+          )}
+          ref={bodyRef}
+        >
+          {isEmpty ? (
+            <span className="italic text-foreground/50">(empty)</span>
+          ) : (
+            <MemoryBodyText body={entry.body} />
           )}
         </div>
+      </div>
+      {showCaret ? (
+        <ChevronDown
+          className={cn(
+            "mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-transform",
+            open && "rotate-180",
+          )}
+        />
       ) : null}
-    </div>
+    </>
+  );
+
+  return (
+    <article
+      className="overflow-hidden rounded-2xl bg-muted/40"
+      ref={articleRef}
+    >
+      {showCaret ? (
+        <button
+          aria-expanded={open}
+          className="flex w-full items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/50"
+          onClick={() => setOpen((value) => !value)}
+          type="button"
+        >
+          {content}
+        </button>
+      ) : (
+        <div className="flex items-start gap-3 px-4 py-3">{content}</div>
+      )}
+    </article>
   );
 }
 
 function DanglingRefRow({ danglingRef }: { danglingRef: DanglingRef }) {
   return (
-    <li className="flex items-baseline gap-2">
+    <div className="flex items-baseline gap-2 text-xs">
       <span className="font-mono text-[11px] text-warning">
         {danglingRef.slug}
       </span>
       <span className="text-muted-foreground/70">
         ← {danglingRef.referencedBy.join(", ")}
       </span>
-    </li>
+    </div>
   );
-}
-
-function bodyPreview(body: string): string {
-  const trimmed = body.trim().replace(/\s+/g, " ");
-  if (trimmed.length === 0) return "(empty)";
-  if (trimmed.length <= 60) return trimmed;
-  return `${trimmed.slice(0, 60)}…`;
 }
