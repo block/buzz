@@ -151,7 +151,18 @@ pub async fn query_relay(
     state: &AppState,
     filters: &[serde_json::Value],
 ) -> Result<Vec<nostr::Event>, String> {
-    let url = format!("{}/query", relay_api_base_url_with_override(state));
+    query_relay_at(state, &relay_api_base_url_with_override(state), filters).await
+}
+
+/// Like [`query_relay`] but targets an explicit HTTP API base URL instead of
+/// the workspace override. Used when a query must hit a specific relay (e.g.
+/// reconciling an agent's profile on the relay where it was published).
+pub async fn query_relay_at(
+    state: &AppState,
+    api_base_url: &str,
+    filters: &[serde_json::Value],
+) -> Result<Vec<nostr::Event>, String> {
+    let url = format!("{}/query", api_base_url);
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
@@ -286,10 +297,15 @@ pub async fn sync_managed_agent_profile(
 
 /// Query the relay for an agent's kind:0 profile event.
 ///
+/// Queries the relay identified by `relay_url` (typically the agent's stored
+/// `relay_url`) so the query targets the same host the profile is published to,
+/// even when a workspace relay override is active.
+///
 /// Returns the parsed profile content (display_name, picture) if a kind:0 event
 /// exists for the given pubkey, or `None` if no profile is published.
 pub async fn query_agent_profile(
     state: &AppState,
+    relay_url: &str,
     agent_pubkey: &str,
 ) -> Result<Option<AgentProfileInfo>, String> {
     let filter = serde_json::json!({
@@ -298,7 +314,7 @@ pub async fn query_agent_profile(
         "limit": 1
     });
 
-    let events = query_relay(state, &[filter]).await?;
+    let events = query_relay_at(state, &relay_http_base_url(relay_url), &[filter]).await?;
 
     let Some(event) = events.first() else {
         return Ok(None);

@@ -962,6 +962,7 @@ mod tests {
             private_key_nsec: String::new(),
             auth_tag: None,
             relay_url: String::new(),
+            avatar_url: None,
             acp_command: String::new(),
             agent_command: String::new(),
             agent_args: vec![],

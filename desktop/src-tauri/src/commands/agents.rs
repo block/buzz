@@ -377,7 +377,7 @@ pub async fn create_managed_agent(
     };
 
     // ── Phase 3: save record (sync lock) ───────────────────────────────────────
-    let agent = {
+    let (agent, resolved_avatar_url) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -453,6 +453,18 @@ pub async fn create_managed_agent(
                 Some((pack_path, slug.to_owned()))
             });
 
+        // Resolve the avatar URL once at creation and persist it on the record.
+        // This is the same logic the original publish used (user input, else
+        // command-based fallback) — storing it lets reconciliation compare
+        // against what was actually published instead of re-deriving it.
+        let resolved_avatar_url = input
+            .avatar_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| managed_agent_avatar_url(&agent_command));
+
         let record = crate::managed_agents::ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: name.clone(),
@@ -460,6 +472,7 @@ pub async fn create_managed_agent(
             private_key_nsec: private_key_nsec.clone(),
             auth_tag: auth_tag.clone(),
             relay_url: resolved_relay_url.clone(),
+            avatar_url: resolved_avatar_url.clone(),
             acp_command: input
                 .acp_command
                 .as_deref()
@@ -534,7 +547,10 @@ pub async fn create_managed_agent(
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| "created agent disappeared unexpectedly".to_string())?;
-        build_managed_agent_summary(&app, record, &runtimes)?
+        (
+            build_managed_agent_summary(&app, record, &runtimes)?,
+            resolved_avatar_url,
+        )
     };
 
     // ── Phase 3b: local spawn (async preflight outside store lock) ───────────
@@ -571,19 +587,14 @@ pub async fn create_managed_agent(
     try_regenerate_nest(&app);
 
     // ── Phase 4: sync agent profile on relay (async, outside lock) ───────────
-    let avatar_url = input
-        .avatar_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| managed_agent_avatar_url(agent.agent_command.as_str()));
+    // Use the avatar persisted on the record so the published profile and any
+    // later reconciliation agree on the same value.
     let profile_sync_error = (sync_managed_agent_profile(
         &state,
         &resolved_relay_url,
         &agent_keys,
         &name,
-        avatar_url.as_deref(),
+        resolved_avatar_url.as_deref(),
         auth_tag.as_deref(),
     )
     .await)
@@ -670,8 +681,10 @@ struct ProfileReconcileData {
     private_key_nsec: String,
     name: String,
     relay_url: String,
-    agent_command: String,
-    persona_id: Option<String>,
+    /// Avatar persisted at creation time. Reconciliation compares against this
+    /// rather than re-deriving from persona config, so a restart never
+    /// overwrites the originally published avatar.
+    avatar_url: Option<String>,
     auth_tag: Option<String>,
 }
 
@@ -716,8 +729,7 @@ pub async fn start_managed_agent(
             private_key_nsec: record.private_key_nsec.clone(),
             name: record.name.clone(),
             relay_url: record.relay_url.clone(),
-            agent_command: record.agent_command.clone(),
-            persona_id: record.persona_id.clone(),
+            avatar_url: record.avatar_url.clone(),
             auth_tag: record.auth_tag.clone(),
         };
 
@@ -786,8 +798,7 @@ pub async fn start_managed_agent(
             use tauri::Manager;
             let state = reconcile_app.state::<AppState>();
             if let Err(e) =
-                reconcile_agent_profile(&state, &reconcile_app, &reconcile_pubkey, &reconcile_data)
-                    .await
+                reconcile_agent_profile(&state, &reconcile_pubkey, &reconcile_data).await
             {
                 eprintln!(
                     "sprout-desktop: profile reconciliation failed for agent {reconcile_pubkey}: {e}"
@@ -804,34 +815,24 @@ pub async fn start_managed_agent(
 /// Queries the relay for the agent's existing profile and re-publishes if missing
 /// or stale (display_name or picture mismatch). This is fire-and-forget — errors
 /// are returned to the caller for logging but never block agent startup.
+///
+/// Query and publish both target the agent's stored `relay_url` so that, under
+/// an active workspace relay override, reconciliation reads and writes the same
+/// relay the agent's profile actually lives on.
 async fn reconcile_agent_profile(
     state: &AppState,
-    app: &AppHandle,
     agent_pubkey: &str,
     data: &ProfileReconcileData,
 ) -> Result<(), String> {
     use crate::relay::{query_agent_profile, sync_managed_agent_profile};
 
-    // Derive the expected avatar URL from persona config or agent command fallback.
-    let expected_avatar = resolve_avatar_for_reconcile(app, data);
+    // Compare against the avatar persisted at creation time — never re-derive it.
+    let expected_avatar = data.avatar_url.as_deref();
 
-    // Query the relay for the agent's current kind:0 profile.
-    let existing = query_agent_profile(state, agent_pubkey).await?;
+    // Query the same relay the profile is published to (the stored relay_url).
+    let existing = query_agent_profile(state, &data.relay_url, agent_pubkey).await?;
 
-    let needs_sync = match existing {
-        None => true,
-        Some(ref info) => {
-            let name_matches = info.display_name.as_deref().is_some_and(|n| n == data.name);
-            let picture_matches = match (&info.picture, &expected_avatar) {
-                (Some(existing_pic), Some(expected_pic)) => existing_pic == expected_pic,
-                (None, None) => true,
-                _ => false,
-            };
-            !name_matches || !picture_matches
-        }
-    };
-
-    if !needs_sync {
+    if !profile_needs_sync(existing.as_ref(), &data.name, expected_avatar) {
         return Ok(());
     }
 
@@ -843,27 +844,28 @@ async fn reconcile_agent_profile(
         &data.relay_url,
         &agent_keys,
         &data.name,
-        expected_avatar.as_deref(),
+        expected_avatar,
         data.auth_tag.as_deref(),
     )
     .await
 }
 
-/// Resolve the expected avatar URL for profile reconciliation.
-///
-/// Checks the persona's avatar_url first, then falls back to the command-based
-/// avatar derivation (same logic as create_managed_agent).
-fn resolve_avatar_for_reconcile(app: &AppHandle, data: &ProfileReconcileData) -> Option<String> {
-    if let Some(ref persona_id) = data.persona_id {
-        if let Ok(personas) = load_personas(app) {
-            if let Some(persona) = personas.iter().find(|p| p.id == *persona_id) {
-                if persona.avatar_url.is_some() {
-                    return persona.avatar_url.clone();
-                }
-            }
+/// Decide whether a published profile is missing or stale relative to the
+/// expected name and avatar. A missing profile always needs sync; a present
+/// one is stale when either the display name or picture diverges.
+fn profile_needs_sync(
+    existing: Option<&crate::relay::AgentProfileInfo>,
+    expected_name: &str,
+    expected_avatar: Option<&str>,
+) -> bool {
+    match existing {
+        None => true,
+        Some(info) => {
+            let name_matches = info.display_name.as_deref() == Some(expected_name);
+            let picture_matches = info.picture.as_deref() == expected_avatar;
+            !name_matches || !picture_matches
         }
     }
-    managed_agent_avatar_url(&data.agent_command)
 }
 
 #[tauri::command]
@@ -1080,5 +1082,59 @@ mod tests {
                 model_ref: "Qwen3".to_string(),
             })
         );
+    }
+
+    fn profile(name: Option<&str>, picture: Option<&str>) -> crate::relay::AgentProfileInfo {
+        crate::relay::AgentProfileInfo {
+            display_name: name.map(str::to_string),
+            picture: picture.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn profile_needs_sync_when_missing() {
+        assert!(profile_needs_sync(None, "Duncan", Some("https://x/a.png")));
+    }
+
+    #[test]
+    fn profile_needs_sync_when_name_diverges() {
+        let existing = profile(Some("Stilgar"), Some("https://x/a.png"));
+        assert!(profile_needs_sync(
+            Some(&existing),
+            "Duncan",
+            Some("https://x/a.png")
+        ));
+    }
+
+    #[test]
+    fn profile_needs_sync_when_picture_diverges() {
+        let existing = profile(Some("Duncan"), Some("https://x/old.png"));
+        assert!(profile_needs_sync(
+            Some(&existing),
+            "Duncan",
+            Some("https://x/new.png")
+        ));
+    }
+
+    #[test]
+    fn profile_in_sync_when_name_and_picture_match() {
+        let existing = profile(Some("Duncan"), Some("https://x/a.png"));
+        assert!(!profile_needs_sync(
+            Some(&existing),
+            "Duncan",
+            Some("https://x/a.png")
+        ));
+    }
+
+    #[test]
+    fn profile_in_sync_when_both_avatars_absent() {
+        let existing = profile(Some("Duncan"), None);
+        assert!(!profile_needs_sync(Some(&existing), "Duncan", None));
+    }
+
+    #[test]
+    fn profile_needs_sync_when_expected_avatar_absent_but_published() {
+        let existing = profile(Some("Duncan"), Some("https://x/a.png"));
+        assert!(profile_needs_sync(Some(&existing), "Duncan", None));
     }
 }

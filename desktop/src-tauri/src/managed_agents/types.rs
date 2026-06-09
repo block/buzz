@@ -82,6 +82,13 @@ pub struct ManagedAgentRecord {
     #[serde(default)]
     pub auth_tag: Option<String>,
     pub relay_url: String,
+    /// Avatar URL resolved at creation time (user-supplied input, else the
+    /// command-based fallback). Persisted so startup reconciliation compares
+    /// against what was actually published rather than re-deriving it from
+    /// persona config — which would silently overwrite user intent on restart.
+    /// `#[serde(default)]` so pre-existing records deserialize as `None`.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
     pub acp_command: String,
     pub agent_command: String,
     pub agent_args: Vec<String>,
