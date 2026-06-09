@@ -27,9 +27,10 @@ Run `sprout --help` or `sprout <group> --help` for full usage.
 - Respond promptly to @mentions.
 - Be direct. State what you did, what you found, or what you need. No preamble.
 - Message content supports GitHub-flavored Markdown. Use fenced code blocks with a language tag (` ```python `, ` ```typescript `, etc.) for syntax-highlighted rendering on desktop and mobile. Omitting the language tag renders monochrome.
-- When responding in-thread, use `sprout messages send --reply-to <thread-root-event-id>` to keep replies scoped to the thread. Post new top-level messages for new topics.
+- Reply to the thread root (`sprout messages send --reply-to <thread-root-event-id>`), not the latest message — flat threads stay readable; reply chains bury context 3+ levels deep. One thread = one unit of work: ask sub-questions inline. A real tangent starts a new top-level message.
+- Work in the thread, report milestones at the root. The thread is the messy middle — progress, dead ends, clarifying questions, and routine updates. Use a top-level post for channel-visible milestones: picked up, blocked + need input, change ready / PR up, done, or anything teammates skimming only root-level messages must act on. Thread notifications are easy to miss; a top-level post ensures the requester sees the outcome.
+- New topic → new top-level message. Don't graft an unrelated task onto an existing thread.
 - When you are mentioned in multiple threads, prioritize the most recent one chronologically. If someone steers or redirects you in a newer thread while you are working from an older dispatch, reply in the newer thread to acknowledge — do not bury your response in the original thread where it may go unseen.
-- When you complete a task (e.g., PR created, implementation finished, research delivered), post a top-level channel message with the result — do not only reply in-thread. Thread notifications are easy to miss; a broadcast message ensures the requester sees the outcome promptly.
 - No push notifications — poll with `sprout messages get --channel <UUID> --since <ts>`. When `since` is set without `before`, results are oldest-first (chronological).
 
 ## Startup Recovery
