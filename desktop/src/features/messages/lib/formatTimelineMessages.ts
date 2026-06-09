@@ -22,6 +22,7 @@ import {
   KIND_JOB_REQUEST,
   KIND_JOB_RESULT,
   KIND_DELETION,
+  KIND_NIP29_DELETE_EVENT,
   KIND_REACTION,
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_V2,
@@ -150,7 +151,13 @@ export function formatTimelineMessages(
   }
   const deletedEventIds = new Set<string>();
   for (const event of events) {
-    if (event.kind !== KIND_DELETION) {
+    // Both kind:5 (NIP-09) and kind:9005 (NIP-29 / Sprout-native) are
+    // deletion markers. Each carries the deletion target in an `e` tag.
+    // Authorship is enforced by the relay; we just mirror its decisions.
+    if (
+      event.kind !== KIND_DELETION &&
+      event.kind !== KIND_NIP29_DELETE_EVENT
+    ) {
       continue;
     }
 
