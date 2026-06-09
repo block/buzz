@@ -167,7 +167,7 @@ export const MessageRow = React.memo(
     const isThreadReplyLayout = layoutVariant === "thread-reply";
     const guideBleedPx = isThreadReplyLayout ? 4 : 0;
     const avatarSizeClass = "!h-9 !w-9";
-    const avatarButtonRadiusClass = "rounded-xl";
+    const avatarButtonRadiusClass = "rounded-full";
 
     const respondToDotColor =
       message.respondTo === "anyone"

@@ -47,7 +47,7 @@ function MessageRowsSkeleton() {
     <>
       {["first", "second", "third", "fourth", "fifth"].map((row, index) => (
         <div className="flex gap-3" key={row}>
-          <Skeleton className="h-9 w-9 shrink-0 rounded-xl" />
+          <Skeleton className="h-9 w-9 shrink-0 rounded-full" />
           <div className="min-w-0 flex-1 space-y-1 pt-0.5">
             <div className="flex items-baseline gap-2">
               <Skeleton className="h-3.5 w-28" />

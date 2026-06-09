@@ -70,7 +70,7 @@ function DmChannelIcon({
       <span className="relative flex h-5 w-5 shrink-0 items-center justify-center">
         <ProfileAvatar
           avatarUrl={primaryParticipant.avatarUrl}
-          className="h-5 w-5 rounded-[6px] border border-sidebar-border/80 bg-sidebar-accent/80 text-[9px] text-sidebar-foreground shadow-none"
+          className="h-5 w-5 rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-[9px] text-sidebar-foreground shadow-none"
           iconClassName="h-3 w-3"
           label={primaryParticipant.label}
         />
@@ -91,13 +91,13 @@ function DmChannelIcon({
     <span className="relative flex h-5 w-7 shrink-0 items-center">
       <ProfileAvatar
         avatarUrl={primaryParticipant.avatarUrl}
-        className="absolute left-0 top-0 h-[18px] w-[18px] rounded-[6px] border-2 border-sidebar bg-sidebar-accent/80 text-[8px] text-sidebar-foreground shadow-none"
+        className="absolute left-0 top-0 h-[18px] w-[18px] rounded-full border-2 border-sidebar bg-sidebar-accent/80 text-[8px] text-sidebar-foreground shadow-none"
         iconClassName="h-2.5 w-2.5"
         label={primaryParticipant.label}
       />
       <ProfileAvatar
         avatarUrl={secondaryParticipant.avatarUrl}
-        className="absolute bottom-0 right-0 h-[18px] w-[18px] rounded-[6px] border-2 border-sidebar bg-sidebar-accent/80 text-[8px] text-sidebar-foreground shadow-none"
+        className="absolute bottom-0 right-0 h-[18px] w-[18px] rounded-full border-2 border-sidebar bg-sidebar-accent/80 text-[8px] text-sidebar-foreground shadow-none"
         iconClassName="h-2.5 w-2.5"
         label={secondaryParticipant.label}
       />
