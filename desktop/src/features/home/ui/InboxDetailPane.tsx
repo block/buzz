@@ -20,6 +20,7 @@ import {
   InboxMessageRow,
 } from "@/features/home/ui/InboxMessageRow";
 import type { TimelineMessage } from "@/features/messages/types";
+import { ConciergeLauncher } from "@/features/concierge/ui/ConciergeLauncher";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -363,6 +364,7 @@ export function InboxDetailPane({
                     "Replies are not available for this item.")
               }
               replyTarget={composerReplyTarget}
+              toolbarExtraActions={<ConciergeLauncher />}
             />
           </div>
         </div>

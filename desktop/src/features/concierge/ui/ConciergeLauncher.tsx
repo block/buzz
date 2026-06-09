@@ -7,6 +7,7 @@ import {
   SELECTION_CHANGED_EVENT,
 } from "@/features/concierge/lib/conciergeSelection";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 import "./concierge.css";
 
@@ -42,25 +43,30 @@ function useConciergeName(): string {
 }
 
 /**
- * Home-screen entry point: a floating mini-orb that opens the Concierge.
- * Shows the user's selected agent name. Self-contained so the (dense) Home
- * view stays untouched.
+ * Composer-toolbar entry point: a compact orb button that opens the
+ * Concierge, mounted next to the send arrow (mic-key placement). The
+ * tooltip names the user's selected agent; the sidebar nav entry remains
+ * the persistent entry point when no composer is on screen.
  */
 export function ConciergeLauncher() {
   const { goConcierge } = useAppNavigation();
   const name = useConciergeName();
   return (
-    <button
-      aria-label={`Open ${name}`}
-      className="concierge-launcher group fixed bottom-5 right-5 z-[45] flex items-center gap-2.5 rounded-full border border-border/60 bg-background/85 py-2 pl-2.5 pr-4 shadow-lg backdrop-blur-md transition-colors hover:border-primary/40 hover:bg-background"
-      data-testid="concierge-launcher"
-      onClick={() => {
-        void goConcierge();
-      }}
-      type="button"
-    >
-      <span aria-hidden className="concierge-launcher__orb" />
-      <span className="text-sm font-medium text-foreground/90">{name}</span>
-    </button>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          aria-label={`Open ${name}`}
+          className="concierge-launcher inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-muted focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+          data-testid="concierge-launcher"
+          onClick={() => {
+            void goConcierge();
+          }}
+          type="button"
+        >
+          <span aria-hidden className="concierge-launcher__orb" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{name}</TooltipContent>
+    </Tooltip>
   );
 }
