@@ -88,7 +88,7 @@ The decrypted plaintext is a UTF-8 JSON object:
 - `done` -- reminder was shown or acknowledged
 - `cancelled` -- author cancelled it without deleting history
 
-A pending reminder MUST contain either a `target` object or a non-empty `note`.
+A pending reminder MUST contain either a `target` object or a non-empty `note`. A reminder MAY be note-only and need not reference an existing Nostr event; clients can create standalone private reminders by setting `note` and omitting `target`.
 
 When `target.a` is present, clients SHOULD resolve the current addressable event. When both `target.a` and `target.id` are present, `id` is only a snapshot fallback; it MUST NOT override a resolvable `a` reference. If `a` is absent or cannot be resolved, clients MAY use `id`. `relays` are hints only.
 
