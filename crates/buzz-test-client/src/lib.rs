@@ -149,6 +149,12 @@ impl BuzzTestClient {
         Ok(())
     }
 
+    /// Sends a raw JSON value as a WebSocket text frame.
+    pub async fn send_raw(&mut self, value: &serde_json::Value) -> Result<(), TestClientError> {
+        self.inner.send_raw(value).await?;
+        Ok(())
+    }
+
     /// Receives the next relay message, waiting up to `timeout_dur`.
     pub async fn recv_event(
         &mut self,
