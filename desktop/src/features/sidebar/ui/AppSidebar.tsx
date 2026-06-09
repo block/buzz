@@ -10,6 +10,7 @@ import {
   Zap,
 } from "lucide-react";
 import * as React from "react";
+import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
@@ -443,30 +444,34 @@ export function AppSidebar({
               </SidebarMenuBadge>
             ) : null}
           </SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              data-testid="open-pulse-view"
-              isActive={selectedView === "pulse"}
-              onClick={onSelectPulse}
-              tooltip="Pulse"
-              type="button"
-            >
-              <Activity className="h-4 w-4" />
-              <span>Pulse</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              data-testid="open-projects-view"
-              isActive={selectedView === "projects"}
-              onClick={onSelectProjects}
-              tooltip="Projects"
-              type="button"
-            >
-              <FolderGit2 className="h-4 w-4" />
-              <span>Projects</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
+          <FeatureGate feature="pulse">
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                data-testid="open-pulse-view"
+                isActive={selectedView === "pulse"}
+                onClick={onSelectPulse}
+                tooltip="Pulse"
+                type="button"
+              >
+                <Activity className="h-4 w-4" />
+                <span>Pulse</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </FeatureGate>
+          <FeatureGate feature="projects">
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                data-testid="open-projects-view"
+                isActive={selectedView === "projects"}
+                onClick={onSelectProjects}
+                tooltip="Projects"
+                type="button"
+              >
+                <FolderGit2 className="h-4 w-4" />
+                <span>Projects</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </FeatureGate>
           <SidebarMenuItem>
             <SidebarMenuButton
               data-testid="open-agents-view"
@@ -487,18 +492,20 @@ export function AppSidebar({
               </SidebarMenuBadge>
             ) : null}
           </SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              data-testid="open-workflows-view"
-              isActive={selectedView === "workflows"}
-              onClick={onSelectWorkflows}
-              tooltip="Workflows"
-              type="button"
-            >
-              <Zap className="h-4 w-4" />
-              <span>Workflows</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
+          <FeatureGate feature="workflows">
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                data-testid="open-workflows-view"
+                isActive={selectedView === "workflows"}
+                onClick={onSelectWorkflows}
+                tooltip="Workflows"
+                type="button"
+              >
+                <Zap className="h-4 w-4" />
+                <span>Workflows</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </FeatureGate>
         </SidebarMenu>
       </SidebarHeader>
 
@@ -647,29 +654,31 @@ export function AppSidebar({
                   onUnstarChannel={onUnstarChannel}
                 />
               </SidebarDndContext>
-              <ChannelGroupSection
-                browseAriaLabel="Browse forums"
-                browseTestId="browse-forums"
-                createAriaLabel="Create a forum"
-                hasUnread={unreadChannelIds.size > 0}
-                isCollapsed={collapsedGroups.forums}
-                isActiveChannel={selectedView === "channel"}
-                items={forumChannels}
-                listTestId="forum-list"
-                onBrowse={onOpenBrowseForums}
-                onCreateClick={() => setCreateDialogKind("forum")}
-                onMarkAllRead={onMarkAllChannelsRead}
-                onMarkChannelRead={onMarkChannelRead}
-                onMarkChannelUnread={onMarkChannelUnread}
-                onSelectChannel={onSelectChannel}
-                onToggleCollapsed={() => toggleCollapsedGroup("forums")}
-                selectedChannelId={selectedChannelId}
-                title="Forums"
-                unreadChannelIds={unreadChannelIds}
-                mutedChannelIds={mutedChannelIds}
-                onMuteChannel={onMuteChannel}
-                onUnmuteChannel={onUnmuteChannel}
-              />
+              <FeatureGate feature="forum">
+                <ChannelGroupSection
+                  browseAriaLabel="Browse forums"
+                  browseTestId="browse-forums"
+                  createAriaLabel="Create a forum"
+                  hasUnread={unreadChannelIds.size > 0}
+                  isCollapsed={collapsedGroups.forums}
+                  isActiveChannel={selectedView === "channel"}
+                  items={forumChannels}
+                  listTestId="forum-list"
+                  onBrowse={onOpenBrowseForums}
+                  onCreateClick={() => setCreateDialogKind("forum")}
+                  onMarkAllRead={onMarkAllChannelsRead}
+                  onMarkChannelRead={onMarkChannelRead}
+                  onMarkChannelUnread={onMarkChannelUnread}
+                  onSelectChannel={onSelectChannel}
+                  onToggleCollapsed={() => toggleCollapsedGroup("forums")}
+                  selectedChannelId={selectedChannelId}
+                  title="Forums"
+                  unreadChannelIds={unreadChannelIds}
+                  mutedChannelIds={mutedChannelIds}
+                  onMuteChannel={onMuteChannel}
+                  onUnmuteChannel={onUnmuteChannel}
+                />
+              </FeatureGate>
               <SidebarSection
                 action={
                   <SidebarGroupAction

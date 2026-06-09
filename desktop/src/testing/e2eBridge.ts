@@ -3167,6 +3167,8 @@ async function handleUpdateChannel(
     channelId: string;
     name?: string;
     description?: string;
+    visibility?: "open" | "private";
+    ttlSeconds?: number | null;
   },
   config: E2eConfig | undefined,
 ) {
@@ -3179,6 +3181,16 @@ async function handleUpdateChannel(
     if (args.description !== undefined) {
       channel.description = args.description;
     }
+    if (args.visibility !== undefined) {
+      channel.visibility = args.visibility;
+    }
+    if (args.ttlSeconds !== undefined) {
+      channel.ttl_seconds = args.ttlSeconds;
+      channel.ttl_deadline =
+        args.ttlSeconds === null
+          ? null
+          : new Date(Date.now() + args.ttlSeconds * 1000).toISOString();
+    }
     touchMockChannel(channel);
     return toRawChannelDetail(channel, config);
   }
@@ -3190,6 +3202,12 @@ async function handleUpdateChannel(
   if (args.description !== undefined) {
     tags.push(["about", args.description]);
   }
+  if (args.visibility !== undefined) {
+    tags.push(["visibility", args.visibility]);
+  }
+  if (args.ttlSeconds !== undefined) {
+    tags.push(["ttl", args.ttlSeconds === null ? "" : String(args.ttlSeconds)]);
+  }
   await submitSignedEvent(config, { kind: 9002, content: "", tags });
 
   // Re-fetch updated metadata
@@ -3200,19 +3218,24 @@ async function handleUpdateChannel(
   const evTags = (ev?.tags ?? []) as string[][];
   const getTag = (name: string) =>
     evTags.find((t) => t[0] === name)?.[1] ?? null;
+  const ttlTag = getTag("ttl");
+  const ttlSeconds = ttlTag === null || ttlTag === "" ? null : Number(ttlTag);
   return {
     id: args.channelId,
     name: getTag("name") ?? "",
     description: getTag("about") ?? null,
     channel_type: getTag("t") ?? "stream",
-    visibility: evTags.some((t) => t[0] === "private") ? "private" : "open",
+    visibility: getTag("visibility") ?? "open",
     topic: getTag("topic") ?? null,
     purpose: getTag("purpose") ?? null,
     member_count: 0,
     role: "owner",
     archived_at: null,
-    ttl_seconds: null,
-    ttl_deadline: null,
+    ttl_seconds: ttlSeconds,
+    ttl_deadline:
+      ttlSeconds === null
+        ? null
+        : new Date(Date.now() + ttlSeconds * 1000).toISOString(),
     created_at: ev?.created_at
       ? new Date(ev.created_at * 1000).toISOString()
       : new Date().toISOString(),
@@ -5142,9 +5165,9 @@ function sendToMockSocket(args: {
 
     // Mesh control events (24620 status report, 24621 connect request) are not
     // channel messages — they carry a `p` tag, not an `h` tag. The real relay
-    // accepts them after membership/shape checks; the mock just ACKs so the
-    // desktop mesh flow (publishMeshConnectRequest) can proceed. We do not model
-    // the paired 24622 here; that belongs in a dedicated call-me-now test.
+    // accepts them after membership/shape checks; the mock just ACKs so legacy
+    // direct-TS mesh helpers can proceed. Current create/start flows publish
+    // these from the Rust coordinator instead.
     if (event.kind === 24620 || event.kind === 24621) {
       if (
         event.kind === 24621 &&
@@ -5410,6 +5433,46 @@ export function maybeInstallE2eTauriMocks() {
         mockMeshState.nodeState = "running";
         mockMeshState.nodeMode = "client";
         return meshNodeStatus("running", "client");
+      case "mesh_prepare_relay_mesh_client": {
+        // The Rust coordinator owns connect signaling. In the browser e2e
+        // bridge, mirror the event template it would publish so specs can keep
+        // asserting canonical #p targets without resurrecting the old TS
+        // signaling helper.
+        if (!mockMeshState.admitted) {
+          throw new Error(mockMeshState.denyReason);
+        }
+        mockMeshState.nodeState = "running";
+        mockMeshState.nodeMode = "client";
+        const target = (
+          payload as {
+            request?: {
+              target?: {
+                endpointAddr?: string;
+                endpointId?: string | null;
+                reporterPubkey?: string;
+              };
+            };
+          } | null
+        )?.request?.target;
+        const reporterPubkey = target?.reporterPubkey?.trim().toLowerCase();
+        const selfPubkey = (
+          identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey
+        ).toLowerCase();
+        if (reporterPubkey && reporterPubkey !== selfPubkey) {
+          window.__SPROUT_E2E_SIGNED_EVENTS__?.push({
+            kind: 24621,
+            tags: [["p", reporterPubkey]],
+            content: JSON.stringify({
+              self_endpoint_addr: "mock-endpoint-addr",
+              peer_endpoint_addr: target?.endpointAddr ?? "mock-endpoint-addr",
+              self_endpoint_id: "mock-endpoint-id",
+              peer_endpoint_id: target?.endpointId ?? undefined,
+              attempt_id: "mock-attempt-id",
+            }),
+          });
+        }
+        return meshNodeStatus("running", "client");
+      }
       case "mesh_dial_endpoint_addr":
         return meshNodeStatus("running", mockMeshState.nodeMode ?? "client");
       case "mesh_status_report_payload":
@@ -5651,7 +5714,8 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "update_channel":
         return handleUpdateChannel(
-          payload as Parameters<typeof handleUpdateChannel>[0],
+          (payload as { input: Parameters<typeof handleUpdateChannel>[0] })
+            .input,
           activeConfig,
         );
       case "set_channel_topic":

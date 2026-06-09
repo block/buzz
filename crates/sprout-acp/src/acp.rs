@@ -360,12 +360,29 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
-        let params = serde_json::json!({
-            "sessionId": session_id,
-            "prompt": [
-                { "type": "text", "text": prompt_text }
-            ]
-        });
+        self.session_prompt_blocks_with_idle_timeout(
+            session_id,
+            std::slice::from_ref(&prompt_text),
+            idle_timeout,
+            max_duration,
+        )
+        .await
+    }
+
+    /// Like [`session_prompt_with_idle_timeout`](Self::session_prompt_with_idle_timeout),
+    /// but sends each entry in `prompt_blocks` as a separate text content block.
+    ///
+    /// Used for slash-command pass-through: ACP connectors detect commands via
+    /// the **first** block's text starting with `/`, so the harness sends
+    /// `["/cmd args", "<sprout context>"]` instead of one wrapped block.
+    pub async fn session_prompt_blocks_with_idle_timeout(
+        &mut self,
+        session_id: &str,
+        prompt_blocks: &[&str],
+        idle_timeout: std::time::Duration,
+        max_duration: std::time::Duration,
+    ) -> Result<StopReason, AcpError> {
+        let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
 
@@ -916,6 +933,20 @@ impl AcpClient {
                     tracing::debug!(target: "acp::thought", "{text}");
                 }
             }
+            "available_commands_update" => {
+                // Advertised slash commands (ACP slash-commands extension).
+                // Logged for observability; UI surfacing is a follow-up.
+                let names: Vec<&str> = update["availableCommands"]
+                    .as_array()
+                    .map(|cmds| cmds.iter().filter_map(|c| c["name"].as_str()).collect())
+                    .unwrap_or_default();
+                tracing::info!(
+                    target: "acp::update",
+                    "available_commands_update: {} commands [{}]",
+                    names.len(),
+                    names.join(", ")
+                );
+            }
             other => {
                 tracing::debug!(target: "acp::update", "session/update: {other}");
             }
@@ -1019,6 +1050,18 @@ impl AcpClient {
 }
 
 // ─── Permission response constructors ────────────────────────────────────────
+
+/// Build `session/prompt` params from one or more text content blocks.
+fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::Value {
+    let blocks: Vec<serde_json::Value> = prompt_blocks
+        .iter()
+        .map(|text| serde_json::json!({ "type": "text", "text": text }))
+        .collect();
+    serde_json::json!({
+        "sessionId": session_id,
+        "prompt": blocks,
+    })
+}
 
 /// Build a JSON-RPC permission response with `outcome: "selected"`.
 fn permission_response_selected(id: &serde_json::Value, option_id: &str) -> serde_json::Value {
@@ -1398,6 +1441,24 @@ mod tests {
         assert_eq!(prompt.len(), 1);
         assert_eq!(prompt[0]["type"].as_str(), Some("text"));
         assert_eq!(prompt[0]["text"].as_str(), Some(prompt_text));
+    }
+
+    #[test]
+    fn session_prompt_slash_command_two_block_format() {
+        // Slash-command pass-through: bare command first, wrapped context second.
+        let params = build_prompt_params(
+            "sess_abc123",
+            &[
+                "/goal ship it",
+                "[Sprout event: @mention]\nContent: @Eva /goal ship it",
+            ],
+        );
+        let prompt = params["prompt"].as_array().unwrap();
+        assert_eq!(prompt.len(), 2);
+        assert_eq!(prompt[0]["type"].as_str(), Some("text"));
+        assert_eq!(prompt[0]["text"].as_str(), Some("/goal ship it"));
+        assert!(prompt[0]["text"].as_str().unwrap().starts_with('/'));
+        assert_eq!(prompt[1]["type"].as_str(), Some("text"));
     }
 
     #[test]

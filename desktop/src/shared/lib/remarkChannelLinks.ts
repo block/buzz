@@ -2,9 +2,9 @@
  * Remark plugin that detects #channel-name patterns in text nodes and wraps them
  * in custom HAST `channel-link` elements for styled rendering via react-markdown.
  *
- * When `channelNames` is provided, multi-word channel names (e.g. "my channel")
- * are matched first (longest-first to avoid partial matches), then the plugin
- * falls back to the generic `#\S+` pattern for unknown channels.
+ * Known channel names are matched longest-first to avoid partial matches. When
+ * no known names are provided, falls back to `#\S+` so that channel links still
+ * render while the channel list is loading asynchronously.
  */
 
 import { createRemarkPrefixPlugin } from "./createRemarkPrefixPlugin";
@@ -17,7 +17,9 @@ type RemarkChannelLinksOptions = {
 export default function remarkChannelLinks(
   options?: RemarkChannelLinksOptions,
 ) {
-  const channelPattern = buildPrefixPattern("#", options?.channelNames ?? []);
+  const channelPattern = buildPrefixPattern("#", options?.channelNames ?? [], {
+    fallbackToGeneric: true,
+  });
 
   return createRemarkPrefixPlugin(channelPattern, (matchText) => {
     const channelName = matchText.slice(1);

@@ -204,6 +204,10 @@ REPLY_ID=$(echo "$REPLY" | jq -r '.event_id')
 # messages send with mentions — @name in content is auto-resolved, no flag needed
 sprout messages send --channel "$CHANNEL_ID" --content "Hey @someone" | jq .
 
+# messages send with NIP-27 nostr:npub1… inline mention — auto-resolved to p-tag
+sprout messages send --channel "$CHANNEL_ID" \
+  --content "Check with nostr:npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg on this" | jq .
+
 # messages send from stdin — safe path for content with shell metacharacters
 # (backticks, $vars, code blocks) that would otherwise be expanded by the shell.
 echo 'Body with `backticks` and $vars stays literal.' \

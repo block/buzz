@@ -3,6 +3,11 @@ import { getVersion } from "@tauri-apps/api/app";
 import { ArrowLeft } from "lucide-react";
 
 import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
+import { getFeature } from "@/shared/features/manifest";
+import {
+  resolveEnabled,
+  useFeatureSnapshot,
+} from "@/shared/features/useFeatureEnabled";
 import { cn } from "@/shared/lib/cn";
 import {
   Sidebar,
@@ -57,7 +62,14 @@ const settingsNavGroups: Array<{
   },
   {
     label: "App",
-    sections: ["agents", "compute", "mobile", "updates", "doctor"],
+    sections: [
+      "agents",
+      "compute",
+      "experimental",
+      "mobile",
+      "updates",
+      "doctor",
+    ],
   },
 ];
 
@@ -114,9 +126,21 @@ export function SettingsView({
 }: SettingsViewProps) {
   const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
   const myMembershipQuery = useMyRelayMembershipQuery();
+  const featureState = useFeatureSnapshot();
   const visibleSections = React.useMemo(() => {
     const membership = myMembershipQuery.data;
+
     return settingsSections.filter((s) => {
+      // Feature gate check. Manifest is preview-only — if the gate id is in
+      // the manifest, it's preview and needs an opt-in; if it's not, it's
+      // stable and renders unconditionally (fail-open).
+      if (s.featureGate) {
+        const feature = getFeature(s.featureGate);
+        if (feature && !resolveEnabled(s.featureGate, featureState)) {
+          return false;
+        }
+      }
+      // Relay members requires admin/owner role
       if (s.value === "relay-members") {
         return (
           membership != null &&
@@ -125,7 +149,7 @@ export function SettingsView({
       }
       return true;
     });
-  }, [myMembershipQuery.data]);
+  }, [myMembershipQuery.data, featureState]);
 
   const [isLoaded, setIsLoaded] = React.useState(false);
   const [appVersion, setAppVersion] = React.useState<string | null>(null);

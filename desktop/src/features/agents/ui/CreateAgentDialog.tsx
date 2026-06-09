@@ -36,8 +36,8 @@ import {
 } from "./ProviderConfigFields";
 import { CreateAgentRespondToField } from "./RespondToField";
 import { RelayMeshAgentSection } from "@/features/mesh-compute/ui/RelayMeshAgentSection";
+import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 import type { MeshServeTarget } from "@/shared/api/tauriMesh";
-import { startRelayMeshClientForTarget } from "@/features/mesh-compute/startRelayMeshClientForTarget";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 
 // ── Dialog ────────────────────────────────────────────────────────────────────
@@ -102,6 +102,10 @@ export function CreateAgentDialog({
   const [meshClientError, setMeshClientError] = React.useState<string | null>(
     null,
   );
+  // True while the relay-mesh client preflight (connect-request + dial) runs
+  // inside handleSubmit. That await can take tens of seconds and happens
+  // before createMutation fires, so isPending alone leaves the button live.
+  const [meshPreparing, setMeshPreparing] = React.useState(false);
 
   const runtimes = providersQuery.data ?? [];
   const allProviders = allProvidersQuery.data ?? [];
@@ -323,6 +327,7 @@ export function CreateAgentDialog({
     // Relay-mesh mode requires a concrete serve target, not just a model name.
     !(useMesh && (meshModelId.trim().length === 0 || meshTarget == null)) &&
     respondToValid &&
+    !meshPreparing &&
     !createMutation.isPending;
 
   async function handleSubmit() {
@@ -330,7 +335,18 @@ export function CreateAgentDialog({
     try {
       if (useMesh) {
         try {
-          await startRelayMeshClientForTarget(meshModelId.trim(), meshTarget);
+          if (!meshTarget) {
+            setMeshClientError(
+              "Select a relay mesh serve target before creating the agent.",
+            );
+            return;
+          }
+          setMeshPreparing(true);
+          try {
+            await meshPrepareRelayMeshClient(meshModelId.trim(), meshTarget);
+          } finally {
+            setMeshPreparing(false);
+          }
         } catch (err) {
           setMeshClientError(err instanceof Error ? err.message : String(err));
           return;
@@ -394,6 +410,7 @@ export function CreateAgentDialog({
             systemPrompt: systemPrompt.trim() || undefined,
             envVars,
             model: useMesh ? meshModelId.trim() || undefined : undefined,
+            relayMesh: useMesh ? { modelRef: meshModelId.trim() } : undefined,
             spawnAfterCreate,
             // Relay-mesh agents need a freshly selected serve target to start;
             // do not auto-restore them later with only the saved model/env.
@@ -660,7 +677,11 @@ export function CreateAgentDialog({
               size="sm"
               type="button"
             >
-              {createMutation.isPending ? "Creating..." : "Create agent"}
+              {meshPreparing
+                ? "Connecting to mesh..."
+                : createMutation.isPending
+                  ? "Creating..."
+                  : "Create agent"}
             </Button>
           </div>
         </div>

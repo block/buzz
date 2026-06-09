@@ -174,6 +174,21 @@ impl SubscriptionRegistry {
         sub_ids
     }
 
+    /// Return the distinct connection IDs holding any subscription scoped to
+    /// `channel_id` (both kind-filtered and wildcard channel subscriptions).
+    pub fn channel_subscriber_conns(&self, channel_id: Uuid) -> Vec<ConnId> {
+        let mut conns: HashSet<ConnId> = HashSet::new();
+        for entry in self.channel_kind_index.iter() {
+            if entry.key().channel_id == channel_id {
+                conns.extend(entry.value().iter().map(|(conn_id, _)| *conn_id));
+            }
+        }
+        if let Some(entry) = self.channel_wildcard_index.get(&channel_id) {
+            conns.extend(entry.value().iter().map(|(conn_id, _)| *conn_id));
+        }
+        conns.into_iter().collect()
+    }
+
     /// Return all (conn_id, sub_id) pairs whose filters match the given event.
     pub fn fan_out(&self, event: &StoredEvent) -> Vec<(ConnId, SubId)> {
         let mut results = Vec::new();
@@ -926,6 +941,50 @@ mod tests {
         let matches_b = registry.fan_out(&event_b);
         assert_eq!(matches_b.len(), 1);
         assert_eq!(matches_b[0].1, "sub-b");
+    }
+
+    #[test]
+    fn test_channel_subscriber_conns_dedupes_and_scopes_to_channel() {
+        let registry = SubscriptionRegistry::new();
+        let conn_a = Uuid::new_v4();
+        let conn_b = Uuid::new_v4();
+        let conn_other = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        let channel_other = Uuid::new_v4();
+
+        // conn_a: a kinded + a wildcard sub on the channel — must dedupe to one entry.
+        registry.register(
+            conn_a,
+            "kinded".to_string(),
+            vec![Filter::new().kind(Kind::TextNote)],
+            Some(channel),
+        );
+        registry.register(
+            conn_a,
+            "wildcard".to_string(),
+            vec![Filter::new()],
+            Some(channel),
+        );
+        // conn_b: kinded sub on the channel.
+        registry.register(
+            conn_b,
+            "b".to_string(),
+            vec![Filter::new().kind(Kind::Metadata)],
+            Some(channel),
+        );
+        // conn_other: subscribed to a different channel — must be excluded.
+        registry.register(
+            conn_other,
+            "other".to_string(),
+            vec![Filter::new().kind(Kind::TextNote)],
+            Some(channel_other),
+        );
+
+        let mut conns = registry.channel_subscriber_conns(channel);
+        conns.sort();
+        let mut expected = vec![conn_a, conn_b];
+        expected.sort();
+        assert_eq!(conns, expected);
     }
 
     #[test]

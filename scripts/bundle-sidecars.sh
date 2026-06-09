@@ -2,21 +2,30 @@
 set -euo pipefail
 
 SIDECARS=(sprout-acp sprout-agent sprout-dev-mcp git-credential-nostr sprout)
-TARGET=${1:-$(rustc -vV | sed -n 's|host: ||p')}
+HOST=$(rustc -vV | sed -n 's|host: ||p')
+TARGET=${1:-$HOST}
 BINARIES_DIR="desktop/src-tauri/binaries"
+
+# A cross-target build (`cargo build --target <triple>`) emits to
+# target/<triple>/release; a host build emits to target/release.
+if [[ "$TARGET" == "$HOST" ]]; then
+    SRC_DIR="target/release"
+else
+    SRC_DIR="target/${TARGET}/release"
+fi
 
 missing=()
 for bin in "${SIDECARS[@]}"; do
-    [[ -f "target/release/$bin" ]] || missing+=("$bin")
+    [[ -f "$SRC_DIR/$bin" ]] || missing+=("$bin")
 done
 if [[ ${#missing[@]} -gt 0 ]]; then
-    echo "Error: missing release binaries: ${missing[*]}" >&2
+    echo "Error: missing release binaries in $SRC_DIR: ${missing[*]}" >&2
     echo "Run 'cargo build --release -p sprout-acp -p sprout-agent -p sprout-dev-mcp -p git-credential-nostr -p sprout-cli' first." >&2
     exit 1
 fi
 
 mkdir -p "$BINARIES_DIR"
 for bin in "${SIDECARS[@]}"; do
-    cp "target/release/$bin" "$BINARIES_DIR/${bin}-${TARGET}"
+    cp "$SRC_DIR/$bin" "$BINARIES_DIR/${bin}-${TARGET}"
 done
 echo "Sidecars bundled for $TARGET"

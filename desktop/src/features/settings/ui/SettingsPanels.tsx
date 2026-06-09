@@ -5,6 +5,7 @@ import {
   Check,
   Cpu,
   Download,
+  FlaskConical,
   Keyboard,
   LayoutTemplate,
   LockKeyhole,
@@ -33,6 +34,7 @@ import {
 import { SYNTAX_THEMES, isLightTheme } from "@/shared/theme/theme-loader";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
 import { DoctorSettingsPanel } from "./DoctorSettingsPanel";
+import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
 import { MobilePairingCard } from "./MobilePairingCard";
@@ -44,6 +46,7 @@ import { UpdateChecker } from "../UpdateChecker";
 export type SettingsSection =
   | "profile"
   | "notifications"
+  | "experimental"
   | "agents"
   | "channel-templates"
   | "compute"
@@ -61,6 +64,8 @@ export type SettingsSectionDescriptor = {
   value: SettingsSection;
   label: string;
   icon: LucideIcon;
+  /** If set, this section is only visible when the feature is enabled */
+  featureGate?: string;
 };
 
 export type SettingsPanelProps = {
@@ -94,14 +99,21 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     icon: BellRing,
   },
   {
+    value: "experimental",
+    label: "Experiments",
+    icon: FlaskConical,
+  },
+  {
     value: "agents",
     label: "Agents",
     icon: Bot,
+    featureGate: "managed-agents",
   },
   {
     value: "channel-templates",
     label: "Templates",
     icon: LayoutTemplate,
+    featureGate: "channel-templates",
   },
   {
     value: "compute",
@@ -122,6 +134,7 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "custom-emoji",
     label: "Custom Emoji",
     icon: Smile,
+    featureGate: "custom-emoji",
   },
   {
     value: "mobile",
@@ -137,6 +150,7 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "doctor",
     label: "Doctor",
     icon: Stethoscope,
+    featureGate: "doctor",
   },
 ];
 
@@ -296,6 +310,8 @@ export function renderSettingsSection(
           onSetSoundEnabled={props.onSetSoundEnabled}
         />
       );
+    case "experimental":
+      return <ExperimentalFeaturesCard />;
     case "agents":
       return <PreventSleepSettingsCard />;
     case "channel-templates":

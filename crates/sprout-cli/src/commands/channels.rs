@@ -350,7 +350,7 @@ pub async fn cmd_update_channel(
     }
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = sprout_sdk::build_update_channel(channel_uuid, name, description)
+    let builder = sprout_sdk::build_update_channel(channel_uuid, name, description, None, None)
         .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
 
     let event = client.sign_event(builder)?;

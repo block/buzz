@@ -259,6 +259,111 @@ jobs:
           ARCHIVE_PATH: ${{ steps.artifacts.outputs.archive }}
           SIG_PATH: ${{ steps.artifacts.outputs.sig }}
 
+  release-macos-x64:
+    name: Release macOS (Intel)
+    runs-on: macos-latest
+    needs: release
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      id-token: write # required by block/apple-codesign-action for OIDC
+    env:
+      VERSION: ${{ needs.release.outputs.version }}
+      TARGET: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
+          persist-credentials: false
+
+      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+
+      - name: Add Rust target
+        run: rustup target add "$TARGET"
+
+      - name: Patch version
+        run: |
+          cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
+          cd src-tauri && cargo update --workspace
+
+      - name: Generate release config
+        run: cd desktop && node scripts/build-release-config.mjs
+        env:
+          SPROUT_UPDATER_PUBLIC_KEY: ${{ secrets.SPROUT_UPDATER_PUBLIC_KEY }}
+          SPROUT_UPDATER_ENDPOINT: https://github.com/block/sprout/releases/download/sprout-desktop-latest/latest.json
+
+      - name: Build sidecars
+        run: |
+          cargo build --release --target "$TARGET" -p sprout-acp -p sprout-agent -p sprout-dev-mcp -p git-credential-nostr -p sprout-cli
+          ./scripts/bundle-sidecars.sh "$TARGET"
+
+      - name: Build unsigned Tauri app
+        run: cd desktop && pnpm tauri build --verbose --no-sign --target "$TARGET" --config src-tauri/tauri.release.conf.json
+        env:
+          SPROUT_UPDATER_PUBLIC_KEY: ${{ secrets.SPROUT_UPDATER_PUBLIC_KEY }}
+          SPROUT_UPDATER_ENDPOINT: https://github.com/block/sprout/releases/download/sprout-desktop-latest/latest.json
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
+          CMAKE_OSX_DEPLOYMENT_TARGET: "10.15"
+
+      - name: Locate unsigned DMG
+        id: unsigned
+        run: |
+          BUNDLE_DIR="desktop/src-tauri/target/${TARGET}/release/bundle"
+          DMG=$(find "$BUNDLE_DIR/dmg" -name '*.dmg' -type f | head -1)
+          if [[ -z "$DMG" ]]; then
+            echo "::error::No DMG found in $BUNDLE_DIR/dmg"
+            exit 1
+          fi
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+
+      - name: Codesign and Notarize
+        id: codesign
+        uses: block/apple-codesign-action@679535d1ab7c5a7c18e6f9afcba3464512cc3dde # v1.1.0
+        with:
+          osx-codesign-role: ${{ secrets.OSX_CODESIGN_ROLE }}
+          codesign-s3-bucket: ${{ secrets.CODESIGN_S3_BUCKET }}
+          unsigned-artifact-path: ${{ steps.unsigned.outputs.dmg }}
+          entitlements-plist-path: desktop/src-tauri/Entitlements.plist
+          artifact-name: sprout-${{ github.sha }}-${{ github.run_id }}-x64
+
+      - name: Replace DMG and signed .app
+        env:
+          SIGNED_DMG: ${{ steps.codesign.outputs.signed-dmg-path }}
+          SIGNED_APP_ZIP: ${{ steps.codesign.outputs.signed-artifact-path }}
+          UNSIGNED_DMG: ${{ steps.unsigned.outputs.dmg }}
+        run: |
+          set -euo pipefail
+          APP_DIR="desktop/src-tauri/target/${TARGET}/release/bundle/macos"
+
+          # Replace the unsigned DMG with the signed/notarized one.
+          cp "$SIGNED_DMG" "$UNSIGNED_DMG"
+
+          # Swap the unsigned .app for the signed .app from the action's zip,
+          # so the verify step below checks the signed bundle (matches arm64).
+          EXTRACT_DIR="${RUNNER_TEMP}/signed-app-extract-x64"
+          rm -rf "$EXTRACT_DIR" && mkdir -p "$EXTRACT_DIR"
+          ditto -x -k "$SIGNED_APP_ZIP" "$EXTRACT_DIR"
+          rm -rf "${APP_DIR}/Sprout.app"
+          cp -R "${EXTRACT_DIR}/Sprout.app" "${APP_DIR}/Sprout.app"
+
+      - name: Verify code signature
+        run: |
+          APP_DIR="desktop/src-tauri/target/${TARGET}/release/bundle/macos/Sprout.app"
+          codesign --verify --deep --strict --verbose=2 "$APP_DIR"
+          spctl --assess --type execute --verbose=4 "$APP_DIR"
+
+      - name: Upload Intel DMG to versioned GitHub release
+        run: gh release upload "v${VERSION}" "$DMG_PATH" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DMG_PATH: ${{ steps.unsigned.outputs.dmg }}
+
   release-linux:
     name: Release Linux
     runs-on: ubuntu-latest

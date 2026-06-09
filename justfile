@@ -217,6 +217,9 @@ mesh-e2e:
 
 # Mesh-compute Layer 1: REAL serve->client->inference on this machine (not CI)
 mesh-e2e-hardware:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     cargo run -p sprout-relay --example mesh_serve_client_smoke
 
 # Run all checks suitable for CI / pre-push (no infra needed)
@@ -283,6 +286,7 @@ staging *ARGS: _ensure-sidecar-stubs
     set -euo pipefail
     pnpm install
     cargo build --release -p sprout-acp -p sprout-agent -p sprout-dev-mcp -p sprout-cli
+    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     cp target/release/sprout "desktop/src-tauri/binaries/sprout-${TARGET}"

@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.3.14
+
+bfafdd46b29 fix(sdk): resolve multi-word display names and add NIP-27 nostr:npub mention extraction (#905)
+15f610dcd5c fix(desktop): re-enable mcp_command reconciliation and harden spawn site (#909)
+da80c7340f3 Fix desktop DM and sidebar UI polish (#908)
+dd08f988dec Animate reaction counts (#904)
+10b6674bd79 Mobile custom emoji + settings redesign (#906)
+732e23dd5c3 Renew TTL when unarchiving ephemeral channels (#902)
+
+
 ## v0.3.13
 
 ecca5e77e4e Collapse channel header actions (#901)

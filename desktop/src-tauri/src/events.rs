@@ -158,14 +158,24 @@ pub fn build_leave(channel_id: Uuid) -> Result<EventBuilder, String> {
     Ok(EventBuilder::new(Kind::Custom(9022), "").tags(tags))
 }
 
-/// Kind 9002 — update channel name/description.
+/// Kind 9002 — update channel name/description/visibility/ttl.
+///
+/// `ttl`: outer `None` leaves it unchanged; `Some(Some(secs))` sets the
+/// ephemeral timeout; `Some(None)` clears it (emits `["ttl", ""]`).
 pub fn build_update_channel(
     channel_id: Uuid,
     name: Option<&str>,
     about: Option<&str>,
+    visibility: Option<&str>,
+    ttl: Option<Option<i32>>,
 ) -> Result<EventBuilder, String> {
-    if name.is_none() && about.is_none() {
-        return Err("at least one of name or about must be provided".into());
+    if name.is_none() && about.is_none() && visibility.is_none() && ttl.is_none() {
+        return Err("at least one of name, about, visibility, or ttl must be provided".into());
+    }
+    if let Some(v) = visibility {
+        if v != "open" && v != "private" {
+            return Err("visibility must be \"open\" or \"private\"".into());
+        }
     }
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     if let Some(n) = name {
@@ -173,6 +183,15 @@ pub fn build_update_channel(
     }
     if let Some(a) = about {
         tags.push(tag(vec!["about", a])?);
+    }
+    if let Some(v) = visibility {
+        tags.push(tag(vec!["visibility", v])?);
+    }
+    if let Some(ttl) = ttl {
+        match ttl {
+            Some(secs) => tags.push(tag(vec!["ttl", &secs.to_string()])?),
+            None => tags.push(tag(vec!["ttl", ""])?),
+        }
     }
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
 }

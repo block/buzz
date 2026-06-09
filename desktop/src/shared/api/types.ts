@@ -57,6 +57,9 @@ export type UpdateChannelInput = {
   channelId: string;
   name?: string;
   description?: string;
+  visibility?: ChannelVisibility;
+  /** Omit to leave unchanged, `null` to clear (permanent), or a positive number of seconds to set. */
+  ttlSeconds?: number | null;
 };
 
 export type SetChannelTopicInput = {
@@ -318,6 +321,10 @@ export type BackendProviderProbeResult = {
   config_schema?: Record<string, unknown>;
 };
 
+export type RelayMeshConfig = {
+  modelRef: string;
+};
+
 export type CreateManagedAgentInput = {
   name: string;
   personaId?: string;
@@ -345,6 +352,7 @@ export type CreateManagedAgentInput = {
    * normalized server-side (must be 64 hex chars each).
    */
   respondToAllowlist?: string[];
+  relayMesh?: RelayMeshConfig;
 };
 
 export type CreateManagedAgentResponse = {

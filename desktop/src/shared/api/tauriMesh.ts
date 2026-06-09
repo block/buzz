@@ -103,6 +103,15 @@ export async function meshEnsureClientNode(
   });
 }
 
+export async function meshPrepareRelayMeshClient(
+  modelId: string,
+  target: MeshServeTarget,
+): Promise<MeshNodeStatus> {
+  return await invokeTauri<MeshNodeStatus>("mesh_prepare_relay_mesh_client", {
+    request: { modelId, target },
+  });
+}
+
 export async function meshDialEndpointAddr(
   endpointAddr: string,
 ): Promise<MeshNodeStatus> {

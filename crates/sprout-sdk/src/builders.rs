@@ -534,16 +534,28 @@ pub fn build_leave(channel_id: Uuid) -> Result<EventBuilder, SdkError> {
 
 // ── Builder 16: build_update_channel ─────────────────────────────────────────
 
-/// Build a NIP-29 edit-metadata event for name/about (kind 9002).
+/// Build a NIP-29 edit-metadata event for name/about/visibility/ttl (kind 9002).
+///
+/// `ttl`: outer `None` leaves it unchanged; `Some(Some(secs))` sets the
+/// ephemeral timeout; `Some(None)` clears it (emits `["ttl", ""]`).
 pub fn build_update_channel(
     channel_id: Uuid,
     name: Option<&str>,
     about: Option<&str>,
+    visibility: Option<&str>,
+    ttl: Option<Option<i32>>,
 ) -> Result<EventBuilder, SdkError> {
-    if name.is_none() && about.is_none() {
+    if name.is_none() && about.is_none() && visibility.is_none() && ttl.is_none() {
         return Err(SdkError::InvalidTag(
-            "at least one of name or about must be provided".into(),
+            "at least one of name, about, visibility, or ttl must be provided".into(),
         ));
+    }
+    if let Some(v) = visibility {
+        if v != "open" && v != "private" {
+            return Err(SdkError::InvalidTag(
+                "visibility must be \"open\" or \"private\"".into(),
+            ));
+        }
     }
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(n) = name {
@@ -551,6 +563,15 @@ pub fn build_update_channel(
     }
     if let Some(a) = about {
         tags.push(tag(&["about", a])?);
+    }
+    if let Some(v) = visibility {
+        tags.push(tag(&["visibility", v])?);
+    }
+    if let Some(ttl) = ttl {
+        match ttl {
+            Some(secs) => tags.push(tag(&["ttl", &secs.to_string()])?),
+            None => tags.push(tag(&["ttl", ""])?),
+        }
     }
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
 }
@@ -1606,17 +1627,45 @@ mod tests {
     #[test]
     fn update_channel_name_and_about() {
         let cid = uuid();
-        let ev = sign(build_update_channel(cid, Some("new-name"), Some("new about")).unwrap());
+        let ev = sign(
+            build_update_channel(cid, Some("new-name"), Some("new about"), None, None).unwrap(),
+        );
         assert_eq!(ev.kind.as_u16(), 9002);
         assert!(has_tag(&ev, "name", "new-name"));
         assert!(has_tag(&ev, "about", "new about"));
     }
 
     #[test]
+    fn update_channel_visibility_and_ttl() {
+        let cid = uuid();
+        let ev =
+            sign(build_update_channel(cid, None, None, Some("private"), Some(Some(3600))).unwrap());
+        assert_eq!(ev.kind.as_u16(), 9002);
+        assert!(has_tag(&ev, "visibility", "private"));
+        assert!(has_tag(&ev, "ttl", "3600"));
+    }
+
+    #[test]
+    fn update_channel_clears_ttl() {
+        let cid = uuid();
+        let ev = sign(build_update_channel(cid, None, None, None, Some(None)).unwrap());
+        assert!(has_tag(&ev, "ttl", ""));
+    }
+
+    #[test]
+    fn update_channel_invalid_visibility_rejected() {
+        let cid = uuid();
+        assert!(matches!(
+            build_update_channel(cid, None, None, Some("secret"), None),
+            Err(SdkError::InvalidTag(_))
+        ));
+    }
+
+    #[test]
     fn update_channel_no_fields_rejected() {
         let cid = uuid();
         assert!(matches!(
-            build_update_channel(cid, None, None),
+            build_update_channel(cid, None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }

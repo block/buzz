@@ -329,22 +329,41 @@ pub async fn create_channel(
         .ok_or_else(|| "channel created but metadata not yet available".to_string())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateChannelInput {
+    pub channel_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub visibility: Option<String>,
+    /// Absent = leave unchanged, `null` = clear (permanent), seconds = set.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub ttl_seconds: Option<Option<i32>>,
+}
+
 #[tauri::command]
 pub async fn update_channel(
-    channel_id: String,
-    name: Option<String>,
-    description: Option<String>,
+    input: UpdateChannelInput,
     state: State<'_, AppState>,
 ) -> Result<ChannelDetailInfo, String> {
-    let uuid = parse_channel_uuid(&channel_id)?;
-    let builder = events::build_update_channel(uuid, name.as_deref(), description.as_deref())?;
+    let uuid = parse_channel_uuid(&input.channel_id)?;
+    let builder = events::build_update_channel(
+        uuid,
+        input.name.as_deref(),
+        input.description.as_deref(),
+        input.visibility.as_deref(),
+        input.ttl_seconds,
+    )?;
     submit_event(builder, &state).await?;
 
     let events = query_relay(
         &state,
         &[serde_json::json!({
             "kinds": [39000],
-            "#d": [channel_id],
+            "#d": [input.channel_id],
             "limit": 1
         })],
     )

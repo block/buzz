@@ -6,7 +6,16 @@ const srcRoot = path.resolve(
   "src",
 );
 
+const repoRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
+
 export function resolve(specifier, context, nextResolve) {
+  if (specifier === "@features-manifest") {
+    const resolved = path.join(repoRoot, "preview-features.json");
+    return nextResolve(resolved, context);
+  }
   if (specifier.startsWith("@/")) {
     const resolved = `${srcRoot}/${specifier.slice(2)}.ts`;
     return nextResolve(resolved, context);

@@ -2,9 +2,9 @@
  * Remark plugin that detects @mention patterns in text nodes and wraps them
  * in custom HAST `mention` elements for styled rendering via react-markdown.
  *
- * When `mentionNames` is provided, multi-word display names (e.g. "John Doe")
- * are matched first (longest-first to avoid partial matches), then the plugin
- * falls back to the generic `@\S+` pattern for unknown mentions.
+ * Only p-tagged member names are highlighted — multi-word display names
+ * (e.g. "John Doe") are matched longest-first to avoid partial matches.
+ * When no known names are provided, nothing is highlighted.
  */
 
 import { createRemarkPrefixPlugin } from "./createRemarkPrefixPlugin";

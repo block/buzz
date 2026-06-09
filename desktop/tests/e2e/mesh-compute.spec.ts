@@ -5,7 +5,7 @@ import { openSettings } from "../helpers/settings";
 
 // Layer 3 of the mesh e2e: the desktop UI contract for mesh-compute, driven
 // through the real UI + the (mocked) Tauri mesh commands. Asserts the bridge
-// CALL ORDER, not just labels — in particular the ensure-before-spawn
+// CALL ORDER, not just labels — in particular the prepare-before-spawn
 // invariant and the membership-denial copy.
 
 type E2eWindow = Window & {
@@ -170,15 +170,15 @@ test("Run-on-relay-mesh ensures the client node BEFORE spawning the agent", asyn
     .poll(async () => (await commands(page)).slice(before))
     .toContain("create_managed_agent");
 
-  // The invariant: within the Create action, ensure runs BEFORE create.
+  // The invariant: within the Create action, prepare runs BEFORE create.
   const slice = (await commands(page)).slice(before);
-  const ensureIdx = slice.indexOf("mesh_ensure_client_node");
+  const prepareIdx = slice.indexOf("mesh_prepare_relay_mesh_client");
   const createIdx = slice.indexOf("create_managed_agent");
   expect(
-    ensureIdx,
-    "ensure must occur in the Create action",
+    prepareIdx,
+    "prepare must occur in the Create action",
   ).toBeGreaterThanOrEqual(0);
-  expect(ensureIdx).toBeLessThan(createIdx);
+  expect(prepareIdx).toBeLessThan(createIdx);
 });
 
 test("Run-on-relay-mesh skips connect signaling for own serve target", async ({
@@ -204,7 +204,7 @@ test("Run-on-relay-mesh skips connect signaling for own serve target", async ({
     .toContain("create_managed_agent");
 
   const slice = (await commands(page)).slice(before);
-  expect(slice).toContain("mesh_ensure_client_node");
+  expect(slice).toContain("mesh_prepare_relay_mesh_client");
   expect(
     (await signedEvents(page)).filter((event) => event.kind === 24621),
   ).toHaveLength(0);

@@ -918,6 +918,12 @@ pub async fn run_prompt_task(
 
     // ── Build prompt text (with optional context fetch) ──────────────────
 
+    // When the batch is a single slash-command message (e.g. "@Eva /goal …"),
+    // `slash_command` holds the bare command. It is sent as the FIRST prompt
+    // content block so ACP connectors' slash-command detection
+    // (`prompt[0].text.startsWith("/")`) fires; the wrapped Sprout context
+    // follows as a second block.
+    let mut slash_command: Option<String> = None;
     let prompt_text = if let Some(text) = prompt_text {
         // Pre-built prompt (heartbeat or legacy path).
         text
@@ -940,6 +946,22 @@ pub async fn run_prompt_task(
 
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
+
+        let known_names: Vec<&str> = profile_lookup
+            .iter()
+            .flat_map(|lookup| lookup.values())
+            .flat_map(|p| [p.display_name.as_deref(), p.nip05_handle.as_deref()])
+            .flatten()
+            .collect();
+        slash_command = crate::queue::slash_command_for_batch(b, &known_names);
+        if let Some(ref cmd) = slash_command {
+            tracing::info!(
+                target: "pool::prompt",
+                channel = %b.channel_id,
+                command = %cmd,
+                "slash-command pass-through"
+            );
+        }
 
         let agent_core_section = agent.state.core_sections.get(&b.channel_id).cloned();
         crate::queue::format_prompt(
@@ -979,6 +1001,13 @@ pub async fn run_prompt_task(
 
     // ── Send the actual prompt ────────────────────────────────────────────
 
+    // Slash-command pass-through sends two text blocks: the bare command
+    // first (so connector detection fires), then the wrapped Sprout context.
+    let prompt_blocks: Vec<&str> = match slash_command {
+        Some(ref cmd) => vec![cmd.as_str(), prompt_text.as_str()],
+        None => vec![prompt_text.as_str()],
+    };
+
     // ── Cancel-aware prompt dispatch ──────────────────────────────────────
     // When cancel_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can interrupt it. Heartbeats (cancel_rx=None) take the
@@ -988,9 +1017,9 @@ pub async fn run_prompt_task(
             // Heartbeat / non-cancellable path.
             agent
                 .acp
-                .session_prompt_with_idle_timeout(
+                .session_prompt_blocks_with_idle_timeout(
                     &session_id,
-                    &prompt_text,
+                    &prompt_blocks,
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 )
@@ -999,9 +1028,9 @@ pub async fn run_prompt_task(
         Some(rx) => {
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_with_idle_timeout(
+                result = agent.acp.session_prompt_blocks_with_idle_timeout(
                     &session_id,
-                    &prompt_text,
+                    &prompt_blocks,
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,

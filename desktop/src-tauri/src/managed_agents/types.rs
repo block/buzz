@@ -141,6 +141,36 @@ pub struct ManagedAgentRecord {
     /// Preserved across mode toggles so users don't lose state.
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
+    /// inference through Sprout's relay-mesh local endpoint; the `model_ref` is
+    /// the served model id to route to. `None` is a normal agent.
+    ///
+    /// This is the source of truth for "is this a mesh agent + which model" —
+    /// replacing the old practice of sniffing it back out of `env_vars`
+    /// (`relay_mesh_config`). Spawn-time env vars are *derived from* this, not
+    /// the other way around. `#[serde(default)]` so pre-existing saved records
+    /// deserialize as `None` and are resolved via the env-var fallback until
+    /// they are rewritten with this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_mesh: Option<RelayMeshConfig>,
+}
+
+/// Typed relay-mesh configuration carried on a [`ManagedAgentRecord`].
+///
+/// Feature-independent on purpose: the field is always present in the record
+/// schema so saved agents round-trip identically whether or not the `mesh-llm`
+/// feature is compiled in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayMeshConfig {
+    /// The served model id this agent routes to (e.g. "Qwen3").
+    ///
+    /// `alias` because this struct crosses two boundaries with different
+    /// casing conventions: the TS create request sends camelCase
+    /// (`relayMesh: { modelRef }` — `rename_all` on the request does not
+    /// recurse into nested structs), while persisted records use snake_case.
+    /// Serialization stays `model_ref` so saved records are stable.
+    #[serde(alias = "modelRef")]
+    pub model_ref: String,
 }
 
 #[derive(Debug)]
@@ -219,6 +249,8 @@ pub struct CreateManagedAgentRequest {
     /// before being written to the record.
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    #[serde(default)]
+    pub relay_mesh: Option<RelayMeshConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -739,5 +771,43 @@ mod tests {
         // (Allowlist mode requires ≥1 entry) is the caller's job.
         let result = validate_respond_to_allowlist(&[]).unwrap();
         assert!(result.is_empty());
+    }
+
+    use super::{CreateManagedAgentRequest, RelayMeshConfig};
+
+    /// Wire-shape test: the create request arrives from TS as camelCase
+    /// (`relayMesh: { modelRef }`). `rename_all = "camelCase"` on
+    /// `CreateManagedAgentRequest` does NOT recurse into nested structs, so
+    /// `RelayMeshConfig` needs its own `alias = "modelRef"`. This test pins
+    /// the exact JSON the frontend sends; if the alias is dropped, creating
+    /// a relay-mesh agent fails to deserialize at the Tauri boundary.
+    #[test]
+    fn create_request_deserializes_camel_case_relay_mesh() {
+        let request: CreateManagedAgentRequest = serde_json::from_str(
+            r#"{
+                "name": "mesh-agent",
+                "relayMesh": { "modelRef": "Qwen3" }
+            }"#,
+        )
+        .expect("camelCase relayMesh payload from TS should deserialize");
+        assert_eq!(
+            request.relay_mesh,
+            Some(RelayMeshConfig {
+                model_ref: "Qwen3".to_string()
+            })
+        );
+    }
+
+    /// Persisted records use snake_case; the camelCase alias must not break
+    /// the stored-record round trip.
+    #[test]
+    fn relay_mesh_config_round_trips_snake_case() {
+        let config = RelayMeshConfig {
+            model_ref: "Qwen3".to_string(),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert_eq!(json, r#"{"model_ref":"Qwen3"}"#);
+        let back: RelayMeshConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
     }
 }

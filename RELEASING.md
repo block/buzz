@@ -88,6 +88,16 @@ Each release produces two GitHub releases:
 
 ---
 
+## Platform Support
+
+The release workflow builds **two separate macOS DMGs** — Apple
+Silicon (`darwin-aarch64`, the `release` job) and Intel
+(`darwin-x86_64`, the `release-macos-x64` job) — plus Linux `.deb` and
+`.AppImage`. Both macOS DMGs are codesigned, notarized, and attached to
+the same `v<version>` release. Intel users download the `_x64.dmg`.
+
+---
+
 ## Prerequisites
 
 - **Write access** to the `block/sprout` GitHub repository
@@ -114,4 +124,8 @@ Commit or stash your changes before running `just release`.
 The version string must be valid semver: `MAJOR.MINOR.PATCH` with an optional pre-release suffix. Do not include a `v` prefix.
 
 ### Auto-updater reports "no update available"
-Verify that the `sprout-desktop-latest` release exists and contains a valid `latest.json`.
+Verify that the `sprout-desktop-latest` release exists and contains a
+valid `latest.json`. The auto-updater manifest currently lists
+`darwin-aarch64` only, so Intel and Linux users do not yet receive
+auto-updates — they download new versions manually from the release
+page. (Adding their entries to `latest.json` is a follow-up.)

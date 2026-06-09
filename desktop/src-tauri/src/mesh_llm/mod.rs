@@ -1,5 +1,11 @@
 use std::collections::BTreeMap;
 
+mod coordinator;
+pub(crate) use coordinator::{
+    publish_current_status_once, publish_stopped_status_once, RelayMeshConnectRequest,
+};
+pub use coordinator::{spawn_listener, start_client, MeshCoordinator};
+
 mod discovery;
 pub use discovery::{availability_from_events, mesh_status_filter};
 use discovery::{device_name_from_status, endpoint_id_from_status, enrich_status_payload_identity};
@@ -197,9 +203,29 @@ pub struct DesktopMeshRuntime {
     model_name: Option<String>,
 }
 
+fn initialize_mesh_native_runtime() -> anyhow::Result<()> {
+    let cache = mesh_llm_sdk::native_runtime::native_runtime_cache(None)?;
+    let installed = cache.installed()?;
+    let current = mesh_llm_sdk::native_runtime::CURRENT_MESH_VERSION;
+    if !installed
+        .iter()
+        .any(|runtime| runtime.mesh_version == current)
+    {
+        anyhow::bail!(
+            "mesh native runtime for MeshLLM {current} is not installed; run `just staging` or `just mesh-e2e-hardware` to prepare it"
+        );
+    }
+    mesh_llm_host_runtime::initialize_host_runtime().map_err(|error| {
+        anyhow::anyhow!(
+            "mesh native runtime failed to load; run `just staging` or `just mesh-e2e-hardware` to repair it: {error}"
+        )
+    })
+}
+
 impl DesktopMeshRuntime {
     pub async fn start(request: StartMeshNodeRequest) -> anyhow::Result<Self> {
         validate_no_leak_request(&request)?;
+        initialize_mesh_native_runtime()?;
         let model_id = request
             .model_id
             .clone()

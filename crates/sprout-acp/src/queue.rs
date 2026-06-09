@@ -628,6 +628,87 @@ pub fn parse_thread_tags(event: &Event) -> ThreadTags {
     }
 }
 
+// ── Slash command detection ───────────────────────────────────────────────────
+
+/// Extract a leading slash command from message content.
+///
+/// ACP connectors (claude-agent-acp, codex-acp) detect slash commands by
+/// checking whether the **first** prompt content block starts with `/`. Sprout
+/// users must @mention an agent to reach it, so the wire content is typically
+/// `"@Eva /goal ship it"`. This strips leading mention tokens — `@word`,
+/// multi-word display names from `known_names`, and NIP-27 `nostr:npub1…` /
+/// `nostr:nprofile1…` references — and returns the remainder iff it is a
+/// slash command.
+///
+/// Returns `Some("/goal ship it")` when the first non-mention token starts
+/// with `/` followed by an ASCII alphanumeric; `None` otherwise. A `/`
+/// appearing later in the text (e.g. `"@Eva see /tmp/foo"`) never matches.
+pub fn extract_slash_command(content: &str, known_names: &[&str]) -> Option<String> {
+    // Longest-first so "Dawn Smith" wins over "Dawn".
+    let mut names: Vec<&str> = known_names
+        .iter()
+        .copied()
+        .filter(|n| !n.trim().is_empty())
+        .collect();
+    names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+
+    let mut rest = content.trim_start();
+    loop {
+        if rest.starts_with("nostr:npub1") || rest.starts_with("nostr:nprofile1") {
+            // NIP-27 inline reference — skip the whole token.
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            rest = rest[end..].trim_start();
+        } else if let Some(after_at) = rest.strip_prefix('@') {
+            // Known display names first (longest match wins, case-insensitive,
+            // must end at whitespace or end-of-string), then a single-word
+            // token of the characters Sprout allows in plain @mentions.
+            let name_len = names
+                .iter()
+                .find_map(|name| {
+                    let candidate = after_at.get(..name.len())?;
+                    if !candidate.eq_ignore_ascii_case(name) {
+                        return None;
+                    }
+                    match after_at[name.len()..].chars().next() {
+                        None => Some(name.len()),
+                        Some(c) if c.is_whitespace() => Some(name.len()),
+                        _ => None,
+                    }
+                })
+                .or_else(|| {
+                    let len = after_at
+                        .find(|c: char| {
+                            !(c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+                        })
+                        .unwrap_or(after_at.len());
+                    (len > 0).then_some(len)
+                });
+            match name_len {
+                Some(len) => rest = after_at[len..].trim_start(),
+                None => return None, // bare '@' — not a mention
+            }
+        } else {
+            break;
+        }
+    }
+
+    let mut chars = rest.chars();
+    (chars.next() == Some('/') && chars.next().is_some_and(|c| c.is_ascii_alphanumeric()))
+        .then(|| rest.to_string())
+}
+
+/// Return the slash command for a batch, if it qualifies for pass-through.
+///
+/// Pass-through is deliberately conservative: exactly one event, no cancelled
+/// carryover (a cancel + re-prompt needs the merged context format), and
+/// content that is a slash command after leading mentions.
+pub fn slash_command_for_batch(batch: &FlushBatch, known_names: &[&str]) -> Option<String> {
+    if batch.events.len() != 1 || !batch.cancelled_events.is_empty() {
+        return None;
+    }
+    extract_slash_command(&batch.events[0].event.content, known_names)
+}
+
 // ── Prompt formatting ─────────────────────────────────────────────────────────
 
 /// Conversation context fetched by the harness before prompting.
@@ -3001,6 +3082,111 @@ mod tests {
         assert!(
             !prompt.contains("--reply-to"),
             "batched prompt where last event is top-level should NOT include reply instruction"
+        );
+    }
+
+    // ── Slash command extraction ──────────────────────────────────────────────
+
+    /// Build a single-event FlushBatch with the given content.
+    fn make_single_batch(content: &str) -> FlushBatch {
+        FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![BatchEvent {
+                event: make_event(content),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+        }
+    }
+
+    #[test]
+    fn test_extract_slash_command_basic() {
+        assert_eq!(
+            extract_slash_command("/init", &[]),
+            Some("/init".to_string())
+        );
+        assert_eq!(
+            extract_slash_command("@Eva /goal ship it", &[]),
+            Some("/goal ship it".to_string())
+        );
+        // Multiple leading mentions.
+        assert_eq!(
+            extract_slash_command("@Eva @Max /review", &[]),
+            Some("/review".to_string())
+        );
+        // NIP-27 inline reference.
+        assert_eq!(
+            extract_slash_command(
+                "nostr:npub1xhqc4cnnln86lqxk983qulu8yxusfxfhntwl75es2jkvy5zvz26qzr0685 /status",
+                &[]
+            ),
+            Some("/status".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_slash_command_multi_word_display_name() {
+        // "@Dawn Smith /goal" — "Smith /goal" would otherwise be prose.
+        assert_eq!(
+            extract_slash_command("@Dawn Smith /goal go", &["Dawn Smith", "Eva"]),
+            Some("/goal go".to_string())
+        );
+        // Longest match wins over the single-word fallback.
+        assert_eq!(
+            extract_slash_command("@Dawn Smith /goal", &["Dawn"]),
+            None,
+            "single-word match leaves 'Smith /goal' — not a command"
+        );
+    }
+
+    #[test]
+    fn test_extract_slash_command_rejects_non_commands() {
+        // Slash not the first token after mentions.
+        assert_eq!(extract_slash_command("@Eva see /tmp/foo", &[]), None);
+        // Plain message.
+        assert_eq!(extract_slash_command("@Eva hello", &[]), None);
+        // Bare slash or non-alphanumeric after slash.
+        assert_eq!(extract_slash_command("@Eva /", &[]), None);
+        assert_eq!(extract_slash_command("@Eva //comment", &[]), None);
+        // Dot-prefix is NOT a slash command.
+        assert_eq!(extract_slash_command("@Eva .goal", &[]), None);
+        // Bare '@' is not a mention.
+        assert_eq!(extract_slash_command("@ /goal", &[]), None);
+        // Email-like text shouldn't strip.
+        assert_eq!(extract_slash_command("user@host.com /x", &[]), None);
+    }
+
+    #[test]
+    fn test_slash_command_for_batch_gating() {
+        // Single qualifying event → pass-through.
+        assert_eq!(
+            slash_command_for_batch(&make_single_batch("@Eva /init"), &[]),
+            Some("/init".to_string())
+        );
+
+        // Multi-event batch → no pass-through.
+        let mut multi = make_single_batch("@Eva /init");
+        multi.events.push(BatchEvent {
+            event: make_event("another message"),
+            prompt_tag: "test".into(),
+            received_at: Instant::now(),
+        });
+        assert_eq!(slash_command_for_batch(&multi, &[]), None);
+
+        // Cancelled carryover → no pass-through.
+        let mut cancelled = make_single_batch("@Eva /init");
+        cancelled.cancelled_events.push(BatchEvent {
+            event: make_event("interrupted"),
+            prompt_tag: "test".into(),
+            received_at: Instant::now(),
+        });
+        assert_eq!(slash_command_for_batch(&cancelled, &[]), None);
+
+        // Non-command single event → no pass-through.
+        assert_eq!(
+            slash_command_for_batch(&make_single_batch("@Eva hello"), &[]),
+            None
         );
     }
 }

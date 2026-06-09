@@ -1,3 +1,4 @@
+import path from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
@@ -24,6 +25,7 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@": "/src",
+      "@features-manifest": path.resolve(__dirname, "../preview-features.json"),
     },
   },
 

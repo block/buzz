@@ -902,30 +902,42 @@ fn row_to_member_record(row: sqlx::postgres::PgRow) -> Result<MemberRecord> {
 
 // ── Phase 2: Channel Metadata ─────────────────────────────────────────────────
 
-/// Partial update for channel name/description.
+/// Partial update for channel metadata. Every field is `None` to leave the
+/// column unchanged.
+#[derive(Default)]
 pub struct ChannelUpdate {
     /// New channel name, or `None` to leave unchanged.
     pub name: Option<String>,
     /// New channel description, or `None` to leave unchanged.
     pub description: Option<String>,
+    /// New visibility (`"open"`/`"private"`), or `None` to leave unchanged.
+    pub visibility: Option<String>,
+    /// TTL change: outer `None` leaves it unchanged, `Some(None)` clears the
+    /// ephemeral TTL (channel becomes permanent), `Some(Some(secs))` sets it.
+    /// On any change the `ttl_deadline` is reset to `NOW() + ttl_seconds`.
+    pub ttl_seconds: Option<Option<i32>>,
 }
 
-/// Updates channel name and/or description dynamically.
+/// Updates channel metadata dynamically.
 ///
-/// At least one field must be `Some`; returns `InvalidData` otherwise.
+/// At least one field must be provided; returns `InvalidData` otherwise.
 /// Returns the updated `ChannelRecord` on success.
 pub async fn update_channel(
     pool: &PgPool,
     channel_id: Uuid,
     updates: ChannelUpdate,
 ) -> Result<ChannelRecord> {
-    if updates.name.is_none() && updates.description.is_none() {
+    if updates.name.is_none()
+        && updates.description.is_none()
+        && updates.visibility.is_none()
+        && updates.ttl_seconds.is_none()
+    {
         return Err(DbError::InvalidData(
             "at least one field must be provided for update".to_string(),
         ));
     }
 
-    // Build SET clause dynamically — only include fields that are Some.
+    // Build SET clause dynamically — only include fields that are provided.
     // Track parameter index for positional placeholders.
     let mut set_parts: Vec<String> = Vec::new();
     let mut param_idx: usize = 1;
@@ -936,6 +948,22 @@ pub async fn update_channel(
     if updates.description.is_some() {
         set_parts.push(format!("description = ${param_idx}"));
         param_idx += 1;
+    }
+    if updates.visibility.is_some() {
+        set_parts.push(format!("visibility = ${param_idx}::channel_visibility"));
+        param_idx += 1;
+    }
+    if let Some(ref ttl) = updates.ttl_seconds {
+        // Set ttl_seconds, then reset the deadline from now (or clear both).
+        set_parts.push(format!("ttl_seconds = ${param_idx}"));
+        param_idx += 1;
+        match ttl {
+            Some(_) => set_parts.push(format!(
+                "ttl_deadline = NOW() + (${} || ' seconds')::interval",
+                param_idx - 1
+            )),
+            None => set_parts.push("ttl_deadline = NULL".to_string()),
+        }
     }
     let sql = format!(
         "UPDATE channels SET {}, updated_at = NOW() WHERE id = ${param_idx} AND deleted_at IS NULL",
@@ -948,6 +976,12 @@ pub async fn update_channel(
     }
     if let Some(ref desc) = updates.description {
         q = q.bind(desc);
+    }
+    if let Some(ref vis) = updates.visibility {
+        q = q.bind(vis);
+    }
+    if let Some(ref ttl) = updates.ttl_seconds {
+        q = q.bind(*ttl);
     }
     q = q.bind(channel_id);
 

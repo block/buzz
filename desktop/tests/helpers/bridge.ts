@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
 export const TEST_IDENTITIES = {
   tyler: {
@@ -98,6 +99,13 @@ type BridgeOptions = {
   relayWsUrl?: string;
   skipOnboardingSeed?: boolean;
   skipWorkspaceSeed?: boolean;
+  /**
+   * When true (default), seed every preview feature in preview-features.json as
+   * enabled in localStorage so E2E tests can interact with gated UI without
+   * clicking through the Experiments settings panel. Set to false in specs
+   * that exercise the Experiments toggle UI itself.
+   */
+  seedPreviewFeatures?: boolean;
   user?: keyof typeof TEST_IDENTITIES;
 };
 
@@ -141,6 +149,17 @@ async function seedDefaultWorkspace(page: Page, relayWsUrl?: string) {
   );
 }
 
+async function seedPreviewFeaturesEnabled(page: Page) {
+  await page.addInitScript(
+    ({ key, ids }) => {
+      const overrides: Record<string, boolean> = {};
+      for (const id of ids) overrides[id] = true;
+      window.localStorage.setItem(key, JSON.stringify(overrides));
+    },
+    { key: FEATURE_OVERRIDES_STORAGE_KEY, ids: PREVIEW_FEATURE_IDS },
+  );
+}
+
 export async function installBridge(page: Page, options: BridgeOptions) {
   const identity =
     options.mode === "relay"
@@ -154,6 +173,11 @@ export async function installBridge(page: Page, options: BridgeOptions) {
   }
   if (!options.skipOnboardingSeed) {
     await seedOnboardingCompletionForKnownIdentities(page);
+  }
+  // Default to opting every preview feature in. Specs that exercise the
+  // Experiments toggle UI itself pass `seedPreviewFeatures: false`.
+  if (options.seedPreviewFeatures !== false) {
+    await seedPreviewFeaturesEnabled(page);
   }
 
   await page.addInitScript(
@@ -243,19 +267,29 @@ export async function installBridge(page: Page, options: BridgeOptions) {
 export async function installMockBridge(
   page: Page,
   mock?: MockBridgeOptions,
-  options?: { skipOnboardingSeed?: boolean; skipWorkspaceSeed?: boolean },
+  options?: {
+    skipOnboardingSeed?: boolean;
+    skipWorkspaceSeed?: boolean;
+    seedPreviewFeatures?: boolean;
+  },
 ) {
   await installBridge(page, {
     mode: "mock",
     mock,
     skipOnboardingSeed: options?.skipOnboardingSeed,
     skipWorkspaceSeed: options?.skipWorkspaceSeed,
+    seedPreviewFeatures: options?.seedPreviewFeatures,
   });
 }
 
 export async function installRelayBridge(
   page: Page,
   user: keyof typeof TEST_IDENTITIES = "tyler",
+  options?: { seedPreviewFeatures?: boolean },
 ) {
-  await installBridge(page, { mode: "relay", user });
+  await installBridge(page, {
+    mode: "relay",
+    user,
+    seedPreviewFeatures: options?.seedPreviewFeatures,
+  });
 }

@@ -86,6 +86,7 @@ coverage into three layers and are explicit about what is real vs mocked.
 | 3 | desktop UI contract: Share-compute start/stop, Run-on-relay-mesh preset, **ensure-before-spawn** order, membership-gated toggle | `desktop/tests/e2e/mesh-compute.spec.ts` | UI REAL, Tauri mesh commands MOCKED via the e2e bridge | **Yes** | `cd desktop && pnpm test:e2e:integration -- mesh-compute.spec.ts` |
 
 `just mesh-e2e` runs the two CI-safe layers (2 + 3). Layer 1 is run on hardware.
+`just mesh-e2e-hardware` prepares a matching MeshLLM native runtime in a Sprout-controlled local cache before starting the real serve/client smoke, so it does not depend on a manually preseeded `MESH_LLM_NATIVE_RUNTIME_CACHE_DIR`.
 
 ### What "real" means per layer
 
@@ -94,9 +95,12 @@ coverage into three layers and are explicit about what is real vs mocked.
   token, and asserts a chat completion *routed through the client* returns
   `finish_reason=stop` with non-empty content. Verified locally with
   SmolLM2-135M; point `MESH_SMOKE_MODEL` at a larger `.gguf` for scale.
-  Note: with `disable_iroh_relays(true)` the join bootstraps via STUN-discovered
-  public addresses + relay-signed call-me-now (no public iroh relay) — see the
-  connectivity model above.
+  The just target first runs `scripts/ensure-mesh-native-runtime.sh`, which
+  builds/packages/installs the MeshLLM native runtime matching the pinned SDK
+  into `.cache/mesh-llm-native-runtime` and exports `MESH_LLM_NATIVE_RUNTIME_CACHE_DIR`
+  for the smoke. Note: with `disable_iroh_relays(true)` the join bootstraps via
+  STUN-discovered public addresses + relay-signed call-me-now (no public iroh
+  relay) — see the connectivity model above.
 - **Layer 2 proves the auth invariant without faking it.** The policy mapping
   (`MembershipDecision` → admit/deny) is exercised directly: member → allow,
   open relay → allow, non-member → deny, owner-delegation → deny (v1),

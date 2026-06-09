@@ -797,14 +797,20 @@ pub fn spawn_agent_child(
     let agent_args = normalize_agent_args(&record.agent_command, record.agent_args.clone());
     let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
-    let resolved_mcp_command: Option<std::path::PathBuf> =
-        if record.mcp_command.is_empty() {
-            None
-        } else {
-            Some(resolve_command(&record.mcp_command).ok_or_else(|| {
-                missing_command_message(&record.mcp_command, "MCP server command")
-            })?)
-        };
+    let resolved_mcp_command: Option<std::path::PathBuf> = if record.mcp_command.is_empty() {
+        None
+    } else {
+        match resolve_command(&record.mcp_command) {
+            Some(path) => Some(path),
+            None => {
+                eprintln!(
+                    "sprout-desktop: mcp_command {:?} not found, skipping",
+                    record.mcp_command
+                );
+                None
+            }
+        }
+    };
     // Resolve agent command to a full path (DMG launches have minimal PATH).
     let resolved_agent_command = resolve_command(&record.agent_command)
         .map(|p| p.display().to_string())
@@ -1276,6 +1282,7 @@ mod tests {
             last_error: None,
             respond_to,
             respond_to_allowlist: allowlist,
+            relay_mesh: None,
         }
     }
 

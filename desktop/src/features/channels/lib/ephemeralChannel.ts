@@ -165,3 +165,73 @@ export function getEphemeralChannelDisplay(
           : `Ephemeral channel. Cleans up ${verboseRemaining}.`,
   };
 }
+
+const TTL_UNIT_SECONDS: Record<string, number> = {
+  s: 1,
+  m: 60,
+  h: 60 * 60,
+  d: 60 * 60 * 24,
+};
+
+const TTL_TOKEN_RE = /(\d+)([smhd])/giy;
+
+/**
+ * Parse a friendly duration string (`30m`, `12h`, `1d`, or combinations like
+ * `1d12h`) into a positive number of seconds.
+ *
+ * Whitespace is tolerated, units are case-insensitive, and a bare number is
+ * rejected (a unit is always required). Returns `null` for empty or malformed
+ * input, or for a total of zero. The same unit may not appear twice.
+ */
+export function parseTtlDuration(input: string): number | null {
+  const cleaned = input.trim().toLowerCase().replace(/\s+/g, "");
+  if (cleaned === "") {
+    return null;
+  }
+
+  TTL_TOKEN_RE.lastIndex = 0;
+  const seen = new Set<string>();
+  let total = 0;
+  let consumed = 0;
+  for (
+    let match = TTL_TOKEN_RE.exec(cleaned);
+    match !== null;
+    match = TTL_TOKEN_RE.exec(cleaned)
+  ) {
+    const [token, amount, unit] = match;
+    if (seen.has(unit)) {
+      return null;
+    }
+    seen.add(unit);
+    total += Number(amount) * TTL_UNIT_SECONDS[unit];
+    consumed += token.length;
+  }
+
+  // Reject leftover characters (e.g. "1x", "1d!", "abc") and zero totals.
+  if (consumed !== cleaned.length || total <= 0) {
+    return null;
+  }
+  return total;
+}
+
+/**
+ * Format a number of seconds back into a compact friendly string (`30m`,
+ * `12h`, `1d`, `1d12h`) — the inverse of `parseTtlDuration` for the common
+ * cases. Components that are zero are omitted; a non-positive input yields `""`.
+ */
+export function formatTtlDuration(ttlSeconds: number): string {
+  if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) {
+    return "";
+  }
+  let remaining = Math.floor(ttlSeconds);
+  const parts: string[] = [];
+  for (const unit of ["d", "h", "m", "s"] as const) {
+    const size = TTL_UNIT_SECONDS[unit];
+    const count = Math.floor(remaining / size);
+    if (count > 0) {
+      parts.push(`${count}${unit}`);
+      remaining -= count * size;
+    }
+  }
+  return parts.join("");
+}
