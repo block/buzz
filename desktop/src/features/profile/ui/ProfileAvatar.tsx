@@ -10,6 +10,7 @@ type ProfileAvatarProps = {
   label: string;
   className?: string;
   iconClassName?: string;
+  plain?: boolean;
   testId?: string;
 };
 
@@ -18,13 +19,18 @@ export function ProfileAvatar({
   label,
   className,
   iconClassName,
+  plain = false,
   testId,
 }: ProfileAvatarProps) {
   const initials = getInitials(label);
 
   return (
     <Avatar
-      className={cn("shrink-0 bg-primary/20 text-primary shadow-xs", className)}
+      className={cn(
+        "shrink-0 text-primary shadow-xs",
+        plain ? "bg-transparent shadow-none" : "bg-primary/20",
+        className,
+      )}
       data-testid={testId}
     >
       {avatarUrl ? (
@@ -36,7 +42,10 @@ export function ProfileAvatar({
         />
       ) : null}
       <AvatarFallback
-        className="bg-primary/20 font-semibold text-primary"
+        className={cn(
+          "font-semibold text-primary",
+          plain ? "bg-transparent" : "bg-primary/20",
+        )}
         delayMs={200}
       >
         {initials.length > 0 ? (

@@ -1,25 +1,13 @@
 import * as React from "react";
-import {
-  Activity,
-  Archive,
-  ArchiveRestore,
-  Copy,
-  MessageSquare,
-  X,
-} from "lucide-react";
+import { ArrowLeft, X } from "lucide-react";
 import { toast } from "sonner";
 
-import {
-  useContactListQuery,
-  useFollowMutation,
-  useUnfollowMutation,
-  useUserProfileQuery,
-} from "@/features/profile/hooks";
+import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import {
   useRelayAgentsQuery,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
-import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
+import { useChannelsQuery } from "@/features/channels/hooks";
 import {
   useArchiveIdentityMutation,
   useIsIdentityArchived,
@@ -27,17 +15,25 @@ import {
   useUnarchiveIdentityMutation,
 } from "@/features/identity-archive/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
+import {
+  useContactListQuery,
+  useFollowMutation,
+  useUnfollowMutation,
+  useUserProfileQuery,
+} from "@/features/profile/hooks";
+import {
+  ChannelsFocusedView,
+  MemoryFocusedView,
+  ProfileSummaryView,
+} from "@/features/profile/ui/UserProfilePanelSections";
 import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
-import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
-import { PresenceBadge } from "@/features/presence/ui/PresenceBadge";
-import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
 import { cn } from "@/shared/lib/cn";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
   OverlayPanelBackdrop,
@@ -55,35 +51,17 @@ type UserProfilePanelProps = {
   onResetWidth: () => void;
   onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
   pubkey: string;
-  /**
-   * When true, the panel sits beside a sibling pane managed by a single-panel
-   * width controller (ChannelScreen). The width is clamped so the sibling keeps
-   * at least THREAD_PANEL_MIN_WIDTH_PX. Standalone/floating mounts (e.g. Pulse)
-   * have no such sibling, so they omit this and use the configured width
-   * directly — otherwise `calc(100% - 300px)` would wrongly shrink the panel.
-   */
   splitPaneClamp?: boolean;
   widthPx: number;
 };
 
-const RUNTIME_LABELS: Record<string, string> = {
-  goose: "Goose",
-  "claude-code": "Claude Code",
-  "codex-acp": "Codex",
-  aider: "Aider",
+type ProfilePanelView = "summary" | "memories" | "channels";
+
+const VIEW_TITLES: Record<ProfilePanelView, string> = {
+  summary: "Profile",
+  memories: "Memories",
+  channels: "Channels",
 };
-
-function runtimeLabel(command: string): string {
-  return RUNTIME_LABELS[command] ?? command;
-}
-
-function InfoBadge({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="inline-flex items-center rounded-full bg-muted/50 px-2 py-0.5 text-xs text-muted-foreground">
-      {children}
-    </span>
-  );
-}
 
 function truncatePubkey(pubkey: string) {
   if (pubkey.length <= 16) {
@@ -91,6 +69,34 @@ function truncatePubkey(pubkey: string) {
   }
 
   return `${pubkey.slice(0, 8)}…${pubkey.slice(-8)}`;
+}
+
+function deriveChannelNames(
+  pubkeyLower: string,
+  relayAgent: RelayAgent | undefined,
+  managedAgent: ManagedAgent | undefined,
+  channels: { name: string; memberPubkeys: string[] }[] | undefined,
+): string[] {
+  const names: string[] = [];
+
+  for (const name of relayAgent?.channels ?? []) {
+    if (!names.includes(name)) {
+      names.push(name);
+    }
+  }
+
+  if (managedAgent && channels) {
+    for (const channel of channels) {
+      const isMember = channel.memberPubkeys.some(
+        (memberPubkey) => memberPubkey.toLowerCase() === pubkeyLower,
+      );
+      if (isMember && !names.includes(channel.name)) {
+        names.push(channel.name);
+      }
+    }
+  }
+
+  return names.sort((left, right) => left.localeCompare(right));
 }
 
 export function UserProfilePanel({
@@ -111,16 +117,17 @@ export function UserProfilePanel({
     splitPaneClamp && !isOverlay && !isSinglePanelView;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
+  const [view, setView] = React.useState<ProfilePanelView>("summary");
+
   const profileQuery = useUserProfileQuery(pubkey);
   const relayAgentsQuery = useRelayAgentsQuery({ enabled: true });
   const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
+  const channelsQuery = useChannelsQuery();
   const presenceQuery = usePresenceQuery([pubkey]);
   const userStatusQuery = useUserStatusQuery([pubkey]);
   const myMembershipQuery = useMyRelayMembershipQuery();
   const oaOwnerQuery = useOaOwnerQuery(
     pubkey,
-    // Skip the kind:0 lookup when viewing yourself — the OA gate is for
-    // archiving *other* identities you own.
     currentPubkey !== undefined &&
       pubkey.toLowerCase() !== currentPubkey.toLowerCase(),
   );
@@ -138,15 +145,16 @@ export function UserProfilePanel({
   const userStatus = userStatusQuery.data?.[pubkeyLower];
 
   const relayAgent = relayAgentsQuery.data?.find(
-    (a) => a.pubkey.toLowerCase() === pubkeyLower,
+    (agent) => agent.pubkey.toLowerCase() === pubkeyLower,
   );
   const managedAgent = managedAgentsQuery.data?.find(
-    (a) => a.pubkey.toLowerCase() === pubkeyLower,
+    (agent) => agent.pubkey.toLowerCase() === pubkeyLower,
   );
   const isBot = Boolean(relayAgent || managedAgent);
+  const isOwner = useIsManagedAgent(isBot ? pubkey : null);
   const isSelf =
     currentPubkey !== undefined && pubkeyLower === currentPubkey.toLowerCase();
-  const canViewActivity = isBot && Boolean(onOpenAgentSession);
+  const canViewActivity = isOwner === true && Boolean(onOpenAgentSession);
   const isFollowing =
     !isSelf &&
     (contactListQuery.data?.contacts.some(
@@ -154,15 +162,27 @@ export function UserProfilePanel({
     ) ??
       false);
 
-  // NIP-IA gates. Button shows when ANY of: self path (acting on own pubkey),
-  // admin path (current user is owner/admin in relay_members), or owner path
-  // (current user is the verified NIP-OA owner of the viewee per its live
-  // kind:0). The relay picks the consent path; we just ensure the request is
-  // permitted to be built locally.
   const myRole = myMembershipQuery.data?.role;
   const isRelayAdminOrOwner = myRole === "owner" || myRole === "admin";
   const isOaOwnerOfViewee = oaOwnerQuery.data?.isMe === true;
   const canArchive = isSelf || isRelayAdminOrOwner || isOaOwnerOfViewee;
+
+  const channelNames = React.useMemo(
+    () =>
+      deriveChannelNames(
+        pubkeyLower,
+        relayAgent,
+        managedAgent,
+        channelsQuery.data,
+      ),
+    [pubkeyLower, relayAgent, managedAgent, channelsQuery.data],
+  );
+
+  const prevPubkeyRef = React.useRef(pubkey);
+  if (prevPubkeyRef.current !== pubkey) {
+    prevPubkeyRef.current = pubkey;
+    setView("summary");
+  }
 
   const handleArchive = React.useCallback(() => {
     archiveMutation.mutate(
@@ -190,18 +210,18 @@ export function UserProfilePanel({
     );
   }, [pubkey, unarchiveMutation]);
 
-  const handleCopyPubkey = React.useCallback(() => {
-    void navigator.clipboard.writeText(pubkey).then(() => {
-      toast.success("Copied to clipboard");
-    });
-  }, [pubkey]);
-
   const handleMessage = React.useCallback(() => {
     onOpenDm?.([pubkey]);
     onClose();
   }, [onClose, onOpenDm, pubkey]);
 
+  const handleOpenActivity = React.useCallback(() => {
+    onClose();
+    onOpenAgentSession?.(pubkey);
+  }, [onClose, onOpenAgentSession, pubkey]);
+
   const displayName = profile?.displayName ?? truncatePubkey(pubkey);
+  const panelTitle = VIEW_TITLES[view];
 
   return (
     <>
@@ -266,6 +286,26 @@ export function UserProfilePanel({
           data-tauri-drag-region
         >
           <div className="flex min-w-0 items-center gap-1.5">
+            {view !== "summary" ? (
+              <Button
+                aria-label="Back to profile"
+                className={cn(
+                  "shrink-0",
+                  usesChannelSplitChrome
+                    ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
+                    : "h-7 w-7 rounded-full text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                )}
+                data-testid="user-profile-panel-back"
+                onClick={() => setView("summary")}
+                size="icon"
+                type="button"
+                variant="ghost"
+              >
+                <ArrowLeft
+                  className={cn(usesChannelSplitChrome ? "size-4" : "size-3.5")}
+                />
+              </Button>
+            ) : null}
             <h2
               className={cn(
                 "translate-y-px font-semibold tracking-tight",
@@ -274,7 +314,7 @@ export function UserProfilePanel({
                   : "text-sm leading-5",
               )}
             >
-              Profile
+              {panelTitle}
             </h2>
           </div>
           <Button
@@ -304,211 +344,48 @@ export function UserProfilePanel({
               (usesChannelSplitChrome ? "pt-[92px]" : "pt-[76px]"),
           )}
         >
-          <div className="flex flex-col items-center gap-4 pt-4">
-            {/* Avatar */}
-            {profile?.avatarUrl ? (
-              <img
-                alt={displayName}
-                className="aspect-square w-full rounded-lg object-cover shadow-xs"
-                referrerPolicy="no-referrer"
-                src={rewriteRelayUrl(profile.avatarUrl)}
-              />
-            ) : (
-              <div className="flex aspect-square w-full items-center justify-center rounded-lg bg-secondary text-5xl font-semibold text-secondary-foreground shadow-xs">
-                {displayName.slice(0, 2).toUpperCase()}
-              </div>
-            )}
-
-            {/* Name + bot identicon */}
-            <div className="flex flex-col items-center gap-1">
-              <div className="flex items-center gap-2">
-                <h3 className="text-base font-semibold">{displayName}</h3>
-                {isBot ? (
-                  <BotIdenticon
-                    value={displayName}
-                    size={20}
-                    className="shrink-0 rounded"
-                  />
-                ) : null}
-              </div>
-              {profile?.nip05Handle ? (
-                <p className="text-xs text-muted-foreground">
-                  {profile.nip05Handle}
-                </p>
-              ) : null}
-              {/* NIP-IA "Archived" flair (relay-scoped). Spec §Client Behavior:
-                  surface archive metadata where relevant. */}
-              {isArchived ? (
-                <span
-                  className="mt-1 inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-300"
-                  data-testid="user-profile-archived-flair"
-                  title="This identity is archived on this relay. Historical events remain attributed to it."
-                >
-                  <Archive className="h-3 w-3" />
-                  Archived on this relay
-                </span>
-              ) : null}
-            </div>
-
-            {/* Presence */}
-            {presenceStatus ? <PresenceBadge status={presenceStatus} /> : null}
-
-            {/* User status */}
-            {userStatus ? (
-              <p className="text-center text-sm text-muted-foreground">
-                {userStatus.emoji ? (
-                  <StatusEmoji
-                    className="mr-1 h-3.5 w-3.5"
-                    value={userStatus.emoji}
-                  />
-                ) : null}
-                {userStatus.text}
-              </p>
-            ) : null}
-          </div>
-
-          {/* Pubkey (copyable) */}
-          <div className="mt-6">
-            <button
-              className="flex w-full items-center gap-2 rounded-lg border border-border/60 bg-card/50 px-3 py-2 text-left font-mono text-[11px] text-muted-foreground transition-colors hover:bg-muted/50"
-              data-testid="user-profile-copy-pubkey"
-              onClick={handleCopyPubkey}
-              title="Copy public key"
-              type="button"
-            >
-              <span className="min-w-0 flex-1 truncate">{pubkey}</span>
-              <Copy className="h-3.5 w-3.5 shrink-0" />
-            </button>
-          </div>
-
-          {/* Bot info badges */}
-          {isBot && (managedAgent || relayAgent) ? (
-            <div className="mt-4 flex flex-wrap gap-1.5">
-              {managedAgent?.agentCommand ? (
-                <InfoBadge>{runtimeLabel(managedAgent.agentCommand)}</InfoBadge>
-              ) : relayAgent?.agentType ? (
-                <InfoBadge>{runtimeLabel(relayAgent.agentType)}</InfoBadge>
-              ) : null}
-              {managedAgent?.model ? (
-                <InfoBadge>{managedAgent.model}</InfoBadge>
-              ) : null}
-              {managedAgent?.acpCommand ? (
-                <InfoBadge>ACP: {managedAgent.acpCommand}</InfoBadge>
-              ) : null}
-            </div>
+          {view === "summary" ? (
+            <ProfileSummaryView
+              canArchive={canArchive}
+              canViewActivity={canViewActivity}
+              channelCount={channelNames.length}
+              channelsLoading={channelsQuery.isLoading}
+              displayName={displayName}
+              followMutation={followMutation}
+              handleArchive={handleArchive}
+              handleMessage={handleMessage}
+              handleOpenActivity={handleOpenActivity}
+              handleUnarchive={handleUnarchive}
+              isArchived={isArchived}
+              isBot={isBot}
+              isFollowing={isFollowing}
+              isOwner={isOwner}
+              isSelf={isSelf}
+              managedAgent={managedAgent}
+              onOpenChannels={() => setView("channels")}
+              onOpenMemories={() => setView("memories")}
+              onOpenDm={onOpenDm}
+              presenceStatus={presenceStatus}
+              profile={profile}
+              pubkey={pubkey}
+              relayAgent={relayAgent}
+              unfollowMutation={unfollowMutation}
+              userStatus={userStatus}
+              archiveMutation={archiveMutation}
+              unarchiveMutation={unarchiveMutation}
+            />
           ) : null}
 
-          {/* Agent memory (IXI-7 phase 1) — visible only to the agent's owner. */}
-          {isBot ? <MemorySection agentPubkey={pubkey} /> : null}
-
-          {/* About */}
-          {profile?.about ? (
-            <div className="mt-4">
-              <h4 className="mb-1 text-xs font-medium uppercase tracking-wider text-muted-foreground/70">
-                About
-              </h4>
-              <p className="text-sm leading-relaxed text-muted-foreground">
-                {profile.about}
-              </p>
-            </div>
+          {view === "memories" ? (
+            <MemoryFocusedView agentPubkey={pubkey} isOwner={isOwner} />
           ) : null}
 
-          {/* Actions */}
-          <div className="mt-6 flex flex-col gap-2">
-            {!isSelf ? (
-              isFollowing ? (
-                <Button
-                  className="w-full"
-                  disabled={unfollowMutation.isPending}
-                  onClick={() =>
-                    unfollowMutation.mutate(pubkey, {
-                      onError: (error) =>
-                        toast.error(
-                          `Unfollow failed: ${error instanceof Error ? error.message : String(error)}`,
-                        ),
-                    })
-                  }
-                  type="button"
-                  variant="outline"
-                >
-                  Unfollow
-                </Button>
-              ) : (
-                <Button
-                  className="w-full"
-                  disabled={followMutation.isPending}
-                  onClick={() =>
-                    followMutation.mutate(pubkey, {
-                      onError: (error) =>
-                        toast.error(
-                          `Follow failed: ${error instanceof Error ? error.message : String(error)}`,
-                        ),
-                    })
-                  }
-                  type="button"
-                  variant="default"
-                >
-                  Follow
-                </Button>
-              )
-            ) : null}
-            {onOpenDm && !isSelf ? (
-              <Button
-                className="w-full"
-                data-testid="user-profile-message"
-                onClick={handleMessage}
-                type="button"
-              >
-                <MessageSquare className="h-4 w-4" />
-                Message
-              </Button>
-            ) : null}
-            {canViewActivity ? (
-              <button
-                className="flex w-full items-center gap-2 rounded-lg border border-border/60 px-3 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted/50"
-                data-testid={`user-profile-view-activity-${pubkey}`}
-                onClick={() => {
-                  onClose();
-                  onOpenAgentSession?.(pubkey);
-                }}
-                type="button"
-              >
-                <Activity className="h-3.5 w-3.5 text-muted-foreground" />
-                View activity log
-              </button>
-            ) : null}
-            {/* NIP-IA archive / unarchive. Gated to self / relay admin / OA
-                owner of viewee. The relay verifies authority — these gates are
-                purely a UX guard. */}
-            {canArchive && isArchived === false ? (
-              <Button
-                className="w-full"
-                data-testid="user-profile-archive-identity"
-                disabled={archiveMutation.isPending}
-                onClick={handleArchive}
-                type="button"
-                variant="secondary"
-              >
-                <Archive className="h-4 w-4" />
-                {archiveMutation.isPending ? "Archiving…" : "Archive identity"}
-              </Button>
-            ) : null}
-            {canArchive && isArchived === true ? (
-              <Button
-                className="w-full"
-                data-testid="user-profile-unarchive-identity"
-                disabled={unarchiveMutation.isPending}
-                onClick={handleUnarchive}
-                type="button"
-                variant="secondary"
-              >
-                <ArchiveRestore className="h-4 w-4" />
-                {unarchiveMutation.isPending
-                  ? "Unarchiving…"
-                  : "Unarchive identity"}
-              </Button>
-            ) : null}
-          </div>
+          {view === "channels" ? (
+            <ChannelsFocusedView
+              channelNames={channelNames}
+              isLoading={channelsQuery.isLoading}
+            />
+          ) : null}
         </div>
       </aside>
     </>
