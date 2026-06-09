@@ -31,7 +31,7 @@ import {
   NEUTRAL_ACCENT,
   useTheme,
 } from "@/shared/theme/ThemeProvider";
-import { SYNTAX_THEMES, isLightTheme } from "@/shared/theme/theme-loader";
+import { APP_THEMES, isLightTheme } from "@/shared/theme/theme-loader";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
 import { DoctorSettingsPanel } from "./DoctorSettingsPanel";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
@@ -175,8 +175,8 @@ function ThemeSettingsCard() {
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
-    if (!q) return SYNTAX_THEMES;
-    return SYNTAX_THEMES.filter((name) => name.includes(q));
+    if (!q) return APP_THEMES;
+    return APP_THEMES.filter((name) => name.includes(q));
   }, [search]);
 
   return (

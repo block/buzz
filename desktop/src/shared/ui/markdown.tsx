@@ -18,6 +18,7 @@ import {
 } from "shiki";
 
 import { useTheme } from "@/shared/theme/ThemeProvider";
+import { resolveSyntaxThemeName } from "@/shared/theme/theme-loader";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
   isMessageLink,
@@ -536,7 +537,8 @@ function SyntaxHighlightedCode({
   code: string;
   language: string;
 } & React.ComponentProps<"code">) {
-  const { themeName } = useTheme();
+  const { themeName, isDark } = useTheme();
+  const syntaxThemeName = resolveSyntaxThemeName(themeName, isDark);
   const [loadedKey, setLoadedKey] = React.useState(0);
 
   React.useEffect(() => {
@@ -556,10 +558,10 @@ function SyntaxHighlightedCode({
             return;
           }
         }
-        if (!loadedThemes.has(themeName as string)) {
+        if (!loadedThemes.has(syntaxThemeName)) {
           try {
-            await shikiHighlighter.loadTheme(themeName as BundledTheme);
-            loadedThemes.add(themeName as string);
+            await shikiHighlighter.loadTheme(syntaxThemeName as BundledTheme);
+            loadedThemes.add(syntaxThemeName);
             loaded = true;
           } catch {
             return;
@@ -570,30 +572,30 @@ function SyntaxHighlightedCode({
         /* ignore */
       }
     }
-    if (!loadedLangs.has(language) || !loadedThemes.has(themeName as string)) {
+    if (!loadedLangs.has(language) || !loadedThemes.has(syntaxThemeName)) {
       loadAssets();
     }
     return () => {
       cancelled = true;
     };
-  }, [language, themeName]);
+  }, [language, syntaxThemeName]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: loadedKey intentionally triggers re-memoization after async asset loading
   const tokens = React.useMemo(() => {
     if (
       !shikiHighlighter ||
       !loadedLangs.has(language) ||
-      !loadedThemes.has(themeName as string)
+      !loadedThemes.has(syntaxThemeName)
     )
       return null;
     if ((code.match(/\n/g) || []).length > MAX_HIGHLIGHT_LINES) return null;
-    const cacheKey = `${language}:${themeName}:${code}`;
+    const cacheKey = `${language}:${syntaxThemeName}:${code}`;
     const cached = tokenCache.get(cacheKey);
     if (cached) return cached;
     try {
       const result = shikiHighlighter.codeToTokens(code, {
         lang: language as BundledLanguage,
-        theme: themeName as BundledTheme,
+        theme: syntaxThemeName as BundledTheme,
       });
       if (tokenCache.size >= MAX_CACHE_ENTRIES) {
         const firstKey = tokenCache.keys().next().value;
@@ -604,7 +606,7 @@ function SyntaxHighlightedCode({
     } catch {
       return null;
     }
-  }, [code, language, themeName, loadedKey]);
+  }, [code, language, syntaxThemeName, loadedKey]);
 
   const codeClassName = CODE_BLOCK_CLASS;
 

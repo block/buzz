@@ -9,10 +9,13 @@ import {
 } from "react";
 import { createThemeVars, hexToHsl } from "./adaptive-theme";
 import {
-  SYNTAX_THEMES,
+  type AppThemeName,
   type SyntaxThemeName,
   extractThemeInfo,
+  isAppThemeName,
   loadThemeData,
+  prefersDarkMode,
+  resolveLocalThemeVariant,
 } from "./theme-loader";
 
 const STORAGE_KEY = "sprout-theme";
@@ -46,25 +49,28 @@ type ThemeContextValue = {
 
 type ThemeProviderProps = {
   children: ReactNode;
-  defaultTheme?: SyntaxThemeName;
+  defaultTheme?: AppThemeName;
 };
 
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
-function isValidThemeName(name: string): name is SyntaxThemeName {
-  return (SYNTAX_THEMES as readonly string[]).includes(name);
+function normalizeStoredTheme(stored: string | null): AppThemeName | null {
+  if (!stored) return null;
+  if (stored === "neutral-light" || stored === "neutral-dark") return "neutral";
+
+  // Migrate legacy values.
+  if (stored === "light") return "catppuccin-latte";
+  if (stored === "dark") return "houston";
+  if (stored === "system") return "houston";
+
+  return isAppThemeName(stored) ? stored : null;
 }
 
 /** Read stored theme, migrating legacy "light"/"dark"/"system" values. */
-function readStoredTheme(fallback: SyntaxThemeName): SyntaxThemeName {
-  const stored = window.localStorage.getItem(STORAGE_KEY);
-  if (!stored) return fallback;
-
-  // Migrate legacy values
-  if (stored === "light") return "catppuccin-latte";
-  if (stored === "dark" || stored === "system") return "houston";
-
-  return isValidThemeName(stored) ? stored : fallback;
+function readStoredTheme(fallback: AppThemeName): AppThemeName {
+  return (
+    normalizeStoredTheme(window.localStorage.getItem(STORAGE_KEY)) ?? fallback
+  );
 }
 
 function getContrastColor(hex: string): string {
@@ -103,12 +109,27 @@ function applyAccentColor(value: string) {
   root.style.setProperty("--sidebar-active-foreground", fgHsl);
 }
 
-/** Apply cached CSS vars synchronously to prevent FOUC. */
-function applyCachedVars(): string | null {
+/** Apply initial CSS vars synchronously to prevent FOUC. */
+function applyCachedVars(themeName: AppThemeName, systemIsDark: boolean) {
   try {
+    const localVariant = resolveLocalThemeVariant(themeName, systemIsDark);
+    if (localVariant) {
+      const root = document.documentElement;
+      for (const [key, value] of Object.entries(localVariant.vars)) {
+        root.style.setProperty(key, value);
+      }
+      root.classList.remove("light", "dark");
+      root.classList.add(systemIsDark ? "dark" : "light");
+      const accent = window.localStorage.getItem(ACCENT_KEY) ?? DEFAULT_ACCENT;
+      applyAccentColor(accent);
+      return;
+    }
+
     const cached = window.localStorage.getItem(CACHE_KEY);
-    if (!cached) return null;
-    const { themeName, vars, isDark } = JSON.parse(cached);
+    if (!cached) return;
+    const { themeName: cachedThemeName, vars, isDark } = JSON.parse(cached);
+    if (normalizeStoredTheme(cachedThemeName) !== themeName) return;
+
     const root = document.documentElement;
     for (const [key, value] of Object.entries(vars)) {
       root.style.setProperty(key, value as string);
@@ -116,25 +137,34 @@ function applyCachedVars(): string | null {
     root.classList.remove("light", "dark");
     root.classList.add(isDark ? "dark" : "light");
 
-    // Also apply cached accent
     const accent = window.localStorage.getItem(ACCENT_KEY) ?? DEFAULT_ACCENT;
     applyAccentColor(accent);
-
-    return themeName;
   } catch {
-    return null;
+    // Ignore corrupt cache and let the async theme application correct it.
   }
 }
 
 /** Apply a theme: load data, derive CSS vars, set them on :root. */
-async function applyTheme(name: SyntaxThemeName): Promise<{ isDark: boolean }> {
-  const themeData = await loadThemeData(name);
-  const info = extractThemeInfo(name, themeData);
-  const { isDark, vars } = createThemeVars(info.bg, info.fg, info.comment, {
-    added: info.added,
-    deleted: info.deleted,
-    modified: info.modified,
-  });
+async function applyTheme(
+  name: AppThemeName,
+  systemIsDark: boolean,
+): Promise<{ isDark: boolean }> {
+  let isDark: boolean;
+  let vars: Record<string, string>;
+
+  const localVariant = resolveLocalThemeVariant(name, systemIsDark);
+  if (localVariant) {
+    isDark = systemIsDark;
+    vars = localVariant.vars;
+  } else {
+    const themeData = await loadThemeData(name as SyntaxThemeName);
+    const info = extractThemeInfo(name, themeData);
+    ({ isDark, vars } = createThemeVars(info.bg, info.fg, info.comment, {
+      added: info.added,
+      deleted: info.deleted,
+      modified: info.modified,
+    }));
+  }
 
   const root = document.documentElement;
   for (const [key, value] of Object.entries(vars)) {
@@ -161,12 +191,15 @@ export function ThemeProvider({
   children,
   defaultTheme = "houston",
 }: ThemeProviderProps) {
+  const [systemIsDark, setSystemIsDark] = useState(prefersDarkMode);
   // Apply cached vars synchronously before first render
   const [themeName, setThemeName] = useState<string>(() => {
-    const cached = applyCachedVars();
-    return cached ?? readStoredTheme(defaultTheme);
+    const initialTheme = readStoredTheme(defaultTheme);
+    applyCachedVars(initialTheme, systemIsDark);
+    return initialTheme;
   });
   const [isDark, setIsDark] = useState<boolean>(() => {
+    if (resolveLocalThemeVariant(themeName, systemIsDark)) return systemIsDark;
     return document.documentElement.classList.contains("dark");
   });
   const [isLoading, setIsLoading] = useState(true);
@@ -175,27 +208,39 @@ export function ThemeProvider({
     return window.localStorage.getItem(ACCENT_KEY) ?? DEFAULT_ACCENT;
   });
 
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const handleChange = (event: MediaQueryListEvent) => {
+      setSystemIsDark(event.matches);
+    };
+    media.addEventListener("change", handleChange);
+    return () => {
+      media.removeEventListener("change", handleChange);
+    };
+  }, []);
+
   // Load and apply theme
   useEffect(() => {
-    if (!isValidThemeName(themeName)) return;
+    if (!isAppThemeName(themeName)) return;
 
     // Track which theme we're loading to avoid race conditions
-    const thisTheme = themeName;
-    loadingRef.current = thisTheme;
+    const thisLoadKey = `${themeName}:${systemIsDark}`;
+    loadingRef.current = thisLoadKey;
     setIsLoading(true);
 
-    applyTheme(themeName).then(({ isDark: dark }) => {
+    applyTheme(themeName, systemIsDark).then(({ isDark: dark }) => {
       // Only update if this is still the theme we want
-      if (loadingRef.current === thisTheme) {
+      if (loadingRef.current === thisLoadKey) {
         setIsDark(dark);
         setIsLoading(false);
-        // Re-apply accent after theme load (theme vars don't include primary)
+        // Re-apply accent after theme load since theme vars reset primary colors.
         applyAccentColor(
           window.localStorage.getItem(ACCENT_KEY) ?? DEFAULT_ACCENT,
         );
       }
     });
-  }, [themeName]);
+  }, [themeName, systemIsDark]);
 
   // Apply accent color changes
   useEffect(() => {
@@ -203,7 +248,7 @@ export function ThemeProvider({
   }, [accentColor]);
 
   const setTheme = useCallback((name: string) => {
-    if (!isValidThemeName(name)) return;
+    if (!isAppThemeName(name)) return;
     setThemeName(name);
     window.localStorage.setItem(STORAGE_KEY, name);
   }, []);
