@@ -727,12 +727,7 @@ pub async fn start_managed_agent(
 
         let record = find_managed_agent_mut(&mut records, &pubkey)?;
 
-        // Prefer the avatar persisted at creation. For pre-existing records with
-        // no stored value, fall back to the legacy persona/command derivation so
-        // they still self-heal rather than regressing to no avatar.
-        let expected_avatar = record.avatar_url.clone().or_else(|| {
-            resolve_avatar_for_reconcile(&app, record.persona_id.as_deref(), &record.agent_command)
-        });
+        let expected_avatar = reconcile_avatar(record.avatar_url.as_deref(), &record.agent_command);
 
         let reconcile = ProfileReconcileData {
             private_key_nsec: record.private_key_nsec.clone(),
@@ -877,25 +872,16 @@ fn profile_needs_sync(
     }
 }
 
-/// Legacy avatar derivation used only as a fallback for pre-existing records
-/// that have no persisted `avatar_url`. Prefers the persona's avatar, then the
-/// command-based default. New records store the resolved URL directly and never
-/// hit this path.
-fn resolve_avatar_for_reconcile(
-    app: &AppHandle,
-    persona_id: Option<&str>,
-    agent_command: &str,
-) -> Option<String> {
-    if let Some(persona_id) = persona_id {
-        if let Ok(personas) = load_personas(app) {
-            if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
-                if persona.avatar_url.is_some() {
-                    return persona.avatar_url.clone();
-                }
-            }
-        }
+/// Resolve the avatar a managed agent's profile should reconcile against.
+/// Stored value (persisted at creation) wins; legacy records that predate the
+/// field (`stored == None`) fall back to the command-based derivation — the
+/// same source the create path used. Persona config is never consulted: doing
+/// so diverges from what was published and overwrites user intent on restart.
+fn reconcile_avatar(stored: Option<&str>, agent_command: &str) -> Option<String> {
+    match stored {
+        Some(url) => Some(url.to_string()),
+        None => managed_agent_avatar_url(agent_command),
     }
-    managed_agent_avatar_url(agent_command)
 }
 
 #[tauri::command]
@@ -1166,5 +1152,28 @@ mod tests {
     fn profile_needs_sync_when_expected_avatar_absent_but_published() {
         let existing = profile(Some("Duncan"), Some("https://x/a.png"));
         assert!(profile_needs_sync(Some(&existing), "Duncan", None));
+    }
+
+    /// Legacy records (`avatar_url: None`) must reconcile against
+    /// `managed_agent_avatar_url(agent_command)` — never persona config —
+    /// matching what the original create path published.
+    #[test]
+    fn reconcile_avatar_legacy_record_uses_command_not_persona() {
+        let resolved = reconcile_avatar(None, "goose");
+
+        assert_eq!(resolved, managed_agent_avatar_url("goose"));
+        assert!(
+            resolved.is_some(),
+            "goose command should have a known avatar"
+        );
+    }
+
+    /// New records persist their avatar at creation; the stored value is used
+    /// verbatim, never falling back to command derivation.
+    #[test]
+    fn reconcile_avatar_stored_value_wins() {
+        let resolved = reconcile_avatar(Some("https://custom/avatar.png"), "goose");
+
+        assert_eq!(resolved.as_deref(), Some("https://custom/avatar.png"));
     }
 }
