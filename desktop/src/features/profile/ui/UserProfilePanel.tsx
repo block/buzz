@@ -19,6 +19,7 @@ import {
   useRelayAgentsQuery,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
+import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import {
   useArchiveIdentityMutation,
   useIsIdentityArchived,
@@ -396,6 +397,9 @@ export function UserProfilePanel({
               ) : null}
             </div>
           ) : null}
+
+          {/* Agent memory (IXI-7 phase 1) — visible only to the agent's owner. */}
+          {isBot ? <MemorySection agentPubkey={pubkey} /> : null}
 
           {/* About */}
           {profile?.about ? (
