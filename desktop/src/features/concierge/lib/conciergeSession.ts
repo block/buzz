@@ -7,9 +7,9 @@ import {
 import {
   meshAgentPreset,
   meshAvailability,
+  meshPrepareRelayMeshClient,
   type MeshServeTarget,
 } from "@/shared/api/tauriMesh";
-import { startRelayMeshClientForTarget } from "@/features/mesh-compute/startRelayMeshClientForTarget";
 import { meshAgentPresetPatch } from "@/features/mesh-compute/applyMeshAgentPreset";
 import type { Channel, ManagedAgent } from "@/shared/api/types";
 
@@ -78,7 +78,7 @@ export async function ensureConciergeSession(
           "No relay-mesh model is being served. Start serving a model in Settings → Relay compute, then try again.",
       );
     }
-    await startRelayMeshClientForTarget(target.modelId, target);
+    await meshPrepareRelayMeshClient(target.modelId, target);
     const preset = meshAgentPresetPatch(await meshAgentPreset(target.modelId));
     const created = await createManagedAgent({
       name: CONCIERGE_AGENT_NAME,
