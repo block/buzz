@@ -5,8 +5,9 @@ import {
   profileQueryKey,
   useUpdateProfileMutation,
 } from "@/features/profile/hooks";
-import { getIdentity, importIdentity } from "@/shared/api/tauri";
+import { relayClient } from "@/shared/api/relayClient";
 import { getMyRelayMembershipLookup } from "@/shared/api/relayMembers";
+import { getIdentity, importIdentity } from "@/shared/api/tauri";
 import {
   ACCENT_STORAGE_KEY,
   NEUTRAL_ACCENT,
@@ -326,6 +327,15 @@ export function OnboardingFlow({
     updateProfileDraft({ avatarUrl: savedProfile.avatarUrl });
   }, [savedProfile.avatarUrl, updateProfileDraft]);
 
+  const advanceFromProfileWithoutSaving = React.useCallback(() => {
+    profileUpdateMutation.reset();
+    setProfileDraft((current) => ({
+      ...current,
+      displayName: savedProfile.displayName,
+    }));
+    showAvatarPage();
+  }, [profileUpdateMutation, savedProfile.displayName, showAvatarPage]);
+
   const saveErrorMessage =
     profileSaveError instanceof Error ? profileSaveError.message : null;
   const profileStepState: ProfileStepState = {
@@ -358,6 +368,7 @@ export function OnboardingFlow({
   const importDeniedKey = React.useCallback(
     async (nsec: string) => {
       const identity = await importIdentity(nsec);
+      relayClient.disconnect();
       queryClient.setQueryData(["identity"], identity);
       queryClient.removeQueries({ queryKey: profileQueryKey });
       profileUpdateMutation.reset();
@@ -432,7 +443,7 @@ export function OnboardingFlow({
         {currentPage === "profile" ? (
           <ProfileStep
             actions={{
-              advanceWithoutSaving: () => showAvatarPage(),
+              advanceWithoutSaving: advanceFromProfileWithoutSaving,
               back: canBackToWorkspaceSetup
                 ? () => {
                     setTransitionDirection("backward");

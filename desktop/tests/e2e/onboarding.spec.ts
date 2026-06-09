@@ -118,6 +118,27 @@ async function expectHomeView(page: Page) {
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
 }
 
+async function getMockProfile(page: Page) {
+  return page.evaluate(async () => {
+    const invoke = (
+      window as Window & {
+        __SPROUT_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload?: Record<string, unknown>,
+        ) => Promise<unknown>;
+      }
+    ).__SPROUT_E2E_INVOKE_MOCK_COMMAND__;
+    if (!invoke) {
+      throw new Error("Mock invoke bridge is unavailable.");
+    }
+
+    return (await invoke("get_profile")) as {
+      avatar_url: string | null;
+      display_name: string | null;
+    };
+  });
+}
+
 async function expectIncompleteOnboarding(page: Page) {
   await expect(page.getByTestId("onboarding-gate")).toBeVisible();
   await expectShellHidden(page);
@@ -643,6 +664,40 @@ test("failed first profile saves can be skipped for the current session", async 
   await expectHomeView(page);
 });
 
+test("failed saved profile saves can continue without retrying the display name", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, TEST_IDENTITIES.alice);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError: "Temporary profile sync failure.",
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await expect(page.getByTestId("onboarding-display-name")).toHaveValue(
+    "alice",
+  );
+  await page.getByTestId("onboarding-display-name").fill("Alice Draft");
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(page.getByText("Temporary profile sync failure.")).toBeVisible();
+  await page.getByTestId("onboarding-next-without-saving").click();
+
+  await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
+  const avatarUrl = "https://example.com/alice-onboarding-avatar.png";
+  await page.getByTestId("onboarding-avatar-url").fill(avatarUrl);
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(page.getByTestId("onboarding-page-theme")).toBeVisible();
+  await expect(await getMockProfile(page)).toMatchObject({
+    avatar_url: avatarUrl,
+    display_name: "alice",
+  });
+});
+
 test("membership denial can import a different invited key", async ({
   page,
 }) => {
@@ -669,6 +724,15 @@ test("membership denial can import a different invited key", async ({
   ).toBeVisible();
   await page.getByTestId("membership-denied-import-key").click();
 
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __SPROUT_E2E_COMMANDS__?: string[] })
+            .__SPROUT_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toEqual(expect.arrayContaining(["plugin:websocket|disconnect"]));
   await expect(page.getByTestId("onboarding-page-1")).toBeVisible();
   await expect
     .poll(() =>
