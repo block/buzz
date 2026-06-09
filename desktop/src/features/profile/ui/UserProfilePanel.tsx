@@ -3,7 +3,10 @@ import { ArrowLeft, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useIsManagedAgent } from "@/features/agent-memory/hooks";
+import {
+  useAgentMemoryQuery,
+  useIsManagedAgent,
+} from "@/features/agent-memory/hooks";
 import { MemoryRefreshButton } from "@/features/agent-memory/ui/MemorySection";
 import {
   useRelayAgentsQuery,
@@ -172,6 +175,9 @@ export function UserProfilePanel({
   );
   const isBot = Boolean(relayAgent || managedAgent);
   const isOwner = useIsManagedAgent(isBot ? pubkey : null);
+  const memoryQuery = useAgentMemoryQuery(pubkey, {
+    enabled: isOwner === true,
+  });
   const isSelf =
     currentPubkey !== undefined && pubkeyLower === currentPubkey.toLowerCase();
   const canViewActivity = isOwner === true && Boolean(onOpenAgentSession);
@@ -249,6 +255,9 @@ export function UserProfilePanel({
 
   const displayName = profile?.displayName ?? truncatePubkey(pubkey);
   const panelTitle = VIEW_TITLES[view];
+  const memoryCount = memoryQuery.data
+    ? (memoryQuery.data.core ? 1 : 0) + memoryQuery.data.memories.length
+    : undefined;
 
   return (
     <>
@@ -405,6 +414,8 @@ export function UserProfilePanel({
               isOwner={isOwner}
               isSelf={isSelf}
               managedAgent={managedAgent}
+              memoriesLoading={memoryQuery.isLoading}
+              memoryCount={memoryCount}
               onOpenChannels={() => setView("channels")}
               onOpenMemories={() => setView("memories")}
               onOpenDm={onOpenDm}

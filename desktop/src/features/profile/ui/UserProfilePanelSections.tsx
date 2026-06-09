@@ -77,6 +77,8 @@ export type ProfileSummaryViewProps = {
   isOwner: boolean | undefined;
   isSelf: boolean;
   managedAgent: ManagedAgent | undefined;
+  memoriesLoading: boolean;
+  memoryCount: number | undefined;
   onOpenChannels: () => void;
   onOpenMemories: () => void;
   onOpenDm?: (pubkeys: string[]) => void;
@@ -107,6 +109,8 @@ export function ProfileSummaryView({
   isOwner,
   isSelf,
   managedAgent,
+  memoriesLoading,
+  memoryCount,
   onOpenChannels,
   onOpenMemories,
   onOpenDm,
@@ -161,7 +165,13 @@ export function ProfileSummaryView({
               label="Memories"
               onClick={onOpenMemories}
               testId="user-profile-memories-ingress"
-              trailing="View"
+              trailing={
+                memoriesLoading
+                  ? "Loading…"
+                  : memoryCount !== undefined
+                    ? String(memoryCount)
+                    : "View"
+              }
             />
           ) : null}
           {showChannelsIngress ? (

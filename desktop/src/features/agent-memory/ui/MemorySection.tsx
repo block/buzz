@@ -301,19 +301,13 @@ function MemoryShowMoreButton({
 }) {
   const button = (
     <button
-      className={cn(
-        "flex w-full items-center justify-center gap-2 rounded-2xl bg-muted/40 px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-muted/50",
-        truncated && "border border-warning/30",
-      )}
+      className="flex w-full items-center justify-center gap-2 rounded-2xl bg-muted/40 px-4 py-3 text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
       data-testid={
         truncated ? "agent-memory-truncated" : "agent-memory-show-more"
       }
       onClick={onClick}
       type="button"
     >
-      {truncated ? (
-        <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />
-      ) : null}
       View all ({count})
     </button>
   );
