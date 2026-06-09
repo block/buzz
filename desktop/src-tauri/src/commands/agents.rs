@@ -710,6 +710,10 @@ struct ProfileReconcileData {
     /// The agent's command (e.g. "goose"). Used as fallback when no profile
     /// exists on the relay during avatar backfill.
     agent_command: String,
+    /// Persona ID if this agent was created from a persona. Used during avatar
+    /// backfill to recover the correct avatar from the persona record when the
+    /// relay profile has been corrupted.
+    persona_id: Option<String>,
 }
 
 #[tauri::command]
@@ -757,6 +761,7 @@ pub async fn start_managed_agent(
             auth_tag: record.auth_tag.clone(),
             pubkey: record.pubkey.clone(),
             agent_command: record.agent_command.clone(),
+            persona_id: record.persona_id.clone(),
         };
 
         let target = if record.backend == BackendKind::Local {
@@ -838,6 +843,25 @@ pub async fn start_managed_agent(
     result
 }
 
+/// Resolve the avatar to backfill for a legacy agent record (pre-PR-921, no
+/// stored `avatar_url`).
+///
+/// Priority: the persona's avatar wins, because the old reconciliation code
+/// could have overwritten the relay's kind:0 `picture` with the command default
+/// — making the relay an unreliable source for persona-backed agents. Only fall
+/// back to the relay's `picture`, then the command icon, for agents with no
+/// persona avatar to recover from.
+fn resolve_legacy_avatar(
+    persona_avatar: Option<String>,
+    relay_picture: Option<String>,
+    agent_command: &str,
+) -> String {
+    persona_avatar
+        .or(relay_picture)
+        .or_else(|| managed_agent_avatar_url(agent_command))
+        .unwrap_or_default()
+}
+
 /// Reconcile an agent's kind:0 profile on the relay.
 ///
 /// Queries the relay for the agent's existing profile and re-publishes if missing
@@ -845,9 +869,10 @@ pub async fn start_managed_agent(
 /// are returned to the caller for logging but never block agent startup.
 ///
 /// For legacy records (pre-PR-921) where `avatar_url` is `None`, this function
-/// backfills the avatar from the relay's existing kind:0 profile (or falls back
-/// to the command-derived icon) and persists the updated record. After backfill,
-/// normal reconciliation proceeds.
+/// backfills via `resolve_legacy_avatar` — preferring the persona record's avatar
+/// over the relay's `picture`, since the old code may have corrupted the relay
+/// profile — and persists the updated record. After backfill, normal
+/// reconciliation proceeds.
 ///
 /// Query and publish both target the agent's stored `relay_url` so that, under
 /// an active workspace relay override, reconciliation reads and writes the same
@@ -863,16 +888,27 @@ async fn reconcile_agent_profile(
     // Query the relay for the agent's existing kind:0 profile.
     let existing = query_agent_profile(state, &data.relay_url, agent_pubkey).await?;
 
-    // Resolve the expected avatar — backfilling from the relay for legacy records.
+    // Resolve the expected avatar — backfilling for legacy records that have no
+    // stored avatar_url yet.
     let expected_avatar = match data.avatar_url.as_deref() {
         Some(url) => url.to_string(),
         None => {
-            // Legacy record: backfill from relay profile or fall back to command icon.
-            let backfilled = existing
-                .as_ref()
-                .and_then(|info| info.picture.clone())
-                .or_else(|| managed_agent_avatar_url(&data.agent_command))
-                .unwrap_or_default();
+            // Legacy record: the relay profile may have been corrupted by the
+            // old reconciliation code (it overwrote the persona avatar with the
+            // command default), so the persona record is the authoritative source.
+            let persona_avatar = data.persona_id.as_ref().and_then(|pid| {
+                load_personas(app)
+                    .ok()?
+                    .into_iter()
+                    .find(|p| p.id == *pid)?
+                    .avatar_url
+            });
+
+            let backfilled = resolve_legacy_avatar(
+                persona_avatar,
+                existing.as_ref().and_then(|info| info.picture.clone()),
+                &data.agent_command,
+            );
 
             // Persist the backfilled avatar so this migration only runs once.
             if !backfilled.is_empty() {
@@ -1209,5 +1245,42 @@ mod tests {
     fn profile_needs_sync_when_expected_avatar_absent_but_published() {
         let existing = profile(Some("Duncan"), Some("https://x/a.png"));
         assert!(profile_needs_sync(Some(&existing), "Duncan", None));
+    }
+
+    #[test]
+    fn legacy_avatar_prefers_persona_over_corrupted_relay_picture() {
+        // The regression: the relay picture was overwritten with the command
+        // default. The persona avatar must win so the correct avatar is restored.
+        let resolved = resolve_legacy_avatar(
+            Some("https://x/persona.png".to_string()),
+            Some("https://x/default-icon.png".to_string()),
+            "goose",
+        );
+
+        assert_eq!(resolved, "https://x/persona.png");
+    }
+
+    #[test]
+    fn legacy_avatar_falls_back_to_relay_picture_without_persona() {
+        let resolved =
+            resolve_legacy_avatar(None, Some("https://x/relay.png".to_string()), "goose");
+
+        assert_eq!(resolved, "https://x/relay.png");
+    }
+
+    #[test]
+    fn legacy_avatar_falls_back_to_command_icon_when_no_persona_or_relay() {
+        use crate::managed_agents::managed_agent_avatar_url;
+
+        let resolved = resolve_legacy_avatar(None, None, "goose");
+
+        assert_eq!(resolved, managed_agent_avatar_url("goose").unwrap());
+    }
+
+    #[test]
+    fn legacy_avatar_empty_when_nothing_resolves() {
+        let resolved = resolve_legacy_avatar(None, None, "totally-unknown-command");
+
+        assert!(resolved.is_empty());
     }
 }
