@@ -27,7 +27,7 @@ class SendMessage {
   /// If [rootEventId] is null it defaults to [parentEventId] (direct reply to
   /// thread head). Tags are built to match the desktop's `buildReplyTags`
   /// convention with `root` / `reply` markers. Pass [mediaTags] to append
-  /// relay-validated `imeta` tags for uploaded media.
+  /// relay-validated `imeta` tags and NIP-30 `emoji` tags.
   Future<void> call({
     required String channelId,
     required String content,

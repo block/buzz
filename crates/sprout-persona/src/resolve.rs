@@ -35,8 +35,12 @@ pub struct ResolvedPersona {
 
     // → Config.model (plain model ID, post-split)
     pub model: Option<String>,
-    // → PersonaRecord.provider (for desktop display / GOOSE_PROVIDER env)
-    pub provider: Option<String>,
+    /// LLM inference provider extracted from the model string colon prefix (e.g., 'databricks'
+    /// from 'databricks:model-id'). Flows into harness-specific env vars (GOOSE_PROVIDER) only.
+    pub llm_provider: Option<String>,
+    /// Preferred ACP runtime ID from the persona config (e.g., 'goose', 'claude'). Maps to
+    /// PersonaRecord.runtime during pack import.
+    pub runtime: Option<String>,
     pub temperature: Option<f64>,
     pub max_context_tokens: Option<u64>,
 
@@ -200,7 +204,7 @@ fn resolve_one_persona(
     let system_prompt = compose_prompt(&lp.prompt, pack_instructions);
 
     // Split "provider:model-id" into separate fields (V3 contract).
-    let (provider, model) = match lp.model.as_deref() {
+    let (llm_provider, model) = match lp.model.as_deref() {
         Some(s) if !s.trim().is_empty() => {
             let (prov, id) = split_model(s);
             (
@@ -231,7 +235,8 @@ fn resolve_one_persona(
         version,
         system_prompt,
         model,
-        provider,
+        llm_provider,
+        runtime: lp.runtime.clone(),
         temperature: lp.temperature,
         max_context_tokens: lp.max_context_tokens,
         subscribe: lp.subscribe.clone(),
@@ -642,7 +647,7 @@ mod tests {
         assert_eq!(p.name, "bot");
         assert_eq!(p.system_prompt, "You are Bot.\n");
         assert!(p.model.is_none());
-        assert!(p.provider.is_none());
+        assert!(p.llm_provider.is_none());
         assert!(p.triggers.mentions); // built-in default
         assert!(p.mcp_servers.is_empty());
         assert!(p.goose_env_vars.is_empty());
@@ -685,7 +690,7 @@ mod tests {
 
         // Model split into separate fields (V3 contract)
         assert_eq!(p.model.as_deref(), Some("claude-sonnet-4-20250514"));
-        assert_eq!(p.provider.as_deref(), Some("anthropic"));
+        assert_eq!(p.llm_provider.as_deref(), Some("anthropic"));
 
         // Env vars projected
         let env_map: HashMap<&str, &str> = p
@@ -740,10 +745,10 @@ mod tests {
 
         // pip overrides model
         assert_eq!(pip.model.as_deref(), Some("claude-4-opus-20250514"));
-        assert_eq!(pip.provider.as_deref(), Some("anthropic"));
+        assert_eq!(pip.llm_provider.as_deref(), Some("anthropic"));
         // lep inherits model from defaults
         assert_eq!(lep.model.as_deref(), Some("claude-sonnet-4-20250514"));
-        assert_eq!(lep.provider.as_deref(), Some("anthropic"));
+        assert_eq!(lep.llm_provider.as_deref(), Some("anthropic"));
 
         // pip inherits temperature from defaults
         assert_eq!(pip.temperature, Some(0.7));
@@ -835,7 +840,7 @@ mod tests {
         let pack = resolve_pack(dir).unwrap();
         let p = &pack.personas[0];
         assert_eq!(p.model.as_deref(), Some("gpt-4o"));
-        assert_eq!(p.provider.as_deref(), Some("openai"));
+        assert_eq!(p.llm_provider.as_deref(), Some("openai"));
     }
 
     #[test]
@@ -859,7 +864,7 @@ mod tests {
         let pack = resolve_pack(dir).unwrap();
         let p = &pack.personas[0];
         assert_eq!(p.model.as_deref(), Some("gpt-4o"));
-        assert!(p.provider.is_none());
+        assert!(p.llm_provider.is_none());
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────
@@ -876,6 +881,7 @@ mod tests {
             description: "A test persona.".into(),
             avatar: None,
             model: model.map(str::to_owned),
+            runtime: None,
             temperature,
             max_context_tokens,
             subscribe: vec![],

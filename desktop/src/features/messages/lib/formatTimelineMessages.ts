@@ -262,9 +262,11 @@ export function formatTimelineMessages(
 
     const profile = profiles?.[actorPubkey];
     const displayName =
-      profile?.displayName?.trim() ||
-      profile?.nip05Handle?.trim() ||
-      `${actorPubkey.slice(0, 8)}…`;
+      currentPubkeyLower && actorPubkey === currentPubkeyLower
+        ? "You"
+        : profile?.displayName?.trim() ||
+          profile?.nip05Handle?.trim() ||
+          `${actorPubkey.slice(0, 8)}…`;
     existing.users.push({
       pubkey: actorPubkey,
       displayName,

@@ -1,12 +1,11 @@
 import { LogIn } from "lucide-react";
-import { createPortal } from "react-dom";
 
 import { ChatHeader } from "@/features/chat/ui/ChatHeader";
 import type { EphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import { getChannelDescription } from "@/features/channels/lib/channelDescription";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
-import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { Button } from "@/shared/ui/button";
 import type { Channel, PresenceStatus } from "@/shared/api/types";
 
@@ -14,6 +13,9 @@ type ChannelScreenHeaderProps = {
   activeChannel: Channel | null;
   activeChannelEphemeralDisplay: EphemeralChannelDisplay | null;
   activeChannelTitle: string;
+  actionsRightInset?: string;
+  actionsVariant?: "inline" | "compact";
+  activeDmAvatarUrl: string | null;
   activeDmPresenceStatus: PresenceStatus | null;
   currentPubkey?: string;
   isJoining?: boolean;
@@ -27,6 +29,9 @@ export function ChannelScreenHeader({
   activeChannel,
   activeChannelEphemeralDisplay,
   activeChannelTitle,
+  actionsRightInset,
+  actionsVariant = "inline",
+  activeDmAvatarUrl,
   activeDmPresenceStatus,
   currentPubkey,
   isJoining = false,
@@ -59,32 +64,34 @@ export function ChannelScreenHeader({
         currentPubkey={currentPubkey}
         onManageChannel={onManageChannel}
         onToggleMembers={onToggleMembers}
+        variant={actionsVariant}
       />
     )
   ) : null;
 
   if (!showHeaderContent) {
-    if (typeof document === "undefined") {
-      return null;
-    }
-
-    return createPortal(
-      <div className="fixed right-3 top-[9px] z-[45] flex shrink-0 items-center gap-1">
-        <UpdateIndicator />
-        {actions ? <div className="shrink-0">{actions}</div> : null}
-      </div>,
-      document.body,
-    );
+    return null;
   }
 
   return (
     <ChatHeader
-      actionsPlacement="top-right"
       belowSystemChrome
       density="compact"
       actions={actions}
+      actionsRightInset={actionsRightInset}
       channelType={activeChannel?.channelType}
       description={getChannelDescription(activeChannel)}
+      leadingContent={
+        activeChannel?.channelType === "dm" ? (
+          <ProfileAvatar
+            avatarUrl={activeDmAvatarUrl}
+            className="h-6 w-6 rounded-md text-[10px]"
+            iconClassName="h-3.5 w-3.5"
+            label={activeChannelTitle}
+            testId="chat-header-dm-avatar"
+          />
+        ) : undefined
+      }
       statusBadge={
         <ChannelHeaderStatusBadge
           channelType={activeChannel?.channelType}

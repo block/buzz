@@ -15,7 +15,7 @@ export function buildCustomEmojiCategory(customEmoji: CustomEmoji[]) {
       name: "Custom",
       emojis: customEmoji.map((e) => ({
         id: e.shortcode,
-        name: e.shortcode,
+        name: `:${e.shortcode}:`,
         keywords: [e.shortcode],
         skins: [{ src: rewriteRelayUrl(e.url) }],
       })),

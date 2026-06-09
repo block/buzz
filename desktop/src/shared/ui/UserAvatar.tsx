@@ -31,9 +31,7 @@ export function UserAvatar({
   const initials = getInitials(displayName);
 
   return (
-    <Avatar
-      className={cn(sizeClasses[size], "rounded-lg shadow-xs", className)}
-    >
+    <Avatar className={cn(sizeClasses[size], "shadow-xs", className)}>
       {avatarUrl ? (
         <AvatarImage
           alt={`${displayName} avatar`}
@@ -45,7 +43,7 @@ export function UserAvatar({
       ) : null}
       <AvatarFallback
         className={cn(
-          "rounded-lg font-semibold",
+          "font-semibold",
           accent
             ? "bg-primary text-primary-foreground"
             : "bg-secondary text-secondary-foreground",

@@ -25,8 +25,9 @@ pub struct BlobDescriptor {
     /// NIP-71 poster frame URL. `None` for non-video blobs or if extraction failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    /// Original filename, for the generic file-card label. Captured client-side
-    /// (the relay is content-addressed and never learns it). `None` for media.
+    /// Original filename captured client-side (the relay is content-addressed
+    /// and never learns it). Generic files use it for file-card labels; custom
+    /// emoji upload uses it to suggest a shortcode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
 }
@@ -324,15 +325,10 @@ async fn process_picked_path(
         }
     }
 
-    // Generic files (non-image, non-video) carry their original filename so the
-    // client can render a file card with a real label. Media is identified by
-    // its preview, so no filename is attached.
-    if !mime.starts_with("image/") && !mime.starts_with("video/") {
-        descriptor.filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(sanitize_filename);
-    }
+    descriptor.filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(sanitize_filename);
 
     Ok(descriptor)
 }
@@ -430,11 +426,7 @@ pub async fn upload_media_bytes(
         }
     }
 
-    // Attach the original filename for generic files (drag/paste supply it from
-    // the JS File object). Media identifies itself by its preview, so skip it.
-    if !mime.starts_with("image/") && !mime.starts_with("video/") {
-        descriptor.filename = filename.as_deref().map(sanitize_filename);
-    }
+    descriptor.filename = filename.as_deref().map(sanitize_filename);
 
     Ok(descriptor)
 }

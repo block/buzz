@@ -11,6 +11,10 @@ import {
   meshInstalledModels,
 } from "@/shared/api/tauriMesh";
 import type { MeshModelOption, MeshNodeStatus } from "@/shared/api/tauriMesh";
+import {
+  SettingsOptionGroup,
+  SettingsOptionRow,
+} from "@/features/settings/ui/SettingsOptionGroup";
 import { classifyModelRef, modelRefHintLabel } from "../classifyModelRef";
 import { useMeshNodeStatus } from "../hooks/useMeshNodeStatus";
 
@@ -95,6 +99,7 @@ export function MeshComputeSettingsCard() {
   }, [status?.state, status?.modelId, modelInput]);
 
   const isOn = status?.state === "running" || status?.state === "starting";
+  const controlsDisabled = isOn || actionInFlight;
   const refClass = classifyModelRef(modelInput);
   const refHint = modelRefHintLabel(refClass);
   const canStart =
@@ -130,28 +135,27 @@ export function MeshComputeSettingsCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-mesh-share-compute">
-      <div className="mb-3 min-w-0">
-        <h2 className="text-sm font-semibold tracking-tight">Share compute</h2>
-        <p className="text-sm text-muted-foreground">
+      <div className="mb-12 min-w-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Share compute</h2>
+        <p className="text-base font-normal text-muted-foreground">
           Share this machine with your relay. When on, other members can run
           their agents here.
         </p>
       </div>
 
       {error ? (
-        <p className="mb-3 rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
+        <p className="mb-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
           Couldn't load mesh status: {error}
         </p>
       ) : null}
       {actionError ? (
-        <p className="mb-3 rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
+        <p className="mb-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {actionError}
         </p>
       ) : null}
 
-      <div className="flex flex-col gap-4">
-        {/* ── Master toggle + status row ─────────────────────────────── */}
-        <div className="flex items-center justify-between gap-4">
+      <SettingsOptionGroup>
+        <SettingsOptionRow>
           <div className="min-w-0">
             <label
               className="text-sm font-medium"
@@ -168,84 +172,86 @@ export function MeshComputeSettingsCard() {
             id="mesh-share-compute-toggle"
             onCheckedChange={handleToggle}
           />
-        </div>
+        </SettingsOptionRow>
 
-        {/* ── Model field ──────────────────────────────────────────── */}
-        <fieldset
-          className="flex flex-col gap-2"
-          disabled={isOn || actionInFlight}
-        >
-          <legend className="flex items-center gap-2 text-sm font-medium">
+        <div className="px-4 pb-4 pt-5">
+          <label
+            className="mb-3 flex items-center gap-2 text-sm font-medium"
+            htmlFor="mesh-share-compute-model"
+          >
             <Cpu className="h-4 w-4 text-muted-foreground" />
             Model
-          </legend>
-          <Input
-            data-testid="mesh-share-compute-model"
-            onChange={(e) => {
-              const next = e.target.value;
-              setModelInput(next);
-              writeDraft(MODEL_DRAFT_STORAGE_KEY, next);
-            }}
-            placeholder="Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main"
-            value={modelInput}
-          />
-          {refHint ? (
-            <p className="text-xs text-muted-foreground">{refHint}</p>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              Catalog name, HuggingFace ref, or a local file path.
-            </p>
-          )}
-          {installedModels.length > 0 ? (
-            <div className="mt-1">
-              <p className="text-xs text-muted-foreground">
-                Already installed on this machine:
+          </label>
+          <div className="flex flex-col gap-2">
+            <Input
+              data-testid="mesh-share-compute-model"
+              disabled={controlsDisabled}
+              id="mesh-share-compute-model"
+              onChange={(e) => {
+                const next = e.target.value;
+                setModelInput(next);
+                writeDraft(MODEL_DRAFT_STORAGE_KEY, next);
+              }}
+              placeholder="Qwen3-8B-Q4_K_M or hf://meshllm/qwen3-8b@main"
+              value={modelInput}
+            />
+            {refHint ? (
+              <p className="text-sm font-normal text-muted-foreground">
+                {refHint}
               </p>
-              <ul
-                className="mt-1 flex flex-wrap gap-1.5"
-                data-testid="mesh-share-compute-installed-list"
-              >
-                {installedModels.map((m) => (
-                  <li key={m.id}>
-                    <button
-                      className="rounded border border-border/60 bg-muted/20 px-2 py-0.5 text-xs hover:bg-muted/40"
-                      onClick={() => {
-                        setModelInput(m.id);
-                        writeDraft(MODEL_DRAFT_STORAGE_KEY, m.id);
-                      }}
-                      type="button"
-                    >
-                      {m.name ?? m.id}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-        </fieldset>
+            ) : (
+              <p className="text-sm font-normal text-muted-foreground">
+                Catalog name, HuggingFace ref, or a local file path.
+              </p>
+            )}
+            {installedModels.length > 0 ? (
+              <div className="mt-1">
+                <p className="text-sm font-normal text-muted-foreground">
+                  Already installed on this machine:
+                </p>
+                <ul
+                  className="mt-1 flex flex-wrap gap-1.5"
+                  data-testid="mesh-share-compute-installed-list"
+                >
+                  {installedModels.map((m) => (
+                    <li key={m.id}>
+                      <button
+                        className="rounded border border-border/60 bg-muted/20 px-2 py-0.5 text-sm hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={controlsDisabled}
+                        onClick={() => {
+                          setModelInput(m.id);
+                          writeDraft(MODEL_DRAFT_STORAGE_KEY, m.id);
+                        }}
+                        type="button"
+                      >
+                        {m.name ?? m.id}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        </div>
 
-        {/* ── Advanced ─────────────────────────────────────────────── */}
         <details
-          className="rounded border border-border/40 px-3 py-2"
+          className="px-4 py-3"
           onToggle={(e) =>
             setAdvancedOpen((e.target as HTMLDetailsElement).open)
           }
           open={advancedOpen}
         >
-          <summary className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+          <summary className="flex cursor-pointer items-center gap-1.5 text-sm font-medium text-foreground">
             <ChevronDown
               className={cn(
-                "h-3 w-3 transition-transform",
+                "h-3.5 w-3.5 text-muted-foreground transition-transform",
                 advancedOpen ? "rotate-0" : "-rotate-90",
               )}
             />
             Advanced
           </summary>
-          <div className="mt-2 flex flex-col gap-2">
-            <label
-              className="text-xs text-muted-foreground"
-              htmlFor="mesh-vram"
-            >
+          <div className="mt-3 flex flex-col gap-2">
+            <label className="text-sm font-medium" htmlFor="mesh-vram">
               Max VRAM (GB)
             </label>
             <Input
@@ -261,7 +267,7 @@ export function MeshComputeSettingsCard() {
               value={maxVramGb}
             />
             {status?.consoleUrl ? (
-              <p className="text-xs text-muted-foreground">
+              <p className="text-sm font-normal text-muted-foreground">
                 Debug console:{" "}
                 <a
                   className="underline"
@@ -275,14 +281,13 @@ export function MeshComputeSettingsCard() {
             ) : null}
           </div>
         </details>
+      </SettingsOptionGroup>
 
-        {/* ── Architectural-trust footer ───────────────────────────── */}
-        <p className="rounded bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-          Sprout will not publish your machine to public Nostr relays,
-          auto-discover other networks, or share your endpoint outside this
-          relay's members. Only members of this relay can dial in.
-        </p>
-      </div>
+      <p className="mt-3 rounded-lg bg-muted/30 px-3 py-2 text-sm font-normal text-muted-foreground">
+        Sprout will not publish your machine to public Nostr relays,
+        auto-discover other networks, or share your endpoint outside this
+        relay's members. Only members of this relay can dial in.
+      </p>
     </section>
   );
 }

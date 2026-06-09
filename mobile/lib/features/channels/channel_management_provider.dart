@@ -6,6 +6,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/relay/relay.dart';
 import '../profile/profile_provider.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
 import 'channel.dart';
 import 'channels_provider.dart';
 
@@ -393,11 +395,18 @@ class ChannelActions {
   }
 
   Future<void> addReaction(String eventId, String emoji) async {
+    final shortcode = normalizeShortcode(emoji);
+    final emojiUrl = reactionEmojiUrl(
+      emoji,
+      _ref.read(customEmojiListProvider),
+    );
     await _signedEventRelay.submit(
       kind: EventKind.reaction,
       content: emoji,
       tags: [
         ['e', eventId],
+        if (shortcode != null && emojiUrl != null)
+          ['emoji', shortcode, emojiUrl],
       ],
     );
   }
@@ -416,6 +425,7 @@ class ChannelActions {
     required String channelId,
     required String eventId,
     required String content,
+    List<List<String>> mediaTags = const [],
   }) async {
     await _signedEventRelay.submit(
       kind: EventKind.streamMessageEdit,
@@ -423,6 +433,7 @@ class ChannelActions {
       tags: [
         ['h', channelId],
         ['e', eventId],
+        ...mediaTags,
       ],
     );
   }

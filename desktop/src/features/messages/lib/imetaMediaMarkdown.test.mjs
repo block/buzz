@@ -81,6 +81,22 @@ test("formatImetaMediaLine: image mime → ![image] line", () => {
   );
 });
 
+test("buildImetaTags omits image filenames from imeta", () => {
+  assert.deepEqual(
+    buildImetaTags([
+      {
+        url: "https://b/a.png",
+        type: "image/png",
+        sha256: "abc",
+        size: 10,
+        uploaded: 1,
+        filename: "Party Parrot.png",
+      },
+    ]),
+    [["imeta", "url https://b/a.png", "m image/png", "x abc", "size 10"]],
+  );
+});
+
 test("formatImetaMediaLine: video mime → ![video] line (regardless of URL suffix)", () => {
   assert.equal(
     formatImetaMediaLine({ url: "https://cdn/blob/xyz", type: "video/mp4" }),

@@ -347,6 +347,22 @@ fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
     }
 }
 
+#[tauri::command]
+fn perform_sidebar_default_haptic() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{
+            NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
+            NSHapticFeedbackPerformer,
+        };
+
+        NSHapticFeedbackManager::defaultPerformer().performFeedbackPattern_performanceTime(
+            NSHapticFeedbackPattern::Alignment,
+            NSHapticFeedbackPerformanceTime::Now,
+        );
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
@@ -494,8 +510,9 @@ pub fn run() {
             // this worktree's data directory. Must run before
             // restore_managed_agents_on_launch (which reads managed-agents.json).
             migration::sync_shared_agent_data(&app_handle);
-            migration::reconcile_provider_mcp_commands(&app_handle);
             migration::reconcile_persona_pack_paths(&app_handle);
+            migration::reconcile_provider_mcp_commands(&app_handle);
+            migration::migrate_persona_provider_to_runtime(&app_handle);
 
             // Resolve persisted identity key (env var → file → generate+save).
             // This is fatal — the app should not start with an ephemeral identity
@@ -609,7 +626,6 @@ pub fn run() {
             get_user_notes,
             search_users,
             get_presence,
-            set_presence,
             get_default_relay_url,
             is_shared_identity,
             get_relay_ws_url,
@@ -743,6 +759,7 @@ pub fn run() {
             add_agent_to_huddle,
             check_pipeline_hotstart,
             confirm_huddle_active,
+            perform_sidebar_default_haptic,
             get_huddle_agent_pubkeys,
             set_voice_input_mode,
             get_voice_input_mode,

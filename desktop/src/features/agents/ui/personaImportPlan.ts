@@ -150,15 +150,15 @@ export function buildPersonaImportPlan({
     });
   }
 
-  const existingProvider = normalizeOptionalText(persona.provider);
-  const importedProvider = normalizeOptionalText(preview.provider);
-  if (existingProvider !== importedProvider) {
+  const existingRuntime = normalizeOptionalText(persona.runtime);
+  const importedRuntime = normalizeOptionalText(preview.runtime);
+  if (existingRuntime !== importedRuntime) {
     fields.push({
-      field: "provider",
+      field: "runtime",
       label: "Preferred runtime",
-      existingValue: existingProvider,
-      importedValue: importedProvider,
-      ...singleLineChanges(existingProvider, importedProvider),
+      existingValue: existingRuntime,
+      importedValue: importedRuntime,
+      ...singleLineChanges(existingRuntime, importedRuntime),
     });
   }
 

@@ -74,7 +74,7 @@ export function ManagedAgentRow({
   const isActive = agent.status === "running" || agent.status === "deployed";
   const isLocal = agent.backend.type === "local";
   const runtimeSource =
-    agent.backend.type === "provider" ? `Provider ${agent.backend.id}` : null;
+    agent.backend.type === "provider" ? `Remote (${agent.backend.id})` : null;
   const personaLabel = agent.personaId
     ? (personaLabelsById[agent.personaId] ?? null)
     : null;

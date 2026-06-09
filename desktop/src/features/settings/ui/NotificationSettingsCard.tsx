@@ -3,6 +3,7 @@ import type {
   NotificationSettings,
 } from "@/features/notifications/hooks";
 import { Switch } from "@/shared/ui/switch";
+import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 
 export function NotificationSettingsCard({
   isUpdatingDesktopNotifications,
@@ -31,9 +32,9 @@ export function NotificationSettingsCard({
 
   return (
     <section className="min-w-0" data-testid="settings-notifications">
-      <div className="mb-3 min-w-0">
-        <h2 className="text-sm font-semibold tracking-tight">Notifications</h2>
-        <p className="text-sm text-muted-foreground">
+      <div className="mb-12 min-w-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Notifications</h2>
+        <p className="text-base font-normal text-muted-foreground">
           Desktop alerts are on by default. Fine-tune what gets through below.
         </p>
       </div>
@@ -48,8 +49,8 @@ export function NotificationSettingsCard({
               : "Off"}
       </span>
 
-      <div className="flex flex-col gap-4">
-        <div className="flex items-center justify-between gap-4">
+      <SettingsOptionGroup>
+        <SettingsOptionRow>
           <div className="min-w-0">
             <label
               className="text-sm font-medium"
@@ -59,7 +60,7 @@ export function NotificationSettingsCard({
                 ? "Requesting..."
                 : "Desktop alerts"}
             </label>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-sm font-normal text-muted-foreground">
               {notificationSettings.desktopEnabled
                 ? "Native desktop alerts are enabled for the categories you have armed below."
                 : "Request OS permission and surface new mentions or needs-action items outside the app."}
@@ -74,9 +75,9 @@ export function NotificationSettingsCard({
               void onSetDesktopNotificationsEnabled(checked);
             }}
           />
-        </div>
+        </SettingsOptionRow>
 
-        <div className="flex items-center justify-between gap-4">
+        <SettingsOptionRow>
           <div className="min-w-0">
             <label
               className="text-sm font-medium"
@@ -84,7 +85,7 @@ export function NotificationSettingsCard({
             >
               Notification sound
             </label>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-sm font-normal text-muted-foreground">
               Play a sound when a desktop notification fires.
             </p>
           </div>
@@ -100,14 +101,14 @@ export function NotificationSettingsCard({
               onSetSoundEnabled(checked);
             }}
           />
-        </div>
+        </SettingsOptionRow>
 
-        <div className="flex items-center justify-between gap-4">
+        <SettingsOptionRow>
           <div className="min-w-0">
             <label className="text-sm font-medium" htmlFor="home-badge-switch">
               Home badge
             </label>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-sm font-normal text-muted-foreground">
               Show a Home badge for mentions and needs-action items in the
               sidebar.
             </p>
@@ -120,14 +121,14 @@ export function NotificationSettingsCard({
               onSetHomeBadgeEnabled(checked);
             }}
           />
-        </div>
+        </SettingsOptionRow>
 
-        <div className="flex items-center justify-between gap-4">
+        <SettingsOptionRow>
           <div className="min-w-0">
             <label className="text-sm font-medium" htmlFor="mentions-switch">
               @Mentions
             </label>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-sm font-normal text-muted-foreground">
               Alert when someone tags your pubkey in a channel you can access.
             </p>
           </div>
@@ -139,9 +140,9 @@ export function NotificationSettingsCard({
               onSetMentionNotificationsEnabled(checked);
             }}
           />
-        </div>
+        </SettingsOptionRow>
 
-        <div className="flex items-center justify-between gap-4">
+        <SettingsOptionRow>
           <div className="min-w-0">
             <label
               className="text-sm font-medium"
@@ -149,7 +150,7 @@ export function NotificationSettingsCard({
             >
               Needs action
             </label>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-sm font-normal text-muted-foreground">
               Alert for reminders and workflow approvals that are waiting on
               you.
             </p>
@@ -162,8 +163,8 @@ export function NotificationSettingsCard({
               onSetNeedsActionNotificationsEnabled(checked);
             }}
           />
-        </div>
-      </div>
+        </SettingsOptionRow>
+      </SettingsOptionGroup>
 
       {permissionBlocked && (
         <p className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">

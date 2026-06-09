@@ -139,6 +139,14 @@ pub enum PresenceStatus {
     Offline,
 }
 
+#[derive(Clone, clap::ValueEnum)]
+pub enum EmojiScope {
+    #[value(name = "own")]
+    Own,
+    #[value(name = "workspace")]
+    Workspace,
+}
+
 impl std::fmt::Display for PresenceStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -240,9 +248,6 @@ pub enum MessagesCmd {
         /// Also publish to the Nostr network
         #[arg(long, default_value_t = false)]
         broadcast: bool,
-        /// Explicit mention pubkeys (64-char hex)
-        #[arg(long = "mention")]
-        mentions: Vec<String>,
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
         files: Vec<String>,
@@ -598,6 +603,27 @@ pub enum EmojiCmd {
         /// Emoji shortcode, without surrounding colons
         #[arg(long)]
         shortcode: String,
+    },
+    /// Export custom emojis to stdout or a file
+    Export {
+        /// Write JSON to this file path instead of stdout
+        #[arg(long)]
+        file: Option<String>,
+        /// Export your own set (default) or the full workspace palette
+        #[arg(long, value_enum, default_value = "own")]
+        scope: EmojiScope,
+    },
+    /// Import custom emojis from stdin or a file into your own set
+    Import {
+        /// Read JSON from this file path instead of stdin
+        #[arg(long)]
+        file: Option<String>,
+        /// Replace your entire set instead of merging
+        #[arg(long, default_value_t = false)]
+        replace: bool,
+        /// Print what would be published without writing
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
 }
 
@@ -1286,7 +1312,10 @@ mod tests {
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
-        assert_eq!(names(&cmd, "emoji"), vec!["list", "rm", "set"]);
+        assert_eq!(
+            names(&cmd, "emoji"),
+            vec!["export", "import", "list", "rm", "set"]
+        );
         assert_eq!(
             names(&cmd, "dms"),
             vec!["add-member", "hide", "list", "open"]
@@ -1323,7 +1352,7 @@ mod tests {
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),
-            ("emoji", 3),
+            ("emoji", 5),
             ("feed", 1),
             ("messages", 8),
             ("pack", 2),

@@ -14,7 +14,7 @@ function createPersona(
     displayName,
     avatarUrl,
     systemPrompt,
-    provider: null,
+    runtime: null,
     model: null,
     namePool: [],
     isBuiltIn: false,

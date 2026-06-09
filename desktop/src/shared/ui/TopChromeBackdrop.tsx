@@ -18,7 +18,7 @@ export function TopChromeBackdrop({ className }: { className?: string }) {
     <div
       aria-hidden="true"
       className={cn(
-        "pointer-events-none absolute inset-x-0 top-0 z-40 h-10 bg-background/75 backdrop-blur-md supports-[backdrop-filter]:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/35",
+        "pointer-events-none absolute inset-x-0 top-0 z-40 h-10 bg-background/75 backdrop-blur-md supports-[backdrop-filter]:bg-background/65 after:absolute after:inset-x-0 after:top-10 after:h-px after:bg-border/35 after:content-[''] dark:bg-background/45 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/35",
         className,
       )}
     />

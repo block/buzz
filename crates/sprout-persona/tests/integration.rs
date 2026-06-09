@@ -426,12 +426,12 @@ fn resolve_full_pipeline() {
     assert_eq!(pip.description, "Orchestration agent");
     assert_eq!(pip.version, "1.0.0"); // defaults to pack version
 
-    // Model split: "anthropic:claude-4-opus-20250514" → provider + model
-    assert_eq!(pip.provider.as_deref(), Some("anthropic"));
+    // Model split: "anthropic:claude-4-opus-20250514" → llm_provider + model
+    assert_eq!(pip.llm_provider.as_deref(), Some("anthropic"));
     assert_eq!(pip.model.as_deref(), Some("claude-4-opus-20250514"));
 
     // Lep inherits pack default model
-    assert_eq!(lep.provider.as_deref(), Some("anthropic"));
+    assert_eq!(lep.llm_provider.as_deref(), Some("anthropic"));
     assert_eq!(lep.model.as_deref(), Some("claude-sonnet-4-20250514"));
 
     // System prompt composed: persona body + pack instructions
@@ -544,12 +544,12 @@ fn resolve_multi_persona_pack() {
         .unwrap();
 
     // Alpha overrides model and temperature
-    assert_eq!(alpha.provider.as_deref(), Some("anthropic"));
+    assert_eq!(alpha.llm_provider.as_deref(), Some("anthropic"));
     assert_eq!(alpha.model.as_deref(), Some("claude-sonnet-4-20250514"));
     assert_eq!(alpha.temperature, Some(0.9));
 
     // Beta inherits all defaults
-    assert_eq!(beta.provider.as_deref(), Some("openai"));
+    assert_eq!(beta.llm_provider.as_deref(), Some("openai"));
     assert_eq!(beta.model.as_deref(), Some("gpt-4o"));
     assert_eq!(beta.temperature, Some(0.5));
     assert!(beta.thread_replies);

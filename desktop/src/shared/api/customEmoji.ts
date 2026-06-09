@@ -55,6 +55,24 @@ export function normalizeShortcode(raw: string): string | null {
 }
 
 /**
+ * Suggest a valid custom-emoji shortcode from an uploaded filename.
+ * Mirrors Slack's file-first flow: strip the extension, lowercase, and collapse
+ * runs of invalid characters into a single underscore.
+ */
+export function suggestShortcodeFromFilename(filename: string): string | null {
+  const basename = filename
+    .trim()
+    .replace(/^.*[/\\]/, "")
+    .replace(/\.[^.]*$/, "");
+  const suggested = basename
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^[_-]+|[_-]+$/g, "");
+  return normalizeShortcode(suggested);
+}
+
+/**
  * Parse NIP-30 `["emoji", shortcode, url]` tags from a single event into a
  * custom-emoji list. Shortcodes are normalized; malformed/duplicate entries
  * within the one event are skipped (first wins).

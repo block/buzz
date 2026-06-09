@@ -1,5 +1,6 @@
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { cn } from "@/shared/lib/cn";
+import { emojiDisplayName } from "@/shared/lib/emojiName";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 
 /**
@@ -29,6 +30,7 @@ export function StatusEmoji({ value, className }: StatusEmojiProps) {
 
   if (!value) return null;
 
+  const displayName = emojiDisplayName(value);
   const match = value.match(SHORTCODE_RE);
   if (match) {
     const shortcode = match[1].toLowerCase();
@@ -39,6 +41,7 @@ export function StatusEmoji({ value, className }: StatusEmojiProps) {
       return (
         <img
           alt={value}
+          title={displayName}
           src={rewriteRelayUrl(found.url)}
           className={cn(
             "inline-block object-contain align-text-bottom",
@@ -53,5 +56,9 @@ export function StatusEmoji({ value, className }: StatusEmojiProps) {
   // Native glyph, or an unknown shortcode we can't resolve — render as text.
   // Thread the caller's className through so native statuses keep the spacing
   // (e.g. `mr-1`) every display site applies to the image branch above.
-  return <span className={className}>{value}</span>;
+  return (
+    <span className={className} title={displayName}>
+      {value}
+    </span>
+  );
 }

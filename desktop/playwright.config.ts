@@ -48,6 +48,7 @@ export default defineConfig({
         "**/stream.spec.ts",
         "**/integration.spec.ts",
         "**/profile.spec.ts",
+        "**/sidebar.spec.ts",
         "**/tokens.spec.ts",
         "**/persona-env-vars.spec.ts",
         "**/mesh-compute.spec.ts",

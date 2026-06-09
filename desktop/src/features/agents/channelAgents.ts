@@ -17,15 +17,15 @@ import {
   uploadMediaBytes,
 } from "@/shared/api/tauri";
 import type {
-  AcpProvider,
+  AcpRuntime,
   ChannelRole,
   ManagedAgent,
   ManagedAgentBackend,
   RespondToMode,
 } from "@/shared/api/types";
 
-type ChannelAgentProvider = Pick<
-  AcpProvider,
+type ChannelAgentRuntime = Pick<
+  AcpRuntime,
   "id" | "label" | "command" | "defaultArgs" | "mcpCommand"
 >;
 
@@ -43,7 +43,7 @@ export type AttachManagedAgentToChannelResult = {
 };
 
 export type EnsureChannelAgentPresetInput = {
-  provider: ChannelAgentProvider;
+  runtime: ChannelAgentRuntime;
   role?: Exclude<ChannelRole, "owner">;
   ensureRunning?: boolean;
 };
@@ -51,11 +51,11 @@ export type EnsureChannelAgentPresetInput = {
 export type EnsureChannelAgentPresetResult =
   AttachManagedAgentToChannelResult & {
     created: boolean;
-    providerId: string;
+    runtimeId: string;
   };
 
 export type CreateChannelManagedAgentInput = {
-  provider: ChannelAgentProvider;
+  runtime: ChannelAgentRuntime;
   name: string;
   systemPrompt?: string;
   avatarUrl?: string;
@@ -76,7 +76,7 @@ export type CreateChannelManagedAgentInput = {
 export type CreateChannelManagedAgentResult =
   AttachManagedAgentToChannelResult & {
     created: boolean;
-    providerId: string;
+    runtimeId: string;
   };
 
 export type CreateChannelManagedAgentBatchFailure = {
@@ -147,25 +147,25 @@ export async function attachManagedAgentToChannel(
   } satisfies AttachManagedAgentToChannelResult;
 }
 
-function buildChannelAgentName(providerId: string, providerLabel: string) {
-  const normalizedProviderId = providerId.trim().toLowerCase();
-  if (normalizedProviderId.length > 0) {
-    return normalizedProviderId;
+function buildChannelAgentName(runtimeId: string, runtimeLabel: string) {
+  const normalizedRuntimeId = runtimeId.trim().toLowerCase();
+  if (normalizedRuntimeId.length > 0) {
+    return normalizedRuntimeId;
   }
 
-  return providerLabel.trim().toLowerCase() || "agent";
+  return runtimeLabel.trim().toLowerCase() || "agent";
 }
 
 function pickPreferredChannelPresetAgent(
   agents: ManagedAgent[],
   memberPubkeys: ReadonlySet<string>,
-  providerCommand: string,
+  runtimeCommand: string,
   expectedName: string,
 ) {
   const inChannelAgent = pickPreferredManagedAgent(
     agents.filter(
       (agent) =>
-        commandsMatch(agent.agentCommand, providerCommand) &&
+        commandsMatch(agent.agentCommand, runtimeCommand) &&
         memberPubkeys.has(normalizePubkey(agent.pubkey)),
     ),
   );
@@ -176,7 +176,7 @@ function pickPreferredChannelPresetAgent(
   return pickPreferredManagedAgent(
     agents.filter(
       (agent) =>
-        commandsMatch(agent.agentCommand, providerCommand) &&
+        commandsMatch(agent.agentCommand, runtimeCommand) &&
         agent.name.trim().toLowerCase() === expectedName.trim().toLowerCase(),
     ),
   );
@@ -194,13 +194,13 @@ export async function ensureChannelAgentPresetInChannel(
   );
   const managedAgents = await listManagedAgents();
   const expectedName = buildChannelAgentName(
-    input.provider.id,
-    input.provider.label,
+    input.runtime.id,
+    input.runtime.label,
   );
   const existingAgent = pickPreferredChannelPresetAgent(
     managedAgents,
     memberPubkeys,
-    input.provider.command,
+    input.runtime.command,
     expectedName,
   );
 
@@ -213,16 +213,16 @@ export async function ensureChannelAgentPresetInChannel(
     return {
       ...attached,
       created: false,
-      providerId: input.provider.id,
+      runtimeId: input.runtime.id,
     };
   }
 
   const created = await createManagedAgent({
     name: expectedName,
     acpCommand: "sprout-acp",
-    agentCommand: input.provider.command,
-    agentArgs: input.provider.defaultArgs,
-    mcpCommand: input.provider.mcpCommand ?? "",
+    agentCommand: input.runtime.command,
+    agentArgs: input.runtime.defaultArgs,
+    mcpCommand: input.runtime.mcpCommand ?? "",
     spawnAfterCreate: false,
   });
   const attached = await attachManagedAgentToChannel(channelId, {
@@ -234,7 +234,7 @@ export async function ensureChannelAgentPresetInChannel(
   return {
     ...attached,
     created: true,
-    providerId: input.provider.id,
+    runtimeId: input.runtime.id,
   };
 }
 
@@ -293,7 +293,7 @@ export async function createChannelManagedAgent(
       return {
         ...attached,
         created: false,
-        providerId: input.provider.id,
+        runtimeId: input.runtime.id,
       };
     }
   }
@@ -309,7 +309,7 @@ export async function createChannelManagedAgent(
   ) {
     const reusable = findReusableGenericAgent(
       context.managedAgents,
-      input.provider.command,
+      input.runtime.command,
       context.channelMemberPubkeys,
     );
     if (reusable) {
@@ -336,7 +336,7 @@ export async function createChannelManagedAgent(
       return {
         ...attached,
         created: false,
-        providerId: input.provider.id,
+        runtimeId: input.runtime.id,
       };
     }
   }
@@ -362,9 +362,9 @@ export async function createChannelManagedAgent(
   const created = await createManagedAgent({
     name: trimmedName,
     acpCommand: "sprout-acp",
-    agentCommand: input.provider.command,
-    agentArgs: input.provider.defaultArgs,
-    mcpCommand: input.provider.mcpCommand ?? "",
+    agentCommand: input.runtime.command,
+    agentArgs: input.runtime.defaultArgs,
+    mcpCommand: input.runtime.mcpCommand ?? "",
     personaId: input.personaId ?? undefined,
     systemPrompt: input.systemPrompt?.trim() || undefined,
     avatarUrl: resolvedAvatarUrl,
@@ -390,7 +390,7 @@ export async function createChannelManagedAgent(
   return {
     ...attached,
     created: true,
-    providerId: input.provider.id,
+    runtimeId: input.runtime.id,
   };
 }
 

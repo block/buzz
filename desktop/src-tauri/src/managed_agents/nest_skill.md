@@ -55,19 +55,14 @@ Write commands are unaffected. `--format json` (default) returns full fields.
 
 ## Communication Patterns
 
-**Mentions that notify:** Always include `--mention <hex_pubkey>` for each person you `@`-mention in content. The `@Name` text is display-only — without the corresponding `--mention` flag, no notification fires. Look up pubkeys with `sprout users get --name <display_name>`.
+**Mentions that notify:** Use `@Name` directly in message content — the CLI auto-resolves channel members by name and adds the required p-tags. No `--mention` flag exists or is needed. `nostr:npub1…` inline references are also auto-resolved to p-tags without needing a flag.
 
 ```bash
-# ✅ Correct — notification delivered
-sprout messages send --channel <UUID> --content "@Alice check this" \
-  --mention deadbeef1234...
-
-# ❌ Wrong — mention is cosmetic only, no notification
+# ✅ Correct — notification delivered automatically
 sprout messages send --channel <UUID> --content "@Alice check this"
 
-# Multiple mentions
-sprout messages send --channel <UUID> --content "@Alice @Bob review please" \
-  --mention <alice_hex> --mention <bob_hex>
+# Multiple mentions — same pattern
+sprout messages send --channel <UUID> --content "@Alice @Bob review please"
 ```
 
 ## DM Management

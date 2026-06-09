@@ -39,6 +39,8 @@ class ReadStateCrypto {
       nip44Decrypt(conversationKey, ciphertext);
 }
 
+enum _ApplyRemoteContextResult { unchanged, advanced }
+
 class ReadStateManager {
   final String pubkey;
   final ReadStateCrypto _crypto;
@@ -63,9 +65,7 @@ class ReadStateManager {
   Completer<void>? _publishCompleter;
   bool _remoteUnsupported = false;
   int _maxFetchedCreatedAt = 0;
-  final Set<String> _forcedContextIds = {};
   final Map<String, int> _contextSourceCreatedAt = {};
-  final Set<String> _pendingSyncedRollbacks = {};
   final Set<String> _pendingSyncedAdvances = {};
 
   ReadStateManager({
@@ -116,23 +116,11 @@ class ReadStateManager {
   }
 
   void markContextRead(String contextId, int unixTimestamp) {
-    _forcedContextIds.remove(contextId);
     _advanceContext(contextId, unixTimestamp, publishable: true);
     _contextSourceCreatedAt[contextId] = max(
       currentUnixSeconds(),
       _maxFetchedCreatedAt + 1,
     );
-  }
-
-  void markContextUnread(String contextId, int lastMessageTimestamp) {
-    if (_disposed || lastMessageTimestamp <= 0) return;
-    final rollbackTo = lastMessageTimestamp - 1;
-    _effectiveState[contextId] = rollbackTo;
-    _publishableContextIds.add(contextId);
-    _forcedContextIds.add(contextId);
-    _persistLocalState();
-    _onChanged();
-    _schedulePublish();
   }
 
   void seedContextRead(String contextId, int unixTimestamp) {
@@ -255,17 +243,15 @@ class ReadStateManager {
       }
 
       for (final entry in decoded.blob.contexts.entries) {
-        if (_forcedContextIds.contains(entry.key)) continue;
-        final sourceCreatedAt = _contextSourceCreatedAt[entry.key] ?? 0;
-        final current = _effectiveState[entry.key] ?? 0;
-        if (event.createdAt > sourceCreatedAt) {
-          _effectiveState[entry.key] = entry.value;
-          _contextSourceCreatedAt[entry.key] = event.createdAt;
-        } else if (event.createdAt == sourceCreatedAt &&
-            entry.value != current) {
-          _effectiveState[entry.key] = entry.value;
+        final result = _applyRemoteContextTimestamp(
+          contextId: entry.key,
+          timestamp: entry.value,
+          eventCreatedAt: event.createdAt,
+        );
+        if (result == _ApplyRemoteContextResult.advanced) {
+          _pendingSyncedAdvances.add(entry.key);
+          _publishableContextIds.add(entry.key);
         }
-        _publishableContextIds.add(entry.key);
       }
 
       if (decoded.blob.clientId == _clientId &&
@@ -329,27 +315,13 @@ class ReadStateManager {
 
     var changed = false;
     for (final entry in decoded.blob.contexts.entries) {
-      if (_forcedContextIds.contains(entry.key)) continue;
-      final sourceCreatedAt = _contextSourceCreatedAt[entry.key] ?? 0;
-      final current = _effectiveState[entry.key] ?? 0;
-      if (event.createdAt > sourceCreatedAt) {
-        if (_effectiveState[entry.key] != entry.value) {
-          if (entry.value < current && current > 0) {
-            _pendingSyncedRollbacks.add(entry.key);
-            _pendingSyncedAdvances.remove(entry.key);
-            debugPrint(
-              '[ReadStateManager] synced rollback ctx=${entry.key.substring(0, min(12, entry.key.length))}… from=$current to=${entry.value}',
-            );
-          } else if (entry.value > current) {
-            _pendingSyncedAdvances.add(entry.key);
-            _pendingSyncedRollbacks.remove(entry.key);
-          }
-          _effectiveState[entry.key] = entry.value;
-          changed = true;
-        }
-        _contextSourceCreatedAt[entry.key] = event.createdAt;
-      } else if (event.createdAt == sourceCreatedAt && entry.value != current) {
-        _effectiveState[entry.key] = entry.value;
+      final result = _applyRemoteContextTimestamp(
+        contextId: entry.key,
+        timestamp: entry.value,
+        eventCreatedAt: event.createdAt,
+      );
+      if (result == _ApplyRemoteContextResult.advanced) {
+        _pendingSyncedAdvances.add(entry.key);
         changed = true;
       }
       if (_publishableContextIds.add(entry.key)) {
@@ -373,6 +345,27 @@ class ReadStateManager {
         !_isIdenticalToLastPublished(_currentContexts())) {
       _schedulePublish();
     }
+  }
+
+  _ApplyRemoteContextResult _applyRemoteContextTimestamp({
+    required String contextId,
+    required int timestamp,
+    required int eventCreatedAt,
+  }) {
+    final sourceCreatedAt = _contextSourceCreatedAt[contextId] ?? 0;
+    final current = _effectiveState[contextId] ?? 0;
+    final next = max(current, timestamp);
+    final result = next == current
+        ? _ApplyRemoteContextResult.unchanged
+        : _ApplyRemoteContextResult.advanced;
+
+    if (result == _ApplyRemoteContextResult.advanced) {
+      _effectiveState[contextId] = next;
+    }
+    if (eventCreatedAt > sourceCreatedAt) {
+      _contextSourceCreatedAt[contextId] = eventCreatedAt;
+    }
+    return result;
   }
 
   void _schedulePublish() {
@@ -427,7 +420,6 @@ class ReadStateManager {
         }
       }
       _lastPublishedContexts = contexts;
-      _forcedContextIds.clear();
       _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, createdAt);
       _persistLocalState();
     } catch (error) {
@@ -487,12 +479,6 @@ class ReadStateManager {
     return true;
   }
 
-  Set<String> drainSyncedRollbacks() {
-    final drained = Set<String>.from(_pendingSyncedRollbacks);
-    _pendingSyncedRollbacks.clear();
-    return drained;
-  }
-
   Set<String> drainSyncedAdvances() {
     final drained = Set<String>.from(_pendingSyncedAdvances);
     _pendingSyncedAdvances.clear();
@@ -517,7 +503,6 @@ class ReadStateManager {
     _publishableContextIds
       ..clear()
       ..addAll(stored.publishableContextIds);
-    _forcedContextIds.clear();
     _contextSourceCreatedAt
       ..clear()
       ..addAll(stored.sourceCreatedAt);

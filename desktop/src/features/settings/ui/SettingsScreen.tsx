@@ -7,7 +7,6 @@ type SettingsScreenProps = {
   currentPubkey?: string;
   fallbackDisplayName?: string;
   isUpdatingDesktopNotifications: boolean;
-  mode: "profile" | "preferences";
   notificationErrorMessage: string | null;
   notificationPermission: DesktopNotificationPermissionState;
   notificationSettings: NotificationSettings;
@@ -25,7 +24,6 @@ export function SettingsScreen({
   currentPubkey,
   fallbackDisplayName,
   isUpdatingDesktopNotifications,
-  mode,
   notificationErrorMessage,
   notificationPermission,
   notificationSettings,
@@ -43,7 +41,6 @@ export function SettingsScreen({
       currentPubkey={currentPubkey}
       fallbackDisplayName={fallbackDisplayName}
       isUpdatingDesktopNotifications={isUpdatingDesktopNotifications}
-      mode={mode}
       notificationErrorMessage={notificationErrorMessage}
       notificationPermission={notificationPermission}
       notificationSettings={notificationSettings}

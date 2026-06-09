@@ -51,7 +51,7 @@ pub fn create_persona(
     let display_name = trim_required(&input.display_name, "Display name")?;
     let system_prompt = trim_required(&input.system_prompt, "System prompt")?;
     let avatar_url = trim_optional(input.avatar_url);
-    let provider = trim_optional(input.provider);
+    let runtime = trim_optional(input.runtime);
     let model = trim_optional(input.model);
     let now = now_iso();
 
@@ -72,7 +72,7 @@ pub fn create_persona(
         display_name,
         avatar_url,
         system_prompt,
-        provider,
+        runtime,
         model,
         name_pool,
         is_builtin: false,
@@ -98,7 +98,7 @@ pub fn update_persona(
     let display_name = trim_required(&input.display_name, "Display name")?;
     let system_prompt = trim_required(&input.system_prompt, "System prompt")?;
     let avatar_url = trim_optional(input.avatar_url);
-    let provider = trim_optional(input.provider);
+    let runtime = trim_optional(input.runtime);
     let model = trim_optional(input.model);
 
     let _store_guard = state
@@ -117,7 +117,7 @@ pub fn update_persona(
     persona.display_name = display_name;
     persona.avatar_url = avatar_url;
     persona.system_prompt = system_prompt;
-    persona.provider = provider;
+    persona.runtime = runtime;
     persona.model = model;
     persona.name_pool = input
         .name_pool
@@ -335,7 +335,7 @@ pub async fn export_persona_to_json(
     // forked, distributed), and bundling API keys / credentials in them
     // would be a significant footgun. Users who import a card and need
     // credentials must supply them post-import via the persona dialog.
-    let (display_name, system_prompt, avatar_url, provider, model, name_pool) = {
+    let (display_name, system_prompt, avatar_url, runtime, model, name_pool) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -349,7 +349,7 @@ pub async fn export_persona_to_json(
             persona.display_name.clone(),
             persona.system_prompt.clone(),
             persona.avatar_url.clone(),
-            persona.provider.clone(),
+            persona.runtime.clone(),
             persona.model.clone(),
             persona.name_pool.clone(),
         )
@@ -359,7 +359,7 @@ pub async fn export_persona_to_json(
         &display_name,
         &system_prompt,
         avatar_url.as_deref(),
-        provider.as_deref(),
+        runtime.as_deref(),
         model.as_deref(),
         &name_pool,
     )?;

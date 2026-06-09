@@ -3,8 +3,10 @@ import { ArrowDown } from "lucide-react";
 
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { Separator } from "@/shared/ui/separator";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { TimelineSkeleton } from "./TimelineSkeleton";
@@ -15,6 +17,10 @@ import { useTimelineScrollManager } from "./useTimelineScrollManager";
 type MessageTimelineProps = {
   channelId?: string | null;
   messages: TimelineMessage[];
+  directMessageIntro?: {
+    avatarUrl: string | null;
+    displayName: string;
+  } | null;
   isLoading?: boolean;
   emptyTitle?: string;
   emptyDescription?: string;
@@ -24,6 +30,8 @@ type MessageTimelineProps = {
   /** Optional external ref to the scroll container — used by the parent to
    *  observe scroll position or adjust padding dynamically. */
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
+  /** True when the timeline has the composer overlay below it. */
+  hasComposerOverlay?: boolean;
   isFetchingOlder?: boolean;
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
@@ -53,12 +61,14 @@ type MessageTimelineProps = {
 
 export const MessageTimeline = React.memo(function MessageTimeline({
   channelId,
+  directMessageIntro = null,
   messages,
   isLoading = false,
   emptyTitle = "No messages yet",
   emptyDescription = "Send the first message to start the thread.",
   currentPubkey,
   fetchOlder,
+  hasComposerOverlay = true,
   hasOlderMessages = true,
   isFetchingOlder = false,
   followThreadById,
@@ -137,18 +147,34 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     sentinelRef: topSentinelRef,
   });
 
+  const hasConversationMessage = messages.some(
+    (message) => message.kind !== KIND_SYSTEM_MESSAGE,
+  );
+  const showDirectMessageIntro =
+    !isLoading && directMessageIntro !== null && !hasConversationMessage;
+  const showGenericEmpty =
+    !isLoading && messages.length === 0 && directMessageIntro === null;
+  const showMessageList =
+    !isLoading && messages.length > 0 && !showDirectMessageIntro;
+
   return (
     <TooltipProvider delayDuration={200}>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <div
-          className="absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-24 pt-1 [overflow-anchor:none] sm:px-6"
+          className={cn(
+            "absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pt-1 [overflow-anchor:none] sm:px-6",
+            hasComposerOverlay ? "pb-24" : "pb-4",
+          )}
           data-scroll-restoration-id={scrollRestorationId}
           data-testid="message-timeline"
           onScroll={syncScrollState}
           ref={scrollContainerRef}
         >
           <div
-            className="flex w-full flex-col gap-2 pt-[76px]"
+            className={cn(
+              "flex w-full flex-col gap-2 pt-[92px]",
+              (showDirectMessageIntro || showGenericEmpty) && "min-h-full",
+            )}
             ref={contentRef}
           >
             <div ref={topSentinelRef} aria-hidden className="h-px" />
@@ -159,22 +185,34 @@ export const MessageTimeline = React.memo(function MessageTimeline({
               </div>
             ) : null}
 
-            {!hasOlderMessages && !isLoading && messages.length > 0 ? (
+            {isLoading ? <TimelineSkeleton /> : null}
+
+            {showDirectMessageIntro ? (
               <div
-                className="flex items-center gap-3 py-2"
-                data-testid="message-timeline-beginning"
+                className="mb-10 mt-auto flex w-full flex-col items-start text-left sm:-ml-2"
+                data-testid="message-dm-intro"
               >
-                <Separator className="flex-1" />
-                <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/75">
-                  Beginning of conversation
+                <ProfileAvatar
+                  avatarUrl={directMessageIntro.avatarUrl}
+                  className="h-[60px] w-[60px] text-base"
+                  iconClassName="h-6 w-6"
+                  label={directMessageIntro.displayName}
+                  testId="message-dm-intro-avatar"
+                />
+                <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
+                  {directMessageIntro.displayName}
                 </p>
-                <Separator className="flex-1" />
+                <p className="mt-1 max-w-full truncate whitespace-nowrap text-sm leading-5 text-muted-foreground">
+                  This is the beginning of your direct message with{" "}
+                  <span className="font-medium text-foreground">
+                    {directMessageIntro.displayName}
+                  </span>
+                  .
+                </p>
               </div>
             ) : null}
 
-            {isLoading ? <TimelineSkeleton /> : null}
-
-            {!isLoading && messages.length === 0 ? (
+            {showGenericEmpty ? (
               <div
                 className="rounded-3xl border border-dashed border-border/80 bg-card/70 px-6 py-10 text-center shadow-xs"
                 data-testid="message-empty"
@@ -188,7 +226,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
               </div>
             ) : null}
 
-            {!isLoading && messages.length > 0 ? (
+            {showMessageList ? (
               <TimelineMessageList
                 channelId={channelId}
                 currentPubkey={currentPubkey}
@@ -216,7 +254,12 @@ export const MessageTimeline = React.memo(function MessageTimeline({
         </div>
 
         {!isAtBottom ? (
-          <div className="pointer-events-none absolute inset-x-0 bottom-36 z-20 flex justify-center px-4">
+          <div
+            className={cn(
+              "pointer-events-none absolute inset-x-0 z-20 flex justify-center px-4",
+              hasComposerOverlay ? "bottom-36" : "bottom-4",
+            )}
+          >
             <Button
               className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-[11px] font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-3.5"
               data-testid="message-scroll-to-latest"

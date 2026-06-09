@@ -13,7 +13,7 @@ function createPersona(id, displayName) {
     displayName,
     avatarUrl: null,
     systemPrompt: `${displayName} prompt`,
-    provider: null,
+    runtime: null,
     model: null,
     isBuiltIn: false,
     isActive: true,

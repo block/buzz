@@ -62,6 +62,7 @@ void main() {
   ProviderContainer buildContainer({
     required List<Channel> channels,
     Map<String, int> readContexts = const {},
+    Set<String> locallyForcedChannelIds = const {},
     bool readStateReady = true,
     Map<String, int> highPriorityMap = const {},
   }) {
@@ -80,6 +81,7 @@ void main() {
               pubkey: 'me',
               contexts: readContexts,
               version: 1,
+              locallyForcedChannelIds: locallyForcedChannelIds,
             ),
           ),
         ),
@@ -249,6 +251,23 @@ void main() {
         channels: [makeChannel(id: 'ch-a', lastMessageAtSeconds: t20)],
         readContexts: {},
         readStateReady: false,
+      );
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      final badge = container.read(unreadBadgeProvider);
+      expect(badge.highPriorityCount, 0);
+      expect(badge.generalUnreadCount, 1);
+    },
+  );
+
+  test(
+    'locally forced channel counts unread without publishing rollback',
+    () async {
+      final container = buildContainer(
+        channels: [makeChannel(id: 'ch-a', lastMessageAtSeconds: t20)],
+        readContexts: {'ch-a': t30},
+        locallyForcedChannelIds: {'ch-a'},
       );
       addTearDown(container.dispose);
 

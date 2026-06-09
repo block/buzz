@@ -90,6 +90,8 @@ test("custom emoji round-trips through select-all + send to the timeline", async
     .getByTestId("message-timeline")
     .locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`);
   await expect(sentEmoji.last()).toBeVisible();
+  await sentEmoji.last().hover();
+  await expect(page.getByText(`:${SHORTCODE}:`).last()).toBeVisible();
   // The composer clears after send.
   await expect(input.locator("img[data-custom-emoji]")).toHaveCount(0);
 });
@@ -141,8 +143,10 @@ test("reacting with a custom emoji renders via the localhost media proxy", async
   // to surface the custom emoji, then click it.
   const picker = page.locator("em-emoji-picker");
   await picker.locator("input[type='search']").fill(REACTION_SHORTCODE);
-  // Custom emoji buttons carry the shortcode as their `title` (no aria-label).
-  await picker.locator(`button[title='${REACTION_SHORTCODE}']`).first().click();
+  await picker
+    .getByRole("button", { name: `:${REACTION_SHORTCODE}:` })
+    .first()
+    .click();
 
   // The reaction pill renders the custom emoji as an <img alt=":react:">. Its
   // src must be the localhost proxy URL — proving rewriteRelayUrl() ran. A raw
@@ -155,6 +159,40 @@ test("reacting with a custom emoji renders via the localhost media proxy", async
       `^http://localhost:${MOCK_MEDIA_PROXY_PORT}/media/[\\da-f]{64}\\.png$`,
     ),
   );
+
+  const inlineAddReactionButton = row.getByLabel("Add reaction");
+  await expect
+    .poll(() =>
+      inlineAddReactionButton.evaluate((button) => {
+        return getComputedStyle(button).opacity;
+      }),
+    )
+    .toBe("0");
+  await expect
+    .poll(() =>
+      inlineAddReactionButton.evaluate((button) => {
+        const rect = button.getBoundingClientRect();
+        return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
+      }),
+    )
+    .toBe("40x32");
+  await expect
+    .poll(() =>
+      inlineAddReactionButton.evaluate((button) => {
+        return getComputedStyle(button).transitionProperty;
+      }),
+    )
+    .not.toContain("width");
+  await row.hover();
+  await expect(inlineAddReactionButton).toBeVisible();
+  await expect
+    .poll(() =>
+      inlineAddReactionButton.evaluate((button) => {
+        const rect = button.getBoundingClientRect();
+        return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
+      }),
+    )
+    .toBe("40x32");
 
   // Toggle the reaction back off: click the pill, which fires remove_reaction
   // -> emits a kind:5 deletion targeting the reaction event. The pill must
@@ -281,7 +319,10 @@ test("a system message accepts a custom-emoji reaction", async ({ page }) => {
 
   const picker = page.locator("em-emoji-picker");
   await picker.locator("input[type='search']").fill(REACTION_SHORTCODE);
-  await picker.locator(`button[title='${REACTION_SHORTCODE}']`).first().click();
+  await picker
+    .getByRole("button", { name: `:${REACTION_SHORTCODE}:` })
+    .first()
+    .click();
 
   const reactionImg = row.locator(`img[alt=':${REACTION_SHORTCODE}:']`);
   await expect(reactionImg).toBeVisible();

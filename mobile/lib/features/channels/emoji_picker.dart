@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
+import '../custom_emoji/custom_emoji_render.dart';
 
 /// Opens the full emoji picker as a modal bottom sheet.
 void showEmojiPicker({
@@ -185,16 +189,16 @@ const emojiCategories = <({String label, IconData icon, List<String> emoji})>[
   ),
 ];
 
-class EmojiPickerSheet extends StatefulWidget {
+class EmojiPickerSheet extends ConsumerStatefulWidget {
   final void Function(String emoji) onSelect;
 
   const EmojiPickerSheet({super.key, required this.onSelect});
 
   @override
-  State<EmojiPickerSheet> createState() => _EmojiPickerSheetState();
+  ConsumerState<EmojiPickerSheet> createState() => _EmojiPickerSheetState();
 }
 
-class _EmojiPickerSheetState extends State<EmojiPickerSheet> {
+class _EmojiPickerSheetState extends ConsumerState<EmojiPickerSheet> {
   /// -1 = "All", 0..N = specific category.
   int _selectedCategory = -1;
 
@@ -210,9 +214,14 @@ class _EmojiPickerSheetState extends State<EmojiPickerSheet> {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    final customEmoji = ref.watch(customEmojiListProvider);
+    final isCustomCategory =
+        customEmoji.isNotEmpty && _selectedCategory == emojiCategories.length;
     final emoji = _selectedCategory < 0
         ? _allEmoji
-        : emojiCategories[_selectedCategory].emoji;
+        : _selectedCategory < emojiCategories.length
+        ? emojiCategories[_selectedCategory].emoji
+        : const <String>[];
 
     return SizedBox(
       height: 340,
@@ -235,6 +244,14 @@ class _EmojiPickerSheetState extends State<EmojiPickerSheet> {
                     selected: _selectedCategory == i,
                     onTap: () => setState(() => _selectedCategory = i),
                   ),
+                if (customEmoji.isNotEmpty)
+                  CategoryIcon(
+                    icon: LucideIcons.sparkles,
+                    selected: isCustomCategory,
+                    onTap: () => setState(
+                      () => _selectedCategory = emojiCategories.length,
+                    ),
+                  ),
               ],
             ),
           ),
@@ -242,27 +259,69 @@ class _EmojiPickerSheetState extends State<EmojiPickerSheet> {
           const SizedBox(height: Grid.xxs),
           // Emoji grid.
           Expanded(
-            child: GridView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 8,
-                mainAxisSpacing: Grid.half,
-                crossAxisSpacing: Grid.half,
-              ),
-              itemCount: emoji.length,
-              itemBuilder: (context, index) {
-                final e = emoji[index];
-                return GestureDetector(
-                  onTap: () => widget.onSelect(e),
-                  child: Center(
-                    child: Text(e, style: const TextStyle(fontSize: 28)),
+            child: isCustomCategory
+                ? _CustomEmojiGrid(
+                    emoji: customEmoji,
+                    onSelect: widget.onSelect,
+                  )
+                : GridView.builder(
+                    padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: 8,
+                          mainAxisSpacing: Grid.half,
+                          crossAxisSpacing: Grid.half,
+                        ),
+                    itemCount: emoji.length,
+                    itemBuilder: (context, index) {
+                      final e = emoji[index];
+                      return GestureDetector(
+                        onTap: () => widget.onSelect(e),
+                        child: Center(
+                          child: Text(e, style: const TextStyle(fontSize: 28)),
+                        ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class _CustomEmojiGrid extends StatelessWidget {
+  final List<CustomEmoji> emoji;
+  final void Function(String emoji) onSelect;
+
+  const _CustomEmojiGrid({required this.emoji, required this.onSelect});
+
+  @override
+  Widget build(BuildContext context) {
+    return GridView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: Grid.xs),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 6,
+        mainAxisSpacing: Grid.half,
+        crossAxisSpacing: Grid.half,
+      ),
+      itemCount: emoji.length,
+      itemBuilder: (context, index) {
+        final entry = emoji[index];
+        return GestureDetector(
+          onTap: () => onSelect(':${entry.shortcode}:'),
+          child: Tooltip(
+            message: ':${entry.shortcode}:',
+            child: Center(
+              child: CustomEmojiImage(
+                shortcode: entry.shortcode,
+                url: entry.url,
+                size: 32,
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

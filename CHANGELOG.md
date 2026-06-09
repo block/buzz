@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.3.13
+
+ecca5e77e4e Collapse channel header actions (#901)
+4ec7f8125e8 sprout-agent: make Databricks defaults env-only (#868)
+b384354e2bd Restyle settings sections (#894)
+fdcbb696fe0 Add emoji reaction particles (#890)
+32039b9a25b Move settings into the app shell (#893)
+45f3dfe5ba6 Tune chat text sizing (#891)
+29f6ccf9e9c Style channel header navigation (#889)
+2ebe5517410 fix: rename missed known_acp_provider_exact → known_acp_runtime_exact (#900)
+97bdb79ded5 chore(deps): update radix-ui-primitives monorepo (#898)
+4a93100e199 chore(deps): update actions/checkout digest to df4cb1c (#897)
+0a6067ca1be refactor: rename ACP "provider" to "runtime" across the codebase (#783)
+056b87d3da4 Unify avatar radius (#892)
+
+
+## v0.3.12
+
+1b7b6978fc8 Show hover cards for inline message emoji (#885)
+5268fac2d84 Fix monotonic read-state merges (#884)
+0a4783c6f8a Refine sidebar behavior and borders (#869)
+5d7c7489698 fix(presence): clear on disconnect, fix heartbeat/TTL, drop broken REST path (#877)
+ef98ae942a5 fix(cli): publish ephemeral events over WebSocket via sprout-ws-client (#876)
+2f50011bdd2 docs(sprout-acp): add communication discipline rules to base prompt + deprecate --mention flag (#883)
+5c2476a71e4 Polish thread summaries and reactions (#881)
+7129cd6f23e feat(cli): add emoji export and import subcommands (#882)
+b84f8e6a010 Polish message row hover states (#880)
+bc53008676f Improve emoji naming and custom emoji UX (#878)
+581c7e95a9b docs: add ecosystem section to CONTRIBUTING.md, fix stale release info (#873)
+031152221bd fix(relay): wire custom filter fields through HTTP bridge (#864)
+f1c672fea53 chore: deprecate sprout-mcp — fill CLI gaps, remove crate and all references (#850)
+5bdac0566fb Fix custom emoji status in profile popover (#874)
+b295f51c904 fix(agent): gate handoff on provider token usage, not byte estimate (#821)
+cdb7bc27e11 docs: add VISION_MESH.md — the compute-commons vision (#867)
+d4bb7f66e0d fix(desktop): simplify profile popover header (#853)
+ccff5464a41 fix(desktop): remove thread comment hover outline (#861)
+ad7ab482eb1 feat(desktop): always show channel section search/add buttons (#856)
+
+
 ## v0.3.11
 
 269b35e8de7 fix(mobile+desktop): cross-device read state sync + diagnostic logging (#843)

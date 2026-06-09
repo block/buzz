@@ -39,8 +39,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
-import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 function copyToClipboard(text: string, successMessage: string) {
@@ -263,12 +263,12 @@ export function MessageActionBar({
   onEdit,
   onFollowThread,
   onMarkUnread,
+  onReactionBadgeBurstRequest,
   onReactionSelect,
   onReply,
   onUnfollowThread,
   reactionErrorMessage = null,
   reactions,
-  reactionPending = false,
   isFollowingThread,
 }: {
   /** Channel UUID — required for the "Copy link" action; when omitted the
@@ -279,12 +279,12 @@ export function MessageActionBar({
   onEdit?: (message: TimelineMessage) => void;
   onFollowThread?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
+  onReactionBadgeBurstRequest?: (emoji: string) => void;
   onReactionSelect?: (emoji: string) => Promise<void>;
   onReply?: (message: TimelineMessage) => void;
   onUnfollowThread?: (message: TimelineMessage) => void;
   reactionErrorMessage?: string | null;
   reactions: TimelineReaction[];
-  reactionPending?: boolean;
   isFollowingThread?: boolean;
 }) {
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
@@ -307,6 +307,10 @@ export function MessageActionBar({
   const selectedReactionCount = reactions.filter(
     (reaction) => reaction.reactedByCurrentUser,
   ).length;
+  const wouldAddReaction = (emoji: string) =>
+    !reactions.some(
+      (reaction) => reaction.emoji === emoji && reaction.reactedByCurrentUser,
+    );
 
   return (
     <div
@@ -334,7 +338,6 @@ export function MessageActionBar({
                     aria-label="Open reactions"
                     className="h-6 w-6 rounded-full p-0"
                     data-testid={`react-message-${message.id}`}
-                    disabled={reactionPending}
                     size="sm"
                     type="button"
                     variant={
@@ -343,11 +346,7 @@ export function MessageActionBar({
                         : "ghost"
                     }
                   >
-                    {reactionPending ? (
-                      <Spinner className="h-3 w-3" />
-                    ) : (
-                      <SmilePlus className="h-3 w-3" />
-                    )}
+                    <SmilePlus className="h-3 w-3" />
                   </Button>
                 </PopoverTrigger>
               </TooltipTrigger>
@@ -374,6 +373,12 @@ export function MessageActionBar({
                   }
                   // `value` is already a `native` glyph or a `:shortcode:` for
                   // custom emoji; the toggle mutation resolves the URL.
+                  if (
+                    wouldAddReaction(value) &&
+                    isPositiveEmojiParticle(value)
+                  ) {
+                    onReactionBadgeBurstRequest?.(value);
+                  }
                   void onReactionSelect(value).finally(() => {
                     setIsReactionPickerOpen(false);
                   });

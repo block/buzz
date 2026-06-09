@@ -1,3 +1,5 @@
+use std::io::Read;
+
 use crate::client::{normalize_write_response, SproutClient};
 use crate::error::CliError;
 use sprout_sdk::CustomEmoji;
@@ -139,6 +141,159 @@ async fn cmd_rm(client: &SproutClient, shortcode: &str) -> Result<(), CliError> 
     publish_own_set(client, &emojis).await
 }
 
+/// 10 MiB — a safety rail against runaway producers. An emoji manifest will
+/// never approach this size in practice.
+const STDIN_MAX_BYTES: u64 = 10_000_000;
+
+/// Read from a file path or stdin. Returns `CliError::Usage` on empty stdin,
+/// `CliError::Other` on I/O failure.
+fn read_source(file: Option<&str>) -> Result<String, CliError> {
+    match file {
+        Some(path) => std::fs::read_to_string(path)
+            .map_err(|e| CliError::Other(format!("failed to read file '{path}': {e}"))),
+        None => {
+            let mut buf = String::new();
+            std::io::stdin()
+                .take(STDIN_MAX_BYTES)
+                .read_to_string(&mut buf)
+                .map_err(|e| CliError::Other(format!("stdin read failed: {e}")))?;
+            if buf.is_empty() {
+                return Err(CliError::Usage(
+                    "no input: provide --file or pipe JSON to stdin".into(),
+                ));
+            }
+            Ok(buf)
+        }
+    }
+}
+
+/// Write to a file path or stdout.
+fn write_output(output: &str, file: Option<&str>) -> Result<(), CliError> {
+    match file {
+        Some(path) => std::fs::write(path, output)
+            .map_err(|e| CliError::Other(format!("failed to write file '{path}': {e}"))),
+        None => {
+            println!("{output}");
+            Ok(())
+        }
+    }
+}
+
+/// Export custom emojis to stdout or a file.
+async fn cmd_export(
+    client: &SproutClient,
+    file: Option<&str>,
+    scope: &crate::EmojiScope,
+) -> Result<(), CliError> {
+    let entries: Vec<EmojiEntry> = match scope {
+        crate::EmojiScope::Own => {
+            let mut entries: Vec<EmojiEntry> = fetch_own_emoji(client)
+                .await?
+                .into_iter()
+                .map(|e| EmojiEntry {
+                    shortcode: e.shortcode,
+                    url: e.url,
+                })
+                .collect();
+            // Sort to match union_custom_emoji output order so repeated
+            // export | import --replace cycles are stable.
+            entries.sort_by(|a, b| a.shortcode.cmp(&b.shortcode).then(a.url.cmp(&b.url)));
+            entries
+        }
+        crate::EmojiScope::Workspace => {
+            let filter = serde_json::json!({
+                "kinds": [sprout_sdk::kind::KIND_EMOJI_SET],
+                "#d": [CUSTOM_EMOJI_SET_D_TAG],
+            });
+            let raw = client.query(&filter).await?;
+            let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+                .map_err(|e| CliError::Other(format!("failed to parse emoji set query: {e}")))?;
+            union_custom_emoji(&events)
+        }
+    };
+    let output = serde_json::to_string(&serde_json::json!({ "emojis": entries }))
+        .map_err(|e| CliError::Other(format!("serialization failed: {e}")))?;
+    write_output(&output, file)
+}
+
+/// Import custom emojis from stdin or a file into the caller's own set.
+async fn cmd_import(
+    client: &SproutClient,
+    file: Option<&str>,
+    replace: bool,
+    dry_run: bool,
+) -> Result<(), CliError> {
+    // 1. Read raw JSON
+    let raw = read_source(file)?;
+
+    // 2. Parse and extract ["emojis"] array
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| CliError::Usage(format!("invalid JSON: {e}")))?;
+    let arr = parsed
+        .get("emojis")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            CliError::Usage("input must be a JSON object with an \"emojis\" array".into())
+        })?;
+
+    // 3–4. Parse each element and normalize shortcodes
+    let mut import_entries: Vec<CustomEmoji> = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let shortcode = item
+            .get("shortcode")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CliError::Usage(format!("emojis[{i}]: missing \"shortcode\" field")))?;
+        let url = item
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CliError::Usage(format!("emojis[{i}]: missing \"url\" field")))?;
+        let normalized = sprout_sdk::normalize_custom_emoji_shortcode(shortcode)
+            .map_err(|e| CliError::Usage(format!("emojis[{i}]: invalid shortcode: {e}")))?;
+        import_entries.push(CustomEmoji {
+            shortcode: normalized,
+            url: url.to_string(),
+        });
+    }
+
+    // 5. Deduplicate within the import batch (first occurrence wins)
+    let mut seen = std::collections::HashSet::new();
+    import_entries.retain(|e| seen.insert(e.shortcode.clone()));
+
+    // 6. Build final set
+    let final_set: Vec<CustomEmoji> = if replace {
+        import_entries
+    } else {
+        let mut existing = fetch_own_emoji(client).await?;
+        let existing_shortcodes: std::collections::HashSet<String> =
+            existing.iter().map(|e| e.shortcode.clone()).collect();
+        for entry in import_entries {
+            if !existing_shortcodes.contains(&entry.shortcode) {
+                existing.push(entry);
+            }
+        }
+        existing
+    };
+
+    // 7. Dry-run: print final set to stdout, warn to stderr
+    if dry_run {
+        let entries: Vec<EmojiEntry> = final_set
+            .iter()
+            .map(|e| EmojiEntry {
+                shortcode: e.shortcode.clone(),
+                url: e.url.clone(),
+            })
+            .collect();
+        let output = serde_json::to_string(&serde_json::json!({ "emojis": entries }))
+            .map_err(|e| CliError::Other(format!("serialization failed: {e}")))?;
+        println!("{output}");
+        eprintln!("(dry run — not published)");
+        return Ok(());
+    }
+
+    // 8. Publish
+    publish_own_set(client, &final_set).await
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
@@ -149,6 +304,12 @@ pub async fn dispatch(cmd: crate::EmojiCmd, client: &SproutClient) -> Result<(),
         EmojiCmd::List => cmd_list(client).await,
         EmojiCmd::Set { shortcode, url } => cmd_set(client, &shortcode, &url).await,
         EmojiCmd::Rm { shortcode } => cmd_rm(client, &shortcode).await,
+        EmojiCmd::Export { file, scope } => cmd_export(client, file.as_deref(), &scope).await,
+        EmojiCmd::Import {
+            file,
+            replace,
+            dry_run,
+        } => cmd_import(client, file.as_deref(), replace, dry_run).await,
     }
 }
 

@@ -58,7 +58,7 @@ export const EmojiPicker = React.memo(function EmojiPicker({
         }
       }}
       perLine={8}
-      previewPosition="none"
+      previewPosition="bottom"
       set="native"
       skinTonePosition="search"
       theme="auto"

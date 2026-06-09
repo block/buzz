@@ -18,6 +18,7 @@ class SearchHit {
   final String? channelName;
   final int createdAt;
   final double score;
+  final List<List<String>> tags;
 
   const SearchHit({
     required this.eventId,
@@ -28,6 +29,7 @@ class SearchHit {
     this.channelName,
     required this.createdAt,
     required this.score,
+    this.tags = const [],
   });
 
   factory SearchHit.fromJson(Map<String, dynamic> json) => SearchHit(
@@ -39,6 +41,11 @@ class SearchHit {
     channelName: json['channel_name'] as String?,
     createdAt: json['created_at'] as int? ?? 0,
     score: (json['score'] as num?)?.toDouble() ?? 0.0,
+    tags:
+        (json['tags'] as List<dynamic>?)
+            ?.map((t) => (t as List<dynamic>).map((e) => e as String).toList())
+            .toList() ??
+        const [],
   );
 }
 
@@ -155,6 +162,7 @@ class SearchNotifier extends Notifier<SearchState> {
                   : null,
               createdAt: e.createdAt,
               score: 0.0,
+              tags: e.tags,
             ),
           )
           .toList();

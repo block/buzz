@@ -206,7 +206,7 @@ test("mark-as-unread via context menu shows dot badge", async ({ page }) => {
   await waitForBadgeState(page, { state: "dot" });
 });
 
-test("synced mark-as-unread from another device shows dot, synced mark-as-read clears it", async ({
+test("remote read-state rollback is ignored while local mark-unread still shows dot", async ({
   page,
 }) => {
   await page.goto("/");
@@ -271,8 +271,8 @@ test("synced mark-as-unread from another device shows dot, synced mark-as-read c
     },
   );
 
-  // Step 2: rollback — read timestamp drops (another device marks unread).
-  // createdAt must be strictly greater than step 1 to pass LWW gate.
+  // Step 2: a remote rollback carries an older read timestamp in a newer
+  // event. NIP-RS read markers are monotonic, so this must be ignored.
   await page.evaluate(
     ({ clientId, slotId, channelId, ts, createdAt }) => {
       (
@@ -300,10 +300,16 @@ test("synced mark-as-unread from another device shows dot, synced mark-as-read c
     },
   );
 
-  // The unread dot should appear.
-  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 
-  // Step 3: advance — read timestamp moves forward (device marks read).
+  // Local mark-unread remains an in-session affordance and should still show
+  // the dot immediately without publishing a lower read timestamp.
+  await page.getByTestId("channel-random").click({ button: "right" });
+  await page.getByText("Mark unread").click();
+  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  await waitForBadgeState(page, { state: "dot" });
+
+  // Step 3: remote advance clears the local forced-unread dot.
   await page.evaluate(
     ({ clientId, slotId, channelId, ts, createdAt }) => {
       (
@@ -326,11 +332,10 @@ test("synced mark-as-unread from another device shows dot, synced mark-as-read c
       clientId: REMOTE_CLIENT_ID,
       slotId: REMOTE_SLOT_ID,
       channelId: RANDOM_CHANNEL_ID,
-      ts: now,
+      ts: now + 10,
       createdAt: now + 10,
     },
   );
 
-  // The unread dot should disappear.
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 });

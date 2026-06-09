@@ -61,6 +61,7 @@ crates/
   sprout-cli          # Agent-first CLI
   sprout-sdk          # Typed Nostr event builders
   sprout-admin        # Operator CLI for relay administration
+  sprout-ws-client    # Shared NIP-42 WebSocket client (connect, auth, publish)
   sprout-test-client  # Integration test client and E2E test suite
   sprig               # All-in-one harness bundling ACP, agent, and dev MCP
 

@@ -2,8 +2,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use sprout_core::PresenceStatus;
-
 #[derive(Serialize)]
 pub struct IdentityInfo {
     pub pubkey: String,
@@ -72,12 +70,6 @@ pub struct UserNotesCursor {
 pub struct UserNotesResponse {
     pub notes: Vec<UserNoteInfo>,
     pub next_cursor: Option<UserNotesCursor>,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct SetPresenceResponse {
-    pub status: PresenceStatus,
-    pub ttl_seconds: u64,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -77,7 +77,7 @@ export function AvatarUpload({
         <div className="relative h-20 w-20 shrink-0">
           <ProfileAvatar
             avatarUrl={avatarUrl || null}
-            className="h-full w-full rounded-3xl text-xl"
+            className="h-full w-full text-xl"
             iconClassName="h-6 w-6"
             label={previewName}
             testId={`${testIdPrefix}-preview`}

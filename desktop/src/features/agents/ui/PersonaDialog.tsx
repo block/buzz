@@ -2,7 +2,7 @@ import * as React from "react";
 import { RefreshCw, Upload } from "lucide-react";
 
 import type {
-  AcpProviderCatalogEntry,
+  AcpRuntimeCatalogEntry,
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
@@ -35,8 +35,8 @@ type PersonaDialogProps = {
   error: Error | null;
   isPending: boolean;
   isImportPending?: boolean;
-  providers: AcpProviderCatalogEntry[];
-  providersLoading?: boolean;
+  runtimes: AcpRuntimeCatalogEntry[];
+  runtimesLoading?: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (input: CreatePersonaInput | UpdatePersonaInput) => Promise<void>;
   onImportUpdateFile?: (
@@ -55,8 +55,8 @@ export function PersonaDialog({
   error,
   isPending,
   isImportPending = false,
-  providers,
-  providersLoading = false,
+  runtimes,
+  runtimesLoading = false,
   onOpenChange,
   onSubmit,
   onImportUpdateFile,
@@ -64,7 +64,7 @@ export function PersonaDialog({
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
   const [systemPrompt, setSystemPrompt] = React.useState("");
-  const [provider, setProvider] = React.useState("");
+  const [runtime, setRuntime] = React.useState("");
   const [model, setModel] = React.useState("");
   const [namePoolText, setNamePoolText] = React.useState("");
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
@@ -88,7 +88,7 @@ export function PersonaDialog({
     setDisplayName(initialValues.displayName);
     setAvatarUrl(initialValues.avatarUrl ?? "");
     setSystemPrompt(initialValues.systemPrompt);
-    setProvider(initialValues.provider ?? "");
+    setRuntime(initialValues.runtime ?? "");
     setModel(initialValues.model ?? "");
     setNamePoolText(
       ("namePool" in initialValues
@@ -214,7 +214,7 @@ export function PersonaDialog({
       setDisplayName("");
       setAvatarUrl("");
       setSystemPrompt("");
-      setProvider("");
+      setRuntime("");
       setModel("");
       setNamePoolText("");
       setImportErrorMessage(null);
@@ -238,7 +238,7 @@ export function PersonaDialog({
       displayName,
       avatarUrl: avatarUrl.trim() || undefined,
       systemPrompt,
-      provider: provider.trim() || undefined,
+      runtime: runtime.trim() || undefined,
       model: model.trim() || undefined,
       namePool: namePool.length > 0 ? namePool : undefined,
       envVars,
@@ -266,15 +266,15 @@ export function PersonaDialog({
     importErrorMessage,
   });
 
-  const selectedProvider = providers.find((p) => p.id === provider);
-  const providerWarning =
-    selectedProvider && selectedProvider.availability !== "available" ? (
+  const selectedRuntime = runtimes.find((p) => p.id === runtime);
+  const runtimeWarning =
+    selectedRuntime && selectedRuntime.availability !== "available" ? (
       <p className="text-xs text-warning">
-        {selectedProvider.availability === "adapter_missing"
-          ? `${selectedProvider.label} CLI is installed but the ACP adapter is missing.`
-          : selectedProvider.availability === "cli_missing"
-            ? `${selectedProvider.label} ACP adapter is installed but the CLI is missing.`
-            : `${selectedProvider.label} is not installed.`}{" "}
+        {selectedRuntime.availability === "adapter_missing"
+          ? `${selectedRuntime.label} CLI is installed but the ACP adapter is missing.`
+          : selectedRuntime.availability === "cli_missing"
+            ? `${selectedRuntime.label} ACP adapter is installed but the CLI is missing.`
+            : `${selectedRuntime.label} is not installed.`}{" "}
         Visit Settings &gt; Doctor to set it up.
       </p>
     ) : null;
@@ -349,22 +349,22 @@ export function PersonaDialog({
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="persona-provider">
+              <label className="text-sm font-medium" htmlFor="persona-runtime">
                 Preferred runtime
               </label>
               <select
                 className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-                disabled={isPending || providersLoading}
-                id="persona-provider"
-                onChange={(event) => setProvider(event.target.value)}
-                value={provider}
+                disabled={isPending || runtimesLoading}
+                id="persona-runtime"
+                onChange={(event) => setRuntime(event.target.value)}
+                value={runtime}
               >
                 <option value="">
-                  {providersLoading
+                  {runtimesLoading
                     ? "Loading runtimes..."
                     : "No preference (use default)"}
                 </option>
-                {providers.map((p) => (
+                {runtimes.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.label}
                     {p.availability === "adapter_missing"
@@ -382,7 +382,7 @@ export function PersonaDialog({
                 be pre-selected. Unavailable runtimes can be installed from
                 Settings &gt; Doctor.
               </p>
-              {providerWarning}
+              {runtimeWarning}
             </div>
 
             <div className="space-y-1.5">

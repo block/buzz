@@ -7,6 +7,7 @@ import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle } from "../HuddleContext";
 import { useHeadphonesGate } from "../lib/useHeadphonesGate";
@@ -26,6 +27,7 @@ type ActiveHuddle = {
 type HuddleIndicatorProps = {
   channelId: string;
   className?: string;
+  renderMode?: "button" | "menu-item";
   /** Called when the user clicks the button and no huddle is active (start). */
   onStart?: () => void;
   /** Whether the start action is disabled (e.g., permissions, already starting). */
@@ -40,6 +42,7 @@ type HuddleIndicatorProps = {
 export function HuddleIndicator({
   channelId,
   className,
+  renderMode = "button",
   onStart,
   startDisabled,
 }: HuddleIndicatorProps) {
@@ -226,19 +229,39 @@ export function HuddleIndicator({
   // No active huddle — render the start button (if onStart provided).
   if (!activeHuddle) {
     if (!onStart) return null;
+    if (renderMode === "menu-item") {
+      return (
+        <>
+          <DropdownMenuItem
+            className={className}
+            data-testid="channel-start-huddle-trigger"
+            disabled={startDisabled || isStarting}
+            onSelect={() => headphonesGate.gate(() => onStart())}
+          >
+            <Headphones />
+            <span>Start huddle</span>
+          </DropdownMenuItem>
+          {gateDialog}
+        </>
+      );
+    }
+
     return (
       <>
         <Button
           aria-label="Start huddle"
-          className={cn("h-7 w-7 rounded-full", className)}
+          className={cn(
+            "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5",
+            className,
+          )}
           data-testid="channel-start-huddle-trigger"
           disabled={startDisabled || isStarting}
           onClick={() => headphonesGate.gate(() => onStart())}
           size="icon"
           type="button"
-          variant="outline"
+          variant="ghost"
         >
-          <Headphones className="h-3 w-3" />
+          <Headphones className="size-5" />
         </Button>
         {gateDialog}
       </>
@@ -264,21 +287,44 @@ export function HuddleIndicator({
     }
   }
 
+  if (renderMode === "menu-item") {
+    return (
+      <>
+        <DropdownMenuItem
+          className={className}
+          data-testid="channel-start-huddle-trigger"
+          disabled={isJoining || isStarting}
+          onSelect={() => headphonesGate.gate(() => void doJoin())}
+        >
+          <Headphones />
+          <span>Join huddle</span>
+          <span className="ml-auto text-xs text-muted-foreground">
+            {participantCount}
+          </span>
+        </DropdownMenuItem>
+        {gateDialog}
+      </>
+    );
+  }
+
   return (
     <>
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
             aria-label={`Join active huddle (${participantCount} participant${participantCount !== 1 ? "s" : ""})`}
-            className={cn("relative h-7 w-7 rounded-full", className)}
+            className={cn(
+              "relative h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5",
+              className,
+            )}
             disabled={isJoining || isStarting}
             onClick={() => headphonesGate.gate(() => void doJoin())}
             size="icon"
             type="button"
-            variant="outline"
+            variant="ghost"
           >
-            <Headphones className="h-3 w-3 text-muted-foreground" />
-            <span className="absolute inset-0 animate-pulse rounded-full ring-2 ring-border/70" />
+            <Headphones className="size-5 text-muted-foreground" />
+            <span className="absolute inset-0 animate-pulse rounded-lg ring-2 ring-border/70" />
             {/* Participant count badge */}
             {participantCount > 0 && (
               <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-border bg-background px-0.5 text-[9px] font-bold text-muted-foreground">

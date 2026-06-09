@@ -9,6 +9,8 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
@@ -55,6 +57,7 @@ class ComposeBar extends HookConsumerWidget {
     final uploadingCount = useState(0);
     final hasAttachments = attachments.value.isNotEmpty;
     final hasPendingUploads = uploadingCount.value > 0;
+    final customEmoji = ref.watch(customEmojiListProvider);
 
     final resolvedHint =
         hintText ??
@@ -239,6 +242,7 @@ class ComposeBar extends HookConsumerWidget {
       final payload = _ComposeDraftPayload.fromDraft(
         text: text,
         attachments: attachments.value,
+        customEmoji: customEmoji,
       );
 
       isSending.value = true;
@@ -940,6 +944,7 @@ class _ComposeDraftPayload {
   factory _ComposeDraftPayload.fromDraft({
     required String text,
     required List<BlobDescriptor> attachments,
+    required List<CustomEmoji> customEmoji,
   }) {
     var content = text;
     final mediaTags = <List<String>>[];
@@ -947,6 +952,7 @@ class _ComposeDraftPayload {
       mediaTags.add(attachment.toImetaTag());
       content += '\n${attachment.toMarkdownImage()}';
     }
+    mediaTags.addAll(buildCustomEmojiTags(content, customEmoji));
     return _ComposeDraftPayload(content: content, mediaTags: mediaTags);
   }
 }

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 
 import {
   customEmojiFromEvent,
   customEmojiFromTags,
   normalizeShortcode,
+  suggestShortcodeFromFilename,
 } from "./customEmoji.ts";
 
 function ev(tags) {
@@ -81,6 +83,22 @@ test("normalizeShortcode rejects invalid chars and empties", () => {
   assert.equal(normalizeShortcode("emoji!"), null);
   assert.equal(normalizeShortcode("::"), null);
   assert.equal(normalizeShortcode(""), null);
+});
+
+test("suggestShortcodeFromFilename derives a valid name from common filenames", () => {
+  assert.equal(
+    suggestShortcodeFromFilename("Party Parrot.gif"),
+    "party_parrot",
+  );
+  assert.equal(
+    suggestShortcodeFromFilename("ship-it.final.PNG"),
+    "ship-it_final",
+  );
+  assert.equal(
+    suggestShortcodeFromFilename(path.join("tmp", "Narf! Zort.webp")),
+    "narf_zort",
+  );
+  assert.equal(suggestShortcodeFromFilename("---.png"), null);
 });
 
 test("customEmojiFromTags normalizes shortcodes (case-fold)", () => {

@@ -121,9 +121,9 @@ export function usePersonaImportActions(
         avatarUrl: selectedFieldSet.has("avatarUrl")
           ? (preview.avatarDataUrl ?? undefined)
           : (existing.avatarUrl ?? undefined),
-        provider: selectedFieldSet.has("provider")
-          ? (preview.provider ?? undefined)
-          : (existing.provider ?? undefined),
+        runtime: selectedFieldSet.has("runtime")
+          ? (preview.runtime ?? undefined)
+          : (existing.runtime ?? undefined),
         model: selectedFieldSet.has("model")
           ? (preview.model ?? undefined)
           : (existing.model ?? undefined),

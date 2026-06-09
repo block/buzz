@@ -285,7 +285,9 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     /Ephemeral channel\. Cleans up (tomorrow|in \d+ hours?)\./,
   );
 
-  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+  await page
+    .getByRole("button", { name: "Toggle Sidebar", exact: true })
+    .click();
   await expect(
     page.getByTestId(`channel-ephemeral-${channelName}`),
   ).toBeVisible();

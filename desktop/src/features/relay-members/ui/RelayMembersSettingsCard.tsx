@@ -351,148 +351,151 @@ export function RelayMembersSettingsCard({
   }
 
   return (
-    <section className="min-w-0 space-y-6" data-testid="settings-relay-members">
-      <div className="space-y-1">
-        <h2 className="text-sm font-semibold tracking-tight">Relay Access</h2>
-        <p className="text-sm text-muted-foreground">
+    <section className="min-w-0" data-testid="settings-relay-members">
+      <div className="mb-12 space-y-1">
+        <h2 className="text-2xl font-semibold tracking-tight">Relay Access</h2>
+        <p className="text-base font-normal text-muted-foreground">
           Manage who can connect to this relay. Owners can invite admins or
           members; admins can invite members.
         </p>
       </div>
 
-      <form className="space-y-1.5" onSubmit={handleAddMember}>
-        <label className="text-sm font-medium" htmlFor="relay-member-pubkey">
-          Invite a person
-        </label>
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <Input
-            className="flex-1"
-            id="relay-member-pubkey"
-            onChange={(event) => setPubkeyInput(event.target.value)}
-            placeholder="npub1… or 64-char hex pubkey"
-            value={pubkeyInput}
-          />
-          <div className="inline-flex shrink-0 self-stretch sm:self-auto">
-            <Button
-              className={cn(
-                canGrantAdmin && "rounded-r-none",
-                "flex-1 sm:flex-none",
-              )}
-              data-testid="invite-relay-member"
-              disabled={!canAdd}
-              type="submit"
-            >
-              <UserPlus className="h-4 w-4" />
-              <span className="inline-block min-w-[3.5rem] text-left capitalize">
-                {role}
-              </span>
-            </Button>
-            {canGrantAdmin ? (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    aria-label="Choose invite role"
-                    className="rounded-l-none border-l border-primary-foreground/20 px-2"
-                    data-testid="relay-invite-role-trigger"
-                    disabled={addMutation.isPending}
-                    type="button"
-                  >
-                    <ChevronDown className="h-4 w-4" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-56">
-                  <DropdownMenuLabel>Invite as</DropdownMenuLabel>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuRadioGroup
-                    onValueChange={(value) =>
-                      setRole(value as AssignableRelayRole)
-                    }
-                    value={role}
-                  >
-                    {ROLE_OPTIONS.map((option) => (
-                      <DropdownMenuRadioItem
-                        data-testid={`relay-invite-role-${option.value}`}
-                        key={option.value}
-                        value={option.value}
-                      >
-                        <div className="flex flex-col">
-                          <span className="text-sm font-medium">
-                            {option.label}
-                          </span>
-                          <span className="text-xs text-muted-foreground">
-                            {option.description}
-                          </span>
-                        </div>
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ) : null}
+      <div className="space-y-6">
+        <form className="space-y-1.5" onSubmit={handleAddMember}>
+          <label className="text-sm font-medium" htmlFor="relay-member-pubkey">
+            Invite a person
+          </label>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Input
+              className="flex-1"
+              id="relay-member-pubkey"
+              onChange={(event) => setPubkeyInput(event.target.value)}
+              placeholder="npub1… or 64-char hex pubkey"
+              value={pubkeyInput}
+            />
+            <div className="inline-flex shrink-0 self-stretch sm:self-auto">
+              <Button
+                className={cn(
+                  canGrantAdmin && "rounded-r-none",
+                  "flex-1 sm:flex-none",
+                )}
+                data-testid="invite-relay-member"
+                disabled={!canAdd}
+                type="submit"
+              >
+                <UserPlus className="h-4 w-4" />
+                <span className="inline-block min-w-[3.5rem] text-left capitalize">
+                  {role}
+                </span>
+              </Button>
+              {canGrantAdmin ? (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      aria-label="Choose invite role"
+                      className="rounded-l-none border-l border-primary-foreground/20 px-2"
+                      data-testid="relay-invite-role-trigger"
+                      disabled={addMutation.isPending}
+                      type="button"
+                    >
+                      <ChevronDown className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-56">
+                    <DropdownMenuLabel>Invite as</DropdownMenuLabel>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuRadioGroup
+                      onValueChange={(value) =>
+                        setRole(value as AssignableRelayRole)
+                      }
+                      value={role}
+                    >
+                      {ROLE_OPTIONS.map((option) => (
+                        <DropdownMenuRadioItem
+                          data-testid={`relay-invite-role-${option.value}`}
+                          key={option.value}
+                          value={option.value}
+                        >
+                          <div className="flex flex-col">
+                            <span className="text-sm font-medium">
+                              {option.label}
+                            </span>
+                            <span className="text-sm font-normal text-muted-foreground">
+                              {option.description}
+                            </span>
+                          </div>
+                        </DropdownMenuRadioItem>
+                      ))}
+                    </DropdownMenuRadioGroup>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              ) : null}
+            </div>
           </div>
-        </div>
-        {pubkeyInput.trim().length > 0 && !isValidHexPubkey(normalizedInput) ? (
-          <p className="text-xs text-destructive">
-            Enter a valid npub or 64-character hex pubkey.
+          {pubkeyInput.trim().length > 0 &&
+          !isValidHexPubkey(normalizedInput) ? (
+            <p className="text-xs text-destructive">
+              Enter a valid npub or 64-character hex pubkey.
+            </p>
+          ) : null}
+        </form>
+
+        {membersQuery.error instanceof Error ? (
+          <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {membersQuery.error.message}
           </p>
         ) : null}
-      </form>
 
-      {membersQuery.error instanceof Error ? (
-        <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          {membersQuery.error.message}
-        </p>
-      ) : null}
-
-      <div className="space-y-3">
-        <div className="flex items-baseline justify-between gap-2">
-          <h3 className="text-sm font-medium">
-            Members
-            {members.length > 0 ? (
-              <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                ({members.length})
-              </span>
-            ) : null}
-          </h3>
-        </div>
-
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <input
-            className="w-full rounded-lg border border-border/70 bg-background/70 py-2 pl-9 pr-3 text-sm placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            data-testid="relay-members-search"
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search members by name, npub, or role…"
-            type="text"
-            value={search}
-          />
-        </div>
-
-        {membersQuery.isLoading ? (
-          <p className="text-sm text-muted-foreground">
-            Loading relay members…
-          </p>
-        ) : members.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-border/70 bg-background/40 px-3 py-6 text-center text-sm text-muted-foreground">
-            No relay members yet. Invite someone above to get started.
-          </p>
-        ) : filteredMembers.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-border/70 bg-background/40 px-3 py-6 text-center text-sm text-muted-foreground">
-            No members match your search.
-          </p>
-        ) : (
-          <div className="max-h-[28rem] space-y-2 overflow-y-auto pr-1">
-            {filteredMembers.map((member) => (
-              <RelayMemberRow
-                currentPubkey={currentPubkey}
-                currentRole={currentRole}
-                key={member.pubkey}
-                member={member}
-                profile={profiles?.[normalizePubkey(member.pubkey)]}
-              />
-            ))}
+        <div className="space-y-3">
+          <div className="flex items-baseline justify-between gap-2">
+            <h3 className="text-sm font-medium">
+              Members
+              {members.length > 0 ? (
+                <span className="ml-1.5 text-xs font-normal text-muted-foreground">
+                  ({members.length})
+                </span>
+              ) : null}
+            </h3>
           </div>
-        )}
+
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <input
+              className="w-full rounded-lg border border-border/70 bg-background/70 py-2 pl-9 pr-3 text-sm placeholder:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              data-testid="relay-members-search"
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search members by name, npub, or role…"
+              type="text"
+              value={search}
+            />
+          </div>
+
+          {membersQuery.isLoading ? (
+            <p className="text-sm text-muted-foreground">
+              Loading relay members…
+            </p>
+          ) : members.length === 0 ? (
+            <p className="rounded-lg border border-dashed border-border/70 bg-background/40 px-3 py-6 text-center text-sm text-muted-foreground">
+              No relay members yet. Invite someone above to get started.
+            </p>
+          ) : filteredMembers.length === 0 ? (
+            <p className="rounded-lg border border-dashed border-border/70 bg-background/40 px-3 py-6 text-center text-sm text-muted-foreground">
+              No members match your search.
+            </p>
+          ) : (
+            <div className="max-h-[28rem] space-y-2 overflow-y-auto pr-1">
+              {filteredMembers.map((member) => (
+                <RelayMemberRow
+                  currentPubkey={currentPubkey}
+                  currentRole={currentRole}
+                  key={member.pubkey}
+                  member={member}
+                  profile={profiles?.[normalizePubkey(member.pubkey)]}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </section>
   );

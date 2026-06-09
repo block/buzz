@@ -15,7 +15,7 @@ import { useReusableAgentDetection } from "@/features/channels/ui/useReusableAge
 import { AddChannelBotTeamsSection } from "@/features/channels/ui/AddChannelBotTeamsSection";
 import { probeBackendProvider } from "@/shared/api/tauri";
 import type {
-  AcpProvider,
+  AcpRuntime,
   BackendProviderCandidate,
   BackendProviderProbeResult,
   ManagedAgentBackend,
@@ -29,19 +29,18 @@ import {
   DropdownMenuContent,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import {
   coerceConfigValues,
   ProviderConfigFields,
 } from "@/features/agents/ui/ProviderConfigFields";
-import {
-  collectProviderWarnings,
-  resolvePersonaProvider,
-} from "@/features/agents/lib/resolvePersonaProvider";
+import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
+import { useEffectiveRuntimes } from "@/features/channels/ui/useEffectiveRuntimes";
 import { getActivePersonas } from "@/features/agents/lib/catalog";
 import { getUsableTeams } from "@/features/agents/lib/teamPersonas";
-import { useLastRuntimeProvider } from "@/features/agents/lib/useLastRuntimeProvider";
+import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import { CreateAgentRespondToField } from "@/features/agents/ui/RespondToField";
 
 type AddChannelBotDialogProps = {
@@ -49,24 +48,26 @@ type AddChannelBotDialogProps = {
   backendProvidersLoading?: boolean;
   channelId: string | null;
   open: boolean;
-  providers: AcpProvider[];
+  providers: AcpRuntime[];
   providersErrorMessage?: string | null;
   providersLoading?: boolean;
   onAdded?: (result: CreateChannelManagedAgentResult) => void;
   onOpenChange: (open: boolean) => void;
 };
 
-function defaultBotName(provider: AcpProvider | null) {
-  if (!provider) {
+const RUNTIME_NONE_SENTINEL = "__none__";
+
+function defaultBotName(runtime: AcpRuntime | null) {
+  if (!runtime) {
     return "";
   }
 
-  const normalizedId = provider.id.trim().toLowerCase();
+  const normalizedId = runtime.id.trim().toLowerCase();
   if (normalizedId.length > 0) {
     return normalizedId;
   }
 
-  return provider.label.trim().toLowerCase() || "agent";
+  return runtime.label.trim().toLowerCase() || "agent";
 }
 
 function toggleValue(values: readonly string[], value: string) {
@@ -103,7 +104,7 @@ export function AddChannelBotDialog({
   onAdded,
   onOpenChange,
 }: AddChannelBotDialogProps) {
-  const { lastProviderId, setLastProvider } = useLastRuntimeProvider();
+  const { setLastRuntime } = useLastRuntime();
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
   const inChannelPersonaIds = useInChannelPersonaIds(
@@ -119,7 +120,7 @@ export function AddChannelBotDialog({
     () => getUsableTeams(teamsQuery.data ?? [], personas),
     [personas, teamsQuery.data],
   );
-  const [selectedProviderId, setSelectedProviderId] = React.useState("");
+  const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("");
   const [selectedPersonaIds, setSelectedPersonaIds] = React.useState<string[]>(
     [],
   );
@@ -150,13 +151,15 @@ export function AddChannelBotDialog({
     React.useState<BackendProviderProbeResult | null>(null);
   const [probeError, setProbeError] = React.useState<string | null>(null);
 
-  const selectedProvider = React.useMemo(
+  const selectedRuntime = React.useMemo(
     () =>
-      providers.find((provider) => provider.id === selectedProviderId) ??
-      providers[0] ??
-      null,
-    [providers, selectedProviderId],
+      selectedRuntimeId
+        ? (providers.find((runtime) => runtime.id === selectedRuntimeId) ??
+          null)
+        : null,
+    [providers, selectedRuntimeId],
   );
+  const isOverrideActive = selectedRuntime !== null;
   const selectedPersonas = React.useMemo(
     () => personas.filter((persona) => selectedPersonaIds.includes(persona.id)),
     [personas, selectedPersonaIds],
@@ -166,22 +169,18 @@ export function AddChannelBotDialog({
   const reusableAgent = useReusableAgentDetection(
     channelId,
     open && channelId !== null,
-    selectedProvider,
+    selectedRuntime ?? providers[0] ?? null,
     selectedPersonas,
     includeGeneric,
     customPrompt,
   );
 
-  // Surface warnings when a persona's preferred provider differs from the
-  // user-selected provider. In this dialog the user explicitly picks a
-  // runtime via the dropdown, so the fallback is `selectedProvider` (their
-  // choice), NOT `providers[0]`. This differs intentionally from
-  // AddTeamToChannelDialog which has no provider selector and falls back
-  // to the first available runtime.
-  const providerWarnings = React.useMemo(
-    () =>
-      collectProviderWarnings(selectedPersonas, providers, selectedProvider),
-    [selectedPersonas, providers, selectedProvider],
+  const { runtimeWarnings, effectiveRuntimes } = useEffectiveRuntimes(
+    personas,
+    selectedPersonas,
+    providers,
+    selectedRuntime,
+    isOverrideActive,
   );
 
   const isProviderMode = runOn !== "local";
@@ -199,25 +198,12 @@ export function AddChannelBotDialog({
   }, [isProviderMode, probedProvider, providerConfig]);
 
   React.useEffect(() => {
-    if (!open) {
+    if (!selectedRuntime || hasEditedCustomName) {
       return;
     }
 
-    if (!selectedProviderId && providers.length > 0) {
-      const remembered = lastProviderId
-        ? providers.find((p) => p.id === lastProviderId)
-        : null;
-      setSelectedProviderId(remembered ? remembered.id : providers[0].id);
-    }
-  }, [open, providers, selectedProviderId, lastProviderId]);
-
-  React.useEffect(() => {
-    if (!selectedProvider || hasEditedCustomName) {
-      return;
-    }
-
-    setCustomName(defaultBotName(selectedProvider));
-  }, [hasEditedCustomName, selectedProvider]);
+    setCustomName(defaultBotName(selectedRuntime));
+  }, [hasEditedCustomName, selectedRuntime]);
 
   React.useEffect(() => {
     setSelectedPersonaIds((current) =>
@@ -270,7 +256,7 @@ export function AddChannelBotDialog({
   }, [isProviderMode, selectedBackendProvider]);
 
   function reset() {
-    setSelectedProviderId("");
+    setSelectedRuntimeId("");
     setSelectedPersonaIds([]);
     setIncludeGeneric(false);
     setCustomName(providers[0] ? defaultBotName(providers[0]) : "");
@@ -319,7 +305,7 @@ export function AddChannelBotDialog({
   }
 
   async function handleSubmit() {
-    if (!selectedProvider || selectedCount === 0) {
+    if (providers.length === 0 || selectedCount === 0) {
       return;
     }
 
@@ -347,7 +333,7 @@ export function AddChannelBotDialog({
       ...(includeGeneric
         ? [
             {
-              provider: selectedProvider,
+              runtime: selectedRuntime ?? providers[0],
               name: customName,
               systemPrompt: customPrompt,
               role: "bot" as const,
@@ -358,13 +344,15 @@ export function AddChannelBotDialog({
           ]
         : []),
       ...selectedPersonas.map((persona) => {
-        const resolved = resolvePersonaProvider(
-          persona.provider,
+        const effectiveFallback = selectedRuntime ?? providers[0] ?? null;
+        const resolved = resolvePersonaRuntime(
+          persona.runtime,
           providers,
-          selectedProvider,
+          effectiveFallback,
+          isOverrideActive,
         );
         return {
-          provider: resolved.provider ?? selectedProvider,
+          runtime: resolved.runtime ?? effectiveFallback ?? providers[0],
           name: persona.displayName,
           personaId: persona.id,
           systemPrompt: persona.systemPrompt,
@@ -425,7 +413,7 @@ export function AddChannelBotDialog({
     respondTo !== "allowlist" || respondToAllowlist.length > 0;
 
   const canSubmit =
-    selectedProvider !== null &&
+    (selectedRuntime !== null || providers.length > 0) &&
     selectedCount > 0 &&
     (!includeGeneric || customName.trim().length > 0) &&
     respondToValid &&
@@ -437,9 +425,11 @@ export function AddChannelBotDialog({
   const canChooseProvider =
     providers.length > 0 && !providersLoading && !createBotsMutation.isPending;
   const canToggleSelections = !createBotsMutation.isPending;
-  const providerTriggerLabel = providersLoading
+  const runtimeTriggerLabel = providersLoading
     ? "Loading runtimes..."
-    : (selectedProvider?.label ?? "No runtimes found");
+    : providers.length === 0
+      ? "No runtimes found"
+      : (selectedRuntime?.label ?? "Use persona defaults");
   const addButtonLabel = createBotsMutation.isPending
     ? selectedCount > 1
       ? `Adding ${selectedCount}...`
@@ -539,7 +529,7 @@ export function AddChannelBotDialog({
                 type="button"
                 variant="ghost"
               >
-                <span className="truncate">{providerTriggerLabel}</span>
+                <span className="truncate">{runtimeTriggerLabel}</span>
                 <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
               </Button>
             </DropdownMenuTrigger>
@@ -550,11 +540,19 @@ export function AddChannelBotDialog({
             >
               <DropdownMenuRadioGroup
                 onValueChange={(id) => {
-                  setSelectedProviderId(id);
-                  setLastProvider(id);
+                  if (id === RUNTIME_NONE_SENTINEL) {
+                    setSelectedRuntimeId("");
+                  } else {
+                    setSelectedRuntimeId(id);
+                    setLastRuntime(id);
+                  }
                 }}
-                value={selectedProvider?.id ?? ""}
+                value={selectedRuntime?.id ?? RUNTIME_NONE_SENTINEL}
               >
+                <DropdownMenuRadioItem value={RUNTIME_NONE_SENTINEL}>
+                  Use persona defaults
+                </DropdownMenuRadioItem>
+                <DropdownMenuSeparator />
                 {providers.map((provider) => (
                   <DropdownMenuRadioItem key={provider.id} value={provider.id}>
                     {provider.label}
@@ -564,9 +562,9 @@ export function AddChannelBotDialog({
             </DropdownMenuContent>
           </DropdownMenu>
           <p className="text-xs text-muted-foreground">
-            {selectedPersonas.some((p) => p.provider)
-              ? "Personas with a preferred runtime will use their own instead of this selection."
-              : "Default runtime for all deployed agents."}
+            {isOverrideActive
+              ? "All agents will use this runtime, overriding persona preferences."
+              : "Each persona uses its preferred runtime. Choose a runtime above to override all."}
           </p>
         </div>
 
@@ -584,6 +582,7 @@ export function AddChannelBotDialog({
 
         <AddChannelBotPersonasSection
           canToggleSelections={canToggleSelections}
+          effectiveRuntimes={effectiveRuntimes}
           inChannelPersonaIds={inChannelPersonaIds}
           includeGeneric={includeGeneric}
           isLoading={personasQuery.isLoading}
@@ -647,8 +646,8 @@ export function AddChannelBotDialog({
           </p>
         ) : null}
 
-        {providerWarnings.length > 0
-          ? providerWarnings.map((warning) => (
+        {runtimeWarnings.length > 0
+          ? runtimeWarnings.map((warning) => (
               <div
                 className="flex gap-3 rounded-2xl border border-warning/30 bg-warning-bg px-4 py-3"
                 key={warning}

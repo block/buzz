@@ -3,167 +3,26 @@
 
 //! Minimal NIP-01 WebSocket test client for the Sprout relay.
 
-use std::collections::VecDeque;
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, EventBuilder, Filter, Keys, Kind, RelayUrl, Tag};
+use nostr::{Event, EventBuilder, Filter, Keys, Kind, Tag};
 use serde_json::{json, Value};
 use thiserror::Error;
-use tokio::time::timeout;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 use tracing::debug;
 
-/// A message received from a Nostr relay.
-#[derive(Debug, Clone)]
-pub enum RelayMessage {
-    /// An event matching an active subscription.
-    Event {
-        /// The subscription ID this event belongs to.
-        subscription_id: String,
-        /// The Nostr event payload.
-        event: Box<Event>,
-    },
-    /// Acknowledgement of a published event.
-    Ok(OkResponse),
-    /// End-of-stored-events marker for a subscription.
-    Eose {
-        /// The subscription ID that has reached end-of-stored-events.
-        subscription_id: String,
-    },
-    /// The relay closed a subscription, usually with an error.
-    Closed {
-        /// The subscription ID that was closed.
-        subscription_id: String,
-        /// Human-readable reason for the closure.
-        message: String,
-    },
-    /// A human-readable notice from the relay.
-    Notice {
-        /// The notice text.
-        message: String,
-    },
-    /// A NIP-42 authentication challenge from the relay.
-    Auth {
-        /// The challenge string to sign.
-        challenge: String,
-    },
-}
-
-/// The relay's response to a published event (NIP-01 `OK` message).
-#[derive(Debug, Clone)]
-pub struct OkResponse {
-    /// Hex-encoded ID of the event that was acknowledged.
-    pub event_id: String,
-    /// Whether the relay accepted the event.
-    pub accepted: bool,
-    /// Human-readable reason string (empty when accepted without comment).
-    pub message: String,
-}
-
-/// Parse a raw relay text frame into a typed [`RelayMessage`].
-#[allow(clippy::result_large_err)]
-pub fn parse_relay_message(text: &str) -> Result<RelayMessage, TestClientError> {
-    let arr: Vec<Value> = serde_json::from_str(text)?;
-
-    let msg_type = arr
-        .first()
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TestClientError::UnexpectedMessage(text.to_string()))?;
-
-    match msg_type {
-        "EVENT" => {
-            let sub_id = arr
-                .get(1)
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| TestClientError::UnexpectedMessage(text.to_string()))?
-                .to_string();
-            let event: Event = serde_json::from_value(
-                arr.get(2)
-                    .cloned()
-                    .ok_or_else(|| TestClientError::UnexpectedMessage(text.to_string()))?,
-            )?;
-            Ok(RelayMessage::Event {
-                subscription_id: sub_id,
-                event: Box::new(event),
-            })
-        }
-        "OK" => {
-            let event_id = arr
-                .get(1)
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| TestClientError::UnexpectedMessage(text.to_string()))?
-                .to_string();
-            let accepted = arr.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
-            let message = arr
-                .get(3)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Ok(RelayMessage::Ok(OkResponse {
-                event_id,
-                accepted,
-                message,
-            }))
-        }
-        "EOSE" => {
-            let sub_id = arr
-                .get(1)
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| TestClientError::UnexpectedMessage(text.to_string()))?
-                .to_string();
-            Ok(RelayMessage::Eose {
-                subscription_id: sub_id,
-            })
-        }
-        "CLOSED" => {
-            let sub_id = arr
-                .get(1)
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| TestClientError::UnexpectedMessage(text.to_string()))?
-                .to_string();
-            let message = arr
-                .get(2)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Ok(RelayMessage::Closed {
-                subscription_id: sub_id,
-                message,
-            })
-        }
-        "NOTICE" => {
-            let message = arr
-                .get(1)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Ok(RelayMessage::Notice { message })
-        }
-        "AUTH" => {
-            let challenge = arr
-                .get(1)
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| TestClientError::UnexpectedMessage(text.to_string()))?
-                .to_string();
-            Ok(RelayMessage::Auth { challenge })
-        }
-        other => Err(TestClientError::UnexpectedMessage(format!(
-            "unknown message type: {other}"
-        ))),
-    }
-}
+use sprout_ws_client::NostrWsConnection;
+pub use sprout_ws_client::{parse_relay_message, OkResponse, RelayMessage, WsClientError};
 
 /// Errors returned by [`SproutTestClient`] operations.
 #[derive(Debug, Error)]
 pub enum TestClientError {
     /// A WebSocket transport error occurred.
     #[error("WebSocket error: {0}")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+    WebSocket(tokio_tungstenite::tungstenite::Error),
 
     /// A JSON serialization or deserialization error occurred.
     #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(serde_json::Error),
 
     /// Failed to build a Nostr event.
     #[error("Nostr event builder error: {0}")]
@@ -198,20 +57,32 @@ pub enum TestClientError {
     NoAuthChallenge,
 }
 
+impl From<WsClientError> for TestClientError {
+    fn from(e: WsClientError) -> Self {
+        match e {
+            WsClientError::WebSocket(e) => TestClientError::WebSocket(e),
+            WsClientError::Json(e) => TestClientError::Json(e),
+            WsClientError::EventBuilder(s) => TestClientError::EventBuilder(s),
+            WsClientError::Url(s) => TestClientError::Url(s),
+            WsClientError::Timeout => TestClientError::Timeout,
+            WsClientError::ConnectionClosed => TestClientError::ConnectionClosed,
+            WsClientError::UnexpectedMessage(s) => TestClientError::UnexpectedMessage(s),
+            WsClientError::AuthFailed(s) => TestClientError::AuthFailed(s),
+            WsClientError::EventRejected(s) => TestClientError::EventRejected(s),
+            WsClientError::NoAuthChallenge => TestClientError::NoAuthChallenge,
+        }
+    }
+}
+
 impl From<nostr::event::builder::Error> for TestClientError {
     fn from(e: nostr::event::builder::Error) -> Self {
         TestClientError::EventBuilder(e.to_string())
     }
 }
 
-type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-
 /// WebSocket test client for integration testing against a running Sprout relay.
 pub struct SproutTestClient {
-    ws: WsStream,
-    buffer: VecDeque<RelayMessage>,
-    pending_challenge: Option<String>,
-    relay_url: String,
+    inner: NostrWsConnection,
 }
 
 impl SproutTestClient {
@@ -224,50 +95,20 @@ impl SproutTestClient {
 
     /// Connects to the relay at `url` without performing authentication.
     pub async fn connect_unauthenticated(url: &str) -> Result<Self, TestClientError> {
-        let parsed = url
-            .parse::<url::Url>()
-            .map_err(|e| TestClientError::Url(e.to_string()))?;
-
-        let (ws, _response) = connect_async(parsed.as_str())
-            .await
-            .map_err(TestClientError::WebSocket)?;
-
+        let inner = NostrWsConnection::connect(url).await?;
         debug!("connected to relay at {url}");
-
-        Ok(Self {
-            ws,
-            buffer: VecDeque::new(),
-            pending_challenge: None,
-            relay_url: url.to_string(),
-        })
+        Ok(Self { inner })
     }
 
     /// Performs NIP-42 authentication using `keys` against the connected relay.
     pub async fn authenticate(&mut self, keys: &Keys) -> Result<(), TestClientError> {
-        let challenge = self.wait_for_auth_challenge(Duration::from_secs(5)).await?;
-
-        let relay_url =
-            RelayUrl::parse(&self.relay_url).map_err(|e| TestClientError::Url(e.to_string()))?;
-
-        let auth_event = EventBuilder::auth(&challenge, relay_url).sign_with_keys(keys)?;
-        let event_id = auth_event.id.to_hex();
-
-        self.send_raw(&json!(["AUTH", auth_event])).await?;
-
-        let ok = self.wait_for_ok(&event_id, Duration::from_secs(5)).await?;
-        if !ok.accepted {
-            return Err(TestClientError::AuthFailed(ok.message));
-        }
-
-        debug!("NIP-42 authentication successful");
+        self.inner.authenticate(keys, None).await?;
         Ok(())
     }
 
     /// Sends a signed event to the relay and waits for the OK response.
     pub async fn send_event(&mut self, event: Event) -> Result<OkResponse, TestClientError> {
-        let event_id = event.id.to_hex();
-        self.send_raw(&json!(["EVENT", event])).await?;
-        self.wait_for_ok(&event_id, Duration::from_secs(10)).await
+        Ok(self.inner.send_event(event).await?)
     }
 
     /// Builds and sends a text message event to `channel_id` using the given `kind`.
@@ -296,14 +137,16 @@ impl SproutTestClient {
         msg.push(json!("REQ"));
         msg.push(json!(sub_id));
         for f in filters {
-            msg.push(serde_json::to_value(&f)?);
+            msg.push(serde_json::to_value(&f).map_err(WsClientError::Json)?);
         }
-        self.send_raw(&Value::Array(msg)).await
+        self.inner.send_raw(&Value::Array(msg)).await?;
+        Ok(())
     }
 
     /// Sends a CLOSE message to cancel the subscription identified by `sub_id`.
     pub async fn close_subscription(&mut self, sub_id: &str) -> Result<(), TestClientError> {
-        self.send_raw(&json!(["CLOSE", sub_id])).await
+        self.inner.send_raw(&json!(["CLOSE", sub_id])).await?;
+        Ok(())
     }
 
     /// Receives the next relay message, waiting up to `timeout_dur`.
@@ -311,10 +154,7 @@ impl SproutTestClient {
         &mut self,
         timeout_dur: Duration,
     ) -> Result<RelayMessage, TestClientError> {
-        if let Some(msg) = self.buffer.pop_front() {
-            return Ok(msg);
-        }
-        self.recv_one(timeout_dur).await
+        Ok(self.inner.next_event(timeout_dur).await?)
     }
 
     /// Collects all events for `sub_id` until EOSE is received, waiting up to `timeout_dur`.
@@ -326,14 +166,16 @@ impl SproutTestClient {
         let deadline = tokio::time::Instant::now() + timeout_dur;
         let mut events = Vec::new();
 
-        let old_buffer = std::mem::take(&mut self.buffer);
-        let mut found_eose = false;
-        for msg in old_buffer {
-            if found_eose {
-                self.buffer.push_back(msg);
-                continue;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or(Duration::ZERO);
+
+            if remaining.is_zero() {
+                return Err(TestClientError::Timeout);
             }
-            match msg {
+
+            match self.inner.next_event(remaining).await? {
                 RelayMessage::Event {
                     subscription_id,
                     event,
@@ -341,213 +183,24 @@ impl SproutTestClient {
                     events.push(*event);
                 }
                 RelayMessage::Eose { subscription_id } if subscription_id == sub_id => {
-                    found_eose = true;
+                    return Ok(events);
                 }
-                other => self.buffer.push_back(other),
-            }
-        }
-        if found_eose {
-            return Ok(events);
-        }
-
-        loop {
-            let remaining = deadline
-                .checked_duration_since(tokio::time::Instant::now())
-                .unwrap_or(Duration::ZERO);
-
-            if remaining.is_zero() {
-                return Err(TestClientError::Timeout);
-            }
-
-            let raw = timeout(remaining, self.ws.next())
-                .await
-                .map_err(|_| TestClientError::Timeout)?
-                .ok_or(TestClientError::ConnectionClosed)?
-                .map_err(TestClientError::WebSocket)?;
-
-            match raw {
-                Message::Text(text) => {
-                    let msg = parse_relay_message(&text)?;
-                    match msg {
-                        RelayMessage::Event {
-                            subscription_id,
-                            event,
-                        } if subscription_id == sub_id => {
-                            events.push(*event);
-                        }
-                        RelayMessage::Eose { subscription_id } if subscription_id == sub_id => {
-                            return Ok(events);
-                        }
-                        RelayMessage::Auth { ref challenge } => {
-                            self.pending_challenge = Some(challenge.clone());
-                            self.buffer.push_back(msg);
-                        }
-                        other => self.buffer.push_back(other),
-                    }
-                }
-                Message::Ping(data) => {
-                    self.ws.send(Message::Pong(data)).await?;
-                }
-                Message::Close(_) => return Err(TestClientError::ConnectionClosed),
                 _ => {}
             }
         }
     }
 
     /// Closes the WebSocket connection gracefully.
-    pub async fn disconnect(mut self) -> Result<(), TestClientError> {
-        self.ws.close(None).await?;
+    pub async fn disconnect(self) -> Result<(), TestClientError> {
+        self.inner.disconnect().await?;
         Ok(())
-    }
-
-    async fn send_raw(&mut self, value: &Value) -> Result<(), TestClientError> {
-        let text = serde_json::to_string(value)?;
-        debug!("→ relay: {text}");
-        self.ws.send(Message::Text(text.into())).await?;
-        Ok(())
-    }
-
-    async fn recv_one(&mut self, timeout_dur: Duration) -> Result<RelayMessage, TestClientError> {
-        if let Some(msg) = self.buffer.pop_front() {
-            return Ok(msg);
-        }
-
-        loop {
-            let raw = timeout(timeout_dur, self.ws.next())
-                .await
-                .map_err(|_| TestClientError::Timeout)?
-                .ok_or(TestClientError::ConnectionClosed)?
-                .map_err(TestClientError::WebSocket)?;
-
-            match raw {
-                Message::Text(text) => {
-                    let msg = parse_relay_message(&text)?;
-                    if let RelayMessage::Auth { ref challenge } = msg {
-                        self.pending_challenge = Some(challenge.clone());
-                    }
-                    return Ok(msg);
-                }
-                Message::Ping(data) => {
-                    self.ws.send(Message::Pong(data)).await?;
-                }
-                Message::Close(_) => return Err(TestClientError::ConnectionClosed),
-                _ => {}
-            }
-        }
-    }
-
-    async fn wait_for_auth_challenge(
-        &mut self,
-        timeout_dur: Duration,
-    ) -> Result<String, TestClientError> {
-        if let Some(challenge) = self.pending_challenge.take() {
-            return Ok(challenge);
-        }
-
-        if let Some(idx) = self
-            .buffer
-            .iter()
-            .position(|m| matches!(m, RelayMessage::Auth { .. }))
-        {
-            match self.buffer.remove(idx).unwrap() {
-                RelayMessage::Auth { challenge } => return Ok(challenge),
-                _ => unreachable!(),
-            }
-        }
-
-        let deadline = tokio::time::Instant::now() + timeout_dur;
-
-        loop {
-            let remaining = deadline
-                .checked_duration_since(tokio::time::Instant::now())
-                .unwrap_or(Duration::ZERO);
-
-            if remaining.is_zero() {
-                return Err(TestClientError::NoAuthChallenge);
-            }
-
-            let raw = timeout(remaining, self.ws.next())
-                .await
-                .map_err(|_| TestClientError::NoAuthChallenge)?
-                .ok_or(TestClientError::ConnectionClosed)?
-                .map_err(TestClientError::WebSocket)?;
-
-            match raw {
-                Message::Text(text) => {
-                    let msg = parse_relay_message(&text)?;
-                    match msg {
-                        RelayMessage::Auth { challenge } => return Ok(challenge),
-                        other => self.buffer.push_back(other),
-                    }
-                }
-                Message::Ping(data) => {
-                    self.ws.send(Message::Pong(data)).await?;
-                }
-                Message::Close(_) => return Err(TestClientError::ConnectionClosed),
-                _ => {}
-            }
-        }
-    }
-
-    async fn wait_for_ok(
-        &mut self,
-        event_id: &str,
-        timeout_dur: Duration,
-    ) -> Result<OkResponse, TestClientError> {
-        let deadline = tokio::time::Instant::now() + timeout_dur;
-
-        if let Some(idx) = self
-            .buffer
-            .iter()
-            .position(|m| matches!(m, RelayMessage::Ok(ok) if ok.event_id == event_id))
-        {
-            match self.buffer.remove(idx).unwrap() {
-                RelayMessage::Ok(ok) => return Ok(ok),
-                _ => unreachable!(),
-            }
-        }
-
-        loop {
-            let remaining = deadline
-                .checked_duration_since(tokio::time::Instant::now())
-                .unwrap_or(Duration::ZERO);
-
-            if remaining.is_zero() {
-                return Err(TestClientError::Timeout);
-            }
-
-            let raw = timeout(remaining, self.ws.next())
-                .await
-                .map_err(|_| TestClientError::Timeout)?
-                .ok_or(TestClientError::ConnectionClosed)?
-                .map_err(TestClientError::WebSocket)?;
-
-            match raw {
-                Message::Text(text) => {
-                    let msg = parse_relay_message(&text)?;
-                    match msg {
-                        RelayMessage::Ok(ok) if ok.event_id == event_id => return Ok(ok),
-                        RelayMessage::Auth { ref challenge } => {
-                            self.pending_challenge = Some(challenge.clone());
-                            self.buffer.push_back(msg);
-                        }
-                        other => self.buffer.push_back(other),
-                    }
-                }
-                Message::Ping(data) => {
-                    self.ws.send(Message::Pong(data)).await?;
-                }
-                Message::Close(_) => return Err(TestClientError::ConnectionClosed),
-                _ => {}
-            }
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::Keys;
+    use nostr::{EventBuilder, Keys, Kind, RelayUrl, Tag};
 
     #[test]
     fn parse_relay_messages() {

@@ -33,7 +33,10 @@ test("profile popover renders a custom emoji status as an image", async ({
 
   const picker = page.locator("em-emoji-picker");
   await picker.locator("input[type='search']").fill(SHORTCODE);
-  await picker.locator(`button[title='${SHORTCODE}']`).first().click();
+  await picker
+    .getByRole("button", { name: `:${SHORTCODE}:` })
+    .first()
+    .click();
   await page.getByTestId("set-status-input").fill(STATUS_TEXT);
   await page.getByTestId("set-status-save").click();
 

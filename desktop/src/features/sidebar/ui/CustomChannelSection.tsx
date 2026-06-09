@@ -41,6 +41,10 @@ import {
   DroppableUngroupedBody,
   SortableSectionShell,
 } from "@/features/sidebar/ui/SidebarDnd";
+import {
+  SECTION_ACTION_VISIBILITY_CLASS,
+  SECTION_ICON_BUTTON_CLASS,
+} from "@/features/sidebar/ui/sidebarSectionStyles";
 import type { ChannelSection } from "@/features/sidebar/lib/useChannelSections";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -49,10 +53,6 @@ import { cn } from "@/shared/lib/cn";
 // Shared styles
 // ---------------------------------------------------------------------------
 
-const SECTION_ICON_BUTTON_CLASS =
-  "flex h-5 w-5 items-center justify-center rounded-md text-sidebar-foreground/50 hover:bg-sidebar-accent/60 hover:text-sidebar-foreground";
-export const SECTION_ACTION_VISIBILITY_CLASS =
-  "opacity-0 transition-opacity group-hover/sidebar-section:opacity-100 group-focus-within/sidebar-section:opacity-100";
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
 const SECTION_LABEL_CHEVRON_CLASS =
@@ -142,10 +142,7 @@ export function ChannelContextMenuItems({
     channelId: string,
     lastMessageAt: string | null | undefined,
   ) => void;
-  onMarkChannelUnread?: (
-    channelId: string,
-    lastMessageAt: string | null | undefined,
-  ) => void;
+  onMarkChannelUnread?: (channelId: string) => void;
   onMuteChannel?: (channelId: string) => void;
   onUnmuteChannel?: (channelId: string) => void;
   onStarChannel?: (channelId: string) => void;
@@ -182,9 +179,7 @@ export function ChannelContextMenuItems({
           Mark as read
         </ContextMenuItem>
       ) : !hasUnread && onMarkChannelUnread ? (
-        <ContextMenuItem
-          onClick={() => onMarkChannelUnread(channel.id, channel.lastMessageAt)}
-        >
+        <ContextMenuItem onClick={() => onMarkChannelUnread(channel.id)}>
           <CircleDot className="h-4 w-4" />
           Mark unread
         </ContextMenuItem>
@@ -271,7 +266,7 @@ function SectionHeaderActions({
           onClick={onBrowse}
           type="button"
         >
-          <Search className="h-3.5 w-3.5" />
+          <Search className="h-4 w-4" />
         </button>
       ) : null}
       {onCreateClick ? (
@@ -340,10 +335,7 @@ export function ChannelGroupSection({
     channelId: string,
     lastMessageAt: string | null | undefined,
   ) => void;
-  onMarkChannelUnread: (
-    channelId: string,
-    lastMessageAt: string | null | undefined,
-  ) => void;
+  onMarkChannelUnread: (channelId: string) => void;
   onSelectChannel: (channelId: string) => void;
   onToggleCollapsed: () => void;
   selectedChannelId: string | null;
@@ -517,10 +509,7 @@ export function CustomChannelSection({
     channelId: string,
     lastMessageAt: string | null | undefined,
   ) => void;
-  onMarkChannelUnread: (
-    channelId: string,
-    lastMessageAt: string | null | undefined,
-  ) => void;
+  onMarkChannelUnread: (channelId: string) => void;
   onMarkSectionRead: () => void;
   onAssignChannel: (channelId: string, sectionId: string) => void;
   onUnassignChannel: (channelId: string) => void;

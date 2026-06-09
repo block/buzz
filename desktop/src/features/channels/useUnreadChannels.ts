@@ -246,8 +246,6 @@ export function useUnreadChannels(
     getEffectiveTimestamp,
     isReady: isReadStateReady,
     markContextRead,
-    markContextUnread,
-    drainSyncedRollbacks,
     drainSyncedAdvances,
     readStateVersion,
   } = useReadState(pubkey, relayClient);
@@ -268,35 +266,24 @@ export function useUnreadChannels(
   channelsRef.current = channels;
 
   // Channels manually marked unread this session (e.g., right-click → "mark
-  // unread"). The NIP-RS rollback (markContextUnread) is the cross-device
-  // mechanism; this in-session flag is what makes the badge appear *now* in
-  // the case where we don't yet have an observed latest timestamp to compare
-  // against. Cleared when the user opens the channel.
+  // unread"). Because NIP-RS read markers are monotonic, this in-session flag
+  // is what makes the badge appear *now* without lowering synced read state.
+  // Cleared when the user opens the channel.
   const forcedUnreadRef = React.useRef(new Set<string>());
 
-  // When a synced event rolls back a read marker (cross-device mark-as-unread),
-  // merge into forcedUnreadRef so the badge appears immediately without waiting
-  // for a catch-up REQ that already ran with the old (higher) marker.
   // When a synced event advances a read marker (cross-device mark-as-read),
   // remove from forcedUnreadRef so the dot clears immediately.
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion is the intentional drain trigger
   React.useEffect(() => {
-    const rolled = drainSyncedRollbacks();
     const advanced = drainSyncedAdvances();
     let anyNew = false;
-    for (const channelId of rolled) {
-      if (!forcedUnreadRef.current.has(channelId)) {
-        forcedUnreadRef.current.add(channelId);
-        anyNew = true;
-      }
-    }
     for (const channelId of advanced) {
       if (forcedUnreadRef.current.delete(channelId)) {
         anyNew = true;
       }
     }
     if (anyNew) bumpLatestVersion();
-  }, [readStateVersion, drainSyncedRollbacks, drainSyncedAdvances]);
+  }, [readStateVersion, drainSyncedAdvances]);
 
   // Root event IDs of threads where the current user has replied at least once.
   // Used to determine if thread replies should trigger unread notifications.
@@ -375,28 +362,14 @@ export function useUnreadChannels(
   );
 
   // Manually mark a channel unread (e.g., right-click → "mark unread"). Sets
-  // the in-session forced flag so the sidebar badge appears immediately, and
-  // rolls the NIP-RS read marker back so the unread state syncs across
-  // devices. The forced flag is cleared in markChannelRead when the user
-  // opens the channel. If lastMessageAt is unknown we still set the forced
-  // flag, but skip the NIP-RS rollback — without a target timestamp we have
-  // nothing honest to publish.
-  const markChannelUnread = React.useCallback(
-    (channelId: string, lastMessageAt: string | null | undefined) => {
-      if (!forcedUnreadRef.current.has(channelId)) {
-        forcedUnreadRef.current.add(channelId);
-        bumpLatestVersion();
-      }
-      const unixSeconds =
-        toUnixSeconds(lastMessageAt) ??
-        latestByChannelRef.current.get(channelId) ??
-        null;
-      if (unixSeconds !== null) {
-        markContextUnread(channelId, unixSeconds);
-      }
-    },
-    [markContextUnread],
-  );
+  // the in-session forced flag so the sidebar badge appears immediately. NIP-RS
+  // read markers are monotonic, so we do not publish a lower timestamp.
+  const markChannelUnread = React.useCallback((channelId: string) => {
+    if (!forcedUnreadRef.current.has(channelId)) {
+      forcedUnreadRef.current.add(channelId);
+      bumpLatestVersion();
+    }
+  }, []);
 
   // Mark the active channel as read when it changes or new messages arrive.
   // Honours the caller's contract that a null activeReadAt suppresses

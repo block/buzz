@@ -33,6 +33,12 @@ export function useActiveChannelHeader(
           activeDmParticipantPubkeys[0]?.toLowerCase()
         ] ?? null)
       : null;
+  const activeDmAvatarUrl =
+    activeDmParticipantPubkeys.length > 0
+      ? (activeDmProfilesQuery.data?.profiles?.[
+          activeDmParticipantPubkeys[0]?.toLowerCase()
+        ]?.avatarUrl ?? null)
+      : null;
 
   return {
     activeChannelTitle: activeChannel
@@ -42,6 +48,7 @@ export function useActiveChannelHeader(
           activeDmProfilesQuery.data?.profiles,
         )
       : "Channels",
+    activeDmAvatarUrl,
     activeDmPresenceStatus,
     activeChannelEphemeralDisplay,
   };

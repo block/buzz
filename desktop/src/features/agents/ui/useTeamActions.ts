@@ -288,7 +288,7 @@ export function useTeamActions(
           displayName: member.imported.display_name,
           systemPrompt: member.imported.system_prompt,
           avatarUrl: member.imported.avatar_url ?? undefined,
-          provider: member.existing.provider ?? undefined,
+          runtime: member.existing.runtime ?? undefined,
           model: member.existing.model ?? undefined,
           namePool: [...member.existing.namePool],
         });

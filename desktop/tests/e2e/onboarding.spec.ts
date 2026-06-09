@@ -141,7 +141,7 @@ test("page 1 accepts an avatar URL as the secondary avatar path", async ({
   expect(box?.height).toBeCloseTo(80, 0);
 
   await continueToSetupPage(page);
-  await expect(page.getByTestId("onboarding-provider-goose")).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
 });
 
 test("avatar upload rejects a file whose server-detected MIME is not an image", async ({
@@ -230,7 +230,7 @@ test("first-run onboarding keeps the shell hidden through both pages and only ma
   await page.getByTestId("onboarding-display-name").fill("Alice");
   await continueToSetupPage(page);
   await expectShellHidden(page);
-  await expect(page.getByTestId("onboarding-provider-goose")).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
   await expectNoHomeSeenEntries(page);
 
   await page.getByTestId("onboarding-finish").click();
@@ -272,7 +272,7 @@ test("page 2 falls back to Doctor guidance when ACP tools are not installed", as
   await installMockBridge(
     page,
     {
-      acpProvidersCatalog: [],
+      acpRuntimesCatalog: [],
     },
     { skipOnboardingSeed: true },
   );

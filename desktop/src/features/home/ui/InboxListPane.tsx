@@ -33,6 +33,7 @@ type InboxListPaneProps = {
   onFilterChange: (filter: InboxFilter) => void;
   onSelect: (itemId: string) => void;
   selectedId: string | null;
+  showRightDivider?: boolean;
 };
 
 export function InboxListPane({
@@ -42,11 +43,18 @@ export function InboxListPane({
   onFilterChange,
   onSelect,
   selectedId,
+  showRightDivider = false,
 }: InboxListPaneProps) {
   const activeFilter = FILTER_OPTIONS.find((option) => option.value === filter);
 
   return (
-    <section className="relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-background/60">
+    <section
+      className={cn(
+        "relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-background/60",
+        showRightDivider &&
+          "after:pointer-events-none after:absolute after:bottom-0 after:right-0 after:top-10 after:z-40 after:w-px after:bg-border/35 after:content-['']",
+      )}
+    >
       <TopChromeBackdrop className="h-[76px]" />
       <div className="absolute inset-x-0 top-[42px] z-40 min-h-[32px] px-5 py-[4px]">
         <div className="flex min-w-0 items-center justify-between gap-3">
@@ -125,7 +133,7 @@ export function InboxListPane({
                   <div className="relative">
                     <UserAvatar
                       avatarUrl={item.avatarUrl}
-                      className="h-8 w-8 rounded-xl"
+                      className="h-8 w-8"
                       displayName={item.senderLabel}
                       size="md"
                     />

@@ -34,7 +34,6 @@ import {
 } from "@/features/messages/lib/formatTimelineMessages";
 import { buildThreadPanelData } from "@/features/messages/lib/threadPanel";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
-import type { TimelineMessage } from "@/features/messages/types";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
@@ -45,8 +44,12 @@ import { useChannelFind } from "@/features/search/useChannelFind";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 import { AgentSessionProvider } from "@/shared/context/AgentSessionContext";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
-import { useElementWidthBreakpoint } from "@/shared/hooks/use-mobile";
 import {
+  useElementWidth,
+  useIsThreadPanelOverlay,
+} from "@/shared/hooks/use-mobile";
+import {
+  THREAD_PANEL_MIN_WIDTH_PX,
   THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX,
   useThreadPanelWidth,
 } from "@/shared/hooks/useThreadPanelWidth";
@@ -58,6 +61,10 @@ import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
+
+const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760;
+const HEADER_ACTIONS_SPLIT_GUTTER_PX = 12;
+
 export function ChannelScreen({
   activeChannel,
   currentIdentity,
@@ -77,6 +84,7 @@ export function ChannelScreen({
     unfollowThread,
     isFollowingThread,
     isNotifiedForThread,
+    setTopbarSearchHidden,
   } = useAppShell();
   const [profilePanelPubkey, setProfilePanelPubkey] = React.useState<
     string | null
@@ -88,10 +96,9 @@ export function ChannelScreen({
     widthPx: threadPanelWidthPx,
   } = useThreadPanelWidth();
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
-  const [channelContentRef, isNarrowPanelViewport] =
-    useElementWidthBreakpoint<HTMLDivElement>(
-      THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX,
-    );
+  const isThreadPanelOverlay = useIsThreadPanelOverlay();
+  const [channelContentRef, channelContentWidthPx] =
+    useElementWidth<HTMLDivElement>();
   const [openThreadHeadId, setOpenThreadHeadId] = React.useState<string | null>(
     null,
   );
@@ -126,6 +133,7 @@ export function ChannelScreen({
   }, [activeChannel?.isMember, activeChannelId, activeReadAt, markChannelRead]);
   const {
     activeChannelTitle,
+    activeDmAvatarUrl,
     activeDmPresenceStatus,
     activeChannelEphemeralDisplay,
   } = useActiveChannelHeader(activeChannel, currentPubkey);
@@ -157,14 +165,22 @@ export function ChannelScreen({
     currentPubkey,
     latestMessageEvent,
   );
+  const activeDmParticipantPubkeys = React.useMemo(
+    () =>
+      activeChannel?.channelType === "dm"
+        ? activeChannel.participantPubkeys
+        : [],
+    [activeChannel],
+  );
   const messageProfilePubkeys = React.useMemo(
     () => [
       ...new Set([
         ...messageAuthorPubkeys,
+        ...activeDmParticipantPubkeys,
         ...typingEntries.map((entry) => entry.pubkey),
       ]),
     ],
-    [messageAuthorPubkeys, typingEntries],
+    [activeDmParticipantPubkeys, messageAuthorPubkeys, typingEntries],
   );
   const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
     enabled: messageProfilePubkeys.length > 0,
@@ -334,14 +350,10 @@ export function ChannelScreen({
         : undefined,
     [activeChannel, handleToggleReaction],
   );
-  const handleMarkUnread = React.useCallback(
-    (message: TimelineMessage) => {
-      if (!activeChannelId) return;
-      const messageIso = new Date(message.createdAt * 1_000).toISOString();
-      markChannelUnread(activeChannelId, messageIso);
-    },
-    [activeChannelId, markChannelUnread],
-  );
+  const handleMarkUnread = React.useCallback(() => {
+    if (!activeChannelId) return;
+    markChannelUnread(activeChannelId);
+  }, [activeChannelId, markChannelUnread]);
   const {
     channelAgentSessionAgents,
     closeAgentSession: handleCloseAgentSession,
@@ -434,12 +446,32 @@ export function ChannelScreen({
   ]);
 
   useLoadMissingAncestors(activeChannel, resolvedMessages);
+  const hasAuxiliaryPanel = Boolean(
+    openThreadHeadMessage || openAgentSessionPubkey || profilePanelPubkey,
+  );
+  const isNarrowPanelViewport =
+    channelContentWidthPx > 0 &&
+    channelContentWidthPx < THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX;
   const isSinglePanelView =
     isNarrowPanelViewport &&
     activeChannel?.channelType !== "forum" &&
-    Boolean(
-      openThreadHeadMessage || openAgentSessionPubkey || profilePanelPubkey,
-    );
+    hasAuxiliaryPanel;
+  const hasSplitRightPanel =
+    !isSinglePanelView && !isThreadPanelOverlay && hasAuxiliaryPanel;
+  const shouldCompactHeaderActions =
+    hasAuxiliaryPanel &&
+    channelContentWidthPx > 0 &&
+    channelContentWidthPx < HEADER_ACTIONS_COMPACT_BREAKPOINT_PX;
+  const splitRightPanelInset = hasSplitRightPanel
+    ? `min(${threadPanelWidthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`
+    : undefined;
+  const headerActionsRightInset = splitRightPanelInset
+    ? `calc(${splitRightPanelInset} + ${HEADER_ACTIONS_SPLIT_GUTTER_PX}px)`
+    : undefined;
+  React.useEffect(() => {
+    setTopbarSearchHidden(isSinglePanelView);
+    return () => setTopbarSearchHidden(false);
+  }, [isSinglePanelView, setTopbarSearchHidden]);
 
   return (
     <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>
@@ -448,6 +480,9 @@ export function ChannelScreen({
           activeChannel={activeChannel}
           activeChannelEphemeralDisplay={activeChannelEphemeralDisplay}
           activeChannelTitle={activeChannelTitle}
+          actionsRightInset={headerActionsRightInset}
+          actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
+          activeDmAvatarUrl={activeDmAvatarUrl}
           activeDmPresenceStatus={activeDmPresenceStatus}
           currentPubkey={currentPubkey}
           isJoining={joinChannelMutation.isPending}

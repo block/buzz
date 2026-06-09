@@ -241,8 +241,7 @@ from step 4 and @mention the agent:
 ```bash
 export SPROUT_PRIVATE_KEY=$SENDER_SK          # the key from step 4
 sprout messages send --channel "$CHANNEL" \
-  --content "Hey agent, reply PONG only." \
-  --mention "$AGENT_PUBKEY"
+  --content "Hey agent, reply PONG only."
 
 # Wait 10–90s, then read the channel — the agent's reply is a kind:9 from
 # AGENT_PUBKEY. The current ACP build is quiet on stdout during a turn, so

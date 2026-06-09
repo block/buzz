@@ -1,7 +1,7 @@
 {
   "name": "sprout",
   "private": true,
-  "version": "0.3.11",
+  "version": "0.3.13",
   "type": "module",
   "scripts": {
     "dev": "vite",

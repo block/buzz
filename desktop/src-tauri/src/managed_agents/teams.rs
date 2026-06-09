@@ -329,7 +329,7 @@ mod tests {
             display_name: name.to_string(),
             avatar_url: None,
             system_prompt: prompt.to_string(),
-            provider: None,
+            runtime: None,
             model: None,
             name_pool: Vec::new(),
             is_builtin: false,

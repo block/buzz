@@ -12,6 +12,7 @@ members = [
     "crates/sprig",
     "crates/sprout-proxy",
     "crates/sprout-test-client",
+    "crates/sprout-ws-client",
     "crates/sprout-admin",
     "crates/sprout-workflow",
     "crates/sprout-media",
@@ -116,6 +117,7 @@ sprout-proxy = { path = "crates/sprout-proxy" }
 sprout-workflow = { path = "crates/sprout-workflow" }
 sprout-media = { path = "crates/sprout-media" }
 sprout-sdk = { path = "crates/sprout-sdk" }
+sprout-ws-client = { path = "crates/sprout-ws-client" }
 
 # CI profile — release-grade codegen for the relay so e2e tests hit a
 # realistic binary, not an unoptimised debug build.  Inherits `release`

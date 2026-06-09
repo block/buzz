@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sprout_mobile/features/channels/read_state/read_state_format.dart';
 import 'package:sprout_mobile/features/channels/read_state/read_state_manager.dart';
 import 'package:sprout_mobile/shared/relay/relay.dart';
 
@@ -104,6 +106,49 @@ void main() {
       expect(manager.getEffectiveTimestamp('channel-2'), 43);
     },
   );
+
+  test('remote read-state rollback is ignored', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final keychain = nostr.Keys.generate();
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: keychain.nsec,
+      pubkey: keychain.public,
+    );
+    final relay = _FakeRelaySession();
+    final manager = ReadStateManager(
+      pubkey: keychain.public,
+      prefs: prefs,
+      crypto: crypto!,
+      relaySession: relay,
+      signedEventRelay: _FakeSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+
+    relay.historyEvents = [
+      _readStateEvent(
+        pubkey: keychain.public,
+        crypto: crypto,
+        clientId: 'remote-client',
+        slotId: 'remote-slot',
+        contexts: {'channel-1': 100},
+        createdAt: 100,
+      ),
+      _readStateEvent(
+        pubkey: keychain.public,
+        crypto: crypto,
+        clientId: 'remote-client',
+        slotId: 'remote-slot',
+        contexts: {'channel-1': 50},
+        createdAt: 110,
+      ),
+    ];
+
+    await manager.initialize();
+
+    expect(manager.getEffectiveTimestamp('channel-1'), 100);
+  });
 }
 
 class _SubmittedEvent {
@@ -176,4 +221,44 @@ class _MissingScopeSignedEventRelay implements SignedEventRelay {
     submitCount++;
     throw Exception('missing users:write');
   }
+}
+
+NostrEvent _readStateEvent({
+  required String pubkey,
+  required ReadStateCrypto crypto,
+  required String clientId,
+  required String slotId,
+  required Map<String, int> contexts,
+  required int createdAt,
+}) {
+  final blob = ReadStateBlob(clientId: clientId, contexts: contexts);
+  return NostrEvent(
+    id: 'event-$clientId-$createdAt',
+    pubkey: pubkey,
+    createdAt: createdAt,
+    kind: EventKind.readState,
+    tags: [
+      ['d', '$readStateDTagPrefix$slotId'],
+      ['t', 'read-state'],
+    ],
+    content: crypto.encrypt(jsonEncode(blob.toJson())),
+    sig: 'sig',
+  );
+}
+
+class _FakeRelaySession extends RelaySessionNotifier {
+  List<NostrEvent> historyEvents = [];
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => historyEvents;
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) async => () {};
 }

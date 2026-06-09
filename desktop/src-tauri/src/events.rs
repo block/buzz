@@ -690,15 +690,6 @@ pub fn build_dm_hide(channel_id: &str) -> Result<EventBuilder, String> {
     Ok(EventBuilder::new(Kind::Custom(41012), "").tags(tags))
 }
 
-/// Kind 20001 — ephemeral presence broadcast (`online` / `away` / `offline`).
-pub fn build_presence(status: &str) -> Result<EventBuilder, String> {
-    match status {
-        "online" | "away" | "offline" => {}
-        other => return Err(format!("invalid presence status: {other}")),
-    };
-    Ok(EventBuilder::new(Kind::Custom(20001), status.to_string()))
-}
-
 /// Kind 30620 — replaceable workflow definition.
 ///
 /// The `d` tag carries the workflow id; `h` tag carries the channel id; the

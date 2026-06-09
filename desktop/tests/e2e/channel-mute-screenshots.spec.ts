@@ -65,9 +65,9 @@ test.describe("channel muting screenshots", () => {
     await muteItem.evaluate((el) =>
       Promise.all(
         el
-          .closest("[data-state]")!
-          .getAnimations()
-          .map((a) => a.finished),
+          .closest("[data-state]")
+          ?.getAnimations()
+          .map((a) => a.finished) ?? [],
       ),
     );
 
@@ -158,9 +158,9 @@ test.describe("channel muting screenshots", () => {
     await unmuteItem.evaluate((el) =>
       Promise.all(
         el
-          .closest("[data-state]")!
-          .getAnimations()
-          .map((a) => a.finished),
+          .closest("[data-state]")
+          ?.getAnimations()
+          .map((a) => a.finished) ?? [],
       ),
     );
 

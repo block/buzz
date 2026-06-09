@@ -372,8 +372,8 @@ mod tests {
         );
     }
 
-    // Note: `extract_at_names`, `merge_mentions`, and `normalize_mention_pubkeys`
-    // moved to `sprout_sdk::mentions` and are tested there.
+    // Note: `extract_at_names`, `extract_at_mentions_with_known`, `merge_mentions`,
+    // and `normalize_mention_pubkeys` live in `sprout_sdk::mentions` and are tested there.
 
     // --- parse_event_id ---
 

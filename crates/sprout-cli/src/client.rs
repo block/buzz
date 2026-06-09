@@ -284,6 +284,36 @@ impl SproutClient {
     }
 
     // -----------------------------------------------------------------------
+    // WebSocket publish (ephemeral events)
+    // -----------------------------------------------------------------------
+
+    /// Publish an ephemeral event via WebSocket with NIP-42 authentication.
+    ///
+    /// The relay rejects ephemeral kinds (20000–29999) over HTTP. Delegates to
+    /// `sprout_ws_client::publish_event` which handles connect, NIP-42 auth,
+    /// EVENT send, OK wait, and graceful close.
+    pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
+        let ws_url = to_ws_url(&self.relay_url);
+        let ok =
+            sprout_ws_client::publish_event(&ws_url, event, &self.keys, self.auth_tag.as_ref(), 10)
+                .await
+                .map_err(|e| CliError::Other(e.to_string()))?;
+
+        if !ok.accepted {
+            return Err(CliError::Relay {
+                status: 400,
+                body: ok.message,
+            });
+        }
+        Ok(serde_json::json!({
+            "event_id": ok.event_id,
+            "accepted": true,
+            "message": ok.message,
+        })
+        .to_string())
+    }
+
+    // -----------------------------------------------------------------------
     // File upload (Blossom protocol)
     // -----------------------------------------------------------------------
 
@@ -439,6 +469,13 @@ pub fn normalize_relay_url(url: &str) -> String {
         .replace("ws://", "http://")
         .trim_end_matches('/')
         .to_string()
+}
+
+/// Convert an HTTP(S) relay base URL back to a WebSocket URL for NIP-01 connections.
+fn to_ws_url(http_url: &str) -> String {
+    http_url
+        .replace("https://", "wss://")
+        .replace("http://", "ws://")
 }
 
 // ---------------------------------------------------------------------------

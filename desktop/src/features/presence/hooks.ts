@@ -2,11 +2,11 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { relayClient } from "@/shared/api/relayClient";
-import { getPresence, setPresence } from "@/shared/api/tauri";
+import { getPresence } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { PresenceLookup, PresenceStatus } from "@/shared/api/types";
 
-const PRESENCE_HEARTBEAT_INTERVAL_MS = 60_000;
+const PRESENCE_HEARTBEAT_INTERVAL_MS = 30_000;
 const PRESENCE_IDLE_TIMEOUT_MS = 5 * 60_000;
 const PRESENCE_STATUS_TICK_INTERVAL_MS = 30_000;
 const PRESENCE_TTL_SECONDS = 90;
@@ -103,12 +103,18 @@ export function usePresenceSubscription() {
     let isCancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    function handlePresenceEvent(event: { pubkey: string; content: string }) {
+    function handlePresenceEvent(event: {
+      pubkey: string;
+      content: string;
+      tags?: string[][];
+    }) {
       if (isCancelled) return;
       const status = event.content;
       if (status !== "online" && status !== "away" && status !== "offline")
         return;
-      const pubkey = event.pubkey.toLowerCase();
+      const pubkey = (
+        event.tags?.find((t) => t[0] === "p")?.[1] ?? event.pubkey
+      ).toLowerCase();
       queryClient.setQueriesData<PresenceLookup>(
         { queryKey: ["presence"] },
         (old) => {
@@ -162,20 +168,13 @@ export function useSetPresenceMutation(pubkey?: string) {
 
   return useMutation({
     mutationFn: async (status: PresenceStatus) => {
-      // Prefer WS — triggers fan-out to subscribers. REST fallback if WS fails.
-      try {
-        await relayClient.sendPresence(status);
-        return {
-          status,
-          ttlSeconds: status === "offline" ? 0 : PRESENCE_TTL_SECONDS,
-          viaWs: true,
-        };
-      } catch {
-        const result = await setPresence(status);
-        return { ...result, viaWs: false };
-      }
+      await relayClient.sendPresence(status);
+      return {
+        status,
+        ttlSeconds: status === "offline" ? 0 : PRESENCE_TTL_SECONDS,
+      };
     },
-    onSuccess: ({ status, viaWs }) => {
+    onSuccess: ({ status }) => {
       if (normalizedPubkey.length === 0) return;
       // Update all cached presence queries containing this pubkey.
       queryClient.setQueriesData<PresenceLookup>(
@@ -186,9 +185,6 @@ export function useSetPresenceMutation(pubkey?: string) {
           return { ...old, [normalizedPubkey]: status };
         },
       );
-      // REST fallback: no WS echo will arrive, invalidate for full refresh.
-      if (!viaWs)
-        void queryClient.invalidateQueries({ queryKey: ["presence"] });
     },
   });
 }

@@ -6,11 +6,6 @@
 //! `SPROUT_SHARE_IDENTITY=1` and `SPROUT_PRIVATE_KEY` is set. All dev
 //! instances share the same physical files — edits in any worktree are
 //! immediately visible to all others.
-//!
-//! **Provider reconciliation** (`reconcile_provider_mcp_commands`): Per-launch
-//! fix-up of `mcp_command` values in `managed-agents.json` against the
-//! discovery table. Ensures known providers always have their canonical
-//! `mcp_command`; unknown/custom agents are left untouched.
 
 use std::path::{Path, PathBuf};
 use tauri::Manager;
@@ -264,54 +259,6 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
     }
 }
 
-fn reconcile_mcp_commands_in_file(path: &Path) {
-    patch_json_records(path, |obj| {
-        let agent_command = match obj.get("agent_command").and_then(|v| v.as_str()) {
-            Some(cmd) => cmd.to_string(),
-            None => return false,
-        };
-        let Some(provider) = crate::managed_agents::known_acp_provider(&agent_command) else {
-            return false;
-        };
-        let expected = provider.mcp_command.unwrap_or("");
-        let current = obj
-            .get("mcp_command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        // Only clear the known stale default — never touch user-customized values.
-        if current == "sprout-mcp-server" {
-            eprintln!(
-                "sprout-desktop: provider-reconcile: {:?} ({:?}): mcp_command {:?} → {:?}",
-                obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-                agent_command,
-                current,
-                expected,
-            );
-            obj.insert(
-                "mcp_command".to_string(),
-                serde_json::Value::String(expected.to_string()),
-            );
-            true
-        } else {
-            false
-        }
-    });
-}
-
-/// Reconcile `mcp_command` values in managed-agents.json against the
-/// discovery table. Known providers get their canonical mcp_command;
-/// unknown/custom agents are left untouched.
-pub fn reconcile_provider_mcp_commands(app: &tauri::AppHandle) {
-    let Ok(dir) = app.path().app_data_dir() else {
-        return;
-    };
-    let path = dir.join("agents/managed-agents.json");
-    if !path.exists() {
-        return;
-    }
-    reconcile_mcp_commands_in_file(&path);
-}
-
 fn reconcile_pack_paths_in_file(path: &Path, canonical_dir: &Path) {
     let canonical_packs = canonical_dir.join("agents/packs");
     patch_json_records(path, |obj| {
@@ -371,6 +318,89 @@ pub fn reconcile_persona_pack_paths(app: &tauri::AppHandle) {
     reconcile_pack_paths_in_file(&path, &canonical_dir);
 }
 
+fn reconcile_mcp_commands_in_file(path: &Path) {
+    patch_json_records(path, |obj| {
+        let agent_command = match obj.get("agent_command").and_then(|v| v.as_str()) {
+            Some(cmd) => cmd.to_string(),
+            None => return false,
+        };
+        let Some(runtime) = crate::managed_agents::known_acp_runtime(&agent_command) else {
+            return false;
+        };
+        let expected = runtime.mcp_command.unwrap_or("");
+        let current = obj
+            .get("mcp_command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if current == expected {
+            return false;
+        }
+        // Only fix values that are clearly stale (empty or a removed binary).
+        // Leave user-customized values untouched.
+        if !current.is_empty() && current != "sprout-mcp-server" {
+            return false;
+        }
+        eprintln!(
+            "sprout-desktop: runtime-reconcile: {:?} ({:?}): mcp_command {:?} → {:?}",
+            obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+            agent_command,
+            current,
+            expected,
+        );
+        obj.insert(
+            "mcp_command".to_string(),
+            serde_json::Value::String(expected.to_string()),
+        );
+        true
+    });
+}
+
+/// Reconcile `mcp_command` values in managed-agents.json against the
+/// discovery table. Known runtimes get their canonical mcp_command;
+/// unknown/custom agents are left untouched. Covers both the current
+/// app data dir and the canonical dev data dir (for worktree instances).
+pub fn reconcile_provider_mcp_commands(app: &tauri::AppHandle) {
+    let Ok(current_dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let mut dirs = vec![current_dir.clone()];
+    if let Some(canonical) = canonical_dev_data_dir(&current_dir) {
+        if canonical.exists() && canonical != current_dir {
+            dirs.push(canonical);
+        }
+    }
+    for dir in dirs {
+        let path = dir.join("agents/managed-agents.json");
+        if path.exists() {
+            reconcile_mcp_commands_in_file(&path);
+        }
+    }
+}
+
+fn rename_provider_to_runtime_in_personas(path: &Path) {
+    patch_json_records(path, |obj| {
+        if obj.contains_key("runtime") {
+            return false;
+        }
+        if let Some(value) = obj.remove("provider") {
+            obj.insert("runtime".to_string(), value);
+            true
+        } else {
+            false
+        }
+    });
+}
+
+pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let path = dir.join("agents/personas.json");
+    if !path.exists() {
+        return;
+    }
+    rename_provider_to_runtime_in_personas(&path);
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,161 +698,6 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_clears_mcp_command_for_goose() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agents_json(
-            dir.path(),
-            &serde_json::json!([{
-                "name": "Scout",
-                "agent_command": "goose",
-                "mcp_command": "sprout-mcp-server"
-            }]),
-        );
-        reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
-        let records = read_agents_json(dir.path());
-        assert_eq!(records[0]["mcp_command"], "");
-    }
-
-    #[test]
-    fn reconcile_clears_mcp_command_for_claude() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agents_json(
-            dir.path(),
-            &serde_json::json!([{
-                "name": "Claude Agent",
-                "agent_command": "claude-agent-acp",
-                "mcp_command": "sprout-mcp-server"
-            }]),
-        );
-        reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
-        let records = read_agents_json(dir.path());
-        assert_eq!(records[0]["mcp_command"], "");
-    }
-
-    #[test]
-    fn reconcile_preserves_sprout_dev_mcp() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agents_json(
-            dir.path(),
-            &serde_json::json!([{
-                "name": "Solo",
-                "agent_command": "sprout-agent",
-                "mcp_command": "sprout-dev-mcp"
-            }]),
-        );
-        let before =
-            std::fs::read_to_string(dir.path().join("agents/managed-agents.json")).unwrap();
-        reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
-        let after = std::fs::read_to_string(dir.path().join("agents/managed-agents.json")).unwrap();
-        assert_eq!(
-            before, after,
-            "file should not be rewritten when already correct"
-        );
-    }
-
-    #[test]
-    fn reconcile_fixes_sprout_agent_if_stale() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agents_json(
-            dir.path(),
-            &serde_json::json!([{
-                "name": "Solo",
-                "agent_command": "sprout-agent",
-                "mcp_command": "sprout-mcp-server"
-            }]),
-        );
-        reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
-        let records = read_agents_json(dir.path());
-        assert_eq!(records[0]["mcp_command"], "sprout-dev-mcp");
-    }
-
-    #[test]
-    fn reconcile_leaves_unknown_agent_untouched() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agents_json(
-            dir.path(),
-            &serde_json::json!([{
-                "name": "Custom Bot",
-                "agent_command": "my-custom-agent",
-                "mcp_command": "my-custom-mcp"
-            }]),
-        );
-        reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
-        let records = read_agents_json(dir.path());
-        assert_eq!(records[0]["mcp_command"], "my-custom-mcp");
-    }
-
-    #[test]
-    fn reconcile_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agents_json(
-            dir.path(),
-            &serde_json::json!([{
-                "name": "Scout",
-                "agent_command": "goose",
-                "mcp_command": "sprout-mcp-server"
-            }]),
-        );
-        let path = dir.path().join("agents/managed-agents.json");
-        reconcile_mcp_commands_in_file(&path);
-        let after_first = std::fs::read_to_string(&path).unwrap();
-        reconcile_mcp_commands_in_file(&path);
-        let after_second = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(after_first, after_second);
-    }
-
-    #[test]
-    fn reconcile_handles_mixed_records() {
-        let dir = tempfile::tempdir().unwrap();
-        write_agents_json(
-            dir.path(),
-            &serde_json::json!([
-                {"name": "Scout", "agent_command": "goose", "mcp_command": "sprout-mcp-server"},
-                {"name": "Claude", "agent_command": "claude-agent-acp", "mcp_command": "sprout-mcp-server"},
-                {"name": "Solo", "agent_command": "sprout-agent", "mcp_command": "sprout-dev-mcp"},
-                {"name": "Custom", "agent_command": "my-bot", "mcp_command": "my-mcp"},
-                {"name": "Codex", "agent_command": "codex-acp", "mcp_command": "sprout-mcp-server"}
-            ]),
-        );
-        reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
-        let records = read_agents_json(dir.path());
-        assert_eq!(records[0]["mcp_command"], "", "goose should be cleared");
-        assert_eq!(records[1]["mcp_command"], "", "claude should be cleared");
-        assert_eq!(
-            records[2]["mcp_command"], "sprout-dev-mcp",
-            "sprout-agent preserved"
-        );
-        assert_eq!(
-            records[3]["mcp_command"], "my-mcp",
-            "custom agent untouched"
-        );
-        assert_eq!(records[4]["mcp_command"], "", "codex should be cleared");
-    }
-
-    #[test]
-    fn reconcile_leaves_absent_mcp_command_untouched() {
-        let dir = tempfile::tempdir().unwrap();
-        let json = serde_json::json!([{"name": "Solo", "agent_command": "sprout-agent"}]);
-        write_agents_json(dir.path(), &json);
-        let path = dir.path().join("agents/managed-agents.json");
-        let before = std::fs::read_to_string(&path).unwrap();
-        reconcile_mcp_commands_in_file(&path);
-        assert_eq!(before, std::fs::read_to_string(&path).unwrap());
-    }
-
-    #[test]
-    fn reconcile_leaves_null_mcp_command_untouched() {
-        let dir = tempfile::tempdir().unwrap();
-        let json =
-            serde_json::json!([{"name":"Solo","agent_command":"sprout-agent","mcp_command":null}]);
-        write_agents_json(dir.path(), &json);
-        let path = dir.path().join("agents/managed-agents.json");
-        let before = std::fs::read_to_string(&path).unwrap();
-        reconcile_mcp_commands_in_file(&path);
-        assert_eq!(before, std::fs::read_to_string(&path).unwrap());
-    }
-
-    #[test]
     fn sync_creates_packs_directory_symlink() {
         let (_parent, canonical, worktree) = setup_sync_layout();
         sync_files(&canonical, &worktree);
@@ -993,5 +868,208 @@ mod tests {
         let after_second = std::fs::read_to_string(&path).unwrap();
 
         assert_eq!(after_first, after_second);
+    }
+
+    fn write_personas_json(dir: &Path, records: &serde_json::Value) {
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::write(
+            dir.join("agents/personas.json"),
+            serde_json::to_vec_pretty(records).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn read_personas_json(dir: &Path) -> Vec<serde_json::Value> {
+        let content = std::fs::read_to_string(dir.join("agents/personas.json")).unwrap();
+        serde_json::from_str(&content).unwrap()
+    }
+
+    #[test]
+    fn rename_provider_to_runtime_migrates_field() {
+        let dir = tempfile::tempdir().unwrap();
+        write_personas_json(
+            dir.path(),
+            &serde_json::json!([{
+                "id": "persona-1",
+                "displayName": "Alice",
+                "provider": "goose"
+            }]),
+        );
+        rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"));
+        let records = read_personas_json(dir.path());
+        assert_eq!(records[0]["runtime"], "goose");
+        assert!(records[0].get("provider").is_none());
+    }
+
+    #[test]
+    fn rename_provider_to_runtime_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        write_personas_json(
+            dir.path(),
+            &serde_json::json!([{
+                "id": "persona-1",
+                "displayName": "Alice",
+                "runtime": "goose"
+            }]),
+        );
+        let before = std::fs::read_to_string(dir.path().join("agents/personas.json")).unwrap();
+        rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"));
+        let after = std::fs::read_to_string(dir.path().join("agents/personas.json")).unwrap();
+        assert_eq!(
+            before, after,
+            "file should not be rewritten when already migrated"
+        );
+    }
+
+    #[test]
+    fn rename_provider_to_runtime_skips_record_without_either_key() {
+        let dir = tempfile::tempdir().unwrap();
+        write_personas_json(
+            dir.path(),
+            &serde_json::json!([{
+                "id": "persona-1",
+                "displayName": "Alice"
+            }]),
+        );
+        let before = std::fs::read_to_string(dir.path().join("agents/personas.json")).unwrap();
+        rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"));
+        let after = std::fs::read_to_string(dir.path().join("agents/personas.json")).unwrap();
+        assert_eq!(
+            before, after,
+            "file should not be rewritten when no provider key exists"
+        );
+    }
+
+    #[test]
+    fn rename_provider_to_runtime_preserves_existing_runtime_over_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        write_personas_json(
+            dir.path(),
+            &serde_json::json!([{
+                "id": "persona-1",
+                "displayName": "Alice",
+                "provider": "old-value",
+                "runtime": "correct-value"
+            }]),
+        );
+        rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"));
+        let records = read_personas_json(dir.path());
+        assert_eq!(records[0]["runtime"], "correct-value");
+        // provider key should still be there since the closure returns false when runtime exists
+        assert_eq!(records[0]["provider"], "old-value");
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_clears_stale_sprout_mcp_server() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agents_json(
+            dir.path(),
+            &serde_json::json!([{
+                "name": "Solo",
+                "agent_command": "goose",
+                "mcp_command": "sprout-mcp-server"
+            }]),
+        );
+        reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+        let records = read_agents_json(dir.path());
+        assert_eq!(records[0]["mcp_command"], "");
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_sets_canonical_for_sprout_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agents_json(
+            dir.path(),
+            &serde_json::json!([{
+                "name": "Stilgar",
+                "agent_command": "sprout-agent",
+                "mcp_command": "sprout-mcp-server"
+            }]),
+        );
+        reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+        let records = read_agents_json(dir.path());
+        assert_eq!(records[0]["mcp_command"], "sprout-dev-mcp");
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_leaves_custom_value_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = serde_json::json!([{
+            "name": "Solo",
+            "agent_command": "goose",
+            "mcp_command": "my-custom-mcp"
+        }]);
+        write_agents_json(dir.path(), &json);
+        let path = dir.path().join("agents/managed-agents.json");
+        let before = std::fs::read_to_string(&path).unwrap();
+        reconcile_mcp_commands_in_file(&path);
+        assert_eq!(before, std::fs::read_to_string(&path).unwrap());
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_leaves_unknown_runtime_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = serde_json::json!([{
+            "name": "Custom",
+            "agent_command": "my-custom-agent",
+            "mcp_command": "sprout-mcp-server"
+        }]);
+        write_agents_json(dir.path(), &json);
+        let path = dir.path().join("agents/managed-agents.json");
+        let before = std::fs::read_to_string(&path).unwrap();
+        reconcile_mcp_commands_in_file(&path);
+        assert_eq!(before, std::fs::read_to_string(&path).unwrap());
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agents_json(
+            dir.path(),
+            &serde_json::json!([{
+                "name": "Solo",
+                "agent_command": "goose",
+                "mcp_command": "sprout-mcp-server"
+            }]),
+        );
+        let path = dir.path().join("agents/managed-agents.json");
+        reconcile_mcp_commands_in_file(&path);
+        let after_first = std::fs::read_to_string(&path).unwrap();
+        reconcile_mcp_commands_in_file(&path);
+        assert_eq!(after_first, std::fs::read_to_string(&path).unwrap());
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_handles_mixed_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agents_json(
+            dir.path(),
+            &serde_json::json!([
+                {"name": "Stale Goose", "agent_command": "goose", "mcp_command": "sprout-mcp-server"},
+                {"name": "Clean Goose", "agent_command": "goose", "mcp_command": ""},
+                {"name": "Custom Agent", "agent_command": "goose", "mcp_command": "my-custom-mcp"},
+                {"name": "Stale Sprout", "agent_command": "sprout-agent", "mcp_command": "sprout-mcp-server"}
+            ]),
+        );
+        reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+        let records = read_agents_json(dir.path());
+        assert_eq!(records[0]["mcp_command"], "");
+        assert_eq!(records[1]["mcp_command"], "");
+        assert_eq!(records[2]["mcp_command"], "my-custom-mcp");
+        assert_eq!(records[3]["mcp_command"], "sprout-dev-mcp");
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_skips_record_without_agent_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = serde_json::json!([{
+            "name": "No Command",
+            "mcp_command": "sprout-mcp-server"
+        }]);
+        write_agents_json(dir.path(), &json);
+        let path = dir.path().join("agents/managed-agents.json");
+        let before = std::fs::read_to_string(&path).unwrap();
+        reconcile_mcp_commands_in_file(&path);
+        assert_eq!(before, std::fs::read_to_string(&path).unwrap());
     }
 }

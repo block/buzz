@@ -129,7 +129,7 @@ export function registerCustomEmojiMarkdownIt(
     // proxy at PM-render time, so here we emit the raw `src`; `parseHTML`
     // re-derives the node from `data-shortcode` and the palette supplies the
     // live url. We still set `src` so a fully-formed <img> round-trips cleanly.
-    return `<img data-custom-emoji data-shortcode="${esc(shortcode)}" src="${esc(src)}" alt=":${esc(shortcode)}:" />`;
+    return `<img data-custom-emoji data-shortcode="${esc(shortcode)}" src="${esc(src)}" alt=":${esc(shortcode)}:" title=":${esc(shortcode)}:" />`;
   };
 }
 
@@ -190,6 +190,7 @@ export const CustomEmojiNode = Node.create<CustomEmojiNodeOptions>({
       mergeAttributes(HTMLAttributes, {
         src,
         alt: `:${shortcode}:`,
+        title: `:${shortcode}:`,
         "data-custom-emoji": "",
         "data-shortcode": shortcode,
         draggable: "false",

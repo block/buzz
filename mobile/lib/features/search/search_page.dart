@@ -12,6 +12,7 @@ import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
 import '../channels/small_avatar.dart';
+import '../channels/message_content.dart';
 import '../channels/date_formatters.dart';
 import '../forum/forum_thread_page.dart';
 import '../profile/profile_provider.dart';
@@ -359,7 +360,12 @@ class _MessageTile extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const SizedBox(height: 2),
-          Text(hit.content, maxLines: 2, overflow: TextOverflow.ellipsis),
+          MessageContent(
+            content: hit.content,
+            tags: hit.tags,
+            maxLines: 2,
+            baseStyle: context.textTheme.bodyMedium,
+          ),
           const SizedBox(height: 2),
           Text(
             timeAgo,

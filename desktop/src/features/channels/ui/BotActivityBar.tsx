@@ -181,7 +181,7 @@ export function BotActivityComposerAction({
               <UserAvatar
                 avatarUrl={agentAvatarUrl(agent)}
                 className={cn(
-                  "rounded-full border border-background",
+                  "border border-background",
                   isInline
                     ? "!h-[18px] !w-[18px] shadow-xs ring-1 ring-primary/25 text-[7px]"
                     : "!h-5 !w-5 text-[8px]",
@@ -243,7 +243,7 @@ export function BotActivityComposerAction({
               >
                 <UserAvatar
                   avatarUrl={agentAvatarUrl(agent)}
-                  className="!h-6 !w-6 shrink-0 rounded-full text-[9px]"
+                  className="!h-6 !w-6 shrink-0 text-[9px]"
                   displayName={agent.name}
                 />
                 <span className="min-w-0 flex-1 truncate">{agent.name}</span>

@@ -167,9 +167,9 @@ function ThemeSettingsCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-theme">
-      <div className="mb-3 min-w-0">
-        <h2 className="text-sm font-semibold tracking-tight">Appearance</h2>
-        <p className="text-sm text-muted-foreground">
+      <div className="mb-12 min-w-0">
+        <h2 className="text-2xl font-semibold tracking-tight">Appearance</h2>
+        <p className="text-base font-normal text-muted-foreground">
           Choose a theme for Sprout. Light and dark mode is auto-detected.
         </p>
       </div>

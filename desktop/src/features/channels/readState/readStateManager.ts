@@ -47,6 +47,49 @@ function slotIdKey(pubkey: string): string {
   return `${SLOT_ID_KEY_PREFIX}:${pubkey}`;
 }
 
+export type ApplyRemoteContextResult = "unchanged" | "advanced";
+
+function resolveRemoteContextTimestamp(args: {
+  current: number;
+  timestamp: number;
+}): { next: number; result: ApplyRemoteContextResult } {
+  const next = Math.max(args.current, args.timestamp);
+  return {
+    next,
+    result: next === args.current ? "unchanged" : "advanced",
+  };
+}
+
+export function applyRemoteContextTimestamp(args: {
+  effectiveState: Map<string, number>;
+  contextSourceCreatedAt: Map<string, number>;
+  contextId: string;
+  timestamp: number;
+  eventCreatedAt: number;
+}): ApplyRemoteContextResult {
+  const {
+    effectiveState,
+    contextSourceCreatedAt,
+    contextId,
+    timestamp,
+    eventCreatedAt,
+  } = args;
+  const sourceCreatedAt = contextSourceCreatedAt.get(contextId) ?? 0;
+  const current = effectiveState.get(contextId) ?? 0;
+  const { next, result } = resolveRemoteContextTimestamp({
+    current,
+    timestamp,
+  });
+
+  if (result === "advanced") {
+    effectiveState.set(contextId, next);
+  }
+  if (eventCreatedAt > sourceCreatedAt) {
+    contextSourceCreatedAt.set(contextId, eventCreatedAt);
+  }
+  return result;
+}
+
 export class ReadStateManager {
   private pubkey: string;
   private relayClient: RelayClient;
@@ -60,9 +103,7 @@ export class ReadStateManager {
   private unsubscribeLive: (() => void) | null = null;
   private initialized = false;
   private maxFetchedCreatedAt = 0;
-  private forcedContexts = new Set<string>();
   private contextSourceCreatedAt = new Map<string, number>();
-  private pendingSyncedRollbacks = new Set<string>();
   private pendingSyncedAdvances = new Set<string>();
   private destroyed = false;
 
@@ -101,7 +142,6 @@ export class ReadStateManager {
   }
 
   markContextRead(contextId: string, unixTimestamp: number): void {
-    this.forcedContexts.delete(contextId);
     this.advanceContext(contextId, unixTimestamp, { publishable: true });
     this.contextSourceCreatedAt.set(
       contextId,
@@ -111,16 +151,6 @@ export class ReadStateManager {
 
   seedContextRead(contextId: string, unixTimestamp: number): void {
     this.advanceContext(contextId, unixTimestamp, { publishable: false });
-  }
-
-  markContextUnread(contextId: string, lastMessageUnix: number): void {
-    const rollbackTo = lastMessageUnix - 1;
-    this.effectiveState.set(contextId, rollbackTo);
-    this.publishableContextIds.add(contextId);
-    this.forcedContexts.add(contextId);
-    this.persistLocalState();
-    this.notifyListeners();
-    this.schedulePublish();
   }
 
   private advanceContext(
@@ -241,16 +271,17 @@ export class ReadStateManager {
       }
 
       for (const [ctx, ts] of Object.entries(blob.contexts)) {
-        if (this.forcedContexts.has(ctx)) continue;
-        const sourceCreatedAt = this.contextSourceCreatedAt.get(ctx) ?? 0;
-        const current = this.effectiveState.get(ctx) ?? 0;
-        if (event.created_at > sourceCreatedAt) {
-          this.effectiveState.set(ctx, ts);
-          this.contextSourceCreatedAt.set(ctx, event.created_at);
-        } else if (event.created_at === sourceCreatedAt && ts !== current) {
-          this.effectiveState.set(ctx, ts);
+        const result = applyRemoteContextTimestamp({
+          effectiveState: this.effectiveState,
+          contextSourceCreatedAt: this.contextSourceCreatedAt,
+          contextId: ctx,
+          timestamp: ts,
+          eventCreatedAt: event.created_at,
+        });
+        if (result !== "unchanged") {
+          this.pendingSyncedAdvances.add(ctx);
+          this.publishableContextIds.add(ctx);
         }
-        this.publishableContextIds.add(ctx);
       }
 
       if (blob.client_id === this.clientId) {
@@ -361,27 +392,15 @@ export class ReadStateManager {
 
     let anyAdvanced = false;
     for (const [ctx, ts] of Object.entries(blob.contexts)) {
-      if (this.forcedContexts.has(ctx)) continue;
-      const sourceCreatedAt = this.contextSourceCreatedAt.get(ctx) ?? 0;
-      const current = this.effectiveState.get(ctx) ?? 0;
-      if (event.created_at > sourceCreatedAt) {
-        if (this.effectiveState.get(ctx) !== ts) {
-          if (ts < current && current > 0) {
-            this.pendingSyncedRollbacks.add(ctx);
-            this.pendingSyncedAdvances.delete(ctx);
-            console.debug(
-              `[ReadStateManager] synced rollback ctx=${ctx.substring(0, 12)}… from=${current} to=${ts}`,
-            );
-          } else if (ts > current) {
-            this.pendingSyncedAdvances.add(ctx);
-            this.pendingSyncedRollbacks.delete(ctx);
-          }
-          this.effectiveState.set(ctx, ts);
-          anyAdvanced = true;
-        }
-        this.contextSourceCreatedAt.set(ctx, event.created_at);
-      } else if (event.created_at === sourceCreatedAt && ts !== current) {
-        this.effectiveState.set(ctx, ts);
+      const result = applyRemoteContextTimestamp({
+        effectiveState: this.effectiveState,
+        contextSourceCreatedAt: this.contextSourceCreatedAt,
+        contextId: ctx,
+        timestamp: ts,
+        eventCreatedAt: event.created_at,
+      });
+      if (result === "advanced") {
+        this.pendingSyncedAdvances.add(ctx);
         anyAdvanced = true;
       }
       if (!this.publishableContextIds.has(ctx)) {
@@ -467,7 +486,6 @@ export class ReadStateManager {
         }
       }
       this.lastPublishedContexts = contexts;
-      this.forcedContexts.clear();
       this.maxFetchedCreatedAt = Math.max(
         this.maxFetchedCreatedAt,
         event.created_at,
@@ -542,12 +560,6 @@ export class ReadStateManager {
       this.publishableContextIds,
       this.contextSourceCreatedAt,
     );
-  }
-
-  drainSyncedRollbacks(): ReadonlySet<string> {
-    const drained = this.pendingSyncedRollbacks;
-    this.pendingSyncedRollbacks = new Set<string>();
-    return drained;
   }
 
   drainSyncedAdvances(): ReadonlySet<string> {

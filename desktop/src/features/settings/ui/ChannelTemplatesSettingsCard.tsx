@@ -11,7 +11,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
-  useAvailableAcpProviders,
+  useAvailableAcpRuntimes,
   usePersonasQuery,
   useTeamsQuery,
 } from "@/features/agents/hooks";
@@ -25,7 +25,7 @@ import {
 import { AddChannelBotPersonasSection } from "@/features/channels/ui/AddChannelBotPersonasSection";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type {
-  AcpProvider,
+  AcpRuntime,
   AgentPersona,
   AgentTeam,
   ChannelTemplate,
@@ -103,12 +103,12 @@ export function ChannelTemplatesSettingsCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-channel-templates">
-      <div className="mb-3 flex items-start justify-between gap-4 min-w-0">
+      <div className="mb-12 flex min-w-0 items-start justify-between gap-4">
         <div className="min-w-0">
-          <h2 className="text-sm font-semibold tracking-tight">
+          <h2 className="text-2xl font-semibold tracking-tight">
             Channel Templates
           </h2>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-base font-normal text-muted-foreground">
             Save reusable channel configurations and apply them when creating
             new channels.
           </p>
@@ -222,7 +222,7 @@ function TemplateRow({
           ) : null}
         </div>
         {template.description ? (
-          <p className="mt-0.5 truncate text-xs text-muted-foreground">
+          <p className="mt-0.5 truncate text-sm font-normal text-muted-foreground">
             {template.description}
           </p>
         ) : null}
@@ -295,8 +295,8 @@ function TemplateFormDialog({
   const updateMutation = useUpdateChannelTemplateMutation();
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
-  const providersQuery = useAvailableAcpProviders();
-  const providers = providersQuery.data ?? [];
+  const providersQuery = useAvailableAcpRuntimes();
+  const runtimes = providersQuery.data ?? [];
 
   const [name, setName] = React.useState("");
   const [description, setDescription] = React.useState("");
@@ -305,10 +305,10 @@ function TemplateFormDialog({
     [],
   );
   const [selectedTeamIds, setSelectedTeamIds] = React.useState<string[]>([]);
-  const [personaProviders, setPersonaProviders] = React.useState<
+  const [personaRuntimes, setPersonaRuntimes] = React.useState<
     Record<string, string>
   >({});
-  const [teamProviders, setTeamProviders] = React.useState<
+  const [teamRuntimes, setTeamRuntimes] = React.useState<
     Record<string, string>
   >({});
 
@@ -322,24 +322,24 @@ function TemplateFormDialog({
       setCanvasTemplate(template.canvasTemplate ?? "");
       setSelectedPersonaIds(template.agents.personas.map((p) => p.personaId));
       setSelectedTeamIds(template.agents.teams.map((t) => t.teamId));
-      const pProviders: Record<string, string> = {};
+      const pRuntimes: Record<string, string> = {};
       for (const p of template.agents.personas) {
-        if (p.provider) pProviders[p.personaId] = p.provider;
+        if (p.runtime) pRuntimes[p.personaId] = p.runtime;
       }
-      setPersonaProviders(pProviders);
-      const tProviders: Record<string, string> = {};
+      setPersonaRuntimes(pRuntimes);
+      const tRuntimes: Record<string, string> = {};
       for (const t of template.agents.teams) {
-        if (t.provider) tProviders[t.teamId] = t.provider;
+        if (t.runtime) tRuntimes[t.teamId] = t.runtime;
       }
-      setTeamProviders(tProviders);
+      setTeamRuntimes(tRuntimes);
     } else {
       setName("");
       setDescription("");
       setCanvasTemplate("");
       setSelectedPersonaIds([]);
       setSelectedTeamIds([]);
-      setPersonaProviders({});
-      setTeamProviders({});
+      setPersonaRuntimes({});
+      setTeamRuntimes({});
     }
   }, [open, template]);
 
@@ -351,14 +351,14 @@ function TemplateFormDialog({
     const agents = {
       personas: selectedPersonaIds.map((personaId) => ({
         personaId,
-        provider: personaProviders[personaId] || null,
+        runtime: personaRuntimes[personaId] || null,
         model: null,
         role: null,
         backend: null,
       })),
       teams: selectedTeamIds.map((teamId) => ({
         teamId,
-        provider: teamProviders[teamId] || null,
+        runtime: teamRuntimes[teamId] || null,
         model: null,
         backend: null,
       })),
@@ -409,7 +409,7 @@ function TemplateFormDialog({
   function handleTogglePersona(personaId: string) {
     setSelectedPersonaIds((prev) => {
       if (prev.includes(personaId)) {
-        setPersonaProviders((pp) => {
+        setPersonaRuntimes((pp) => {
           const next = { ...pp };
           delete next[personaId];
           return next;
@@ -423,7 +423,7 @@ function TemplateFormDialog({
   function handleToggleTeam(teamId: string) {
     setSelectedTeamIds((prev) => {
       if (prev.includes(teamId)) {
-        setTeamProviders((tp) => {
+        setTeamRuntimes((tp) => {
           const next = { ...tp };
           delete next[teamId];
           return next;
@@ -557,25 +557,25 @@ function TemplateFormDialog({
             isLoading={teamsQuery.isLoading}
           />
 
-          {/* Provider assignments */}
-          <ProviderAssignments
+          {/* Runtime assignments */}
+          <RuntimeAssignments
             isPending={isPending}
             personas={personasQuery.data ?? []}
-            personaProviders={personaProviders}
-            providers={providers}
+            personaRuntimes={personaRuntimes}
+            providers={runtimes}
             providersLoading={providersQuery.isLoading}
             selectedPersonaIds={selectedPersonaIds}
             selectedTeamIds={selectedTeamIds}
-            teamProviders={teamProviders}
+            teamRuntimes={teamRuntimes}
             teams={teamsQuery.data ?? []}
-            onPersonaProviderChange={(personaId, providerId) =>
-              setPersonaProviders((prev) => ({
+            onPersonaRuntimeChange={(personaId, runtimeId) =>
+              setPersonaRuntimes((prev) => ({
                 ...prev,
-                [personaId]: providerId,
+                [personaId]: runtimeId,
               }))
             }
-            onTeamProviderChange={(teamId, providerId) =>
-              setTeamProviders((prev) => ({ ...prev, [teamId]: providerId }))
+            onTeamRuntimeChange={(teamId, runtimeId) =>
+              setTeamRuntimes((prev) => ({ ...prev, [teamId]: runtimeId }))
             }
           />
         </form>
@@ -609,7 +609,7 @@ function TemplateTeamSelector({
     <div className="space-y-3">
       <div>
         <div className="text-sm font-medium">Teams</div>
-        <p className="text-xs text-muted-foreground">
+        <p className="text-sm font-normal text-muted-foreground">
           Select teams to include in this template.
         </p>
       </div>
@@ -647,32 +647,32 @@ function TemplateTeamSelector({
 }
 
 // ---------------------------------------------------------------------------
-// ProviderAssignments — per-entry provider dropdowns for selected agents
+// RuntimeAssignments — per-entry runtime dropdowns for selected agents
 // ---------------------------------------------------------------------------
 
-function ProviderAssignments({
+function RuntimeAssignments({
   isPending,
-  onPersonaProviderChange,
-  onTeamProviderChange,
+  onPersonaRuntimeChange,
+  onTeamRuntimeChange,
   personas,
-  personaProviders,
+  personaRuntimes,
   providers,
   providersLoading,
   selectedPersonaIds,
   selectedTeamIds,
-  teamProviders,
+  teamRuntimes,
   teams,
 }: {
   isPending: boolean;
-  onPersonaProviderChange: (personaId: string, providerId: string) => void;
-  onTeamProviderChange: (teamId: string, providerId: string) => void;
+  onPersonaRuntimeChange: (personaId: string, runtimeId: string) => void;
+  onTeamRuntimeChange: (teamId: string, runtimeId: string) => void;
   personas: AgentPersona[];
-  personaProviders: Record<string, string>;
-  providers: AcpProvider[];
+  personaRuntimes: Record<string, string>;
+  providers: AcpRuntime[];
   providersLoading: boolean;
   selectedPersonaIds: readonly string[];
   selectedTeamIds: readonly string[];
-  teamProviders: Record<string, string>;
+  teamRuntimes: Record<string, string>;
   teams: readonly AgentTeam[];
 }) {
   const hasSelections =
@@ -687,8 +687,8 @@ function ProviderAssignments({
   return (
     <div className="space-y-3">
       <div>
-        <div className="text-sm font-medium">Runtime providers</div>
-        <p className="text-xs text-muted-foreground">
+        <div className="text-sm font-medium">Runtimes</div>
+        <p className="text-sm font-normal text-muted-foreground">
           Choose which runtime to use for each agent.
         </p>
       </div>
@@ -697,34 +697,32 @@ function ProviderAssignments({
         <p className="text-xs text-muted-foreground">Discovering runtimes...</p>
       ) : providers.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          No ACP runtimes detected. Install one to assign providers.
+          No ACP runtimes detected. Install one to assign runtimes.
         </p>
       ) : (
         <div className="space-y-2">
           {selectedPersonas.map((persona) => (
-            <ProviderRow
+            <RuntimeRow
               key={persona.id}
               avatarUrl={persona.avatarUrl}
               disabled={isPending}
               label={persona.displayName}
-              onChange={(providerId) =>
-                onPersonaProviderChange(persona.id, providerId)
+              onChange={(runtimeId) =>
+                onPersonaRuntimeChange(persona.id, runtimeId)
               }
               providers={providers}
-              value={personaProviders[persona.id] ?? ""}
+              value={personaRuntimes[persona.id] ?? ""}
             />
           ))}
           {selectedTeams.map((team) => (
-            <ProviderRow
+            <RuntimeRow
               key={team.id}
               disabled={isPending}
               icon="team"
               label={team.name}
-              onChange={(providerId) =>
-                onTeamProviderChange(team.id, providerId)
-              }
+              onChange={(runtimeId) => onTeamRuntimeChange(team.id, runtimeId)}
               providers={providers}
-              value={teamProviders[team.id] ?? ""}
+              value={teamRuntimes[team.id] ?? ""}
             />
           ))}
         </div>
@@ -733,7 +731,7 @@ function ProviderAssignments({
   );
 }
 
-function ProviderRow({
+function RuntimeRow({
   avatarUrl,
   disabled,
   icon,
@@ -746,8 +744,8 @@ function ProviderRow({
   disabled: boolean;
   icon?: "team";
   label: string;
-  onChange: (providerId: string) => void;
-  providers: AcpProvider[];
+  onChange: (runtimeId: string) => void;
+  providers: AcpRuntime[];
   value: string;
 }) {
   return (
@@ -758,7 +756,7 @@ function ProviderRow({
         ) : (
           <ProfileAvatar
             avatarUrl={avatarUrl ?? null}
-            className="h-5 w-5 shrink-0 rounded-full text-[8px] bg-muted text-muted-foreground ring-1 ring-border/50"
+            className="h-5 w-5 shrink-0 text-[8px] bg-muted text-muted-foreground ring-1 ring-border/50"
             label={label}
           />
         )}
@@ -771,9 +769,9 @@ function ProviderRow({
         value={value}
       >
         <option value="">Default</option>
-        {providers.map((provider) => (
-          <option key={provider.id} value={provider.id}>
-            {provider.label}
+        {providers.map((runtime) => (
+          <option key={runtime.id} value={runtime.id}>
+            {runtime.label}
           </option>
         ))}
       </select>

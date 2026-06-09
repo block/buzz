@@ -14,7 +14,7 @@ import {
   KIND_USER_STATUS,
 } from "@/shared/constants/kinds";
 import type {
-  RawAcpProviderCatalogEntry,
+  RawAcpRuntimeCatalogEntry,
   RawInstallRuntimeResult,
 } from "@/shared/api/tauri";
 
@@ -33,7 +33,7 @@ type MockCommandAvailability = {
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
-    acpProvidersCatalog?: RawAcpProviderCatalogEntry[];
+    acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
     installAcpRuntimeResult?: RawInstallRuntimeResult;
     managedAgentPrereqs?: {
       acp?: MockCommandAvailability;
@@ -113,11 +113,6 @@ type RawSearchUsersResponse = {
 type PresenceStatus = "online" | "away" | "offline";
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
-
-type RawSetPresenceResponse = {
-  status: PresenceStatus;
-  ttl_seconds: number;
-};
 
 type RawChannel = {
   id: string;
@@ -596,7 +591,6 @@ const CHARLIE_PUBKEY =
 const OUTSIDER_PUBKEY =
   "df8e91b86fda13a9a67896df77232f7bdab2ba9c3e165378e1ba3d24c13a328e";
 const MOCK_IDENTITY_PUBKEY = DEFAULT_MOCK_IDENTITY.pubkey;
-const MOCK_PRESENCE_TTL_SECONDS = 90;
 
 const mockDisplayNames = new Map<string, string>([
   [MOCK_IDENTITY_PUBKEY, DEFAULT_MOCK_IDENTITY.display_name],
@@ -2603,7 +2597,7 @@ async function handleUpdateProfile(
     if (nextAvatarUrl && nextAvatarUrl !== profile.avatar_url) {
       profile.avatar_url = nextAvatarUrl;
     }
-    if (nextAbout && nextAbout !== profile.about) {
+    if (typeof nextAbout === "string" && nextAbout !== profile.about) {
       profile.about = nextAbout;
     }
     if (
@@ -2821,7 +2815,7 @@ async function handleGetPresence(
     return {} satisfies RawPresenceLookup;
   }
 
-  // Presence is ephemeral (kind:20001) — query via bridge which synthesizes from Redis.
+  // Presence is ephemeral (kind:20001) — mock returns from in-memory map.
   const events = await relayQuery(config, [
     { kinds: [20001], authors: args.pubkeys, limit: args.pubkeys.length },
   ]);
@@ -2839,40 +2833,6 @@ async function handleGetPresence(
     }
   }
   return result;
-}
-
-async function handleSetPresence(
-  args: {
-    status: PresenceStatus;
-  },
-  config: E2eConfig | undefined,
-) {
-  const identity = getIdentity(config);
-  if (!identity) {
-    setMockPresenceStatus(getMockMemberPubkey(config), args.status);
-
-    return {
-      status: args.status,
-      ttl_seconds: args.status === "offline" ? 0 : MOCK_PRESENCE_TTL_SECONDS,
-    } satisfies RawSetPresenceResponse;
-  }
-
-  // Presence is ephemeral kind:20001 — submit via POST /events.
-  // Note: the relay may reject this with "kind 20001 is only accepted via WebSocket"
-  // in which case we just return the expected shape (presence is best-effort in e2e).
-  try {
-    await submitSignedEvent(config, {
-      kind: 20001,
-      content: args.status,
-      tags: [],
-    });
-  } catch {
-    // Expected: ephemeral events may be WS-only
-  }
-  return {
-    status: args.status,
-    ttl_seconds: args.status === "offline" ? 0 : 90,
-  };
 }
 
 async function handleCreateChannel(
@@ -3828,10 +3788,10 @@ async function handleListRelayAgents(): Promise<RawRelayAgent[]> {
   return mockRelayAgents.map(cloneRelayAgent);
 }
 
-async function handleDiscoverAcpProviders(
+async function handleDiscoverAcpRuntimes(
   config: E2eConfig | undefined,
-): Promise<RawAcpProviderCatalogEntry[]> {
-  const configured = config?.mock?.acpProvidersCatalog;
+): Promise<RawAcpRuntimeCatalogEntry[]> {
+  const configured = config?.mock?.acpRuntimesCatalog;
   if (configured) {
     return configured;
   }
@@ -3899,7 +3859,7 @@ async function handleDiscoverAcpProviders(
 
 async function handleInstallAcpRuntime(
   args: {
-    providerId?: string;
+    runtimeId?: string;
   },
   config: E2eConfig | undefined,
 ): Promise<RawInstallRuntimeResult> {
@@ -3912,7 +3872,7 @@ async function handleInstallAcpRuntime(
     steps: [
       {
         step: "adapter",
-        command: `mock install ${args.providerId ?? "unknown"}`,
+        command: `mock install ${args.runtimeId ?? "unknown"}`,
         success: true,
         stdout: "mock: installed successfully",
         stderr: "",
@@ -5168,6 +5128,16 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (event.kind === 20001) {
+      const status = event.content;
+      if (status === "online" || status === "away" || status === "offline") {
+        setMockPresenceStatus(event.pubkey, status);
+      }
+      emitMockGlobalEvent(event);
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
     if (event.kind === KIND_USER_STATUS) {
       const hasGeneralDTag = event.tags.some(
         (tag) => tag[0] === "d" && tag[1] === "general",
@@ -5537,11 +5507,6 @@ export function maybeInstallE2eTauriMocks() {
           },
           activeConfig,
         );
-      case "set_presence":
-        return handleSetPresence(
-          payload as Parameters<typeof handleSetPresence>[0],
-          activeConfig,
-        );
       case "get_relay_ws_url":
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":
@@ -5549,10 +5514,10 @@ export function maybeInstallE2eTauriMocks() {
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
       case "discover_acp_providers":
-        return handleDiscoverAcpProviders(activeConfig);
+        return handleDiscoverAcpRuntimes(activeConfig);
       case "install_acp_runtime":
         return handleInstallAcpRuntime(
-          payload as { providerId?: string },
+          payload as { runtimeId?: string },
           activeConfig,
         );
       case "discover_backend_providers":

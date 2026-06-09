@@ -37,7 +37,7 @@ enum _QuickAction { createChannel, createForum, newDm }
 const double _kBannerHeight = 24.0;
 
 bool _isUnread(Channel channel, ReadStateState readState) {
-  if (readState.syncedForcedChannelIds.contains(channel.id)) {
+  if (readState.locallyForcedChannelIds.contains(channel.id)) {
     return true;
   }
 
@@ -1119,7 +1119,7 @@ class _ChannelTile extends ConsumerWidget {
                       } else {
                         ref
                             .read(readStateProvider.notifier)
-                            .markContextUnread(channel.id, ts);
+                            .markContextUnread(channel.id);
                       }
                     }
                   },

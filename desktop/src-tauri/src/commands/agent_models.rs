@@ -7,7 +7,7 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         build_managed_agent_summary, default_agent_workdir, find_managed_agent_mut,
-        load_managed_agents, managed_agent_avatar_url, missing_command_message,
+        known_acp_runtime, load_managed_agents, managed_agent_avatar_url, missing_command_message,
         normalize_agent_args, resolve_command, save_managed_agents, sync_managed_agent_processes,
         try_regenerate_nest, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
         UpdateManagedAgentResponse,
@@ -84,11 +84,14 @@ pub async fn get_agent_models(
         cmd.arg("models")
             .arg("--json")
             .env("SPROUT_ACP_AGENT_COMMAND", &agent_command)
-            .env("SPROUT_ACP_AGENT_ARGS", agent_args.join(","))
-            .env(
-                "GOOSE_MODE",
-                std::env::var("GOOSE_MODE").unwrap_or_else(|_| "auto".into()),
-            );
+            .env("SPROUT_ACP_AGENT_ARGS", agent_args.join(","));
+        if let Some(meta) = known_acp_runtime(&agent_command) {
+            for (key, value) in meta.default_env {
+                if std::env::var(key).is_err() {
+                    cmd.env(key, value);
+                }
+            }
+        }
         // User env layering — written LAST so it overrides any Sprout-set env above.
         for (k, v) in &merged_env {
             cmd.env(k, v);

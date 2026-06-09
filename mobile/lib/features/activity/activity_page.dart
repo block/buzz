@@ -9,6 +9,7 @@ import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
+import '../channels/message_content.dart';
 import '../channels/channels_provider.dart';
 import '../channels/small_avatar.dart';
 import '../profile/user_cache_provider.dart';
@@ -229,11 +230,11 @@ class _FeedItemTile extends ConsumerWidget {
             ),
             const SizedBox(height: Grid.half),
             // Content preview (max 2 lines)
-            Text(
-              item.displayContent,
+            MessageContent(
+              content: item.displayContent,
+              tags: item.tags,
               maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: context.textTheme.bodySmall?.copyWith(
+              baseStyle: context.textTheme.bodySmall?.copyWith(
                 color: context.colors.onSurfaceVariant,
               ),
             ),
