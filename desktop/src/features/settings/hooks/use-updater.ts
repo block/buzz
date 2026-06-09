@@ -122,7 +122,9 @@ export function useUpdater() {
           setStatus({ state: "checking" });
         }
 
-        const update = await check();
+        const update = await check({
+          headers: { "Cache-Control": "no-cache" },
+        });
         const shouldShowQuietResult =
           !background || manualResultRequestedRef.current;
 
