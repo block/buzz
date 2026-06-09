@@ -1,4 +1,5 @@
 import * as React from "react";
+import { flushSync } from "react-dom";
 
 import { uploadMediaBytes } from "@/shared/api/tauri";
 
@@ -45,8 +46,10 @@ export function useAvatarUpload({
         return;
       }
 
-      setIsUploading(true);
-      setErrorMessage(null);
+      flushSync(() => {
+        setIsUploading(true);
+        setErrorMessage(null);
+      });
 
       try {
         const buffer = await file.arrayBuffer();

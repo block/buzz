@@ -97,6 +97,7 @@ type BridgeOptions = {
   relayHttpUrl?: string;
   relayWsUrl?: string;
   skipOnboardingSeed?: boolean;
+  skipWorkspaceSeed?: boolean;
   user?: keyof typeof TEST_IDENTITIES;
 };
 
@@ -146,9 +147,11 @@ export async function installBridge(page: Page, options: BridgeOptions) {
       ? TEST_IDENTITIES[options.user ?? "tyler"]
       : undefined;
 
-  // Always seed a workspace so useWorkspaceInit doesn't show WelcomeSetup.
+  // Most specs seed a workspace so useWorkspaceInit doesn't show WelcomeSetup.
   // skipOnboardingSeed only controls the onboarding-completion flag.
-  await seedDefaultWorkspace(page, options.relayWsUrl);
+  if (!options.skipWorkspaceSeed) {
+    await seedDefaultWorkspace(page, options.relayWsUrl);
+  }
   if (!options.skipOnboardingSeed) {
     await seedOnboardingCompletionForKnownIdentities(page);
   }
@@ -240,12 +243,13 @@ export async function installBridge(page: Page, options: BridgeOptions) {
 export async function installMockBridge(
   page: Page,
   mock?: MockBridgeOptions,
-  options?: { skipOnboardingSeed?: boolean },
+  options?: { skipOnboardingSeed?: boolean; skipWorkspaceSeed?: boolean },
 ) {
   await installBridge(page, {
     mode: "mock",
     mock,
     skipOnboardingSeed: options?.skipOnboardingSeed,
+    skipWorkspaceSeed: options?.skipWorkspaceSeed,
   });
 }
 

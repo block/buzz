@@ -41,6 +41,11 @@ export function saveWorkspaces(workspaces: Workspace[]): void {
   localStorage.setItem(WORKSPACES_KEY, JSON.stringify(workspaces));
 }
 
+export function clearWorkspaceStorage(): void {
+  localStorage.removeItem(WORKSPACES_KEY);
+  localStorage.removeItem(ACTIVE_WORKSPACE_KEY);
+}
+
 export function loadActiveWorkspaceId(): string | null {
   return localStorage.getItem(ACTIVE_WORKSPACE_KEY);
 }
@@ -83,11 +88,13 @@ export function deriveWorkspaceName(relayUrl: string): string {
 export function initFirstWorkspace(
   relayUrl: string,
   pubkey: string,
+  name?: string,
 ): Workspace {
   const normalizedUrl = normalizeRelayUrl(relayUrl);
+  const trimmedName = name?.trim();
   const workspace: Workspace = {
     id: crypto.randomUUID(),
-    name: deriveWorkspaceName(normalizedUrl),
+    name: trimmedName || deriveWorkspaceName(normalizedUrl),
     relayUrl: normalizedUrl,
     pubkey,
     addedAt: new Date().toISOString(),

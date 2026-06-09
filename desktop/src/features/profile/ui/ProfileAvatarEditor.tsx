@@ -1,13 +1,15 @@
 import emojiData from "@emoji-mart/data";
 import Picker from "@emoji-mart/react";
 import { Link2, Loader2, UploadCloud } from "lucide-react";
+import { motion } from "motion/react";
 import * as React from "react";
 
 import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
+import { Spinner } from "@/shared/ui/spinner";
+import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import {
   AVATAR_COLORS,
   AVATAR_COLOR_SWATCHES,
@@ -41,18 +43,23 @@ import {
 
 export { parseEmojiAvatarDataUrl } from "./ProfileAvatarEditor.utils";
 
-type AvatarMode = "image" | "emoji";
+export type AvatarMode = "image" | "emoji";
 
 type ProfileAvatarEditorProps = {
   avatarUrl: string;
   previewName: string;
   onUrlChange: (url: string) => void;
+  emojiPickerTheme?: "auto" | "dark" | "light";
+  emojiPickerThemeVars?: React.CSSProperties;
   onEmojiAvatarChange?: () => void;
+  onCustomColorPickerOpenChange?: (isOpen: boolean) => void;
+  onModeChange?: (mode: AvatarMode) => void;
   onUploadedAvatarChange?: (url: string | null) => void;
   onUploadingChange?: (isUploading: boolean) => void;
   onDone?: () => void;
   donePending?: boolean;
   hiddenAvatarUrl?: string | null;
+  showEmojiColorControlsWhenEmpty?: boolean;
   disabled?: boolean;
   testIdPrefix?: string;
 };
@@ -61,15 +68,39 @@ type EmojiMartEmoji = {
   native?: string;
 };
 
+const AVATAR_EDITOR_MOTION_TRANSITION = {
+  duration: 0.25,
+  ease: "easeOut",
+} as const;
+const INITIAL_EMOJI_AVATAR_COLORS = AVATAR_COLORS.filter(
+  (color) => color !== DEFAULT_EMOJI_AVATAR_COLOR,
+);
+
+function randomInitialEmojiAvatarColor() {
+  const colors =
+    INITIAL_EMOJI_AVATAR_COLORS.length > 0
+      ? INITIAL_EMOJI_AVATAR_COLORS
+      : AVATAR_COLORS;
+  return (
+    colors[Math.floor(Math.random() * colors.length)] ??
+    DEFAULT_EMOJI_AVATAR_COLOR
+  );
+}
+
 export function ProfileAvatarEditor({
   avatarUrl,
   donePending = false,
+  emojiPickerTheme = "dark",
+  emojiPickerThemeVars,
   hiddenAvatarUrl,
+  onCustomColorPickerOpenChange,
   onEmojiAvatarChange,
+  onModeChange,
   onUploadedAvatarChange,
   onUrlChange,
   onDone,
   onUploadingChange,
+  showEmojiColorControlsWhenEmpty = false,
   disabled,
   testIdPrefix = "profile-avatar",
 }: ProfileAvatarEditorProps) {
@@ -99,24 +130,42 @@ export function ProfileAvatarEditor({
   const dragDepthRef = React.useRef(0);
   const emojiPickerContainerRef = React.useRef<HTMLDivElement | null>(null);
   const hueDragUserSelectRef = React.useRef<string | null>(null);
+  const modeContentRef = React.useRef<HTMLDivElement | null>(null);
   const isUrlInputFocusedRef = React.useRef(false);
   const hasUserEditedUrlDraftRef = React.useRef(false);
-  const emojiMartThemeVars = useEmojiMartThemeVars();
+  const [modeContentHeight, setModeContentHeight] = React.useState<
+    number | null
+  >(null);
+  const documentEmojiMartThemeVars = useEmojiMartThemeVars();
+  const emojiMartThemeVars = emojiPickerThemeVars ?? documentEmojiMartThemeVars;
   const customColorDraft = React.useMemo(
     () => hsvToHex(customHue, customSaturation, customValue),
     [customHue, customSaturation, customValue],
   );
-  const shouldShowColorControls = mode === "emoji" && selectedEmoji !== null;
+  const shouldShowColorControls =
+    mode === "emoji" &&
+    (selectedEmoji !== null || showEmojiColorControlsWhenEmpty);
   const isCustomColorPickerVisible =
     isCustomColorPickerOpen && shouldShowColorControls;
+  const updateMode = React.useCallback(
+    (nextMode: AvatarMode) => {
+      if (mode === nextMode) {
+        return;
+      }
+
+      setMode(nextMode);
+      onModeChange?.(nextMode);
+    },
+    [mode, onModeChange],
+  );
   const handleUploadSuccess = React.useCallback(
     (uploadedUrl: string) => {
       setUrlDraft("");
       onUploadedAvatarChange?.(uploadedUrl);
       onUrlChange(uploadedUrl);
-      setMode("image");
+      updateMode("image");
     },
-    [onUploadedAvatarChange, onUrlChange],
+    [onUploadedAvatarChange, onUrlChange, updateMode],
   );
   const {
     clearError: clearUploadError,
@@ -131,7 +180,25 @@ export function ProfileAvatarEditor({
 
   useEmojiMartStyles(emojiPickerContainerRef, mode === "emoji");
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
+    const node = modeContentRef.current;
+    if (!node) {
+      return;
+    }
+
+    const updateModeContentHeight = () => {
+      setModeContentHeight(node.getBoundingClientRect().height);
+    };
+
+    updateModeContentHeight();
+
+    const resizeObserver = new ResizeObserver(updateModeContentHeight);
+    resizeObserver.observe(node);
+
+    return () => resizeObserver.disconnect();
+  }, []);
+
+  React.useLayoutEffect(() => {
     onUploadingChange?.(isUploading);
   }, [isUploading, onUploadingChange]);
 
@@ -161,14 +228,28 @@ export function ProfileAvatarEditor({
     }
   }, [shouldShowColorControls]);
 
+  React.useLayoutEffect(() => {
+    onCustomColorPickerOpenChange?.(isCustomColorPickerVisible);
+
+    return () => {
+      onCustomColorPickerOpenChange?.(false);
+    };
+  }, [isCustomColorPickerVisible, onCustomColorPickerOpenChange]);
+
   React.useEffect(() => {
     if (!isCustomColorPickerOpen || !selectedEmoji) {
       return;
     }
 
+    const nextAvatarUrl = emojiAvatarDataUrl(selectedEmoji, customColorDraft);
+    if (avatarUrl === nextAvatarUrl) {
+      return;
+    }
+
     onUploadedAvatarChange?.(null);
-    onUrlChange(emojiAvatarDataUrl(selectedEmoji, customColorDraft));
+    onUrlChange(nextAvatarUrl);
   }, [
+    avatarUrl,
     customColorDraft,
     isCustomColorPickerOpen,
     onUploadedAvatarChange,
@@ -202,9 +283,9 @@ export function ProfileAvatarEditor({
       }
 
       void uploadFile(file);
-      setMode("image");
+      updateMode("image");
     },
-    [isInputDisabled, uploadFile],
+    [isInputDisabled, updateMode, uploadFile],
   );
 
   const applyUrl = React.useCallback(() => {
@@ -218,12 +299,13 @@ export function ProfileAvatarEditor({
     onUploadedAvatarChange?.(null);
     onUrlChange(nextUrl);
     hasUserEditedUrlDraftRef.current = false;
-    setMode("image");
+    updateMode("image");
   }, [
     clearUploadError,
     isInputDisabled,
     onUploadedAvatarChange,
     onUrlChange,
+    updateMode,
     urlDraft,
   ]);
 
@@ -314,6 +396,9 @@ export function ProfileAvatarEditor({
       }
 
       if (swatch === CUSTOM_AVATAR_COLOR_SWATCH) {
+        if (!selectedEmoji) {
+          return;
+        }
         openCustomColorPicker();
         return;
       }
@@ -380,7 +465,7 @@ export function ProfileAvatarEditor({
           return;
         }
         dragDepthRef.current += 1;
-        setMode("image");
+        updateMode("image");
         setIsDragging(true);
       }}
       onDragLeave={(event) => {
@@ -404,7 +489,7 @@ export function ProfileAvatarEditor({
           return;
         }
         event.dataTransfer.dropEffect = "copy";
-        setMode("image");
+        updateMode("image");
         setIsDragging(true);
       }}
       onDrop={(event) => {
@@ -429,7 +514,7 @@ export function ProfileAvatarEditor({
               if (isInputDisabled) {
                 return;
               }
-              setMode(nextMode as AvatarMode);
+              updateMode(nextMode as AvatarMode);
             }}
             value={mode}
           >
@@ -439,7 +524,7 @@ export function ProfileAvatarEditor({
             >
               <div
                 aria-hidden="true"
-                className="absolute bottom-1 left-1 top-1 z-0 rounded-full bg-background shadow transition-transform duration-150 ease-out"
+                className="absolute bottom-1 left-1 top-1 z-0 rounded-full bg-background shadow transition-transform duration-[250ms] ease-out"
                 style={{
                   transform: `translateX(${mode === "emoji" ? "100%" : "0"})`,
                   width: "calc((100% - 8px) / 2)",
@@ -462,369 +547,408 @@ export function ProfileAvatarEditor({
             </TabsList>
           </Tabs>
 
-          <div className="overflow-visible">
-            {mode === "image" ? (
-              <div className="grid content-start gap-3">
-                <button
-                  className={cn(
-                    "relative flex h-[120px] flex-col items-center justify-center gap-3 overflow-hidden rounded-xl border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-150 ease-out hover:bg-muted/80 disabled:opacity-60",
-                    isImageDropActive &&
-                      "border-primary bg-primary/10 text-primary ring-1 ring-primary/35 hover:bg-primary/10",
-                  )}
-                  data-dragging={isImageDropActive ? "true" : undefined}
-                  data-testid={`${testIdPrefix}-upload`}
-                  disabled={isInputDisabled}
-                  onClick={openPicker}
-                  type="button"
-                >
-                  <span
-                    aria-hidden="true"
+          <div
+            className="overflow-hidden transition-[height] duration-[250ms] ease-out"
+            style={
+              modeContentHeight === null
+                ? undefined
+                : { height: modeContentHeight }
+            }
+          >
+            <div className="overflow-visible" ref={modeContentRef}>
+              {mode === "image" ? (
+                <div className="grid content-start gap-3">
+                  <button
                     className={cn(
-                      "pointer-events-none absolute inset-0 rounded-[inherit] bg-primary/10 opacity-0 transition-opacity duration-150 ease-out",
-                      isImageDropActive && "opacity-100",
+                      "relative flex h-[120px] flex-col items-center justify-center gap-3 overflow-hidden rounded-xl border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color] duration-[250ms] ease-out hover:bg-muted/80 disabled:opacity-60",
+                      isImageDropActive &&
+                        "border-primary bg-primary/10 text-primary ring-1 ring-primary/35 hover:bg-primary/10",
                     )}
-                    data-testid={`${testIdPrefix}-drop-mask`}
-                  />
-                  {isUploading ? (
-                    <Loader2 className="relative h-8 w-8 animate-spin text-muted-foreground" />
-                  ) : (
-                    <UploadCloud
+                    data-dragging={isImageDropActive ? "true" : undefined}
+                    data-testid={`${testIdPrefix}-upload`}
+                    disabled={isInputDisabled}
+                    onClick={openPicker}
+                    type="button"
+                  >
+                    <span
+                      aria-hidden="true"
                       className={cn(
-                        "relative h-8 w-8 text-muted-foreground transition-colors duration-150 ease-out",
+                        "pointer-events-none absolute inset-0 rounded-[inherit] bg-primary/10 opacity-0 transition-opacity duration-[250ms] ease-out",
+                        isImageDropActive && "opacity-100",
+                      )}
+                      data-testid={`${testIdPrefix}-drop-mask`}
+                    />
+                    {isUploading ? (
+                      <Loader2 className="relative h-8 w-8 animate-spin text-muted-foreground" />
+                    ) : (
+                      <UploadCloud
+                        className={cn(
+                          "relative h-8 w-8 text-muted-foreground transition-colors duration-[250ms] ease-out",
+                          isImageDropActive && "text-primary",
+                        )}
+                      />
+                    )}
+                    <span
+                      className={cn(
+                        "relative text-sm font-medium text-muted-foreground transition-colors duration-[250ms] ease-out",
                         isImageDropActive && "text-primary",
                       )}
-                    />
-                  )}
-                  <span className="relative text-sm font-medium">
-                    {isUploading ? (
-                      "Uploading..."
-                    ) : isImageDropActive ? (
-                      "Drop image here"
-                    ) : (
-                      <>
-                        Drop or{" "}
-                        <span className="underline underline-offset-2">
-                          browse
-                        </span>
-                      </>
-                    )}
-                  </span>
-                </button>
+                    >
+                      {isUploading ? (
+                        "Uploading..."
+                      ) : isImageDropActive ? (
+                        "Drop image here"
+                      ) : (
+                        <>
+                          Drop or{" "}
+                          <span className="underline underline-offset-2">
+                            browse
+                          </span>
+                        </>
+                      )}
+                    </span>
+                  </button>
 
-                <div className="flex h-16 items-center gap-3 rounded-xl bg-muted px-5 transition-colors focus-within:bg-muted/80">
-                  <Link2 className="h-4 w-4 text-muted-foreground" />
-                  <input
-                    className="min-w-0 flex-1 bg-transparent text-sm font-medium text-foreground outline-none placeholder:text-muted-foreground"
-                    data-testid={`${testIdPrefix}-url`}
-                    disabled={isInputDisabled}
-                    onBlur={() => {
-                      isUrlInputFocusedRef.current = false;
-                      applyUrl();
-                    }}
-                    onChange={(event) => {
-                      clearUploadError();
-                      hasUserEditedUrlDraftRef.current = true;
-                      setUrlDraft(event.target.value);
-                      onUploadedAvatarChange?.(null);
-                      onUrlChange(event.target.value);
-                    }}
-                    onFocus={() => {
-                      isUrlInputFocusedRef.current = true;
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
+                  <div className="flex h-16 items-center gap-3 rounded-xl bg-muted px-5 transition-colors duration-[250ms] ease-out focus-within:bg-muted/80">
+                    <Link2 className="h-4 w-4 text-muted-foreground" />
+                    <input
+                      className="min-w-0 flex-1 bg-transparent text-sm font-medium text-foreground outline-none placeholder:text-muted-foreground"
+                      data-testid={`${testIdPrefix}-url`}
+                      disabled={isInputDisabled}
+                      onBlur={() => {
+                        isUrlInputFocusedRef.current = false;
                         applyUrl();
-                      }
-                    }}
-                    placeholder="Paste a URL (Slack profile, etc.)"
-                    type="url"
-                    value={urlDraft}
-                  />
-                </div>
-
-                {uploadErrorMessage ? (
-                  <p
-                    className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive"
-                    data-testid={`${testIdPrefix}-upload-error`}
-                    role="alert"
-                  >
-                    {uploadErrorMessage}
-                  </p>
-                ) : null}
-              </div>
-            ) : (
-              <div className="relative grid content-start gap-3">
-                <div
-                  className="sprout-emoji-mart relative z-0 h-[316px] overflow-hidden rounded-xl bg-muted"
-                  ref={emojiPickerContainerRef}
-                  style={emojiMartThemeVars}
-                >
-                  <Picker
-                    categories={EMOJI_MART_CATEGORIES}
-                    data={emojiData}
-                    dynamicWidth
-                    emojiButtonRadius="999px"
-                    emojiButtonSize={64}
-                    emojiSize={48}
-                    icons="outline"
-                    navPosition="bottom"
-                    onEmojiSelect={(
-                      emoji: EmojiMartEmoji,
-                      event?: MouseEvent,
-                    ) => {
-                      if (isInputDisabled) {
-                        return;
-                      }
-                      if (!emoji.native) {
-                        return;
-                      }
-                      burstEmoji(emoji.native, event);
-                      setSelectedEmoji(emoji.native);
-                      applyEmojiAvatar(emoji.native, selectedColor);
-                    }}
-                    previewPosition="none"
-                    searchPosition="none"
-                    set="native"
-                    skinTonePosition="none"
-                    theme="dark"
-                  />
-                </div>
-
-                <div
-                  aria-hidden={!shouldShowColorControls}
-                  className={cn(
-                    "origin-top overflow-hidden transition-[max-height,margin,opacity,transform] duration-150 ease-out",
-                    shouldShowColorControls
-                      ? "mt-3 max-h-64 scale-100 opacity-100"
-                      : "mt-0 max-h-0 scale-[0.96] opacity-0",
-                  )}
-                  data-testid={`${testIdPrefix}-color-grid-shell`}
-                  inert={shouldShowColorControls ? undefined : true}
-                >
-                  <div
-                    className="grid grid-cols-8 justify-items-center gap-3 rounded-xl bg-muted p-4"
-                    data-testid={`${testIdPrefix}-color-grid`}
-                  >
-                    {AVATAR_COLOR_SWATCHES.map((swatch) => {
-                      const isCustomSwatch =
-                        swatch === CUSTOM_AVATAR_COLOR_SWATCH;
-                      const isSelected = isCustomSwatch
-                        ? !AVATAR_COLORS.some(
-                            (color) =>
-                              color.toUpperCase() ===
-                              selectedColor.toUpperCase(),
-                          )
-                        : swatch.toUpperCase() === selectedColor.toUpperCase();
-
-                      return (
-                        <button
-                          aria-label={
-                            isCustomSwatch
-                              ? "Choose custom avatar color"
-                              : `Use ${swatch} background`
-                          }
-                          aria-pressed={isSelected}
-                          className="relative h-10 w-10 rounded-full border border-border transition-transform duration-200 ease-out hover:scale-[1.15] focus-visible:scale-[1.15] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                          data-testid={
-                            isCustomSwatch
-                              ? `${testIdPrefix}-custom-color`
-                              : undefined
-                          }
-                          key={swatch}
-                          onClick={() => handleColorSelect(swatch)}
-                          style={{
-                            background: isCustomSwatch
-                              ? isSelected
-                                ? selectedColor
-                                : "conic-gradient(from 0deg, #ff4d4d, #ffe75c, #73ef75, #63c6f2, #b141ff, #ff4d4d)"
-                              : swatch,
-                          }}
-                          type="button"
-                        >
-                          {isSelected ? (
-                            <span
-                              className="absolute inset-1 rounded-full border-[3px]"
-                              style={{
-                                borderColor: contrastColorForBackground(
-                                  isCustomSwatch ? selectedColor : swatch,
-                                ),
-                              }}
-                            />
-                          ) : null}
-                        </button>
-                      );
-                    })}
+                      }}
+                      onChange={(event) => {
+                        clearUploadError();
+                        hasUserEditedUrlDraftRef.current = true;
+                        setUrlDraft(event.target.value);
+                        onUploadedAvatarChange?.(null);
+                        onUrlChange(event.target.value);
+                      }}
+                      onFocus={() => {
+                        isUrlInputFocusedRef.current = true;
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          applyUrl();
+                        }
+                      }}
+                      placeholder="Paste a URL (Slack profile, etc.)"
+                      type="url"
+                      value={urlDraft}
+                    />
                   </div>
-                </div>
 
-                <div
-                  aria-hidden={!isCustomColorPickerVisible}
-                  className={cn(
-                    "absolute inset-0 z-40 flex origin-bottom flex-col rounded-xl bg-muted p-4 transition-[opacity,transform] duration-150 ease-out",
-                    isCustomColorPickerVisible
-                      ? "pointer-events-auto translate-y-0 scale-y-100 opacity-100"
-                      : "pointer-events-none translate-y-8 scale-y-[0.94] opacity-0",
-                  )}
-                >
+                  {uploadErrorMessage ? (
+                    <p
+                      className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive"
+                      data-testid={`${testIdPrefix}-upload-error`}
+                      role="alert"
+                    >
+                      {uploadErrorMessage}
+                    </p>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="relative grid content-start gap-3">
                   <div
-                    className="relative min-h-0 w-full flex-1 cursor-pointer overflow-hidden rounded-xl shadow-[inset_0_-18px_34px_rgba(0,0,0,0.18)]"
-                    data-testid={`${testIdPrefix}-custom-color-spectrum`}
-                    onPointerDown={(event) => {
-                      event.preventDefault();
-                      event.currentTarget.setPointerCapture(event.pointerId);
-                      updateCustomColorFromPointer(event);
-                    }}
-                    onPointerMove={(event) => {
-                      if (event.buttons === 1) {
-                        event.preventDefault();
-                        updateCustomColorFromPointer(event);
-                      }
-                    }}
-                    onPointerUp={(event) => {
-                      event.preventDefault();
-                      updateCustomColorFromPointer(event);
-                    }}
-                    style={{
-                      backgroundColor: `hsl(${customHue}, 100%, 50%)`,
-                      backgroundImage:
-                        "linear-gradient(to bottom, transparent 0%, #000000 100%), linear-gradient(to right, #ffffff 0%, rgba(255,255,255,0) 100%)",
-                    }}
+                    className="sprout-emoji-mart relative z-0 h-[316px] overflow-hidden rounded-xl bg-muted transition-colors duration-[250ms] ease-out"
+                    ref={emojiPickerContainerRef}
+                    style={emojiMartThemeVars}
+                  >
+                    <Picker
+                      categories={EMOJI_MART_CATEGORIES}
+                      data={emojiData}
+                      dynamicWidth
+                      emojiButtonRadius="999px"
+                      emojiButtonSize={64}
+                      emojiSize={48}
+                      icons="outline"
+                      navPosition="bottom"
+                      onEmojiSelect={(
+                        emoji: EmojiMartEmoji,
+                        event?: MouseEvent,
+                      ) => {
+                        if (isInputDisabled) {
+                          return;
+                        }
+                        if (!emoji.native) {
+                          return;
+                        }
+                        const nextColor =
+                          selectedEmoji === null
+                            ? randomInitialEmojiAvatarColor()
+                            : selectedColor;
+                        burstEmoji(emoji.native, event);
+                        setSelectedEmoji(emoji.native);
+                        setSelectedColor(nextColor);
+                        applyEmojiAvatar(emoji.native, nextColor);
+                      }}
+                      previewPosition="none"
+                      searchPosition="none"
+                      set="native"
+                      skinTonePosition="none"
+                      theme={emojiPickerTheme}
+                    />
+                  </div>
+
+                  <div
+                    aria-hidden={!shouldShowColorControls}
+                    className={cn(
+                      showEmojiColorControlsWhenEmpty
+                        ? "overflow-hidden"
+                        : "origin-top overflow-hidden transition-[max-height,margin,opacity,transform] duration-[250ms] ease-out",
+                      shouldShowColorControls
+                        ? "mt-3 max-h-64 scale-100 opacity-100"
+                        : "mt-0 max-h-0 scale-[0.96] opacity-0",
+                    )}
+                    data-testid={`${testIdPrefix}-color-grid-shell`}
+                    inert={shouldShowColorControls ? undefined : true}
                   >
                     <div
-                      aria-hidden="true"
-                      className="pointer-events-none absolute"
-                      style={{
-                        inset: `${CUSTOM_COLOR_GRID_VERTICAL_INSET}px ${CUSTOM_COLOR_GRID_HORIZONTAL_INSET}px`,
-                      }}
+                      className="grid grid-cols-8 justify-items-center gap-3 rounded-xl bg-muted p-4 transition-colors duration-[250ms] ease-out"
+                      data-testid={`${testIdPrefix}-color-grid`}
                     >
-                      {Array.from({
-                        length:
-                          CUSTOM_COLOR_GRID_COLUMNS * CUSTOM_COLOR_GRID_ROWS,
-                      }).map((_, index) => {
-                        const column = index % CUSTOM_COLOR_GRID_COLUMNS;
-                        const row = Math.floor(
-                          index / CUSTOM_COLOR_GRID_COLUMNS,
-                        );
-                        const gridSaturation = Math.round(
-                          (column / (CUSTOM_COLOR_GRID_COLUMNS - 1)) * 100,
-                        );
-                        const gridValue = Math.round(
-                          100 - (row / (CUSTOM_COLOR_GRID_ROWS - 1)) * 100,
-                        );
-                        const isSelectedGridDot =
-                          gridSaturation === customSaturation &&
-                          gridValue === customValue;
+                      {AVATAR_COLOR_SWATCHES.map((swatch) => {
+                        const isCustomSwatch =
+                          swatch === CUSTOM_AVATAR_COLOR_SWATCH;
+                        const isSelected = isCustomSwatch
+                          ? !AVATAR_COLORS.some(
+                              (color) =>
+                                color.toUpperCase() ===
+                                selectedColor.toUpperCase(),
+                            )
+                          : swatch.toUpperCase() ===
+                            selectedColor.toUpperCase();
 
                         return (
-                          <span
+                          <button
+                            aria-label={
+                              isCustomSwatch
+                                ? selectedEmoji
+                                  ? "Choose custom avatar color"
+                                  : "Choose an emoji before custom avatar color"
+                                : `Use ${swatch} background`
+                            }
+                            aria-pressed={isSelected}
                             className={cn(
-                              "absolute h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/60 shadow-[0_0_4px_rgba(255,255,255,0.24)]",
-                              isSelectedGridDot &&
-                                "h-3 w-3 border-2 border-white shadow-[0_2px_10px_rgba(0,0,0,0.24)]",
+                              "relative h-10 w-10 scroll-mb-52 rounded-full border border-border transition-transform duration-200 ease-out hover:scale-[1.15] focus-visible:scale-[1.15] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                              isCustomSwatch &&
+                                !selectedEmoji &&
+                                "cursor-not-allowed opacity-45 hover:scale-100 focus-visible:scale-100",
                             )}
-                            key={`${column}-${row}`}
+                            data-testid={
+                              isCustomSwatch
+                                ? `${testIdPrefix}-custom-color`
+                                : undefined
+                            }
+                            disabled={isCustomSwatch && !selectedEmoji}
+                            key={swatch}
+                            onClick={() => handleColorSelect(swatch)}
                             style={{
-                              backgroundColor: isSelectedGridDot
-                                ? customColorDraft
-                                : undefined,
-                              left: `${
-                                (column / (CUSTOM_COLOR_GRID_COLUMNS - 1)) * 100
-                              }%`,
-                              top: `${
-                                (row / (CUSTOM_COLOR_GRID_ROWS - 1)) * 100
-                              }%`,
+                              background: isCustomSwatch
+                                ? isSelected
+                                  ? selectedColor
+                                  : "conic-gradient(from 0deg, #ff4d4d, #ffe75c, #73ef75, #63c6f2, #b141ff, #ff4d4d)"
+                                : swatch,
                             }}
-                          />
+                            type="button"
+                          >
+                            {isSelected ? (
+                              <span
+                                className="absolute inset-1 rounded-full border-[3px]"
+                                style={{
+                                  borderColor: contrastColorForBackground(
+                                    isCustomSwatch ? selectedColor : swatch,
+                                  ),
+                                }}
+                              />
+                            ) : null}
+                          </button>
                         );
                       })}
                     </div>
-                    <div
-                      className="pointer-events-none absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full border-[3px] border-white shadow-[0_5px_16px_rgba(0,0,0,0.24),inset_0_0_0_1px_rgba(0,0,0,0.06)]"
-                      style={{
-                        backgroundColor: customColorDraft,
-                        left: gridInsetPosition(
-                          customSaturation,
-                          CUSTOM_COLOR_GRID_HORIZONTAL_INSET,
-                        ),
-                        top: gridInsetPosition(
-                          100 - customValue,
-                          CUSTOM_COLOR_GRID_VERTICAL_INSET,
-                        ),
-                      }}
-                    />
                   </div>
 
-                  <div
-                    aria-label="Choose custom avatar color hue"
-                    aria-valuemax={360}
-                    aria-valuemin={0}
-                    aria-valuenow={customHue}
-                    className="sprout-avatar-hue-scrubber relative mt-3 h-10 w-full cursor-pointer select-none rounded-full touch-none"
-                    data-testid={`${testIdPrefix}-custom-color-hue`}
-                    onKeyDown={(event) => {
-                      if (
-                        event.key === "ArrowLeft" ||
-                        event.key === "ArrowDown"
-                      ) {
-                        event.preventDefault();
-                        adjustCustomHue(-6);
-                      } else if (
-                        event.key === "ArrowRight" ||
-                        event.key === "ArrowUp"
-                      ) {
-                        event.preventDefault();
-                        adjustCustomHue(6);
-                      } else if (event.key === "Home") {
-                        event.preventDefault();
-                        setCustomHue(0);
-                      } else if (event.key === "End") {
-                        event.preventDefault();
-                        setCustomHue(360);
-                      }
-                    }}
-                    onPointerDown={(event) => {
-                      event.preventDefault();
-                      lockHueDragSelection();
-                      event.currentTarget.setPointerCapture(event.pointerId);
-                      updateCustomHueFromPointer(event);
-                    }}
-                    onPointerMove={(event) => {
-                      if (event.buttons === 1) {
-                        event.preventDefault();
-                        updateCustomHueFromPointer(event);
-                      }
-                    }}
-                    onPointerCancel={unlockHueDragSelection}
-                    onPointerUp={unlockHueDragSelection}
-                    onLostPointerCapture={unlockHueDragSelection}
-                    role="slider"
-                    tabIndex={isCustomColorPickerVisible ? 0 : -1}
+                  <motion.div
+                    aria-hidden={!isCustomColorPickerVisible}
+                    className={cn(
+                      "absolute inset-0 z-40 flex flex-col rounded-xl bg-muted p-4",
+                      isCustomColorPickerVisible
+                        ? "pointer-events-auto"
+                        : "pointer-events-none",
+                    )}
+                    animate={
+                      isCustomColorPickerVisible
+                        ? { opacity: 1 }
+                        : { opacity: 0 }
+                    }
+                    inert={isCustomColorPickerVisible ? undefined : true}
+                    initial={false}
+                    transition={AVATAR_EDITOR_MOTION_TRANSITION}
                   >
                     <div
-                      aria-hidden="true"
-                      className="absolute top-1 h-8 w-8 -translate-x-1/2 rounded-full"
-                      data-testid={`${testIdPrefix}-custom-color-hue-thumb`}
+                      className="relative min-h-0 w-full flex-1 cursor-pointer overflow-hidden rounded-xl shadow-[inset_0_-18px_34px_rgba(0,0,0,0.18)]"
+                      data-testid={`${testIdPrefix}-custom-color-spectrum`}
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        updateCustomColorFromPointer(event);
+                      }}
+                      onPointerMove={(event) => {
+                        if (event.buttons === 1) {
+                          event.preventDefault();
+                          updateCustomColorFromPointer(event);
+                        }
+                      }}
+                      onPointerUp={(event) => {
+                        event.preventDefault();
+                        updateCustomColorFromPointer(event);
+                      }}
                       style={{
-                        left: hueScrubberPosition((customHue / 360) * 100),
+                        backgroundColor: `hsl(${customHue}, 100%, 50%)`,
+                        backgroundImage:
+                          "linear-gradient(to bottom, transparent 0%, #000000 100%), linear-gradient(to right, #ffffff 0%, rgba(255,255,255,0) 100%)",
                       }}
                     >
-                      <div className="h-full w-full rounded-full bg-white shadow-[0_5px_18px_rgba(0,0,0,0.24),inset_0_0_0_1px_rgba(0,0,0,0.06)]" />
-                    </div>
-                  </div>
+                      <div
+                        aria-hidden="true"
+                        className="pointer-events-none absolute"
+                        style={{
+                          inset: `${CUSTOM_COLOR_GRID_VERTICAL_INSET}px ${CUSTOM_COLOR_GRID_HORIZONTAL_INSET}px`,
+                        }}
+                      >
+                        {Array.from({
+                          length:
+                            CUSTOM_COLOR_GRID_COLUMNS * CUSTOM_COLOR_GRID_ROWS,
+                        }).map((_, index) => {
+                          const column = index % CUSTOM_COLOR_GRID_COLUMNS;
+                          const row = Math.floor(
+                            index / CUSTOM_COLOR_GRID_COLUMNS,
+                          );
+                          const gridSaturation = Math.round(
+                            (column / (CUSTOM_COLOR_GRID_COLUMNS - 1)) * 100,
+                          );
+                          const gridValue = Math.round(
+                            100 - (row / (CUSTOM_COLOR_GRID_ROWS - 1)) * 100,
+                          );
+                          const isSelectedGridDot =
+                            gridSaturation === customSaturation &&
+                            gridValue === customValue;
 
-                  <button
-                    className="mt-3 h-12 w-full rounded-xl bg-background px-6 text-sm font-medium text-foreground transition-colors hover:bg-background/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                    data-testid={`${testIdPrefix}-custom-color-done`}
-                    onClick={commitCustomColor}
-                    tabIndex={isCustomColorPickerVisible ? 0 : -1}
-                    type="button"
-                  >
-                    Use color
-                  </button>
+                          return (
+                            <span
+                              className={cn(
+                                "absolute h-1 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/60 shadow-[0_0_4px_rgba(255,255,255,0.24)]",
+                                isSelectedGridDot &&
+                                  "h-3 w-3 border-2 border-white shadow-[0_2px_10px_rgba(0,0,0,0.24)]",
+                              )}
+                              key={`${column}-${row}`}
+                              style={{
+                                backgroundColor: isSelectedGridDot
+                                  ? customColorDraft
+                                  : undefined,
+                                left: `${
+                                  (column / (CUSTOM_COLOR_GRID_COLUMNS - 1)) *
+                                  100
+                                }%`,
+                                top: `${
+                                  (row / (CUSTOM_COLOR_GRID_ROWS - 1)) * 100
+                                }%`,
+                              }}
+                            />
+                          );
+                        })}
+                      </div>
+                      <div
+                        className="pointer-events-none absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full border-[3px] border-white shadow-[0_5px_16px_rgba(0,0,0,0.24),inset_0_0_0_1px_rgba(0,0,0,0.06)]"
+                        style={{
+                          backgroundColor: customColorDraft,
+                          left: gridInsetPosition(
+                            customSaturation,
+                            CUSTOM_COLOR_GRID_HORIZONTAL_INSET,
+                          ),
+                          top: gridInsetPosition(
+                            100 - customValue,
+                            CUSTOM_COLOR_GRID_VERTICAL_INSET,
+                          ),
+                        }}
+                      />
+                    </div>
+
+                    <div
+                      aria-label="Choose custom avatar color hue"
+                      aria-valuemax={360}
+                      aria-valuemin={0}
+                      aria-valuenow={customHue}
+                      className="sprout-avatar-hue-scrubber relative mt-3 h-10 w-full cursor-pointer select-none rounded-full touch-none"
+                      data-testid={`${testIdPrefix}-custom-color-hue`}
+                      onKeyDown={(event) => {
+                        if (
+                          event.key === "ArrowLeft" ||
+                          event.key === "ArrowDown"
+                        ) {
+                          event.preventDefault();
+                          adjustCustomHue(-6);
+                        } else if (
+                          event.key === "ArrowRight" ||
+                          event.key === "ArrowUp"
+                        ) {
+                          event.preventDefault();
+                          adjustCustomHue(6);
+                        } else if (event.key === "Home") {
+                          event.preventDefault();
+                          setCustomHue(0);
+                        } else if (event.key === "End") {
+                          event.preventDefault();
+                          setCustomHue(360);
+                        }
+                      }}
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        lockHueDragSelection();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        updateCustomHueFromPointer(event);
+                      }}
+                      onPointerMove={(event) => {
+                        if (event.buttons === 1) {
+                          event.preventDefault();
+                          updateCustomHueFromPointer(event);
+                        }
+                      }}
+                      onPointerCancel={unlockHueDragSelection}
+                      onPointerUp={unlockHueDragSelection}
+                      onLostPointerCapture={unlockHueDragSelection}
+                      role="slider"
+                      tabIndex={isCustomColorPickerVisible ? 0 : -1}
+                    >
+                      <div
+                        aria-hidden="true"
+                        className="absolute top-1 h-8 w-8 -translate-x-1/2 rounded-full"
+                        data-testid={`${testIdPrefix}-custom-color-hue-thumb`}
+                        style={{
+                          left: hueScrubberPosition((customHue / 360) * 100),
+                        }}
+                      >
+                        <div className="h-full w-full rounded-full bg-white shadow-[0_5px_18px_rgba(0,0,0,0.24),inset_0_0_0_1px_rgba(0,0,0,0.06)]" />
+                      </div>
+                    </div>
+
+                    <Button
+                      className="mt-3 h-12 w-full rounded-xl"
+                      data-testid={`${testIdPrefix}-custom-color-done`}
+                      onClick={commitCustomColor}
+                      tabIndex={isCustomColorPickerVisible ? 0 : -1}
+                      type="button"
+                    >
+                      Use color
+                    </Button>
+                  </motion.div>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </div>
 
           {onDone && !isCustomColorPickerOpen ? (
@@ -835,7 +959,11 @@ export function ProfileAvatarEditor({
               onClick={onDone}
               type="button"
             >
-              {donePending ? "Saving..." : "Done"}
+              {donePending ? (
+                <Spinner aria-label="Saving avatar" className="h-4 w-4" />
+              ) : (
+                "Done"
+              )}
             </Button>
           ) : null}
         </div>

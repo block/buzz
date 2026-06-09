@@ -1,6 +1,7 @@
-import { hexToBytes } from "@noble/hashes/utils.js";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
-import { finalizeEvent } from "nostr-tools/pure";
+import { decode } from "nostr-tools/nip19";
+import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { parse as yamlParse } from "yaml";
 
 import type { RelayEvent } from "@/shared/api/types";
@@ -1620,6 +1621,44 @@ function readStoredIdentityOverride(): TestIdentity | undefined {
   }
 }
 
+function writeStoredIdentityOverride(identity: TestIdentity) {
+  window.localStorage.setItem(
+    E2E_IDENTITY_OVERRIDE_STORAGE_KEY,
+    JSON.stringify(identity),
+  );
+}
+
+function importMockIdentity(nsec: string) {
+  const decoded = decode(nsec.trim());
+  if (decoded.type !== "nsec") {
+    throw new Error("Invalid Nostr private key.");
+  }
+
+  const privateKey = bytesToHex(decoded.data);
+  const pubkey = getPublicKey(decoded.data);
+  const username = mockDisplayNames.get(pubkey) ?? "";
+  const identity = {
+    privateKey,
+    pubkey,
+    username,
+  };
+  writeStoredIdentityOverride(identity);
+  if (!mockProfiles.has(pubkey)) {
+    mockProfiles.set(pubkey, {
+      pubkey,
+      display_name: username || null,
+      avatar_url: null,
+      about: null,
+      nip05_handle: null,
+    });
+  }
+
+  return {
+    pubkey,
+    display_name: username,
+  };
+}
+
 function isRelayMode(config: E2eConfig | undefined): boolean {
   return config?.mode === "relay";
 }
@@ -2585,27 +2624,27 @@ async function handleUpdateProfile(
     }
 
     const profile = ensureMockProfile(config);
-    const nextDisplayName = args.displayName?.trim();
-    const nextAvatarUrl = args.avatarUrl?.trim();
-    const nextAbout = args.about?.trim();
-    const nextNip05Handle = args.nip05Handle?.trim();
+    const hasDisplayNameUpdate = typeof args.displayName === "string";
+    const hasAvatarUrlUpdate = typeof args.avatarUrl === "string";
+    const hasAboutUpdate = typeof args.about === "string";
+    const hasNip05HandleUpdate = typeof args.nip05Handle === "string";
+    const nextDisplayName = args.displayName?.trim() ?? "";
+    const nextAvatarUrl = args.avatarUrl?.trim() ?? "";
+    const nextAbout = args.about?.trim() ?? "";
+    const nextNip05Handle = args.nip05Handle?.trim() ?? "";
 
-    if (nextDisplayName && nextDisplayName !== profile.display_name) {
-      profile.display_name = nextDisplayName;
-      applyMockDisplayName(profile.pubkey, nextDisplayName);
+    if (hasDisplayNameUpdate && nextDisplayName !== profile.display_name) {
+      profile.display_name = nextDisplayName || null;
+      applyMockDisplayName(profile.pubkey, profile.display_name);
     }
-    if (nextAvatarUrl && nextAvatarUrl !== profile.avatar_url) {
-      profile.avatar_url = nextAvatarUrl;
+    if (hasAvatarUrlUpdate && nextAvatarUrl !== profile.avatar_url) {
+      profile.avatar_url = nextAvatarUrl || null;
     }
-    if (typeof nextAbout === "string" && nextAbout !== profile.about) {
-      profile.about = nextAbout;
+    if (hasAboutUpdate && nextAbout !== profile.about) {
+      profile.about = nextAbout || null;
     }
-    if (
-      typeof nextNip05Handle === "string" &&
-      nextNip05Handle !== profile.nip05_handle
-    ) {
-      profile.nip05_handle =
-        nextNip05Handle.length > 0 ? nextNip05Handle : null;
+    if (hasNip05HandleUpdate && nextNip05Handle !== profile.nip05_handle) {
+      profile.nip05_handle = nextNip05Handle || null;
     }
 
     return cloneProfile(profile);
@@ -5416,6 +5455,10 @@ export function maybeInstallE2eTauriMocks() {
         return DEFAULT_MOCK_IDENTITY;
       case "get_nsec":
         return "nsec1mock000000000000000000000000000000000000000000000000000000";
+      case "import_identity":
+        return importMockIdentity(
+          (payload as { nsec?: string } | null)?.nsec ?? "",
+        );
       case "apply_workspace":
         return;
       case "get_profile":

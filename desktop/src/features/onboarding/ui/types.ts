@@ -1,6 +1,11 @@
-import type { AcpRuntime, Profile } from "@/shared/api/types";
+import type { AcpRuntimeCatalogEntry, Profile } from "@/shared/api/types";
 
-export type OnboardingPage = "profile" | "setup" | "membership-denied";
+export type OnboardingPage =
+  | "profile"
+  | "avatar"
+  | "theme"
+  | "setup"
+  | "membership-denied";
 
 export type OnboardingActions = {
   complete: () => void;
@@ -34,9 +39,6 @@ export type ProfileStepAvatarState = {
 
 export type ProfileStepState = {
   avatar: ProfileStepAvatarState;
-  /** Bech32-encoded current pubkey (npub1…), shown so the user can confirm
-   *  which identity they're saving the profile for. */
-  currentNpub: string | null;
   isUploadingAvatar: boolean;
   isSaving: boolean;
   name: ProfileStepNameState;
@@ -45,8 +47,8 @@ export type ProfileStepState = {
 
 export type ProfileStepActions = {
   advanceWithoutSaving: () => void;
+  back?: () => void;
   clearAvatarDraft: () => void;
-  importIdentity: (nsec: string) => Promise<void>;
   onUploadingChange: (isUploading: boolean) => void;
   skipForNow: () => void;
   submit: () => void;
@@ -59,11 +61,15 @@ export type SetupStepActions = {
   complete: () => void;
 };
 
+export type ThemeStepActions = {
+  skip: () => void;
+  submit: () => void;
+};
+
 export type SetupStepRuntimeState = {
   errorMessage: string | null;
   isChecking: boolean;
-  items: AcpRuntime[];
-  showSetupLaterHint: boolean;
+  items: AcpRuntimeCatalogEntry[];
 };
 
 export type SetupStepState = {

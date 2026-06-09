@@ -15,9 +15,9 @@ import {
   loadThemeData,
 } from "./theme-loader";
 
-const STORAGE_KEY = "sprout-theme";
+export const THEME_STORAGE_KEY = "sprout-theme";
 const CACHE_KEY = "sprout-theme-cache";
-const ACCENT_KEY = "sprout-accent-color";
+export const ACCENT_STORAGE_KEY = "sprout-accent-color";
 export const NEUTRAL_ACCENT = "neutral";
 
 export const ACCENT_COLORS = [
@@ -57,7 +57,7 @@ function isValidThemeName(name: string): name is SyntaxThemeName {
 
 /** Read stored theme, migrating legacy "light"/"dark"/"system" values. */
 function readStoredTheme(fallback: SyntaxThemeName): SyntaxThemeName {
-  const stored = window.localStorage.getItem(STORAGE_KEY);
+  const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
   if (!stored) return fallback;
 
   // Migrate legacy values
@@ -117,7 +117,8 @@ function applyCachedVars(): string | null {
     root.classList.add(isDark ? "dark" : "light");
 
     // Also apply cached accent
-    const accent = window.localStorage.getItem(ACCENT_KEY) ?? DEFAULT_ACCENT;
+    const accent =
+      window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
     applyAccentColor(accent);
 
     return themeName;
@@ -172,7 +173,7 @@ export function ThemeProvider({
   const [isLoading, setIsLoading] = useState(true);
   const loadingRef = useRef<string | null>(null);
   const [accentColor, setAccentColorState] = useState<string>(() => {
-    return window.localStorage.getItem(ACCENT_KEY) ?? DEFAULT_ACCENT;
+    return window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT;
   });
 
   // Load and apply theme
@@ -191,7 +192,7 @@ export function ThemeProvider({
         setIsLoading(false);
         // Re-apply accent after theme load (theme vars don't include primary)
         applyAccentColor(
-          window.localStorage.getItem(ACCENT_KEY) ?? DEFAULT_ACCENT,
+          window.localStorage.getItem(ACCENT_STORAGE_KEY) ?? DEFAULT_ACCENT,
         );
       }
     });
@@ -205,11 +206,11 @@ export function ThemeProvider({
   const setTheme = useCallback((name: string) => {
     if (!isValidThemeName(name)) return;
     setThemeName(name);
-    window.localStorage.setItem(STORAGE_KEY, name);
+    window.localStorage.setItem(THEME_STORAGE_KEY, name);
   }, []);
 
   const setAccentColor = useCallback((color: string) => {
-    window.localStorage.setItem(ACCENT_KEY, color);
+    window.localStorage.setItem(ACCENT_STORAGE_KEY, color);
     setAccentColorState(color);
   }, []);
 

@@ -10,6 +10,7 @@ import type { ReactNode } from "react";
 
 import type { Workspace } from "./types";
 import {
+  clearWorkspaceStorage,
   loadActiveWorkspaceId,
   loadWorkspaces,
   saveActiveWorkspaceId,
@@ -23,6 +24,7 @@ export type UseWorkspacesReturn = {
   reinitKey: number;
   /** Add a workspace, deduplicating by relayUrl. Returns the final ID in the list. */
   addWorkspace: (workspace: Workspace) => string;
+  clearWorkspaces: () => void;
   removeWorkspace: (id: string) => void;
   switchWorkspace: (id: string) => void;
   /** Force the active workspace to re-init (e.g. after a deep-link reconnect). */
@@ -93,6 +95,12 @@ function useWorkspacesInternal(): UseWorkspacesReturn {
       return next;
     });
     return resolvedId;
+  }, []);
+
+  const clearWorkspaces = useCallback(() => {
+    clearWorkspaceStorage();
+    setWorkspacesState([]);
+    setActiveId(null);
   }, []);
 
   const removeWorkspace = useCallback(
@@ -166,6 +174,7 @@ function useWorkspacesInternal(): UseWorkspacesReturn {
     activeWorkspace,
     reinitKey,
     addWorkspace,
+    clearWorkspaces,
     removeWorkspace,
     switchWorkspace,
     reconnectWorkspace,
