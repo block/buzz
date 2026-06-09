@@ -237,6 +237,10 @@ function MemoryGraphView({
         </div>
       ) : // No `core` but there are memories. Surface a small note so the
       // user understands why the orphans-only view looks the way it does.
+      // This branch only fires when `orphans.length > 0` by design: the
+      // `isEmpty` short-circuit above (line ~220) catches the
+      // zero-memories-and-zero-core case with the empty-state copy, so we
+      // don't need a redundant `orphans.length === 0` branch here.
       orphans.length > 0 ? (
         <p
           className="text-xs italic text-muted-foreground"

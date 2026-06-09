@@ -90,6 +90,17 @@ pub async fn get_agent_memory(
     // store — that's the local source of truth for "agents I own". The UI
     // must already have hidden the section for non-owners; this is just
     // defense in depth.
+    //
+    // Why `managed_agents` rather than a NIP-OA `kind:0` lookup (the gate
+    // the archive command uses): the question this surface needs to answer
+    // is "do I have the seckey to decrypt this agent's engrams?", not
+    // "does this agent's `kind:0` declare me as its OA owner?". The former
+    // is what `managed_agents` records — it can't lie, you either have the
+    // key locally or you don't. The latter is forgeable (a malicious agent
+    // can put any pubkey in their `auth` tag) and would also require a
+    // relay roundtrip on every panel open. Keep this gate; don't swap it
+    // back to `resolve_oa_owner` "for consistency" — they're answering
+    // different questions.
     let agent = PublicKey::from_hex(&agent_pubkey)
         .map_err(|e| format!("agent pubkey must be 64-hex: {e}"))?;
 
@@ -118,6 +129,11 @@ pub async fn get_agent_memory(
         "limit": ENGRAM_FETCH_LIMIT,
     });
     let events = query_relay(&state, &[filter]).await?;
+    // `>=` is intentional and accepts a false-positive at exactly
+    // ENGRAM_FETCH_LIMIT events: if the relay returned the cap, we can't
+    // distinguish "exactly cap" from "cap because clipped". The banner copy
+    // says "may be incomplete" which covers the off-by-one. Switch to a
+    // delta-cursor sync in IXI-60 if this matters in practice.
     let truncated = events.len() as u32 >= ENGRAM_FETCH_LIMIT;
 
     // ── Validate, decrypt, group by `d` (NIP-AE Listing) ────────────────

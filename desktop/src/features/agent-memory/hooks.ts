@@ -13,9 +13,24 @@ export const agentMemoryQueryKey = (agentPubkey: string) =>
 
 /**
  * Synchronous gate: does this desktop manage the agent? Used by the profile
- * panel to hide the Memory section entirely for non-owners. Returns
- * `undefined` while the managed-agent list is loading so the panel can
- * defer the section briefly rather than flash it for one frame.
+ * panel to hide the Memory section entirely for non-owners.
+ *
+ * Returns `boolean | undefined`:
+ *   - `undefined` is the *loading* state (managed-agent list still resolving).
+ *     Callers should defer rendering, not show an error.
+ *   - `true` / `false` once the list is known.
+ *
+ * Why `managed_agents` (not NIP-OA `kind:0` via `useOaOwnerQuery`)?
+ * The archive button gates on `useOaOwnerQuery` because publishing a
+ * `kind:9035` requires verifying NIP-OA cryptographically — the action is
+ * *signing as the OA owner*. The memory viewer's question is different:
+ * "do I have the seckey to decrypt this agent's engrams?" `managed_agents`
+ * answers exactly that — it's the local source of truth for "agents whose
+ * keys this desktop holds." NIP-OA on its own is weaker for this surface:
+ * a malicious agent can forge an `auth` tag in their `kind:0` pointing at
+ * any pubkey, but only the desktop that actually holds the seckey can
+ * decrypt. Don't "fix" this back to `useOaOwnerQuery` — it would replace
+ * a precise predicate with a weaker one and add a relay roundtrip.
  *
  * Lowercase compare because pubkeys can arrive from either side in mixed
  * case via Nostr libs; the underlying store stores them as-given.
