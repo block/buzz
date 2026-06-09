@@ -1,6 +1,21 @@
-import type { InboxFilter, InboxItem } from "@/features/home/lib/inbox";
+import { ChevronDown, Inbox } from "lucide-react";
+
+import {
+  formatInboxTypeLabel,
+  type InboxFilter,
+  type InboxItem,
+} from "@/features/home/lib/inbox";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { Markdown } from "@/shared/ui/markdown";
+import { TopChromeBackdrop } from "@/shared/ui/TopChromeBackdrop";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const FILTER_OPTIONS: Array<{ label: string; value: InboxFilter }> = [
@@ -18,6 +33,7 @@ type InboxListPaneProps = {
   onFilterChange: (filter: InboxFilter) => void;
   onSelect: (itemId: string) => void;
   selectedId: string | null;
+  showRightDivider?: boolean;
 };
 
 export function InboxListPane({
@@ -27,29 +43,60 @@ export function InboxListPane({
   onFilterChange,
   onSelect,
   selectedId,
+  showRightDivider = false,
 }: InboxListPaneProps) {
+  const activeFilter = FILTER_OPTIONS.find((option) => option.value === filter);
+
   return (
-    <section className="flex min-h-0 min-w-0 flex-col overflow-hidden bg-background/60">
-      <div className="px-5 pb-3 pt-14">
-        <div className="flex flex-nowrap gap-1">
-          {FILTER_OPTIONS.map((option) => (
-            <Button
-              className="h-7 rounded-full border border-transparent px-1.5 text-[10.5px] font-medium text-muted-foreground data-[active=true]:border-border/70 data-[active=true]:bg-background/80 data-[active=true]:text-foreground data-[active=true]:shadow-xs data-[active=true]:backdrop-blur-sm"
-              data-active={filter === option.value}
-              key={option.value}
-              onClick={() => onFilterChange(option.value)}
-              size="sm"
-              type="button"
-              variant="ghost"
-            >
-              {option.label}
-            </Button>
-          ))}
+    <section
+      className={cn(
+        "relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-background/60",
+        showRightDivider &&
+          "after:pointer-events-none after:absolute after:bottom-0 after:right-0 after:top-10 after:z-40 after:w-px after:bg-border/35 after:content-['']",
+      )}
+    >
+      <TopChromeBackdrop className="h-[76px]" />
+      <div className="absolute inset-x-0 top-[42px] z-40 min-h-[32px] px-5 py-[4px]">
+        <div className="flex min-w-0 items-center justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-[6px]">
+            <Inbox className="h-[14px] w-[14px] shrink-0 text-muted-foreground" />
+            <h2 className="translate-y-px truncate text-sm font-semibold leading-5 tracking-tight">
+              Inbox
+            </h2>
+          </div>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full border-border/70 bg-background/70 px-2.5 text-[11px] font-medium leading-[1] text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/60 hover:text-foreground"
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <span>{activeFilter?.label ?? "All"}</span>
+                <ChevronDown className="h-3 w-3" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-[10rem]">
+              <DropdownMenuRadioGroup
+                onValueChange={(value) => onFilterChange(value as InboxFilter)}
+                value={filter}
+              >
+                {FILTER_OPTIONS.map((option) => (
+                  <DropdownMenuRadioItem
+                    key={option.value}
+                    value={option.value}
+                  >
+                    {option.label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
       <div
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain pt-[76px]"
         data-testid="home-inbox-list"
       >
         {items.length === 0 ? (
@@ -68,13 +115,14 @@ export function InboxListPane({
             {items.map((item) => {
               const isSelected = item.id === selectedId;
               const isDone = doneSet.has(item.id);
+              const typeLabel = formatInboxTypeLabel(item);
 
               return (
                 <button
                   className={cn(
                     "flex w-full items-start gap-2.5 border-l px-5 py-2 text-left transition-colors",
                     isSelected
-                      ? "border-l-primary bg-muted/30"
+                      ? "border-l-transparent bg-muted/30"
                       : "border-l-transparent hover:bg-muted/25 active:bg-muted/40",
                   )}
                   data-testid={`home-inbox-item-${item.id}`}
@@ -85,7 +133,7 @@ export function InboxListPane({
                   <div className="relative">
                     <UserAvatar
                       avatarUrl={item.avatarUrl}
-                      className="h-8 w-8 rounded-xl"
+                      className="h-8 w-8"
                       displayName={item.senderLabel}
                       size="md"
                     />
@@ -118,28 +166,32 @@ export function InboxListPane({
                       </span>
                     </div>
 
-                    <p
+                    <div
                       className={cn(
-                        "mt-0.5 line-clamp-2 text-sm leading-5",
+                        "mt-0.5 line-clamp-2 text-sm leading-5 [&_*]:inline [&_a]:font-medium [&_a]:text-current [&_br]:hidden [&_p]:inline",
                         isDone
                           ? "font-normal text-muted-foreground"
                           : "font-semibold text-foreground",
                       )}
                     >
-                      {item.preview}
-                    </p>
+                      <Markdown
+                        className="inline max-w-full text-inherit"
+                        content={item.preview}
+                        interactive={false}
+                        mentionNames={item.mentionNames}
+                        tight
+                      />
+                    </div>
 
                     <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      {item.channelLabel ? (
-                        <span
-                          className={cn(
-                            "text-[11px] text-muted-foreground",
-                            isDone ? "font-normal" : "font-semibold",
-                          )}
-                        >
-                          #{item.channelLabel}
-                        </span>
-                      ) : null}
+                      <span
+                        className={cn(
+                          "text-[11px] text-muted-foreground",
+                          isDone ? "font-normal" : "font-semibold",
+                        )}
+                      >
+                        {typeLabel}
+                      </span>
                     </div>
                   </div>
                 </button>

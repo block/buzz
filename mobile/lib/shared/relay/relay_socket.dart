@@ -178,7 +178,7 @@ class RelaySocket {
 
     try {
       // Decode bech32 nsec to hex private key.
-      final privkeyHex = nostr.Nip19.decodePrivkey(_nsec);
+      final privkeyHex = nostr.Nip19.decode(payload: _nsec).data;
       if (privkeyHex.isEmpty) {
         _failAuth(Exception('Invalid nsec'));
         return;
@@ -195,11 +195,11 @@ class RelaySocket {
         kind: EventKind.auth,
         content: '',
         tags: tags,
-        privkey: privkeyHex,
+        secretKey: privkeyHex,
       );
 
       _pendingAuthEventId = event.id;
-      send(['AUTH', event.toJson()]);
+      send(['AUTH', event.toMap()]);
     } catch (e) {
       _failAuth(e);
     }

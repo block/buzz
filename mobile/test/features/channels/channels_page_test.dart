@@ -332,6 +332,7 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
       pubkey: state.pubkey,
       contexts: state.contexts,
       version: state.version + 1,
+      locallyForcedChannelIds: state.locallyForcedChannelIds,
     );
   }
 

@@ -7,10 +7,7 @@ use tauri::State;
 use crate::{
     app_state::AppState,
     events,
-    models::{
-        ProfileInfo, SearchUsersResponse, SetPresenceResponse, UserNotesResponse,
-        UsersBatchResponse,
-    },
+    models::{ProfileInfo, SearchUsersResponse, UserNotesResponse, UsersBatchResponse},
     nostr_convert,
     relay::{query_relay, submit_event},
 };
@@ -268,25 +265,6 @@ pub async fn get_presence(
         .into_iter()
         .map(|(pk, (_, status))| (pk, status))
         .collect())
-}
-
-#[tauri::command]
-pub async fn set_presence(
-    status: PresenceStatus,
-    state: State<'_, AppState>,
-) -> Result<SetPresenceResponse, String> {
-    let status_str = match status {
-        PresenceStatus::Online => "online",
-        PresenceStatus::Away => "away",
-        PresenceStatus::Offline => "offline",
-    };
-    let builder = events::build_presence(status_str)?;
-    submit_event(builder, &state).await?;
-
-    Ok(SetPresenceResponse {
-        status,
-        ttl_seconds: 60,
-    })
 }
 
 fn current_pubkey_hex(state: &AppState) -> Result<String, String> {

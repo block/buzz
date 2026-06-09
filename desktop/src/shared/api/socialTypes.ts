@@ -3,6 +3,14 @@ export type UserNote = {
   pubkey: string;
   createdAt: number;
   content: string;
+  tags: string[][];
+};
+
+export type NoteReactionSummary = {
+  noteId: string;
+  emoji: string;
+  count: number;
+  pubkeys: string[];
 };
 
 export type UserNotesCursor = {

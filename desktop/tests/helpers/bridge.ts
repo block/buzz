@@ -42,7 +42,7 @@ type MockCommandAvailability = {
 };
 
 type MockBridgeOptions = {
-  acpProvidersCatalog?: Record<string, unknown>[];
+  acpRuntimesCatalog?: Record<string, unknown>[];
   managedAgentPrereqs?: {
     acp?: MockCommandAvailability;
     mcp?: MockCommandAvailability;
@@ -70,6 +70,25 @@ type MockBridgeOptions = {
    * evaluates false).
    */
   relayRole?: "owner" | "admin" | "member" | null;
+  /**
+   * Reporter pubkey injected into mocked mesh serve targets. Defaults to the
+   * active identity; specs can override to catch malformed/missing #p handling.
+   */
+  meshReporterPubkey?: string;
+  /**
+   * Descriptors returned by the mocked `pick_and_upload_media` /
+   * `upload_media_bytes` commands. When omitted, the bridge returns a single
+   * generic PDF so the file-attachment flow can be exercised by default. An
+   * explicit `[]` is honoured (models a picker cancel / no files selected).
+   */
+  uploadDescriptors?: {
+    url: string;
+    sha256: string;
+    size: number;
+    type: string;
+    uploaded: number;
+    filename?: string;
+  }[];
 };
 
 type BridgeOptions = {
@@ -176,6 +195,7 @@ export async function installBridge(page: Page, options: BridgeOptions) {
       const testWindow = window as Window & {
         __SPROUT_E2E__?: Record<string, unknown>;
         __SPROUT_E2E_APP_BADGE_COUNT__?: number;
+        __SPROUT_E2E_APP_BADGE_STATE__?: string;
         __SPROUT_E2E_CLICK_NOTIFICATION__?: (index: number) => boolean;
         __SPROUT_E2E_NOTIFICATIONS__?: Array<{
           body: string | null;
@@ -193,6 +213,7 @@ export async function installBridge(page: Page, options: BridgeOptions) {
         relayWsUrl: relayWsUrl ?? currentConfig.relayWsUrl,
       };
       testWindow.__SPROUT_E2E_APP_BADGE_COUNT__ = 0;
+      testWindow.__SPROUT_E2E_APP_BADGE_STATE__ = "none";
       testWindow.__SPROUT_E2E_CLICK_NOTIFICATION__ = (index: number) => {
         const notification = notificationInstances[index];
         if (!notification) {

@@ -1,7 +1,7 @@
 import * as React from "react";
 import { AnimatePresence, LayoutGroup, motion } from "motion/react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { X } from "lucide-react";
+import { FileText, X } from "lucide-react";
 
 import type { BlobDescriptor } from "@/shared/api/tauri";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
@@ -50,9 +50,50 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
           {attachments.map((attachment) => {
             const hash = shortHash(attachment.sha256);
             const isVideo = attachment.type.startsWith("video/");
+            const isImage = attachment.type.startsWith("image/");
+            const isFile = !isVideo && !isImage;
             const thumbUrl = attachment.thumb
               ? rewriteRelayUrl(attachment.thumb)
               : rewriteRelayUrl(attachment.url);
+
+            // Generic file: compact chip with a file icon + filename, plus the
+            // same remove button. No lightbox (nothing to preview).
+            if (isFile) {
+              const label =
+                attachment.filename ||
+                attachment.url.split("/").pop() ||
+                `file ${hash}`;
+              return (
+                <motion.div
+                  key={attachment.url}
+                  layout
+                  initial={false}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                  className="group relative"
+                >
+                  <div className="flex h-5 max-w-[10rem] items-center gap-1 rounded border border-border/70 bg-muted px-1.5">
+                    <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
+                    <span className="truncate text-[10px] text-muted-foreground">
+                      {label}
+                    </span>
+                  </div>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={() => onRemove(attachment.url)}
+                        className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-foreground text-background group-hover:flex"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Remove attachment</TooltipContent>
+                  </Tooltip>
+                </motion.div>
+              );
+            }
 
             return (
               <motion.div

@@ -270,7 +270,7 @@ class MediaUploadService {
 
   String _buildUploadAuthHeader(String sha256) {
     final authEvent = _buildUploadAuthEvent(sha256);
-    final authJson = jsonEncode(authEvent.toJson());
+    final authJson = authEvent.toJson();
     final encoded = base64Url.encode(utf8.encode(authJson)).replaceAll('=', '');
     return 'Nostr $encoded';
   }
@@ -281,7 +281,7 @@ class MediaUploadService {
       throw Exception('Cannot upload media: no signing key available');
     }
 
-    final privkeyHex = nostr.Nip19.decodePrivkey(nsec);
+    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
     if (privkeyHex.isEmpty) {
       throw Exception('Invalid nsec');
     }
@@ -300,7 +300,7 @@ class MediaUploadService {
       kind: _uploadAuthKind,
       content: 'Upload sprout-media',
       tags: tags,
-      privkey: privkeyHex,
+      secretKey: privkeyHex,
       verify: false,
     );
   }

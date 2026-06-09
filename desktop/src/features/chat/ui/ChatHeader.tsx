@@ -10,24 +10,30 @@ import {
   Zap,
 } from "lucide-react";
 import type * as React from "react";
+import { createPortal } from "react-dom";
 
 import type { ChannelType, ChannelVisibility } from "@/shared/api/types";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
 import { cn } from "@/shared/lib/cn";
-import { useSidebar } from "@/shared/ui/sidebar";
 
 type ChatHeaderProps = {
   actions?: React.ReactNode;
+  actionsPlacement?: "inline" | "top-right";
+  actionsRightInset?: string;
+  belowSystemChrome?: boolean;
+  density?: "default" | "compact";
   title: string;
   description?: string;
   channelType?: ChannelType;
   visibility?: ChannelVisibility;
+  leadingContent?: React.ReactNode;
   mode?: "home" | "channel" | "agents" | "workflows" | "pulse" | "projects";
   overlaysContent?: boolean;
   statusBadge?: React.ReactNode;
 };
 
 const HEADER_ICON_CLASS = "h-[14px] w-[14px] text-muted-foreground";
+const CHANNEL_HASH_ICON_CLASS = "h-[14px] w-[14px] translate-y-px";
 
 function ChannelIcon({
   channelType,
@@ -70,42 +76,55 @@ function ChannelIcon({
     return <FileText className={HEADER_ICON_CLASS} />;
   }
 
-  return <Hash className={HEADER_ICON_CLASS} />;
+  return <Hash className={CHANNEL_HASH_ICON_CLASS} color="gray" />;
 }
 
 export function ChatHeader({
   actions,
+  actionsPlacement = "inline",
+  actionsRightInset,
+  belowSystemChrome = false,
+  density = "default",
   title,
   description,
   channelType,
   visibility,
+  leadingContent,
   mode = "channel",
   overlaysContent = false,
   statusBadge,
 }: ChatHeaderProps) {
   const trimmedDescription = description?.trim() ?? "";
-  const { state: sidebarState } = useSidebar();
-  const reserveGlobalControls = sidebarState === "collapsed";
+  const topRightActions = (
+    <div className="fixed right-3 top-[9px] z-[45] flex shrink-0 items-center gap-1">
+      <UpdateIndicator />
+      {actions ? <div className="shrink-0">{actions}</div> : null}
+    </div>
+  );
 
-  return (
+  const header = (
     <header
       className={cn(
-        "relative z-30 flex min-h-[44px] min-w-0 shrink-0 cursor-default select-none items-center gap-[10px] bg-background/70 py-[6px] pl-[16px] pr-[8px] backdrop-blur-xl transition-[margin,padding] duration-200 ease-linear supports-[backdrop-filter]:bg-background/55 sm:pl-[24px] sm:pr-[12px]",
-        overlaysContent && "-mb-[44px]",
-        reserveGlobalControls && "md:pl-[160px]",
+        "pointer-events-auto relative z-30 flex min-w-0 shrink-0 cursor-default select-none items-center gap-[10px] bg-transparent pl-[16px] pr-[8px] transition-[margin,padding] duration-200 ease-linear sm:pr-[12px]",
+        density === "compact"
+          ? "h-[32px] py-0"
+          : "min-h-[44px] py-[6px] sm:pl-[24px]",
+        overlaysContent && !belowSystemChrome && "-mb-[44px]",
       )}
       data-testid="chat-header"
       data-tauri-drag-region
     >
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 flex-wrap items-center gap-[4px]">
-          <ChannelIcon
-            channelType={channelType}
-            mode={mode}
-            visibility={visibility}
-          />
+          {leadingContent ?? (
+            <ChannelIcon
+              channelType={channelType}
+              mode={mode}
+              visibility={visibility}
+            />
+          )}
           <h1
-            className="min-w-0 truncate text-sm font-semibold leading-5 tracking-tight"
+            className="min-w-0 translate-y-px truncate text-base font-semibold leading-6 tracking-tight"
             data-testid="chat-title"
             title={trimmedDescription || undefined}
           >
@@ -119,10 +138,34 @@ export function ChatHeader({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-1">
-        <UpdateIndicator />
-        {actions ? <div className="shrink-0">{actions}</div> : null}
-      </div>
+      {actionsPlacement === "top-right" ? (
+        typeof document === "undefined" ? null : (
+          createPortal(topRightActions, document.body)
+        )
+      ) : actionsRightInset ? (
+        <div
+          className="absolute top-1/2 z-10 flex shrink-0 -translate-y-1/2 items-center gap-1"
+          style={{ right: actionsRightInset }}
+        >
+          <UpdateIndicator />
+          {actions ? <div className="shrink-0">{actions}</div> : null}
+        </div>
+      ) : (
+        <div className="flex shrink-0 items-center gap-1">
+          <UpdateIndicator />
+          {actions ? <div className="shrink-0">{actions}</div> : null}
+        </div>
+      )}
     </header>
+  );
+
+  if (!belowSystemChrome) {
+    return header;
+  }
+
+  return (
+    <div className="pointer-events-none relative z-30 h-[92px] -mb-[92px] bg-background/80 pb-[9px] pt-[48px] backdrop-blur-md after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-border/35 after:content-[''] supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55">
+      {header}
+    </div>
   );
 }

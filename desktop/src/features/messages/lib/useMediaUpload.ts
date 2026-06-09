@@ -6,18 +6,6 @@ import {
   uploadMediaBytes,
 } from "@/shared/api/tauri";
 
-export const ALLOWED_MEDIA_TYPES = [
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-  "video/mp4",
-  "video/quicktime",
-  "video/x-matroska",
-  "video/webm",
-  "video/x-msvideo",
-];
-
 /**
  * First 4 hex chars of the sha256 — used as a short display name.
  * Note: 4 hex chars = 65,536 possible values. Collision is unlikely
@@ -137,18 +125,9 @@ export function useMediaUpload() {
       const files = Array.from(event.dataTransfer.files);
       if (files.length === 0) return;
 
-      const validFiles = files.filter((f) =>
-        ALLOWED_MEDIA_TYPES.includes(f.type),
-      );
-
-      if (validFiles.length === 0) {
-        setUploadState({
-          status: "error",
-          message:
-            "Unsupported file type. Supported: JPEG, PNG, GIF, WebP, MP4, MOV, MKV, WebM, AVI",
-        });
-        return;
-      }
+      // Accept any file. The Tauri layer and the relay enforce the deny-list
+      // (active-content + executables) and size caps; everything else uploads.
+      const validFiles = files;
 
       setUploadingCount((c) => c + validFiles.length);
       const baseIndex = reserveSlots(validFiles.length);
@@ -160,9 +139,10 @@ export function useMediaUpload() {
         (async () => {
           try {
             const buffer = await file.arrayBuffer();
-            const descriptor = await uploadMediaBytes([
-              ...new Uint8Array(buffer),
-            ]);
+            const descriptor = await uploadMediaBytes(
+              [...new Uint8Array(buffer)],
+              file.name,
+            );
             fillSlot(slotIndex, descriptor);
           } catch (err) {
             onUploadError(err);
@@ -228,8 +208,10 @@ export function useMediaUpload() {
       preventDefault: () => void;
     }) => {
       const items = Array.from(event.clipboardData.items);
+      // Only clipboard items that are actual files — `getAsFile()` returns null
+      // for text/string items, so pasting plain text never triggers an upload.
       const mediaFiles = items
-        .filter((item) => ALLOWED_MEDIA_TYPES.includes(item.type))
+        .filter((item) => item.kind === "file")
         .map((item) => item.getAsFile())
         .filter((f): f is File => f !== null);
       if (mediaFiles.length === 0) return;
@@ -245,9 +227,10 @@ export function useMediaUpload() {
         (async () => {
           try {
             const buffer = await file.arrayBuffer();
-            const descriptor = await uploadMediaBytes([
-              ...new Uint8Array(buffer),
-            ]);
+            const descriptor = await uploadMediaBytes(
+              [...new Uint8Array(buffer)],
+              file.name,
+            );
             fillSlot(slotIndex, descriptor);
           } catch (err) {
             onUploadError(err);
@@ -261,11 +244,13 @@ export function useMediaUpload() {
   /** Upload a File directly — used by Tiptap's editorProps.handlePaste. */
   const uploadFile = React.useCallback(
     async (file: File) => {
-      if (!ALLOWED_MEDIA_TYPES.includes(file.type)) return;
       setUploadingCount((c) => c + 1);
       try {
         const buffer = await file.arrayBuffer();
-        const descriptor = await uploadMediaBytes([...new Uint8Array(buffer)]);
+        const descriptor = await uploadMediaBytes(
+          [...new Uint8Array(buffer)],
+          file.name,
+        );
         onUploaded(descriptor);
       } catch (err) {
         onUploadError(err);

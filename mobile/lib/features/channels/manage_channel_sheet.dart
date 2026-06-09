@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
+import 'channel_mutes/channel_mutes_provider.dart';
 
 class ManageChannelSheet extends HookConsumerWidget {
   final Channel channel;
@@ -27,6 +29,9 @@ class ManageChannelSheet extends HookConsumerWidget {
       }
       return null;
     }, [canvasAsync.asData?.value.content, isEditingCanvas.value]);
+
+    final mutesState = ref.watch(channelMutesProvider);
+    final isMuted = mutesState.store.channels[channel.id]?.muted == true;
 
     final canJoin =
         channel.visibility == 'open' &&
@@ -120,6 +125,25 @@ class ManageChannelSheet extends HookConsumerWidget {
                 ),
               ),
             ],
+            const SizedBox(height: Grid.xs),
+            SwitchListTile(
+              title: const Text('Mute channel'),
+              subtitle: const Text('Suppress notifications and unread badges'),
+              secondary: const Icon(LucideIcons.bellOff),
+              contentPadding: EdgeInsets.zero,
+              value: isMuted,
+              onChanged: (value) {
+                if (value) {
+                  ref
+                      .read(channelMutesProvider.notifier)
+                      .muteChannel(channel.id);
+                } else {
+                  ref
+                      .read(channelMutesProvider.notifier)
+                      .unmuteChannel(channel.id);
+                }
+              },
+            ),
             if (canJoin || canLeave) ...[
               const SizedBox(height: Grid.xs),
               Wrap(

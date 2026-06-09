@@ -127,7 +127,7 @@ async fn ensure_partition(
          FOR VALUES FROM ('{start_date_str}') TO ('{end_date_str}')"
     );
 
-    sqlx::query(&sql).execute(pool).await?;
+    sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
     info!("added partition {partition_name}");
 
     Ok(())

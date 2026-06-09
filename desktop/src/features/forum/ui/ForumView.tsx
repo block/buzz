@@ -143,7 +143,7 @@ export function ForumView({
   }
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col pt-11">
       {/* New post area */}
       <div className="border-b border-border/60 p-4">
         {isComposerOpen ? (

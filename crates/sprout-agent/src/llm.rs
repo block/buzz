@@ -56,13 +56,14 @@ impl Llm {
     pub async fn complete(
         &self,
         cfg: &Config,
+        system_prompt: &str,
         history: &[HistoryItem],
         tools: &[ToolDef],
     ) -> Result<LlmResponse, AgentError> {
         match cfg.provider {
             Provider::Anthropic => {
                 let v = self
-                    .post_anthropic(cfg, &anthropic_body(cfg, history, tools))
+                    .post_anthropic(cfg, &anthropic_body(cfg, system_prompt, history, tools))
                     .await?;
                 parse_anthropic(v)
             }
@@ -70,12 +71,12 @@ impl Llm {
                 self.openai_request(cfg, |use_responses| {
                     if use_responses {
                         (
-                            responses_body(cfg, history, tools),
+                            responses_body(cfg, system_prompt, history, tools),
                             parse_responses as OpenAiParse,
                         )
                     } else {
                         (
-                            openai_body(cfg, history, tools),
+                            openai_body(cfg, system_prompt, history, tools),
                             parse_openai as OpenAiParse,
                         )
                     }
@@ -227,7 +228,12 @@ impl Llm {
     }
 }
 
-fn anthropic_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> Value {
+fn anthropic_body(
+    cfg: &Config,
+    system_prompt: &str,
+    history: &[HistoryItem],
+    tools: &[ToolDef],
+) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     let mut pending: Vec<Value> = Vec::new();
     let flush = |out: &mut Vec<Value>, p: &mut Vec<Value>| {
@@ -275,7 +281,7 @@ fn anthropic_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> V
         })
         .collect();
     let mut body = json!({ "model": cfg.model, "max_tokens": cfg.max_output_tokens,
-        "system": cfg.system_prompt, "messages": messages });
+        "system": system_prompt, "messages": messages });
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
     }
@@ -295,12 +301,35 @@ fn anthropic_tool_result_content(content: &[ToolResultContent]) -> Vec<Value> {
         .collect()
 }
 
-fn openai_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> Value {
-    let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": cfg.system_prompt })];
+fn openai_body(
+    cfg: &Config,
+    system_prompt: &str,
+    history: &[HistoryItem],
+    tools: &[ToolDef],
+) -> Value {
+    let mut messages: Vec<Value> = vec![json!({ "role": "system", "content": system_prompt })];
+    // Images returned from tool calls ride on a trailing `role:"user"`
+    // message because OpenAI Chat's `role:"tool"` content is text-only. We
+    // batch them across a run of adjacent ToolResult items so that all
+    // `role:"tool"` messages stay contiguous — splitting them with a user
+    // turn breaks OpenAI-Chat-compatible frontends that translate back to
+    // Anthropic `tool_result` (notably Databricks model serving), since
+    // Anthropic requires every `tool_use` in one assistant turn to be
+    // answered by a single immediately-following user message.
+    let mut pending_images: Vec<Value> = Vec::new();
+    let flush_images = |messages: &mut Vec<Value>, pending: &mut Vec<Value>| {
+        if !pending.is_empty() {
+            messages.push(json!({ "role": "user", "content": std::mem::take(pending) }));
+        }
+    };
     for item in history {
         match item {
-            HistoryItem::User(text) => messages.push(json!({ "role": "user", "content": text })),
+            HistoryItem::User(text) => {
+                flush_images(&mut messages, &mut pending_images);
+                messages.push(json!({ "role": "user", "content": text }));
+            }
             HistoryItem::Assistant { text, tool_calls } => {
+                flush_images(&mut messages, &mut pending_images);
                 let mut msg = serde_json::Map::new();
                 msg.insert("role".into(), json!("assistant"));
                 msg.insert("content".into(), json!(text.as_str()));
@@ -323,13 +352,11 @@ fn openai_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> Valu
                 messages.push(json!({
                     "role": "tool", "tool_call_id": r.provider_id,
                     "content": openai_tool_text_content(&r.content) }));
-                let image_content = openai_image_user_content(&r.content);
-                if !image_content.is_empty() {
-                    messages.push(json!({ "role": "user", "content": image_content }));
-                }
+                pending_images.extend(openai_image_user_content(&r.content));
             }
         }
     }
+    flush_images(&mut messages, &mut pending_images);
     let tools_json: Vec<Value> = tools
         .iter()
         .map(|t| {
@@ -383,7 +410,12 @@ fn openai_image_user_content(content: &[ToolResultContent]) -> Vec<Value> {
 // "No tool call found for call_id ...". `HistoryItem` ordering already
 // guarantees this.
 
-fn responses_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> Value {
+fn responses_body(
+    cfg: &Config,
+    system_prompt: &str,
+    history: &[HistoryItem],
+    tools: &[ToolDef],
+) -> Value {
     let mut input: Vec<Value> = Vec::with_capacity(history.len());
     for item in history {
         match item {
@@ -447,7 +479,7 @@ fn responses_body(cfg: &Config, history: &[HistoryItem], tools: &[ToolDef]) -> V
 
     let mut body = json!({
         "model": cfg.model,
-        "instructions": cfg.system_prompt,
+        "instructions": system_prompt,
         "max_output_tokens": cfg.max_output_tokens,
         "input": input,
     });
@@ -536,10 +568,12 @@ fn parse_responses(v: Value) -> Result<LlmResponse, AgentError> {
         Some("completed") => ProviderStop::EndTurn,
         _ => ProviderStop::Other,
     };
+    let input_tokens = sum_usage(&v, &["input_tokens"]);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
+        input_tokens,
     })
 }
 
@@ -551,6 +585,54 @@ fn map_stop(s: Option<&str>) -> ProviderStop {
         Some("refusal" | "content_filter") => ProviderStop::Refusal,
         _ => ProviderStop::Other,
     }
+}
+
+/// Sum a set of `usage` token fields, returning `None` only when the `usage`
+/// object is absent or carries none of the requested fields. A field that is
+/// present is added; a field that is missing contributes 0. This keeps the
+/// result an inclusive total (so cached tokens are never silently dropped)
+/// while still distinguishing "no usage reported" from "usage was zero".
+fn sum_usage(v: &Value, fields: &[&str]) -> Option<u64> {
+    let usage = v.get("usage")?;
+    let mut total: u64 = 0;
+    let mut saw_any = false;
+    for f in fields {
+        if let Some(n) = usage.get(*f).and_then(Value::as_u64) {
+            total = total.saturating_add(n);
+            saw_any = true;
+        }
+    }
+    saw_any.then_some(total)
+}
+
+/// Input-token total for Anthropic / Databricks (Anthropic-style) responses.
+/// `input_tokens` alone EXCLUDES cached tokens, so we sum it with the two
+/// cache fields to get the inclusive total the context budget must gate on.
+fn anthropic_input_tokens(v: &Value) -> Option<u64> {
+    sum_usage(
+        v,
+        &[
+            "input_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ],
+    )
+}
+
+/// Input-token total for OpenAI Chat Completions and Databricks responses.
+/// OpenAI's `prompt_tokens` is already inclusive. Databricks uses the same
+/// `prompt_tokens` wire field but ALSO reports Anthropic-style cache fields
+/// alongside it, so we sum them; the cache fields are simply absent (and
+/// contribute 0) for vanilla OpenAI.
+fn openai_chat_input_tokens(v: &Value) -> Option<u64> {
+    sum_usage(
+        v,
+        &[
+            "prompt_tokens",
+            "cache_read_input_tokens",
+            "cache_creation_input_tokens",
+        ],
+    )
 }
 
 fn str_field(v: &Value, key: &str) -> String {
@@ -578,10 +660,12 @@ fn parse_anthropic(v: Value) -> Result<LlmResponse, AgentError> {
             }
         }
     }
+    let input_tokens = anthropic_input_tokens(&v);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
+        input_tokens,
     })
 }
 
@@ -612,10 +696,12 @@ fn parse_openai(v: Value) -> Result<LlmResponse, AgentError> {
             )?);
         }
     }
+    let input_tokens = openai_chat_input_tokens(&v);
     Ok(LlmResponse {
         text,
         tool_calls,
         stop,
+        input_tokens,
     })
 }
 
@@ -838,6 +924,7 @@ mod tests {
             max_sessions: 1,
             max_line_bytes: 1024 * 1024,
             max_history_bytes: 16 * 1024 * 1024,
+            max_context_tokens: 200_000,
             max_handoffs: 1,
             max_parallel_tools: 1,
             hook_timeout: Duration::from_secs(1),
@@ -848,6 +935,7 @@ mod tests {
             base_url: "http://example.invalid".into(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
+            hints_enabled: true,
         }
     }
 
@@ -878,7 +966,7 @@ mod tests {
 
     #[test]
     fn anthropic_tool_result_preserves_image_block() {
-        let body = anthropic_body(&cfg(Provider::Anthropic), &image_history(), &[]);
+        let body = anthropic_body(&cfg(Provider::Anthropic), "system", &image_history(), &[]);
         let content = &body["messages"][2]["content"][0]["content"];
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "image");
@@ -924,7 +1012,12 @@ mod tests {
                 "properties": {"command": {"type": "string"}},
             }),
         }];
-        let body = responses_body(&cfg_responses(), &[HistoryItem::User("hi".into())], &tools);
+        let body = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &tools,
+        );
         assert_eq!(body["model"], "model");
         assert_eq!(body["instructions"], "system");
         assert_eq!(body["max_output_tokens"], 1024);
@@ -952,7 +1045,7 @@ mod tests {
         // function_call item *must* appear in `input[]` before its matching
         // function_call_output, otherwise the API rejects with
         // "No tool call found for call_id ...".
-        let body = responses_body(&cfg_responses(), &tool_call_history(), &[]);
+        let body = responses_body(&cfg_responses(), "system", &tool_call_history(), &[]);
         let input = body["input"].as_array().unwrap();
 
         // [0] user, [1] assistant text, [2] function_call, [3] function_call_output
@@ -991,7 +1084,7 @@ mod tests {
                 }],
             },
         ];
-        let body = responses_body(&cfg_responses(), &history, &[]);
+        let body = responses_body(&cfg_responses(), "system", &history, &[]);
         let input = body["input"].as_array().unwrap();
         assert_eq!(input.len(), 2);
         assert_eq!(input[0]["role"], "user");
@@ -1000,7 +1093,7 @@ mod tests {
 
     #[test]
     fn responses_body_image_tool_result_attaches_input_image() {
-        let body = responses_body(&cfg_responses(), &image_history(), &[]);
+        let body = responses_body(&cfg_responses(), "system", &image_history(), &[]);
         let input = body["input"].as_array().unwrap();
         // function_call_output carries the text part; image rides on a
         // trailing user message as `input_image`.
@@ -1102,7 +1195,7 @@ mod tests {
 
     #[test]
     fn openai_tool_result_adds_followup_image_user_message() {
-        let body = openai_body(&cfg(Provider::OpenAi), &image_history(), &[]);
+        let body = openai_body(&cfg(Provider::OpenAi), "system", &image_history(), &[]);
         assert_eq!(body["messages"][3]["role"], "tool");
         assert!(body["messages"][3]["content"]
             .as_str()
@@ -1114,6 +1207,81 @@ mod tests {
             body["messages"][4]["content"][0]["image_url"]["url"],
             "data:image/png;base64,aW1n"
         );
+    }
+
+    /// Regression for Databricks model serving (and any OpenAI-Chat frontend
+    /// that translates to Anthropic on the way to the model). Parallel tool
+    /// calls where one or more return images previously produced an
+    /// interleaved sequence:
+    ///   role:"tool"  (A)
+    ///   role:"user"  (image A)
+    ///   role:"tool"  (B)
+    ///   role:"user"  (image B)
+    /// The intervening user message split the run of tool results, so the
+    /// translator could no longer fold them into a single Anthropic
+    /// `tool_result`-bearing user message — Anthropic then rejected the
+    /// request with "tool_use ids were found without tool_result blocks
+    /// immediately after". Fix: every `role:"tool"` for a run of adjacent
+    /// ToolResults emits contiguously, then a single trailing user message
+    /// carries all of the images from the batch.
+    #[test]
+    fn openai_parallel_image_tool_results_stay_contiguous() {
+        let history = vec![
+            HistoryItem::User("describe both images".into()),
+            HistoryItem::Assistant {
+                text: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        provider_id: "toolu_a".into(),
+                        name: "dev__view_image".into(),
+                        arguments: serde_json::json!({"source": "a.png"}),
+                    },
+                    ToolCall {
+                        provider_id: "toolu_b".into(),
+                        name: "dev__view_image".into(),
+                        arguments: serde_json::json!({"source": "b.png"}),
+                    },
+                ],
+            },
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "toolu_a".into(),
+                content: vec![
+                    ToolResultContent::Text("10×10, 70 B (image/png from a.png)".into()),
+                    ToolResultContent::Image {
+                        data: "aaa".into(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+                is_error: false,
+            }),
+            HistoryItem::ToolResult(ToolResult {
+                provider_id: "toolu_b".into(),
+                content: vec![
+                    ToolResultContent::Text("10×10, 70 B (image/png from b.png)".into()),
+                    ToolResultContent::Image {
+                        data: "bbb".into(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+                is_error: false,
+            }),
+        ];
+        let body = openai_body(&cfg(Provider::OpenAi), "system", &history, &[]);
+        let messages = body["messages"].as_array().unwrap();
+        // [0] system, [1] user, [2] assistant(tool_calls), [3] tool A, [4] tool B, [5] user(images)
+        assert_eq!(messages.len(), 6, "messages: {messages:#?}");
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(messages[3]["tool_call_id"], "toolu_a");
+        assert_eq!(
+            messages[4]["role"], "tool",
+            "tool results must stay adjacent; intervening user message breaks Databricks/Anthropic pairing"
+        );
+        assert_eq!(messages[4]["tool_call_id"], "toolu_b");
+        assert_eq!(messages[5]["role"], "user");
+        let imgs = messages[5]["content"].as_array().unwrap();
+        assert_eq!(imgs.len(), 2);
+        assert_eq!(imgs[0]["image_url"]["url"], "data:image/png;base64,aaa");
+        assert_eq!(imgs[1]["image_url"]["url"], "data:image/png;base64,bbb");
     }
 
     /// Regression: a connection that is accepted and then dropped before any
@@ -1183,5 +1351,113 @@ mod tests {
             "server should have seen at least 2 connection attempts, saw {}",
             accepts.load(Ordering::SeqCst)
         );
+    }
+
+    // ---- usage / input-token extraction -------------------------------------
+
+    #[test]
+    fn parse_anthropic_sums_input_and_cache_tokens() {
+        // input_tokens alone excludes cached tokens; the inclusive total must
+        // sum all three so a cache-heavy turn can't undercount the budget.
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input_tokens": 100,
+                "cache_read_input_tokens": 900,
+                "cache_creation_input_tokens": 50,
+                "output_tokens": 7
+            }
+        });
+        let r = parse_anthropic(v).unwrap();
+        assert_eq!(r.input_tokens, Some(1050));
+    }
+
+    #[test]
+    fn parse_anthropic_input_tokens_only() {
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {"input_tokens": 42, "output_tokens": 3}
+        });
+        assert_eq!(parse_anthropic(v).unwrap().input_tokens, Some(42));
+    }
+
+    #[test]
+    fn parse_anthropic_missing_usage_is_none() {
+        let v = serde_json::json!({
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}]
+        });
+        assert_eq!(parse_anthropic(v).unwrap().input_tokens, None);
+    }
+
+    #[test]
+    fn parse_openai_uses_prompt_tokens() {
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 123, "completion_tokens": 4, "total_tokens": 127}
+        });
+        assert_eq!(parse_openai(v).unwrap().input_tokens, Some(123));
+    }
+
+    #[test]
+    fn parse_openai_databricks_sums_cache_fields() {
+        // Databricks uses the OpenAI chat wire format (prompt_tokens) but also
+        // reports Anthropic-style cache fields; the inclusive total sums them.
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}],
+            "usage": {
+                "prompt_tokens": 200,
+                "completion_tokens": 4,
+                "total_tokens": 204,
+                "cache_read_input_tokens": 800,
+                "cache_creation_input_tokens": 0
+            }
+        });
+        assert_eq!(parse_openai(v).unwrap().input_tokens, Some(1000));
+    }
+
+    #[test]
+    fn parse_openai_missing_usage_is_none() {
+        let v = serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}]
+        });
+        assert_eq!(parse_openai(v).unwrap().input_tokens, None);
+    }
+
+    #[test]
+    fn parse_responses_uses_input_tokens() {
+        let v = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}]
+            }],
+            "usage": {"input_tokens": 321, "output_tokens": 9, "total_tokens": 330}
+        });
+        assert_eq!(parse_responses(v).unwrap().input_tokens, Some(321));
+    }
+
+    #[test]
+    fn parse_responses_missing_usage_is_none() {
+        let v = serde_json::json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}]
+            }]
+        });
+        assert_eq!(parse_responses(v).unwrap().input_tokens, None);
+    }
+
+    #[test]
+    fn sum_usage_empty_object_is_none() {
+        // A `usage` object present but carrying none of the requested fields
+        // is "no usable reading" -> None, not Some(0).
+        let v = serde_json::json!({"usage": {"output_tokens": 5}});
+        assert_eq!(sum_usage(&v, &["input_tokens", "prompt_tokens"]), None);
     }
 }

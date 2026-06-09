@@ -285,7 +285,9 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     /Ephemeral channel\. Cleans up (tomorrow|in \d+ hours?)\./,
   );
 
-  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+  await page
+    .getByRole("button", { name: "Toggle Sidebar", exact: true })
+    .click();
   await expect(
     page.getByTestId(`channel-ephemeral-${channelName}`),
   ).toBeVisible();
@@ -842,11 +844,11 @@ test("members sidebar keeps direct pubkey entry behind a toggle", async ({
 test("open-channel members can add agents from the header", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 1280, height: 420 });
   await page.goto("/");
 
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await page.setViewportSize({ width: 1280, height: 420 });
 
   const addAgentTrigger = page.getByTestId("channel-add-bot-trigger");
   await expect(addAgentTrigger).toBeEnabled();
@@ -872,7 +874,35 @@ test("open-channel members can add agents from the header", async ({
   await expect(page.getByTestId("add-channel-bot-dialog-footer")).toBeVisible();
 });
 
-test("removing a channel-scoped agent also cleans up the managed agent record", async ({
+test("private-channel members can add members and bots without admin", async ({
+  page,
+}) => {
+  await page.goto("/");
+  // secret-projects is a private (non-DM) channel where the current user is a
+  // plain member, not owner/admin. They should still be able to add members
+  // and bots — only granting elevated roles is reserved for owners/admins.
+  await openMembersSidebar(page, "secret-projects");
+
+  // The invite card is shown to any member, not just owners/admins.
+  await expect(
+    page.getByTestId("channel-management-search-users"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("channel-management-add-members"),
+  ).toBeVisible();
+
+  // The role dropdown hides the elevated "admin" option for non-admins — the
+  // relay rejects it anyway — while keeping the non-elevated roles a member
+  // may grant (member, guest, bot).
+  const roleSelect = page.getByTestId("channel-management-add-role");
+  await expect(roleSelect.locator("option")).toHaveText([
+    "member",
+    "guest",
+    "bot",
+  ]);
+});
+
+test("removing a channel-scoped agent preserves the managed agent record", async ({
   page,
 }) => {
   const agentName = `cleanup-agent-${Date.now()}`;
@@ -893,10 +923,7 @@ test("removing a channel-scoped agent also cleans up the managed agent record", 
   await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
 
   await page.getByTestId("open-agents-view").click();
-  await expect(page.getByTestId(`managed-agent-${agentPubkey}`)).toHaveCount(0);
-
-  const commands = await readCommandLog(page);
-  expect(commands).toContain("delete_managed_agent");
+  await expect(page.getByTestId(`managed-agent-${agentPubkey}`)).toHaveCount(1);
 });
 
 test("members sidebar can respawn a stopped managed bot", async ({ page }) => {
@@ -947,7 +974,7 @@ test("members sidebar can respawn a stopped managed bot", async ({ page }) => {
   ).toBe(baselineStopCount + 1);
 });
 
-test("members sidebar supports bulk remove for managed bots", async ({
+test("members sidebar supports bulk remove for managed bots from channel", async ({
   page,
 }) => {
   const firstAgentName = `sidebar-remove-a-${Date.now()}`;
@@ -985,21 +1012,18 @@ test("members sidebar supports bulk remove for managed bots", async ({
   await page.getByTestId("open-agents-view").click();
   await expect(
     page.getByTestId(`managed-agent-${firstAgentPubkey}`),
-  ).toHaveCount(0);
+  ).toHaveCount(1);
   await expect(
     page.getByTestId(`managed-agent-${secondAgentPubkey}`),
-  ).toHaveCount(0);
+  ).toHaveCount(1);
 
   const commands = await readCommandLog(page);
   expect(
     commands.filter((command) => command === "remove_channel_member"),
   ).toHaveLength(2);
-  expect(
-    commands.filter((command) => command === "delete_managed_agent"),
-  ).toHaveLength(2);
 });
 
-test("removing a multi-channel managed bot keeps its record until it is orphaned", async ({
+test("removing a multi-channel managed bot preserves its record after removal from all channels", async ({
   page,
 }) => {
   const agentName = `multi-channel-agent-${Date.now()}`;
@@ -1035,9 +1059,6 @@ test("removing a multi-channel managed bot keeps its record until it is orphaned
   const baselineRemoves = baseline.filter(
     (c) => c === "remove_channel_member",
   ).length;
-  const baselineDeletes = baseline.filter(
-    (c) => c === "delete_managed_agent",
-  ).length;
 
   await openMembersSidebar(page, "general");
   await openMemberMenu(page, agentPubkey);
@@ -1052,16 +1073,11 @@ test("removing a multi-channel managed bot keeps its record until it is orphaned
   await expect(page.getByTestId(`managed-agent-${agentPubkey}`)).toHaveCount(1);
 
   let commands = await readCommandLog(page);
-  // First removal: 1 remove_channel_member, bot still in second channel
-  // so no delete_managed_agent yet.
+  // First removal: 1 remove_channel_member, agent record preserved.
   expect(
     commands.filter((c) => c === "remove_channel_member").length -
       baselineRemoves,
   ).toBe(1);
-  expect(
-    commands.filter((c) => c === "delete_managed_agent").length -
-      baselineDeletes,
-  ).toBe(0);
 
   await openMembersSidebar(page, secondChannelName);
   await openMemberMenu(page, agentPubkey);
@@ -1073,18 +1089,14 @@ test("removing a multi-channel managed bot keeps its record until it is orphaned
   await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
 
   await page.getByTestId("open-agents-view").click();
-  await expect(page.getByTestId(`managed-agent-${agentPubkey}`)).toHaveCount(0);
+  await expect(page.getByTestId(`managed-agent-${agentPubkey}`)).toHaveCount(1);
 
   commands = await readCommandLog(page);
-  // Second removal: bot is now orphaned, so cleanup deletes the managed agent.
+  // Second removal: agent is preserved even after removal from all channels.
   expect(
     commands.filter((c) => c === "remove_channel_member").length -
       baselineRemoves,
   ).toBe(2);
-  expect(
-    commands.filter((c) => c === "delete_managed_agent").length -
-      baselineDeletes,
-  ).toBe(1);
 });
 
 test("bulk remove stays hidden when row-level remove is not allowed", async ({
@@ -1218,7 +1230,7 @@ test("manage channel can delete an owned stream", async ({ page }) => {
   ).toBeVisible();
   await page.getByTestId("channel-delete-confirm").click();
 
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   await expect(page.getByTestId("stream-list")).not.toContainText(channelName);
 });
 

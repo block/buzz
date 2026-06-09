@@ -16,7 +16,7 @@ Sprout is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
 ┌─────────────────────────────────────────────────────────────────────┐
 │                           CLIENTS                                    │
 │                                                                      │
-│  Human (Nostr app, web, mobile)    Agent (MCP tools via sprout-mcp) │
+│  Human (Nostr app, web, mobile)    Agent (CLI tools via sprout-cli) │
 │           │                                    │                     │
 │           └──────────── WebSocket ─────────────┘                    │
 └─────────────────────────────────────────────────────────────────────┘
@@ -78,10 +78,9 @@ sprout-core  (zero I/O — types, verification, filter matching, kind registry)
          │
          └── sprout-relay       (ties everything together — the server)
 
-sprout-mcp          (agent API surface — stdio MCP server; depends on sprout-core and sprout-sdk)
 sprout-acp          (agent harness — bridges relay @mentions → AI agents via ACP/JSON-RPC)
 sprout-proxy        (NIP-28 compatibility proxy — translates standard Nostr clients ↔ Sprout relay)
-sprout-sdk          (typed Nostr event builders — used by sprout-mcp, sprout-acp, and sprout-cli)
+sprout-sdk          (typed Nostr event builders — used by sprout-acp and sprout-cli)
 sprout-media        (Blossom/S3 media storage)
 sprout-cli          (agent-first CLI)
 sprout-admin        (operator CLI: relay membership + key generation)
@@ -135,7 +134,7 @@ The `kind` integer is the only dispatch switch. The relay routes, stores, and fa
 
 `sprout-core` defines all 81 kinds as `pub const KIND_*: u32` and exports `ALL_KINDS: &[u32]`. Kinds are `u32` (NIP-01 specifies unsigned integer; `u32` covers the full range). Sprout uses both standard Nostr kinds (e.g., kind 7 for reactions) and custom ranges (40000+).
 
-Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `sprout-core/src/kind.rs` and imported by `sprout-relay/src/handlers/event.rs`. `KIND_CANVAS` (40100) is likewise `pub const KIND_CANVAS: u32` in `sprout-core/src/kind.rs`; `sprout-mcp/src/server.rs` uses the constant via import.
+Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `sprout-core/src/kind.rs` and imported by `sprout-relay/src/handlers/event.rs`. `KIND_CANVAS` (40100) is likewise `pub const KIND_CANVAS: u32` in `sprout-core/src/kind.rs`.
 
 ### Wire Protocol (NIP-01 messages)
 
@@ -679,40 +678,17 @@ pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), 
 
 ---
 
-### sprout-mcp — Agent API Surface
-
-stdio MCP server using the `rmcp` SDK. The interface through which AI agents interact with Sprout. Logs to stderr (stdout is the MCP JSON-RPC channel).
-
-The registered tool surface is grouped into toolsets, enabled per server via `SPROUT_TOOLSETS`. The authoritative list (and per-toolset grouping) is `ALL_TOOLS` in `crates/sprout-mcp/src/toolsets.rs` — the doc deliberately doesn't duplicate it, since a hand-copied list drifts. The default toolset covers messaging, threads, search, feed, reactions, channel basics, DMs, profiles/presence, and workflow triggers; opt-in toolsets add channel admin, canvas, workflow admin, forums, social, and media.
-
-**Key implementation details:**
-- Connects to relay via WebSocket (`tokio_tungstenite`). Handles NIP-42 auth automatically.
-- Ephemeral keypair generated if `SPROUT_PRIVATE_KEY` not set (printed to stderr).
-- Exponential backoff reconnection: 1s → 30s. Resubscribes all active subscriptions after reconnect.
-- REST calls use NIP-98 Schnorr-signed auth when `SPROUT_PRIVATE_KEY` is set; falls back to `X-Pubkey: <hex>` in dev mode.
-- `create_channel` sends a signed Nostr kind 9007 event (NIP-29 group creation, not a REST call).
-- `set_canvas` sends kind 40100 with `h` tag pointing to channel UUID.
-- UUID validation at tool boundary before any network call.
-- `MAX_CONTENT_BYTES = 65,536` enforced in `send_message`.
-- `get_channel_history` caps at 200 results; `get_workflow_runs` caps at 100; `get_feed` max 50 per category.
-
-**Does NOT:** persist state. Does NOT implement server-side logic — it's a thin client over the relay's WebSocket and REST APIs.
-
----
-
 ### sprout-acp — Agent Communication Protocol Harness
 
-Standalone binary that bridges Sprout relay events to AI agents via the [Agent Communication Protocol](https://agentclientprotocol.com/) (ACP). The active counterpart to `sprout-mcp`'s passive tool-serving role.
+Standalone binary that bridges Sprout relay events to AI agents via the [Agent Communication Protocol](https://agentclientprotocol.com/) (ACP).
 
 **Architecture:**
 
 ```
 Sprout Relay ──WS──→ sprout-acp ──stdio (ACP/JSON-RPC)──→ Agent (goose/codex/claude)
-                                                                  │
-                                                        sprout-mcp-server (subprocess)
 ```
 
-`sprout-acp` spawns AI agent subprocesses (1–32, default 1), connects to the relay via WebSocket with NIP-42 auth, discovers channels via REST API, and queues `@mention` events per channel. At most one prompt is in-flight per channel. Queued events are batched into a single prompt sent via `session/prompt` over ACP. The agent uses `sprout-mcp-server` tools (provided as a subprocess) to reply.
+`sprout-acp` spawns AI agent subprocesses (1–32, default 1), connects to the relay via WebSocket with NIP-42 auth, discovers channels via REST API, and queues `@mention` events per channel. At most one prompt is in-flight per channel. Queued events are batched into a single prompt sent via `session/prompt` over ACP.
 
 **Key modules:**
 
@@ -730,9 +706,9 @@ Sprout Relay ──WS──→ sprout-acp ──stdio (ACP/JSON-RPC)──→ Ag
 - Pool of 1–32 agent subprocesses with claim/return lifecycle.
 - Per-channel queuing: at most one prompt in-flight per channel; subsequent @mentions queue until the agent responds.
 - Crash recovery: agent subprocess crashes are detected and the agent is respawned.
-- Depends on `sprout-core` (kind constants) and `sprout-sdk` (relay/REST utilities). Does NOT depend on `sprout-mcp` at compile time.
+- Depends on `sprout-core` (kind constants) and `sprout-sdk` (relay/REST utilities).
 
-**Does NOT:** persist state. Does NOT implement the MCP tool surface — that's `sprout-mcp`'s job.
+**Does NOT:** persist state.
 
 ---
 
@@ -758,7 +734,6 @@ Subcommands:
 | File | Tests | Scope |
 |------|-------|-------|
 | `tests/e2e_relay.rs` | 27 | WebSocket protocol (auth, subscriptions, filters, limits, NIP-11) |
-| `tests/e2e_mcp.rs` | 14 | MCP tool integration (messaging, channels, canvas, feed) |
 | `tests/e2e_media.rs` | 7 | Media upload/download (Blossom) |
 | `tests/e2e_media_extended.rs` | 18 | Extended media scenarios |
 | `tests/e2e_nostr_interop.rs` | 15 | NIP-28 proxy interoperability |
@@ -766,11 +741,11 @@ Subcommands:
 | `tests/e2e_tokens.rs` | 20 | Token auth and scope enforcement |
 | `tests/e2e_workflows.rs` | 7 | Workflow CRUD, trigger, and execution |
 
-All e2e tests are `#[ignore]` — require a running relay. Total: **148 e2e tests**.
+All e2e tests are `#[ignore]` — require a running relay. Total: **134 e2e tests**.
 
 `src/main.rs` is a manual testing CLI (`sprout-test-cli`) with `--send`, `--subscribe`, `--channel`, `--url`, `--kind` flags.
 
-Re-exports `parse_relay_message`, `OkResponse`, `RelayMessage` from `sprout-mcp` to avoid duplicating the wire protocol parser.
+Defines `parse_relay_message`, `OkResponse`, `RelayMessage` directly in `src/lib.rs`.
 
 ---
 

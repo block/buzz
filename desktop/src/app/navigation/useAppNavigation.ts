@@ -135,6 +135,7 @@ export function useAppNavigation() {
       options?: {
         messageId?: string;
         replace?: boolean;
+        threadRootId?: string | null;
       },
     ) =>
       commitNavigation(
@@ -143,7 +144,12 @@ export function useAppNavigation() {
           params: {
             channelId,
           },
-          search: options?.messageId ? { messageId: options.messageId } : {},
+          search: options?.messageId
+            ? {
+                messageId: options.messageId,
+                threadRootId: options.threadRootId ?? undefined,
+              }
+            : {},
         },
         {
           replace: options?.replace,
@@ -217,6 +223,7 @@ export function useAppNavigation() {
 
       return goChannel(destination.channelId, {
         messageId: destination.messageId,
+        threadRootId: destination.threadRootId,
       });
     },
     [goChannel, goForumPost],

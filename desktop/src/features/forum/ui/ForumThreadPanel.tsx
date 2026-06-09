@@ -10,6 +10,7 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type { ForumThreadResponse, ThreadReply } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
+import { parseImetaTags } from "@/features/messages/lib/parseImeta";
 import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
@@ -107,6 +108,7 @@ function ReplyRow({
           channelNames={channelNames}
           compact
           content={reply.content}
+          imetaByUrl={parseImetaTags(reply.tags)}
           mentionNames={replyMentionNames}
         />
       </div>
@@ -245,6 +247,7 @@ export function ForumThreadPanel({
             <Markdown
               channelNames={channelNames}
               content={post.content}
+              imetaByUrl={parseImetaTags(post.tags)}
               mentionNames={postMentionNames}
             />
           </div>

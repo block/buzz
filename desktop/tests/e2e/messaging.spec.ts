@@ -71,12 +71,12 @@ test("copy a rendered code block and paste it back as code", async ({
   await page.keyboard.press("ControlOrMeta+V");
   await page.getByTestId("send-message").click();
 
-  const copiedCodeBlock = page.locator("pre", { hasText: code });
-  await expect(copiedCodeBlock).toHaveCount(1);
+  const codeBlock = page.locator("[data-code-block]");
+  await expect(codeBlock).toHaveCount(1);
 
   const copyButton = page.getByLabel("Copy code block");
   await expect(copyButton).toHaveCSS("opacity", "0");
-  await copiedCodeBlock.hover();
+  await codeBlock.hover();
   await expect(copyButton).toHaveCSS("opacity", "1");
   await copyButton.click();
   await expect
@@ -87,7 +87,7 @@ test("copy a rendered code block and paste it back as code", async ({
   await page.keyboard.press("ControlOrMeta+V");
   await input.press("Enter");
 
-  await expect(copiedCodeBlock).toHaveCount(2);
+  await expect(codeBlock).toHaveCount(2);
 });
 
 test("pasting a long copied code block scrolls composer to cursor", async ({
@@ -115,7 +115,7 @@ test("pasting a long copied code block scrolls composer to cursor", async ({
   await page.keyboard.press("ControlOrMeta+V");
   await page.getByTestId("send-message").click();
 
-  const copiedCodeBlock = page.locator("pre", { hasText: longCode });
+  const copiedCodeBlock = page.locator("[data-code-block]");
   await expect(copiedCodeBlock).toHaveCount(1);
   await copiedCodeBlock.hover();
   await page.getByLabel("Copy code block").click();
@@ -132,6 +132,52 @@ test("pasting a long copied code block scrolls composer to cursor", async ({
       ),
     )
     .toBeLessThanOrEqual(1);
+});
+
+test("code block shows language label when language is specified", async ({
+  page,
+}) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: "http://127.0.0.1:4173",
+  });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await page.evaluate(
+    (text) => navigator.clipboard.writeText(text),
+    "```typescript\nconst x = 1;\n```",
+  );
+
+  await input.click();
+  await page.keyboard.press("ControlOrMeta+V");
+  await page.getByTestId("send-message").click();
+
+  const codeBlock = page.locator("[data-code-block]");
+  await expect(codeBlock).toBeVisible();
+  await expect(codeBlock.getByText("typescript")).toBeVisible();
+});
+
+test("typing triple backticks and Enter creates a code block in composer", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type("```");
+  await page.keyboard.press("Enter");
+
+  // A <pre> code block should appear inside the ProseMirror editor
+  const editorPre = input.locator("pre");
+  await expect(editorPre).toBeVisible();
+
+  // The literal backticks should be consumed (not visible as text)
+  await expect(input).not.toContainText("```");
 });
 
 test("message input clears after send", async ({ page }) => {
@@ -331,9 +377,10 @@ test("shows your avatar on your own message when profile avatar is set", async (
 
   await page.goto("/");
   await openSettings(page, "profile");
+  await page.getByTestId("profile-avatar-edit").click();
   await page.getByTestId("profile-avatar-url").fill(avatarUrl);
-  await page.getByTestId("profile-save").click();
-  await page.getByTestId("settings-close").click();
+  await page.getByTestId("profile-avatar-done").click();
+  await page.getByTestId("settings-back-to-app").click();
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -357,6 +404,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   const siblingReply = `Sibling threaded reply ${timestamp}`;
   const nestedReply = `Nested threaded reply ${timestamp}`;
   const nestedReplyFromBob = `Nested reply from Bob ${timestamp}`;
+  const nestedReplyVisibleTopMaxPx = 280;
   const fillerReplies = Array.from(
     { length: 14 },
     (_, index) => `Thread filler reply ${index} ${timestamp}`,
@@ -426,6 +474,68 @@ test("opens a single-level thread panel with inline expansion", async ({
   await expect(
     rootSummaryRow.getByTestId("message-thread-summary-participant"),
   ).toHaveCount(1);
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-participant")
+        .first()
+        .evaluate((wrapper) => {
+          const avatar = wrapper.firstElementChild;
+          if (!(avatar instanceof HTMLElement)) return "missing";
+          const rect = avatar.getBoundingClientRect();
+          return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
+        }),
+    )
+    .toBe("28x28");
+
+  await page.mouse.move(0, 0);
+  const rootSummaryWidthBeforeHover = await rootSummaryRow.evaluate((row) =>
+    Math.round(row.getBoundingClientRect().width),
+  );
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-last-reply")
+        .evaluate((label) =>
+          Number.parseFloat(getComputedStyle(label).opacity),
+        ),
+    )
+    .toBeGreaterThan(0.8);
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-hover-action")
+        .evaluate((label) =>
+          Number.parseFloat(getComputedStyle(label).opacity),
+        ),
+    )
+    .toBeLessThan(0.1);
+  await rootSummaryRow.hover();
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-last-reply")
+        .evaluate((label) =>
+          Number.parseFloat(getComputedStyle(label).opacity),
+        ),
+    )
+    .toBeLessThan(0.1);
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-hover-action")
+        .evaluate((label) =>
+          Number.parseFloat(getComputedStyle(label).opacity),
+        ),
+    )
+    .toBeGreaterThan(0.8);
+  await expect
+    .poll(() =>
+      rootSummaryRow.evaluate((row) =>
+        Math.round(row.getBoundingClientRect().width),
+      ),
+    )
+    .toBe(rootSummaryWidthBeforeHover);
 
   await threadPanel.getByTestId("message-thread-close").click();
   await expect(threadPanel).toBeHidden();
@@ -478,7 +588,7 @@ test("opens a single-level thread panel with inline expansion", async ({
         return rowRect.top - bodyRect.top;
       });
     })
-    .toBeLessThanOrEqual(160);
+    .toBeLessThanOrEqual(nestedReplyVisibleTopMaxPx);
 
   const firstReplyId = await firstReplyRow.getAttribute("data-message-id");
   if (!firstReplyId) {
@@ -532,7 +642,7 @@ test("opens a single-level thread panel with inline expansion", async ({
         return rowRect.top - bodyRect.top;
       });
     })
-    .toBeLessThanOrEqual(160);
+    .toBeLessThanOrEqual(nestedReplyVisibleTopMaxPx);
 
   await firstReplySummaryRow.click();
   await expect(
@@ -606,6 +716,76 @@ test("thread panel width uses session storage and reset handle", async ({
       });
     })
     .toBe(defaultWidthPx);
+});
+
+test("narrow thread view collapses channel header actions into a menu", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 980, height: 720 });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("channel-add-bot-trigger")).toBeVisible();
+  await expect(page.getByTestId("channel-actions-menu-trigger")).toHaveCount(0);
+
+  const rootMessage = page.locator('[data-message-id="mock-general-alice"]');
+  const threadPanel = page.getByTestId("message-thread-panel");
+
+  await rootMessage.hover();
+  await page.getByTestId("reply-message-mock-general-alice").click();
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("message-thread-back")).toHaveCount(0);
+
+  const menuTrigger = page.getByTestId("channel-actions-menu-trigger");
+  await expect(menuTrigger).toBeVisible();
+  await expect(page.getByTestId("channel-add-bot-trigger")).toBeHidden();
+  await expect(page.getByTestId("channel-members-trigger")).toBeHidden();
+  await expect(page.getByTestId("channel-management-trigger")).toBeHidden();
+
+  const menuBox = await menuTrigger.boundingBox();
+  const threadPanelBox = await threadPanel.boundingBox();
+  if (!menuBox || !threadPanelBox) {
+    throw new Error("Expected header action menu and thread panel bounds");
+  }
+  const menuGapPx = threadPanelBox.x - (menuBox.x + menuBox.width);
+  expect(menuGapPx).toBeGreaterThanOrEqual(10);
+  expect(menuGapPx).toBeLessThanOrEqual(14);
+
+  await menuTrigger.click();
+
+  await expect(page.getByTestId("channel-add-bot-trigger")).toBeVisible();
+  await expect(page.getByTestId("channel-members-trigger")).toBeVisible();
+  await expect(page.getByTestId("channel-start-huddle-trigger")).toBeVisible();
+  await expect(page.getByTestId("channel-management-trigger")).toBeVisible();
+});
+
+test("single-panel thread view hides topbar search and channel actions", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 860, height: 720 });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("open-search")).toBeVisible();
+  await expect(page.getByTestId("channel-add-bot-trigger")).toBeVisible();
+
+  const rootMessage = page.locator('[data-message-id="mock-general-alice"]');
+  const threadPanel = page.getByTestId("message-thread-panel");
+
+  await rootMessage.hover();
+  await page.getByTestId("reply-message-mock-general-alice").click();
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("message-thread-back")).toBeVisible();
+  await expect(page.getByTestId("open-search")).toHaveCount(0);
+  await expect(page.getByTestId("channel-actions-menu-trigger")).toHaveCount(0);
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
+
+  await threadPanel.getByTestId("message-thread-back").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("open-search")).toBeVisible();
+  await expect(page.getByTestId("channel-add-bot-trigger")).toBeVisible();
 });
 
 test("composer is focused after selecting a channel", async ({ page }) => {
@@ -717,4 +897,99 @@ test("thread composer keeps focus after sending a thread reply", async ({
   expect(focusInThreadPanel).toBe(true);
 
   await expect(threadInput).toBeFocused();
+});
+
+test("ArrowUp in an empty composer edits your last message right after sending", async ({
+  page,
+}) => {
+  // Regression: after a send, the composer keeps DOM focus and ProseMirror
+  // would consume ArrowUp before it reached the edit-last-message handler,
+  // so ↑ did nothing until you clicked out and back. The handler now lives
+  // in the editor keymap, so ↑ must work with no intermediate click.
+  const message = `Edit-last via arrow up ${Date.now()}`;
+  const input = page.getByTestId("message-input");
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await input.fill(message);
+  await input.press("Enter");
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+
+  // Composer stays focused after send — no click, just press ↑.
+  await expect(input).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+
+  // Edit mode is entered for the just-sent message.
+  const editBanner = page.getByTestId("edit-target");
+  await expect(editBanner).toBeVisible();
+  await expect(editBanner).toContainText(message);
+  await expect(input).toHaveText(message);
+});
+
+test("ArrowUp does not edit when the composer has draft text", async ({
+  page,
+}) => {
+  // Guard: ↑ must only hijack to edit when the composer is empty, so it
+  // never steals the arrow key from someone navigating drafted text.
+  const sent = `Sent before draft ${Date.now()}`;
+  const draft = `Half-typed draft ${Date.now()}`;
+  const input = page.getByTestId("message-input");
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await input.fill(sent);
+  await input.press("Enter");
+  await expect(page.getByTestId("message-timeline")).toContainText(sent);
+
+  await input.fill(draft);
+  await expect(input).toHaveText(draft);
+  await page.keyboard.press("ArrowUp");
+
+  // No edit mode; the draft is untouched.
+  await expect(page.getByTestId("edit-target")).toHaveCount(0);
+  await expect(input).toHaveText(draft);
+});
+
+test("ArrowUp edits your last thread reply right after sending it", async ({
+  page,
+}) => {
+  // Same fix must hold in the thread composer (shares MessageComposer).
+  const seed = `Thread arrow-up seed ${Date.now()}`;
+  const reply = `Thread reply to edit ${Date.now()}`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await page.getByTestId("message-input").fill(seed);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(seed);
+
+  const rootMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  const threadInput = threadPanel.getByTestId("message-input");
+  await expect(threadInput).toBeFocused();
+
+  await page.keyboard.type(reply);
+  await page.keyboard.press("Enter");
+  await expect(threadPanel).toContainText(reply);
+
+  // No click — press ↑ in the still-focused thread composer.
+  await page.keyboard.press("ArrowUp");
+
+  const editBanner = threadPanel.getByTestId("edit-target");
+  await expect(editBanner).toBeVisible();
+  await expect(editBanner).toContainText(reply);
+  await expect(threadInput).toHaveText(reply);
 });

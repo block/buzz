@@ -85,8 +85,12 @@ pub async fn cmd_get_user_notes(
     pubkey: &str,
     limit: Option<u32>,
     before: Option<i64>,
+    before_id: Option<&str>,
 ) -> Result<(), CliError> {
     validate_hex64(pubkey)?;
+    if let Some(bid) = before_id {
+        validate_hex64(bid)?;
+    }
     let limit = limit.unwrap_or(50).min(100);
 
     let mut filter = serde_json::json!({
@@ -97,6 +101,9 @@ pub async fn cmd_get_user_notes(
 
     if let Some(b) = before {
         filter["until"] = serde_json::json!(b);
+    }
+    if let Some(bid) = before_id {
+        filter["before_id"] = serde_json::json!(bid);
     }
 
     let resp = client.query(&filter).await?;
@@ -217,7 +224,8 @@ pub async fn dispatch(cmd: crate::SocialCmd, client: &SproutClient) -> Result<()
             pubkey,
             limit,
             before,
-        } => cmd_get_user_notes(client, &pubkey, limit, before).await,
+            before_id,
+        } => cmd_get_user_notes(client, &pubkey, limit, before, before_id.as_deref()).await,
         SocialCmd::GetContactList { pubkey } => cmd_get_contact_list(client, &pubkey).await,
         SocialCmd::SetList {
             kind,

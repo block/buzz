@@ -7,12 +7,12 @@ members = [
     "crates/sprout-auth",
     "crates/sprout-search",
     "crates/sprout-audit",
-    "crates/sprout-mcp",
     "crates/sprout-acp",
     "crates/sprout-agent",
     "crates/sprig",
     "crates/sprout-proxy",
     "crates/sprout-test-client",
+    "crates/sprout-ws-client",
     "crates/sprout-admin",
     "crates/sprout-workflow",
     "crates/sprout-media",
@@ -47,8 +47,8 @@ tower       = { version = "0.5", features = ["timeout", "util"] }
 tower-http  = { version = "0.6", features = ["trace", "cors", "compression-gzip", "limit", "fs"] }
 
 # Database
-sqlx = { version = "0.8", features = [
-    "runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"
+sqlx = { version = "0.9", features = [
+    "runtime-tokio", "tls-rustls", "postgres", "uuid", "chrono", "json"
 ] }
 
 # Redis
@@ -102,7 +102,7 @@ futures-util = "0.3"
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 
-# MCP SDK
+# MCP SDK (used by sprout-dev-mcp and sprout-agent)
 rmcp = { version = "1.1.0", features = ["server", "transport-io", "macros"] }
 schemars = { version = "1", default-features = false }
 
@@ -113,11 +113,11 @@ sprout-auth = { path = "crates/sprout-auth" }
 sprout-pubsub = { path = "crates/sprout-pubsub" }
 sprout-search = { path = "crates/sprout-search" }
 sprout-audit = { path = "crates/sprout-audit" }
-sprout-mcp = { path = "crates/sprout-mcp" }
 sprout-proxy = { path = "crates/sprout-proxy" }
 sprout-workflow = { path = "crates/sprout-workflow" }
 sprout-media = { path = "crates/sprout-media" }
 sprout-sdk = { path = "crates/sprout-sdk" }
+sprout-ws-client = { path = "crates/sprout-ws-client" }
 
 # CI profile — release-grade codegen for the relay so e2e tests hit a
 # realistic binary, not an unoptimised debug build.  Inherits `release`

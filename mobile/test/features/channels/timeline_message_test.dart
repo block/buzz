@@ -93,6 +93,7 @@ NostrEvent _edit({
   required String targetId,
   required String content,
   int createdAt = 2000,
+  List<List<String>> extraTags = const [],
 }) => NostrEvent(
   id: id,
   pubkey: 'alice',
@@ -101,6 +102,7 @@ NostrEvent _edit({
   tags: [
     ['h', 'ch1'],
     ['e', targetId],
+    ...extraTags,
   ],
   content: content,
   sig: '',
@@ -110,6 +112,8 @@ NostrEvent _reaction({
   required String id,
   required String targetId,
   int createdAt = 2000,
+  String content = '👍',
+  List<List<String>> extraTags = const [],
 }) => NostrEvent(
   id: id,
   pubkey: 'bob',
@@ -118,8 +122,9 @@ NostrEvent _reaction({
   tags: [
     ['h', 'ch1'],
     ['e', targetId],
+    ...extraTags,
   ],
-  content: '👍',
+  content: content,
   sig: '',
 );
 
@@ -316,6 +321,68 @@ void main() {
       expect(result, hasLength(1));
       expect(result[0].content, 'edited');
       expect(result[0].edited, true);
+    });
+
+    test('applies edit tags for custom emoji rendering', () {
+      final events = [
+        _textMsg(
+          id: 'a',
+          content: 'original :old:',
+          extraTags: [
+            ['emoji', 'old', 'https://relay.example/old.png'],
+          ],
+        ),
+        _edit(
+          id: 'e1',
+          targetId: 'a',
+          content: 'edited :new:',
+          extraTags: [
+            ['emoji', 'new', 'https://relay.example/new.png'],
+          ],
+        ),
+      ];
+
+      final result = formatTimeline(events);
+      expect(result.single.content, 'edited :new:');
+      expect(
+        result.single.tags.any(
+          (tag) =>
+              tag.length >= 3 &&
+              tag[0] == 'emoji' &&
+              tag[1] == 'new' &&
+              tag[2] == 'https://relay.example/new.png',
+        ),
+        isTrue,
+      );
+      expect(
+        result.single.tags.any(
+          (tag) =>
+              tag.length >= 3 &&
+              tag[0] == 'emoji' &&
+              tag[1] == 'old' &&
+              tag[2] == 'https://relay.example/old.png',
+        ),
+        isFalse,
+      );
+    });
+
+    test('preserves custom emoji reaction image URL from emoji tag', () {
+      final messages = formatTimeline([
+        _textMsg(id: 'm1'),
+        _reaction(
+          id: 'r1',
+          targetId: 'm1',
+          content: ':shipit:',
+          extraTags: [
+            ['emoji', 'shipit', 'https://relay.example/shipit.png'],
+          ],
+        ),
+      ], currentPubkey: 'bob');
+
+      final reaction = messages.single.reactions.single;
+      expect(reaction.emoji, ':shipit:');
+      expect(reaction.emojiUrl, 'https://relay.example/shipit.png');
+      expect(reaction.reactedByCurrentUser, isTrue);
     });
 
     test('latest edit wins', () {

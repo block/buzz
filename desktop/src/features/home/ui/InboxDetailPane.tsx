@@ -1,5 +1,7 @@
 import {
+  ArrowLeft,
   CheckCheck,
+  Hash,
   Mail,
   MailOpen,
   MoreHorizontal,
@@ -12,12 +14,14 @@ import type {
   InboxItem,
   InboxReply,
 } from "@/features/home/lib/inbox";
+import { formatInboxTypeLabel } from "@/features/home/lib/inbox";
 import {
   type InboxDisplayMessage,
   InboxMessageRow,
 } from "@/features/home/ui/InboxMessageRow";
 import type { TimelineMessage } from "@/features/messages/types";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -26,6 +30,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { TopChromeBackdrop } from "@/shared/ui/TopChromeBackdrop";
 import {
   Tooltip,
   TooltipContent,
@@ -41,11 +46,13 @@ type InboxDetailPaneProps = {
   isDone: boolean;
   isDeletingMessage?: boolean;
   isSendingReply?: boolean;
+  isSinglePanelView?: boolean;
   isThreadContextLoading?: boolean;
   item: InboxItem | null;
   messages?: InboxContextMessage[];
   replies?: InboxReply[];
   contextChannelName?: string | null;
+  onBack?: () => void;
   onDelete: () => void;
   onOpenContext?: (channelId: string, messageId: string) => void;
   onSendReply: (input: {
@@ -70,11 +77,13 @@ export function InboxDetailPane({
   isDone,
   isDeletingMessage = false,
   isSendingReply = false,
+  isSinglePanelView = false,
   isThreadContextLoading = false,
   item,
   messages = [],
   replies = [],
   contextChannelName = null,
+  onBack,
   onDelete,
   onOpenContext,
   onSendReply,
@@ -192,9 +201,8 @@ export function InboxDetailPane({
         }
       : null;
   const channelContextName = contextChannelName ?? item.channelLabel;
-  const contextLabel = channelContextName
-    ? `#${channelContextName}`
-    : item.categoryLabel;
+  const contextLabel = channelContextName ?? formatInboxTypeLabel(item);
+  const hasChannelContext = Boolean(channelContextName);
   const contextChannelId = item.item.channelId;
 
   const handleSelectReplyTarget = (message: InboxDisplayMessage) => {
@@ -211,41 +219,99 @@ export function InboxDetailPane({
       ref={detailPaneRef}
     >
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        <div className="absolute inset-x-0 top-0 z-40 flex min-h-[44px] items-center justify-between gap-3 bg-background/70 py-[6px] pl-6 pr-3 backdrop-blur-xl supports-[backdrop-filter]:bg-background/55">
-          <div className="min-w-0">
-            {canOpenChannel && contextChannelId && onOpenContext ? (
-              <button
-                className="truncate text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                onClick={() => onOpenContext(contextChannelId, item.id)}
-                title={item.fullTimestampLabel}
-                type="button"
-              >
-                {contextLabel}
-              </button>
-            ) : (
-              <h2
-                className="truncate text-sm font-semibold leading-5 tracking-tight text-foreground"
-                title={item.fullTimestampLabel}
-              >
-                {contextLabel}
-              </h2>
-            )}
-          </div>
-
-          <TooltipProvider delayDuration={200}>
-            <div className="flex shrink-0 items-center gap-1">
-              <HeaderMoreMenu
-                canDelete={canDelete}
-                isDeletingMessage={isDeletingMessage}
-                isDone={isDone}
-                onDelete={onDelete}
-                onToggleDone={onToggleDone}
-              />
+        <TopChromeBackdrop className="h-[76px]" />
+        <div
+          className={cn(
+            "absolute inset-x-0 top-[42px] z-40 min-h-[32px] py-[4px] pr-3",
+            "pl-5",
+          )}
+        >
+          <div className="flex min-w-0 items-center justify-between gap-3">
+            <div
+              className={cn(
+                "flex min-w-0 -translate-y-[4px] items-center",
+                isSinglePanelView ? "gap-[4px]" : "gap-1",
+              )}
+            >
+              {onBack ? (
+                isSinglePanelView ? (
+                  <div className="relative h-[14px] w-[14px] shrink-0">
+                    <Button
+                      aria-label="Back to inbox list"
+                      className="absolute left-1/2 top-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full p-0 text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                      onClick={onBack}
+                      size="icon"
+                      type="button"
+                      variant="ghost"
+                    >
+                      <ArrowLeft className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                ) : (
+                  <Button
+                    aria-label="Back to inbox list"
+                    className="h-6 w-6 rounded-full p-0 text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                    onClick={onBack}
+                    size="icon"
+                    type="button"
+                    variant="ghost"
+                  >
+                    <ArrowLeft className="h-3.5 w-3.5" />
+                  </Button>
+                )
+              ) : null}
+              <div className="min-w-0">
+                {canOpenChannel && contextChannelId && onOpenContext ? (
+                  <button
+                    className="flex min-w-0 items-center gap-[4px] text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                    onClick={() => onOpenContext(contextChannelId, item.id)}
+                    title={item.fullTimestampLabel}
+                    type="button"
+                  >
+                    {hasChannelContext ? (
+                      <Hash
+                        className="h-[14px] w-[14px] shrink-0"
+                        color="gray"
+                      />
+                    ) : null}
+                    <span className="min-w-0 translate-y-px truncate">
+                      {contextLabel}
+                    </span>
+                  </button>
+                ) : (
+                  <h2
+                    className="flex min-w-0 items-center gap-[4px] text-sm font-semibold leading-5 tracking-tight text-foreground"
+                    title={item.fullTimestampLabel}
+                  >
+                    {hasChannelContext ? (
+                      <Hash
+                        className="h-[14px] w-[14px] shrink-0"
+                        color="gray"
+                      />
+                    ) : null}
+                    <span className="min-w-0 translate-y-px truncate">
+                      {contextLabel}
+                    </span>
+                  </h2>
+                )}
+              </div>
             </div>
-          </TooltipProvider>
+
+            <TooltipProvider delayDuration={200}>
+              <div className="flex shrink-0 items-center gap-1">
+                <HeaderMoreMenu
+                  canDelete={canDelete}
+                  isDeletingMessage={isDeletingMessage}
+                  isDone={isDone}
+                  onDelete={onDelete}
+                  onToggleDone={onToggleDone}
+                />
+              </div>
+            </TooltipProvider>
+          </div>
         </div>
 
-        <div className="absolute inset-0 overflow-y-auto overscroll-contain pb-32 pt-14">
+        <div className="absolute inset-0 overflow-y-auto overscroll-contain pb-32 pt-[76px]">
           <div>
             {isThreadContextLoading ? (
               <div className="px-6 pb-3 text-[11px] text-muted-foreground">
@@ -258,8 +324,8 @@ export function InboxDetailPane({
                   <div className="mx-6 my-3 border-t border-border/60" />
                 ) : null}
                 <InboxMessageRow
-                  activeReplyTargetId={replyTargetId}
                   canReply={canReply}
+                  channelId={item.item.channelId}
                   isFocusHighlightVisible={isFocusHighlightVisible}
                   message={message}
                   onSelectReplyTarget={handleSelectReplyTarget}
@@ -275,7 +341,7 @@ export function InboxDetailPane({
             <MessageComposer
               channelId={item.item.channelId}
               channelName={item.channelLabel ?? "channel"}
-              containerClassName="px-6 pb-4 sm:px-6 [&>div]:max-w-none"
+              containerClassName="px-4 pb-4 sm:px-4"
               disabled={!canReply}
               draftKey={`inbox-reply:${item.id}`}
               isSending={isSendingReply}

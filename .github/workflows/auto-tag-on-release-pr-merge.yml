@@ -1,0 +1,62 @@
+name: Auto-tag on Release PR Merge
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  auto-tag:
+    if: >
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'version-bump/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+
+      - name: Extract version from branch name
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          VERSION="${BRANCH#version-bump/}"
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Invalid version in branch name: '$VERSION'"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_ENV"
+          echo "Tagging v${VERSION}"
+
+      - name: Create and push tag
+        env:
+          VERSION: ${{ env.version }}
+        run: |
+          EXISTING_SHA="$(git ls-remote --tags origin "refs/tags/v$VERSION" | awk '{print $1}')"
+          if [ -n "$EXISTING_SHA" ]; then
+            if [ "$EXISTING_SHA" = "$GITHUB_SHA" ]; then
+              echo "Tag v$VERSION already exists at $GITHUB_SHA — skipping tag creation"
+              exit 0
+            else
+              echo "::error::Tag v$VERSION already exists at $EXISTING_SHA (expected $GITHUB_SHA)"
+              exit 1
+            fi
+          fi
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Trigger release build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ env.version }}
+        run: |
+          gh workflow run release.yml \
+            -f version="$VERSION" \
+            -f ref="v$VERSION"

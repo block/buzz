@@ -1,8 +1,9 @@
 use nostr::Keys;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::app_state::AppState;
+use crate::managed_agents::try_regenerate_nest;
 use crate::relay;
 
 #[derive(Serialize)]
@@ -30,6 +31,7 @@ pub fn get_active_workspace(state: State<'_, AppState>) -> Result<ActiveWorkspac
 pub fn apply_workspace(
     relay_url: String,
     nsec: Option<String>,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     // ── Validate before mutating ──────────────────────────────────────────
@@ -50,6 +52,8 @@ pub fn apply_workspace(
         let mut keys_guard = state.keys.lock().map_err(|e| e.to_string())?;
         *keys_guard = keys;
     }
+
+    try_regenerate_nest(&app);
 
     Ok(())
 }

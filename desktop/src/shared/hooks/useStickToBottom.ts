@@ -27,6 +27,9 @@ export function useStickToBottom<T extends HTMLElement = HTMLDivElement>() {
     const el = ref.current;
     if (!el) return;
 
+    // Start at the bottom; the observer below only reacts to later changes.
+    el.scrollTop = el.scrollHeight;
+
     let rafId: number | null = null;
 
     const scrollIfSticky = () => {

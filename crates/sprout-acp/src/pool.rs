@@ -35,8 +35,8 @@ use crate::acp::{
 use crate::config::{DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
-    ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo, PromptProfile,
-    PromptProfileLookup,
+    prepend_base_prompt, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
+    PromptProfile, PromptProfileLookup,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -192,6 +192,13 @@ pub struct PromptContext {
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
     pub heartbeat_prompt: Option<String>,
+    /// Base prompt content, or `None` if `--no-base-prompt` was passed.
+    ///
+    /// `'static` because `PromptContext` is `Arc`-shared across async tasks.
+    /// Content from `--base-prompt-file` is promoted via `Box::leak` in `main.rs`
+    /// after validated file read in `Config::from_cli()`. The compiled-in default
+    /// (`include_str!`) is inherently `'static`.
+    pub base_prompt: Option<&'static str>,
     pub cwd: String,
     /// REST client for pre-prompt context fetches (thread/DM history).
     pub rest_client: RestClient,
@@ -212,8 +219,8 @@ pub struct PromptContext {
     /// Whether NIP-AE agent core memory injection is enabled. When false,
     /// the per-session core engram fetch is skipped and `core_sections`
     /// remains empty for every channel, so `format_prompt` renders no
-    /// `[Agent Memory — core]` section. Driven by `--memory` /
-    /// `SPROUT_ACP_MEMORY`.
+    /// `[Agent Memory — core]` section. On by default; disabled via
+    /// `--no-memory` / `SPROUT_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
 }
 
@@ -753,10 +760,11 @@ pub async fn run_prompt_task(
     // happens when a session is invalidated and recreated (see
     // `SessionState::invalidate_channel`).
     //
-    // Operator opt-in: `--memory` / `SPROUT_ACP_MEMORY` enables the NIP-AE
-    // injection path. By default we skip the fetch outright and leave
-    // `state.core_sections` empty, so `format_prompt` renders no core
-    // section. The `sprout mem` CLI and the relay's acceptance of
+    // Operator opt-out: `--no-memory` / `SPROUT_ACP_NO_MEMORY` disables the
+    // NIP-AE injection path. By default we run the fetch and populate
+    // `state.core_sections`, so `format_prompt` renders the core section.
+    // When disabled we skip the fetch outright and leave `core_sections`
+    // empty. The `sprout mem` CLI and the relay's acceptance of
     // kind:30174 engrams are unaffected.
     if is_new_session && ctx.memory_enabled {
         if let (PromptSource::Channel(cid), Some(owner_pk)) =
@@ -803,11 +811,16 @@ pub async fn run_prompt_task(
                 target: "pool::session",
                 "sending initial_message to session {session_id} for channel {cid}"
             );
+            // Prepend base prompt to initial_message for platform orientation.
+            let init_msg = match ctx.base_prompt {
+                Some(bp) => prepend_base_prompt(bp, initial_msg),
+                None => initial_msg.to_string(),
+            };
             let init_result = agent
                 .acp
                 .session_prompt_with_idle_timeout(
                     &session_id,
-                    initial_msg,
+                    &init_msg,
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 )
@@ -905,6 +918,12 @@ pub async fn run_prompt_task(
 
     // ── Build prompt text (with optional context fetch) ──────────────────
 
+    // When the batch is a single slash-command message (e.g. "@Eva /goal …"),
+    // `slash_command` holds the bare command. It is sent as the FIRST prompt
+    // content block so ACP connectors' slash-command detection
+    // (`prompt[0].text.startsWith("/")`) fires; the wrapped Sprout context
+    // follows as a second block.
+    let mut slash_command: Option<String> = None;
     let prompt_text = if let Some(text) = prompt_text {
         // Pre-built prompt (heartbeat or legacy path).
         text
@@ -928,14 +947,33 @@ pub async fn run_prompt_task(
         let profile_lookup =
             fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
 
+        let known_names: Vec<&str> = profile_lookup
+            .iter()
+            .flat_map(|lookup| lookup.values())
+            .flat_map(|p| [p.display_name.as_deref(), p.nip05_handle.as_deref()])
+            .flatten()
+            .collect();
+        slash_command = crate::queue::slash_command_for_batch(b, &known_names);
+        if let Some(ref cmd) = slash_command {
+            tracing::info!(
+                target: "pool::prompt",
+                channel = %b.channel_id,
+                command = %cmd,
+                "slash-command pass-through"
+            );
+        }
+
         let agent_core_section = agent.state.core_sections.get(&b.channel_id).cloned();
         crate::queue::format_prompt(
             b,
-            ctx.system_prompt.as_deref(),
-            agent_core_section.as_deref(),
-            channel_info.as_ref(),
-            conversation_context.as_ref(),
-            profile_lookup.as_ref(),
+            &crate::queue::FormatPromptArgs {
+                base_prompt: ctx.base_prompt,
+                system_prompt: ctx.system_prompt.as_deref(),
+                agent_core: agent_core_section.as_deref(),
+                channel_info: channel_info.as_ref(),
+                conversation_context: conversation_context.as_ref(),
+                profile_lookup: profile_lookup.as_ref(),
+            },
         )
     } else {
         // Should not happen — batch is None only for heartbeats which have prompt_text.
@@ -963,6 +1001,13 @@ pub async fn run_prompt_task(
 
     // ── Send the actual prompt ────────────────────────────────────────────
 
+    // Slash-command pass-through sends two text blocks: the bare command
+    // first (so connector detection fires), then the wrapped Sprout context.
+    let prompt_blocks: Vec<&str> = match slash_command {
+        Some(ref cmd) => vec![cmd.as_str(), prompt_text.as_str()],
+        None => vec![prompt_text.as_str()],
+    };
+
     // ── Cancel-aware prompt dispatch ──────────────────────────────────────
     // When cancel_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can interrupt it. Heartbeats (cancel_rx=None) take the
@@ -972,9 +1017,9 @@ pub async fn run_prompt_task(
             // Heartbeat / non-cancellable path.
             agent
                 .acp
-                .session_prompt_with_idle_timeout(
+                .session_prompt_blocks_with_idle_timeout(
                     &session_id,
-                    &prompt_text,
+                    &prompt_blocks,
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 )
@@ -983,9 +1028,9 @@ pub async fn run_prompt_task(
         Some(rx) => {
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_with_idle_timeout(
+                result = agent.acp.session_prompt_blocks_with_idle_timeout(
                     &session_id,
-                    &prompt_text,
+                    &prompt_blocks,
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,

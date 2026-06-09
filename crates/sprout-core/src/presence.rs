@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 /// The WebSocket path (kind:20001) accepts arbitrary status strings for
 /// forward-compatibility; this enum is the curated set for structured APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[cfg_attr(feature = "mcp-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum PresenceStatus {
     /// User is actively online.

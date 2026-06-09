@@ -7,9 +7,10 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         build_managed_agent_summary, default_agent_workdir, find_managed_agent_mut,
-        load_managed_agents, managed_agent_avatar_url, missing_command_message,
+        known_acp_runtime, load_managed_agents, managed_agent_avatar_url, missing_command_message,
         normalize_agent_args, resolve_command, save_managed_agents, sync_managed_agent_processes,
-        AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
+        try_regenerate_nest, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
+        UpdateManagedAgentResponse,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -44,12 +45,12 @@ pub async fn get_agent_models(
             .find(|r| r.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
 
-        let resolved = resolve_command(&record.acp_command, Some(&app))
+        let resolved = resolve_command(&record.acp_command)
             .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
 
         let args = normalize_agent_args(&record.agent_command, record.agent_args.clone());
 
-        let resolved_agent = resolve_command(&record.agent_command, Some(&app))
+        let resolved_agent = resolve_command(&record.agent_command)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| record.agent_command.clone());
 
@@ -83,11 +84,14 @@ pub async fn get_agent_models(
         cmd.arg("models")
             .arg("--json")
             .env("SPROUT_ACP_AGENT_COMMAND", &agent_command)
-            .env("SPROUT_ACP_AGENT_ARGS", agent_args.join(","))
-            .env(
-                "GOOSE_MODE",
-                std::env::var("GOOSE_MODE").unwrap_or_else(|_| "auto".into()),
-            );
+            .env("SPROUT_ACP_AGENT_ARGS", agent_args.join(","));
+        if let Some(meta) = known_acp_runtime(&agent_command) {
+            for (key, value) in meta.default_env {
+                if std::env::var(key).is_err() {
+                    cmd.env(key, value);
+                }
+            }
+        }
         // User env layering — written LAST so it overrides any Sprout-set env above.
         for (k, v) in &merged_env {
             cmd.env(k, v);
@@ -245,6 +249,8 @@ pub async fn update_managed_agent(
         let summary = build_managed_agent_summary(&app, record, &runtimes)?;
         (summary, sync_params)
     }; // lock dropped here
+
+    try_regenerate_nest(&app);
 
     // Phase 2: relay profile sync (async, best-effort, outside lock)
     let profile_sync_error =

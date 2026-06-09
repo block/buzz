@@ -78,6 +78,7 @@ function DetailSkeleton() {
 type Tab = "code" | "commits";
 
 function RepoTabs({
+  repoId,
   treeEntries,
   treeLoading,
   commits,
@@ -85,6 +86,7 @@ function RepoTabs({
   readme,
   readmeLoading,
 }: {
+  repoId: string;
   treeEntries: TreeEntry[] | undefined;
   treeLoading: boolean;
   commits: CommitInfo[] | undefined;
@@ -125,7 +127,11 @@ function RepoTabs({
       {/* Tab content */}
       {tab === "code" && (
         <>
-          <RepoTreeSection entries={treeEntries} isLoading={treeLoading} />
+          <RepoTreeSection
+            entries={treeEntries}
+            isLoading={treeLoading}
+            repoId={repoId}
+          />
           <RepoReadmeSection readme={readme} isLoading={readmeLoading} />
         </>
       )}
@@ -256,6 +262,7 @@ export function RepoDetailPage() {
 
         {/* Tabs */}
         <RepoTabs
+          repoId={repoId}
           treeEntries={treeEntries}
           treeLoading={treeLoading}
           commits={commits}

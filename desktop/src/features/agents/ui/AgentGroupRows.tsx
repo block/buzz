@@ -1,4 +1,5 @@
 import type { ManagedAgent, PresenceLookup } from "@/shared/api/types";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { ManagedAgentRow } from "./ManagedAgentRow";
 
 export type AgentGroupRowsProps = {
@@ -39,11 +40,11 @@ export function AgentGroupRows({
   onToggleStartOnAppLaunch,
 }: AgentGroupRowsProps) {
   return (
-    <div className="space-y-2 border-t border-border/50 px-3 py-2">
+    <div className="divide-y divide-border/50 border-t border-border/50">
       {agents.map((agent) => (
         <ManagedAgentRow
           agent={agent}
-          channelNames={channelsByPubkey[agent.pubkey] ?? []}
+          channelNames={channelsByPubkey[normalizePubkey(agent.pubkey)] ?? []}
           isActionPending={isActionPending}
           isLogSelected={selectedLogAgentPubkey === agent.pubkey}
           key={agent.pubkey}

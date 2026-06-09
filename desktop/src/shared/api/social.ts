@@ -1,5 +1,6 @@
 import type {
   ContactListResponse,
+  NoteReactionSummary,
   PublishNoteResult,
   UserNote,
   UserNotesResponse,
@@ -12,6 +13,14 @@ type RawUserNote = {
   pubkey: string;
   created_at: number;
   content: string;
+  tags: string[][];
+};
+
+type RawNoteReactionSummary = {
+  note_id: string;
+  emoji: string;
+  count: number;
+  pubkeys: string[];
 };
 
 type RawUserNotesCursor = {
@@ -38,7 +47,30 @@ function fromRawUserNote(note: RawUserNote): UserNote {
     pubkey: note.pubkey,
     createdAt: note.created_at,
     content: note.content,
+    tags: note.tags,
   };
+}
+
+export async function getNoteReactions(
+  noteIds: string[],
+): Promise<NoteReactionSummary[]> {
+  const response = await invokeTauri<RawNoteReactionSummary[]>(
+    "get_note_reactions",
+    { noteIds },
+  );
+  return response.map((summary) => ({
+    noteId: summary.note_id,
+    emoji: summary.emoji,
+    count: summary.count,
+    pubkeys: summary.pubkeys,
+  }));
+}
+
+export async function getNote(noteId: string): Promise<UserNote | null> {
+  const response = await invokeTauri<RawUserNote | null>("get_note", {
+    noteId,
+  });
+  return response ? fromRawUserNote(response) : null;
 }
 
 export async function getUserNotes(
@@ -134,6 +166,48 @@ export async function setContactList(
     eventId: raw.event_id,
     accepted: raw.accepted,
     message: raw.message,
+  };
+}
+
+export async function getLikedNotes(
+  authorPubkey: string,
+  limit?: number,
+): Promise<UserNotesResponse> {
+  const response = await invokeTauri<RawUserNotesResponse>("get_liked_notes", {
+    authorPubkey,
+    limit: limit ?? null,
+  });
+
+  return {
+    notes: response.notes.map(fromRawUserNote),
+    nextCursor: response.next_cursor
+      ? {
+          before: response.next_cursor.before,
+          beforeId: response.next_cursor.before_id,
+        }
+      : null,
+  };
+}
+
+export async function getGlobalNotes(options?: {
+  limit?: number;
+  before?: number;
+  beforeId?: string;
+}): Promise<UserNotesResponse> {
+  const response = await invokeTauri<RawUserNotesResponse>("get_global_notes", {
+    limit: options?.limit ?? null,
+    before: options?.before ?? null,
+    beforeId: options?.beforeId ?? null,
+  });
+
+  return {
+    notes: response.notes.map(fromRawUserNote),
+    nextCursor: response.next_cursor
+      ? {
+          before: response.next_cursor.before,
+          beforeId: response.next_cursor.before_id,
+        }
+      : null,
   };
 }
 

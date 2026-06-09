@@ -138,13 +138,15 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `OPENAI_COMPAT_MODEL` | — | Required when provider=openai. |
 | `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, OpenRouter, Ollama, etc. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
-| `DATABRICKS_HOST` | goose config | Required when provider=databricks or when using Databricks fallback. If unset, read from goose's `~/.config/goose/config.yaml`. |
-| `DATABRICKS_MODEL` | goose config | Required when provider=databricks or when using Databricks fallback. If unset, uses `DATABRICKS_MODEL` from goose config, or `GOOSE_MODEL`/`GOOSE_MODE` when `GOOSE_PROVIDER=databricks`. |
+| `DATABRICKS_HOST` | — | Required when provider=databricks or when using Databricks fallback. |
+| `DATABRICKS_MODEL` | — | Required when provider=databricks or when using Databricks fallback. |
 | `DATABRICKS_TOKEN` | — | Optional static bearer escape hatch. If unset, Databricks uses browser OAuth + refresh cache. |
 | `SPROUT_AGENT_SYSTEM_PROMPT` | built-in | Inline system prompt. |
 | `SPROUT_AGENT_SYSTEM_PROMPT_FILE` | — | File path. Mutually exclusive with the above. |
 | `SPROUT_AGENT_MAX_ROUNDS` | `0` | Tool-loop iteration cap. 0 = unlimited. |
 | `SPROUT_AGENT_MAX_OUTPUT_TOKENS` | `32768` | Per LLM call. Headroom for large tool-call inputs (e.g. file writes via heredoc); Sonnet 4 / Opus 4 cap at 64K. |
+| `SPROUT_AGENT_MAX_CONTEXT_TOKENS` | `200000` | Provider context window used by the handoff gate. |
+| `SPROUT_AGENT_MAX_HANDOFFS` | `10` | Max context handoffs per session before falling back to truncation. |
 | `SPROUT_AGENT_LLM_TIMEOUT_SECS` | `120` | |
 | `SPROUT_AGENT_TOOL_TIMEOUT_SECS` | `660` | Per-tool call timeout in seconds |
 | `SPROUT_AGENT_MAX_PARALLEL_TOOLS` | `8` | Max concurrent tool calls per turn (1 = sequential) |
@@ -168,7 +170,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
 
-If `SPROUT_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, or `SPROUT_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, the agent automatically falls back to Databricks OAuth when Databricks host/model config is available. The same Databricks fallback applies when `SPROUT_AGENT_PROVIDER` is unset. Host/model can come from env or from goose's config file; explicit Anthropic/OpenAI API keys always win.
+If `SPROUT_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, or `SPROUT_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, the agent automatically falls back to Databricks OAuth when `DATABRICKS_HOST` and `DATABRICKS_MODEL` are set. The same Databricks fallback applies when `SPROUT_AGENT_PROVIDER` is unset. Explicit Anthropic/OpenAI API keys always win.
 
 `provider=openai` speaks two HTTP dialects: the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format).
 

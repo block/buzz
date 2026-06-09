@@ -1,12 +1,19 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../shared/clipboard_utils.dart';
+import '../../shared/syntax_highlight.dart';
 import '../../shared/theme/theme.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
+import '../custom_emoji/custom_emoji_render.dart';
 import 'media_viewer_page.dart';
 import 'message_media.dart';
 
@@ -15,7 +22,7 @@ const _messageMediaMaxImageHeight = 240.0;
 
 /// Renders message content with markdown formatting, @mentions, #channel links,
 /// and media-aware markdown images/videos.
-class MessageContent extends StatelessWidget {
+class MessageContent extends HookConsumerWidget {
   final String content;
 
   /// Display names for mentioned pubkeys, extracted from event p-tags.
@@ -34,6 +41,8 @@ class MessageContent extends StatelessWidget {
 
   final TextStyle? baseStyle;
 
+  final int? maxLines;
+
   const MessageContent({
     super.key,
     required this.content,
@@ -42,90 +51,102 @@ class MessageContent extends StatelessWidget {
     this.tags = const [],
     this.onChannelTap,
     this.baseStyle,
+    this.maxLines,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final style =
         baseStyle ??
         context.textTheme.bodyMedium?.copyWith(color: context.colors.onSurface);
     final imetaByUrl = parseImetaTags(tags);
+    final customEmoji = _mergeCustomEmoji(
+      customEmojiFromTags(tags),
+      ref.watch(customEmojiListProvider),
+    );
 
-    // Convert autolinks and bare URLs to standard markdown links,
-    // but skip content inside backticks (inline code / fenced blocks).
-    final buffer = StringBuffer();
-    final parts = content.split('`');
-    for (var i = 0; i < parts.length; i++) {
-      if (i.isOdd) {
-        // Inside backticks — preserve as-is.
-        buffer.write('`${parts[i]}`');
-      } else {
-        // 1. Angle-bracket autolinks: <https://...>
-        var segment = parts[i].replaceAllMapped(
-          RegExp(r'<(https?://[^>]+)>'),
-          (m) => '[${m[1]}](${m[1]})',
-        );
-        // 2. Bare URLs not already inside markdown link/image syntax.
-        //    Negative lookbehind avoids matching URLs preceded by ]( or =
-        //    which are already part of markdown links or imeta tags.
-        segment = segment.replaceAllMapped(
-          RegExp(r'(?<![(\]=])https?://[^\s)>\]]+'),
-          (m) {
-            final url = m[0]!;
-            // Skip if this URL is already a markdown link label that equals
-            // the URL (produced by step 1 or authored as [url](url)).
-            final start = m.start;
-            if (start >= 1 && segment[start - 1] == '[') return url;
-            return '[$url]($url)';
-          },
-        );
-        buffer.write(segment);
-      }
-    }
-    final processed = buffer.toString();
-
-    // Replace spaces with non-breaking spaces inside known mention names
-    // so the gpt_markdown combined regex can match multi-word names
-    // even when caseSensitive is not preserved.
-    // Skip content inside backticks to avoid altering inline code.
-    final mentionParts = processed.split('`');
-    final mentionBuf = StringBuffer();
-    for (var i = 0; i < mentionParts.length; i++) {
-      if (i.isOdd) {
-        mentionBuf.write('`${mentionParts[i]}`');
-      } else {
-        var segment = mentionParts[i];
-        for (final name in mentionNames.values) {
-          if (name.contains(' ')) {
-            final nbspName = name.replaceAll(' ', '\u00A0');
-            segment = segment.replaceAllMapped(
-              RegExp('@${RegExp.escape(name)}', caseSensitive: false),
-              (m) => '@$nbspName',
-            );
-          }
+    final finalContent = useMemoized(() {
+      // Convert autolinks and bare URLs to standard markdown links,
+      // but skip content inside backticks (inline code / fenced blocks).
+      final buffer = StringBuffer();
+      final parts = content.split('`');
+      for (var i = 0; i < parts.length; i++) {
+        if (i.isOdd) {
+          // Inside backticks — preserve as-is.
+          buffer.write('`${parts[i]}`');
+        } else {
+          // 1. Angle-bracket autolinks: <https://...>
+          var segment = parts[i].replaceAllMapped(
+            RegExp(r'<(https?://[^>]+)>'),
+            (m) => '[${m[1]}](${m[1]})',
+          );
+          // 2. Bare URLs not already inside markdown link/image syntax.
+          //    Negative lookbehind avoids matching URLs preceded by ]( or =
+          //    which are already part of markdown links or imeta tags.
+          segment = segment.replaceAllMapped(
+            RegExp(r'(?<![(\]=])https?://[^\s)>\]]+'),
+            (m) {
+              final url = m[0]!;
+              // Skip if this URL is already a markdown link label that equals
+              // the URL (produced by step 1 or authored as [url](url)).
+              final start = m.start;
+              if (start >= 1 && segment[start - 1] == '[') return url;
+              return '[$url]($url)';
+            },
+          );
+          buffer.write(segment);
         }
-        mentionBuf.write(segment);
       }
-    }
-    final mentionProcessed = mentionBuf.toString();
+      final processed = buffer.toString();
 
-    // Ensure channel links at the very start of content don't get
-    // swallowed by markdown processing.
-    var finalContent = mentionProcessed;
-    if (RegExp(r'^#[A-Za-z0-9_]').hasMatch(finalContent)) {
-      finalContent = '\u200B$finalContent';
-    }
+      // Replace spaces with non-breaking spaces inside known mention names
+      // so the gpt_markdown combined regex can match multi-word names
+      // even when caseSensitive is not preserved.
+      // Skip content inside backticks to avoid altering inline code.
+      final mentionParts = processed.split('`');
+      final mentionBuf = StringBuffer();
+      for (var i = 0; i < mentionParts.length; i++) {
+        if (i.isOdd) {
+          mentionBuf.write('`${mentionParts[i]}`');
+        } else {
+          var segment = mentionParts[i];
+          for (final name in mentionNames.values) {
+            if (name.contains(' ')) {
+              final nbspName = name.replaceAll(' ', '\u00A0');
+              segment = segment.replaceAllMapped(
+                RegExp('@${RegExp.escape(name)}', caseSensitive: false),
+                (m) => '@$nbspName',
+              );
+            }
+          }
+          mentionBuf.write(segment);
+        }
+      }
+      final mentionProcessed = mentionBuf.toString();
+
+      // Ensure channel links at the very start of content don't get
+      // swallowed by markdown processing.
+      var result = mentionProcessed;
+      if (RegExp(r'^#[A-Za-z0-9_]').hasMatch(result)) {
+        result = '\u200B$result';
+      }
+      return result;
+    }, [content, mentionNames]);
 
     return GptMarkdown(
       finalContent,
       style: style,
       followLinkColor: false,
+      codeBuilder: (context, name, code, closed) =>
+          _MessageCodeBlock(name: name, code: code),
       linkBuilder: (context, linkText, url, linkStyle) =>
           _buildLink(context, linkText, url, linkStyle, style),
       imageBuilder: (context, imageUrl) =>
           _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
+      maxLines: maxLines,
       inlineComponents: [
         _MentionMd(mentionNames: mentionNames),
+        CustomEmojiMd(customEmoji),
         _ChannelLinkMd(channelNames: channelNames, onChannelTap: onChannelTap),
         ...MarkdownComponent.inlineComponents,
       ],
@@ -182,6 +203,20 @@ class MessageContent extends StatelessWidget {
       ),
     );
   }
+}
+
+List<CustomEmoji> _mergeCustomEmoji(
+  List<CustomEmoji> eventEmoji,
+  List<CustomEmoji> paletteEmoji,
+) {
+  if (eventEmoji.isEmpty) return paletteEmoji;
+  if (paletteEmoji.isEmpty) return eventEmoji;
+  final seen = <String>{};
+  final merged = <CustomEmoji>[];
+  for (final emoji in [...eventEmoji, ...paletteEmoji]) {
+    if (seen.add(emoji.shortcode)) merged.add(emoji);
+  }
+  return merged;
 }
 
 class _MessageImagePreview extends StatefulWidget {
@@ -438,6 +473,111 @@ class _MediaPreviewFallback extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _MessageCodeBlock extends HookWidget {
+  final String name;
+  final String code;
+
+  const _MessageCodeBlock({required this.name, required this.code});
+
+  @override
+  Widget build(BuildContext context) {
+    final isCopied = useState(false);
+
+    Future<void> handleCopy() async {
+      await copyToClipboard(context, code, message: 'Copied code to clipboard');
+      if (!context.mounted) return;
+      isCopied.value = true;
+      Future.delayed(const Duration(seconds: 2), () {
+        if (context.mounted) isCopied.value = false;
+      });
+    }
+
+    final codeBaseStyle = TextStyle(
+      fontFamily: 'GeistMono',
+      fontSize: 13,
+      height: 1.5,
+      color: context.colors.onSurface,
+    );
+    final isDark = context.theme.brightness == Brightness.dark;
+    final codeTheme = isDark ? highlightDarkTheme : highlightLightTheme;
+    final codeSpans = useMemoized(
+      () => highlightCode(code, name, codeTheme, codeBaseStyle),
+      [code, name, isDark],
+    );
+    return Container(
+      margin: const EdgeInsets.only(top: Grid.half),
+      decoration: BoxDecoration(
+        color: context.colors.surfaceContainerHighest.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: context.colors.outline.withValues(alpha: 0.7),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (name.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(
+                left: Grid.twelve,
+                top: Grid.half + Grid.quarter,
+              ),
+              child: Text(
+                name,
+                style: context.textTheme.labelSmall?.copyWith(
+                  color: context.colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+          Stack(
+            children: [
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                  Grid.twelve,
+                  name.isEmpty ? Grid.half + Grid.quarter : Grid.quarter,
+                  44,
+                  Grid.half + Grid.quarter,
+                ),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: RichText(
+                    softWrap: false,
+                    text: TextSpan(style: codeBaseStyle, children: codeSpans),
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 0,
+                right: Grid.quarter,
+                child: SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: IconButton(
+                    onPressed: handleCopy,
+                    padding: EdgeInsets.zero,
+                    visualDensity: VisualDensity.compact,
+                    style: IconButton.styleFrom(
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    icon: Icon(
+                      isCopied.value ? LucideIcons.check : LucideIcons.copy,
+                      size: 14,
+                      color: isCopied.value
+                          ? context.colors.primary
+                          : context.colors.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

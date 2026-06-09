@@ -10,10 +10,21 @@ import {
   buildInboxItems,
   formatInboxFullTimestamp,
 } from "@/features/home/lib/inbox";
+import {
+  getContextMessageDepth,
+  getReactionTargetId,
+  matchesInboxFilter,
+} from "@/features/home/lib/inboxViewHelpers";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
 import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
-import { useResizableInboxListWidth } from "@/features/home/useResizableInboxListWidth";
+import {
+  INBOX_COLUMN_MIN_WIDTH_PX,
+  INBOX_SINGLE_COLUMN_BREAKPOINT_PX,
+  useResizableInboxListWidth,
+} from "@/features/home/useResizableInboxListWidth";
+import { HomeChannelActions } from "@/features/home/ui/HomeChannelActions";
+import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
 import { InboxListPane } from "@/features/home/ui/InboxListPane";
 import {
@@ -21,85 +32,15 @@ import {
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
 import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
-import { getThreadReference } from "@/features/messages/lib/threading";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
-import type { HomeFeedResponse, RelayEvent } from "@/shared/api/types";
+import type { HomeFeedResponse } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
+import { cn } from "@/shared/lib/cn";
 import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
+import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { Button } from "@/shared/ui/button";
-import { Skeleton } from "@/shared/ui/skeleton";
-
-function matchesInboxFilter(
-  item: { categories: InboxFilter[] },
-  filter: InboxFilter,
-) {
-  if (filter === "all") {
-    return item.categories.some((category) => category !== "activity");
-  }
-
-  return item.categories.includes(filter);
-}
-
-function HomeLoadingState() {
-  return (
-    <div className="flex-1 overflow-hidden">
-      <div className="grid h-full min-h-0 w-full lg:grid-cols-[320px_minmax(0,1fr)]">
-        <div className="overflow-hidden border-r border-border/70 bg-background/60">
-          <div className="border-b border-border/70 px-4 pb-4 pt-14">
-            <Skeleton className="h-4 w-20" />
-            <Skeleton className="mt-2 h-4 w-28" />
-            <Skeleton className="mt-4 h-10 rounded-md" />
-          </div>
-          <div className="space-y-3 px-4 py-4">
-            {["a", "b", "c", "d"].map((row) => (
-              <Skeleton className="h-20 rounded-md" key={row} />
-            ))}
-          </div>
-        </div>
-
-        <div className="overflow-hidden bg-background/60">
-          <div className="border-b border-border/70 px-5 pb-4 pt-14">
-            <Skeleton className="h-5 w-48" />
-            <Skeleton className="mt-3 h-8 w-72" />
-          </div>
-          <div className="px-5 py-5">
-            <Skeleton className="h-64 rounded-md" />
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function getContextMessageDepth(
-  event: RelayEvent,
-  eventById: ReadonlyMap<string, RelayEvent>,
-): number {
-  let depth = 0;
-  let parentId = getThreadReference(event.tags).parentId;
-  const seen = new Set<string>([event.id]);
-
-  while (parentId && eventById.has(parentId) && !seen.has(parentId)) {
-    depth += 1;
-    seen.add(parentId);
-    parentId = getThreadReference(eventById.get(parentId)?.tags ?? []).parentId;
-  }
-
-  return depth;
-}
-
-function getReactionTargetId(tags: string[][]) {
-  for (let index = tags.length - 1; index >= 0; index -= 1) {
-    const tag = tags[index];
-    if (tag?.[0] === "e" && typeof tag[1] === "string") {
-      return tag[1];
-    }
-  }
-
-  return null;
-}
 
 type HomeViewProps = {
   feed?: HomeFeedResponse;
@@ -107,6 +48,7 @@ type HomeViewProps = {
   errorMessage?: string;
   currentPubkey?: string;
   availableChannelIds: ReadonlySet<string>;
+  onOpenChannel: (channelId: string) => void;
   onOpenContext: (channelId: string, messageId: string) => void;
   onRefresh: () => void;
 };
@@ -117,9 +59,14 @@ export function HomeView({
   errorMessage,
   currentPubkey,
   availableChannelIds,
+  onOpenChannel,
   onOpenContext,
   onRefresh,
 }: HomeViewProps) {
+  const [homeInboxRef, homeInboxWidthPx] = useElementWidth<HTMLDivElement>();
+  const isNarrowHomeViewport =
+    homeInboxWidthPx > 0 &&
+    homeInboxWidthPx < INBOX_SINGLE_COLUMN_BREAKPOINT_PX;
   const [filter, setFilter] = React.useState<InboxFilter>("all");
   const [selectedItemId, setSelectedItemId] = React.useState<string | null>(
     null,
@@ -283,10 +230,18 @@ export function HomeView({
       return;
     }
 
-    if (!filteredItems.some((item) => item.id === selectedItemId)) {
-      setSelectedItemId(filteredItems[0]?.id ?? null);
+    // Don't default-select before the width is measured: at width 0
+    // isNarrowHomeViewport is false, so narrow Home would cold-load into detail.
+    if (homeInboxWidthPx === 0) {
+      return;
     }
-  }, [filteredItems, selectedItemId]);
+
+    if (!filteredItems.some((item) => item.id === selectedItemId)) {
+      setSelectedItemId(
+        isNarrowHomeViewport ? null : (filteredItems[0]?.id ?? null),
+      );
+    }
+  }, [filteredItems, homeInboxWidthPx, isNarrowHomeViewport, selectedItemId]);
 
   React.useEffect(() => {
     void selectedItemId;
@@ -351,39 +306,74 @@ export function HomeView({
     selectedItem !== null &&
     currentPubkey?.trim().toLowerCase() ===
       selectedItem.item.pubkey.trim().toLowerCase();
+  const isSinglePanelDetailView =
+    isNarrowHomeViewport && selectedItemId !== null;
+  const showListPane = !isSinglePanelDetailView;
+  const showDetailPane = !isNarrowHomeViewport || isSinglePanelDetailView;
+  const maxEffectiveInboxListWidthPx =
+    homeInboxWidthPx > 0
+      ? Math.max(
+          INBOX_COLUMN_MIN_WIDTH_PX,
+          homeInboxWidthPx - INBOX_COLUMN_MIN_WIDTH_PX,
+        )
+      : undefined;
+  const effectiveInboxListWidthPx =
+    homeInboxWidthPx > 0
+      ? Math.min(
+          inboxListWidthPx,
+          maxEffectiveInboxListWidthPx ?? inboxListWidthPx,
+        )
+      : inboxListWidthPx;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <HomeChannelActions
+        channel={selectedChannel}
+        currentPubkey={currentPubkey}
+        onOpenChannel={onOpenChannel}
+      />
       <div
-        className="relative grid min-h-0 flex-1 w-full lg:grid-cols-[var(--home-inbox-list-width)_minmax(0,1fr)]"
+        className={cn(
+          "relative grid min-h-0 w-full flex-1",
+          showListPane && showDetailPane
+            ? "grid-cols-[var(--home-inbox-list-width)_minmax(0,1fr)]"
+            : "grid-cols-1",
+        )}
         data-testid="home-inbox"
+        ref={homeInboxRef}
         style={
           {
-            "--home-inbox-list-width": `${inboxListWidthPx}px`,
+            "--home-inbox-list-width": `${effectiveInboxListWidthPx}px`,
           } as React.CSSProperties
         }
       >
-        <InboxListPane
-          doneSet={effectiveDoneSet}
-          filter={filter}
-          items={filteredItems}
-          onFilterChange={setFilter}
-          onSelect={(itemId) => {
-            setSelectedItemId(itemId);
-            markItemRead(itemId);
-          }}
-          selectedId={selectedItemId}
-        />
+        {showListPane ? (
+          <InboxListPane
+            doneSet={effectiveDoneSet}
+            filter={filter}
+            items={filteredItems}
+            onFilterChange={setFilter}
+            onSelect={(itemId) => {
+              setSelectedItemId(itemId);
+              markItemRead(itemId);
+            }}
+            selectedId={selectedItemId}
+            showRightDivider={showListPane && showDetailPane}
+          />
+        ) : null}
 
         <button
           aria-label="Resize inbox list"
-          className="group absolute inset-y-0 z-20 hidden w-3 -translate-x-1/2 cursor-col-resize lg:block"
+          className={cn(
+            "group absolute inset-y-0 z-40 w-3 -translate-x-1/2 cursor-col-resize",
+            showListPane && showDetailPane ? "block" : "hidden",
+          )}
           data-testid="home-inbox-list-resize-handle"
           onDoubleClick={
             canResetInboxListWidth ? handleInboxListWidthReset : undefined
           }
           onPointerDown={handleInboxListResizeStart}
-          style={{ left: `${inboxListWidthPx}px` }}
+          style={{ left: `${effectiveInboxListWidthPx}px` }}
           title={
             canResetInboxListWidth
               ? "Drag to resize. Double-click to reset width."
@@ -391,110 +381,124 @@ export function HomeView({
           }
           type="button"
         >
-          <span className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border/80 group-focus-visible:bg-border/80" />
+          <span className="absolute bottom-0 left-1/2 top-10 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border/80 group-focus-visible:bg-border/80" />
         </button>
 
-        <InboxDetailPane
-          canDelete={canDelete}
-          canOpenChannel={Boolean(
-            selectedItem?.item.channelId &&
-              availableChannelIds.has(selectedItem.item.channelId),
-          )}
-          canReply={canReply}
-          disabledReplyReason={disabledReplyReason}
-          isDone={selectedItem ? effectiveDoneSet.has(selectedItem.id) : false}
-          isDeletingMessage={isDeletingMessage}
-          isSendingReply={isSendingReply}
-          isThreadContextLoading={threadContext.isLoading}
-          item={selectedItem}
-          messages={contextMessages}
-          replies={selectedItemReplies}
-          contextChannelName={selectedChannel?.name ?? null}
-          onDelete={() => {
-            if (!selectedItem || !canDelete) {
-              return;
+        {showDetailPane ? (
+          <InboxDetailPane
+            canDelete={canDelete}
+            canOpenChannel={Boolean(
+              selectedItem?.item.channelId &&
+                availableChannelIds.has(selectedItem.item.channelId),
+            )}
+            canReply={canReply}
+            contextChannelName={selectedChannel?.name ?? null}
+            disabledReplyReason={disabledReplyReason}
+            isDeletingMessage={isDeletingMessage}
+            isDone={
+              selectedItem ? effectiveDoneSet.has(selectedItem.id) : false
             }
+            isSendingReply={isSendingReply}
+            isSinglePanelView={isSinglePanelDetailView}
+            isThreadContextLoading={threadContext.isLoading}
+            item={selectedItem}
+            messages={contextMessages}
+            onBack={
+              isSinglePanelDetailView
+                ? () => {
+                    setSelectedItemId(null);
+                  }
+                : undefined
+            }
+            onDelete={() => {
+              if (!selectedItem || !canDelete) {
+                return;
+              }
 
-            setIsDeletingMessage(true);
-            void deleteMessage(selectedItem.id)
-              .then(() => {
-                onRefresh();
-              })
-              .finally(() => {
-                setIsDeletingMessage(false);
-              });
-          }}
-          onOpenContext={onOpenContext}
-          onSendReply={async ({
-            content,
-            mediaTags,
-            mentionPubkeys,
-            parentEventId,
-          }) => {
-            const channelId = selectedItem?.item.channelId;
-            if (!selectedItem || !channelId || !canReply) {
-              throw new Error("Replies are not available for this item.");
-            }
-
-            const itemToReply = selectedItem;
-            setIsSendingReply(true);
-            try {
-              const result = await sendChannelMessage(
-                channelId,
-                content,
-                parentEventId,
-                mediaTags,
-                mentionPubkeys,
-              );
-              const authorPubkey = currentPubkey ?? itemToReply.item.pubkey;
-              const reply: InboxReply = {
-                authorLabel: currentPubkey
-                  ? resolveUserLabel({
-                      currentPubkey,
-                      profiles: feedProfiles,
-                      pubkey: authorPubkey,
-                    })
-                  : "You",
-                avatarUrl:
-                  currentPubkey && feedProfiles
-                    ? (feedProfiles[currentPubkey.trim().toLowerCase()]
-                        ?.avatarUrl ?? null)
-                    : null,
-                content,
-                depth: result.depth,
-                fullTimestampLabel: formatInboxFullTimestamp(result.createdAt),
-                id: result.eventId,
-                parentId: result.parentEventId,
-                rootId: result.rootEventId,
-              };
-              setLocalRepliesByItemId((current) => ({
-                ...current,
-                [itemToReply.id]: [...(current[itemToReply.id] ?? []), reply],
-              }));
-              onRefresh();
-            } finally {
-              setIsSendingReply(false);
-            }
-          }}
-          onToggleReaction={
-            canReact
-              ? async (message, emoji, remove) => {
-                  await toggleReactionMutation.mutateAsync({
-                    emoji,
-                    eventId: message.id,
-                    remove,
-                  });
-                  await channelMessagesQuery.refetch();
+              setIsDeletingMessage(true);
+              void deleteMessage(selectedItem.id)
+                .then(() => {
                   onRefresh();
-                }
-              : undefined
-          }
-          onToggleDone={() => {
-            if (selectedItem) {
-              handleToggleDone(selectedItem.id);
+                })
+                .finally(() => {
+                  setIsDeletingMessage(false);
+                });
+            }}
+            onOpenContext={onOpenContext}
+            onSendReply={async ({
+              content,
+              mediaTags,
+              mentionPubkeys,
+              parentEventId,
+            }) => {
+              const channelId = selectedItem?.item.channelId;
+              if (!selectedItem || !channelId || !canReply) {
+                throw new Error("Replies are not available for this item.");
+              }
+
+              const itemToReply = selectedItem;
+              setIsSendingReply(true);
+              try {
+                const result = await sendChannelMessage(
+                  channelId,
+                  content,
+                  parentEventId,
+                  mediaTags,
+                  mentionPubkeys,
+                );
+                const authorPubkey = currentPubkey ?? itemToReply.item.pubkey;
+                const reply: InboxReply = {
+                  authorLabel: currentPubkey
+                    ? resolveUserLabel({
+                        currentPubkey,
+                        profiles: feedProfiles,
+                        pubkey: authorPubkey,
+                      })
+                    : "You",
+                  avatarUrl:
+                    currentPubkey && feedProfiles
+                      ? (feedProfiles[currentPubkey.trim().toLowerCase()]
+                          ?.avatarUrl ?? null)
+                      : null,
+                  content,
+                  depth: result.depth,
+                  fullTimestampLabel: formatInboxFullTimestamp(
+                    result.createdAt,
+                  ),
+                  id: result.eventId,
+                  parentId: result.parentEventId,
+                  rootId: result.rootEventId,
+                };
+                setLocalRepliesByItemId((current) => ({
+                  ...current,
+                  [itemToReply.id]: [...(current[itemToReply.id] ?? []), reply],
+                }));
+                onRefresh();
+              } finally {
+                setIsSendingReply(false);
+              }
+            }}
+            onToggleDone={() => {
+              if (selectedItem) {
+                handleToggleDone(selectedItem.id);
+              }
+            }}
+            onToggleReaction={
+              canReact
+                ? async (message, emoji, remove) => {
+                    await toggleReactionMutation.mutateAsync({
+                      emoji,
+                      eventId: message.id,
+                      remove,
+                    });
+                    await channelMessagesQuery.refetch();
+                    onRefresh();
+                  }
+                : undefined
             }
-          }}
-        />
+            replies={selectedItemReplies}
+          />
+        ) : null}
       </div>
     </div>
   );

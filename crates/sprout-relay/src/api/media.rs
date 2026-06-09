@@ -146,18 +146,42 @@ pub async fn upload_blob(
         )
         .await?
     } else {
-        // Image path: collect body to bytes (bounded by transport-layer limit).
-        let max = state.config.media.max_image_bytes;
+        // Non-video path: buffer the body (bounded by the larger of the image
+        // and generic-file caps), then decide image-vs-generic by sniffed MIME.
+        // Images go through the thumbnailing pipeline; everything else (docs,
+        // archives, audio, text, data) takes the generic file path and is
+        // served as a download.
+        let max = state
+            .config
+            .media
+            .max_image_bytes
+            .max(state.config.media.max_file_bytes);
         let bytes = axum::body::to_bytes(body, max as usize)
             .await
             .map_err(|_| MediaError::FileTooLarge { size: 0, max })?;
-        sprout_media::process_upload(
-            &state.media_storage,
-            &state.config.media,
-            &auth.auth_event,
-            bytes,
-        )
-        .await?
+
+        let is_image = matches!(
+            infer::get(&bytes).map(|t| t.mime_type()),
+            Some("image/jpeg" | "image/png" | "image/gif" | "image/webp")
+        );
+
+        if is_image {
+            sprout_media::process_upload(
+                &state.media_storage,
+                &state.config.media,
+                &auth.auth_event,
+                bytes,
+            )
+            .await?
+        } else {
+            sprout_media::process_file_upload(
+                &state.media_storage,
+                &state.config.media,
+                &auth.auth_event,
+                bytes,
+            )
+            .await?
+        }
     };
 
     // Normalize MIME to a known set to bound label cardinality.
@@ -197,18 +221,29 @@ pub async fn upload_blob(
 
 // ── Serve ─────────────────────────────────────────────────────────────────────
 
-/// Validate that sha256_ext is a safe path segment.
+/// Whether a path-segment extension is a safe token.
+///
+/// The sidecar's `ext` field is the *authoritative* extension — the serve and
+/// resolve paths always compare the requested ext against it. This check is a
+/// cheap structural gate to reject obviously hostile path segments (traversal,
+/// overlong, non-alphanumeric) before any storage lookup. Accepts 1–8 lowercase
+/// alphanumeric chars, which covers every extension the generic file path emits
+/// (jpg, png, mp4, pdf, docx, xlsx, tar, 7z, mp3, flac, json, bin, …).
+pub(crate) fn is_safe_ext(ext: &str) -> bool {
+    !ext.is_empty() && ext.len() <= 8 && ext.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9'))
+}
+
+/// Validate that `sha256_ext` is a safe path segment.
 ///
 /// Accepted forms (max 3 segments):
 ///   - `{sha256}`                   — bare 64-char lowercase hex
 ///   - `{sha256}.{ext}`             — hash + extension
 ///   - `{sha256}.thumb.jpg`          — hash + thumb variant (always JPEG)
 ///
-/// Where `{ext}` ∈ {"jpg", "png", "gif", "webp"} for primary blobs (uploads canonicalize to .jpg, not .jpeg).
+/// `{ext}` must be a safe token (see [`is_safe_ext`]); the sidecar comparison
+/// downstream enforces the actual canonical extension.
 /// Rejects path traversal, leading underscores, and any non-hex first segment.
 fn validate_media_path(sha256_ext: &str) -> Result<(), MediaError> {
-    const ALLOWED_EXTS: &[&str] = &["jpg", "png", "gif", "webp", "mp4"];
-
     let segments: Vec<&str> = sha256_ext.split('.').collect();
 
     // 1–3 segments only (hash, optional thumb, optional ext)
@@ -227,7 +262,7 @@ fn validate_media_path(sha256_ext: &str) -> Result<(), MediaError> {
         1 => {} // bare hash — ok
         2 => {
             // {hash}.{ext}
-            if !ALLOWED_EXTS.contains(&segments[1]) {
+            if !is_safe_ext(segments[1]) {
                 return Err(MediaError::NotFound);
             }
         }
@@ -303,6 +338,16 @@ pub async fn get_blob(
         sidecar_mime
     };
 
+    // Images and video render inline; generic files force download. This is the
+    // primary defence for non-previewable types — combined with `nosniff` and
+    // `CSP: default-src 'none'`, an attachment disposition prevents an uploaded
+    // file from ever executing or rendering as active content in the client.
+    let disposition = if sprout_media::serve_inline(&content_type) {
+        "inline"
+    } else {
+        "attachment"
+    };
+
     let key = resolve_s3_key(&state.media_storage, &sha256_ext).await?;
 
     // Parse optional Range header.
@@ -330,7 +375,7 @@ pub async fn get_blob(
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, &content_type)
                 .header(header::CONTENT_LENGTH, total.to_string())
-                .header(header::CONTENT_DISPOSITION, "inline")
+                .header(header::CONTENT_DISPOSITION, disposition)
                 .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
                 .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'")
                 .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
@@ -375,7 +420,7 @@ pub async fn get_blob(
                         .header(header::CONTENT_TYPE, &content_type)
                         .header(header::CONTENT_RANGE, content_range)
                         .header(header::CONTENT_LENGTH, chunk.len().to_string())
-                        .header(header::CONTENT_DISPOSITION, "inline")
+                        .header(header::CONTENT_DISPOSITION, disposition)
                         .header(header::ACCEPT_RANGES, "bytes")
                         .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
                         .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'")
@@ -498,14 +543,12 @@ pub async fn head_blob(
 /// - `sha256.ext`       → used as-is (already validated by `validate_media_path`)
 /// - `sha256` (no dot)  → read sidecar to get extension, return `sha256.ext`
 ///
-/// Sidecar-derived extensions are validated against the allowlist to prevent
+/// Sidecar-derived extensions are validated as safe tokens to prevent
 /// object-key confusion if sidecar data is ever tampered with.
 async fn resolve_s3_key(
     storage: &sprout_media::MediaStorage,
     sha256_ext: &str,
 ) -> Result<String, MediaError> {
-    const ALLOWED_EXTS: &[&str] = &["jpg", "png", "gif", "webp", "mp4"];
-
     if sha256_ext.contains('.') {
         Ok(sha256_ext.to_string())
     } else {
@@ -514,7 +557,7 @@ async fn resolve_s3_key(
             .await
             .map_err(|_| MediaError::NotFound)?;
         // Validate sidecar ext — never trust storage as authoritative for path construction
-        if !ALLOWED_EXTS.contains(&sidecar.ext.as_str()) {
+        if !is_safe_ext(&sidecar.ext) {
             return Err(MediaError::NotFound);
         }
         Ok(format!("{}.{}", sha256_ext, sidecar.ext))
@@ -648,10 +691,39 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_media_path_rejects_bad_ext() {
-        assert!(validate_media_path(&format!("{VALID_HASH}.svg")).is_err());
-        assert!(validate_media_path(&format!("{VALID_HASH}.exe")).is_err());
-        assert!(validate_media_path(&format!("{VALID_HASH}.pdf")).is_err());
+    fn test_validate_media_path_accepts_generic_exts() {
+        // Path validation now accepts any safe ext token — the deny-list for
+        // dangerous *content* lives in the upload validator, not here. The
+        // sidecar ext comparison is the authoritative check at serve time.
+        assert!(validate_media_path(&format!("{VALID_HASH}.pdf")).is_ok());
+        assert!(validate_media_path(&format!("{VALID_HASH}.docx")).is_ok());
+        assert!(validate_media_path(&format!("{VALID_HASH}.zip")).is_ok());
+        assert!(validate_media_path(&format!("{VALID_HASH}.mp3")).is_ok());
+        assert!(validate_media_path(&format!("{VALID_HASH}.bin")).is_ok());
+    }
+
+    #[test]
+    fn test_validate_media_path_rejects_malformed_ext() {
+        // Reject ext tokens that aren't safe: uppercase, too long, special chars.
+        assert!(validate_media_path(&format!("{VALID_HASH}.PDF")).is_err());
+        assert!(validate_media_path(&format!("{VALID_HASH}.toolongext")).is_err());
+        // 3-segment paths are only valid as the `.thumb.jpg` variant; a
+        // hash.tar.gz form is rejected (compound extensions aren't a thing here —
+        // the canonical ext is a single token like `gz`).
+        assert!(validate_media_path(&format!("{VALID_HASH}.tar.gz")).is_err());
+    }
+
+    #[test]
+    fn test_is_safe_ext() {
+        assert!(is_safe_ext("jpg"));
+        assert!(is_safe_ext("docx"));
+        assert!(is_safe_ext("7z"));
+        assert!(is_safe_ext("bin"));
+        assert!(!is_safe_ext("")); // empty
+        assert!(!is_safe_ext("PDF")); // uppercase
+        assert!(!is_safe_ext("ta r")); // space
+        assert!(!is_safe_ext("toolongext")); // > 8 chars
+        assert!(!is_safe_ext("../etc")); // traversal chars
     }
 
     #[test]

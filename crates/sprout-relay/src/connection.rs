@@ -192,6 +192,14 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
 
     state.sub_registry.remove_connection(conn.conn_id);
     state.conn_manager.deregister(conn.conn_id);
+    if let AuthState::Authenticated(ref auth_ctx) = *conn.auth_state.read().await {
+        let remaining = state
+            .conn_manager
+            .connection_ids_for_pubkey(auth_ctx.pubkey.to_bytes().as_slice());
+        if remaining.is_empty() {
+            let _ = state.pubsub.clear_presence(&auth_ctx.pubkey).await;
+        }
+    }
     metrics::gauge!("sprout_ws_connections_active").decrement(1.0);
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection closed");
 

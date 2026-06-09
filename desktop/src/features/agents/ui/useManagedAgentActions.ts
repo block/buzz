@@ -79,13 +79,29 @@ export function useManagedAgentActions() {
 
   const channelsByPubkey = React.useMemo(() => {
     const map: Record<string, string[]> = {};
+    // Seed from relay agent profiles (kind:10100 events).
     for (const ra of relayAgentsQuery.data ?? []) {
       if (ra.channels.length > 0) {
-        map[ra.pubkey] = ra.channels;
+        map[normalizePubkey(ra.pubkey)] = ra.channels;
+      }
+    }
+    // Fill in from channel member lists (kind:39002) for any managed agents
+    // not already covered by relay agent data.
+    const normalizedManaged = new Set(
+      managedAgents.map((a) => normalizePubkey(a.pubkey)),
+    );
+    for (const ch of channelsQuery.data ?? []) {
+      for (const pk of ch.memberPubkeys) {
+        const key = normalizePubkey(pk);
+        if (!normalizedManaged.has(key)) continue;
+        if (!map[key]) map[key] = [];
+        if (!map[key].includes(ch.name)) {
+          map[key].push(ch.name);
+        }
       }
     }
     return map;
-  }, [relayAgentsQuery.data]);
+  }, [relayAgentsQuery.data, channelsQuery.data, managedAgents]);
 
   // Clear log selection if the agent was removed
   React.useEffect(() => {

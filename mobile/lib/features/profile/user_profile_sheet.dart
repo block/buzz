@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
@@ -12,6 +12,7 @@ import '../channels/channel_management_provider.dart';
 import 'presence_cache_provider.dart';
 import 'user_cache_provider.dart';
 import 'user_status_cache_provider.dart';
+import '../channels/message_content.dart';
 
 /// Show a user profile bottom sheet for the given [pubkey].
 void showUserProfileSheet(BuildContext context, String pubkey) {
@@ -160,10 +161,12 @@ class UserProfileSheet extends HookConsumerWidget {
                 ),
 
                 if (userStatus != null && !userStatus.isEmpty)
-                  _InfoRow(
+                  _InfoRowContent(
                     icon: LucideIcons.messageCircle,
-                    text:
-                        '${userStatus.emoji.isNotEmpty ? '${userStatus.emoji} ' : ''}${userStatus.text}',
+                    child: MessageContent(
+                      content:
+                          '${userStatus.emoji.isNotEmpty ? '${userStatus.emoji} ' : ''}${userStatus.text}',
+                    ),
                   ),
 
                 _InfoRow(
@@ -173,13 +176,11 @@ class UserProfileSheet extends HookConsumerWidget {
                     color: context.colors.onSurfaceVariant,
                     fontFamily: 'monospace',
                   ),
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: pubkey));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Public key copied'),
-                        duration: Duration(seconds: 2),
-                      ),
+                  onTap: () async {
+                    await copyToClipboard(
+                      context,
+                      pubkey,
+                      message: 'Public key copied',
                     );
                   },
                 ),
@@ -255,6 +256,29 @@ class UserProfileSheet extends HookConsumerWidget {
 }
 
 /// A row displaying an icon + text, used for profile info items.
+
+class _InfoRowContent extends StatelessWidget {
+  final IconData icon;
+  final Widget child;
+
+  const _InfoRowContent({required this.icon, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: Grid.quarter),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 16, color: context.colors.onSurfaceVariant),
+          const SizedBox(width: Grid.xxs),
+          Expanded(child: child),
+        ],
+      ),
+    );
+  }
+}
+
 class _InfoRow extends StatelessWidget {
   final IconData icon;
   final String text;

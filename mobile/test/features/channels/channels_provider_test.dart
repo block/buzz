@@ -225,8 +225,9 @@ void main() {
 
     await container.read(channelsProvider.future);
 
-    // Two history fetches: memberships (kind:39002) then metadata (kind:39000).
-    expect(session.historyFilters, hasLength(2));
+    // Two history fetches for channel loading, plus one per non-DM channel
+    // for high-priority event backfill.
+    expect(session.historyFilters.length, greaterThanOrEqualTo(2));
     expect(session.historyFilters[0].kinds, [39002]);
     expect(session.historyFilters[0].tags['#p'], [myPk]);
     expect(session.historyFilters[1].kinds, [39000]);

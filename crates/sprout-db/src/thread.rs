@@ -372,7 +372,7 @@ pub async fn get_thread_replies(
         " ORDER BY tm.event_created_at ASC LIMIT ${param_idx}"
     ));
 
-    let mut q = sqlx::query(&sql).bind(root_event_id);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(root_event_id);
 
     if let Some(dl) = depth_limit {
         q = q.bind(dl as i32);
@@ -550,7 +550,7 @@ pub async fn get_channel_messages_top_level(
         " ORDER BY e.created_at {order} LIMIT ${param_idx}"
     ));
 
-    let mut q = sqlx::query(&sql).bind(channel_id);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(channel_id);
 
     if let Some(cursor) = before_cursor {
         q = q.bind(cursor);

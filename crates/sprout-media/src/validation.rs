@@ -14,6 +14,143 @@ use crate::error::MediaError;
 /// `video/mp4` and `validate_content()` rejects it here.
 const ALLOWED_MIME_TYPES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
+/// MIME types blocked from the generic file-upload path.
+///
+/// These are the formats a browser (or the desktop webview) will *execute* or
+/// *render as active content* if it ever reaches them with the wrong response
+/// headers. We serve generic files with `Content-Disposition: attachment` +
+/// `X-Content-Type-Options: nosniff` + `CSP: default-src 'none'`, which already
+/// neutralises them — this allowlist-of-denials is defence in depth, so a future
+/// header regression can't turn an uploaded blob into a stored-XSS vector.
+///
+/// HTML, JS, and SVG are the classic stored-XSS carriers. Native executables are
+/// blocked because there's no legitimate reason to host them inline in chat and
+/// they're a malware-distribution risk.
+const BLOCKED_FILE_MIME_TYPES: &[&str] = &[
+    // Active web content — stored-XSS vectors.
+    "text/html",
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "application/javascript",
+    "text/javascript",
+    // Native executables / installers.
+    "application/x-msdownload", // .exe / .dll
+    "application/x-executable", // ELF
+    "application/vnd.microsoft.portable-executable",
+    "application/x-mach-binary", // Mach-O
+    "application/x-sharedlib",
+    "application/x-elf",
+    "application/x-msi",
+    "application/vnd.android.package-archive", // .apk
+    "application/x-apple-diskimage",           // .dmg
+];
+
+/// Map a sniffed MIME type to a file extension for the generic file path.
+///
+/// Covers the common document, archive, audio, and data formats `infer`
+/// recognises. Returns `None` for MIME types we don't have a canonical
+/// extension for — the caller falls back to `bin`.
+fn file_mime_to_ext(mime: &str) -> Option<&'static str> {
+    let ext = match mime {
+        // Documents
+        "application/pdf" => "pdf",
+        "application/msword" => "doc",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => "docx",
+        "application/vnd.ms-excel" => "xls",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => "xlsx",
+        "application/vnd.ms-powerpoint" => "ppt",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => "pptx",
+        "application/vnd.oasis.opendocument.text" => "odt",
+        "application/vnd.oasis.opendocument.spreadsheet" => "ods",
+        "application/vnd.oasis.opendocument.presentation" => "odp",
+        "application/rtf" => "rtf",
+        "application/epub+zip" => "epub",
+        // Archives
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
+        "application/x-tar" => "tar",
+        "application/x-7z-compressed" => "7z",
+        "application/x-rar-compressed" | "application/vnd.rar" => "rar",
+        "application/x-bzip2" => "bz2",
+        "application/x-xz" => "xz",
+        "application/zstd" => "zst",
+        // Audio
+        "audio/mpeg" => "mp3",
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => "m4a",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "audio/wav" | "audio/x-wav" => "wav",
+        "audio/ogg" => "ogg",
+        "audio/aac" => "aac",
+        "audio/opus" => "opus",
+        // Other media containers (served as downloads, not transcoded)
+        "video/quicktime" => "mov",
+        "video/webm" => "webm",
+        "video/x-matroska" => "mkv",
+        // Data / text
+        "application/json" => "json",
+        "text/csv" => "csv",
+        "text/plain" => "txt",
+        _ => return None,
+    };
+    Some(ext)
+}
+
+/// Validate uploaded bytes for the **generic file** upload path.
+///
+/// This is the catch-all path for non-image, non-video attachments (documents,
+/// archives, audio, text, data). It enforces three things:
+///   1. A size cap (`config.max_file_bytes`).
+///   2. A *deny* list — known active-content and executable MIME types are
+///      rejected even though safe headers already neutralise them.
+///   3. Magic-byte sniffing where possible.
+///
+/// Files with no detectable signature (plain text, CSV, source code, JSON —
+/// none of which have magic bytes) are accepted as `application/octet-stream`.
+/// They are always served as downloads, so an un-sniffable file can never
+/// execute in the app.
+///
+/// Returns `(mime, ext)`.
+pub fn validate_file_content(
+    bytes: &[u8],
+    config: &MediaConfig,
+) -> Result<(String, String), MediaError> {
+    // 1. Size cap.
+    if bytes.len() as u64 > config.max_file_bytes {
+        return Err(MediaError::FileTooLarge {
+            size: bytes.len() as u64,
+            max: config.max_file_bytes,
+        });
+    }
+
+    // 2. Sniff. `None` means no magic signature (text/csv/json/source) — that's
+    //    fine for the generic path; treat as opaque binary served as a download.
+    match infer::get(bytes) {
+        Some(kind) => {
+            let mime = kind.mime_type().to_string();
+            // 3. Deny dangerous active-content / executable types.
+            if BLOCKED_FILE_MIME_TYPES.contains(&mime.as_str()) {
+                return Err(MediaError::DisallowedContentType(mime));
+            }
+            let ext = file_mime_to_ext(&mime)
+                .map(str::to_string)
+                .unwrap_or_else(|| kind.extension().to_string());
+            Ok((mime, ext))
+        }
+        None => Ok(("application/octet-stream".to_string(), "bin".to_string())),
+    }
+}
+
+/// Whether a stored blob should be served inline (rendered in the client) or as
+/// an attachment (forced download).
+///
+/// Images and video are previewed inline by the renderer; everything else is a
+/// generic file card with a download action, so it serves as an attachment.
+/// PDF is intentionally *not* inline yet — inline PDF preview is a planned
+/// fast-follow; until the renderer handles it, force download like any other file.
+pub fn serve_inline(mime: &str) -> bool {
+    mime.starts_with("image/") || mime.starts_with("video/")
+}
+
 /// Metadata extracted from a validated MP4 file.
 #[derive(Debug, Clone)]
 pub struct VideoMeta {
@@ -282,6 +419,7 @@ mod tests {
             max_image_bytes: 50 * 1024 * 1024,
             max_gif_bytes: 10 * 1024 * 1024,
             max_video_bytes: 524_288_000,
+            max_file_bytes: 104_857_600,
             public_base_url: String::new(),
             server_domain: None,
         }
@@ -1138,5 +1276,75 @@ mod tests {
             matches!(result, Err(MediaError::ResolutionTooHigh)),
             "expected ResolutionTooHigh, got {result:?}"
         );
+    }
+
+    // --- Generic file path tests ---
+
+    /// Minimal PDF header — infer detects `application/pdf` from `%PDF`.
+    const TINY_PDF: &[u8] = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n%%EOF";
+
+    /// Minimal ZIP header — infer detects `application/zip` from `PK\x03\x04`.
+    const TINY_ZIP: &[u8] = &[
+        0x50, 0x4B, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn test_validate_file_pdf_accepted() {
+        let config = test_config();
+        let (mime, ext) = validate_file_content(TINY_PDF, &config).unwrap();
+        assert_eq!(mime, "application/pdf");
+        assert_eq!(ext, "pdf");
+    }
+
+    #[test]
+    fn test_validate_file_zip_accepted() {
+        let config = test_config();
+        let (mime, ext) = validate_file_content(TINY_ZIP, &config).unwrap();
+        assert_eq!(mime, "application/zip");
+        assert_eq!(ext, "zip");
+    }
+
+    #[test]
+    fn test_validate_file_plaintext_accepted_as_octet_stream() {
+        // Plain text has no magic bytes — infer returns None. The generic path
+        // accepts it as opaque binary served as a download (the common Slack
+        // case: .txt, .csv, .md, source code).
+        let config = test_config();
+        let (mime, ext) = validate_file_content(b"hello, this is a text file\n", &config).unwrap();
+        assert_eq!(mime, "application/octet-stream");
+        assert_eq!(ext, "bin");
+    }
+
+    #[test]
+    fn test_validate_file_html_rejected() {
+        // HTML is a stored-XSS carrier — blocked even though headers neutralise it.
+        let config = test_config();
+        let html = b"<!DOCTYPE html><html><body><script>alert(1)</script></body></html>";
+        let result = validate_file_content(html, &config);
+        assert!(
+            matches!(result, Err(MediaError::DisallowedContentType(ref m)) if m == "text/html"),
+            "expected DisallowedContentType(text/html), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_file_too_large_rejected() {
+        let mut config = test_config();
+        config.max_file_bytes = 10;
+        let result = validate_file_content(TINY_PDF, &config);
+        assert!(matches!(result, Err(MediaError::FileTooLarge { .. })));
+    }
+
+    #[test]
+    fn test_serve_inline() {
+        assert!(serve_inline("image/jpeg"));
+        assert!(serve_inline("image/png"));
+        assert!(serve_inline("video/mp4"));
+        // Generic files force download.
+        assert!(!serve_inline("application/pdf"));
+        assert!(!serve_inline("application/zip"));
+        assert!(!serve_inline("application/octet-stream"));
+        assert!(!serve_inline("audio/mpeg"));
+        assert!(!serve_inline("text/plain"));
     }
 }

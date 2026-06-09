@@ -231,6 +231,12 @@ pub struct AppState {
     /// Key: agent pubkey bytes (32). Value: (count, window_start).
     /// 100 events/sec per agent — prevents relay/DB pressure from bursty telemetry.
     pub observer_rate_limiter: Arc<DashMap<[u8; 32], (u32, Instant)>>,
+    /// Per-requester sliding-window rate limiter for mesh connect requests
+    /// (kind 24621). Key: requester pubkey bytes (32). Value: (count,
+    /// window_start). Bounds the 1→2 call-me-now amplification: a member is
+    /// trusted, but a buggy desktop loop shouldn't make the relay sign+fan
+    /// unboundedly. 20/sec is far above any real interactive use.
+    pub mesh_connect_rate_limiter: Arc<DashMap<[u8; 32], (u32, Instant)>>,
     /// Cache for observer agent-owner authorization (kind 24200).
     /// Key: (agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
     /// agent_owner_pubkey is immutable so a long TTL (5 min) is safe.
@@ -376,6 +382,7 @@ impl AppState {
                     .build(),
             ),
             observer_rate_limiter: Arc::new(DashMap::new()),
+            mesh_connect_rate_limiter: Arc::new(DashMap::new()),
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(1_000)

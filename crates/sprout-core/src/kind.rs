@@ -30,6 +30,8 @@ pub const KIND_NIP65_RELAY_LIST_METADATA: u32 = 10002;
 /// User-owned global state, keyed by `(pubkey, kind)`. References content but is not itself
 /// channel-scoped content.
 pub const KIND_BOOKMARK_LIST: u32 = 10003;
+/// NIP-51: Emoji list (replaceable) — user preferred emojis and pointers to emoji sets.
+pub const KIND_EMOJI_LIST: u32 = 10030;
 /// NIP-51: Follow set (parameterized replaceable, 30000–39999 range) — named curated lists of pubkeys.
 ///
 /// User-owned, keyed by `(pubkey, kind, d_tag)`. Allows multiple named follow lists on top of
@@ -39,6 +41,15 @@ pub const KIND_FOLLOW_SET: u32 = 30000;
 ///
 /// User-owned, keyed by `(pubkey, kind, d_tag)`.
 pub const KIND_BOOKMARK_SET: u32 = 30003;
+/// NIP-51 / NIP-30: Emoji set (parameterized replaceable).
+///
+/// User-owned, keyed by `(pubkey, kind, d_tag)`. Each member publishes their own
+/// kind:30030 set (signed as themselves); the workspace emoji "palette" is the
+/// client-side union of everyone's sets — a view computed on read, not stored
+/// state. Ingest allowlists member-authored kind:30030/10030 (see
+/// `required_scope_for_kind`), and the generic NIP-33 replace path keeps only the
+/// latest per `(pubkey, d_tag)`.
+pub const KIND_EMOJI_SET: u32 = 30030;
 /// NIP-01: Channel metadata (replaceable). Not used by Sprout today.
 pub const KIND_CHANNEL_METADATA: u32 = 41;
 /// NIP-09: Event deletion request.
@@ -107,7 +118,6 @@ pub const RELAY_ADMIN_ADD_MEMBER: u32 = 9030;
 pub const RELAY_ADMIN_REMOVE_MEMBER: u32 = 9031;
 /// NIP-43: Change the role of an existing relay member.
 pub const RELAY_ADMIN_CHANGE_ROLE: u32 = 9032;
-
 // NIP-43 relay membership announcement events (relay-signed)
 /// NIP-43: Relay membership list snapshot (relay-signed, replaceable by convention).
 pub const KIND_NIP43_MEMBERSHIP_LIST: u32 = 13534;
@@ -145,6 +155,12 @@ pub const KIND_NIP29_GROUP_ROLES: u32 = 39003;
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
 
+/// Mesh-LLM relay status (relay-signed, parameterized replaceable, d=sprout-relay-mesh).
+///
+/// Published only by the relay. Carries a sanitized, member-readable projection
+/// of mesh status, including EndpointAddr dial pointers for serving nodes.
+pub const KIND_MESH_LLM_RELAY_STATUS: u32 = 30621;
+
 /// Lower bound of the NIP-33 parameterized replaceable range (30000–39999).
 pub const PARAM_REPLACEABLE_KIND_MIN: u32 = 30000;
 /// Upper bound of the NIP-33 parameterized replaceable range (30000–39999).
@@ -164,6 +180,22 @@ pub const KIND_PAIRING: u32 = 24134;
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
+/// Ephemeral: mesh status report (desktop → relay). A relay member reports its
+/// current mesh serve availability + EndpointAddr(s) so the relay can project a
+/// sanitized, relay-signed kind:30621 discovery note keyed per reporter. Tagged
+/// `["p", <self>]` optional; never stored — the durable record is the relay's
+/// 30621, not this transient input.
+pub const KIND_MESH_STATUS_REPORT: u32 = 24620;
+/// Ephemeral: mesh connect request (desktop → relay). A relay member asks the
+/// relay to coordinate a direct iroh hole-punch to a peer it discovered via
+/// kind:30621. Tagged `["p", <target_pubkey>]`. Never stored; the relay
+/// validates membership of both ends, then emits paired KIND_MESH_CALL_ME_NOW.
+pub const KIND_MESH_CONNECT_REQUEST: u32 = 24621;
+/// Ephemeral: mesh call-me-now signal (relay → desktop, relay-signed). The live
+/// dial trigger for a direct iroh hole-punch — carries the peer's EndpointAddr
+/// so both ends dial near-simultaneously. Tagged `["p", <recipient_pubkey>]`.
+/// Never stored; seconds expiry.
+pub const KIND_MESH_CALL_ME_NOW: u32 = 24622;
 
 // Stream messaging
 /// NIP-29 group chat message kind. V1 used kind:10001 (replaceable range — wrong), then 40001.
@@ -318,8 +350,10 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PIN_LIST,
     KIND_NIP65_RELAY_LIST_METADATA,
     KIND_BOOKMARK_LIST,
+    KIND_EMOJI_LIST,
     KIND_FOLLOW_SET,
     KIND_BOOKMARK_SET,
+    KIND_EMOJI_SET,
     KIND_CHANNEL_METADATA,
     KIND_DELETION,
     KIND_REACTION,
@@ -354,6 +388,9 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_NIP29_GROUP_ROLES,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
+    KIND_MESH_STATUS_REPORT,
+    KIND_MESH_CONNECT_REQUEST,
+    KIND_MESH_CALL_ME_NOW,
     KIND_BLOSSOM_AUTH,
     KIND_PAIRING,
     KIND_AGENT_OBSERVER_FRAME,
@@ -370,6 +407,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_SYSTEM_MESSAGE,
     KIND_CHANNEL_SUMMARY,
     KIND_PRESENCE_SNAPSHOT,
+    KIND_MESH_LLM_RELAY_STATUS,
     KIND_DM_OPEN,
     KIND_DM_ADD_MEMBER,
     KIND_DM_HIDE,
@@ -480,7 +518,10 @@ pub const fn is_command_kind(kind: u32) -> bool {
 /// Returns `true` if `kind` is a relay-only sidecar kind.
 /// Client submission of these kinds must be rejected.
 pub const fn is_relay_only_kind(kind: u32) -> bool {
-    matches!(kind, KIND_CHANNEL_SUMMARY | KIND_PRESENCE_SNAPSHOT)
+    matches!(
+        kind,
+        KIND_CHANNEL_SUMMARY | KIND_PRESENCE_SNAPSHOT | KIND_MESH_LLM_RELAY_STATUS
+    )
 }
 
 /// Extract the kind from a nostr Event as u32.
@@ -498,6 +539,7 @@ pub fn event_kind_i32(event: &nostr::Event) -> i32 {
 // Compile-time: new kinds are in the expected ranges.
 const _: () = assert!(is_replaceable(KIND_AGENT_PROFILE)); // 10100 ∈ 10000–19999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_MESH_LLM_RELAY_STATUS)); // 30621 ∈ 30000–39999
 
 // Compile-time: NIP-34 parameterized replaceable kinds are in the correct range.
 const _: () = assert!(

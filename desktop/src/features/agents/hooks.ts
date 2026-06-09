@@ -11,7 +11,7 @@ import { channelsQueryKey } from "@/features/channels/hooks";
 import {
   createManagedAgent,
   deleteManagedAgent,
-  discoverAcpProviders,
+  discoverAcpRuntimes,
   discoverBackendProviders,
   discoverManagedAgentPrereqs,
   getManagedAgentLog,
@@ -38,7 +38,7 @@ import {
   updateTeam,
 } from "@/shared/api/tauriTeams";
 import type {
-  AcpProvider,
+  AcpRuntime,
   AgentPersona,
   AgentTeam,
   CreateManagedAgentInput,
@@ -74,7 +74,7 @@ export const relayAgentsQueryKey = ["relay-agents"] as const;
 export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
 export const teamsQueryKey = ["teams"] as const;
-export const acpProvidersQueryKey = ["acp-providers"] as const;
+export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
 
@@ -100,20 +100,20 @@ async function invalidateAgentQueries(
   ]);
 }
 
-export function useAcpProvidersQuery() {
+export function useAcpRuntimesQuery() {
   return useQuery({
-    queryKey: acpProvidersQueryKey,
-    queryFn: discoverAcpProviders,
+    queryKey: acpRuntimesQueryKey,
+    queryFn: discoverAcpRuntimes,
     staleTime: 60_000,
   });
 }
 
-export function useAvailableAcpProviders() {
-  const query = useAcpProvidersQuery();
+export function useAvailableAcpRuntimes() {
+  const query = useAcpRuntimesQuery();
   const available = React.useMemo(
     () =>
       (query.data ?? []).filter(
-        (p): p is AcpProvider => p.availability === "available",
+        (p): p is AcpRuntime => p.availability === "available",
       ),
     [query.data],
   );
@@ -123,9 +123,9 @@ export function useAvailableAcpProviders() {
 export function useInstallAcpRuntimeMutation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (providerId: string) => installAcpRuntime(providerId),
+    mutationFn: (runtimeId: string) => installAcpRuntime(runtimeId),
     onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: acpProvidersQueryKey });
+      void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
     },
   });
 }
@@ -456,7 +456,7 @@ export function useEnsureGooseInChannelMutation(channelId: string | null) {
       }
 
       const attached = await ensureChannelAgentPresetInChannel(channelId, {
-        provider: {
+        runtime: {
           id: "goose",
           label: "Goose",
           command: "goose",

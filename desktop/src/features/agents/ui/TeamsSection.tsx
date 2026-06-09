@@ -161,7 +161,7 @@ export function TeamsSection({
                         {visible.map((persona) => (
                           <ProfileAvatar
                             avatarUrl={persona.avatarUrl}
-                            className="h-6 w-6 rounded-full border-2 border-card text-[10px]"
+                            className="h-6 w-6 border-2 border-card text-[10px]"
                             key={persona.id}
                             label={persona.displayName}
                           />

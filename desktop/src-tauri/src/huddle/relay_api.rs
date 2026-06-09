@@ -170,17 +170,17 @@ pub(crate) async fn connect_audio_relay(
         .clone();
 
     tokio::spawn(async move {
-        if let Err(e) = audio_relay_pipeline(
+        if let Err(e) = audio_relay_pipeline(AudioRelayPipelineArgs {
             ws_tx,
             ws_rx,
             pcm_rx,
-            cancel_clone.clone(),
-            app_handle.clone(),
+            cancel: cancel_clone.clone(),
+            app_handle: app_handle.clone(),
             initial_peers,
             tts_cancel,
             tts_active,
             output_device_name,
-        )
+        })
         .await
         {
             eprintln!("sprout-desktop: audio relay pipeline exited: {e}");
@@ -204,17 +204,31 @@ pub(crate) async fn connect_audio_relay(
 pub(crate) type WsStream =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn audio_relay_pipeline(
+struct AudioRelayPipelineArgs {
     ws_tx: futures_util::stream::SplitSink<WsStream, WsMsg>,
     ws_rx: futures_util::stream::SplitStream<WsStream>,
-    mut pcm_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    pcm_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     cancel: CancellationToken,
     app_handle: Option<tauri::AppHandle>,
     initial_peers: Vec<(u8, String)>,
     tts_cancel: Arc<AtomicBool>,
     tts_active: Arc<AtomicBool>,
     output_device_name: Option<String>,
-) -> Result<(), String> {
+}
+
+async fn audio_relay_pipeline(args: AudioRelayPipelineArgs) -> Result<(), String> {
+    let AudioRelayPipelineArgs {
+        ws_tx,
+        ws_rx,
+        mut pcm_rx,
+        cancel,
+        app_handle,
+        initial_peers,
+        tts_cancel,
+        tts_active,
+        output_device_name,
+    } = args;
+
     let mut encoder = opus::Encoder::new(48000, opus::Channels::Mono, opus::Application::Voip)
         .map_err(|e| format!("opus encoder: {e}"))?;
     encoder
@@ -383,7 +397,7 @@ pub(crate) async fn fetch_channel_members(
     let all = fetch_channel_members_with_roles(channel_id, state).await?;
     Ok(all
         .into_iter()
-        .filter(|(_, role)| role_filter.map_or(true, |r| role.as_deref() == Some(r)))
+        .filter(|(_, role)| role_filter.is_none_or(|r| role.as_deref() == Some(r)))
         .map(|(pubkey, _)| pubkey)
         .collect())
 }

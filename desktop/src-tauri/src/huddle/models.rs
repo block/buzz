@@ -664,13 +664,12 @@ impl ModelManager {
             MAX_STT_DOWNLOAD_BYTES,
             "stt archive",
             |downloaded, content_length| {
-                if let Some(total) = content_length {
-                    if total > 0 {
-                        let pct = ((downloaded * 89) / total).min(89) as u8;
-                        slot.set_status(ModelStatus::Downloading {
-                            progress_percent: pct,
-                        });
-                    }
+                if let Some(pct) =
+                    content_length.and_then(|total| (downloaded * 89).checked_div(total))
+                {
+                    slot.set_status(ModelStatus::Downloading {
+                        progress_percent: pct.min(89) as u8,
+                    });
                 }
             },
         )
@@ -779,10 +778,11 @@ impl ModelManager {
         for (i, (url, filename)) in downloads.iter().enumerate() {
             eprintln!("sprout-desktop: downloading Pocket TTS {filename} from {url}");
 
-            let response = fetch_url(&http_client, url, filename).await.map_err(|e| {
-                let _ = std::fs::remove_dir_all(&temp_dir);
-                e
-            })?;
+            let response = fetch_url(&http_client, url, filename)
+                .await
+                .inspect_err(|_| {
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                })?;
 
             let dest = temp_dir.join(filename);
             let slot = self.tts.clone();
@@ -807,9 +807,8 @@ impl ModelManager {
                 },
             )
             .await
-            .map_err(|e| {
+            .inspect_err(|_| {
                 let _ = std::fs::remove_dir_all(&temp_dir);
-                e
             })?;
             eprintln!("sprout-desktop: downloaded {bytes} bytes ({filename}), wrote to disk");
 

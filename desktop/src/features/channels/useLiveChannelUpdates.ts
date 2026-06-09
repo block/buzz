@@ -4,7 +4,12 @@ import { useQueryClient } from "@tanstack/react-query";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
-import { getChannelIdFromTags } from "@/features/messages/lib/threading";
+import {
+  getChannelIdFromTags,
+  getThreadReference,
+  isBroadcastReply,
+} from "@/features/messages/lib/threading";
+import { shouldNotifyForEvent } from "@/features/notifications/lib/shouldNotify";
 import { relayClient } from "@/shared/api/relayClient";
 import {
   CHANNEL_EVENT_KINDS,
@@ -23,6 +28,13 @@ export type UseLiveChannelUpdatesOptions = {
    * unread badges. See `UNREAD_TRIGGER_KINDS` for the exact kind set.
    */
   onChannelMessage?: (channelId: string, event: RelayEvent) => void;
+  onThreadReplyNotification?: (channelId: string, event: RelayEvent) => void;
+  onSelfChannelMessage?: (event: RelayEvent) => void;
+  participatedRootIds?: ReadonlySet<string>;
+  followedRootIds?: ReadonlySet<string>;
+  authoredRootIds?: ReadonlySet<string>;
+  mutedRootIds?: ReadonlySet<string>;
+  mutedChannelIds?: ReadonlySet<string>;
 };
 
 const LIVE_SUBSCRIPTION_RETRY_BASE_MS = 1_000;
@@ -31,6 +43,8 @@ const LIVE_SUBSCRIPTION_RETRY_MAX_MS = 30_000;
 // Only "new content" kinds should bump unread state. Shared with the
 // catch-up query in useUnreadChannels so the two paths stay in lockstep.
 const UNREAD_TRIGGER_KINDS = new Set<number>(CHANNEL_MESSAGE_EVENT_KINDS);
+
+export const EMPTY_SET: ReadonlySet<string> = new Set();
 
 function isExternalMentionEvent(event: RelayEvent, currentPubkey: string) {
   return (
@@ -144,6 +158,16 @@ export function useLiveChannelUpdates(
       return;
     }
 
+    // Let the caller observe self-authored trigger events (e.g. to track
+    // thread participation) before the author-exclusion guard filters them.
+    if (
+      UNREAD_TRIGGER_KINDS.has(event.kind) &&
+      normalizedCurrentPubkey.length > 0 &&
+      event.pubkey.toLowerCase() === normalizedCurrentPubkey
+    ) {
+      options.onSelfChannelMessage?.(event);
+    }
+
     // Notify the unread tracker. Restricted to human-visible message kinds
     // and to events authored by someone other than the current user — your
     // own outgoing messages should never make a channel unread, and
@@ -151,9 +175,25 @@ export function useLiveChannelUpdates(
     if (
       UNREAD_TRIGGER_KINDS.has(event.kind) &&
       (normalizedCurrentPubkey.length === 0 ||
-        event.pubkey.toLowerCase() !== normalizedCurrentPubkey)
+        event.pubkey.toLowerCase() !== normalizedCurrentPubkey) &&
+      shouldNotifyForEvent(event, normalizedCurrentPubkey, {
+        participatedRootIds: options.participatedRootIds ?? EMPTY_SET,
+        followedRootIds: options.followedRootIds ?? EMPTY_SET,
+        authoredRootIds: options.authoredRootIds ?? EMPTY_SET,
+        mutedRootIds: options.mutedRootIds ?? EMPTY_SET,
+        mutedChannelIds: options.mutedChannelIds ?? EMPTY_SET,
+        channelId,
+      })
     ) {
       options.onChannelMessage?.(channelId, event);
+      if (channelId !== activeChannelId) {
+        const ref = getThreadReference(event.tags);
+        const isThreadReply =
+          ref.parentId !== null && !isBroadcastReply(event.tags);
+        if (isThreadReply) {
+          options.onThreadReplyNotification?.(channelId, event);
+        }
+      }
     }
 
     // Merge into the timeline cache for the active channel.

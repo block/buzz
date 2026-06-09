@@ -90,7 +90,7 @@ export function useUserStatusSubscription() {
     function handleStatusEvent(event: RelayEvent) {
       if (isCancelled) return;
       const dTag = event.tags.find((t) => t[0] === "d");
-      if (!dTag || dTag[1] !== "general") return;
+      if (dTag?.[1] !== "general") return;
       const parsed = parseUserStatusEvent(event);
       const status: UserStatus | null =
         parsed.text || parsed.emoji
@@ -165,6 +165,11 @@ export function useSetUserStatusMutation(pubkey?: string) {
         text || emoji
           ? { text, emoji, updatedAt: Math.floor(Date.now() / 1_000) }
           : null;
+
+      queryClient.setQueryData<UserStatusLookup>(
+        userStatusQueryKey([normalizedPubkey]),
+        (old) => ({ ...(old ?? {}), [normalizedPubkey]: status }),
+      );
 
       queryClient.setQueriesData<UserStatusLookup>(
         { queryKey: ["user-status"] },

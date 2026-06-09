@@ -4,12 +4,14 @@ use tauri::AppHandle;
 
 use crate::{
     managed_agents::{
-        append_log_marker, known_acp_provider, login_shell_path, managed_agent_log_path,
+        append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
         ManagedAgentProcess, ManagedAgentRecord, ManagedAgentSummary,
     },
     util::now_iso,
 };
+
+type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
 
 /// Binary name fragments for all known agent/harness processes that Sprout
 /// may spawn. Used by `process_belongs_to_us()` and the orphan sweep to
@@ -28,8 +30,6 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "codex-acp",
     "codex_acp",
     "goose",
-    "sprout-mcp",
-    "sprout_mcp",
     // sprout-dev-mcp's multicall personalities (rg, tree, sprout,
     // git-credential-nostr, git-sign-nostr) are short-lived per-tool-call
     // invocations — not listed here.
@@ -113,6 +113,118 @@ pub(crate) fn process_belongs_to_us(pid: u32) -> bool {
 
 #[cfg(not(unix))]
 pub(crate) fn process_belongs_to_us(_pid: u32) -> bool {
+    false
+}
+
+/// The value stamped into the `SPROUT_MANAGED_AGENT` env var of every agent we
+/// spawn, identifying *which* desktop instance owns it. We use the app's bundle
+/// identifier (`xyz.block.sprout.app` for release, `xyz.block.sprout.app.dev`
+/// for `just dev`) because it is stable across restarts — a relaunched dev
+/// instance still recognizes its own previously-spawned agents as reclaimable,
+/// while never matching another instance's (e.g. a dev build never reaps a DMG
+/// build's agents, and vice versa). This is what lets two Sprouts coexist on
+/// one machine without one's cleanup nuking the other's agents.
+pub(crate) fn current_instance_id(app: &AppHandle) -> String {
+    app.config().identifier.clone()
+}
+
+/// Build the full `SPROUT_MANAGED_AGENT=<instance-id>` env entry we match
+/// against when scanning processes. Kept here so the spawn stamp and the sweep
+/// matcher can never drift apart.
+fn sprout_marker_entry(instance_id: &str) -> Vec<u8> {
+    format!("SPROUT_MANAGED_AGENT={instance_id}").into_bytes()
+}
+
+/// Check if a running process is one of *our* managed agents: it must carry
+/// `SPROUT_MANAGED_AGENT=<instance_id>` in its environment, where `instance_id`
+/// is this desktop instance's id. A process stamped with a *different* instance
+/// id belongs to another live Sprout app and must never be reaped here.
+#[cfg(target_os = "macos")]
+fn process_has_sprout_marker(pid: u32, instance_id: &str) -> bool {
+    let marker = sprout_marker_entry(instance_id);
+
+    let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut buf_size: libc::size_t = 0;
+
+    // First call: get required buffer size.
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut buf_size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return false;
+    }
+
+    let mut buf: Vec<u8> = vec![0; buf_size];
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut buf_size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return false;
+    }
+    buf.truncate(buf_size);
+
+    // Buffer layout: [i32 argc][exec_path\0][null padding][argv\0...][env\0...]
+    if buf.len() < std::mem::size_of::<libc::c_int>() {
+        return false;
+    }
+    let mut n_args: libc::c_int = 0;
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            buf.as_ptr(),
+            &mut n_args as *mut libc::c_int as *mut u8,
+            std::mem::size_of::<libc::c_int>(),
+        );
+    }
+    let mut pos = std::mem::size_of::<libc::c_int>();
+
+    // Skip exec path (scan to first null).
+    while pos < buf.len() && buf[pos] != 0 {
+        pos += 1;
+    }
+    // Skip null padding between exec path and argv[0].
+    while pos < buf.len() && buf[pos] == 0 {
+        pos += 1;
+    }
+    // Skip argc argument strings.
+    let mut args_remaining = n_args;
+    while args_remaining > 0 && pos < buf.len() {
+        while pos < buf.len() && buf[pos] != 0 {
+            pos += 1;
+        }
+        while pos < buf.len() && buf[pos] == 0 {
+            pos += 1;
+        }
+        args_remaining -= 1;
+    }
+    // Remaining bytes are null-delimited environment strings.
+    buf[pos..].split(|&b| b == 0).any(|entry| entry == marker)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn process_has_sprout_marker(pid: u32, instance_id: &str) -> bool {
+    let marker = sprout_marker_entry(instance_id);
+    let Ok(data) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return false;
+    };
+    data.split(|&b| b == 0).any(|entry| entry == marker)
+}
+
+#[cfg(not(unix))]
+fn process_has_sprout_marker(_pid: u32, _instance_id: &str) -> bool {
     false
 }
 
@@ -200,7 +312,9 @@ fn sigterm_then_sigkill(pids: &[i32]) {
     std::thread::sleep(std::time::Duration::from_millis(200));
 
     for &pid in pids {
-        if process_is_running(pid as u32) {
+        // Check if the group has any living members, not just the leader.
+        // kill(-pid, 0) returns 0 if ANY member of the group is signalable.
+        if unsafe { libc::kill(-pid, 0) } == 0 {
             unsafe {
                 libc::kill(-pid, libc::SIGKILL);
             }
@@ -216,16 +330,23 @@ fn sigterm_then_sigkill(pids: &[i32]) {
 #[cfg(unix)]
 pub(crate) fn sweep_orphaned_agent_processes(app: &AppHandle, skip_pids: &[u32]) {
     let entries = super::read_all_agent_pid_files(app);
-    let orphans: Vec<i32> = entries
+    // Collect live orphans AND dead-leader groups into a single kill batch.
+    // Dead leaders: PGID may have been recycled, but the window is narrow
+    // (PID files are from this session) and the cost of missing surviving
+    // group members outweighs the recycling risk.
+    let targets: Vec<i32> = entries
         .iter()
         .filter(|(_, pid)| {
-            !skip_pids.contains(pid) && process_is_running(*pid) && process_belongs_to_us(*pid)
+            if skip_pids.contains(pid) {
+                return false;
+            }
+            (process_is_running(*pid) && process_belongs_to_us(*pid)) || !process_is_running(*pid)
         })
         .map(|(_, pid)| *pid as i32)
         .collect();
 
-    if !orphans.is_empty() {
-        sigterm_then_sigkill(&orphans);
+    if !targets.is_empty() {
+        sigterm_then_sigkill(&targets);
     }
 
     // Clean up PID files for processes we just killed or that are already gone.
@@ -243,6 +364,151 @@ pub(crate) fn sweep_orphaned_agent_processes(app: &AppHandle, skip_pids: &[u32])
 pub(crate) fn sweep_orphaned_agent_processes(app: &AppHandle, _skip_pids: &[u32]) {
     let _ = app;
 }
+
+/// Enumerate all processes on the system owned by the current user and kill any
+/// agent binary stamped with *this* instance's `SPROUT_MANAGED_AGENT` marker
+/// (`instance_id`) that isn't in `skip_pids`. This catches orphans that escaped
+/// PID-file-based cleanup (e.g. agent workers spawned with their own process
+/// group whose parent harness already exited and had its PID file removed),
+/// while leaving another live Sprout instance's agents untouched.
+#[cfg(target_os = "macos")]
+pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32]) {
+    extern "C" {
+        fn proc_listallpids(buffer: *mut libc::c_int, buffersize: libc::c_int) -> libc::c_int;
+        fn proc_pidinfo(
+            pid: libc::c_int,
+            flavor: libc::c_int,
+            arg: u64,
+            buffer: *mut libc::c_void,
+            buffersize: libc::c_int,
+        ) -> libc::c_int;
+    }
+
+    #[repr(C)]
+    struct BSDInfo {
+        _pad: [u8; 20],
+        pbi_uid: u32,
+        _rest: [u8; 112],
+    }
+    const _: () = assert!(std::mem::size_of::<BSDInfo>() == 136);
+    const PROC_PIDTBSDINFO: libc::c_int = 3;
+
+    let my_uid = unsafe { libc::getuid() };
+
+    let count = unsafe { proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return;
+    }
+
+    let buf_len = (count as usize) * 2;
+    let mut pids: Vec<libc::c_int> = vec![0; buf_len];
+    let actual = unsafe {
+        proc_listallpids(
+            pids.as_mut_ptr(),
+            (buf_len * std::mem::size_of::<libc::c_int>()) as libc::c_int,
+        )
+    };
+    if actual <= 0 {
+        return;
+    }
+    pids.truncate(actual as usize);
+
+    let my_pid = std::process::id() as i32;
+    let mut orphans: Vec<i32> = Vec::new();
+
+    for &pid in &pids {
+        if pid <= 0 {
+            continue;
+        }
+        let upid = pid as u32;
+        if skip_pids.contains(&upid) || pid == my_pid {
+            continue;
+        }
+        // Check binary name first (cheap proc_name call) before UID lookup.
+        if !process_belongs_to_us(upid) {
+            continue;
+        }
+        // Verify UID to avoid killing another user's identically-named binary.
+        let mut info = std::mem::MaybeUninit::<BSDInfo>::zeroed();
+        let ret = unsafe {
+            proc_pidinfo(
+                pid,
+                PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr() as *mut libc::c_void,
+                std::mem::size_of::<BSDInfo>() as libc::c_int,
+            )
+        };
+        if ret <= 0 {
+            continue;
+        }
+        let info = unsafe { info.assume_init() };
+        if info.pbi_uid != my_uid {
+            continue;
+        }
+        if !process_has_sprout_marker(upid, instance_id) {
+            continue;
+        }
+        orphans.push(pid);
+    }
+
+    if !orphans.is_empty() {
+        eprintln!(
+            "sprout-desktop: system sweep found {} orphaned agent process(es), cleaning up",
+            orphans.len()
+        );
+        sigterm_then_sigkill(&orphans);
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32]) {
+    let my_uid = unsafe { libc::getuid() };
+    let mut orphans: Vec<i32> = Vec::new();
+    let my_pid = std::process::id() as i32;
+
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let Ok(pid) = name_str.parse::<i32>() else {
+            continue;
+        };
+        if pid <= 0 || pid == my_pid {
+            continue;
+        }
+        let upid = pid as u32;
+        if skip_pids.contains(&upid) {
+            continue;
+        }
+        // Check ownership via /proc/<pid> metadata.
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        use std::os::unix::fs::MetadataExt;
+        if meta.uid() != my_uid {
+            continue;
+        }
+        if process_belongs_to_us(upid) && process_has_sprout_marker(upid, instance_id) {
+            orphans.push(pid);
+        }
+    }
+
+    if !orphans.is_empty() {
+        eprintln!(
+            "sprout-desktop: system sweep found {} orphaned agent process(es), cleaning up",
+            orphans.len()
+        );
+        sigterm_then_sigkill(&orphans);
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn sweep_system_agent_processes(_instance_id: &str, _skip_pids: &[u32]) {}
 
 /// Kill stale agent processes from a previous session whose PID is still alive
 /// but not tracked in the current `runtimes` map. Updates the record fields and
@@ -307,7 +573,9 @@ pub fn sync_managed_agent_processes(
             record.last_error = if status.success() {
                 None
             } else {
-                Some(format!("harness exited with status {status}"))
+                super::meaningful_agent_error_from_log(&runtime.log_path)
+                    .unwrap_or_else(|| format!("harness exited with status {status}"))
+                    .into()
             };
         }
 
@@ -459,7 +727,7 @@ pub fn find_managed_agent_mut<'a>(
 pub(crate) fn build_respond_to_env(
     record: &ManagedAgentRecord,
     owner_hex: Option<&str>,
-) -> Result<(Vec<(&'static str, String)>, Vec<&'static str>), String> {
+) -> Result<RespondToEnv, String> {
     // Defensive re-validation: an on-disk record could have been hand-edited.
     let normalized = super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)?;
     if record.respond_to == super::types::RespondTo::Allowlist && normalized.is_empty() {
@@ -527,12 +795,24 @@ pub fn spawn_agent_child(
         .try_clone()
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
     let agent_args = normalize_agent_args(&record.agent_command, record.agent_args.clone());
-    let resolved_acp_command = resolve_command(&record.acp_command, Some(app))
+    let resolved_acp_command = resolve_command(&record.acp_command)
         .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
-    let resolved_mcp_command = resolve_command(&record.mcp_command, Some(app))
-        .ok_or_else(|| missing_command_message(&record.mcp_command, "MCP server command"))?;
+    let resolved_mcp_command: Option<std::path::PathBuf> = if record.mcp_command.is_empty() {
+        None
+    } else {
+        match resolve_command(&record.mcp_command) {
+            Some(path) => Some(path),
+            None => {
+                eprintln!(
+                    "sprout-desktop: mcp_command {:?} not found, skipping",
+                    record.mcp_command
+                );
+                None
+            }
+        }
+    };
     // Resolve agent command to a full path (DMG launches have minimal PATH).
-    let resolved_agent_command = resolve_command(&record.agent_command, Some(app))
+    let resolved_agent_command = resolve_command(&record.agent_command)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| record.agent_command.clone());
 
@@ -575,10 +855,17 @@ pub fn spawn_agent_child(
     command.env("SPROUT_RELAY_URL", &record.relay_url);
     command.env("SPROUT_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("SPROUT_ACP_AGENT_ARGS", agent_args.join(","));
-    command.env("SPROUT_ACP_MCP_COMMAND", &resolved_mcp_command);
+    match &resolved_mcp_command {
+        Some(mcp_cmd) => {
+            command.env("SPROUT_ACP_MCP_COMMAND", mcp_cmd);
+        }
+        None => {
+            command.env("SPROUT_ACP_MCP_COMMAND", "");
+        }
+    }
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
-    // Uses "*" because build_mcp_servers() hard-codes the server name to "sprout-mcp".
-    if known_acp_provider(&record.agent_command).is_some_and(|p| p.mcp_hooks) {
+    let runtime_meta = known_acp_runtime(&record.agent_command);
+    if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
     // Only emit SPROUT_ACP_IDLE_TIMEOUT when the user has explicitly set an
@@ -598,10 +885,13 @@ pub fn spawn_agent_child(
     command.env("SPROUT_ACP_AGENTS", record.parallelism.to_string());
     command.env("SPROUT_ACP_MULTIPLE_EVENT_HANDLING", "owner-interrupt");
     command.env("SPROUT_ACP_DEDUP", "queue");
-    command.env(
-        "GOOSE_MODE",
-        std::env::var("GOOSE_MODE").unwrap_or_else(|_| "auto".to_string()),
-    );
+    if let Some(meta) = runtime_meta {
+        for (key, value) in meta.default_env {
+            if std::env::var(key).is_err() {
+                command.env(key, value);
+            }
+        }
+    }
     if let (Some(pack_path), Some(persona_name)) =
         (&record.persona_pack_path, &record.persona_name_in_pack)
     {
@@ -644,6 +934,13 @@ pub fn spawn_agent_child(
     } else {
         command.env_remove("SPROUT_ACP_MODEL");
     }
+    if let Some(meta) = runtime_meta {
+        if !meta.supports_acp_model_switching {
+            if let (Some(env_key), Some(model)) = (meta.model_env_var, &effective_model) {
+                command.env(env_key, model);
+            }
+        }
+    }
     if let Some(toolsets) = &record.mcp_toolsets {
         command.env("SPROUT_TOOLSETS", toolsets);
     } else {
@@ -684,7 +981,7 @@ pub fn spawn_agent_child(
     // interfere with other remotes (e.g. GitHub).
     //
     // NOSTR_PRIVATE_KEY mirrors SPROUT_PRIVATE_KEY — keep in sync.
-    if let Some(cred_helper) = resolve_command("git-credential-nostr", Some(app)) {
+    if let Some(cred_helper) = resolve_command("git-credential-nostr") {
         let relay_http_url = crate::relay::relay_http_base_url(&record.relay_url);
 
         command.env("NOSTR_PRIVATE_KEY", &record.private_key_nsec);
@@ -707,6 +1004,13 @@ pub fn spawn_agent_child(
         );
     }
 
+    // Baked-in Databricks defaults for internal builds (sprout-releases sets
+    // SPROUT_BUILD_DATABRICKS_* at compile time; OSS builds bake nothing).
+    // Written BEFORE user env_vars so a GUI/persona override still wins.
+    for (key, value) in build_databricks_defaults() {
+        command.env(key, value);
+    }
+
     // ── User env vars: persona first, then per-agent (last wins) ────────
     //
     // Precedence: desktop parent env < persona env_vars < agent env_vars.
@@ -722,6 +1026,14 @@ pub fn spawn_agent_child(
     for (key, value) in super::env_vars::merged_user_env(&persona_env, &record.env_vars) {
         command.env(key, value);
     }
+
+    // Mark as Sprout-managed *and* which desktop instance owns us, so the
+    // system-wide orphan sweep only reaps this instance's own agents and never
+    // another live Sprout's (e.g. a `just dev` build won't kill a DMG build's
+    // agents). Propagates automatically through the full tree (sprout-acp →
+    // goose → MCP servers) because neither sprout-acp nor goose calls
+    // env_clear().
+    command.env("SPROUT_MANAGED_AGENT", current_instance_id(app));
 
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.
@@ -750,6 +1062,23 @@ fn child_rust_log_filter() -> String {
         Ok(existing) if !existing.trim().is_empty() => format!("{existing},sprout_acp=info"),
         _ => "sprout_acp=info".to_string(),
     }
+}
+
+/// Databricks host/model baked in at compile time for internal builds. Empty
+/// in OSS builds, where the `SPROUT_BUILD_DATABRICKS_*` env is unset.
+fn build_databricks_defaults() -> Vec<(&'static str, &'static str)> {
+    let mut defaults = Vec::new();
+    if let Some(host) = option_env!("SPROUT_DESKTOP_BUILD_DATABRICKS_HOST") {
+        if !host.is_empty() {
+            defaults.push(("DATABRICKS_HOST", host));
+        }
+    }
+    if let Some(model) = option_env!("SPROUT_DESKTOP_BUILD_DATABRICKS_MODEL") {
+        if !model.is_empty() {
+            defaults.push(("DATABRICKS_MODEL", model));
+        }
+    }
+    defaults
 }
 
 pub fn start_managed_agent_process(
@@ -858,30 +1187,53 @@ pub fn stop_managed_agent_process(
 
 #[cfg(test)]
 mod tests {
-    use crate::managed_agents::known_acp_provider;
+    use crate::managed_agents::known_acp_runtime;
+
+    #[test]
+    fn marker_entry_is_namespaced_by_instance_id() {
+        // The spawn stamp and the sweep matcher must produce identical bytes;
+        // both go through sprout_marker_entry, so this pins the on-the-wire
+        // format and guards against a dev build (`...app.dev`) matching a
+        // release build's (`...app`) agents.
+        assert_eq!(
+            super::sprout_marker_entry("xyz.block.sprout.app"),
+            b"SPROUT_MANAGED_AGENT=xyz.block.sprout.app".to_vec()
+        );
+        assert_ne!(
+            super::sprout_marker_entry("xyz.block.sprout.app"),
+            super::sprout_marker_entry("xyz.block.sprout.app.dev")
+        );
+    }
 
     #[test]
     fn sprout_agent_has_mcp_hooks() {
-        let p = known_acp_provider("sprout-agent").expect("should resolve");
+        let p = known_acp_runtime("sprout-agent").expect("should resolve");
         assert!(p.mcp_hooks);
         assert_eq!(p.mcp_command, Some("sprout-dev-mcp"));
     }
 
     #[test]
+    fn databricks_defaults_empty_in_oss_build() {
+        // OSS (and normal test) builds set neither SPROUT_BUILD_DATABRICKS_*,
+        // so nothing is baked in and no DATABRICKS_* is injected on spawn.
+        assert!(super::build_databricks_defaults().is_empty());
+    }
+
+    #[test]
     fn sprout_agent_resolved_via_path() {
-        assert!(known_acp_provider("/usr/local/bin/sprout-agent").is_some_and(|p| p.mcp_hooks));
+        assert!(known_acp_runtime("/usr/local/bin/sprout-agent").is_some_and(|p| p.mcp_hooks));
     }
 
     #[test]
     fn goose_has_no_mcp_hooks() {
-        let p = known_acp_provider("goose").expect("should resolve");
+        let p = known_acp_runtime("goose").expect("should resolve");
         assert!(!p.mcp_hooks);
         assert_eq!(p.mcp_command, None);
     }
 
     #[test]
     fn unknown_command_returns_none() {
-        assert!(known_acp_provider("custom-agent").is_none());
+        assert!(known_acp_runtime("custom-agent").is_none());
     }
 
     // ── build_respond_to_env tests ───────────────────────────────────────
@@ -906,7 +1258,7 @@ mod tests {
             acp_command: "sprout-acp".into(),
             agent_command: "goose".into(),
             agent_args: vec![],
-            mcp_command: "sprout-mcp-server".into(),
+            mcp_command: String::new(),
             turn_timeout_seconds: 320,
             idle_timeout_seconds: None,
             max_turn_duration_seconds: None,
@@ -930,6 +1282,7 @@ mod tests {
             last_error: None,
             respond_to,
             respond_to_allowlist: allowlist,
+            relay_mesh: None,
         }
     }
 

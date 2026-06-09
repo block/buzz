@@ -270,3 +270,92 @@ test("round-trip: text offset → PM → text offset is identity", () => {
     );
   }
 });
+
+// ── Custom-emoji atom node ───────────────────────────────────────────
+// The node is an inline leaf that is 1 PM position wide but projects to
+// its full `:shortcode:` text. The projection must account for that width
+// mismatch so cursor math and autocomplete offsets stay correct.
+
+import { CustomEmojiNode } from "./customEmojiNode.ts";
+
+const schemaWithEmoji = getSchema([
+  StarterKit.configure({
+    hardBreak: { keepMarks: true },
+    heading: false,
+    trailingNode: false,
+    link: false,
+  }),
+  CustomEmojiNode,
+]);
+
+const eDoc = (...content) => schemaWithEmoji.nodes.doc.create(null, content);
+const ePara = (...c) => schemaWithEmoji.nodes.paragraph.create(null, c);
+const eText = (s) => schemaWithEmoji.text(s);
+const emoji = (shortcode) =>
+  schemaWithEmoji.nodes.customEmoji.create({ shortcode, src: "" });
+
+test("atom: projects to its full :shortcode: text", () => {
+  const d = eDoc(ePara(eText("hi "), emoji("wave"), eText(" there")));
+  const p = buildPlainTextProjection(d);
+  assert.equal(p.text, "hi :wave: there");
+});
+
+test("atom: text matches textBetween (renderText-equivalent width)", () => {
+  const d = eDoc(ePara(eText("a"), emoji("party_parrot"), eText("b")));
+  const p = buildPlainTextProjection(d);
+  // textBetween uses the node's `leafText` (renderText) → `:shortcode:`.
+  assert.equal(p.text, "a:party_parrot:b");
+});
+
+test("atom: PM before/after maps to text edges", () => {
+  // doc(para(text("hi "), emoji, text(" x")))
+  //   pos 0 = doc start; para opens at 0, content begins at 1.
+  //   "hi " is 3 chars → PM 1..4; emoji atom at PM 4 (1 wide) → 4..5;
+  //   " x" → PM 5..7.
+  const d = eDoc(ePara(eText("hi "), emoji("wave"), eText(" x")));
+  const p = buildPlainTextProjection(d);
+  assert.equal(p.text, "hi :wave: x");
+  // PM 4 (just before the atom) → text offset 3 (end of "hi ").
+  assert.equal(p.mapPMToTextOffset(4), 3);
+  // PM 5 (just after the atom) → text offset 9 (after ":wave:").
+  assert.equal(p.mapPMToTextOffset(5), "hi :wave:".length);
+});
+
+test("atom: text offsets inside the shortcode snap to the node's left edge", () => {
+  const d = eDoc(ePara(emoji("wave"), eText("x")));
+  const p = buildPlainTextProjection(d);
+  assert.equal(p.text, ":wave:x");
+  const leftPM = p.mapTextOffsetToPM(0); // before the atom
+  // Any offset within ":wave:" (0..5) cannot land inside the atom → left edge.
+  for (let off = 0; off < ":wave:".length; off++) {
+    assert.equal(
+      p.mapTextOffsetToPM(off),
+      leftPM,
+      `offset ${off} inside shortcode should snap to the node's left edge`,
+    );
+  }
+  // The offset at the right edge of ":wave:" lands after the atom (the "x").
+  const afterPM = p.mapTextOffsetToPM(":wave:".length);
+  assert.ok(afterPM > leftPM, "right edge should be past the atom");
+});
+
+test("atom: caret offsets around an atom round-trip", () => {
+  // Only the *caret* positions (before/after the atom, not inside the
+  // shortcode interior) are expected to round-trip.
+  const d = eDoc(ePara(eText("ab"), emoji("wave"), eText("cd")));
+  const p = buildPlainTextProjection(d);
+  assert.equal(p.text, "ab:wave:cd");
+  const caretTextOffsets = [
+    0,
+    1,
+    2, // before the atom (end of "ab")
+    "ab:wave:".length, // after the atom (start of "cd")
+    "ab:wave:c".length,
+    "ab:wave:cd".length,
+  ];
+  for (const offset of caretTextOffsets) {
+    const pm = p.mapTextOffsetToPM(offset);
+    const back = p.mapPMToTextOffset(pm);
+    assert.equal(back, offset, `caret offset ${offset} → pm ${pm} → ${back}`);
+  }
+});

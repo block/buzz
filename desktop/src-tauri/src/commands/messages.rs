@@ -265,11 +265,13 @@ async fn resolve_thread_ref(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn send_channel_message(
     channel_id: String,
     content: String,
     parent_event_id: Option<String>,
     media_tags: Option<Vec<Vec<String>>>,
+    emoji_tags: Option<Vec<Vec<String>>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
     state: State<'_, AppState>,
@@ -279,6 +281,7 @@ pub async fn send_channel_message(
     let mentions = mention_pubkeys.unwrap_or_default();
     let mention_refs: Vec<&str> = mentions.iter().map(|s| s.as_str()).collect();
     let media = media_tags.unwrap_or_default();
+    let emoji = emoji_tags.unwrap_or_default();
     let kind_num = kind.unwrap_or(sprout_core::kind::KIND_STREAM_MESSAGE);
 
     let mut resolved_root: Option<String> = None;
@@ -316,6 +319,7 @@ pub async fn send_channel_message(
                 thread_ref.as_ref(),
                 &mention_refs,
                 &media,
+                &emoji,
             )?
         }
     };
@@ -342,10 +346,18 @@ pub async fn send_channel_message(
 pub async fn add_reaction(
     event_id: String,
     emoji: String,
+    emoji_url: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let target_eid = EventId::from_hex(&event_id).map_err(|e| format!("invalid event ID: {e}"))?;
-    let builder = events::build_reaction(target_eid, emoji.trim())?;
+    let builder = match emoji_url {
+        // Custom-emoji reaction (NIP-30): kind:7 with `:shortcode:` content and
+        // an `["emoji", shortcode, url]` tag. Delegates to the SDK builder so
+        // shortcode normalization + validation match the relay exactly.
+        Some(url) => sprout_sdk::build_custom_emoji_reaction(target_eid, emoji.trim(), &url)
+            .map_err(|e| format!("invalid custom emoji reaction: {e}"))?,
+        None => events::build_reaction(target_eid, emoji.trim())?,
+    };
     submit_event(builder, &state).await?;
     Ok(())
 }
@@ -389,16 +401,22 @@ pub async fn edit_message(
     channel_id: String,
     event_id: String,
     content: String,
+    media_tags: Vec<Vec<String>>,
+    emoji_tags: Option<Vec<Vec<String>>>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
         .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
     let target_eid = EventId::from_hex(&event_id).map_err(|e| format!("invalid event ID: {e}"))?;
     let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return Err("edit content must not be empty".into());
+    // Empty text is allowed when the edit still carries imeta attachments
+    // (a media-only edit). Reject only when both are empty.
+    if trimmed.is_empty() && media_tags.is_empty() {
+        return Err("edit must have content or attachments".into());
     }
-    let builder = events::build_message_edit(channel_uuid, target_eid, trimmed)?;
+    let emoji = emoji_tags.unwrap_or_default();
+    let builder =
+        events::build_message_edit(channel_uuid, target_eid, trimmed, &media_tags, &emoji)?;
     submit_event(builder, &state).await?;
     Ok(())
 }

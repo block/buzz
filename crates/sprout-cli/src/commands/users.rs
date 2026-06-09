@@ -276,17 +276,16 @@ pub async fn cmd_get_presence(client: &SproutClient, pubkeys_csv: &str) -> Resul
     Ok(())
 }
 
-/// Set presence status — sign and submit a kind:20001 presence update event.
+/// Set presence status — sign and submit a kind:20001 presence update event via WebSocket.
 ///
-/// NOTE: Kind 20001 is ephemeral and only accepted via WebSocket connections.
-/// The CLI uses the HTTP bridge (POST /events) which rejects ephemeral kinds.
-/// This will fail until the CLI gains a WS publish path. The kind is correct
-/// per the protocol spec (KIND_PRESENCE_UPDATE = 20001).
+/// Kind 20001 is ephemeral and only accepted via WebSocket connections. This
+/// method connects to the relay over WS, performs NIP-42 authentication, and
+/// publishes the event directly — bypassing the HTTP bridge.
 pub async fn cmd_set_presence(client: &SproutClient, status: &str) -> Result<(), CliError> {
     let builder = sprout_sdk::build_presence_update(status).map_err(crate::validate::sdk_err)?;
     let event = client.sign_event(builder)?;
 
-    let resp = client.submit_event(event).await?;
+    let resp = client.publish_ephemeral_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
 }

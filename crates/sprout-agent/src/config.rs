@@ -1,13 +1,10 @@
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::time::Duration;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 64;
-
-/// Leaves headroom for the summary call.
-pub const HANDOFF_THRESHOLD: f64 = 0.75;
 
 pub const HANDOFF_MAX_OUTPUT_TOKENS: u32 = 8192;
 
@@ -59,6 +56,13 @@ pub struct Config {
     pub max_sessions: usize,
     pub max_line_bytes: usize,
     pub max_history_bytes: usize,
+    /// Provider context window in tokens used to gate handoff. The handoff
+    /// fires when the previous request's (cache-summed) input tokens cross the
+    /// handoff threshold for this budget, before the next request can exceed
+    /// the window and 400. Default 200_000 — matching Claude 4.x windows;
+    /// operators lower/raise it for other models. Set via
+    /// `SPROUT_AGENT_MAX_CONTEXT_TOKENS`.
+    pub max_context_tokens: u64,
     pub max_handoffs: usize,
     pub max_parallel_tools: usize,
     pub hook_timeout: Duration,
@@ -75,13 +79,13 @@ pub struct Config {
     pub anthropic_api_version: String,
     /// OpenAI endpoint selection. See [`OpenAiApi`].
     pub openai_api: OpenAiApi,
+    pub hints_enabled: bool,
 }
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        let goose_databricks = GooseDatabricksConfig::load_default();
-        let databricks_host = env("DATABRICKS_HOST").or_else(|| goose_databricks.host.clone());
-        let databricks_model = env("DATABRICKS_MODEL").or_else(|| goose_databricks.model.clone());
+        let databricks_host = env("DATABRICKS_HOST");
+        let databricks_model = env("DATABRICKS_MODEL");
         let provider = resolve_provider(
             env("SPROUT_AGENT_PROVIDER").as_deref(),
             env("ANTHROPIC_API_KEY").as_deref(),
@@ -110,12 +114,8 @@ impl Config {
             ),
             Provider::Databricks => (
                 env("DATABRICKS_TOKEN").unwrap_or_default(),
-                databricks_model.ok_or_else(|| {
-                    "config: DATABRICKS_MODEL required (or set GOOSE_MODEL in goose config with GOOSE_PROVIDER=databricks)".to_string()
-                })?,
-                databricks_host.ok_or_else(|| {
-                    "config: DATABRICKS_HOST required (or set DATABRICKS_HOST in goose config)".to_string()
-                })?,
+                databricks_model.ok_or_else(|| "config: DATABRICKS_MODEL required".to_string())?,
+                databricks_host.ok_or_else(|| "config: DATABRICKS_HOST required".to_string())?,
                 OpenAiApi::Chat, // Databricks invocations is chat-shaped
             ),
         };
@@ -148,7 +148,8 @@ impl Config {
             max_sessions: parse_env("SPROUT_AGENT_MAX_SESSIONS", usize::MAX)?,
             max_line_bytes: parse_env("SPROUT_AGENT_MAX_LINE_BYTES", 4 * 1024 * 1024)?,
             max_history_bytes: parse_env("SPROUT_AGENT_MAX_HISTORY_BYTES", 16 * 1024 * 1024)?,
-            max_handoffs: parse_env("SPROUT_AGENT_MAX_HANDOFFS", 5)?,
+            max_context_tokens: parse_env("SPROUT_AGENT_MAX_CONTEXT_TOKENS", 200_000u64)?,
+            max_handoffs: parse_env("SPROUT_AGENT_MAX_HANDOFFS", 10)?,
             max_parallel_tools: parse_env("SPROUT_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
             hook_timeout: Duration::from_millis(parse_env(
                 "SPROUT_AGENT_HOOK_TIMEOUT_MS",
@@ -156,6 +157,7 @@ impl Config {
             )?),
             stop_max_rejections: parse_env("SPROUT_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
+            hints_enabled: parse_env("SPROUT_AGENT_NO_HINTS", 0u8)? == 0,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -168,6 +170,12 @@ impl Config {
 
         if self.max_output_tokens < 1 {
             return Err("config: SPROUT_AGENT_MAX_OUTPUT_TOKENS must be >= 1".into());
+        }
+        if self.max_context_tokens <= u64::from(self.max_output_tokens) {
+            return Err(format!(
+                "config: SPROUT_AGENT_MAX_CONTEXT_TOKENS ({}) must be > SPROUT_AGENT_MAX_OUTPUT_TOKENS ({}) — the context window must leave room for the response",
+                self.max_context_tokens, self.max_output_tokens
+            ));
         }
         if self.max_history_bytes < MIN_HISTORY_BYTES {
             return Err(format!(
@@ -222,66 +230,6 @@ fn env_or(k: &str, d: &str) -> String {
 
 fn req(k: &str) -> Result<String, String> {
     env(k).ok_or_else(|| format!("config: {k} required"))
-}
-
-#[derive(Default)]
-struct GooseDatabricksConfig {
-    host: Option<String>,
-    model: Option<String>,
-}
-
-impl GooseDatabricksConfig {
-    fn load_default() -> Self {
-        goose_config_path()
-            .and_then(|p| Self::load_from_path(&p))
-            .unwrap_or_default()
-    }
-
-    fn load_from_path(path: &std::path::Path) -> Option<Self> {
-        let raw = std::fs::read_to_string(path).ok()?;
-        let map: HashMap<String, serde_yaml::Value> = serde_yaml::from_str(&raw).ok()?;
-        Some(Self::from_map(&map))
-    }
-
-    fn from_map(map: &HashMap<String, serde_yaml::Value>) -> Self {
-        let host = yaml_string(map, "DATABRICKS_HOST");
-        let explicit_model = yaml_string(map, "DATABRICKS_MODEL");
-        let goose_provider = yaml_string(map, "GOOSE_PROVIDER");
-        let goose_model = yaml_string(map, "GOOSE_MODEL");
-        let goose_mode = yaml_string(map, "GOOSE_MODE");
-        let model = explicit_model.or_else(|| {
-            if goose_provider
-                .as_deref()
-                .is_some_and(|p| p.eq_ignore_ascii_case("databricks"))
-            {
-                goose_model.or(goose_mode)
-            } else {
-                None
-            }
-        });
-        Self { host, model }
-    }
-}
-
-fn yaml_string(map: &HashMap<String, serde_yaml::Value>, key: &str) -> Option<String> {
-    map.get(key)?
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-}
-
-fn goose_config_path() -> Option<PathBuf> {
-    if let Ok(root) = std::env::var("GOOSE_PATH_ROOT") {
-        return Some(PathBuf::from(root).join("config").join("config.yaml"));
-    }
-    let home = std::env::var("HOME").ok()?;
-    Some(
-        PathBuf::from(home)
-            .join(".config")
-            .join("goose")
-            .join("config.yaml"),
-    )
 }
 
 fn present_nonempty(v: Option<&str>) -> bool {
@@ -540,72 +488,6 @@ mod tests {
         }
         let err = parse_openai_api(Some("nope")).unwrap_err();
         assert!(err.contains("OPENAI_COMPAT_API=nope"), "{err}");
-    }
-
-    #[test]
-    fn goose_databricks_config_reads_host_and_model() {
-        let map = HashMap::from([
-            (
-                "DATABRICKS_HOST".to_string(),
-                serde_yaml::Value::String("https://dbc.example".into()),
-            ),
-            (
-                "GOOSE_PROVIDER".to_string(),
-                serde_yaml::Value::String("databricks".into()),
-            ),
-            (
-                "GOOSE_MODEL".to_string(),
-                serde_yaml::Value::String("goose-claude-4-6-sonnet".into()),
-            ),
-        ]);
-        let cfg = GooseDatabricksConfig::from_map(&map);
-        assert_eq!(cfg.host.as_deref(), Some("https://dbc.example"));
-        assert_eq!(cfg.model.as_deref(), Some("goose-claude-4-6-sonnet"));
-    }
-
-    #[test]
-    fn goose_databricks_config_prefers_explicit_databricks_model() {
-        let map = HashMap::from([
-            (
-                "DATABRICKS_HOST".to_string(),
-                serde_yaml::Value::String("https://dbc.example".into()),
-            ),
-            (
-                "DATABRICKS_MODEL".to_string(),
-                serde_yaml::Value::String("explicit-db-model".into()),
-            ),
-            (
-                "GOOSE_PROVIDER".to_string(),
-                serde_yaml::Value::String("databricks".into()),
-            ),
-            (
-                "GOOSE_MODEL".to_string(),
-                serde_yaml::Value::String("goose-model".into()),
-            ),
-        ]);
-        let cfg = GooseDatabricksConfig::from_map(&map);
-        assert_eq!(cfg.model.as_deref(), Some("explicit-db-model"));
-    }
-
-    #[test]
-    fn goose_databricks_config_ignores_goose_model_for_other_provider() {
-        let map = HashMap::from([
-            (
-                "DATABRICKS_HOST".to_string(),
-                serde_yaml::Value::String("https://dbc.example".into()),
-            ),
-            (
-                "GOOSE_PROVIDER".to_string(),
-                serde_yaml::Value::String("anthropic".into()),
-            ),
-            (
-                "GOOSE_MODEL".to_string(),
-                serde_yaml::Value::String("claude".into()),
-            ),
-        ]);
-        let cfg = GooseDatabricksConfig::from_map(&map);
-        assert_eq!(cfg.host.as_deref(), Some("https://dbc.example"));
-        assert!(cfg.model.is_none());
     }
 
     #[test]

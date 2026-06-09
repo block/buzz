@@ -9,12 +9,18 @@ use sprout_media::validation::mime_to_ext;
 pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result<(), String> {
     const ALLOWED_IMETA_KEYS: &[&str] = &[
         "url", "m", "x", "size", "dim", "blurhash", "alt", "thumb", "fallback", "duration",
-        "bitrate", "image",
+        "bitrate", "image", "filename",
     ];
     const SINGLETON_KEYS: &[&str] = &[
         "url", "m", "x", "size", "dim", "blurhash", "thumb", "alt", "duration", "bitrate", "image",
+        "filename",
     ];
-    const ALLOWED_MIME: &[&str] = &[
+    // Previewable media MIME types — these get the strict url-extension
+    // consistency check below (their ext is derived from the MIME). Generic
+    // files carry arbitrary MIME types whose ext can't be derived from the MIME
+    // alone, so their consistency is enforced against the sidecar in
+    // `verify_imeta_blobs` rather than here.
+    const MEDIA_MIME: &[&str] = &[
         "image/jpeg",
         "image/png",
         "image/gif",
@@ -63,11 +69,13 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                     has_url = true;
                 }
                 "m" => {
-                    if !ALLOWED_MIME.contains(&value) {
-                        return Err(
-                            "imeta m must be a supported MIME type (image/jpeg, image/png, image/gif, image/webp, video/mp4)"
-                                .into(),
-                        );
+                    // Accept any well-formed `type/subtype` MIME token. The
+                    // authoritative gate is `verify_imeta_blobs`, which requires
+                    // `m` to equal the stored sidecar MIME — and a sidecar only
+                    // exists for content that passed the upload validator's
+                    // deny-list. So a blocked type can never reach a valid imeta.
+                    if !is_well_formed_mime(value) {
+                        return Err("imeta m must be a valid MIME type".into());
                     }
                     m_value = value.to_string();
                     has_m = true;
@@ -128,6 +136,23 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
                         );
                     }
                 }
+                "filename" => {
+                    // Original filename for the file-card label. Bounded length;
+                    // no path separators or control chars (it's display-only and
+                    // must never influence storage keys, which are content-addressed).
+                    if value.is_empty() || value.len() > 255 {
+                        return Err("imeta filename must be 1–255 chars".into());
+                    }
+                    if value.contains('/')
+                        || value.contains('\\')
+                        || value.chars().any(|c| c.is_control())
+                    {
+                        return Err(
+                            "imeta filename must not contain path separators or control characters"
+                                .into(),
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -155,10 +180,17 @@ pub fn validate_imeta_tags(tags: &[Vec<String>], media_base_url: &str) -> Result
             }
         }
         if let Some(ext_in_url) = extract_ext_from_media_url(&url_value) {
-            let expected_ext = mime_to_ext(&m_value);
-            if ext_in_url != expected_ext {
-                return Err("imeta url extension does not match m".into());
+            if MEDIA_MIME.contains(&m_value.as_str()) {
+                // Previewable media: the ext is derivable from the MIME, so
+                // enforce exact equality.
+                let expected_ext = mime_to_ext(&m_value);
+                if ext_in_url != expected_ext {
+                    return Err("imeta url extension does not match m".into());
+                }
             }
+            // Generic files: ext can't be derived from the MIME. The sidecar
+            // cross-check in `verify_imeta_blobs` enforces that the URL's ext
+            // (and hash, size, MIME) match the stored blob.
         }
         if !thumb_value.is_empty() {
             if let Some(thumb_hash) = extract_hash_from_media_url(&thumb_value) {
@@ -299,6 +331,22 @@ pub async fn verify_imeta_blobs(
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
+/// Whether a string is a well-formed `type/subtype` MIME token.
+///
+/// Structural check only — does not enforce a known type. The authoritative
+/// content gate is the upload validator's deny-list plus the sidecar MIME
+/// cross-check in `verify_imeta_blobs`. Rejects empties, missing slash,
+/// whitespace, and control characters.
+fn is_well_formed_mime(mime: &str) -> bool {
+    let Some((ty, sub)) = mime.split_once('/') else {
+        return false;
+    };
+    !ty.is_empty()
+        && !sub.is_empty()
+        && mime.len() <= 255
+        && !mime.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
 /// Extract the 64-char hex hash from a `/media/{hash}.{ext}` URL.
 fn extract_hash_from_media_url(url: &str) -> Option<&str> {
     let after = url.rsplit("/media/").next()?;
@@ -323,7 +371,11 @@ fn extract_ext_from_media_url(url: &str) -> Option<&str> {
 
 /// Validate that a URL references a valid local media blob path.
 fn is_local_media_url(url: &str, media_base_url: &str) -> bool {
-    const ALLOWED_EXTS: &[&str] = &["jpg", "png", "gif", "webp", "mp4"];
+    // A safe extension token: 1–8 lowercase alphanumeric chars. Covers media
+    // (jpg, png, mp4) and every generic file ext (pdf, docx, zip, mp3, bin, …).
+    // The blob's authoritative ext lives in the sidecar; this is a structural
+    // gate. Shared with the serve/resolve paths so the predicate can't drift.
+    use crate::api::media::is_safe_ext;
 
     let path_after_media = if let Some(rest) = url.strip_prefix("/media/") {
         rest
@@ -351,7 +403,7 @@ fn is_local_media_url(url: &str, media_base_url: &str) -> bool {
             let ext = segments[1];
             hash.len() == 64
                 && hash.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
-                && ALLOWED_EXTS.contains(&ext)
+                && is_safe_ext(ext)
         }
         3 => {
             let hash = segments[0];
@@ -414,5 +466,73 @@ mod tests {
         ];
         let err = validate_imeta_tags(&[tag], BASE).unwrap_err();
         assert!(err.contains("url hash does not match x"), "{err}");
+    }
+
+    #[test]
+    fn test_imeta_generic_file_with_filename_passes() {
+        // Generic file attachment: non-media MIME, arbitrary ext, filename label.
+        // The url-ext-vs-MIME equality check is skipped for non-media MIMEs
+        // (the sidecar cross-check in verify_imeta_blobs enforces correctness).
+        let tag = vec![
+            "imeta".into(),
+            format!("url /media/{HASH}.pdf"),
+            "m application/pdf".into(),
+            format!("x {HASH}"),
+            "size 2048".into(),
+            "filename Q3-budget.pdf".into(),
+        ];
+        assert!(validate_imeta_tags(&[tag], BASE).is_ok());
+    }
+
+    #[test]
+    fn test_imeta_octet_stream_passes() {
+        // Un-sniffable text/data files upload as octet-stream with a .bin ext.
+        let tag = vec![
+            "imeta".into(),
+            format!("url /media/{HASH}.bin"),
+            "m application/octet-stream".into(),
+            format!("x {HASH}"),
+            "size 512".into(),
+            "filename notes.txt".into(),
+        ];
+        assert!(validate_imeta_tags(&[tag], BASE).is_ok());
+    }
+
+    #[test]
+    fn test_imeta_filename_rejects_path_separators() {
+        let tag = vec![
+            "imeta".into(),
+            format!("url /media/{HASH}.pdf"),
+            "m application/pdf".into(),
+            format!("x {HASH}"),
+            "size 2048".into(),
+            "filename ../../etc/passwd".into(),
+        ];
+        let err = validate_imeta_tags(&[tag], BASE).unwrap_err();
+        assert!(err.contains("filename"), "{err}");
+    }
+
+    #[test]
+    fn test_imeta_rejects_malformed_mime() {
+        let tag = vec![
+            "imeta".into(),
+            format!("url /media/{HASH}.bin"),
+            "m not-a-mime".into(),
+            format!("x {HASH}"),
+            "size 512".into(),
+        ];
+        let err = validate_imeta_tags(&[tag], BASE).unwrap_err();
+        assert!(err.contains("valid MIME"), "{err}");
+    }
+
+    #[test]
+    fn test_is_well_formed_mime() {
+        assert!(is_well_formed_mime("application/pdf"));
+        assert!(is_well_formed_mime("application/octet-stream"));
+        assert!(is_well_formed_mime("audio/mpeg"));
+        assert!(!is_well_formed_mime("notamime"));
+        assert!(!is_well_formed_mime("/pdf"));
+        assert!(!is_well_formed_mime("application/"));
+        assert!(!is_well_formed_mime("application/ pdf")); // whitespace
     }
 }

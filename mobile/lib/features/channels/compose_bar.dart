@@ -9,6 +9,8 @@ import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
@@ -55,6 +57,7 @@ class ComposeBar extends HookConsumerWidget {
     final uploadingCount = useState(0);
     final hasAttachments = attachments.value.isNotEmpty;
     final hasPendingUploads = uploadingCount.value > 0;
+    final customEmoji = ref.watch(customEmojiListProvider);
 
     final resolvedHint =
         hintText ??
@@ -89,10 +92,12 @@ class ComposeBar extends HookConsumerWidget {
 
     // Typing indicator broadcast — throttled to one event per 3 seconds.
     final lastTypingSentMs = useRef(0);
+    final isModifyingText = useRef(false);
 
     // Detect @mention query and broadcast typing on text / selection change.
     useEffect(() {
       void listener() {
+        if (isModifyingText.value) return;
         final text = controller.text;
         final sel = controller.selection;
 
@@ -237,6 +242,7 @@ class ComposeBar extends HookConsumerWidget {
       final payload = _ComposeDraftPayload.fromDraft(
         text: text,
         attachments: attachments.value,
+        customEmoji: customEmoji,
       );
 
       isSending.value = true;
@@ -291,22 +297,27 @@ class ComposeBar extends HookConsumerWidget {
       final sel = controller.selection;
       if (!sel.isValid) return;
 
-      if (sel.isCollapsed) {
-        final offset = sel.baseOffset;
-        final updated =
-            '${text.substring(0, offset)}$prefix$suffix${text.substring(offset)}';
-        controller.text = updated;
-        controller.selection = TextSelection.collapsed(
-          offset: offset + prefix.length,
-        );
-      } else {
-        final selected = text.substring(sel.start, sel.end);
-        final updated =
-            '${text.substring(0, sel.start)}$prefix$selected$suffix${text.substring(sel.end)}';
-        controller.text = updated;
-        controller.selection = TextSelection.collapsed(
-          offset: sel.start + prefix.length + selected.length + suffix.length,
-        );
+      isModifyingText.value = true;
+      try {
+        if (sel.isCollapsed) {
+          final offset = sel.baseOffset;
+          final updated =
+              '${text.substring(0, offset)}$prefix$suffix${text.substring(offset)}';
+          controller.text = updated;
+          controller.selection = TextSelection.collapsed(
+            offset: offset + prefix.length,
+          );
+        } else {
+          final selected = text.substring(sel.start, sel.end);
+          final updated =
+              '${text.substring(0, sel.start)}$prefix$selected$suffix${text.substring(sel.end)}';
+          controller.text = updated;
+          controller.selection = TextSelection.collapsed(
+            offset: sel.start + prefix.length + selected.length + suffix.length,
+          );
+        }
+      } finally {
+        isModifyingText.value = false;
       }
       focusNode.requestFocus();
     }
@@ -593,7 +604,7 @@ void _sendTypingIndicator(
     final nsec = config.nsec;
     if (nsec == null || nsec.isEmpty) return;
 
-    final privkeyHex = nostr.Nip19.decodePrivkey(nsec);
+    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
     if (privkeyHex.isEmpty) return;
 
     final tags = <List<String>>[
@@ -609,13 +620,13 @@ void _sendTypingIndicator(
       kind: EventKind.typingIndicator,
       content: '',
       tags: tags,
-      privkey: privkeyHex,
+      secretKey: privkeyHex,
       verify: false,
     );
 
     // Send directly over WebSocket — fire-and-forget, matching desktop.
     final session = ref.read(relaySessionProvider.notifier);
-    session.sendRaw(['EVENT', event.toJson()]);
+    session.sendRaw(['EVENT', event.toMap()]);
   } catch (_) {
     // Fire-and-forget — typing indicator failure is non-fatal.
   }
@@ -849,6 +860,11 @@ class _FormattingToolbar extends StatelessWidget {
             tooltip: 'Code',
             onTap: () => onFormat('`'),
           ),
+          _FormatButton(
+            icon: LucideIcons.squareCode,
+            tooltip: 'Code block',
+            onTap: () => onFormat('```\n', '\n```'),
+          ),
         ],
       ),
     );
@@ -928,6 +944,7 @@ class _ComposeDraftPayload {
   factory _ComposeDraftPayload.fromDraft({
     required String text,
     required List<BlobDescriptor> attachments,
+    required List<CustomEmoji> customEmoji,
   }) {
     var content = text;
     final mediaTags = <List<String>>[];
@@ -935,6 +952,7 @@ class _ComposeDraftPayload {
       mediaTags.add(attachment.toImetaTag());
       content += '\n${attachment.toMarkdownImage()}';
     }
+    mediaTags.addAll(buildCustomEmojiTags(content, customEmoji));
     return _ComposeDraftPayload(content: content, mediaTags: mediaTags);
   }
 }

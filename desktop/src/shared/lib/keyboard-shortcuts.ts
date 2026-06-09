@@ -42,6 +42,14 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
     category: "Navigation",
   },
   {
+    id: "new-channel",
+    label: "New channel",
+    description: "Open the create channel dialog",
+    keys: "⇧⌘N",
+    keysWindows: "Shift+Ctrl+N",
+    category: "Navigation",
+  },
+  {
     id: "open-settings",
     label: "Settings",
     description: "Open or close settings",
@@ -87,6 +95,22 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
     description: "Show or hide the sidebar",
     keys: "⌘S",
     keysWindows: "Ctrl+S",
+    category: "Navigation",
+  },
+  {
+    id: "mark-current-read",
+    label: "Mark as read",
+    description: "Mark the current conversation as read",
+    keys: "Escape",
+    keysWindows: "Escape",
+    category: "Navigation",
+  },
+  {
+    id: "mark-all-read",
+    label: "Mark all as read",
+    description: "Mark all conversations as read",
+    keys: "⇧Escape",
+    keysWindows: "Shift+Escape",
     category: "Navigation",
   },
 

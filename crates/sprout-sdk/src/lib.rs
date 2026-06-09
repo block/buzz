@@ -67,6 +67,15 @@ pub enum VoteDirection {
     Down,
 }
 
+/// A NIP-30 custom emoji tag payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomEmoji {
+    /// The shortcode without surrounding colons.
+    pub shortcode: String,
+    /// Image URL for this custom emoji.
+    pub url: String,
+}
+
 // ── Channel / Member enums (re-exported from sprout-core) ────────────────────
 
 /// Channel type.

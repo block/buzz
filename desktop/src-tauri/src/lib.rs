@@ -4,6 +4,8 @@ mod events;
 mod huddle;
 mod managed_agents;
 mod media_proxy;
+#[cfg(feature = "mesh-llm")]
+mod mesh_llm;
 mod migration;
 mod models;
 pub mod nostr_convert;
@@ -11,6 +13,89 @@ mod prevent_sleep;
 mod relay;
 mod templates;
 mod util;
+
+#[cfg(not(feature = "mesh-llm"))]
+mod mesh_llm_stubs {
+    use tauri::State;
+
+    use crate::app_state::AppState;
+
+    type CmdResult<T> = Result<T, String>;
+
+    #[tauri::command]
+    pub async fn mesh_availability(_state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+        Err("mesh-llm feature not enabled".to_string())
+    }
+
+    #[tauri::command]
+    pub async fn mesh_start_node(
+        _app: tauri::AppHandle,
+        _state: State<'_, AppState>,
+        _request: serde_json::Value,
+    ) -> CmdResult<serde_json::Value> {
+        Err("mesh-llm feature not enabled".to_string())
+    }
+
+    #[tauri::command]
+    pub async fn mesh_ensure_client_node(
+        _state: State<'_, AppState>,
+        _request: serde_json::Value,
+    ) -> CmdResult<serde_json::Value> {
+        Err("mesh-llm feature not enabled".to_string())
+    }
+
+    #[tauri::command]
+    pub async fn mesh_prepare_relay_mesh_client(
+        _app: tauri::AppHandle,
+        _state: State<'_, AppState>,
+        _request: serde_json::Value,
+    ) -> CmdResult<serde_json::Value> {
+        Err("mesh-llm feature not enabled".to_string())
+    }
+
+    #[tauri::command]
+    pub async fn mesh_stop_node(
+        _app: tauri::AppHandle,
+        _state: State<'_, AppState>,
+    ) -> CmdResult<serde_json::Value> {
+        Err("mesh-llm feature not enabled".to_string())
+    }
+
+    #[tauri::command]
+    pub async fn mesh_node_status(_state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+        Err("mesh-llm feature not enabled".to_string())
+    }
+
+    #[tauri::command]
+    pub async fn mesh_installed_models(
+        _state: State<'_, AppState>,
+    ) -> CmdResult<Vec<serde_json::Value>> {
+        Err("mesh-llm feature not enabled".to_string())
+    }
+
+    #[tauri::command]
+    pub fn mesh_agent_preset(_request: serde_json::Value) -> CmdResult<serde_json::Value> {
+        Err("mesh-llm feature not enabled".to_string())
+    }
+
+    #[tauri::command]
+    pub async fn mesh_dial_endpoint_addr(
+        _state: State<'_, AppState>,
+        _request: serde_json::Value,
+    ) -> CmdResult<serde_json::Value> {
+        Err("mesh-llm feature not enabled".to_string())
+    }
+
+    #[tauri::command]
+    pub async fn mesh_status_report_payload(
+        _state: State<'_, AppState>,
+    ) -> CmdResult<Option<serde_json::Value>> {
+        Err("mesh-llm feature not enabled".to_string())
+    }
+}
+
+#[cfg(not(feature = "mesh-llm"))]
+use mesh_llm_stubs::*;
 
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use commands::*;
@@ -26,7 +111,7 @@ use huddle::{
 use managed_agents::{
     ensure_nest, kill_stale_tracked_processes, load_managed_agents,
     restore_managed_agents_on_launch, save_managed_agents, sync_managed_agent_processes,
-    BackendKind, ManagedAgentProcess,
+    try_regenerate_nest, BackendKind, ManagedAgentProcess,
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -148,11 +233,49 @@ fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), String> {
     // All tracked PIDs have already been killed above, so pass an empty skip list.
     managed_agents::sweep_orphaned_agent_processes(app, &[]);
 
+    // System-wide sweep: agent workers (goose, sprout-agent, etc.) are spawned
+    // in their own process groups by sprout-acp, so group-kills above only
+    // reach the harness, not the workers. Scan all user processes and kill any
+    // known agent binaries that are still running.
+    managed_agents::sweep_system_agent_processes(&managed_agents::current_instance_id(app), &[]);
+
     if changed {
         save_managed_agents(app, &records)?;
     }
 
     Ok(())
+}
+
+/// Parse the query string of a `sprout://message?…` URL into the JSON
+/// payload emitted on `deep-link-message`. Returns `None` when a required
+/// param (`channel`, `id`) is missing or empty — mirroring the validation
+/// policy of the `connect` arm so the frontend never sees a half-formed
+/// payload (e.g. `channelId: ""` from `channel=&id=foo`).
+///
+/// Pulled out of `handle_deep_link_url` so it can be unit-tested without
+/// a live `tauri::AppHandle`.
+fn parse_message_deep_link(url: &Url) -> Option<serde_json::Value> {
+    let mut channel: Option<String> = None;
+    let mut message_id: Option<String> = None;
+    let mut thread: Option<String> = None;
+    for (k, v) in url.query_pairs() {
+        let v = v.into_owned();
+        if v.is_empty() {
+            continue;
+        }
+        match k.as_ref() {
+            "channel" => channel = Some(v),
+            "id" => message_id = Some(v),
+            "thread" => thread = Some(v),
+            _ => {}
+        }
+    }
+    let (channel_id, message_id) = (channel?, message_id?);
+    Some(serde_json::json!({
+        "channelId": channel_id,
+        "messageId": message_id,
+        "threadRootId": thread,
+    }))
 }
 
 /// Handle an incoming `sprout://` deep link URL.
@@ -200,12 +323,43 @@ fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             }
             let _ = app.emit("deep-link-connect", relay_url);
         }
+        Some("message") => {
+            // `sprout://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`
+            //
+            // Validation policy mirrors the `connect` arm: parse what we
+            // need, refuse to emit anything if a required param is missing
+            // so the frontend never sees a half-formed payload. The
+            // frontend listener mirrors `parseMessageLink` in TS — we keep
+            // structure on this side (serde JSON) and let the TS code own
+            // any further normalisation.
+            let Some(payload) = parse_message_deep_link(&url) else {
+                eprintln!("sprout-desktop: message deep link missing channel or id: {url_str}");
+                return;
+            };
+            let _ = app.emit("deep-link-message", payload);
+        }
         Some(action) => {
             eprintln!("sprout-desktop: unknown deep link action: {action}");
         }
         None => {
             eprintln!("sprout-desktop: deep link missing action: {url_str}");
         }
+    }
+}
+
+#[tauri::command]
+fn perform_sidebar_default_haptic() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{
+            NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
+            NSHapticFeedbackPerformer,
+        };
+
+        NSHapticFeedbackManager::defaultPerformer().performFeedbackPattern_performanceTime(
+            NSHapticFeedbackPattern::Alignment,
+            NSHapticFeedbackPerformanceTime::Now,
+        );
     }
 }
 
@@ -352,10 +506,13 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let shutdown_started = Arc::clone(&restore_shutdown_started);
 
-            // Migrate data from the legacy `com.wesb.sprout` directory before
-            // resolving identity, so the persisted key is available at the new
-            // path on first launch after the identifier change.
-            migration::migrate_legacy_data_dir(&app_handle);
+            // Sync shared agent data from the canonical dev data directory to
+            // this worktree's data directory. Must run before
+            // restore_managed_agents_on_launch (which reads managed-agents.json).
+            migration::sync_shared_agent_data(&app_handle);
+            migration::reconcile_persona_pack_paths(&app_handle);
+            migration::reconcile_provider_mcp_commands(&app_handle);
+            migration::migrate_persona_provider_to_runtime(&app_handle);
 
             // Resolve persisted identity key (env var → file → generate+save).
             // This is fatal — the app should not start with an ephemeral identity
@@ -372,6 +529,18 @@ pub fn run() {
 
             resolve_persisted_identity(&app_handle, &state)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+            // Bring up the runtime-owned relay-mesh call-me-now listener now,
+            // before any saved agent restore can request a connection. Its
+            // lifetime is tied to the runtime, not a UI mount — this is what
+            // closes the cold-launch hole-punch race.
+            #[cfg(feature = "mesh-llm")]
+            {
+                let mesh_app = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::mesh_llm::spawn_listener(mesh_app).await;
+                });
+            }
 
             // Start the localhost media streaming proxy. Uses the shared HTTP
             // client so WARP tunnelling applies. The port is stored in AppState
@@ -403,15 +572,13 @@ pub fn run() {
                 }
             }
 
-            // Pre-download voice models in the background so they're ready
-            // when the user starts their first huddle. Idempotent — no-op if
-            // already downloaded. ~289 MB total (~100 MB Parakeet STT + ~189 MB Pocket TTS).
+            try_regenerate_nest(&app_handle);
+
             if let Some(mgr) = huddle::models::global_model_manager() {
                 mgr.start_stt_download(state.http_client.clone());
                 mgr.start_tts_download(state.http_client.clone());
             }
 
-            // Register PTT global shortcut (Ctrl+Space).
             // Non-fatal: huddle works without the shortcut (user can switch to VAD mode).
             #[cfg(desktop)]
             {
@@ -438,9 +605,9 @@ pub fn run() {
 
             // Keep launch-time agent restoration off the synchronous setup path
             // so the frontend can mount and reveal the window promptly.
-            tauri::async_runtime::spawn_blocking(move || {
+            tauri::async_runtime::spawn(async move {
                 if let Err(error) =
-                    restore_managed_agents_on_launch(&app_handle, shutdown_started.as_ref())
+                    restore_managed_agents_on_launch(&app_handle, shutdown_started.as_ref()).await
                 {
                     eprintln!("sprout-desktop: failed to restore managed agents: {error}");
                 }
@@ -459,7 +626,6 @@ pub fn run() {
             get_user_notes,
             search_users,
             get_presence,
-            set_presence,
             get_default_relay_url,
             is_shared_identity,
             get_relay_ws_url,
@@ -507,6 +673,7 @@ pub fn run() {
             pick_and_upload_media,
             upload_media_bytes,
             download_image,
+            download_file,
             list_relay_members,
             get_my_relay_membership,
             add_relay_member,
@@ -526,6 +693,16 @@ pub fn run() {
             delete_managed_agent,
             get_managed_agent_log,
             get_agent_models,
+            mesh_availability,
+            mesh_start_node,
+            mesh_ensure_client_node,
+            mesh_prepare_relay_mesh_client,
+            mesh_dial_endpoint_addr,
+            mesh_status_report_payload,
+            mesh_stop_node,
+            mesh_node_status,
+            mesh_installed_models,
+            mesh_agent_preset,
             update_managed_agent,
             discover_backend_providers,
             probe_backend_provider,
@@ -564,6 +741,10 @@ pub fn run() {
             get_contact_list,
             set_contact_list,
             get_notes_timeline,
+            get_global_notes,
+            get_note,
+            get_note_reactions,
+            get_liked_notes,
             start_huddle,
             join_huddle,
             leave_huddle,
@@ -578,6 +759,7 @@ pub fn run() {
             add_agent_to_huddle,
             check_pipeline_hotstart,
             confirm_huddle_active,
+            perform_sidebar_default_haptic,
             get_huddle_agent_pubkeys,
             set_voice_input_mode,
             get_voice_input_mode,
@@ -594,11 +776,35 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    let shutdown_done = AtomicBool::new(false);
+    let shutdown_done = Arc::new(AtomicBool::new(false));
+
+    // Agent cleanup on SIGINT (Ctrl+C), SIGTERM, and SIGHUP (terminal close).
+    // The ctrlc crate with the "termination" feature covers all three signals
+    // and runs the handler on a dedicated thread (safe for mutex operations).
+    // `shutdown_done` prevents double-execution with the RunEvent handler.
+    // `process::exit(0)` intentionally skips Drop impls to avoid re-entrant
+    // locking in destructors during signal teardown.
+    #[cfg(unix)]
+    {
+        let signal_app = app.handle().clone();
+        let signal_shutdown_done = Arc::clone(&shutdown_done);
+        let signal_shutdown_started = Arc::clone(&shutdown_started);
+        if let Err(e) = ctrlc::set_handler(move || {
+            signal_shutdown_started.store(true, Ordering::SeqCst);
+            if !signal_shutdown_done.swap(true, Ordering::SeqCst) {
+                let _ = shutdown_managed_agents(&signal_app);
+            }
+            std::process::exit(0);
+        }) {
+            eprintln!("sprout-desktop: failed to register signal handler: {e}");
+        }
+    }
+
+    let run_shutdown_done = Arc::clone(&shutdown_done);
     app.run(move |app_handle, event| match event {
         RunEvent::ExitRequested { .. } | RunEvent::Exit => {
             shutdown_started.store(true, Ordering::SeqCst);
-            if !shutdown_done.swap(true, Ordering::SeqCst) {
+            if !run_shutdown_done.swap(true, Ordering::SeqCst) {
                 prevent_sleep::release(&app_handle.state::<AppState>().prevent_sleep);
                 if let Err(error) = shutdown_managed_agents(app_handle) {
                     eprintln!("sprout-desktop: failed to stop managed agents: {error}");
@@ -612,8 +818,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use url::Url;
 
     use crate::models::ChannelInfo;
+    use crate::parse_message_deep_link;
 
     #[test]
     fn channel_info_defaults_is_member_for_legacy_payloads() {
@@ -634,5 +842,47 @@ mod tests {
         .expect("legacy payload should deserialize");
 
         assert!(channel.is_member);
+    }
+
+    #[test]
+    fn parse_message_deep_link_extracts_required_params() {
+        let url = Url::parse("sprout://message?channel=abc&id=xyz").unwrap();
+        let payload = parse_message_deep_link(&url).expect("required params present");
+        assert_eq!(payload["channelId"], "abc");
+        assert_eq!(payload["messageId"], "xyz");
+        assert!(payload["threadRootId"].is_null());
+    }
+
+    #[test]
+    fn parse_message_deep_link_includes_thread_root() {
+        let url = Url::parse("sprout://message?channel=abc&id=xyz&thread=root1").unwrap();
+        let payload = parse_message_deep_link(&url).expect("required params present");
+        assert_eq!(payload["threadRootId"], "root1");
+    }
+
+    #[test]
+    fn parse_message_deep_link_rejects_missing_id() {
+        let url = Url::parse("sprout://message?channel=abc").unwrap();
+        assert!(parse_message_deep_link(&url).is_none());
+    }
+
+    #[test]
+    fn parse_message_deep_link_rejects_empty_channel() {
+        // Regression: `channel=&id=foo` previously produced channelId: "".
+        let url = Url::parse("sprout://message?channel=&id=foo").unwrap();
+        assert!(parse_message_deep_link(&url).is_none());
+    }
+
+    #[test]
+    fn parse_message_deep_link_rejects_empty_id() {
+        let url = Url::parse("sprout://message?channel=abc&id=").unwrap();
+        assert!(parse_message_deep_link(&url).is_none());
+    }
+
+    #[test]
+    fn parse_message_deep_link_treats_empty_thread_as_absent() {
+        let url = Url::parse("sprout://message?channel=abc&id=xyz&thread=").unwrap();
+        let payload = parse_message_deep_link(&url).expect("required params present");
+        assert!(payload["threadRootId"].is_null());
     }
 }

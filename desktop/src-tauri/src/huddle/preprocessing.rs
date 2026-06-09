@@ -40,7 +40,7 @@ const ABBREVIATIONS: &[&str] = &[
 /// Returns non-empty, trimmed strings.
 pub fn split_sentences(text: &str) -> Vec<String> {
     // First, split on newlines and em-dashes to get coarse segments.
-    let coarse: Vec<&str> = text.split(|c: char| c == '\n' || c == '—').collect();
+    let coarse: Vec<&str> = text.split(['\n', '—']).collect();
 
     let mut sentences = Vec::new();
 
@@ -240,7 +240,7 @@ fn strip_urls(text: &str) -> String {
         // belongs to the surrounding sentence rather than the URL itself.
         // A trailing `.`, `!`, or `?` is preserved when it is at end-of-string
         // or followed by whitespace (i.e. it is a sentence boundary).
-        let trailing_punct = if url_token.ends_with(|c: char| matches!(c, '.' | '!' | '?')) {
+        let trailing_punct = if url_token.ends_with(['.', '!', '?']) {
             let after = rest; // rest is already past url_end
             if after.is_empty() || after.starts_with(|c: char| c.is_whitespace()) {
                 // Preserve the trailing punctuation.

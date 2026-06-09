@@ -17,10 +17,11 @@ reach out in the community channels.
 4. [Code Style](#code-style)
 5. [Making a Pull Request](#making-a-pull-request)
 6. [Architecture Overview](#architecture-overview)
-7. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
-8. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
-9. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
-10. [License and CLA](#license-and-cla)
+7. [Ecosystem](#ecosystem)
+8. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
+9. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
+10. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
+11. [License and CLA](#license-and-cla)
 
 ---
 
@@ -279,38 +280,39 @@ required. The scope (in parentheses) is optional but encouraged.
 
 ## Architecture Overview
 
-See [README.md](README.md) for the full crate map and architecture diagram.
-The short version:
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design and
+[AGENTS.md](AGENTS.md#repo-structure) for the complete crate map. The key
+design principles:
 
-```
-sprout-relay      ← WebSocket server, REST API, event ingestion
-sprout-core       ← Shared types, event verification, filter matching
-sprout-db         ← Postgres access layer (sqlx)
-sprout-auth       ← NIP-42 + NIP-98 + API token scopes
-sprout-pubsub     ← Redis fan-out
-sprout-search     ← Typesense full-text search
-sprout-audit      ← Tamper-evident hash-chain audit log
-sprout-workflow   ← YAML-as-code workflow engine
-sprout-mcp        ← stdio MCP server (agent API surface)
-sprout-acp        ← ACP harness (bridges Sprout relay events to AI agents via stdio)
-sprout-proxy      ← Nostr client compatibility layer
-sprout-sdk        ← Typed Nostr event builders (used by sprout-mcp and sprout-cli)
-sprout-media      ← Blossom/S3 media storage
-sprout-cli        ← Agent-first CLI for interacting with the relay
-sprout-admin      ← Operator CLI
-sprout-test-client← Integration test harness
-desktop/          ← Desktop app (Tauri 2 + React 19 + Vite + Tailwind)
-```
+**The relay is the single source of truth.** All state flows through the
+event store. Crates communicate through the database and Redis pub/sub — not
+through direct function calls across crate boundaries (with the exception
+of `sprout-core` types, which are shared everywhere).
 
-**Key design principle:** The relay is the single source of truth. All state
-flows through the event store. Crates communicate through the database and
-Redis pub/sub — not through direct function calls across crate boundaries
-(with the exception of `sprout-core` types, which are shared everywhere).
-
-**Event kinds** are the only switch. Every action in the system — a message,
+**Event kinds are the only switch.** Every action in the system — a message,
 a reaction, a workflow step, a canvas update — is a Nostr event with a kind
 integer. Adding a new feature means defining a new kind. No breaking changes
 to existing clients.
+
+---
+
+## Ecosystem
+
+Sprout is developed across multiple repositories. This repo (`block/sprout`)
+is the open-source home for all application code — the relay, desktop app,
+mobile app, CLI, and agent harness. Internal repositories handle
+enterprise-signed builds and infrastructure deployment.
+
+See [AGENTS.md § Ecosystem](AGENTS.md#ecosystem) for the full repo table and
+dependency diagram.
+
+**External contributors:** Fork `block/sprout`, open a PR, and CI runs
+automatically. No special access is required.
+
+**Block team members:** See the internal
+[sprout-releases CONTRIBUTING.md](https://github.com/squareup/sprout-releases/blob/main/CONTRIBUTING.md)
+for team access setup, onboarding, and the full repo inventory. See
+[RELEASING.md](RELEASING.md) for the release process.
 
 ---
 
@@ -377,61 +379,6 @@ to existing clients.
 
 9. **Document** — `kind.rs` is the authoritative registry of all kind numbers.
    Update `README.md` if it's a user-facing feature.
-
----
-
-## How to Add a New MCP Tool
-
-MCP tools live in `crates/sprout-mcp/src/server.rs`. The `rmcp` crate
-provides the `#[tool]` and `#[tool_router]` macros.
-
-1. **Define a parameter struct:**
-
-   ```rust
-   #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-   pub struct MyToolParams {
-       /// UUID of the target channel.
-       pub channel_id: String,
-       /// Optional limit on results.
-       #[serde(default)]
-       pub limit: Option<u32>,
-   }
-   ```
-
-   Use doc comments (`///`) on fields — they become the tool's parameter
-   descriptions in the MCP schema.
-
-2. **Implement the handler method** on `SproutMcpServer`:
-
-   ```rust
-   #[tool(
-       name = "my_tool",
-       description = "One-sentence description of what this tool does"
-   )]
-   pub async fn my_tool(&self, Parameters(p): Parameters<MyToolParams>) -> String {
-       // Validate inputs at the boundary
-       if uuid::Uuid::parse_str(&p.channel_id).is_err() {
-           return format!("Error: channel_id '{}' is not a valid UUID", p.channel_id);
-       }
-       // Read tools call the relay REST API
-       match self.client.get(&format!("/api/channels/{}/my-resource", p.channel_id)).await {
-           Ok(body) => body,
-           Err(e) => format!("Error: {e}"),
-       }
-   }
-   ```
-
-   **Read vs. write tools:** Read tools use `self.client.get()` (REST).
-   Write tools build a signed Nostr event and call
-   `self.client.send_event(event)` — see `send_message` for the canonical
-   pattern.
-
-3. **The `#[tool_router]` macro** on the `impl SproutMcpServer` block
-   automatically discovers all `#[tool]`-annotated methods — no manual
-   registration or doc updates needed.
-
-4. **Write a test** — add an integration test in
-   `crates/sprout-test-client/tests/e2e_mcp.rs` that exercises the new tool end-to-end.
 
 ---
 

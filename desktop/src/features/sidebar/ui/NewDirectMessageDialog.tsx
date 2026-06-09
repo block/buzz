@@ -180,7 +180,7 @@ export function NewDirectMessageDialog({
                   >
                     <ProfileAvatar
                       avatarUrl={user.avatarUrl}
-                      className="h-5 w-5 rounded-full text-[10px] shadow-none"
+                      className="h-5 w-5 text-[10px] shadow-none"
                       iconClassName="h-3 w-3"
                       label={formatUserName(user)}
                     />
@@ -238,7 +238,7 @@ export function NewDirectMessageDialog({
                     >
                       <ProfileAvatar
                         avatarUrl={user.avatarUrl}
-                        className="h-9 w-9 rounded-2xl text-xs shadow-none"
+                        className="h-9 w-9 text-xs shadow-none"
                         iconClassName="h-4 w-4"
                         label={formatUserName(user)}
                       />

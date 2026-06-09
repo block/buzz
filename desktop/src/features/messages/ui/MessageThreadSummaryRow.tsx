@@ -3,25 +3,12 @@ import type {
   TimelineThreadSummaryParticipant,
 } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
+import { formatThreadSummaryLastReplyTime } from "@/features/messages/lib/dateFormatters";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const MESSAGE_TEXT_OFFSET_PX = 54;
+const MESSAGE_BODY_OFFSET_PX = MESSAGE_TEXT_OFFSET_PX + 4;
 const NESTED_REPLY_OFFSET_PX = 28;
-
-function formatRelativeTime(unixSeconds: number): string {
-  const now = Date.now() / 1_000;
-  const diff = now - unixSeconds;
-
-  if (diff < 60) return "just now";
-  if (diff < 3_600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86_400) return `${Math.floor(diff / 3_600)}h`;
-  if (diff < 604_800) return `${Math.floor(diff / 86_400)}d`;
-
-  return new Date(unixSeconds * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-}
 
 function ParticipantAvatar({
   participant,
@@ -38,9 +25,9 @@ function ParticipantAvatar({
     >
       <UserAvatar
         avatarUrl={participant.avatarUrl}
-        className="rounded-full border-2 border-background"
+        className="h-7 w-7 text-[10px] ring-2 ring-background"
         displayName={participant.author}
-        size="xs"
+        size="sm"
       />
     </div>
   );
@@ -62,7 +49,11 @@ export function MessageThreadSummaryRow({
     visibleDepth > 0
       ? MESSAGE_TEXT_OFFSET_PX + (visibleDepth - 1) * NESTED_REPLY_OFFSET_PX
       : 0;
-  const marginLeftPx = indentPx + MESSAGE_TEXT_OFFSET_PX;
+  const marginLeftPx = indentPx + MESSAGE_BODY_OFFSET_PX;
+  const replyLabel = summary.replyCount === 1 ? "reply" : "replies";
+  const summaryAriaLabel = summary.lastReplyAt
+    ? `View thread with ${summary.replyCount} ${replyLabel}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
+    : `View thread with ${summary.replyCount} ${replyLabel}`;
   const depthGuideOffsets =
     visibleDepth === 0
       ? []
@@ -75,7 +66,7 @@ export function MessageThreadSummaryRow({
         );
 
   return (
-    <div className="relative pb-1 pt-1">
+    <div className="relative pb-1 pt-0.5">
       {depthGuideOffsets.length > 0 ? (
         <div
           aria-hidden
@@ -96,7 +87,8 @@ export function MessageThreadSummaryRow({
       ) : null}
 
       <button
-        className="group inline-flex w-fit max-w-full items-center gap-1 text-left text-xs font-medium text-muted-foreground"
+        aria-label={summaryAriaLabel}
+        className="group relative isolate inline-flex h-8 w-fit max-w-full cursor-pointer items-center gap-1.5 rounded-[12px] text-left text-xs font-medium text-muted-foreground transition-[color,opacity] before:pointer-events-none before:absolute before:-bottom-0.5 before:-left-0.5 before:-right-2 before:-top-0.5 before:-z-10 before:rounded-[12px] before:content-[''] before:transition-[background-color,box-shadow] hover:text-foreground hover:opacity-90 hover:before:bg-background/95 hover:before:ring-1 hover:before:ring-border/70 focus-visible:outline-hidden focus-visible:before:bg-background/95 focus-visible:before:ring-1 focus-visible:before:ring-ring"
         data-thread-head-id={message.id}
         data-testid="message-thread-summary"
         onClick={() => onOpenThread(message)}
@@ -113,15 +105,31 @@ export function MessageThreadSummaryRow({
           ))}
         </div>
         <div className="min-w-0">
-          <div className="font-medium">
-            <span className="transition-colors group-hover:text-foreground">
-              {summary.replyCount}{" "}
-              {summary.replyCount === 1 ? "reply" : "replies"}
+          <div>
+            <span className="font-medium transition-colors group-hover:text-foreground">
+              {summary.replyCount} {replyLabel}
             </span>
             {summary.lastReplyAt ? (
-              <span className="ml-1 text-muted-foreground/70">
-                last {formatRelativeTime(summary.lastReplyAt)}
-              </span>
+              <>
+                <span className="mx-1 font-normal text-muted-foreground/50">
+                  ·
+                </span>
+                <span className="inline-grid font-normal text-muted-foreground/70">
+                  <span
+                    className="col-start-1 row-start-1 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0"
+                    data-testid="message-thread-summary-last-reply"
+                  >
+                    last reply{" "}
+                    {formatThreadSummaryLastReplyTime(summary.lastReplyAt)}
+                  </span>
+                  <span
+                    className="col-start-1 row-start-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+                    data-testid="message-thread-summary-hover-action"
+                  >
+                    View thread
+                  </span>
+                </span>
+              </>
             ) : null}
           </div>
         </div>

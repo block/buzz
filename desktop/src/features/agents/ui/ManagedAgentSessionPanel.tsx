@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
@@ -30,6 +31,7 @@ type ManagedAgentSessionPanelProps = {
   emptyDescription?: string;
   showHeader?: boolean;
   showRaw?: boolean;
+  profiles?: UserProfileLookup;
 };
 
 export function ManagedAgentSessionPanel({
@@ -39,6 +41,7 @@ export function ManagedAgentSessionPanel({
   emptyDescription = "Mention this agent in a channel to watch the next turn.",
   showHeader = true,
   showRaw = true,
+  profiles,
 }: ManagedAgentSessionPanelProps) {
   const hasObserver = isManagedAgentActive(agent);
   const { connectionState, errorMessage, events } = useObserverEvents(
@@ -96,6 +99,7 @@ export function ManagedAgentSessionPanel({
         errorMessage={errorMessage}
         events={scopedEvents}
         hasObserver={hasObserver}
+        profiles={profiles}
         showRaw={showRaw}
         transcript={scopedTranscript}
       />
@@ -145,6 +149,7 @@ function SessionBody({
   errorMessage,
   events,
   hasObserver,
+  profiles,
   showRaw,
   transcript,
 }: {
@@ -154,6 +159,7 @@ function SessionBody({
   errorMessage: string | null;
   events: ObserverEvent[];
   hasObserver: boolean;
+  profiles?: UserProfileLookup;
   showRaw: boolean;
   transcript: TranscriptItem[];
 }) {
@@ -175,6 +181,7 @@ function SessionBody({
             agentName={agentName}
             emptyDescription={emptyDescription}
             items={transcript}
+            profiles={profiles}
           />
           {showRaw ? <RawEventRail events={events} /> : null}
         </div>

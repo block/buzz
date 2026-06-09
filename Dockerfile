@@ -23,9 +23,10 @@ RUN groupadd -g 1000 sprout && useradd -u 1000 -g sprout -m sprout
 # CAKE: writable dirs
 RUN mkdir -p /cache /tmp && chown sprout:sprout /cache /tmp
 
-# socat for Istio abstract→file socket bridge
+# git: relay shells out to `git` for hydrate/receive-pack/upload-pack (S3-backed repos)
+# socat: Istio abstract→file socket bridge
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates socat && rm -rf /var/lib/apt/lists/*
+    ca-certificates git socat && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/sprout-relay /code/sprout-relay
 COPY --from=web-builder /build/web/dist /code/web

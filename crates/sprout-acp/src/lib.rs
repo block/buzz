@@ -24,7 +24,7 @@ use pool::{
     AgentPool, CancelMode, OwnedAgent, PromptContext, PromptOutcome, PromptResult, PromptSource,
     SessionState,
 };
-use queue::{EventQueue, QueuedEvent, ThreadTags};
+use queue::{prepend_base_prompt, EventQueue, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
 use sprout_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
@@ -794,7 +794,7 @@ async fn tokio_main() -> Result<()> {
         .compact()
         .init();
 
-    let config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
+    let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
     tracing::info!("sprout-acp starting: {}", config.summary());
 
     let observer = config
@@ -1069,6 +1069,7 @@ async fn tokio_main() -> Result<()> {
     let dedup_mode = config.dedup_mode;
     let mut queue = EventQueue::new(dedup_mode);
 
+    let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -1076,6 +1077,13 @@ async fn tokio_main() -> Result<()> {
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
+        base_prompt: if config.no_base_prompt {
+            None
+        } else if let Some(content) = base_prompt_content {
+            Some(Box::leak(content.into_boxed_str()))
+        } else {
+            Some(include_str!("base_prompt.md"))
+        },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
         cwd: std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("/"))
@@ -1096,7 +1104,7 @@ async fn tokio_main() -> Result<()> {
     if !config.memory_enabled {
         tracing::info!(
             target: "engram::core",
-            "NIP-AE core memory injection disabled by default (enable with --memory / SPROUT_ACP_MEMORY)"
+            "NIP-AE core memory injection disabled (re-enable by removing --no-memory / SPROUT_ACP_NO_MEMORY)"
         );
     }
 
@@ -2314,6 +2322,10 @@ fn dispatch_heartbeat(
         .heartbeat_prompt
         .clone()
         .unwrap_or_else(default_heartbeat_prompt);
+    let prompt_text = match ctx.base_prompt {
+        Some(bp) => prepend_base_prompt(bp, &prompt_text),
+        None => prompt_text,
+    };
     let result_tx = pool.result_tx();
     let ctx_clone = Arc::clone(ctx);
     let agent_index = agent.index;
@@ -2344,14 +2356,15 @@ fn default_heartbeat_prompt() -> String {
          You have been awakened for a routine heartbeat. You have NO incoming messages or\n\
          active channel context for this turn.\n\n\
          Your tasks:\n\
-         1. Call `get_feed(types='needs_action')` to check for pending workflow approvals or\n\
+         1. Run `sprout feed get --types needs_action` to check for pending workflow approvals or\n\
             high-priority requests addressed to you.\n\
-         2. Call `get_feed(types='mentions')` to check for unanswered @mentions.\n\
-         3. If you find actionable items, address them using the appropriate tools\n\
-            (e.g., `approve_step`, `send_message`, `send_message(parent_event_id=...)`).\n\
+         2. Run `sprout feed get --types mentions` to check for unanswered @mentions.\n\
+         3. If you find actionable items, address them using the appropriate CLI commands\n\
+            (e.g., `sprout workflows approve --token <UUID>`, `sprout messages send`,\n\
+            `sprout messages send --reply-to <event-id>`).\n\
          4. If there are no pending actions or mentions, end your turn immediately.\n\n\
-         Do not call `list_channels()` or `search()` unless you have a specific reason.\n\
-         Do not invent work — only act on items surfaced by the feed tools."
+         Do not run `sprout channels list` or `sprout messages search` unless you have a specific reason.\n\
+         Do not invent work — only act on items surfaced by the feed commands."
     )
 }
 
@@ -2598,8 +2611,15 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
+    if config.mcp_command.is_empty() {
+        return vec![];
+    }
     vec![McpServer {
-        name: "sprout-mcp".to_string(),
+        name: std::path::Path::new(&config.mcp_command)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mcp")
+            .to_string(),
         command: config.mcp_command.clone(),
         args: vec![],
         env: {
@@ -2620,16 +2640,6 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                         .expect("secret key bech32 encoding should never fail"),
                 },
             ];
-            // Forward SPROUT_TOOLSETS so the MCP server enables the
-            // same toolsets the operator configured for this harness.
-            if let Ok(ts) = std::env::var("SPROUT_TOOLSETS") {
-                if !ts.is_empty() {
-                    env.push(EnvVar {
-                        name: "SPROUT_TOOLSETS".into(),
-                        value: ts,
-                    });
-                }
-            }
             // Forward SPROUT_AUTH_TAG (NIP-OA owner attestation credential)
             // so the MCP server can attach it to every signed event.
             if let Ok(auth_tag) = std::env::var("SPROUT_AUTH_TAG") {
@@ -2780,7 +2790,7 @@ mod build_mcp_servers_tests {
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
-            mcp_command: "sprout-mcp-server".into(),
+            mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: 3600,
             agents: 1,
@@ -2808,6 +2818,8 @@ mod build_mcp_servers_tests {
             persona_env_vars: vec![],
             relay_observer: false,
             agent_owner: None,
+            no_base_prompt: false,
+            base_prompt_content: None,
         }
     }
 
@@ -2817,7 +2829,7 @@ mod build_mcp_servers_tests {
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
         let server = &servers[0];
-        assert_eq!(server.name, "sprout-mcp");
+        assert_eq!(server.name, "test-mcp-server");
 
         let names: Vec<&str> = server.env.iter().map(|e| e.name.as_str()).collect();
         assert!(
@@ -2860,6 +2872,50 @@ mod build_mcp_servers_tests {
         assert!(
             !has_auth_tag,
             "empty SPROUT_AUTH_TAG should not be forwarded"
+        );
+    }
+
+    #[test]
+    fn empty_mcp_command_returns_no_servers() {
+        let mut config = test_config();
+        config.mcp_command = "".into();
+        let servers = build_mcp_servers(&config);
+        assert!(
+            servers.is_empty(),
+            "empty mcp_command should produce no MCP servers"
+        );
+    }
+
+    #[test]
+    fn absolute_path_mcp_command_uses_file_stem_as_name() {
+        let mut config = test_config();
+        config.mcp_command = "/opt/bin/my-mcp-server".into();
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "my-mcp-server");
+    }
+
+    #[test]
+    fn mcp_command_with_no_stem_falls_back_to_mcp() {
+        // Path::new("").file_stem() returns None — exercises the unwrap_or("mcp") path.
+        let mut config = test_config();
+        config.mcp_command = "".into();
+        // Empty command returns no servers; test the stem logic directly.
+        assert_eq!(
+            std::path::Path::new("")
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("mcp"),
+            "mcp"
+        );
+
+        // Confirm a non-empty command with no stem (e.g. just a dot) also falls back.
+        config.mcp_command = ".".into();
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(
+            servers[0].name, "mcp",
+            "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
     }
 }

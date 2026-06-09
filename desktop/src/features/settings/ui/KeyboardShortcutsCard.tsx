@@ -1,10 +1,9 @@
-import { Keyboard } from "lucide-react";
-
 import {
   getShortcutsByCategory,
   getPlatformKeys,
   type KeyboardShortcut,
 } from "@/shared/lib/keyboard-shortcuts";
+import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 
 function KeyCombo({ shortcut }: { shortcut: KeyboardShortcut }) {
   const keys = getPlatformKeys(shortcut);
@@ -33,14 +32,11 @@ export function KeyboardShortcutsCard() {
 
   return (
     <section className="min-w-0" data-testid="settings-shortcuts">
-      <div className="mb-3 min-w-0">
-        <div className="flex items-center gap-2">
-          <Keyboard className="h-4 w-4 text-muted-foreground" />
-          <h2 className="text-sm font-semibold tracking-tight">
-            Keyboard Shortcuts
-          </h2>
-        </div>
-        <p className="mt-1 text-sm text-muted-foreground">
+      <div className="mb-12 min-w-0">
+        <h2 className="text-2xl font-semibold tracking-tight">
+          Keyboard Shortcuts
+        </h2>
+        <p className="mt-1 text-base font-normal text-muted-foreground">
           All available keyboard shortcuts. Shortcuts are read-only.
         </p>
       </div>
@@ -51,22 +47,24 @@ export function KeyboardShortcutsCard() {
             <h3 className="mb-2 text-xs font-semibold uppercase tracking-widest text-muted-foreground">
               {category}
             </h3>
-            <div className="rounded-lg border border-border/70 bg-background/70">
-              {shortcuts.map((shortcut, i) => (
-                <div
-                  className={`flex items-center justify-between px-3 py-2 text-sm ${i !== shortcuts.length - 1 ? "border-b border-border/50" : ""}`}
+            <SettingsOptionGroup>
+              {shortcuts.map((shortcut) => (
+                <SettingsOptionRow
+                  className="min-h-12 px-3 py-2"
                   key={shortcut.id}
                 >
                   <div className="min-w-0 flex-1">
-                    <span className="text-foreground">{shortcut.label}</span>
+                    <span className="text-sm font-medium text-foreground">
+                      {shortcut.label}
+                    </span>
                     <span className="ml-2 text-muted-foreground">
                       {shortcut.description}
                     </span>
                   </div>
                   <KeyCombo shortcut={shortcut} />
-                </div>
+                </SettingsOptionRow>
               ))}
-            </div>
+            </SettingsOptionGroup>
           </div>
         ))}
       </div>

@@ -139,6 +139,14 @@ pub enum PresenceStatus {
     Offline,
 }
 
+#[derive(Clone, clap::ValueEnum)]
+pub enum EmojiScope {
+    #[value(name = "own")]
+    Own,
+    #[value(name = "workspace")]
+    Workspace,
+}
+
 impl std::fmt::Display for PresenceStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -179,6 +187,9 @@ enum Cmd {
     /// Add, remove, and list emoji reactions
     #[command(subcommand)]
     Reactions(ReactionsCmd),
+    /// Manage your custom emoji set (workspace palette is the union of all members' sets)
+    #[command(subcommand)]
+    Emoji(EmojiCmd),
     /// List, open, and manage direct messages
     #[command(subcommand)]
     Dms(DmsCmd),
@@ -237,9 +248,6 @@ pub enum MessagesCmd {
         /// Also publish to the Nostr network
         #[arg(long, default_value_t = false)]
         broadcast: bool,
-        /// Explicit mention pubkeys (64-char hex)
-        #[arg(long = "mention")]
-        mentions: Vec<String>,
         /// Attach file(s) — uploads and includes as imeta tags
         #[arg(long = "file")]
         files: Vec<String>,
@@ -330,6 +338,9 @@ pub enum MessagesCmd {
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
+        /// Maximum reply nesting depth to include
+        #[arg(long)]
+        depth_limit: Option<u32>,
     },
     /// Full-text search across messages
     Search {
@@ -377,6 +388,24 @@ pub enum ChannelsCmd {
         /// Channel UUID
         #[arg(long)]
         channel: String,
+    },
+    /// Search channels by human-readable name
+    #[command(
+        after_help = "Examples:\n  sprout channels search --query composer\n  sprout channels search --query sprout-chat-composer --exact\n  sprout channels search --query design --include-archived"
+    )]
+    Search {
+        /// Search query (case-insensitive substring of channel name)
+        #[arg(long)]
+        query: String,
+        /// Require an exact case-insensitive match instead of substring
+        #[arg(long, default_value_t = false)]
+        exact: bool,
+        /// Include archived channels in results
+        #[arg(long, default_value_t = false)]
+        include_archived: bool,
+        /// Maximum number of channel-metadata events to fetch from the relay
+        #[arg(long, default_value_t = 1000)]
+        limit: u32,
     },
     /// Create a new channel
     #[command(
@@ -485,6 +514,13 @@ pub enum ChannelsCmd {
         #[arg(long)]
         pubkey: String,
     },
+    /// Set your channel addition policy
+    #[command(name = "set-add-policy")]
+    SetAddPolicy {
+        /// Policy: anyone | owner_only | nobody
+        #[arg(long)]
+        policy: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -521,9 +557,12 @@ pub enum ReactionsCmd {
         /// Event ID (64-char hex)
         #[arg(long)]
         event: String,
-        /// Emoji character (e.g. '👍')
+        /// Emoji character (e.g. '👍') or custom emoji shortcode
         #[arg(long)]
         emoji: String,
+        /// Image URL for a custom emoji reaction; when set, content becomes `:shortcode:`
+        #[arg(long = "emoji-url")]
+        emoji_url: Option<String>,
     },
     /// Remove an emoji reaction from a message
     Remove {
@@ -539,6 +578,52 @@ pub enum ReactionsCmd {
         /// Event ID (64-char hex)
         #[arg(long)]
         event: String,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Custom emoji subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum EmojiCmd {
+    /// List the workspace custom emoji palette (union of every member's set)
+    List,
+    /// Add or update a custom emoji in your own set
+    Set {
+        /// Emoji shortcode, without surrounding colons
+        #[arg(long)]
+        shortcode: String,
+        /// Image URL for the emoji
+        #[arg(long)]
+        url: String,
+    },
+    /// Remove a custom emoji from your own set
+    Rm {
+        /// Emoji shortcode, without surrounding colons
+        #[arg(long)]
+        shortcode: String,
+    },
+    /// Export custom emojis to stdout or a file
+    Export {
+        /// Write JSON to this file path instead of stdout
+        #[arg(long)]
+        file: Option<String>,
+        /// Export your own set (default) or the full workspace palette
+        #[arg(long, value_enum, default_value = "own")]
+        scope: EmojiScope,
+    },
+    /// Import custom emojis from stdin or a file into your own set
+    Import {
+        /// Read JSON from this file path instead of stdin
+        #[arg(long)]
+        file: Option<String>,
+        /// Replace your entire set instead of merging
+        #[arg(long, default_value_t = false)]
+        replace: bool,
+        /// Print what would be published without writing
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
 }
 
@@ -568,6 +653,12 @@ pub enum DmsCmd {
         /// User pubkey to add (64-char hex)
         #[arg(long)]
         pubkey: String,
+    },
+    /// Hide a DM conversation from your DM list
+    Hide {
+        /// DM conversation UUID
+        #[arg(long)]
+        channel: String,
     },
 }
 
@@ -663,11 +754,16 @@ pub enum WorkflowsCmd {
         workflow: String,
     },
     /// Trigger a workflow run
-    #[command(after_help = "Examples:\n  sprout workflows trigger --workflow <UUID>")]
+    #[command(
+        after_help = "Examples:\n  sprout workflows trigger --workflow <UUID>\n  sprout workflows trigger --workflow <UUID> --inputs '{\"key\":\"value\"}'"
+    )]
     Trigger {
         /// Workflow UUID
         #[arg(long)]
         workflow: String,
+        /// JSON object of input variables passed to the workflow as event content
+        #[arg(long)]
+        inputs: Option<String>,
     },
     /// List runs for a workflow
     Runs {
@@ -709,6 +805,9 @@ pub enum FeedCmd {
         /// Maximum number of results to return
         #[arg(long)]
         limit: Option<u32>,
+        /// Comma-separated feed types to include: mentions, needs_action, activity, agent_activity
+        #[arg(long)]
+        types: Option<String>,
     },
 }
 
@@ -754,6 +853,9 @@ pub enum SocialCmd {
         /// Unix timestamp cursor — return notes created before this time.
         #[arg(long)]
         before: Option<i64>,
+        /// Event ID cursor — return notes created before this event (composite pagination with --before).
+        #[arg(long)]
+        before_id: Option<String>,
     },
     /// Get a user's contact list
     #[command(name = "contacts")]
@@ -1086,6 +1188,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
+        Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
@@ -1120,6 +1223,7 @@ mod tests {
             "canvas",
             "channels",
             "dms",
+            "emoji",
             "feed",
             "mem",
             "messages",
@@ -1199,6 +1303,8 @@ mod tests {
                 "members",
                 "purpose",
                 "remove-member",
+                "search",
+                "set-add-policy",
                 "topic",
                 "unarchive",
                 "update"
@@ -1206,7 +1312,14 @@ mod tests {
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
-        assert_eq!(names(&cmd, "dms"), vec!["add-member", "list", "open"]);
+        assert_eq!(
+            names(&cmd, "emoji"),
+            vec!["export", "import", "list", "rm", "set"]
+        );
+        assert_eq!(
+            names(&cmd, "dms"),
+            vec!["add-member", "hide", "list", "open"]
+        );
         assert_eq!(
             names(&cmd, "users"),
             vec!["get", "presence", "set-presence", "set-profile"]
@@ -1237,8 +1350,9 @@ mod tests {
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
             ("canvas", 2),
-            ("channels", 14),
-            ("dms", 3),
+            ("channels", 16),
+            ("dms", 4),
+            ("emoji", 5),
             ("feed", 1),
             ("messages", 8),
             ("pack", 2),

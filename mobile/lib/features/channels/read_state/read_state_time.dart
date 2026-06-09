@@ -21,3 +21,5 @@ int? isoToUnixSeconds(Object? value) {
 
   return dateTimeToUnixSeconds(DateTime.tryParse(value));
 }
+
+const readStateMaxClockDriftSeconds = 300;

@@ -9,7 +9,6 @@ description = "Core types, event verification, and filter matching for Sprout"
 
 [features]
 test-utils = []
-mcp-schema = ["schemars"]
 
 [dependencies]
 nostr      = { workspace = true }
@@ -21,7 +20,6 @@ chrono     = { workspace = true }
 hex        = { workspace = true }
 hmac       = { workspace = true }
 sha2       = { workspace = true }
-schemars   = { workspace = true, optional = true }
 rand              = { workspace = true }
 subtle            = { workspace = true }
 zeroize           = { workspace = true }

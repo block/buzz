@@ -2,8 +2,6 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use sprout_core::PresenceStatus;
-
 #[derive(Serialize)]
 pub struct IdentityInfo {
     pub pubkey: String,
@@ -51,6 +49,15 @@ pub struct UserNoteInfo {
     pub pubkey: String,
     pub created_at: i64,
     pub content: String,
+    pub tags: Vec<Vec<String>>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct NoteReactionSummary {
+    pub note_id: String,
+    pub emoji: String,
+    pub count: usize,
+    pub pubkeys: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -66,12 +73,6 @@ pub struct UserNotesResponse {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct SetPresenceResponse {
-    pub status: PresenceStatus,
-    pub ttl_seconds: u64,
-}
-
-#[derive(Serialize, Deserialize)]
 pub struct ChannelInfo {
     pub id: String,
     pub name: String,
@@ -82,6 +83,8 @@ pub struct ChannelInfo {
     pub topic: Option<String>,
     pub purpose: Option<String>,
     pub member_count: i64,
+    #[serde(default)]
+    pub member_pubkeys: Vec<String>,
     pub last_message_at: Option<String>,
     pub archived_at: Option<String>,
     #[serde(default)]

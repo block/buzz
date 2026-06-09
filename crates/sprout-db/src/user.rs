@@ -132,7 +132,7 @@ pub async fn update_user_profile(
         "UPDATE users SET {} WHERE pubkey = ${param_idx}",
         set_parts.join(", ")
     );
-    let mut query = sqlx::query(&sql);
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
     if display_name.is_some() {
         query = query.bind(empty_to_none(display_name));
     }

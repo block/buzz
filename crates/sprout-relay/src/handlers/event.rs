@@ -7,7 +7,8 @@ use tracing::{debug, error, info, warn};
 use nostr::{Event, PublicKey};
 use sprout_core::event::StoredEvent;
 use sprout_core::kind::{
-    event_kind_u32, is_ephemeral, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
+    event_kind_u32, is_ephemeral, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP,
+    KIND_MESH_CONNECT_REQUEST, KIND_MESH_STATUS_REPORT, KIND_PRESENCE_UPDATE,
 };
 use sprout_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -55,14 +56,17 @@ pub(crate) async fn dispatch_persistent_event(
 ) -> usize {
     let event_id_hex = stored_event.event.id.to_hex();
 
-    if let Some(ch_id) = stored_event.channel_id {
-        state.mark_local_event(&stored_event.event.id);
-        if let Err(e) = state.pubsub.publish_event(ch_id, &stored_event.event).await {
-            state
-                .local_event_ids
-                .invalidate(&stored_event.event.id.to_bytes());
-            warn!(event_id = %event_id_hex, "Redis publish failed: {e}");
-        }
+    let pubsub_channel = stored_event.channel_id.unwrap_or(uuid::Uuid::nil());
+    state.mark_local_event(&stored_event.event.id);
+    if let Err(e) = state
+        .pubsub
+        .publish_event(pubsub_channel, &stored_event.event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&stored_event.event.id.to_bytes());
+        warn!(event_id = %event_id_hex, "Redis publish failed: {e}");
     }
 
     let matches = state.sub_registry.fan_out(stored_event);
@@ -249,6 +253,22 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             ));
             return;
         }
+        // Mesh signaling kinds are direct desktop-user actions: the resulting
+        // call-me-now routes to the *authenticated connection's* pubkey, so a
+        // proxy-submitted mesh request would point the dial at the proxy, not the
+        // user's desktop. Reject mesh kinds under proxy scope — they must come
+        // from the member's own session.
+        if has_proxy_scope
+            && (kind_u32 == KIND_MESH_CONNECT_REQUEST || kind_u32 == KIND_MESH_STATUS_REPORT)
+        {
+            reject("scope");
+            conn.send(RelayMessage::ok(
+                &event_id_hex,
+                false,
+                "restricted: mesh signaling cannot be proxy-submitted",
+            ));
+            return;
+        }
         handle_ephemeral_event(
             event,
             conn_id,
@@ -381,6 +401,69 @@ async fn handle_ephemeral_event(
         }
 
         conn.send(RelayMessage::ok(event_id_hex, true, ""));
+        return;
+    }
+
+    // Mesh status report (kind:24620). An authenticated relay member reports its
+    // current mesh serve availability; the relay projects it into a relay-signed,
+    // per-reporter kind:30621 discovery note. The report is ephemeral input; the
+    // 30621 is the durable, relay-owned record.
+    if event_kind_u32(&event) == KIND_MESH_STATUS_REPORT {
+        let reporter_hex = auth_pubkey.to_hex();
+        match super::mesh_signaling::handle_status_report(&state, &reporter_hex, &event).await {
+            Ok(()) => {
+                conn.send(RelayMessage::ok(event_id_hex, true, ""));
+            }
+            Err(reason) => {
+                conn.send(RelayMessage::ok(event_id_hex, false, &reason));
+            }
+        }
+        return;
+    }
+
+    // Mesh hole-punch signaling (kind:24621). An authenticated relay member
+    // asks the relay to coordinate a direct iroh hole-punch to a peer it found
+    // via kind:30621. The relay validates the target is also a member, then
+    // emits the paired call-me-now (kind:24622). This is the relay's ONLY role
+    // in the v1 direct-iroh mesh — validate membership + pair + fan out. It
+    // never carries iroh traffic and stores no endpoint state.
+    if event_kind_u32(&event) == KIND_MESH_CONNECT_REQUEST {
+        // Generous per-requester rate limit: each accepted 24621 makes the relay
+        // sign + fan TWO 24622s, so bound the amplification. 20/sec is far above
+        // any real interactive use; a buggy desktop loop can't storm the relay.
+        {
+            let key: [u8; 32] = auth_pubkey.to_bytes();
+            let now = std::time::Instant::now();
+            let mut entry = state
+                .mesh_connect_rate_limiter
+                .entry(key)
+                .or_insert((0, now));
+            let (count, window_start) = entry.value_mut();
+            if now.duration_since(*window_start).as_secs() >= 1 {
+                *count = 1;
+                *window_start = now;
+            } else {
+                *count += 1;
+                if *count > 20 {
+                    drop(entry);
+                    conn.send(RelayMessage::ok(
+                        event_id_hex,
+                        false,
+                        "rate-limited: mesh connect request rate exceeded (20/sec)",
+                    ));
+                    return;
+                }
+            }
+        }
+        let requester_hex = auth_pubkey.to_hex();
+        match super::mesh_signaling::handle_connect_request(&state, &requester_hex, &event).await {
+            Ok(()) => {
+                conn.send(RelayMessage::ok(event_id_hex, true, ""));
+            }
+            Err(reason) => {
+                conn.send(RelayMessage::ok(event_id_hex, false, &reason));
+            }
+        }
         return;
     }
 

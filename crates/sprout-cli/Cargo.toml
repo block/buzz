@@ -62,3 +62,6 @@ url = { workspace = true }
 
 # Persona pack parsing, validation, and resolution
 sprout-persona = { path = "../sprout-persona" }
+
+# WebSocket client — ephemeral event publish (kind:20001 is WS-only on the relay)
+sprout-ws-client = { path = "../sprout-ws-client" }

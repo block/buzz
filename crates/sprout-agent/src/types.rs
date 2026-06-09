@@ -95,6 +95,13 @@ pub struct LlmResponse {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     pub stop: ProviderStop,
+    /// Total input tokens the provider reported for this request, or `None`
+    /// if the response carried no usage. For Anthropic/Databricks this is the
+    /// inclusive sum `input_tokens + cache_read_input_tokens +
+    /// cache_creation_input_tokens` (plain `input_tokens` excludes cached
+    /// tokens, so reading it alone would undercount). Used to gate handoff on
+    /// the real token budget rather than a byte estimate.
+    pub input_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -190,6 +197,7 @@ impl AgentError {
     pub fn json_rpc_code(&self) -> i32 {
         match self {
             Self::InvalidParams(_) => -32602,
+            Self::LlmAuth(_) => -32001,
             _ => -32000,
         }
     }

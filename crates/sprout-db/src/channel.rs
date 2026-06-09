@@ -340,13 +340,7 @@ pub async fn add_member(
                 DbError::InvalidData(format!("invalid role in database: {inviter_role_str}"))
             })?;
 
-            if !inviter_role.is_elevated() {
-                return Err(DbError::AccessDenied(
-                    "inviter must be owner or admin".to_string(),
-                ));
-            }
-
-            // Only owners/admins may grant elevated roles (already verified above — kept for clarity).
+            // Any member can invite others, but only owners/admins may grant elevated roles.
             if role.is_elevated() && !inviter_role.is_elevated() {
                 return Err(DbError::AccessDenied(
                     "only owners/admins may grant elevated roles".to_string(),
@@ -758,7 +752,7 @@ pub async fn get_accessible_channels(
         format!("{base}        ORDER BY array_position(ARRAY['stream','forum','dm']::text[], c.channel_type::text), c.name\n        LIMIT 1000")
     };
 
-    let query = sqlx::query(&sql).bind(pubkey);
+    let query = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(pubkey);
     let query = if let Some(vis) = visibility_filter {
         query.bind(vis)
     } else {
@@ -833,7 +827,7 @@ pub async fn get_users_bulk(pool: &PgPool, pubkeys: &[Vec<u8>]) -> Result<Vec<Us
     let sql =
         format!("SELECT pubkey, display_name, avatar_url, nip05_handle FROM users WHERE pubkey IN ({placeholders})");
 
-    let mut q = sqlx::query(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     for pk in pubkeys {
         q = q.bind(pk);
     }
@@ -948,7 +942,7 @@ pub async fn update_channel(
         set_parts.join(", ")
     );
 
-    let mut q = sqlx::query(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     if let Some(ref name) = updates.name {
         q = q.bind(name);
     }
@@ -1060,7 +1054,11 @@ pub async fn unarchive_channel(pool: &PgPool, channel_id: Uuid) -> Result<()> {
     }
 
     sqlx::query(
-        "UPDATE channels SET archived_at = NULL \
+        "UPDATE channels SET archived_at = NULL, \
+             ttl_deadline = CASE \
+                 WHEN ttl_seconds IS NOT NULL THEN NOW() + (ttl_seconds || ' seconds')::interval \
+                 ELSE ttl_deadline \
+             END \
          WHERE id = $1 AND deleted_at IS NULL AND archived_at IS NOT NULL",
     )
     .bind(channel_id)
@@ -1256,6 +1254,60 @@ mod tests {
                 .await
                 .expect("is_member check"),
             "agent should no longer be a member"
+        );
+    }
+
+    /// Unarchiving an expired ephemeral channel renews its TTL lease so the
+    /// reaper does not immediately archive it again.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_unarchive_expired_ephemeral_channel_renews_ttl_deadline() {
+        let pool = setup_pool().await;
+        let owner_pk = random_pubkey();
+        ensure_user(&pool, &owner_pk).await.expect("ensure owner");
+
+        let channel = create_channel(
+            &pool,
+            "test-unarchive-renews-ttl",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner_pk,
+            Some(60),
+        )
+        .await
+        .expect("create ephemeral channel");
+
+        sqlx::query(
+            "UPDATE channels SET archived_at = NOW(), ttl_deadline = NOW() - interval '1 second' WHERE id = $1",
+        )
+        .bind(channel.id)
+        .execute(&pool)
+        .await
+        .expect("expire and archive channel");
+
+        unarchive_channel(&pool, channel.id)
+            .await
+            .expect("unarchive expired ephemeral channel");
+
+        let channel = get_channel(&pool, channel.id)
+            .await
+            .expect("reload channel");
+        assert!(
+            channel.archived_at.is_none(),
+            "channel should be unarchived"
+        );
+        assert!(
+            channel.ttl_deadline.expect("ttl deadline") > Utc::now(),
+            "unarchive should renew ttl_deadline into the future"
+        );
+
+        let reaped = reap_expired_ephemeral_channels(&pool)
+            .await
+            .expect("run reaper");
+        assert!(
+            !reaped.contains(&channel.id),
+            "reaper should not immediately rearchive renewed channel"
         );
     }
 

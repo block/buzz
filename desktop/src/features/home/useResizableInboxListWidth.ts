@@ -1,13 +1,14 @@
 import * as React from "react";
 
 const INBOX_LIST_DEFAULT_WIDTH_PX = 320;
-const INBOX_LIST_MIN_WIDTH_PX = 260;
+export const INBOX_COLUMN_MIN_WIDTH_PX = 300;
+export const INBOX_SINGLE_COLUMN_BREAKPOINT_PX = INBOX_COLUMN_MIN_WIDTH_PX * 2;
 const INBOX_LIST_MAX_WIDTH_PX = 520;
 const INBOX_LIST_WIDTH_SESSION_KEY = "sprout.desktop.home-inbox-list-width";
 
 function clampInboxListWidth(width: number): number {
   return Math.max(
-    INBOX_LIST_MIN_WIDTH_PX,
+    INBOX_COLUMN_MIN_WIDTH_PX,
     Math.min(INBOX_LIST_MAX_WIDTH_PX, width),
   );
 }

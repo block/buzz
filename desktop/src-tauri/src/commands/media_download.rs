@@ -5,7 +5,7 @@ use crate::app_state::AppState;
 use crate::commands::export_util::save_bytes_with_dialog;
 use crate::relay::relay_api_base_url_with_override;
 
-use super::media::detect_and_validate_mime;
+use super::media::{detect_and_validate_mime, sanitize_filename};
 
 /// Maximum download size: 50 MiB. Prevents OOM from oversized responses.
 const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
@@ -65,7 +65,7 @@ pub async fn download_image(
         .ok()
         .and_then(|u| {
             u.path_segments()?
-                .last()
+                .next_back()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string())
         })
@@ -78,10 +78,65 @@ pub async fn download_image(
         .unwrap_or("png")
         .to_string();
 
-    // Fetch image bytes via the app's HTTP client (goes through WARP tunnel).
+    let bytes = fetch_blob_bytes(&url, &state).await?;
+
+    // Validate the downloaded content is actually a supported media type.
+    detect_and_validate_mime(&bytes)?;
+
+    save_bytes_with_dialog(&app, &filename, "Images", &[&ext], &bytes).await
+}
+
+/// Download an arbitrary file attachment from a relay `/media/` URL and save it
+/// via a native save-file dialog.
+///
+/// The frontend supplies `filename` from the message's imeta `filename` field
+/// (the URL path is only the content hash, so it carries no human-readable
+/// name). We sanitize it defensively before using it as the suggested name.
+///
+/// Mirrors `download_image`'s SSRF and size protections, but uses a generic
+/// "All Files" dialog filter and derives the extension from the supplied
+/// filename rather than assuming an image.
+#[tauri::command]
+pub async fn download_file(
+    url: String,
+    filename: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    // SSRF protection: only allow downloads from the relay's /media/ path.
+    let relay_base = relay_api_base_url_with_override(&state);
+    validate_download_url(&url, &relay_base)?;
+
+    // The imeta filename is the only human-readable name we have; sanitize it
+    // so directory traversal / control characters can never reach the dialog.
+    let filename = sanitize_filename(&filename);
+
+    // Derive extension for the save dialog filter from the supplied filename.
+    let ext = std::path::Path::new(&filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_string());
+
+    let bytes = fetch_blob_bytes(&url, &state).await?;
+
+    // Reuse the upload-side allow/deny policy: rejects executables, HTML, and
+    // other types the relay would never have accepted, while permitting the
+    // arbitrary `application/octet-stream` / text payloads that uploads allow.
+    detect_and_validate_mime(&bytes)?;
+
+    // Generic filter: an arbitrary attachment is not necessarily an image.
+    let extensions: Vec<&str> = ext.as_deref().into_iter().collect();
+    save_bytes_with_dialog(&app, &filename, "All Files", &extensions, &bytes).await
+}
+
+/// Fetch blob bytes from a (pre-validated) relay media URL through the app's
+/// HTTP client, enforcing the download size cap. The caller is responsible for
+/// validating the URL origin and for any content-type checks on the result.
+async fn fetch_blob_bytes(url: &str, state: &State<'_, AppState>) -> Result<Vec<u8>, String> {
+    // Fetch bytes via the app's HTTP client (goes through WARP tunnel).
     let resp = state
         .http_client
-        .get(&url)
+        .get(url)
         .timeout(DOWNLOAD_TIMEOUT)
         .send()
         .await
@@ -119,10 +174,7 @@ pub async fn download_image(
         bytes.extend_from_slice(&chunk);
     }
 
-    // Validate the downloaded content is actually a supported media type.
-    detect_and_validate_mime(&bytes)?;
-
-    save_bytes_with_dialog(&app, &filename, "Images", &[&ext], &bytes).await
+    Ok(bytes)
 }
 
 #[cfg(test)]

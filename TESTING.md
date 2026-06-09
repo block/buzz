@@ -8,7 +8,7 @@ just test               # unit + integration (starts Docker if needed)
 ```
 
 `just test` runs unit tests plus integration tests against Postgres and Redis
-(started via `docker compose`). Neither task runs the E2E suites in
+(started automatically if not already running). Neither task runs the E2E suites in
 `sprout-test-client` — those are marked `#[ignore]` and require a running relay:
 
 ```bash
@@ -183,17 +183,13 @@ header fallback. There is no REST API for fetching message threads — use
 sprout-agent) to the relay. The harness listens for events, drives the
 agent over stdio, and the agent replies through MCP tools.
 
-> The `sprout-mcp` server is being deprecated in favour of direct CLI/relay
-> integration. Keep it in mind if you're poking at the ACP code, but new
-> tests should not depend on it.
-
 Minimum recipe — assumes the relay from step 3 is running and the channel
 `$CHANNEL` from step 4 still exists. The agent identity must be **different**
 from the sender identity (`SPROUT_ACP_RESPOND_TO=anyone` still skips events
 the agent signed itself).
 
 ```bash
-cargo build --release -p sprout-acp -p sprout-mcp
+cargo build --release -p sprout-acp
 export PATH="$PWD/target/release:$PATH"
 
 # 1. Save your sender identity from step 4 — you'll need it to @mention the agent
@@ -215,15 +211,13 @@ sprout channels add-member --channel "$CHANNEL" --pubkey "$AGENT_PUBKEY" --role 
 export SPROUT_PRIVATE_KEY="$AGENT_SK"
 export SPROUT_RELAY_URL=ws://localhost:3000   # match step 3 (e.g. ws://localhost:3030 if overridden)
 export SPROUT_ACP_RESPOND_TO=anyone           # default is owner-only; opens the gate for testing
-export SPROUT_ACP_MEMORY=true                 # opt in to NIP-AE core-memory prompt injection
-export SPROUT_ACP_MCP_COMMAND="$PWD/target/release/sprout-mcp-server"  # explicit path beats $PATH
+# NIP-AE core-memory prompt injection is on by default; set SPROUT_ACP_NO_MEMORY=true to opt out.
 export GOOSE_MODE=auto                        # must be 'auto' or goose hangs on prompts
 
 sprout-acp                                    # foreground; logs to stdout (run in a separate terminal)
 
 # Optional: turn on per-turn tracing if the default log is too quiet.
-# Both crates honour RUST_LOG via tracing_subscriber's EnvFilter.
-# RUST_LOG=sprout_acp=debug,sprout_mcp=debug sprout-acp
+# RUST_LOG=sprout_acp=debug sprout-acp
 ```
 
 > **Using a different ACP agent?** The default recipe assumes `goose` is on
@@ -247,8 +241,7 @@ from step 4 and @mention the agent:
 ```bash
 export SPROUT_PRIVATE_KEY=$SENDER_SK          # the key from step 4
 sprout messages send --channel "$CHANNEL" \
-  --content "Hey agent, reply PONG only." \
-  --mention "$AGENT_PUBKEY"
+  --content "Hey agent, reply PONG only."
 
 # Wait 10–90s, then read the channel — the agent's reply is a kind:9 from
 # AGENT_PUBKEY. The current ACP build is quiet on stdout during a turn, so
@@ -264,7 +257,7 @@ Replies are kind:9 in the same channel; `sprout messages thread --channel <id>
 ## Configuration reference
 
 The relay reads all configuration from environment variables. Defaults work
-out of the box with `docker compose up`. Common overrides:
+out of the box with `just setup` or `just relay`. Common overrides:
 
 | Variable                          | Default                     | Notes |
 |-----------------------------------|-----------------------------|-------|

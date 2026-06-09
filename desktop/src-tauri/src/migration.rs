@@ -1,286 +1,1075 @@
-//! Per-file migration from the legacy `com.wesb.sprout` app data directory
-//! to the current `xyz.block.sprout.app` directory.
+//! Worktree data sync and on-launch reconciliation for the Sprout desktop app.
 //!
-//! On each launch, for every known file in [`LEGACY_FILES`]:
-//!   - If the file **already exists** at the new path → skip (it's its own guard).
-//!   - If the file exists at the old path but not the new → copy it over.
-//!
-//! Each `std::fs::copy` is atomic per-file, so there is no partial-migration
-//! problem and no sentinel file is needed.
-//!
-//! The legacy directory is intentionally **not** deleted — users can clean it
-//! up manually once they're satisfied everything works.
-//!
-//! Errors are logged but never fatal; the app must still start even if
-//! individual file copies fail.
-//!
-//! **Note on dev/prod side-by-side:** Both the production build
-//! (`xyz.block.sprout.app`) and the dev build (`xyz.block.sprout.app.dev`)
-//! will attempt to migrate from the same legacy `com.wesb.sprout` directory,
-//! resulting in duplicated identity keys. To avoid this, set the
-//! `SPROUT_PRIVATE_KEY` env var when running the dev build — this bypasses
-//! file-based identity resolution entirely.
+//! **Worktree sync** (`sync_shared_agent_data`): Per-launch symlink creation
+//! from the current worktree data directory to the canonical dev data
+//! directory (`xyz.block.sprout.app.dev`). Only runs when
+//! `SPROUT_SHARE_IDENTITY=1` and `SPROUT_PRIVATE_KEY` is set. All dev
+//! instances share the same physical files — edits in any worktree are
+//! immediately visible to all others.
 
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
-const LEGACY_DATA_DIR_NAME: &str = "com.wesb.sprout";
+const CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.sprout.app.dev";
 
-/// Known files to migrate from the legacy data directory.
-///
-/// Agent logs and `.window-state.json` are excluded — logs are ephemeral and
-/// the window-state plugin recreates its file automatically.
-const LEGACY_FILES: &[&str] = &[
-    "identity.key",
+/// JSON files symlinked from worktree data directories to the canonical
+/// dev data directory. Only data files — never `agent-pids/` or `logs/`.
+/// `identity.key` is deliberately excluded because worktree instances
+/// receive their identity via the `SPROUT_PRIVATE_KEY` env var.
+const SHARED_AGENT_FILES: &[&str] = &[
     "agents/managed-agents.json",
     "agents/personas.json",
     "agents/teams.json",
 ];
 
-/// Compute the legacy `com.wesb.sprout` data directory path by replacing the
-/// last component of the current app data directory.
-fn legacy_data_dir(current: &Path) -> Option<PathBuf> {
-    current.parent().map(|p| p.join(LEGACY_DATA_DIR_NAME))
+/// Directories symlinked from worktree data directories to the canonical
+/// dev data directory. Each entry becomes a single directory symlink.
+const SHARED_AGENT_DIRS: &[&str] = &["agents/packs"];
+
+fn canonical_dev_data_dir(current: &Path) -> Option<PathBuf> {
+    current.parent().map(|p| p.join(CANONICAL_DEV_IDENTIFIER))
 }
 
-/// Copy a single file from `old_dir/rel` to `new_dir/rel`, creating parent
-/// directories as needed. Skips the file if it already exists at the
-/// destination.
-///
-/// Returns `true` if the file was copied, `false` if skipped or missing.
-fn migrate_file(old_dir: &Path, new_dir: &Path, rel: &str) -> bool {
-    let src = old_dir.join(rel);
-    let dst = new_dir.join(rel);
-
-    if dst.exists() {
-        return false; // Already present — nothing to do.
-    }
-
-    if !src.exists() {
-        return false; // Nothing to migrate.
-    }
-
-    // Ensure parent directories exist (e.g. `agents/`).
-    if let Some(parent) = dst.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!(
-                "sprout-desktop: migration: failed to create {}: {e}",
-                parent.display()
-            );
-            return false;
+/// Read a JSON array of objects from `path`, apply `f` to each object,
+/// and write back if any mutation returned `true`.
+fn patch_json_records(
+    path: &Path,
+    mut f: impl FnMut(&mut serde_json::Map<String, serde_json::Value>) -> bool,
+) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(mut records) = serde_json::from_str::<Vec<serde_json::Value>>(&content) else {
+        eprintln!(
+            "sprout-desktop: patch-json-records: failed to parse {}",
+            path.display()
+        );
+        return;
+    };
+    let mut changed = false;
+    for record in &mut records {
+        if let Some(obj) = record.as_object_mut() {
+            changed |= f(obj);
         }
     }
-
-    match std::fs::copy(&src, &dst) {
-        Ok(_) => {
-            eprintln!("sprout-desktop: migration: copied {rel}");
-            true
-        }
-        Err(e) => {
-            eprintln!("sprout-desktop: migration: failed to copy {rel}: {e}");
-            false
+    if changed {
+        if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
+            let _ = std::fs::write(path, bytes);
         }
     }
 }
 
-/// Migrate known files from the legacy `com.wesb.sprout` app data directory
-/// to the current directory.
+/// Create symlinks for shared agent data files from the current (worktree)
+/// data directory to the canonical dev data directory.
 ///
-/// Called in `setup()` **before** `resolve_persisted_identity` so the persisted
-/// key is available at the new path on first launch after the identifier change.
-pub fn migrate_legacy_data_dir(app: &tauri::AppHandle) {
+/// Guards:
+/// - `SPROUT_SHARE_IDENTITY` must be `"1"`
+/// - `SPROUT_PRIVATE_KEY` must parse as valid `nostr::Keys`
+/// - The canonical dir must differ from the current dir (skip if we ARE canonical)
+/// - The canonical dir must exist
+pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
+    // Guard: only runs when sharing identity with a worktree.
+    let is_shared = std::env::var("SPROUT_SHARE_IDENTITY")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if !is_shared {
+        return;
+    }
+
+    // Guard: SPROUT_PRIVATE_KEY must be a valid nostr key.
+    let has_valid_key = std::env::var("SPROUT_PRIVATE_KEY")
+        .ok()
+        .and_then(|k| k.parse::<nostr::Keys>().ok())
+        .is_some();
+    if !has_valid_key {
+        eprintln!(
+            "sprout-desktop: shared-agent-sync: SPROUT_PRIVATE_KEY missing or invalid, skipping"
+        );
+        return;
+    }
+
     let current_dir = match app.path().app_data_dir() {
         Ok(dir) => dir,
         Err(e) => {
-            eprintln!("sprout-desktop: migration: cannot resolve app data dir: {e}");
+            eprintln!("sprout-desktop: shared-agent-sync: cannot resolve app data dir: {e}");
             return;
         }
     };
 
-    let old_dir = match legacy_data_dir(&current_dir) {
+    let canonical_dir = match canonical_dev_data_dir(&current_dir) {
         Some(dir) => dir,
         None => {
-            eprintln!("sprout-desktop: migration: cannot compute legacy data dir (no parent)");
+            eprintln!(
+                "sprout-desktop: shared-agent-sync: cannot compute canonical dir (no parent)"
+            );
             return;
         }
     };
 
-    if !old_dir.exists() {
-        return; // Nothing to migrate.
+    // Guard: skip if we ARE the canonical instance.
+    // Use canonicalize to handle case-insensitive FS and symlinks.
+    let current_canonical =
+        std::fs::canonicalize(&current_dir).unwrap_or_else(|_| current_dir.clone());
+    let source_canonical =
+        std::fs::canonicalize(&canonical_dir).unwrap_or_else(|_| canonical_dir.clone());
+    if current_canonical == source_canonical {
+        return;
     }
 
-    let mut copied = 0u32;
-    for rel in LEGACY_FILES {
-        if migrate_file(&old_dir, &current_dir, rel) {
-            copied += 1;
+    // Guard: skip if canonical dir doesn't exist.
+    if !canonical_dir.exists() {
+        eprintln!(
+            "sprout-desktop: shared-agent-sync: canonical dir does not exist: {}",
+            canonical_dir.display()
+        );
+        return;
+    }
+
+    let mut synced = 0u32;
+    for rel in SHARED_AGENT_FILES {
+        let src = canonical_dir.join(rel);
+        let dst = current_dir.join(rel);
+
+        if !src.exists() {
+            continue;
+        }
+
+        if let Some(parent) = dst.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "sprout-desktop: shared-agent-sync: failed to create {}: {e}",
+                    parent.display()
+                );
+                continue;
+            }
+        }
+
+        // Already a correct symlink — nothing to do.
+        if dst.is_symlink() {
+            if let Ok(target) = std::fs::read_link(&dst) {
+                if target == src {
+                    continue;
+                }
+            }
+        }
+
+        // Remove whatever's at dst (regular file, wrong symlink, broken symlink).
+        if dst.exists() || dst.is_symlink() {
+            let _ = std::fs::remove_file(&dst);
+        }
+
+        match std::os::unix::fs::symlink(&src, &dst) {
+            Ok(_) => synced += 1,
+            Err(e) => {
+                eprintln!("sprout-desktop: shared-agent-sync: failed to symlink {rel}: {e}");
+            }
         }
     }
 
-    if copied > 0 {
-        eprintln!("sprout-desktop: migration: {copied} file(s) migrated from legacy data dir");
+    // Ensure shared directories exist in canonical before symlinking.
+    // Packs may have been installed in a sibling instance (e.g., `.main`)
+    // before shared-dir syncing existed — migrate them to canonical.
+    for rel in SHARED_AGENT_DIRS {
+        let canonical_target = canonical_dir.join(rel);
+        if !canonical_target.exists() {
+            if let Err(e) = std::fs::create_dir_all(&canonical_target) {
+                eprintln!(
+                    "sprout-desktop: shared-agent-sync: failed to create {}: {e}",
+                    canonical_target.display()
+                );
+            }
+            // Migrate from whichever sibling has real (non-symlink) content.
+            if let Some(parent) = canonical_dir.parent() {
+                if let Ok(entries) = std::fs::read_dir(parent) {
+                    for entry in entries.flatten() {
+                        let sibling = entry.path();
+                        if sibling == canonical_dir {
+                            continue;
+                        }
+                        let sibling_dir = sibling.join(rel);
+                        if sibling_dir.is_dir() && !sibling_dir.is_symlink() {
+                            if let Ok(children) = std::fs::read_dir(&sibling_dir) {
+                                for child in children.flatten() {
+                                    let dest = canonical_target.join(child.file_name());
+                                    if !dest.exists() {
+                                        let _ = std::fs::rename(child.path(), &dest);
+                                    }
+                                }
+                            }
+                            // Replace the sibling's dir with a symlink to canonical.
+                            let _ = std::fs::remove_dir_all(&sibling_dir);
+                            let _ = std::os::unix::fs::symlink(&canonical_target, &sibling_dir);
+                            eprintln!(
+                                "sprout-desktop: shared-agent-sync: migrated {rel} from {}",
+                                sibling.display()
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for rel in SHARED_AGENT_DIRS {
+        let src = canonical_dir.join(rel);
+        let dst = current_dir.join(rel);
+
+        if !src.exists() {
+            continue;
+        }
+
+        if let Some(parent) = dst.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!(
+                    "sprout-desktop: shared-agent-sync: failed to create {}: {e}",
+                    parent.display()
+                );
+                continue;
+            }
+        }
+
+        if dst.is_symlink() {
+            if let Ok(target) = std::fs::read_link(&dst) {
+                if target == src {
+                    continue;
+                }
+            }
+        }
+
+        if dst.is_symlink() {
+            let _ = std::fs::remove_file(&dst);
+        } else if dst.exists() {
+            let _ = std::fs::remove_dir_all(&dst);
+        }
+
+        match std::os::unix::fs::symlink(&src, &dst) {
+            Ok(_) => synced += 1,
+            Err(e) => {
+                eprintln!("sprout-desktop: shared-agent-sync: failed to symlink {rel}: {e}");
+            }
+        }
+    }
+
+    if synced > 0 {
+        eprintln!(
+            "sprout-desktop: shared-agent-sync: {synced} item(s) linked to {}",
+            canonical_dir.display()
+        );
     }
 }
 
+fn reconcile_pack_paths_in_file(path: &Path, canonical_dir: &Path) {
+    let canonical_packs = canonical_dir.join("agents/packs");
+    patch_json_records(path, |obj| {
+        let pack_path = match obj.get("persona_pack_path").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return false,
+        };
+        let pack_path = Path::new(pack_path);
+        let mut found_packs = false;
+        let mut pack_id: Option<&std::ffi::OsStr> = None;
+        for component in pack_path.components() {
+            if found_packs {
+                pack_id = Some(component.as_os_str());
+                break;
+            }
+            if component.as_os_str() == "packs" {
+                found_packs = true;
+            }
+        }
+        let Some(id) = pack_id else {
+            return false;
+        };
+        let expected = canonical_packs.join(id);
+        if pack_path == expected {
+            return false;
+        }
+        eprintln!(
+            "sprout-desktop: pack-path-reconcile: {:?}: {:?} → {:?}",
+            obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+            pack_path,
+            expected,
+        );
+        obj.insert(
+            "persona_pack_path".to_string(),
+            serde_json::Value::String(expected.to_string_lossy().into_owned()),
+        );
+        true
+    });
+}
+
+/// Reconcile `persona_pack_path` values in managed-agents.json to point
+/// to the canonical dev data directory's `agents/packs/` prefix. Fixes
+/// stale paths left when agents were created from worktree instances
+/// whose data directories don't have local pack copies.
+pub fn reconcile_persona_pack_paths(app: &tauri::AppHandle) {
+    let Ok(current_dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let canonical_dir = match canonical_dev_data_dir(&current_dir) {
+        Some(dir) if dir.exists() => dir,
+        _ => current_dir,
+    };
+    let path = canonical_dir.join("agents/managed-agents.json");
+    if !path.exists() {
+        return;
+    }
+    reconcile_pack_paths_in_file(&path, &canonical_dir);
+}
+
+fn reconcile_mcp_commands_in_file(path: &Path) {
+    patch_json_records(path, |obj| {
+        let agent_command = match obj.get("agent_command").and_then(|v| v.as_str()) {
+            Some(cmd) => cmd.to_string(),
+            None => return false,
+        };
+        let Some(runtime) = crate::managed_agents::known_acp_runtime(&agent_command) else {
+            return false;
+        };
+        let expected = runtime.mcp_command.unwrap_or("");
+        let current = obj
+            .get("mcp_command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if current == expected {
+            return false;
+        }
+        // Only fix values that are clearly stale (empty or a removed binary).
+        // Leave user-customized values untouched.
+        if !current.is_empty() && current != "sprout-mcp-server" {
+            return false;
+        }
+        eprintln!(
+            "sprout-desktop: runtime-reconcile: {:?} ({:?}): mcp_command {:?} → {:?}",
+            obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+            agent_command,
+            current,
+            expected,
+        );
+        obj.insert(
+            "mcp_command".to_string(),
+            serde_json::Value::String(expected.to_string()),
+        );
+        true
+    });
+}
+
+/// Reconcile `mcp_command` values in managed-agents.json against the
+/// discovery table. Known runtimes get their canonical mcp_command;
+/// unknown/custom agents are left untouched. Covers both the current
+/// app data dir and the canonical dev data dir (for worktree instances).
+pub fn reconcile_provider_mcp_commands(app: &tauri::AppHandle) {
+    let Ok(current_dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let mut dirs = vec![current_dir.clone()];
+    if let Some(canonical) = canonical_dev_data_dir(&current_dir) {
+        if canonical.exists() && canonical != current_dir {
+            dirs.push(canonical);
+        }
+    }
+    for dir in dirs {
+        let path = dir.join("agents/managed-agents.json");
+        if path.exists() {
+            reconcile_mcp_commands_in_file(&path);
+        }
+    }
+}
+
+fn rename_provider_to_runtime_in_personas(path: &Path) {
+    patch_json_records(path, |obj| {
+        if obj.contains_key("runtime") {
+            return false;
+        }
+        if let Some(value) = obj.remove("provider") {
+            obj.insert("runtime".to_string(), value);
+            true
+        } else {
+            false
+        }
+    });
+}
+
+pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let path = dir.join("agents/personas.json");
+    if !path.exists() {
+        return;
+    }
+    rename_provider_to_runtime_in_personas(&path);
+}
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn legacy_data_dir_replaces_last_component() {
-        let current = PathBuf::from("/Users/me/Library/Application Support/xyz.block.sprout.app");
-        let legacy = legacy_data_dir(&current).unwrap();
+    fn canonical_dev_data_dir_replaces_last_component() {
+        let current = PathBuf::from(
+            "/Users/me/Library/Application Support/xyz.block.sprout.app.dev.my-branch",
+        );
+        let canonical = canonical_dev_data_dir(&current).unwrap();
         assert_eq!(
-            legacy,
-            PathBuf::from("/Users/me/Library/Application Support/com.wesb.sprout")
+            canonical,
+            PathBuf::from("/Users/me/Library/Application Support/xyz.block.sprout.app.dev")
         );
     }
 
     #[test]
-    fn legacy_data_dir_returns_none_for_root() {
-        let current = PathBuf::from("/");
-        let _ = legacy_data_dir(&current);
+    fn canonical_dev_data_dir_returns_none_for_root() {
+        // A root path has no parent — should return None.
+        assert!(canonical_dev_data_dir(Path::new("/")).is_none());
     }
 
-    /// Helper: create a temp dir structure mimicking the old `com.wesb.sprout`
-    /// layout and return `(parent_dir, old_dir, new_dir)`.
-    fn setup_legacy_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    /// Helper: create a temp dir structure mimicking canonical + worktree layout.
+    /// Packs live in a `.main` sibling (not canonical) to match real-world state.
+    /// Returns `(parent_dir_handle, canonical_dir, worktree_dir)`.
+    fn setup_sync_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let parent = tempfile::tempdir().unwrap();
-        let old_dir = parent.path().join(LEGACY_DATA_DIR_NAME);
-        let new_dir = parent.path().join("xyz.block.sprout.app");
+        let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
+        let worktree = parent.path().join("xyz.block.sprout.app.dev.my-branch");
+        let main_instance = parent.path().join("xyz.block.sprout.app.dev.main");
 
-        std::fs::create_dir_all(old_dir.join("agents")).unwrap();
-        std::fs::write(old_dir.join("identity.key"), "nsec1-fake-key-data").unwrap();
+        std::fs::create_dir_all(canonical.join("agents")).unwrap();
         std::fs::write(
-            old_dir.join("agents/managed-agents.json"),
-            r#"[{"id":"a1"}]"#,
+            canonical.join("agents/managed-agents.json"),
+            r#"[{"id":"agent-1"}]"#,
         )
         .unwrap();
-        std::fs::write(old_dir.join("agents/personas.json"), "[]").unwrap();
-        std::fs::write(old_dir.join("agents/teams.json"), "[]").unwrap();
+        std::fs::write(
+            canonical.join("agents/personas.json"),
+            r#"[{"id":"builtin:solo"}]"#,
+        )
+        .unwrap();
+        std::fs::write(canonical.join("agents/teams.json"), r#"[{"id":"team-1"}]"#).unwrap();
 
-        (parent, old_dir, new_dir)
+        // Packs installed from `.main` — canonical has no packs dir.
+        let pack_dir = main_instance.join("agents/packs/com.example.test-pack");
+        std::fs::create_dir_all(&pack_dir).unwrap();
+        std::fs::write(pack_dir.join("instructions.md"), "# Test pack").unwrap();
+        std::fs::write(pack_dir.join("solo.persona.md"), "# Solo").unwrap();
+
+        (parent, canonical, worktree)
     }
 
-    #[test]
-    fn migrate_file_copies_when_missing_at_dest() {
-        let (_parent, old_dir, new_dir) = setup_legacy_layout();
-
-        assert!(migrate_file(&old_dir, &new_dir, "identity.key"));
-        assert_eq!(
-            std::fs::read_to_string(new_dir.join("identity.key")).unwrap(),
-            "nsec1-fake-key-data"
-        );
-    }
-
-    #[test]
-    fn migrate_file_creates_parent_dirs() {
-        let (_parent, old_dir, new_dir) = setup_legacy_layout();
-
-        // agents/ doesn't exist in new_dir yet.
-        assert!(migrate_file(&old_dir, &new_dir, "agents/teams.json"));
-        assert_eq!(
-            std::fs::read_to_string(new_dir.join("agents/teams.json")).unwrap(),
-            "[]"
-        );
-    }
-
-    #[test]
-    fn migrate_file_skips_when_dest_exists() {
-        let (_parent, old_dir, new_dir) = setup_legacy_layout();
-
-        // Pre-create the file at the new location with different content.
-        std::fs::create_dir_all(&new_dir).unwrap();
-        std::fs::write(new_dir.join("identity.key"), "nsec1-new-key").unwrap();
-
-        // Should skip — returns false.
-        assert!(!migrate_file(&old_dir, &new_dir, "identity.key"));
-
-        // Original content preserved.
-        assert_eq!(
-            std::fs::read_to_string(new_dir.join("identity.key")).unwrap(),
-            "nsec1-new-key"
-        );
-    }
-
-    #[test]
-    fn migrate_file_skips_when_source_missing() {
-        let (_parent, old_dir, new_dir) = setup_legacy_layout();
-
-        // File that doesn't exist in old dir.
-        assert!(!migrate_file(&old_dir, &new_dir, "nonexistent.json"));
-        assert!(!new_dir.join("nonexistent.json").exists());
-    }
-
-    #[test]
-    fn migrate_all_known_files() {
-        let (_parent, old_dir, new_dir) = setup_legacy_layout();
-
-        let mut copied = 0u32;
-        for rel in LEGACY_FILES {
-            if migrate_file(&old_dir, &new_dir, rel) {
-                copied += 1;
+    /// Helper: sync files directly (without a Tauri AppHandle) for unit testing.
+    /// Mirrors the symlink loop of `sync_shared_agent_data` but takes explicit
+    /// paths. `sync_shared_agent_data` requires a live Tauri AppHandle and
+    /// cannot be unit-tested directly.
+    fn sync_files(canonical: &Path, worktree: &Path) -> u32 {
+        let mut synced = 0u32;
+        for rel in SHARED_AGENT_FILES {
+            let src = canonical.join(rel);
+            let dst = worktree.join(rel);
+            if !src.exists() {
+                continue;
+            }
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            if dst.is_symlink() {
+                if let Ok(target) = std::fs::read_link(&dst) {
+                    if target == src {
+                        continue;
+                    }
+                }
+            }
+            if dst.exists() || dst.is_symlink() {
+                let _ = std::fs::remove_file(&dst);
+            }
+            std::os::unix::fs::symlink(&src, &dst).unwrap();
+            synced += 1;
+        }
+        // Migrate packs from siblings to canonical (mirrors production logic).
+        for rel in SHARED_AGENT_DIRS {
+            let canonical_target = canonical.join(rel);
+            if !canonical_target.exists() {
+                std::fs::create_dir_all(&canonical_target).unwrap();
+                if let Some(parent) = canonical.parent() {
+                    if let Ok(entries) = std::fs::read_dir(parent) {
+                        for entry in entries.flatten() {
+                            let sibling = entry.path();
+                            if sibling == canonical {
+                                continue;
+                            }
+                            let sibling_dir = sibling.join(rel);
+                            if sibling_dir.is_dir() && !sibling_dir.is_symlink() {
+                                if let Ok(children) = std::fs::read_dir(&sibling_dir) {
+                                    for child in children.flatten() {
+                                        let dest = canonical_target.join(child.file_name());
+                                        if !dest.exists() {
+                                            let _ = std::fs::rename(child.path(), &dest);
+                                        }
+                                    }
+                                }
+                                let _ = std::fs::remove_dir_all(&sibling_dir);
+                                let _ = std::os::unix::fs::symlink(&canonical_target, &sibling_dir);
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        assert_eq!(copied, 4);
-        assert_eq!(
-            std::fs::read_to_string(new_dir.join("identity.key")).unwrap(),
-            "nsec1-fake-key-data"
-        );
-        assert_eq!(
-            std::fs::read_to_string(new_dir.join("agents/managed-agents.json")).unwrap(),
-            r#"[{"id":"a1"}]"#
-        );
-        assert_eq!(
-            std::fs::read_to_string(new_dir.join("agents/personas.json")).unwrap(),
-            "[]"
-        );
-        assert_eq!(
-            std::fs::read_to_string(new_dir.join("agents/teams.json")).unwrap(),
-            "[]"
-        );
-
-        // Old directory must still exist.
-        assert!(old_dir.exists());
+        for rel in SHARED_AGENT_DIRS {
+            let src = canonical.join(rel);
+            let dst = worktree.join(rel);
+            if !src.exists() {
+                continue;
+            }
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            if dst.is_symlink() {
+                if let Ok(target) = std::fs::read_link(&dst) {
+                    if target == src {
+                        continue;
+                    }
+                }
+            }
+            if dst.is_symlink() {
+                let _ = std::fs::remove_file(&dst);
+            } else if dst.exists() {
+                let _ = std::fs::remove_dir_all(&dst);
+            }
+            std::os::unix::fs::symlink(&src, &dst).unwrap();
+            synced += 1;
+        }
+        synced
     }
 
     #[test]
-    fn migrate_is_idempotent() {
-        let (_parent, old_dir, new_dir) = setup_legacy_layout();
-
-        // First pass: copies everything.
-        let first_pass: u32 = LEGACY_FILES
-            .iter()
-            .map(|rel| u32::from(migrate_file(&old_dir, &new_dir, rel)))
-            .sum();
-        assert_eq!(first_pass, 4);
-
-        // Second pass: skips everything (all files already exist).
-        let second_pass: u32 = LEGACY_FILES
-            .iter()
-            .map(|rel| u32::from(migrate_file(&old_dir, &new_dir, rel)))
-            .sum();
-        assert_eq!(second_pass, 0);
+    fn sync_creates_symlinks_to_fresh_worktree() {
+        let (_parent, canonical, worktree) = setup_sync_layout();
+        let synced = sync_files(&canonical, &worktree);
+        assert_eq!(synced, 4);
+        for rel in SHARED_AGENT_FILES {
+            let dst = worktree.join(rel);
+            assert!(dst.is_symlink(), "{rel} should be a symlink");
+            assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
+        }
+        for rel in SHARED_AGENT_DIRS {
+            let dst = worktree.join(rel);
+            assert!(dst.is_symlink(), "{rel} should be a symlink");
+            assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
+        }
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("agents/managed-agents.json")).unwrap(),
+            r#"[{"id":"agent-1"}]"#,
+        );
     }
 
     #[test]
-    fn migrate_partial_only_copies_missing() {
-        let (_parent, old_dir, new_dir) = setup_legacy_layout();
+    fn sync_replaces_existing_files_with_symlinks() {
+        let (_parent, canonical, worktree) = setup_sync_layout();
+        std::fs::create_dir_all(worktree.join("agents")).unwrap();
+        std::fs::write(worktree.join("agents/managed-agents.json"), "[]").unwrap();
+        std::fs::write(worktree.join("agents/personas.json"), "[]").unwrap();
+        std::fs::write(worktree.join("agents/teams.json"), "[]").unwrap();
 
-        // Pre-create identity.key in new dir — only the other 3 should copy.
-        std::fs::create_dir_all(&new_dir).unwrap();
-        std::fs::write(new_dir.join("identity.key"), "nsec1-already-here").unwrap();
+        let synced = sync_files(&canonical, &worktree);
 
-        let copied: u32 = LEGACY_FILES
-            .iter()
-            .map(|rel| u32::from(migrate_file(&old_dir, &new_dir, rel)))
-            .sum();
-        assert_eq!(copied, 3);
-
-        // identity.key should be untouched.
+        assert_eq!(synced, 4);
+        for rel in SHARED_AGENT_FILES {
+            let dst = worktree.join(rel);
+            assert!(
+                dst.is_symlink(),
+                "{rel} should be a symlink after replacing regular file"
+            );
+            assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
+        }
         assert_eq!(
-            std::fs::read_to_string(new_dir.join("identity.key")).unwrap(),
-            "nsec1-already-here"
+            std::fs::read_to_string(worktree.join("agents/managed-agents.json")).unwrap(),
+            r#"[{"id":"agent-1"}]"#,
         );
+    }
+
+    #[test]
+    fn sync_preserves_correct_symlinks() {
+        let (_parent, canonical, worktree) = setup_sync_layout();
+        assert_eq!(sync_files(&canonical, &worktree), 4);
+        assert_eq!(sync_files(&canonical, &worktree), 0);
+        for rel in SHARED_AGENT_FILES {
+            let dst = worktree.join(rel);
+            assert!(dst.is_symlink());
+            assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
+        }
+    }
+
+    #[test]
+    fn sync_replaces_wrong_symlinks() {
+        let (_parent, canonical, worktree) = setup_sync_layout();
+        let wrong_target = PathBuf::from("/nonexistent/wrong-target.json");
+        std::fs::create_dir_all(worktree.join("agents")).unwrap();
+        for rel in SHARED_AGENT_FILES {
+            std::os::unix::fs::symlink(&wrong_target, worktree.join(rel)).unwrap();
+        }
+        let synced = sync_files(&canonical, &worktree);
+        assert_eq!(synced, 4);
+        for rel in SHARED_AGENT_FILES {
+            assert_eq!(
+                std::fs::read_link(worktree.join(rel)).unwrap(),
+                canonical.join(rel)
+            );
+        }
+    }
+
+    #[test]
+    fn sync_handles_broken_symlinks() {
+        let (_parent, canonical, worktree) = setup_sync_layout();
+        std::fs::create_dir_all(worktree.join("agents")).unwrap();
+        let broken_target = PathBuf::from("/this/does/not/exist.json");
+        for rel in SHARED_AGENT_FILES {
+            std::os::unix::fs::symlink(&broken_target, worktree.join(rel)).unwrap();
+        }
+        let synced = sync_files(&canonical, &worktree);
+        assert_eq!(synced, 4);
+        for rel in SHARED_AGENT_FILES {
+            let dst = worktree.join(rel);
+            assert!(dst.is_symlink());
+            assert_eq!(std::fs::read_link(&dst).unwrap(), canonical.join(rel));
+            // Content should be readable through the fixed symlink.
+            assert!(std::fs::read_to_string(&dst).is_ok());
+        }
+    }
+
+    #[test]
+    fn writes_through_symlink_reach_canonical() {
+        let (_parent, canonical, worktree) = setup_sync_layout();
+        sync_files(&canonical, &worktree);
+
+        let worktree_path = worktree.join("agents/personas.json");
+        let canonical_path = canonical.join("agents/personas.json");
+
+        // Write through the symlink using the same pattern as atomic_write_json.
+        let new_content = r#"[{"id":"builtin:solo","updated":true}]"#;
+        let resolved = std::fs::canonicalize(&worktree_path).unwrap();
+        let tmp = resolved.with_extension("json.tmp");
+        std::fs::write(&tmp, new_content.as_bytes()).unwrap();
+        std::fs::rename(&tmp, &resolved).unwrap();
+
+        // The canonical file should have the new content.
+        assert_eq!(
+            std::fs::read_to_string(&canonical_path).unwrap(),
+            new_content
+        );
+        // The worktree path should still be a symlink.
+        assert!(worktree_path.is_symlink());
+        // Reading through the symlink should return the new content.
+        assert_eq!(
+            std::fs::read_to_string(&worktree_path).unwrap(),
+            new_content
+        );
+    }
+
+    #[test]
+    fn canonical_dev_data_dir_returns_self_for_canonical_instance() {
+        // When the current app data dir IS the canonical dev identifier,
+        // canonical_dev_data_dir returns the exact same path — the caller
+        // (sync_shared_agent_data) uses this equality to skip the sync.
+        // The env-var guards (SPROUT_SHARE_IDENTITY, SPROUT_PRIVATE_KEY)
+        // require a live Tauri AppHandle and are covered by integration
+        // testing only.
+        let current =
+            PathBuf::from("/Users/me/Library/Application Support/xyz.block.sprout.app.dev");
+        assert_eq!(canonical_dev_data_dir(&current).unwrap(), current);
+
+        // Also verify with a temp dir on the real filesystem.
+        let parent = tempfile::tempdir().unwrap();
+        let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
+        assert_eq!(canonical_dev_data_dir(&canonical).unwrap(), canonical);
+    }
+
+    fn write_agents_json(dir: &Path, records: &serde_json::Value) {
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::write(
+            dir.join("agents/managed-agents.json"),
+            serde_json::to_vec_pretty(records).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn read_agents_json(dir: &Path) -> Vec<serde_json::Value> {
+        let content = std::fs::read_to_string(dir.join("agents/managed-agents.json")).unwrap();
+        serde_json::from_str(&content).unwrap()
+    }
+
+    #[test]
+    fn sync_creates_packs_directory_symlink() {
+        let (_parent, canonical, worktree) = setup_sync_layout();
+        sync_files(&canonical, &worktree);
+
+        let packs_link = worktree.join("agents/packs");
+        assert!(packs_link.is_symlink());
+        assert_eq!(
+            std::fs::read_link(&packs_link).unwrap(),
+            canonical.join("agents/packs")
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                worktree.join("agents/packs/com.example.test-pack/instructions.md")
+            )
+            .unwrap(),
+            "# Test pack"
+        );
+    }
+
+    #[test]
+    fn sync_migrates_packs_from_sibling_to_canonical() {
+        let (_parent, canonical, worktree) = setup_sync_layout();
+        let main_instance = canonical
+            .parent()
+            .unwrap()
+            .join("xyz.block.sprout.app.dev.main");
+
+        // Before sync: canonical has no packs, .main has the real pack.
+        assert!(!canonical.join("agents/packs").exists());
+        assert!(main_instance
+            .join("agents/packs/com.example.test-pack")
+            .is_dir());
+
+        sync_files(&canonical, &worktree);
+
+        // After sync: canonical has the pack, .main is now a symlink.
+        assert!(canonical
+            .join("agents/packs/com.example.test-pack/instructions.md")
+            .exists());
+        assert!(main_instance.join("agents/packs").is_symlink());
+        assert_eq!(
+            std::fs::read_link(main_instance.join("agents/packs")).unwrap(),
+            canonical.join("agents/packs")
+        );
+    }
+
+    #[test]
+    fn sync_replaces_real_packs_dir_with_symlink() {
+        let (_parent, canonical, worktree) = setup_sync_layout();
+        let real_packs = worktree.join("agents/packs");
+        std::fs::create_dir_all(&real_packs).unwrap();
+        std::fs::write(real_packs.join("stale-file.txt"), "stale").unwrap();
+
+        sync_files(&canonical, &worktree);
+
+        assert!(worktree.join("agents/packs").is_symlink());
+        assert_eq!(
+            std::fs::read_link(worktree.join("agents/packs")).unwrap(),
+            canonical.join("agents/packs")
+        );
+    }
+
+    #[test]
+    fn pack_path_reconcile_rewrites_worktree_path() {
+        let parent = tempfile::tempdir().unwrap();
+        let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
+        std::fs::create_dir_all(canonical.join("agents")).unwrap();
+
+        let worktree_pack_path = format!(
+            "{}/agents/packs/com.wpfleger.sietch-tabr",
+            parent
+                .path()
+                .join("xyz.block.sprout.app.dev.worktree-my-branch")
+                .display()
+        );
+        let expected_path = format!(
+            "{}/agents/packs/com.wpfleger.sietch-tabr",
+            canonical.display()
+        );
+
+        write_agents_json(
+            &canonical,
+            &serde_json::json!([{
+                "name": "Paul",
+                "persona_pack_path": worktree_pack_path
+            }]),
+        );
+
+        reconcile_pack_paths_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
+
+        let records = read_agents_json(&canonical);
+        assert_eq!(records[0]["persona_pack_path"], expected_path);
+    }
+
+    #[test]
+    fn pack_path_reconcile_leaves_canonical_path_unchanged() {
+        let parent = tempfile::tempdir().unwrap();
+        let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
+        std::fs::create_dir_all(canonical.join("agents")).unwrap();
+
+        let canonical_path = format!(
+            "{}/agents/packs/com.wpfleger.sietch-tabr",
+            canonical.display()
+        );
+
+        write_agents_json(
+            &canonical,
+            &serde_json::json!([{
+                "name": "Duncan",
+                "persona_pack_path": canonical_path
+            }]),
+        );
+
+        let before = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
+        reconcile_pack_paths_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
+        let after = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn pack_path_reconcile_skips_records_without_pack_path() {
+        let parent = tempfile::tempdir().unwrap();
+        let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
+        std::fs::create_dir_all(canonical.join("agents")).unwrap();
+
+        write_agents_json(
+            &canonical,
+            &serde_json::json!([{
+                "name": "Test Agent",
+                "agent_command": "sprout-agent"
+            }]),
+        );
+
+        let before = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
+        reconcile_pack_paths_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
+        let after = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
+
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn pack_path_reconcile_is_idempotent() {
+        let parent = tempfile::tempdir().unwrap();
+        let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
+        std::fs::create_dir_all(canonical.join("agents")).unwrap();
+
+        let worktree_pack_path = format!(
+            "{}/agents/packs/com.wpfleger.sietch-tabr",
+            parent
+                .path()
+                .join("xyz.block.sprout.app.dev.worktree-my-branch")
+                .display()
+        );
+
+        write_agents_json(
+            &canonical,
+            &serde_json::json!([{
+                "name": "Paul",
+                "persona_pack_path": worktree_pack_path
+            }]),
+        );
+
+        let path = canonical.join("agents/managed-agents.json");
+        reconcile_pack_paths_in_file(&path, &canonical);
+        let after_first = std::fs::read_to_string(&path).unwrap();
+        reconcile_pack_paths_in_file(&path, &canonical);
+        let after_second = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(after_first, after_second);
+    }
+
+    fn write_personas_json(dir: &Path, records: &serde_json::Value) {
+        std::fs::create_dir_all(dir.join("agents")).unwrap();
+        std::fs::write(
+            dir.join("agents/personas.json"),
+            serde_json::to_vec_pretty(records).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn read_personas_json(dir: &Path) -> Vec<serde_json::Value> {
+        let content = std::fs::read_to_string(dir.join("agents/personas.json")).unwrap();
+        serde_json::from_str(&content).unwrap()
+    }
+
+    #[test]
+    fn rename_provider_to_runtime_migrates_field() {
+        let dir = tempfile::tempdir().unwrap();
+        write_personas_json(
+            dir.path(),
+            &serde_json::json!([{
+                "id": "persona-1",
+                "displayName": "Alice",
+                "provider": "goose"
+            }]),
+        );
+        rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"));
+        let records = read_personas_json(dir.path());
+        assert_eq!(records[0]["runtime"], "goose");
+        assert!(records[0].get("provider").is_none());
+    }
+
+    #[test]
+    fn rename_provider_to_runtime_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        write_personas_json(
+            dir.path(),
+            &serde_json::json!([{
+                "id": "persona-1",
+                "displayName": "Alice",
+                "runtime": "goose"
+            }]),
+        );
+        let before = std::fs::read_to_string(dir.path().join("agents/personas.json")).unwrap();
+        rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"));
+        let after = std::fs::read_to_string(dir.path().join("agents/personas.json")).unwrap();
+        assert_eq!(
+            before, after,
+            "file should not be rewritten when already migrated"
+        );
+    }
+
+    #[test]
+    fn rename_provider_to_runtime_skips_record_without_either_key() {
+        let dir = tempfile::tempdir().unwrap();
+        write_personas_json(
+            dir.path(),
+            &serde_json::json!([{
+                "id": "persona-1",
+                "displayName": "Alice"
+            }]),
+        );
+        let before = std::fs::read_to_string(dir.path().join("agents/personas.json")).unwrap();
+        rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"));
+        let after = std::fs::read_to_string(dir.path().join("agents/personas.json")).unwrap();
+        assert_eq!(
+            before, after,
+            "file should not be rewritten when no provider key exists"
+        );
+    }
+
+    #[test]
+    fn rename_provider_to_runtime_preserves_existing_runtime_over_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        write_personas_json(
+            dir.path(),
+            &serde_json::json!([{
+                "id": "persona-1",
+                "displayName": "Alice",
+                "provider": "old-value",
+                "runtime": "correct-value"
+            }]),
+        );
+        rename_provider_to_runtime_in_personas(&dir.path().join("agents/personas.json"));
+        let records = read_personas_json(dir.path());
+        assert_eq!(records[0]["runtime"], "correct-value");
+        // provider key should still be there since the closure returns false when runtime exists
+        assert_eq!(records[0]["provider"], "old-value");
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_clears_stale_sprout_mcp_server() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agents_json(
+            dir.path(),
+            &serde_json::json!([{
+                "name": "Solo",
+                "agent_command": "goose",
+                "mcp_command": "sprout-mcp-server"
+            }]),
+        );
+        reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+        let records = read_agents_json(dir.path());
+        assert_eq!(records[0]["mcp_command"], "");
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_sets_canonical_for_sprout_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agents_json(
+            dir.path(),
+            &serde_json::json!([{
+                "name": "Stilgar",
+                "agent_command": "sprout-agent",
+                "mcp_command": "sprout-mcp-server"
+            }]),
+        );
+        reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+        let records = read_agents_json(dir.path());
+        assert_eq!(records[0]["mcp_command"], "sprout-dev-mcp");
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_leaves_custom_value_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = serde_json::json!([{
+            "name": "Solo",
+            "agent_command": "goose",
+            "mcp_command": "my-custom-mcp"
+        }]);
+        write_agents_json(dir.path(), &json);
+        let path = dir.path().join("agents/managed-agents.json");
+        let before = std::fs::read_to_string(&path).unwrap();
+        reconcile_mcp_commands_in_file(&path);
+        assert_eq!(before, std::fs::read_to_string(&path).unwrap());
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_leaves_unknown_runtime_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = serde_json::json!([{
+            "name": "Custom",
+            "agent_command": "my-custom-agent",
+            "mcp_command": "sprout-mcp-server"
+        }]);
+        write_agents_json(dir.path(), &json);
+        let path = dir.path().join("agents/managed-agents.json");
+        let before = std::fs::read_to_string(&path).unwrap();
+        reconcile_mcp_commands_in_file(&path);
+        assert_eq!(before, std::fs::read_to_string(&path).unwrap());
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agents_json(
+            dir.path(),
+            &serde_json::json!([{
+                "name": "Solo",
+                "agent_command": "goose",
+                "mcp_command": "sprout-mcp-server"
+            }]),
+        );
+        let path = dir.path().join("agents/managed-agents.json");
+        reconcile_mcp_commands_in_file(&path);
+        let after_first = std::fs::read_to_string(&path).unwrap();
+        reconcile_mcp_commands_in_file(&path);
+        assert_eq!(after_first, std::fs::read_to_string(&path).unwrap());
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_handles_mixed_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agents_json(
+            dir.path(),
+            &serde_json::json!([
+                {"name": "Stale Goose", "agent_command": "goose", "mcp_command": "sprout-mcp-server"},
+                {"name": "Clean Goose", "agent_command": "goose", "mcp_command": ""},
+                {"name": "Custom Agent", "agent_command": "goose", "mcp_command": "my-custom-mcp"},
+                {"name": "Stale Sprout", "agent_command": "sprout-agent", "mcp_command": "sprout-mcp-server"}
+            ]),
+        );
+        reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
+        let records = read_agents_json(dir.path());
+        assert_eq!(records[0]["mcp_command"], "");
+        assert_eq!(records[1]["mcp_command"], "");
+        assert_eq!(records[2]["mcp_command"], "my-custom-mcp");
+        assert_eq!(records[3]["mcp_command"], "sprout-dev-mcp");
+    }
+
+    #[test]
+    fn reconcile_mcp_commands_skips_record_without_agent_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = serde_json::json!([{
+            "name": "No Command",
+            "mcp_command": "sprout-mcp-server"
+        }]);
+        write_agents_json(dir.path(), &json);
+        let path = dir.path().join("agents/managed-agents.json");
+        let before = std::fs::read_to_string(&path).unwrap();
+        reconcile_mcp_commands_in_file(&path);
+        assert_eq!(before, std::fs::read_to_string(&path).unwrap());
     }
 }

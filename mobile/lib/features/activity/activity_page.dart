@@ -4,10 +4,12 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/filter_chip_bar.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
+import '../channels/message_content.dart';
 import '../channels/channels_provider.dart';
 import '../channels/small_avatar.dart';
 import '../profile/user_cache_provider.dart';
@@ -43,15 +45,36 @@ class ActivityPage extends HookConsumerWidget {
 
       body = Column(
         children: [
-          _FilterBar(
+          FilterChipBar<_Filter>(
             selected: filter.value,
             onSelected: (f) => filter.value = f,
-            counts: _FilterCounts(
-              mentions: feed.mentions.length,
-              needsAction: feed.needsAction.length,
-              activity: feed.activity.length,
-              agents: feed.agentActivity.length,
-            ),
+            items: [
+              const FilterChipItem(id: _Filter.all, label: 'All'),
+              FilterChipItem(
+                id: _Filter.mentions,
+                label: 'Mentions',
+                icon: LucideIcons.atSign,
+                count: feed.mentions.length,
+              ),
+              FilterChipItem(
+                id: _Filter.needsAction,
+                label: 'Action',
+                icon: LucideIcons.circleAlert,
+                count: feed.needsAction.length,
+              ),
+              FilterChipItem(
+                id: _Filter.activity,
+                label: 'Activity',
+                icon: LucideIcons.activity,
+                count: feed.activity.length,
+              ),
+              FilterChipItem(
+                id: _Filter.agents,
+                label: 'Agents',
+                icon: LucideIcons.bot,
+                count: feed.agentActivity.length,
+              ),
+            ],
           ),
           Expanded(
             child: items.isEmpty
@@ -119,112 +142,6 @@ class ActivityPage extends HookConsumerWidget {
       MaterialPageRoute<void>(
         builder: (_) => ChannelDetailPage(channel: channel),
       ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Filter bar
-// ---------------------------------------------------------------------------
-
-class _FilterCounts {
-  final int mentions;
-  final int needsAction;
-  final int activity;
-  final int agents;
-
-  const _FilterCounts({
-    required this.mentions,
-    required this.needsAction,
-    required this.activity,
-    required this.agents,
-  });
-}
-
-class _FilterBar extends StatelessWidget {
-  final _Filter selected;
-  final ValueChanged<_Filter> onSelected;
-  final _FilterCounts counts;
-
-  const _FilterBar({
-    required this.selected,
-    required this.onSelected,
-    required this.counts,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.symmetric(
-        horizontal: Grid.xs,
-        vertical: Grid.xxs,
-      ),
-      child: Row(
-        children: [
-          _chip(context, _Filter.all, 'All', null, null),
-          const SizedBox(width: Grid.xxs),
-          _chip(
-            context,
-            _Filter.mentions,
-            'Mentions',
-            LucideIcons.atSign,
-            counts.mentions,
-          ),
-          const SizedBox(width: Grid.xxs),
-          _chip(
-            context,
-            _Filter.needsAction,
-            'Action',
-            LucideIcons.circleAlert,
-            counts.needsAction,
-          ),
-          const SizedBox(width: Grid.xxs),
-          _chip(
-            context,
-            _Filter.activity,
-            'Activity',
-            LucideIcons.activity,
-            counts.activity,
-          ),
-          const SizedBox(width: Grid.xxs),
-          _chip(
-            context,
-            _Filter.agents,
-            'Agents',
-            LucideIcons.bot,
-            counts.agents,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _chip(
-    BuildContext context,
-    _Filter filter,
-    String label,
-    IconData? icon,
-    int? count,
-  ) {
-    final isSelected = selected == filter;
-    final text = count != null ? '$label ($count)' : label;
-    return FilterChip(
-      selected: isSelected,
-      showCheckmark: false,
-      label: icon != null
-          ? Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: 14),
-                const SizedBox(width: Grid.half),
-                Text(text, style: context.textTheme.labelSmall),
-              ],
-            )
-          : Text(text, style: context.textTheme.labelSmall),
-      onSelected: (_) => onSelected(filter),
-      visualDensity: VisualDensity.compact,
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
     );
   }
 }
@@ -313,11 +230,11 @@ class _FeedItemTile extends ConsumerWidget {
             ),
             const SizedBox(height: Grid.half),
             // Content preview (max 2 lines)
-            Text(
-              item.displayContent,
+            MessageContent(
+              content: item.displayContent,
+              tags: item.tags,
               maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: context.textTheme.bodySmall?.copyWith(
+              baseStyle: context.textTheme.bodySmall?.copyWith(
                 color: context.colors.onSurfaceVariant,
               ),
             ),

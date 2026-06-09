@@ -1,4 +1,4 @@
-import type { AcpProvider, Profile } from "@/shared/api/types";
+import type { AcpRuntime, Profile } from "@/shared/api/types";
 
 export type OnboardingPage = "profile" | "setup" | "membership-denied";
 
@@ -62,7 +62,7 @@ export type SetupStepActions = {
 export type SetupStepRuntimeState = {
   errorMessage: string | null;
   isChecking: boolean;
-  items: AcpProvider[];
+  items: AcpRuntime[];
   showSetupLaterHint: boolean;
 };
 

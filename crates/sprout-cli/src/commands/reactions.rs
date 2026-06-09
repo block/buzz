@@ -10,13 +10,19 @@ pub async fn cmd_add_reaction(
     client: &SproutClient,
     event_id: &str,
     emoji: &str,
+    emoji_url: Option<&str>,
 ) -> Result<(), CliError> {
     validate_hex64(event_id)?;
     let target_eid =
         EventId::parse(event_id).map_err(|e| CliError::Usage(format!("invalid event ID: {e}")))?;
 
-    let builder = sprout_sdk::build_reaction(target_eid, emoji)
-        .map_err(|e| CliError::Other(format!("build_reaction failed: {e}")))?;
+    let builder = if let Some(url) = emoji_url {
+        sprout_sdk::build_custom_emoji_reaction(target_eid, emoji, url)
+            .map_err(|e| CliError::Other(format!("build_custom_emoji_reaction failed: {e}")))?
+    } else {
+        sprout_sdk::build_reaction(target_eid, emoji)
+            .map_err(|e| CliError::Other(format!("build_reaction failed: {e}")))?
+    };
 
     let event = client.sign_event(builder)?;
 
@@ -125,7 +131,11 @@ pub async fn cmd_get_reactions(client: &SproutClient, event_id: &str) -> Result<
 pub async fn dispatch(cmd: crate::ReactionsCmd, client: &SproutClient) -> Result<(), CliError> {
     use crate::ReactionsCmd;
     match cmd {
-        ReactionsCmd::Add { event, emoji } => cmd_add_reaction(client, &event, &emoji).await,
+        ReactionsCmd::Add {
+            event,
+            emoji,
+            emoji_url,
+        } => cmd_add_reaction(client, &event, &emoji, emoji_url.as_deref()).await,
         ReactionsCmd::Remove { event, emoji } => cmd_remove_reaction(client, &event, &emoji).await,
         ReactionsCmd::Get { event } => cmd_get_reactions(client, &event).await,
     }

@@ -18,6 +18,10 @@ export function localPublishableContextKey(pubkey: string): string {
   return `sprout.channel-read-state.publishable.v1:${pubkey}`;
 }
 
+export function localSourceCreatedAtKey(pubkey: string): string {
+  return `sprout.channel-read-state.source-created-at.v1:${pubkey}`;
+}
+
 export function isPlainRecord(
   value: unknown,
 ): value is Record<string, unknown> {

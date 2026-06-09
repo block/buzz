@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
+
 import '../../../shared/relay/nostr_models.dart';
 
 const readStateDTagPrefix = 'read-state:';
@@ -141,12 +143,18 @@ DecodedReadStateEvent? decodeReadStateEvent(
   final String plaintext;
   try {
     plaintext = decrypt(event.content);
-  } catch (_) {
+  } catch (e) {
+    debugPrint(
+      '[ReadStateManager] decrypt failed for event ${event.id.substring(0, 8)}…: $e',
+    );
     return null;
   }
 
   final blob = decodeReadStateBlob(plaintext);
   if (blob == null) {
+    debugPrint(
+      '[ReadStateManager] blob decode failed for event ${event.id.substring(0, 8)}…',
+    );
     return null;
   }
 

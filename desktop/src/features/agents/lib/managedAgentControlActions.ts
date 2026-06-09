@@ -75,6 +75,18 @@ export function resolveManagedAgentChannelId(
   return matches.length === 1 ? matches[0].id : null;
 }
 
+function relayMeshAgentError(agent: ManagedAgent): string | null {
+  if (agent.backend.type !== "local") return null;
+  if (agent.envVars.SPROUT_AGENT_PROVIDER !== "openai") return null;
+  if (
+    agent.envVars.OPENAI_COMPAT_BASE_URL?.replace(/\/+$/, "") !==
+    "http://127.0.0.1:9337/v1"
+  ) {
+    return null;
+  }
+  return "Relay-mesh agents need a fresh serve target before start. Create a new agent with Run on relay mesh selected.";
+}
+
 export async function startManagedAgentWithRules({
   agent,
   startManagedAgent,
@@ -82,6 +94,8 @@ export async function startManagedAgentWithRules({
   agent: ManagedAgent;
   startManagedAgent: StartManagedAgent;
 }) {
+  const relayMeshError = relayMeshAgentError(agent);
+  if (relayMeshError) throw new Error(relayMeshError);
   await startManagedAgent(agent.pubkey);
 }
 
@@ -94,6 +108,8 @@ export async function respawnManagedAgentWithRules({
   startManagedAgent: StartManagedAgent;
   stopManagedAgent: StopManagedAgent;
 }) {
+  const relayMeshError = relayMeshAgentError(agent);
+  if (relayMeshError) throw new Error(relayMeshError);
   if (agent.backend.type === "local" && isManagedAgentActive(agent)) {
     await stopManagedAgent(agent.pubkey);
   }

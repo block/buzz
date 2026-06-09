@@ -1,4 +1,4 @@
-import type { AcpProvider, ManagedAgentPrereqs } from "@/shared/api/types";
+import type { AcpRuntime, ManagedAgentPrereqs } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
@@ -19,6 +19,7 @@ export function CreateAgentBasicsFields({
       <Input
         aria-describedby="help-agent-name"
         autoCapitalize="none"
+        autoComplete="off"
         autoCorrect="off"
         data-testid="agent-name-input"
         id="agent-name"
@@ -35,50 +36,50 @@ export function CreateAgentBasicsFields({
   );
 }
 
-export function CreateAgentRuntimeProviderField({
-  providers,
-  providersLoading,
-  selectedProvider,
-  selectedProviderId,
+export function CreateAgentRuntimeField({
+  runtimes,
+  runtimesLoading,
+  selectedRuntime,
+  selectedRuntimeId,
   unavailableCount,
-  onProviderChange,
+  onRuntimeChange,
 }: {
-  providers: AcpProvider[];
-  providersLoading: boolean;
-  selectedProvider: AcpProvider | null;
-  selectedProviderId: string;
+  runtimes: AcpRuntime[];
+  runtimesLoading: boolean;
+  selectedRuntime: AcpRuntime | null;
+  selectedRuntimeId: string;
   unavailableCount: number;
-  onProviderChange: (value: string) => void;
+  onRuntimeChange: (value: string) => void;
 }) {
   return (
     <div className="space-y-1.5">
-      <label className="text-sm font-medium" htmlFor="agent-provider">
+      <label className="text-sm font-medium" htmlFor="agent-runtime">
         Agent runtime
       </label>
       <select
         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-        id="agent-provider"
-        onChange={(event) => onProviderChange(event.target.value)}
-        value={selectedProviderId}
+        id="agent-runtime"
+        onChange={(event) => onRuntimeChange(event.target.value)}
+        value={selectedRuntimeId}
       >
-        {providers.map((provider) => (
-          <option key={provider.id} value={provider.id}>
-            {provider.label}
+        {runtimes.map((runtime) => (
+          <option key={runtime.id} value={runtime.id}>
+            {runtime.label}
           </option>
         ))}
         <option value="custom">Custom command</option>
       </select>
-      {selectedProvider ? (
+      {selectedRuntime ? (
         <p className="text-xs text-muted-foreground">
           Detected via{" "}
           <span className="font-medium">
             {describeResolvedCommand(
-              selectedProvider.command,
-              selectedProvider.binaryPath,
+              selectedRuntime.command,
+              selectedRuntime.binaryPath,
             )}
           </span>
         </p>
-      ) : providersLoading ? (
+      ) : runtimesLoading ? (
         <p className="text-xs text-muted-foreground">
           Looking for installed ACP runtimes...
         </p>
@@ -108,7 +109,7 @@ export function CreateAgentRuntimeFields({
   mcpToolsets,
   parallelism,
   relayUrl,
-  selectedProviderId,
+  selectedRuntimeId,
   systemPrompt,
   turnTimeoutSeconds,
   onAcpCommandChange,
@@ -128,7 +129,7 @@ export function CreateAgentRuntimeFields({
   mcpToolsets: string;
   parallelism: string;
   relayUrl: string;
-  selectedProviderId: string;
+  selectedRuntimeId: string;
   systemPrompt: string;
   turnTimeoutSeconds: string;
   onAcpCommandChange: (value: string) => void;
@@ -150,6 +151,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-relay-url"
+            autoComplete="off"
             id="agent-relay-url"
             onChange={(event) => onRelayUrlChange(event.target.value)}
             placeholder="Leave blank to use the desktop relay"
@@ -170,6 +172,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-acp-command"
+            autoComplete="off"
             id="agent-acp-command"
             onChange={(event) => onAcpCommandChange(event.target.value)}
             value={acpCommand}
@@ -184,7 +187,7 @@ export function CreateAgentRuntimeFields({
         </div>
       </div>
 
-      {selectedProviderId === "custom" ? (
+      {selectedRuntimeId === "custom" ? (
         <div className="space-y-1.5">
           <label
             className="text-sm font-medium"
@@ -194,6 +197,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-runtime-command"
+            autoComplete="off"
             id="agent-runtime-command"
             onChange={(event) => onAgentCommandChange(event.target.value)}
             value={agentCommand}
@@ -215,6 +219,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-runtime-args"
+            autoComplete="off"
             id="agent-runtime-args"
             onChange={(event) => onAgentArgsChange(event.target.value)}
             placeholder="Comma-separated"
@@ -234,6 +239,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-mcp-command"
+            autoComplete="off"
             id="agent-mcp-command"
             onChange={(event) => onMcpCommandChange(event.target.value)}
             value={mcpCommand}
@@ -242,8 +248,8 @@ export function CreateAgentRuntimeFields({
             className="text-xs text-muted-foreground"
             id="help-agent-mcp-command"
           >
-            Command the ACP harness uses to start the MCP tool server for this
-            agent.
+            Optional. Only needed for agents that use a custom MCP server (e.g.
+            sprout-agent with sprout-dev-mcp). Leave blank for most agents.
           </p>
         </div>
 
@@ -253,6 +259,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-timeout"
+            autoComplete="off"
             id="agent-timeout"
             onChange={(event) => onTurnTimeoutChange(event.target.value)}
             placeholder="300"
@@ -269,6 +276,7 @@ export function CreateAgentRuntimeFields({
           </label>
           <Input
             aria-describedby="help-agent-parallelism"
+            autoComplete="off"
             data-testid="agent-parallelism-input"
             id="agent-parallelism"
             inputMode="numeric"
@@ -294,6 +302,7 @@ export function CreateAgentRuntimeFields({
           MCP toolsets
         </label>
         <Input
+          autoComplete="off"
           id="agent-mcp-toolsets"
           onChange={(event) => onMcpToolsetsChange(event.target.value)}
           placeholder="default,canvas,forums,dms,media"
@@ -393,7 +402,7 @@ export function CreateAgentOptionToggles({
         </p>
         <p className="mt-1 text-sm text-foreground/70">
           {prereqs !== null && !isSpawnSupported
-            ? "Requires both the ACP harness and MCP server binaries."
+            ? "Requires the ACP harness binary."
             : "Start the local ACP harness immediately after the profile is saved."}
         </p>
       </button>

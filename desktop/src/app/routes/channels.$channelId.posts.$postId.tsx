@@ -41,6 +41,7 @@ function ForumPostRouteComponent() {
         selectedPostId={postId}
         targetMessageId={null}
         targetReplyId={search.replyId ?? null}
+        targetThreadRootId={null}
       />
     </React.Suspense>
   );

@@ -7,8 +7,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use sprout_core::kind::{
-    event_kind_u32, is_parameterized_replaceable, KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED,
-    KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION,
+    event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_GIT_REPO_ANNOUNCEMENT,
+    KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED, KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS,
     KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
 };
@@ -29,7 +29,7 @@ pub fn is_admin_kind(kind: u32) -> bool {
 /// handled in `ingest_event()` before storage so we can short-circuit on
 /// duplicates without storing the event at all.
 pub fn is_side_effect_kind(kind: u32) -> bool {
-    matches!(kind, 0 | 5 | 9000..=9022 | KIND_GIT_REPO_ANNOUNCEMENT | 41001..=41003 | 40099)
+    matches!(kind, 0 | 5 | 9000..=9022 | KIND_GIT_REPO_ANNOUNCEMENT | KIND_AGENT_PROFILE | 41001..=41003 | 40099)
 }
 
 async fn evict_live_channel_subscriptions(
@@ -89,6 +89,7 @@ pub async fn handle_side_effects(
         9022 => handle_leave_request(event, state).await,
         // NIP-34: Git repo announcement → reserve name + seed manifest pointer.
         KIND_GIT_REPO_ANNOUNCEMENT => handle_git_repo_announcement(event, state).await,
+        KIND_AGENT_PROFILE => handle_agent_profile(event, state).await,
         // kind:7 (reaction) handled inline in ingest_event() before storage.
         _ => Ok(()),
     }
@@ -183,14 +184,29 @@ pub async fn validate_admin_event(
                 return Err(anyhow::anyhow!("invalid role: {role_str}"));
             }
 
-            // PUT_USER: open channels allow any authenticated user; private requires owner/admin.
-            // Policy check applies to both open and private channels.
+            // PUT_USER: open channels allow any authenticated user; private channels
+            // require the actor to be an existing member (any role can invite).
             if channel.visibility == "private" {
                 let members = state.db.get_members(channel_id).await?;
                 let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
                 match actor_member {
-                    Some(m) if m.role == "owner" || m.role == "admin" => {}
-                    _ => return Err(anyhow::anyhow!("actor not authorized")),
+                    Some(_) => {}
+                    None => return Err(anyhow::anyhow!("actor not authorized")),
+                }
+
+                // Only owners/admins may grant elevated roles.
+                let role: sprout_db::channel::MemberRole = role_str.parse().unwrap();
+                if role.is_elevated() {
+                    let actor_role: sprout_db::channel::MemberRole = actor_member
+                        .unwrap()
+                        .role
+                        .parse()
+                        .unwrap_or(sprout_db::channel::MemberRole::Member);
+                    if !actor_role.is_elevated() {
+                        return Err(anyhow::anyhow!(
+                            "only owners/admins may grant elevated roles"
+                        ));
+                    }
                 }
             }
 
@@ -685,6 +701,28 @@ pub async fn emit_group_discovery_events(
         .await?;
     }
 
+    Ok(())
+}
+
+// ── Kind:10100 Agent Profile Handler ─────────────────────────────────────────
+
+async fn handle_agent_profile(event: &Event, state: &Arc<AppState>) -> anyhow::Result<()> {
+    let content: serde_json::Value = serde_json::from_str(&event.content)
+        .map_err(|e| anyhow::anyhow!("kind:10100 content parse error: {e}"))?;
+
+    let policy = content
+        .get("channel_add_policy")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("kind:10100 missing channel_add_policy field"))?;
+
+    let pubkey_bytes = event.pubkey.to_bytes().to_vec();
+    state.db.ensure_user(&pubkey_bytes).await?;
+    state
+        .db
+        .set_channel_add_policy(&pubkey_bytes, policy)
+        .await?;
+
+    info!(pubkey = %hex::encode(&pubkey_bytes), policy, "kind:10100 channel_add_policy updated");
     Ok(())
 }
 

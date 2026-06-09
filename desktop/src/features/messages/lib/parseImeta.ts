@@ -9,6 +9,7 @@ export type ImetaEntry = {
   thumb?: string;
   duration?: number;
   image?: string;
+  filename?: string;
 };
 
 export function parseImetaTags(tags: string[][]): Map<string, ImetaEntry> {
@@ -51,6 +52,9 @@ export function parseImetaTags(tags: string[][]): Map<string, ImetaEntry> {
           break;
         case "image":
           entry.image = val;
+          break;
+        case "filename":
+          entry.filename = val;
           break;
       }
     }

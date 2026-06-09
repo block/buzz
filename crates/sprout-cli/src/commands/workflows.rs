@@ -153,17 +153,42 @@ pub async fn cmd_delete_workflow(client: &SproutClient, workflow_id: &str) -> Re
 }
 
 /// Trigger a workflow — sign and submit a kind:46020 event.
+///
+/// When `inputs` is provided, it is parsed as a JSON object and used as the
+/// event content (MCP parity). When omitted, the event content is `{}`.
 pub async fn cmd_trigger_workflow(
     client: &SproutClient,
     workflow_id: &str,
+    inputs: Option<&str>,
 ) -> Result<(), CliError> {
     let wf_uuid = parse_uuid(workflow_id)?;
 
-    let builder = sprout_sdk::build_workflow_trigger(wf_uuid).map_err(sdk_err)?;
-    let event = client.sign_event(builder)?;
-
-    let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
+    if let Some(raw) = inputs {
+        // Parse and validate it is a JSON object, then build the event manually
+        // so we can embed the inputs as the event content.
+        let parsed: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|e| CliError::Usage(format!("--inputs is not valid JSON: {e}")))?;
+        if !parsed.is_object() {
+            return Err(CliError::Usage("--inputs must be a JSON object".into()));
+        }
+        let content = serde_json::to_string(&parsed).unwrap_or_default();
+        use nostr::{EventBuilder, Kind, Tag};
+        let tags = vec![Tag::parse(["d", &wf_uuid.to_string()])
+            .map_err(|e| CliError::Other(format!("tag error: {e}")))?];
+        let builder = EventBuilder::new(
+            Kind::Custom(sprout_sdk::kind::KIND_WORKFLOW_TRIGGER as u16),
+            &content,
+        )
+        .tags(tags);
+        let event = client.sign_event(builder)?;
+        let resp = client.submit_event(event).await?;
+        println!("{}", normalize_write_response(&resp));
+    } else {
+        let builder = sprout_sdk::build_workflow_trigger(wf_uuid).map_err(sdk_err)?;
+        let event = client.sign_event(builder)?;
+        let resp = client.submit_event(event).await?;
+        println!("{}", normalize_write_response(&resp));
+    }
     Ok(())
 }
 
@@ -207,7 +232,9 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &SproutClient) -> Result
             yaml,
         } => cmd_update_workflow(client, &channel, &workflow, &yaml).await,
         WorkflowsCmd::Delete { workflow } => cmd_delete_workflow(client, &workflow).await,
-        WorkflowsCmd::Trigger { workflow } => cmd_trigger_workflow(client, &workflow).await,
+        WorkflowsCmd::Trigger { workflow, inputs } => {
+            cmd_trigger_workflow(client, &workflow, inputs.as_deref()).await
+        }
         WorkflowsCmd::Runs { workflow, limit } => {
             cmd_get_workflow_runs(client, &workflow, limit).await
         }

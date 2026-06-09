@@ -1,3 +1,5 @@
+#[cfg(feature = "mesh-llm")]
+use super::relay_mesh_model_id;
 use super::{
     find_managed_agent_mut, kill_stale_tracked_processes, load_managed_agents, save_managed_agents,
     spawn_agent_child, sync_managed_agent_processes, BackendKind, ManagedAgentProcess,
@@ -7,13 +9,16 @@ use crate::util;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
 
+type SpawnResult = Result<(std::process::Child, std::path::PathBuf), String>;
+type AgentSpawnResult = (String, SpawnResult);
+
 /// Restore managed agents that were running before the app was closed.
 ///
 /// Split into three phases to minimise lock contention with the frontend:
 ///   A (under lock): sync process state, cleanup, collect agents to start
 ///   B (no locks):   resolve commands and spawn processes in parallel
 ///   C (re-lock):    write back PIDs and status to records on disk
-pub fn restore_managed_agents_on_launch(
+pub async fn restore_managed_agents_on_launch(
     app: &tauri::AppHandle,
     shutdown_started: &AtomicBool,
 ) -> Result<(), String> {
@@ -49,6 +54,12 @@ pub fn restore_managed_agents_on_launch(
             .chain(runtimes.values().map(|rt| rt.child.id()))
             .collect();
         super::sweep_orphaned_agent_processes(app, &tracked_pids);
+
+        // System-wide sweep: enumerate all user processes and kill any known
+        // agent binaries not tracked by this session. Catches orphans whose
+        // PID files were already cleaned up (e.g. agent workers in their own
+        // process group whose parent harness exited).
+        super::sweep_system_agent_processes(&super::current_instance_id(app), &tracked_pids);
 
         let candidates: Vec<String> = records
             .iter()
@@ -93,11 +104,34 @@ pub fn restore_managed_agents_on_launch(
         .ok()
         .map(|k| k.public_key().to_hex());
 
+    #[cfg(feature = "mesh-llm")]
+    let agents_to_start = {
+        let mut mesh_preflight_failures = std::collections::HashSet::new();
+        for record in &agents_to_start {
+            if relay_mesh_model_id(record).is_none() {
+                continue;
+            }
+            // Auto-start after relaunch: re-resolve a live bootstrap target and
+            // dial it. Skip (with an actionable error) only when no live target
+            // serves this model right now.
+            if let Err(error) =
+                crate::commands::ensure_relay_mesh_for_record(app, record, false).await
+            {
+                persist_restore_error(app, &state, &record.pubkey, error)?;
+                mesh_preflight_failures.insert(record.pubkey.clone());
+            }
+        }
+        agents_to_start
+            .into_iter()
+            .filter(|record| !mesh_preflight_failures.contains(&record.pubkey))
+            .collect::<Vec<_>>()
+    };
+    if agents_to_start.is_empty() {
+        return Ok(());
+    }
+
     // ── Phase B (no locks): resolve commands and spawn processes in parallel ──
-    let spawn_results: Vec<(
-        String,
-        Result<(std::process::Child, std::path::PathBuf), String>,
-    )> = std::thread::scope(|scope| {
+    let spawn_results: Vec<AgentSpawnResult> = std::thread::scope(|scope| {
         let owner_hex_ref = owner_hex.as_deref();
         let handles: Vec<_> = agents_to_start
             .iter()
@@ -156,4 +190,22 @@ pub fn restore_managed_agents_on_launch(
     save_managed_agents(app, &records)?;
 
     Ok(())
+}
+
+#[cfg(feature = "mesh-llm")]
+fn persist_restore_error(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    pubkey: &str,
+    error: String,
+) -> Result<(), String> {
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+    let mut records = load_managed_agents(app)?;
+    let record = find_managed_agent_mut(&mut records, pubkey)?;
+    record.updated_at = util::now_iso();
+    record.last_error = Some(error);
+    save_managed_agents(app, &records)
 }

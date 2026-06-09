@@ -13,6 +13,10 @@ export function getChannelIdFromTags(tags: string[][]) {
   return tags.find((tag) => tag[0] === "h")?.[1] ?? null;
 }
 
+export function isBroadcastReply(tags: string[][]): boolean {
+  return tags.some((tag) => tag[0] === "broadcast" && tag[1] === "1");
+}
+
 export function getThreadReference(tags: string[][]): ThreadReference {
   const eventTags = getEventTags(tags);
 

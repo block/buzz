@@ -29,6 +29,8 @@ import {
 import { compareMembersByRole } from "@/features/channels/lib/memberUtils";
 import { CreateWorkflowDialog } from "@/features/workflows/ui/CreateWorkflowDialog";
 import type { Channel } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
+import { useTheme } from "@/shared/theme/ThemeProvider";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -111,6 +113,7 @@ export function ChannelManagementSheet({
   onOpenChange,
   open,
 }: ChannelManagementSheetProps) {
+  const { isDark } = useTheme();
   const channelId = channel?.id ?? null;
   const detailsQuery = useChannelDetailsQuery(channelId, open);
   const membersQuery = useChannelMembersQuery(channelId, open);
@@ -220,11 +223,23 @@ export function ChannelManagementSheet({
   return (
     <Sheet onOpenChange={handleSheetOpenChange} open={open}>
       <SheetContent
-        className="flex w-full flex-col gap-0 overflow-hidden border-l border-border/80 bg-background p-0 sm:max-w-xl"
+        className={cn(
+          "flex w-full flex-col gap-0 overflow-hidden border-l border-border/80 p-0 shadow-none sm:max-w-xl",
+          isDark
+            ? "bg-background/85 backdrop-blur-xl supports-[backdrop-filter]:bg-background/75"
+            : "bg-background",
+        )}
         data-testid="channel-management-sheet"
         side="right"
       >
-        <SheetHeader className="relative z-10 space-y-4 bg-background/25 px-6 py-6 text-left shadow-[0_4px_24px_rgba(0,0,0,0.06)] backdrop-blur-xl supports-[backdrop-filter]:bg-background/20 dark:shadow-[0_4px_24px_rgba(0,0,0,0.25)]">
+        <SheetHeader
+          className={cn(
+            "relative z-10 space-y-4 px-6 py-6 text-left shadow-none",
+            isDark
+              ? "bg-background/60 backdrop-blur-xl supports-[backdrop-filter]:bg-background/50"
+              : "bg-background",
+          )}
+        >
           <SheetTitle className="pr-8">{channel.name}</SheetTitle>
           <SheetDescription className="sr-only">
             Channel settings
@@ -251,7 +266,7 @@ export function ChannelManagementSheet({
           </div>
         </SheetHeader>
 
-        <div className="flex-1 space-y-6 overflow-y-auto px-6 py-6">
+        <div className="flex-1 space-y-6 overflow-y-auto bg-background px-6 py-6">
           <ChannelIdRow channelId={resolvedChannel.id} />
           {detailsQuery.error instanceof Error ? (
             <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">

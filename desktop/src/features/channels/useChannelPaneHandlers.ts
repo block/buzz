@@ -108,13 +108,13 @@ export function useChannelPaneHandlers({
   );
 
   const handleEditSave = React.useCallback(
-    async (content: string) => {
+    async (content: string, mediaTags?: string[][]) => {
       const eventId = editTargetIdRef.current;
       if (!eventId) {
         return;
       }
 
-      await editMutateRef.current({ eventId, content });
+      await editMutateRef.current({ eventId, content, mediaTags });
       setEditTargetId(null);
     },
     [setEditTargetId],

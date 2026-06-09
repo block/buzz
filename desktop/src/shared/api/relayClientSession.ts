@@ -564,7 +564,7 @@ export class RelayClient {
 
     return async () => {
       const active = this.subscriptions.get(subId);
-      if (!active || active.mode !== "live") {
+      if (active?.mode !== "live") {
         return;
       }
 

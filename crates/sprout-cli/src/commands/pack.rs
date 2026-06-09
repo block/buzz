@@ -74,11 +74,11 @@ pub fn cmd_inspect(path: &str) -> Result<(), CliError> {
         println!("    Display: {}", persona.display_name);
         println!("    Description: {}", persona.description);
 
-        if let Some(ref provider) = persona.provider {
+        if let Some(ref llm_provider) = persona.llm_provider {
             if let Some(ref model) = persona.model {
-                println!("    Model: {provider}:{model}");
+                println!("    Model: {llm_provider}:{model}");
             } else {
-                println!("    Provider: {provider}");
+                println!("    Provider: {llm_provider}");
             }
         } else if let Some(ref model) = persona.model {
             println!("    Model: {model}");

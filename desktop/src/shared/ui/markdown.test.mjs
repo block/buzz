@@ -28,17 +28,19 @@ function isValidElement(obj) {
   );
 }
 
-function fakeElement(type) {
-  return { $$typeof: REACT_ELEMENT_TYPE, type, props: {}, key: null };
+function fakeElement(type, props = {}) {
+  return { $$typeof: REACT_ELEMENT_TYPE, type, props, key: null };
+}
+
+function isBlockMedia(child) {
+  return isValidElement(child) && child.props?.["data-block-media"] != null;
 }
 
 function classifyChildren(childArray) {
-  const imageChildren = childArray.filter(
-    (child) => isValidElement(child) && typeof child.type !== "string",
-  );
+  const imageChildren = childArray.filter(isBlockMedia);
   const nonImageChildren = childArray.filter(
     (child) =>
-      !(isValidElement(child) && typeof child.type !== "string") &&
+      !isBlockMedia(child) &&
       !(typeof child === "string" && child.trim() === "") &&
       !(isValidElement(child) && child.type === "br"),
   );
@@ -153,12 +155,19 @@ test("shallowArrayEqual: empty arrays return true", () => {
 
 // ── classifyChildren ──────────────────────────────────────────────────
 
-test("classifyChildren: React component elements are image children", () => {
-  const ImgComponent = () => null;
-  const children = [fakeElement(ImgComponent)];
+test("classifyChildren: elements with data-block-media are image children", () => {
+  const children = [fakeElement("span", { "data-block-media": "" })];
   const { imageChildren, nonImageChildren } = classifyChildren(children);
   assert.equal(imageChildren.length, 1);
   assert.equal(nonImageChildren.length, 0);
+});
+
+test("classifyChildren: React component elements without data-block-media are non-image", () => {
+  const LinkComponent = () => null;
+  const children = [fakeElement(LinkComponent)];
+  const { imageChildren, nonImageChildren } = classifyChildren(children);
+  assert.equal(imageChildren.length, 0);
+  assert.equal(nonImageChildren.length, 1);
 });
 
 test("classifyChildren: plain HTML elements are non-image children", () => {
@@ -189,26 +198,24 @@ test("classifyChildren: <br> elements are excluded from non-image", () => {
   assert.equal(nonImageChildren.length, 0);
 });
 
-test("classifyChildren: mixed images, text, and br", () => {
-  const Img = () => null;
+test("classifyChildren: mixed media, text, and br", () => {
   const children = [
-    fakeElement(Img),
+    fakeElement("span", { "data-block-media": "" }),
     "some text",
     fakeElement("br"),
-    fakeElement(Img),
+    fakeElement("span", { "data-block-media": "" }),
   ];
   const { imageChildren, nonImageChildren } = classifyChildren(children);
   assert.equal(imageChildren.length, 2);
   assert.equal(nonImageChildren.length, 1); // "some text"
 });
 
-test("classifyChildren: images with only whitespace and br between them", () => {
-  const Img = () => null;
+test("classifyChildren: media with only whitespace and br between them", () => {
   const children = [
-    fakeElement(Img),
+    fakeElement("span", { "data-block-media": "" }),
     "  ",
     fakeElement("br"),
-    fakeElement(Img),
+    fakeElement("span", { "data-block-media": "" }),
   ];
   const { imageChildren, nonImageChildren } = classifyChildren(children);
   assert.equal(imageChildren.length, 2);
@@ -217,21 +224,28 @@ test("classifyChildren: images with only whitespace and br between them", () => 
 
 // ── isImageOnlyParagraph ──────────────────────────────────────────────
 
-test("isImageOnlyParagraph: two images with br returns true", () => {
-  const Img = () => null;
-  const children = [fakeElement(Img), fakeElement("br"), fakeElement(Img)];
+test("isImageOnlyParagraph: two media with br returns true", () => {
+  const media = { "data-block-media": "" };
+  const children = [
+    fakeElement("span", media),
+    fakeElement("br"),
+    fakeElement("span", media),
+  ];
   assert.equal(isImageOnlyParagraph(children), true);
 });
 
-test("isImageOnlyParagraph: single image returns false (needs 2+)", () => {
-  const Img = () => null;
-  const children = [fakeElement(Img)];
+test("isImageOnlyParagraph: single media returns false (needs 2+)", () => {
+  const children = [fakeElement("span", { "data-block-media": "" })];
   assert.equal(isImageOnlyParagraph(children), false);
 });
 
-test("isImageOnlyParagraph: images with text returns false", () => {
-  const Img = () => null;
-  const children = [fakeElement(Img), "caption text", fakeElement(Img)];
+test("isImageOnlyParagraph: media with text returns false", () => {
+  const media = { "data-block-media": "" };
+  const children = [
+    fakeElement("span", media),
+    "caption text",
+    fakeElement("span", media),
+  ];
   assert.equal(isImageOnlyParagraph(children), false);
 });
 
@@ -239,40 +253,56 @@ test("isImageOnlyParagraph: no children returns false", () => {
   assert.equal(isImageOnlyParagraph([]), false);
 });
 
-test("isImageOnlyParagraph: three images returns true", () => {
-  const Img = () => null;
-  const children = [fakeElement(Img), fakeElement(Img), fakeElement(Img)];
+test("isImageOnlyParagraph: three media returns true", () => {
+  const media = { "data-block-media": "" };
+  const children = [
+    fakeElement("span", media),
+    fakeElement("span", media),
+    fakeElement("span", media),
+  ];
   assert.equal(isImageOnlyParagraph(children), true);
 });
 
-test("isImageOnlyParagraph: plain HTML img tags are non-image (string type)", () => {
-  // <img> has type "img" (a string) — classified as non-image
+test("isImageOnlyParagraph: plain HTML img tags without data-block-media are non-image", () => {
   const children = [fakeElement("img"), fakeElement("img")];
   assert.equal(isImageOnlyParagraph(children), false);
 });
 
-test("isImageOnlyParagraph: mention span + images is not image-only", () => {
-  const Img = () => null;
-  const children = [fakeElement("span"), fakeElement(Img), fakeElement(Img)];
+test("isImageOnlyParagraph: non-media component + media is not image-only", () => {
+  const LinkComponent = () => null;
+  const media = { "data-block-media": "" };
+  const children = [
+    fakeElement(LinkComponent),
+    fakeElement("span", media),
+    fakeElement("span", media),
+  ];
   assert.equal(isImageOnlyParagraph(children), false);
 });
 
 // ── hasBlockMedia ─────────────────────────────────────────────────────
 
-test("hasBlockMedia: single image component returns true", () => {
-  const Img = () => null;
-  assert.equal(hasBlockMedia([fakeElement(Img)]), true);
-});
-
-test("hasBlockMedia: two images returns true", () => {
-  const Img = () => null;
-  assert.equal(hasBlockMedia([fakeElement(Img), fakeElement(Img)]), true);
-});
-
-test("hasBlockMedia: image with whitespace and br returns true", () => {
-  const Img = () => null;
+test("hasBlockMedia: single media element returns true", () => {
   assert.equal(
-    hasBlockMedia([fakeElement(Img), "  ", fakeElement("br")]),
+    hasBlockMedia([fakeElement("span", { "data-block-media": "" })]),
+    true,
+  );
+});
+
+test("hasBlockMedia: two media returns true", () => {
+  const media = { "data-block-media": "" };
+  assert.equal(
+    hasBlockMedia([fakeElement("span", media), fakeElement("span", media)]),
+    true,
+  );
+});
+
+test("hasBlockMedia: media with whitespace and br returns true", () => {
+  assert.equal(
+    hasBlockMedia([
+      fakeElement("span", { "data-block-media": "" }),
+      "  ",
+      fakeElement("br"),
+    ]),
     true,
   );
 });
@@ -285,13 +315,20 @@ test("hasBlockMedia: text only returns false", () => {
   assert.equal(hasBlockMedia(["hello"]), false);
 });
 
-test("hasBlockMedia: image with text returns false", () => {
-  const Img = () => null;
-  assert.equal(hasBlockMedia([fakeElement(Img), "caption"]), false);
+test("hasBlockMedia: media with text returns false", () => {
+  assert.equal(
+    hasBlockMedia([fakeElement("span", { "data-block-media": "" }), "caption"]),
+    false,
+  );
 });
 
-test("hasBlockMedia: plain HTML img (string type) returns false", () => {
+test("hasBlockMedia: plain HTML img without data-block-media returns false", () => {
   assert.equal(hasBlockMedia([fakeElement("img")]), false);
+});
+
+test("hasBlockMedia: React component without data-block-media returns false", () => {
+  const LinkComponent = () => null;
+  assert.equal(hasBlockMedia([fakeElement(LinkComponent)]), false);
 });
 
 // ── rehypeImageGallery (HAST-level grouping) ──────────────────────────
@@ -389,4 +426,206 @@ test("rehypeImageGallery: mixed content paragraph is not image-only", () => {
   rehypeImageGallery()(tree);
   // Middle paragraph has text, so it breaks the run
   assert.equal(tree.children.length, 3);
+});
+
+// ── messageLinkUrlTransform: sprout:// link preservation ──────────────
+// Regression test: react-markdown's `defaultUrlTransform` strips unknown
+// schemes (returns `""`) before our `a` component override can see them,
+// which would break copy → paste → click for `sprout://message?…` links
+// end-to-end. We pass a custom `urlTransform` that delegates to the
+// default for everything except `sprout://message` hrefs.
+//
+// This test renders real `<ReactMarkdown>` with the production transform
+// and asserts the link href survives to the rendered DOM. Mirrors the
+// `markdown.tsx` source — keep in sync if either changes.
+
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
+
+import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
+
+function messageLinkUrlTransform(value, key) {
+  if (key === "href" && isMessageLink(value)) {
+    return value;
+  }
+  return defaultUrlTransform(value);
+}
+
+function renderMarkdown(content) {
+  return renderToStaticMarkup(
+    React.createElement(
+      ReactMarkdown,
+      { urlTransform: messageLinkUrlTransform },
+      content,
+    ),
+  );
+}
+
+test("messageLinkUrlTransform: preserves sprout://message href", () => {
+  const html = renderMarkdown(
+    "Click [here](sprout://message?channel=abc&id=xyz)",
+  );
+  // HTML-encoded `&` in attributes is fine — the browser decodes back to `&`.
+  assert.match(html, /href="sprout:\/\/message\?channel=abc&(?:amp;)?id=xyz"/);
+});
+
+test("messageLinkUrlTransform: preserves sprout://message href with thread", () => {
+  const html = renderMarkdown(
+    "[link](sprout://message?channel=c1&id=m1&thread=t1)",
+  );
+  assert.match(html, /href="sprout:\/\/message\?[^"]*thread=t1"/);
+});
+
+test("messageLinkUrlTransform: still strips javascript: scheme", () => {
+  const html = renderMarkdown("[xss](javascript:alert(1))");
+  // defaultUrlTransform replaces unsafe schemes with the empty string.
+  assert.match(html, /href=""/);
+  assert.doesNotMatch(html, /javascript:/);
+});
+
+test("messageLinkUrlTransform: passes http(s) through unchanged", () => {
+  const html = renderMarkdown("[ext](https://example.com/path)");
+  assert.match(html, /href="https:\/\/example\.com\/path"/);
+});
+
+test("messageLinkUrlTransform: leaves non-message sprout:// schemes to default", () => {
+  // `sprout://connect?relay=…` is handled by a different code path (Tauri
+  // single-instance). The markdown renderer should let it pass through
+  // defaultUrlTransform (which strips it) since it's not clickable in-app.
+  const html = renderMarkdown(
+    "[connect](sprout://connect?relay=wss://relay.example)",
+  );
+  assert.match(html, /href=""/);
+});
+
+// ── remarkMessageLinks: bare-URL → message-link node ──────────────────
+// `remark-gfm`'s autolinker only covers http(s)://, so bare `sprout://message`
+// URLs in plain text never reach any rendering path without this plugin.
+// The plugin emits a custom `message-link` HAST element which markdown.tsx
+// renders as an inline pill. Tests operate on the mdast tree directly —
+// the rendering side is a plain React component covered by app-level use.
+
+import remarkMessageLinks from "../../features/messages/lib/remarkMessageLinks.ts";
+
+function runPlugin(tree) {
+  remarkMessageLinks()(tree);
+  return tree;
+}
+
+function paragraph(...children) {
+  return { type: "root", children: [{ type: "paragraph", children }] };
+}
+
+function text(value) {
+  return { type: "text", value };
+}
+
+test("remarkMessageLinks: bare sprout://message URL is replaced", () => {
+  const tree = runPlugin(paragraph(text("sprout://message?channel=c&id=m")));
+  const para = tree.children[0];
+  assert.equal(para.children.length, 1);
+  assert.equal(para.children[0].type, "message-link");
+  assert.equal(para.children[0].value, "sprout://message?channel=c&id=m");
+  assert.equal(para.children[0].data.hName, "message-link");
+});
+
+test("remarkMessageLinks: mid-sentence URL splits surrounding text", () => {
+  const tree = runPlugin(
+    paragraph(text("see sprout://message?channel=c&id=m here")),
+  );
+  const kids = tree.children[0].children;
+  assert.equal(kids.length, 3);
+  assert.equal(kids[0].type, "text");
+  assert.equal(kids[0].value, "see ");
+  assert.equal(kids[1].type, "message-link");
+  assert.equal(kids[2].type, "text");
+  assert.equal(kids[2].value, " here");
+});
+
+test("remarkMessageLinks: two URLs in one text node both replaced", () => {
+  const tree = runPlugin(
+    paragraph(
+      text(
+        "first sprout://message?channel=a&id=1 then sprout://message?channel=b&id=2 done",
+      ),
+    ),
+  );
+  const kids = tree.children[0].children;
+  const links = kids.filter((c) => c.type === "message-link");
+  assert.equal(links.length, 2);
+  assert.equal(links[0].value, "sprout://message?channel=a&id=1");
+  assert.equal(links[1].value, "sprout://message?channel=b&id=2");
+});
+
+test("remarkMessageLinks: trailing sentence punctuation stays outside URL", () => {
+  for (const punctuation of [".", ",", ";", ":", "!", "?"]) {
+    const tree = runPlugin(
+      paragraph(text(`see sprout://message?channel=c&id=m${punctuation}`)),
+    );
+    const kids = tree.children[0].children;
+
+    assert.equal(kids.length, 3, punctuation);
+    assert.equal(kids[0].value, "see ", punctuation);
+    assert.equal(kids[1].type, "message-link", punctuation);
+    assert.equal(kids[1].value, "sprout://message?channel=c&id=m", punctuation);
+    assert.equal(kids[2].type, "text", punctuation);
+    assert.equal(kids[2].value, punctuation, punctuation);
+  }
+});
+
+test("remarkMessageLinks: URL inside parens keeps closing paren outside", () => {
+  const tree = runPlugin(
+    paragraph(text("see (sprout://message?channel=c&id=m) for details")),
+  );
+  const kids = tree.children[0].children;
+
+  assert.equal(kids.length, 3);
+  assert.equal(kids[0].value, "see (");
+  assert.equal(kids[1].type, "message-link");
+  assert.equal(kids[1].value, "sprout://message?channel=c&id=m");
+  assert.equal(kids[2].type, "text");
+  assert.equal(kids[2].value, ") for details");
+});
+
+test("remarkMessageLinks: URL without trailing punctuation matches end-to-end", () => {
+  const value = "sprout://message?channel=c&id=m";
+  const tree = runPlugin(paragraph(text(value)));
+  const kids = tree.children[0].children;
+
+  assert.equal(kids.length, 1);
+  assert.equal(kids[0].type, "message-link");
+  assert.equal(kids[0].value, value);
+});
+
+test("remarkMessageLinks: non-message sprout:// URLs are not matched", () => {
+  const original = "sprout://connect?relay=wss://x.example";
+  const tree = runPlugin(paragraph(text(original)));
+  const kids = tree.children[0].children;
+  assert.equal(kids.length, 1);
+  assert.equal(kids[0].type, "text");
+  assert.equal(kids[0].value, original);
+});
+
+test("remarkMessageLinks: text inside inlineCode is left alone", () => {
+  // The shared factory's tree walker descends into all non-text nodes; an
+  // `inlineCode` node has its URL stored in `value` (not children), so the
+  // plugin can't reach it. Guard against a future regression where someone
+  // turns `inlineCode` into a children-bearing node.
+  const tree = {
+    type: "root",
+    children: [
+      {
+        type: "paragraph",
+        children: [
+          { type: "inlineCode", value: "sprout://message?channel=c&id=m" },
+        ],
+      },
+    ],
+  };
+  runPlugin(tree);
+  const kids = tree.children[0].children;
+  assert.equal(kids.length, 1);
+  assert.equal(kids[0].type, "inlineCode");
+  assert.equal(kids[0].value, "sprout://message?channel=c&id=m");
 });

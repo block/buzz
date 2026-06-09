@@ -18,6 +18,22 @@
       "groupName": null,
       "separateMinorPatch": true,
       "separateMultipleMinor": false
+    },
+    {
+      "description": "evalexpr v13 relicensed from MIT to AGPL-3.0 — pin below v13 until migrated to an MIT alternative.",
+      "matchPackageNames": ["evalexpr"],
+      "allowedVersions": "<13"
+    },
+    {
+      "description": "deadpool-redis re-exports redis types — version mismatch causes trait incompatibility.",
+      "matchPackageNames": ["redis", "deadpool-redis"],
+      "matchManagers": ["cargo"],
+      "groupName": "redis"
+    },
+    {
+      "description": "tiptap 3.23.x breaks editor lifecycle under real relay latency — pin until upstream stabilizes.",
+      "matchPackageNames": ["@tiptap/{/,}**"],
+      "allowedVersions": "<3.23.0"
     }
   ]
 }

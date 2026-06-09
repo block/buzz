@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
+import '../custom_emoji/custom_emoji_render.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import 'channel_management_provider.dart';
@@ -72,7 +73,7 @@ class ReactionRow extends StatelessWidget {
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(reaction.emoji, style: const TextStyle(fontSize: 14)),
+                    _ReactionEmoji(reaction: reaction, size: 18),
                     if (reaction.count > 1) ...[
                       const SizedBox(width: Grid.quarter),
                       Text(
@@ -92,6 +93,23 @@ class ReactionRow extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+class _ReactionEmoji extends StatelessWidget {
+  final TimelineReaction reaction;
+  final double size;
+
+  const _ReactionEmoji({required this.reaction, required this.size});
+
+  @override
+  Widget build(BuildContext context) {
+    final emojiUrl = reaction.emojiUrl;
+    if (emojiUrl == null || emojiUrl.isEmpty) {
+      return Text(reaction.emoji, style: TextStyle(fontSize: size));
+    }
+    final shortcode = reaction.emoji.substring(1, reaction.emoji.length - 1);
+    return CustomEmojiImage(shortcode: shortcode, url: emojiUrl, size: size);
   }
 }
 
@@ -162,7 +180,14 @@ class _ReactionDetailSheet extends HookConsumerWidget {
                       Padding(
                         padding: const EdgeInsets.only(right: Grid.half),
                         child: ChoiceChip(
-                          label: Text('${reaction.emoji} ${reaction.count}'),
+                          label: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _ReactionEmoji(reaction: reaction, size: 16),
+                              const SizedBox(width: Grid.quarter),
+                              Text('${reaction.count}'),
+                            ],
+                          ),
                           selected: reaction.emoji == selectedEmoji.value,
                           onSelected: (_) {
                             selectedEmoji.value = reaction.emoji;
@@ -182,13 +207,12 @@ class _ReactionDetailSheet extends HookConsumerWidget {
             ),
             child: Row(
               children: [
-                Text(
-                  currentReaction.emoji,
-                  style: const TextStyle(fontSize: 28),
-                ),
+                _ReactionEmoji(reaction: currentReaction, size: 32),
                 const SizedBox(width: Grid.half),
                 Text(
-                  ':${_emojiToShortcode(currentReaction.emoji)}:',
+                  currentReaction.emoji.startsWith(':')
+                      ? currentReaction.emoji
+                      : ':${_emojiToShortcode(currentReaction.emoji)}:',
                   style: context.textTheme.titleSmall?.copyWith(
                     color: context.colors.onSurfaceVariant,
                   ),

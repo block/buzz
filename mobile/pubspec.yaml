@@ -1,7 +1,7 @@
 name: sprout_mobile
 description: Sprout mobile client
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.3.14+1
 
 environment:
   sdk: ^3.11.4
@@ -18,15 +18,17 @@ dependencies:
   shared_preferences: ^2.5.5
   web_socket_channel: ^3.0.1
   connectivity_plus: ^7.0.0
-  nostr: ^1.5.0
-  pointycastle: ^3.7.3
+  nostr: ^2.0.0
+  pointycastle: ^4.0.0
   url_launcher: ^6.3.2
   gpt_markdown: ^1.1.6
+  highlight: ^0.7.0
   intl: ^0.20.2
   uuid: ^4.5.1
   image_picker: ^1.1.2
   video_player: ^2.10.1
   package_info_plus: ^10.0.0
+  app_badge_plus: ^1.2.10
 
 dev_dependencies:
   flutter_test:

@@ -13,7 +13,7 @@ export type PersonaLibraryState = {
 };
 
 export function isPersonaActive(persona: AgentPersona) {
-  return !persona.isBuiltIn || persona.isActive;
+  return persona.isActive;
 }
 
 export function getActivePersonas(personas: readonly AgentPersona[]) {

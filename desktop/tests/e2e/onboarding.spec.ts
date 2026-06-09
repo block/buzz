@@ -79,6 +79,10 @@ async function expectShellHidden(page: Page) {
   await expect(page.getByTestId("chat-title")).toHaveCount(0);
 }
 
+async function expectHomeView(page: Page) {
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+}
+
 async function expectIncompleteOnboarding(page: Page) {
   await expect(page.getByTestId("onboarding-gate")).toBeVisible();
   await expectShellHidden(page);
@@ -101,7 +105,7 @@ test("completed users skip the loading gate while profile is still settling", as
   await page.goto("/");
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
 });
 
 test("identity fallback text does not count as a real onboarding name", async ({
@@ -137,7 +141,78 @@ test("page 1 accepts an avatar URL as the secondary avatar path", async ({
   expect(box?.height).toBeCloseTo(80, 0);
 
   await continueToSetupPage(page);
-  await expect(page.getByTestId("onboarding-provider-goose")).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
+});
+
+test("avatar upload rejects a file whose server-detected MIME is not an image", async ({
+  page,
+}) => {
+  // Models a spoofed/blank picker MIME: the picked file claims to be an image
+  // (passes the browser-side accept filter) but the shared generic upload path
+  // returns a non-image descriptor. The post-upload backstop must reject it so
+  // a non-image can't become an avatar (regression guard — the shared upload
+  // path no longer rejects non-images server-side).
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      uploadDescriptors: [
+        {
+          url: `https://mock.relay/media/${"b".repeat(64)}.pdf`,
+          sha256: "b".repeat(64),
+          size: 4096,
+          type: "application/pdf",
+          uploaded: Math.floor(Date.now() / 1000),
+          filename: "not-an-image.pdf",
+        },
+      ],
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-avatar-input").setInputFiles({
+    name: "looks-like.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("not really a png"),
+  });
+
+  await expect(page.getByTestId("onboarding-avatar-error")).toContainText(
+    "Choose a PNG, JPG, GIF, or WebP image.",
+  );
+  await expect(page.getByTestId("onboarding-avatar-url")).toHaveValue("");
+});
+
+test("avatar upload accepts a file whose server-detected MIME is an image", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  const url = `https://mock.relay/media/${"c".repeat(64)}.png`;
+  await installMockBridge(
+    page,
+    {
+      uploadDescriptors: [
+        {
+          url,
+          sha256: "c".repeat(64),
+          size: 2048,
+          type: "image/png",
+          uploaded: Math.floor(Date.now() / 1000),
+        },
+      ],
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-avatar-input").setInputFiles({
+    name: "avatar.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("png bytes"),
+  });
+
+  await expect(page.getByTestId("onboarding-avatar-url")).toHaveValue(url);
+  await expect(page.getByTestId("onboarding-avatar-error")).toHaveCount(0);
 });
 
 test("first-run onboarding keeps the shell hidden through both pages and only marks Home seen after finish", async ({
@@ -155,12 +230,12 @@ test("first-run onboarding keeps the shell hidden through both pages and only ma
   await page.getByTestId("onboarding-display-name").fill("Alice");
   await continueToSetupPage(page);
   await expectShellHidden(page);
-  await expect(page.getByTestId("onboarding-provider-goose")).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
   await expectNoHomeSeenEntries(page);
 
   await page.getByTestId("onboarding-finish").click();
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
   await expectHomeSeenCount(page, 2);
 });
 
@@ -172,7 +247,7 @@ test("existing relay profile auto-skips onboarding without localStorage completi
   await page.goto("/");
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
 });
 
 test("finishing onboarding auto-joins the #general channel for a new member", async ({
@@ -186,7 +261,7 @@ test("finishing onboarding auto-joins the #general channel for a new member", as
   await continueToSetupPage(page);
   await page.getByTestId("onboarding-finish").click();
 
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
   await expect(page.getByTestId("channel-general")).toBeVisible();
 });
 
@@ -197,7 +272,7 @@ test("page 2 falls back to Doctor guidance when ACP tools are not installed", as
   await installMockBridge(
     page,
     {
-      acpProvidersCatalog: [],
+      acpRuntimesCatalog: [],
     },
     { skipOnboardingSeed: true },
   );
@@ -250,5 +325,5 @@ test("failed first profile saves can be skipped for the current session", async 
   await page.getByTestId("onboarding-skip").click();
 
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
 });

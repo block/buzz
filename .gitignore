@@ -2,6 +2,9 @@
 /target/
 /dist/
 
+# lefthook-generated hook scripts (machine-specific)
+.hooks/
+
 # Environment files (may contain secrets)
 .env
 .env.local
@@ -26,6 +29,7 @@ Thumbs.db
 playwright-report/
 test-results/
 blob-report/
+.playwright-mcp/
 
 # Node modules (pnpm workspace hoists to root)
 node_modules/

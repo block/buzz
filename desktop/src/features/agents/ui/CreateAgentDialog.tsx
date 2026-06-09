@@ -2,8 +2,8 @@ import { AlertTriangle, ChevronDown } from "lucide-react";
 import * as React from "react";
 
 import {
-  useAcpProvidersQuery,
-  useAvailableAcpProviders,
+  useAcpRuntimesQuery,
+  useAvailableAcpRuntimes,
   useBackendProvidersQuery,
   useCreateManagedAgentMutation,
   useManagedAgentPrereqsQuery,
@@ -26,7 +26,7 @@ import {
 import {
   CreateAgentBasicsFields,
   CreateAgentOptionToggles,
-  CreateAgentRuntimeProviderField,
+  CreateAgentRuntimeField,
   CreateAgentRuntimeFields,
 } from "./CreateAgentDialogSections";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
@@ -35,7 +35,10 @@ import {
   ProviderConfigFields,
 } from "./ProviderConfigFields";
 import { CreateAgentRespondToField } from "./RespondToField";
-import { useLastRuntimeProvider } from "@/features/agents/lib/useLastRuntimeProvider";
+import { RelayMeshAgentSection } from "@/features/mesh-compute/ui/RelayMeshAgentSection";
+import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
+import type { MeshServeTarget } from "@/shared/api/tauriMesh";
+import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 
 // ── Dialog ────────────────────────────────────────────────────────────────────
 
@@ -49,14 +52,14 @@ export function CreateAgentDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const createMutation = useCreateManagedAgentMutation();
-  const providersQuery = useAvailableAcpProviders();
-  const allProvidersQuery = useAcpProvidersQuery();
+  const providersQuery = useAvailableAcpRuntimes();
+  const allProvidersQuery = useAcpRuntimesQuery();
   const backendProvidersQuery = useBackendProvidersQuery();
-  const { lastProviderId, setLastProvider } = useLastRuntimeProvider();
+  const { lastRuntimeId, setLastRuntime } = useLastRuntime();
   const [acpCommand, setAcpCommand] = React.useState("sprout-acp");
   const [agentCommand, setAgentCommand] = React.useState("goose");
   const [agentArgs, setAgentArgs] = React.useState("acp");
-  const [mcpCommand, setMcpCommand] = React.useState("sprout-mcp-server");
+  const [mcpCommand, setMcpCommand] = React.useState("");
   const [mcpToolsets, setMcpToolsets] = React.useState("");
   const prereqsQuery = useManagedAgentPrereqsQuery(acpCommand, mcpCommand);
   const [name, setName] = React.useState("");
@@ -64,10 +67,10 @@ export function CreateAgentDialog({
   const [spawnAfterCreate, setSpawnAfterCreate] = React.useState(true);
   const [startOnAppLaunch, setStartOnAppLaunch] = React.useState(true);
   const [turnTimeoutSeconds, setTurnTimeoutSeconds] = React.useState("320");
-  const [parallelism, setParallelism] = React.useState("3");
+  const [parallelism, setParallelism] = React.useState("24");
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
-  const [selectedProviderId, setSelectedProviderId] =
+  const [selectedRuntimeId, setSelectedRuntimeId] =
     React.useState<string>("custom");
   const [hasSyncedProviderSelection, setHasSyncedProviderSelection] =
     React.useState(false);
@@ -86,23 +89,43 @@ export function CreateAgentDialog({
     React.useState<BackendProviderProbeResult | null>(null);
   const [probeError, setProbeError] = React.useState<string | null>(null);
 
-  const providers = providersQuery.data ?? [];
+  // ── Relay-mesh flow state ──────────────────────────────────────────────────
+  // When `useMesh` is on, the agent runs sprout-agent against a member's
+  // shared compute. The ACP runtime + backend selectors are hidden; runtime
+  // fields are driven by `mesh_agent_preset(meshModelId)` and the submit
+  // input carries `model: meshModelId`.
+  const [useMesh, setUseMesh] = React.useState(false);
+  const [meshModelId, setMeshModelId] = React.useState("");
+  const [meshTarget, setMeshTarget] = React.useState<MeshServeTarget | null>(
+    null,
+  );
+  const [meshClientError, setMeshClientError] = React.useState<string | null>(
+    null,
+  );
+  // True while the relay-mesh client preflight (connect-request + dial) runs
+  // inside handleSubmit. That await can take tens of seconds and happens
+  // before createMutation fires, so isPending alone leaves the button live.
+  const [meshPreparing, setMeshPreparing] = React.useState(false);
+
+  const runtimes = providersQuery.data ?? [];
   const allProviders = allProvidersQuery.data ?? [];
   const unavailableCount = allProviders.filter(
     (p) => p.availability !== "available",
   ).length;
   const backendProviders = backendProvidersQuery.data ?? [];
   const prereqs = prereqsQuery.data ?? null;
-  const selectedProvider = React.useMemo(
-    () =>
-      providers.find((provider) => provider.id === selectedProviderId) ?? null,
-    [providers, selectedProviderId],
+  const selectedRuntime = React.useMemo(
+    () => runtimes.find((runtime) => runtime.id === selectedRuntimeId) ?? null,
+    [runtimes, selectedRuntimeId],
   );
   const selectedBackendProvider = React.useMemo(
     () => backendProviders.find((p) => p.id === runOn) ?? null,
     [backendProviders, runOn],
   );
-  const isProviderMode = runOn !== "local";
+  // Relay mesh always runs in local mode (sprout-agent + OpenAI-compat env);
+  // when on, it suppresses the backend "Run on" branch even if a stale
+  // `runOn` value remains. The relay-mesh path is its own thing.
+  const isProviderMode = !useMesh && runOn !== "local";
 
   const isSpawnSupported =
     prereqs?.acp.available === true && prereqs?.mcp.available === true;
@@ -115,28 +138,28 @@ export function CreateAgentDialog({
       return;
     }
 
-    // Prefer last-used provider from localStorage
-    const remembered = lastProviderId
-      ? providers.find((provider) => provider.id === lastProviderId)
+    // Prefer last-used runtime from localStorage
+    const remembered = lastRuntimeId
+      ? runtimes.find((runtime) => runtime.id === lastRuntimeId)
       : null;
     if (remembered) {
-      setSelectedProviderId(remembered.id);
+      setSelectedRuntimeId(remembered.id);
       setAgentCommand(remembered.command);
       setAgentArgs(remembered.defaultArgs.join(","));
-      setMcpCommand(remembered.mcpCommand ?? "sprout-mcp-server");
+      setMcpCommand(remembered.mcpCommand ?? "");
     } else {
       const matchingProvider =
-        providers.find((provider) => provider.command === agentCommand) ?? null;
+        runtimes.find((runtime) => runtime.command === agentCommand) ?? null;
       if (matchingProvider) {
-        setSelectedProviderId(matchingProvider.id);
+        setSelectedRuntimeId(matchingProvider.id);
       }
     }
     setHasSyncedProviderSelection(true);
   }, [
     agentCommand,
     hasSyncedProviderSelection,
-    lastProviderId,
-    providers,
+    lastRuntimeId,
+    runtimes,
     providersQuery.isLoading,
   ]);
 
@@ -215,19 +238,22 @@ export function CreateAgentDialog({
     setAcpCommand("sprout-acp");
     setAgentCommand("goose");
     setAgentArgs("acp");
-    setMcpCommand("sprout-mcp-server");
+    setMcpCommand("");
     setMcpToolsets("");
     setTurnTimeoutSeconds("320");
-    setParallelism("3");
+    setParallelism("24");
     setSystemPrompt("");
     setEnvVars({});
-    setSelectedProviderId("custom");
+    setSelectedRuntimeId("custom");
     setHasSyncedProviderSelection(false);
     setShowAdvanced(false);
     setRunOn("local");
     setProviderConfig({});
     setProbedProvider(null);
     setProbeError(null);
+    setUseMesh(false);
+    setMeshModelId("");
+    setMeshClientError(null);
     setRespondTo("owner-only");
     setRespondToAllowlist([]);
     createMutation.reset();
@@ -242,24 +268,24 @@ export function CreateAgentDialog({
   }
 
   function handleProviderChange(nextProviderId: string) {
-    setSelectedProviderId(nextProviderId);
+    setSelectedRuntimeId(nextProviderId);
 
     if (nextProviderId === "custom") {
       setShowAdvanced(true);
       return;
     }
 
-    const provider = providers.find(
+    const provider = runtimes.find(
       (candidate) => candidate.id === nextProviderId,
     );
     if (!provider) {
       return;
     }
 
-    setLastProvider(nextProviderId);
+    setLastRuntime(nextProviderId);
     setAgentCommand(provider.command);
     setAgentArgs(provider.defaultArgs.join(","));
-    setMcpCommand(provider.mcpCommand ?? "sprout-mcp-server");
+    setMcpCommand(provider.mcpCommand ?? "");
   }
 
   function handleRunOnChange(value: string) {
@@ -298,11 +324,35 @@ export function CreateAgentDialog({
     // fields and config schema are only known after a successful probe.
     !(isProviderMode && !probedProvider) &&
     providerConfigComplete &&
+    // Relay-mesh mode requires a concrete serve target, not just a model name.
+    !(useMesh && (meshModelId.trim().length === 0 || meshTarget == null)) &&
     respondToValid &&
+    !meshPreparing &&
     !createMutation.isPending;
 
   async function handleSubmit() {
+    setMeshClientError(null);
     try {
+      if (useMesh) {
+        try {
+          if (!meshTarget) {
+            setMeshClientError(
+              "Select a relay mesh serve target before creating the agent.",
+            );
+            return;
+          }
+          setMeshPreparing(true);
+          try {
+            await meshPrepareRelayMeshClient(meshModelId.trim(), meshTarget);
+          } finally {
+            setMeshPreparing(false);
+          }
+        } catch (err) {
+          setMeshClientError(err instanceof Error ? err.message : String(err));
+          return;
+        }
+      }
+
       // Only send the allowlist when the mode is actually "allowlist".
       // Other modes ignore it server-side, but keeping the wire clean makes
       // the agent record easier to inspect.
@@ -359,8 +409,12 @@ export function CreateAgentDialog({
                 : undefined,
             systemPrompt: systemPrompt.trim() || undefined,
             envVars,
+            model: useMesh ? meshModelId.trim() || undefined : undefined,
+            relayMesh: useMesh ? { modelRef: meshModelId.trim() } : undefined,
             spawnAfterCreate,
-            startOnAppLaunch,
+            // Relay-mesh agents need a freshly selected serve target to start;
+            // do not auto-restore them later with only the saved model/env.
+            startOnAppLaunch: useMesh ? false : startOnAppLaunch,
             backend: { type: "local" },
             ...respondToFields,
           };
@@ -388,8 +442,49 @@ export function CreateAgentDialog({
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
             <CreateAgentBasicsFields name={name} onNameChange={setName} />
 
+            <RelayMeshAgentSection
+              current={{
+                acpCommand,
+                agentCommand,
+                agentArgs: agentArgs
+                  .split(",")
+                  .map((v) => v.trim())
+                  .filter((v) => v.length > 0),
+                mcpCommand,
+                model: meshModelId || null,
+                envVars,
+              }}
+              modelId={meshModelId}
+              targetEndpointAddr={meshTarget?.endpointAddr ?? ""}
+              onModelIdChange={(nextId, patch) => {
+                setMeshModelId(nextId);
+                if (patch == null) return;
+                // Fan out the preset into the existing setters so the rest
+                // of the dialog (and the submit branch) see normal local-mode
+                // values — relay-mesh is a curated local agent.
+                setAcpCommand(patch.acpCommand);
+                setAgentCommand(patch.agentCommand);
+                setAgentArgs(patch.agentArgs.join(","));
+                setMcpCommand(patch.mcpCommand);
+                setEnvVars(patch.envVars);
+              }}
+              onTargetChange={setMeshTarget}
+              onUseMeshChange={(next) => {
+                setUseMesh(next);
+                if (!next) {
+                  // Clearing the toggle: drop the model selection so the
+                  // submit guard doesn't fire on a stale value. The runtime
+                  // fields keep whatever the user had — they can re-pick
+                  // ACP runtime or stay with the preset values, their call.
+                  setMeshModelId("");
+                  setMeshTarget(null);
+                }
+              }}
+              useMesh={useMesh}
+            />
+
             {/* Run on selector — only shown when backend providers are discovered */}
-            {backendProviders.length > 0 ? (
+            {!useMesh && backendProviders.length > 0 ? (
               <div className="space-y-1.5">
                 <label className="text-sm font-medium" htmlFor="agent-run-on">
                   Run on
@@ -442,13 +537,13 @@ export function CreateAgentDialog({
             ) : null}
 
             {/* Local mode: show the ACP runtime selector */}
-            {!isProviderMode ? (
-              <CreateAgentRuntimeProviderField
-                onProviderChange={handleProviderChange}
-                providers={providers}
-                providersLoading={providersQuery.isLoading}
-                selectedProvider={selectedProvider}
-                selectedProviderId={selectedProviderId}
+            {!isProviderMode && !useMesh ? (
+              <CreateAgentRuntimeField
+                onRuntimeChange={handleProviderChange}
+                runtimes={runtimes}
+                runtimesLoading={providersQuery.isLoading}
+                selectedRuntime={selectedRuntime}
+                selectedRuntimeId={selectedRuntimeId}
                 unavailableCount={unavailableCount}
               />
             ) : null}
@@ -520,7 +615,7 @@ export function CreateAgentDialog({
                       onTurnTimeoutChange={setTurnTimeoutSeconds}
                       parallelism={parallelism}
                       relayUrl={relayUrl}
-                      selectedProviderId={selectedProviderId}
+                      selectedRuntimeId={selectedRuntimeId}
                       systemPrompt={systemPrompt}
                       turnTimeoutSeconds={turnTimeoutSeconds}
                     />
@@ -553,6 +648,12 @@ export function CreateAgentDialog({
               value={envVars}
             />
 
+            {meshClientError ? (
+              <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                Mesh client failed to start: {meshClientError}
+              </p>
+            ) : null}
+
             {createMutation.error instanceof Error ? (
               <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
                 {createMutation.error.message}
@@ -576,7 +677,11 @@ export function CreateAgentDialog({
               size="sm"
               type="button"
             >
-              {createMutation.isPending ? "Creating..." : "Create agent"}
+              {meshPreparing
+                ? "Connecting to mesh..."
+                : createMutation.isPending
+                  ? "Creating..."
+                  : "Create agent"}
             </Button>
           </div>
         </div>

@@ -100,7 +100,7 @@ export function AgentsView() {
               selectedLogAgentPubkey={agents.logAgentPubkey}
               // Persona props
               canChooseCatalog={personas.catalogPersonas.length > 0}
-              personas={personas.personasQuery.data ?? []}
+              personas={personas.libraryPersonas}
               personasError={
                 personas.personasQuery.error instanceof Error
                   ? personas.personasQuery.error
@@ -212,8 +212,8 @@ export function AgentsView() {
           personas.createPersonaMutation.isPending ||
           personas.updatePersonaMutation.isPending
         }
-        providers={personas.acpProvidersQuery.data ?? []}
-        providersLoading={personas.acpProvidersQuery.isLoading}
+        runtimes={personas.acpRuntimesQuery.data ?? []}
+        runtimesLoading={personas.acpRuntimesQuery.isLoading}
         onImportUpdateFile={
           personas.personaImportActions.handleEditDialogImportUpdateFile
         }

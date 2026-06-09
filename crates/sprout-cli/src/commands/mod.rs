@@ -1,5 +1,6 @@
 pub mod channels;
 pub mod dms;
+pub mod emoji;
 pub mod feed;
 pub mod mem;
 pub mod messages;

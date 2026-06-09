@@ -116,6 +116,7 @@ function upsertMessage(
   text: string,
   timestamp: string,
   channelId: string | null,
+  authorPubkey: string | null = null,
 ) {
   const currentKey = d.activeMessageKey.get(id);
 
@@ -126,6 +127,7 @@ function upsertMessage(
         ...existing,
         text: existing.text + text,
         channelId,
+        authorPubkey: authorPubkey ?? existing.authorPubkey,
       });
       return;
     }
@@ -141,6 +143,7 @@ function upsertMessage(
     text,
     timestamp,
     channelId,
+    authorPubkey,
   });
   d.activeMessageKey = new Map(d.activeMessageKey);
   d.activeMessageKey.set(id, newKey);
@@ -318,6 +321,7 @@ export function processTranscriptEvent(
             parsedPrompt.userText,
             event.timestamp,
             channelId,
+            parsedPrompt.userPubkey,
           );
         }
         if (parsedPrompt.sections.length > 0) {

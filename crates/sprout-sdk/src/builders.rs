@@ -7,8 +7,8 @@ use nostr::{EventBuilder, Kind, Tag};
 use sprout_core::{
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
-        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_GIT_REPO_ANNOUNCEMENT, KIND_PRESENCE_UPDATE,
-        KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_REPO_ANNOUNCEMENT,
+        KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -17,7 +17,9 @@ use sprout_core::{
 };
 use uuid::Uuid;
 
-use crate::{ChannelKind, DiffMeta, MemberRole, SdkError, ThreadRef, Visibility, VoteDirection};
+use crate::{
+    ChannelKind, CustomEmoji, DiffMeta, MemberRole, SdkError, ThreadRef, Visibility, VoteDirection,
+};
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -53,6 +55,55 @@ fn check_pubkey_hex(s: &str, field: &str) -> Result<String, SdkError> {
         )));
     }
     Ok(s.to_ascii_lowercase())
+}
+
+/// Validate and normalize a NIP-30 custom emoji shortcode.
+///
+/// Shortcodes are case-insensitive in Sprout's relay-global set; lowercase
+/// normalization prevents `party_parrot` and `Party_Parrot` from colliding.
+pub fn normalize_custom_emoji_shortcode(shortcode: &str) -> Result<String, SdkError> {
+    let trimmed = shortcode.trim().trim_matches(':');
+    if trimmed.is_empty() {
+        return Err(SdkError::InvalidInput(
+            "emoji shortcode must not be empty".into(),
+        ));
+    }
+    if trimmed.len() > 64 {
+        return Err(SdkError::InvalidInput(format!(
+            "emoji shortcode exceeds 64 bytes (got {})",
+            trimmed.len()
+        )));
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(SdkError::InvalidInput(
+            "emoji shortcode may only contain ASCII letters, digits, hyphens, and underscores"
+                .into(),
+        ));
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+fn check_custom_emoji_url(url: &str) -> Result<(), SdkError> {
+    if url.is_empty() {
+        return Err(SdkError::InvalidInput(
+            "emoji image URL must not be empty".into(),
+        ));
+    }
+    if url.len() > 2048 {
+        return Err(SdkError::InvalidInput(format!(
+            "emoji image URL exceeds 2048 bytes (got {})",
+            url.len()
+        )));
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(SdkError::InvalidInput(
+            "emoji image URL must start with http:// or https://".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Emit NIP-10 e-tags for a `ThreadRef`.
@@ -341,12 +392,62 @@ pub fn build_reaction(
     Ok(EventBuilder::new(Kind::Custom(7), emoji).tags(tags))
 }
 
+/// Build a NIP-25 reaction event using a NIP-30 custom emoji.
+///
+/// The reaction content is `:shortcode:` and the event carries exactly one
+/// `["emoji", shortcode, url]` tag, matching NIP-25's custom emoji reaction
+/// guidance.
+pub fn build_custom_emoji_reaction(
+    target_event_id: nostr::EventId,
+    shortcode: &str,
+    url: &str,
+) -> Result<EventBuilder, SdkError> {
+    let shortcode = normalize_custom_emoji_shortcode(shortcode)?;
+    check_custom_emoji_url(url)?;
+    let content = format!(":{shortcode}:");
+    let tags = vec![
+        tag(&["e", &target_event_id.to_hex()])?,
+        tag(&["emoji", &shortcode, url])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(7), content).tags(tags))
+}
+
 // ── Builder 10: build_remove_reaction ────────────────────────────────────────
 
 /// Build a deletion event targeting a reaction (kind 5).
 pub fn build_remove_reaction(reaction_event_id: nostr::EventId) -> Result<EventBuilder, SdkError> {
     let tags = vec![tag(&["e", &reaction_event_id.to_hex()])?];
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
+}
+
+// ── Builder: per-user custom emoji set ───────────────────────────────────────
+
+/// d-tag for a member's own custom emoji set. Each member publishes one
+/// user-signed kind:30030 under this d-tag; the workspace palette is the
+/// client-side union of every member's set.
+pub const CUSTOM_EMOJI_SET_D_TAG: &str = "sprout:custom-emoji";
+
+/// Build a member's own custom emoji set event (kind:30030, NIP-30/NIP-51).
+///
+/// User-signed and parameterized-replaceable, keyed by `(pubkey, 30030,
+/// "sprout:custom-emoji")`. Replaces the caller's prior set. The workspace
+/// palette shown in clients is the union of every member's set, deduped by
+/// `(shortcode, url)` on read. Add/remove is read-own-set → mutate → rebuild.
+pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, SdkError> {
+    let mut seen = std::collections::HashSet::with_capacity(emojis.len());
+    let mut tags = Vec::with_capacity(emojis.len() + 1);
+    tags.push(tag(&["d", CUSTOM_EMOJI_SET_D_TAG])?);
+    for emoji in emojis {
+        let shortcode = normalize_custom_emoji_shortcode(&emoji.shortcode)?;
+        check_custom_emoji_url(&emoji.url)?;
+        if !seen.insert(shortcode.clone()) {
+            return Err(SdkError::InvalidInput(format!(
+                "duplicate emoji shortcode: {shortcode}"
+            )));
+        }
+        tags.push(tag(&["emoji", &shortcode, &emoji.url])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "").tags(tags))
 }
 
 // ── Builder 11: build_set_canvas ─────────────────────────────────────────────
@@ -1369,6 +1470,32 @@ mod tests {
         let eid = event_id();
         let max_emoji = "a".repeat(64);
         assert!(build_reaction(eid, &max_emoji).is_ok());
+    }
+
+    #[test]
+    fn custom_emoji_reaction_happy_path() {
+        let eid = event_id();
+        let ev = sign(
+            build_custom_emoji_reaction(eid, ":Party_Parrot:", "https://example.com/parrot.png")
+                .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 7);
+        assert_eq!(ev.content, ":party_parrot:");
+        assert!(has_tag(&ev, "emoji", "party_parrot"));
+    }
+
+    #[test]
+    fn custom_emoji_set_happy_path() {
+        let ev = sign(
+            build_custom_emoji_set(&[CustomEmoji {
+                shortcode: "party".to_string(),
+                url: "https://example.com/party.png".to_string(),
+            }])
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 30030);
+        assert!(has_tag(&ev, "d", CUSTOM_EMOJI_SET_D_TAG));
+        assert!(has_tag(&ev, "emoji", "party"));
     }
 
     // ── build_remove_reaction ────────────────────────────────────────────────

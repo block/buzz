@@ -19,12 +19,13 @@ pub struct PersonaRecord {
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub system_prompt: String,
-    /// Preferred ACP provider ID (e.g. "goose", "claude", "codex").
-    /// When deploying an agent from this persona, this provider is pre-selected.
+    /// Preferred ACP runtime ID (e.g., 'goose', 'claude', 'codex'). Determines which agent binary
+    /// Sprout spawns. When deploying from this persona, this runtime is pre-selected in the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
-    /// Preferred model ID (e.g. "gpt-4o", "claude-sonnet-4-20250514").
-    /// Passed to the agent at creation time when deploying from this persona.
+    pub runtime: Option<String>,
+    /// Opaque, harness-specific model identifier string. Format depends on the runtime and its LLM
+    /// provider (e.g., 'goose-claude-4-6-opus' for Databricks, 'claude-opus-4-7' for Anthropic
+    /// direct). Sprout stores and passes through without interpretation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Pool of short, thematic names for bot instances created from this persona.
@@ -44,9 +45,8 @@ pub struct PersonaRecord {
     /// Validated: `[a-zA-Z0-9_-]+`, max 64 chars (safe for env vars and paths).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_pack_persona_slug: Option<String>,
-    /// Environment variables injected when launching agents created from this
-    /// persona. Layered as: desktop parent env < persona `env_vars` <
-    /// individual agent `env_vars` (last wins on collision).
+    /// Harness-level configuration passed to the agent subprocess as environment variables.
+    /// Opaque to Sprout — keys and values are runtime-specific.
     ///
     /// Stored as a BTreeMap for deterministic on-disk ordering.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -141,6 +141,36 @@ pub struct ManagedAgentRecord {
     /// Preserved across mode toggles so users don't lose state.
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
+    /// inference through Sprout's relay-mesh local endpoint; the `model_ref` is
+    /// the served model id to route to. `None` is a normal agent.
+    ///
+    /// This is the source of truth for "is this a mesh agent + which model" —
+    /// replacing the old practice of sniffing it back out of `env_vars`
+    /// (`relay_mesh_config`). Spawn-time env vars are *derived from* this, not
+    /// the other way around. `#[serde(default)]` so pre-existing saved records
+    /// deserialize as `None` and are resolved via the env-var fallback until
+    /// they are rewritten with this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_mesh: Option<RelayMeshConfig>,
+}
+
+/// Typed relay-mesh configuration carried on a [`ManagedAgentRecord`].
+///
+/// Feature-independent on purpose: the field is always present in the record
+/// schema so saved agents round-trip identically whether or not the `mesh-llm`
+/// feature is compiled in.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayMeshConfig {
+    /// The served model id this agent routes to (e.g. "Qwen3").
+    ///
+    /// `alias` because this struct crosses two boundaries with different
+    /// casing conventions: the TS create request sends camelCase
+    /// (`relayMesh: { modelRef }` — `rename_all` on the request does not
+    /// recurse into nested structs), while persisted records use snake_case.
+    /// Serialization stays `model_ref` so saved records are stable.
+    #[serde(alias = "modelRef")]
+    pub model_ref: String,
 }
 
 #[derive(Debug)]
@@ -219,6 +249,8 @@ pub struct CreateManagedAgentRequest {
     /// before being written to the record.
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+    #[serde(default)]
+    pub relay_mesh: Option<RelayMeshConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -236,7 +268,7 @@ pub struct CreatePersonaRequest {
     pub avatar_url: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
-    pub provider: Option<String>,
+    pub runtime: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -254,7 +286,7 @@ pub struct UpdatePersonaRequest {
     pub avatar_url: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
-    pub provider: Option<String>,
+    pub runtime: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -285,7 +317,7 @@ pub enum AcpAvailabilityStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct AcpProviderCatalogEntry {
+pub struct AcpRuntimeCatalogEntry {
     pub id: String,
     pub label: String,
     pub avatar_url: String,
@@ -450,12 +482,11 @@ pub struct UpdateTeamRequest {
 
 pub const DEFAULT_ACP_COMMAND: &str = "sprout-acp";
 pub const DEFAULT_AGENT_COMMAND: &str = "goose";
-pub const DEFAULT_MCP_COMMAND: &str = "sprout-mcp-server";
 /// ~5 min (320s) — matches the CLI harness default (SPROUT_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
 /// 1 hour — absolute wall-clock safety cap per turn.
 pub const DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS: u64 = 3600;
-pub const DEFAULT_AGENT_PARALLELISM: u32 = 3;
+pub const DEFAULT_AGENT_PARALLELISM: u32 = 24;
 
 fn default_agent_parallelism() -> u32 {
     DEFAULT_AGENT_PARALLELISM
@@ -551,7 +582,7 @@ mod tests {
 
         assert!(record.is_active);
         assert!(!record.is_builtin);
-        assert_eq!(record.provider, None);
+        assert_eq!(record.runtime, None);
         assert_eq!(record.model, None);
         assert!(record.name_pool.is_empty());
     }
@@ -569,7 +600,7 @@ mod tests {
                 "acp_command": "sprout-acp",
                 "agent_command": "goose",
                 "agent_args": [],
-                "mcp_command": "sprout-mcp-server",
+                "mcp_command": "",
                 "turn_timeout_seconds": 320,
                 "system_prompt": null,
                 "created_at": "2026-01-01T00:00:00Z",
@@ -598,7 +629,7 @@ mod tests {
             "acp_command": "sprout-acp",
             "agent_command": "goose",
             "agent_args": [],
-            "mcp_command": "sprout-mcp-server",
+            "mcp_command": "",
             "turn_timeout_seconds": 320,
             "system_prompt": null,
             "created_at": "2026-01-01T00:00:00Z",
@@ -676,7 +707,7 @@ mod tests {
                 "acp_command": "sprout-acp",
                 "agent_command": "goose",
                 "agent_args": [],
-                "mcp_command": "sprout-mcp-server",
+                "mcp_command": "",
                 "turn_timeout_seconds": 320,
                 "system_prompt": null,
                 "created_at": "2026-01-01T00:00:00Z",
@@ -696,7 +727,7 @@ mod tests {
     fn validate_respond_to_allowlist_accepts_valid_hex_and_lowercases() {
         let upper = "A".repeat(64);
         let lower = "a".repeat(64);
-        let result = validate_respond_to_allowlist(&[upper.clone()]).unwrap();
+        let result = validate_respond_to_allowlist(std::slice::from_ref(&upper)).unwrap();
         assert_eq!(result, vec![lower.clone()]);
     }
 
@@ -740,5 +771,43 @@ mod tests {
         // (Allowlist mode requires ≥1 entry) is the caller's job.
         let result = validate_respond_to_allowlist(&[]).unwrap();
         assert!(result.is_empty());
+    }
+
+    use super::{CreateManagedAgentRequest, RelayMeshConfig};
+
+    /// Wire-shape test: the create request arrives from TS as camelCase
+    /// (`relayMesh: { modelRef }`). `rename_all = "camelCase"` on
+    /// `CreateManagedAgentRequest` does NOT recurse into nested structs, so
+    /// `RelayMeshConfig` needs its own `alias = "modelRef"`. This test pins
+    /// the exact JSON the frontend sends; if the alias is dropped, creating
+    /// a relay-mesh agent fails to deserialize at the Tauri boundary.
+    #[test]
+    fn create_request_deserializes_camel_case_relay_mesh() {
+        let request: CreateManagedAgentRequest = serde_json::from_str(
+            r#"{
+                "name": "mesh-agent",
+                "relayMesh": { "modelRef": "Qwen3" }
+            }"#,
+        )
+        .expect("camelCase relayMesh payload from TS should deserialize");
+        assert_eq!(
+            request.relay_mesh,
+            Some(RelayMeshConfig {
+                model_ref: "Qwen3".to_string()
+            })
+        );
+    }
+
+    /// Persisted records use snake_case; the camelCase alias must not break
+    /// the stored-record round trip.
+    #[test]
+    fn relay_mesh_config_round_trips_snake_case() {
+        let config = RelayMeshConfig {
+            model_ref: "Qwen3".to_string(),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert_eq!(json, r#"{"model_ref":"Qwen3"}"#);
+        let back: RelayMeshConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, config);
     }
 }

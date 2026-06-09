@@ -1,7 +1,7 @@
 {
   "name": "sprout",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.3.14",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,6 +11,7 @@
     "lint": "biome lint .",
     "check": "biome check . && pnpm check:file-sizes",
     "format": "biome format --write .",
+    "test": "node --import ./test-loader.mjs --experimental-strip-types --test 'src/**/*.test.mjs'",
     "preview": "vite preview",
     "tauri": "tauri",
     "test:e2e": "pnpm build && playwright test",
@@ -20,6 +21,9 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
     "@emoji-mart/data": "^1.2.1",
     "@emoji-mart/react": "^1.1.1",
     "@radix-ui/react-alert-dialog": "^1.1.15",
@@ -71,13 +75,13 @@
   "devDependencies": {
     "@noble/hashes": "^2.0.1",
     "@playwright/test": "^1.58.2",
+    "@tailwindcss/postcss": "^4.3.0",
     "@tanstack/router-plugin": "^1.167.12",
     "@tanstack/virtual-file-routes": "^1.161.7",
     "@tauri-apps/cli": "~2.11",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^6.0.0",
-    "@tailwindcss/postcss": "^4.3.0",
     "nostr-tools": "^2.23.3",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.3.0",

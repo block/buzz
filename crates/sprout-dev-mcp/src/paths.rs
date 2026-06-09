@@ -48,7 +48,7 @@ mod tests {
         // Symlink targeting outside the dir should be rejected.
         #[cfg(unix)]
         {
-            let outside = std::env::temp_dir().join("sprout-mcp-paths-escape-target");
+            let outside = std::env::temp_dir().join("dev-mcp-paths-escape-target");
             let _ = fs::remove_file(&outside);
             fs::write(&outside, b"y").expect("write outside");
             let link = dir.path().join("link.txt");

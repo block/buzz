@@ -15,16 +15,18 @@ import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { SystemMessageRow } from "./SystemMessageRow";
 
 type TimelineMessageListProps = {
-  activeReplyTargetId?: string | null;
   channelId?: string | null;
   currentPubkey?: string;
+  followThreadById?: (rootId: string) => void;
   highlightedMessageId?: string | null;
+  isFollowingThreadById?: (rootId: string) => boolean;
   messageFooters?: Record<string, React.ReactNode>;
   messages: TimelineMessage[];
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
+  unfollowThreadById?: (rootId: string) => void;
   onToggleReaction?: (
     message: TimelineMessage,
     emoji: string,
@@ -42,10 +44,11 @@ type TimelineMessageListProps = {
 };
 
 export const TimelineMessageList = React.memo(function TimelineMessageList({
-  activeReplyTargetId = null,
   channelId,
   currentPubkey,
+  followThreadById,
   highlightedMessageId = null,
+  isFollowingThreadById,
   messageFooters,
   messages,
   onDelete,
@@ -58,6 +61,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   searchActiveMessageId = null,
   searchMatchingMessageIds,
   searchQuery,
+  unfollowThreadById,
 }: TimelineMessageListProps) {
   const entries = React.useMemo(
     () => buildMainTimelineEntries(messages),
@@ -104,15 +108,20 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         <div
           key={message.id}
           className={cn(
-            "relative flex flex-col gap-0",
+            "group/message relative -mx-1 flex flex-col gap-0 rounded-2xl px-1 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
             isHighlighted &&
               "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
           )}
         >
           <MessageRow
-            activeReplyTargetId={activeReplyTargetId}
             channelId={channelId}
             highlighted={false}
+            hoverBackground={false}
+            isFollowingThread={
+              isFollowingThreadById
+                ? isFollowingThreadById(message.id)
+                : undefined
+            }
             message={message}
             onDelete={
               onDelete && currentPubkey && message.pubkey === currentPubkey
@@ -124,9 +133,17 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
                 ? onEdit
                 : undefined
             }
+            onFollowThread={
+              followThreadById ? () => followThreadById(message.id) : undefined
+            }
             onMarkUnread={onMarkUnread}
             onToggleReaction={onToggleReaction}
             onReply={onReply}
+            onUnfollowThread={
+              unfollowThreadById
+                ? () => unfollowThreadById(message.id)
+                : undefined
+            }
             profiles={profiles}
           />
           <MessageThreadSummaryRow
@@ -146,7 +163,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       currentDayGroup?.elements.push(
         <div key={message.id} className="flex flex-col gap-1">
           <MessageRow
-            activeReplyTargetId={activeReplyTargetId}
             channelId={channelId}
             highlighted={message.id === highlightedMessageId || isSearchActive}
             message={message}
@@ -173,7 +189,10 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   }
 
   return dayGroups.map((group) => (
-    <section className="flex flex-col gap-2.5" key={group.key}>
+    <section
+      className="relative flex flex-col gap-2.5 before:absolute before:inset-x-0 before:top-[15px] before:h-px before:bg-border/35 before:content-['']"
+      key={group.key}
+    >
       <DayDivider label={group.label} />
       {group.elements}
     </section>

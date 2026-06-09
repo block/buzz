@@ -14,6 +14,8 @@ pub mod identity_archive;
 pub mod imeta;
 /// Transport-neutral event ingestion pipeline.
 pub mod ingest;
+/// Mesh hole-punch signaling: validate membership + emit paired call-me-now.
+pub mod mesh_signaling;
 /// NIP-43 relay membership admin command handler (kinds 9030–9032).
 pub mod relay_admin;
 /// REQ handler — subscribe, deliver historical events, then EOSE.

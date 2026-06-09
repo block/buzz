@@ -6,10 +6,14 @@
  * and text-splitting logic — this factory captures that once.
  */
 
-type NodeBuilder = (matchText: string) => {
+type Node = {
   // biome-ignore lint/suspicious/noExplicitAny: building mdast-compatible nodes
   [key: string]: any;
 };
+
+type NodeBuilderResult = Node | { node: Node; trailing?: string };
+
+type NodeBuilder = (matchText: string) => NodeBuilderResult;
 
 /**
  * Create a remark plugin that walks the tree, finds regex matches in text
@@ -29,7 +33,11 @@ export function createRemarkPrefixPlugin(
 
 // biome-ignore lint/suspicious/noExplicitAny: remark tree types are not available
 function walkChildren(node: any, pattern: RegExp, buildNode: NodeBuilder) {
-  if (!node?.children || !Array.isArray(node.children)) {
+  if (
+    !node?.children ||
+    !Array.isArray(node.children) ||
+    shouldSkipNode(node)
+  ) {
     return;
   }
 
@@ -50,6 +58,13 @@ function walkChildren(node: any, pattern: RegExp, buildNode: NodeBuilder) {
   }
 }
 
+// biome-ignore lint/suspicious/noExplicitAny: remark tree types are not available
+function shouldSkipNode(node: any): boolean {
+  return (
+    node.type === "link" || node.type === "code" || node.type === "inlineCode"
+  );
+}
+
 function splitByPattern(text: string, pattern: RegExp, buildNode: NodeBuilder) {
   // Reset lastIndex — the pattern is reused across text nodes with the `g` flag
   pattern.lastIndex = 0;
@@ -68,7 +83,11 @@ function splitByPattern(text: string, pattern: RegExp, buildNode: NodeBuilder) {
       parts.push({ type: "text", value: text.slice(lastIndex, match.index) });
     }
 
-    parts.push(buildNode(match[0]));
+    const result = normalizeBuildNodeResult(buildNode(match[0]));
+    parts.push(result.node);
+    if (result.trailing) {
+      parts.push({ type: "text", value: result.trailing });
+    }
 
     lastIndex = match.index + match[0].length;
   }
@@ -82,4 +101,21 @@ function splitByPattern(text: string, pattern: RegExp, buildNode: NodeBuilder) {
   }
 
   return parts;
+}
+
+function normalizeBuildNodeResult(result: NodeBuilderResult): {
+  node: Node;
+  trailing?: string;
+} {
+  if (isBuildNodeWithTrailing(result)) {
+    return result;
+  }
+
+  return { node: result };
+}
+
+function isBuildNodeWithTrailing(
+  result: NodeBuilderResult,
+): result is { node: Node; trailing?: string } {
+  return "node" in result;
 }

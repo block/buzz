@@ -5,6 +5,7 @@ import {
   truncatePubkey,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import {
   collectHomeAlertItems,
@@ -68,6 +69,7 @@ export function useFeedDesktopNotifications(
   settings: NotificationSettings,
   setDesktopEnabled: (enabled: boolean) => Promise<boolean>,
   profiles?: UserProfileLookup,
+  mutedChannelIds?: ReadonlySet<string>,
 ) {
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
   const seenItemIdsRef = React.useRef<Set<string>>(
@@ -99,6 +101,7 @@ export function useFeedDesktopNotifications(
 
   const deliverFeedNotification = React.useEffectEvent(
     async (item: FeedItem, senderName?: string) => {
+      const threadRootId = getThreadReference(item.tags).rootId ?? null;
       const didSend = await sendDesktopNotification({
         body: notificationBody(item),
         target: {
@@ -109,6 +112,7 @@ export function useFeedDesktopNotifications(
           eventId: item.id,
           kind: item.kind,
           pubkey: item.pubkey,
+          threadRootId,
         },
         title: notificationTitle(item, senderName),
       });
@@ -147,7 +151,14 @@ export function useFeedDesktopNotifications(
       ? eligibleFeedNotificationItems(feed, {
           mentions: settings.mentions,
           needsAction: settings.needsAction,
-        }).filter((item) => !nextSeenItemIds.has(item.id))
+        })
+          .filter((item) => !nextSeenItemIds.has(item.id))
+          .filter(
+            (item) =>
+              !item.channelId ||
+              !mutedChannelIds?.has(item.channelId) ||
+              item.category === "mention",
+          )
       : [];
 
     for (const item of currentFeedItems) {
@@ -189,6 +200,7 @@ export function useFeedDesktopNotifications(
     }
   }, [
     feed,
+    mutedChannelIds,
     normalizedPubkey,
     profiles,
     settings.desktopEnabled,

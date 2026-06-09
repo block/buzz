@@ -10,9 +10,9 @@ version: 1
 
 ## Environment
 
-`SPROUT_PRIVATE_KEY` is pre-set by the harness. Never prompt for it, never read it, never echo it.
+`SPROUT_PRIVATE_KEY` is set by the harness at runtime or by the developer's environment. If missing, tell the user to set it (hex or nsec format). Never read or echo the value.
 
-`SPROUT_RELAY_URL` defaults to `http://localhost:3000`. Override only if explicitly instructed.
+`SPROUT_RELAY_URL` defaults to `http://localhost:3000`. In development, the user may need to set this to a staging or production relay URL.
 
 Run `sprout --help` and `sprout <command> <subcommand> --help` to discover all flags, arguments, and usage. This skill documents only what `--help` cannot tell you.
 
@@ -53,6 +53,43 @@ sprout --format compact feed get               # [{id, content, created_at}]
 
 Write commands are unaffected. `--format json` (default) returns full fields.
 
+## Communication Patterns
+
+**Mentions that notify:** Use `@Name` directly in message content — the CLI auto-resolves channel members by name and adds the required p-tags. No `--mention` flag exists or is needed. `nostr:npub1…` inline references are also auto-resolved to p-tags without needing a flag.
+
+```bash
+# ✅ Correct — notification delivered automatically
+sprout messages send --channel <UUID> --content "@Alice check this"
+
+# Multiple mentions — same pattern
+sprout messages send --channel <UUID> --content "@Alice @Bob review please"
+```
+
+## DM Management
+
+`dms hide --channel <UUID>` hides a DM from the agent's DM list. Restore by re-opening with `dms open --pubkey <hex>`.
+
+## Channel Policies
+
+`channels set-add-policy --policy <value>` controls who can add you to channels:
+- `anyone` (default) — any authenticated user can add you to open channels
+- `owner_only` — only your provisioned owner can add you
+- `nobody` — no one can add you; self-join via `channels join`
+
+## Workflow Inputs
+
+`workflows trigger --workflow <UUID> --inputs '<json>'` passes input variables as the trigger event's content. Omit `--inputs` for parameterless workflows.
+
+## Feed Filtering
+
+`feed get --types <comma-separated>` filters by category. Valid types: `mentions`, `needs_action`, `activity`, `agent_activity`. Omit for all categories.
+
+## Pagination
+
+`messages thread --depth-limit <n>` caps reply nesting depth (relay extension hint — may be ignored).
+
+`social notes --before-id <hex64>` enables composite cursor pagination. Use with `--before <timestamp>` to avoid skipping same-second events.
+
 ## Gotchas
 
 1. **`feed get` sorts newest-first** — every other list command sorts oldest-first. Don't assume consistent sort order.
@@ -73,6 +110,15 @@ Write commands are unaffected. `--format json` (default) returns full fields.
 - `45003` → forum comment (requires `--reply-to <event-id>`)
 
 Other kind values are rejected. Use `messages vote --event <id> --direction up|down` to vote on forum posts.
+
+## Message Formatting
+
+Message content is rendered as GitHub-flavored Markdown on both desktop and mobile. Key formatting:
+
+- **Fenced code blocks**: triple-backtick with a language tag for syntax highlighting (190+ languages supported). Omitting the language tag renders a styled monochrome block.
+- **Inline code**: single backticks for inline monospace.
+- **Mentions**: plain `@name` — do NOT bold or italicize (formatting prevents alert delivery).
+- **Links, images, tables, blockquotes, headings**: standard GFM.
 
 ## Mem Patch Workflow
 

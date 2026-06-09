@@ -10,6 +10,7 @@ import { cn } from "@/shared/lib/cn";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
+import { customEmojiFromTags } from "@/shared/api/customEmoji";
 import {
   resolveMentionNames,
   resolveMentionPubkeysByName,
@@ -27,25 +28,31 @@ const NESTED_REPLY_OFFSET_PX = 28;
 
 export const MessageRow = React.memo(
   function MessageRow({
-    activeReplyTargetId = null,
+    channelId = null,
     highlighted = false,
+    hoverBackground = true,
+    isFollowingThread,
     layoutVariant = "default",
     message,
     onDelete,
     onEdit,
+    onFollowThread,
     onMarkUnread,
     onToggleReaction,
     onReply,
+    onUnfollowThread,
     profiles,
     searchQuery,
   }: {
-    activeReplyTargetId?: string | null;
     channelId?: string | null;
     highlighted?: boolean;
+    hoverBackground?: boolean;
+    isFollowingThread?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
     onDelete?: (message: TimelineMessage) => void;
     onEdit?: (message: TimelineMessage) => void;
+    onFollowThread?: (message: TimelineMessage) => void;
     onMarkUnread?: (message: TimelineMessage) => void;
     onToggleReaction?: (
       message: TimelineMessage,
@@ -53,10 +60,14 @@ export const MessageRow = React.memo(
       remove: boolean,
     ) => Promise<void>;
     onReply?: (message: TimelineMessage) => void;
+    onUnfollowThread?: (message: TimelineMessage) => void;
     profiles?: UserProfileLookup;
     searchQuery?: string;
   }) {
     const [expandedDiffId, setExpandedDiffId] = React.useState<string | null>(
+      null,
+    );
+    const [badgeBurstEmoji, setBadgeBurstEmoji] = React.useState<string | null>(
       null,
     );
     const {
@@ -77,6 +88,11 @@ export const MessageRow = React.memo(
 
     const imetaByUrl = React.useMemo(
       () => (message.tags ? parseImetaTags(message.tags) : undefined),
+      [message.tags],
+    );
+
+    const customEmoji = React.useMemo(
+      () => (message.tags ? customEmojiFromTags(message.tags) : undefined),
       [message.tags],
     );
 
@@ -135,8 +151,9 @@ export const MessageRow = React.memo(
           return (
             <Markdown
               channelNames={channelNames}
-              className="max-w-full"
+              className="max-w-full text-[15px] leading-6"
               content={message.body}
+              customEmoji={customEmoji}
               imetaByUrl={imetaByUrl}
               mentionNames={mentionNames}
               mentionPubkeysByName={mentionPubkeysByName}
@@ -186,11 +203,11 @@ export const MessageRow = React.memo(
     );
 
     const authorNode = message.pubkey ? (
-      <span className="truncate text-sm font-semibold leading-none tracking-tight hover:underline">
+      <span className="truncate text-[15px] font-semibold leading-none tracking-tight hover:underline">
         {message.author}
       </span>
     ) : (
-      <h3 className="truncate text-sm font-semibold leading-none tracking-tight">
+      <h3 className="truncate text-[15px] font-semibold leading-none tracking-tight">
         {message.author}
       </h3>
     );
@@ -198,17 +215,22 @@ export const MessageRow = React.memo(
     const actionBarNode = (
       <div className="absolute right-2 top-1 z-10">
         <MessageActionBar
-          activeReplyTargetId={activeReplyTargetId}
+          channelId={channelId}
+          isFollowingThread={isFollowingThread}
           message={message}
           onDelete={onDelete}
           onEdit={onEdit}
+          onFollowThread={onFollowThread}
           onMarkUnread={onMarkUnread}
+          onReactionBadgeBurstRequest={
+            reactionPending ? undefined : setBadgeBurstEmoji
+          }
           onReactionSelect={
             canToggleReactions ? handleReactionSelect : undefined
           }
           onReply={onReply}
+          onUnfollowThread={onUnfollowThread}
           reactionErrorMessage={reactionErrorMessage}
-          reactionPending={reactionPending}
           reactions={reactions}
         />
       </div>
@@ -241,6 +263,12 @@ export const MessageRow = React.memo(
           reactions={reactions}
           canToggle={canToggleReactions}
           pending={reactionPending}
+          burstEmojiOnRender={badgeBurstEmoji}
+          onBurstEmojiRendered={(emoji) => {
+            setBadgeBurstEmoji((current) =>
+              current === emoji ? null : current,
+            );
+          }}
           onSelect={(emoji) => {
             void handleReactionSelect(emoji);
           }}
@@ -299,7 +327,8 @@ export const MessageRow = React.memo(
 
         <article
           className={cn(
-            "group/message relative rounded-2xl px-2 py-1 transition-colors",
+            "group/message relative rounded-2xl px-3 py-2 transition-colors",
+            hoverBackground && "hover:bg-muted/50 focus-within:bg-muted/50",
             "flex items-start gap-2.5",
             highlighted
               ? "-mx-4 rounded-none px-6 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-8"
@@ -433,7 +462,8 @@ export const MessageRow = React.memo(
     prev.message.role === next.message.role &&
     prev.message.personaDisplayName === next.message.personaDisplayName &&
     prev.highlighted === next.highlighted &&
-    prev.activeReplyTargetId === next.activeReplyTargetId &&
+    prev.hoverBackground === next.hoverBackground &&
+    prev.isFollowingThread === next.isFollowingThread &&
     prev.layoutVariant === next.layoutVariant &&
     prev.profiles === next.profiles &&
     prev.searchQuery === next.searchQuery,

@@ -92,6 +92,23 @@ fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), Str
     Ok(())
 }
 
+/// Validate and append NIP-30 custom-emoji tags. Mirrors `imeta_tags`: rejects
+/// any tag whose first element is not "emoji" so this path can't be used to
+/// smuggle forged "h"/"e"/"p" tags. Each tag is `["emoji", shortcode, url]`.
+fn emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
+    for et in emoji_tags {
+        if et.first().map(String::as_str) != Some("emoji") {
+            return Err(format!(
+                "emoji tags must use 'emoji' prefix (got {:?})",
+                et.first()
+            ));
+        }
+        let parts: Vec<&str> = et.iter().map(String::as_str).collect();
+        tags.push(Tag::parse(parts).map_err(|e| format!("invalid emoji tag: {e}"))?);
+    }
+    Ok(())
+}
+
 /// Validate a hex pubkey is exactly 64 hex characters.
 fn check_pubkey(pubkey: &str) -> Result<(), String> {
     if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -240,6 +257,7 @@ pub fn build_message(
     thread_ref: Option<&ThreadRef>,
     mentions: &[&str],
     media_tags: &[Vec<String>],
+    custom_emoji_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
@@ -248,6 +266,7 @@ pub fn build_message(
     }
     tags.extend(mention_tags(mentions)?);
     imeta_tags(media_tags, &mut tags)?;
+    emoji_tags(custom_emoji_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
 }
 
@@ -281,17 +300,25 @@ pub fn build_forum_comment(
     Ok(EventBuilder::new(Kind::Custom(45003), content).tags(tags))
 }
 
-/// Kind 40003 — edit a message.
+/// Kind 40003 — edit a message. Carries the full new content AND a fresh
+/// imeta tag set; the receiver overlays the imeta tags onto the original
+/// event so the rendered message reflects exactly the edited state. NIP-30
+/// custom-emoji tags ride along the same way so an edited body's `:shortcode:`s
+/// stay resolvable (the send path attaches these too).
 pub fn build_message_edit(
     channel_id: Uuid,
     target_event_id: EventId,
     content: &str,
+    media_tags: &[Vec<String>],
+    custom_emoji_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
     check_content(content)?;
-    let tags = vec![
+    let mut tags = vec![
         tag(vec!["h", &channel_id.to_string()])?,
         tag(vec!["e", &target_event_id.to_hex()])?,
     ];
+    imeta_tags(media_tags, &mut tags)?;
+    emoji_tags(custom_emoji_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(40003), content).tags(tags))
 }
 
@@ -661,15 +688,6 @@ pub fn build_dm_open(pubkeys: &[String]) -> Result<EventBuilder, String> {
 pub fn build_dm_hide(channel_id: &str) -> Result<EventBuilder, String> {
     let tags = vec![tag(vec!["h", channel_id])?];
     Ok(EventBuilder::new(Kind::Custom(41012), "").tags(tags))
-}
-
-/// Kind 20001 — ephemeral presence broadcast (`online` / `away` / `offline`).
-pub fn build_presence(status: &str) -> Result<EventBuilder, String> {
-    match status {
-        "online" | "away" | "offline" => {}
-        other => return Err(format!("invalid presence status: {other}")),
-    };
-    Ok(EventBuilder::new(Kind::Custom(20001), status.to_string()))
 }
 
 /// Kind 30620 — replaceable workflow definition.

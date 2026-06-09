@@ -55,7 +55,19 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
     let path = managed_agents_store_path(app)?;
     let payload = serde_json::to_vec_pretty(&sorted)
         .map_err(|error| format!("failed to serialize agent store: {error}"))?;
-    fs::write(&path, payload).map_err(|error| format!("failed to write agent store: {error}"))
+
+    atomic_write_json(&path, &payload)
+}
+
+/// Atomic, symlink-preserving JSON write.
+/// Resolves symlinks so the tmp+rename happens at the real target path,
+/// preserving any symlink at `path`.
+pub(crate) fn atomic_write_json(path: &Path, payload: &[u8]) -> Result<(), String> {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let tmp = resolved.with_extension("json.tmp");
+    std::fs::write(&tmp, payload).map_err(|e| format!("failed to write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &resolved)
+        .map_err(|e| format!("failed to rename {}: {e}", resolved.display()))
 }
 
 /// Maximum log file size before rotation (10 MB).
@@ -173,12 +185,74 @@ pub fn read_log_tail(path: &Path, max_lines: usize) -> Result<String, String> {
         newline_count = bytecount_newlines(&buf);
     }
 
-    let text = String::from_utf8_lossy(&buf);
-    let lines: Vec<&str> = text.lines().collect();
+    // Strip ANSI escapes here (not in the harness) so the desktop log view
+    // renders cleanly while terminals and other tools still get the colors
+    // sprout-acp emits.
+    let cleaned = strip_ansi_escapes::strip_str(String::from_utf8_lossy(&buf));
+    let lines: Vec<&str> = cleaned.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
     Ok(lines[start..].join("\n"))
 }
 
 fn bytecount_newlines(buf: &[u8]) -> usize {
     buf.iter().filter(|&&b| b == b'\n').count()
+}
+
+pub fn meaningful_agent_error_from_log(path: &Path) -> Option<String> {
+    let tail = read_log_tail(path, 200).ok()?;
+    tail.lines().rev().map(str::trim).find_map(|line| {
+        if line.starts_with("Agent reported error:") {
+            return Some(line.to_string());
+        }
+        if line.starts_with("llm auth:") {
+            return Some(format!("Agent reported error: {line}"));
+        }
+        None
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+
+    use tempfile::NamedTempFile;
+
+    fn write_log(content: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().expect("temp log");
+        file.write_all(content.as_bytes()).expect("write log");
+        file
+    }
+
+    #[test]
+    fn meaningful_agent_error_from_log_promotes_wrapped_llm_auth() {
+        let file = write_log("noise\nAgent reported error: llm auth: denied\n");
+        assert_eq!(
+            super::meaningful_agent_error_from_log(file.path()).as_deref(),
+            Some("Agent reported error: llm auth: denied")
+        );
+    }
+
+    #[test]
+    fn meaningful_agent_error_from_log_promotes_unwrapped_llm_auth() {
+        let file = write_log("noise\nllm auth: denied\n");
+        assert_eq!(
+            super::meaningful_agent_error_from_log(file.path()).as_deref(),
+            Some("Agent reported error: llm auth: denied")
+        );
+    }
+
+    #[test]
+    fn meaningful_agent_error_from_log_does_not_promote_midline_auth_text() {
+        let file = write_log("noise before llm auth: denied\n");
+        assert!(super::meaningful_agent_error_from_log(file.path()).is_none());
+    }
+
+    #[test]
+    fn strips_ansi_from_typical_tracing_line() {
+        let input = "\x1b[2m2026-05-27T15:16:32\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2msprout_acp\x1b[0m\x1b[2m:\x1b[0m starting";
+        assert_eq!(
+            strip_ansi_escapes::strip_str(input),
+            "2026-05-27T15:16:32  INFO sprout_acp: starting"
+        );
+    }
 }

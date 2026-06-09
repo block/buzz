@@ -1,4 +1,5 @@
 import type { TimelineMessage } from "@/features/messages/types";
+import { isBroadcastReply } from "@/features/messages/lib/threading";
 
 type ThreadPanelData = {
   threadHead: TimelineMessage | null;
@@ -32,13 +33,6 @@ type ThreadDescendantStats = {
 };
 
 const MAX_SUMMARY_PARTICIPANTS = 3;
-
-function isBroadcastReply(message: TimelineMessage): boolean {
-  return (
-    message.tags?.some((tag) => tag[0] === "broadcast" && tag[1] === "1") ??
-    false
-  );
-}
 
 function normalizeHeadMessage(message: TimelineMessage): TimelineMessage {
   return {
@@ -230,7 +224,10 @@ export function buildMainTimelineEntries(
   const descendantStatsByMessageId = buildDescendantStatsByMessageId(messages);
 
   return messages
-    .filter((message) => message.parentId == null || isBroadcastReply(message))
+    .filter(
+      (message) =>
+        message.parentId == null || isBroadcastReply(message.tags ?? []),
+    )
     .map((message) => {
       return {
         message,

@@ -11,6 +11,9 @@ mod identity;
 mod identity_archive;
 mod media;
 mod media_download;
+mod media_transcode;
+#[cfg(feature = "mesh-llm")]
+mod mesh_llm;
 mod messages;
 pub mod pairing;
 mod personas;
@@ -34,6 +37,8 @@ pub use identity::*;
 pub use identity_archive::*;
 pub use media::*;
 pub use media_download::*;
+#[cfg(feature = "mesh-llm")]
+pub use mesh_llm::*;
 pub use messages::*;
 pub use pairing::*;
 pub use personas::*;

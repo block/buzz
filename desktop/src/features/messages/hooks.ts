@@ -12,7 +12,11 @@ import {
   normalizeMentionPubkeys,
   resolveReplyRootId,
 } from "@/features/messages/lib/threading";
+import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { relayClient } from "@/shared/api/relayClient";
+import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
+import { reactionEmojiUrl } from "@/shared/api/customEmoji";
+import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 import {
   addReaction,
   deleteMessage,
@@ -21,6 +25,9 @@ import {
   sendChannelMessage,
 } from "@/shared/api/tauri";
 import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
+// Same .mjs the renderer uses, so the cache-update projection can't drift
+// from the on-render overlay.
+import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
 import {
   KIND_STREAM_MESSAGE,
   KIND_SYSTEM_MESSAGE,
@@ -293,9 +300,16 @@ export function useSendMessageMutation(
         throw new Error("No identity available for sending messages.");
       }
 
-      // Media-bearing messages MUST go through REST so the relay's imeta
-      // validation runs. The WebSocket path does not validate imeta tags.
-      if (parentEventId || (mediaTags && mediaTags.length > 0)) {
+      // `mediaTags` arrives as the merged outgoing tag set (imeta + NIP-30
+      // emoji). Split it so each kind goes to its own validated Tauri arg —
+      // emoji tags must NOT ride the imeta-only `media` channel (that gate
+      // rejects any non-imeta prefix, which silently dropped emoji sends).
+      const { mediaTags: imetaTags, emojiTags } = splitOutgoingTags(mediaTags);
+
+      // Messages carrying media OR custom-emoji tags MUST go through REST so
+      // the relay's tag validation runs. The WebSocket path emits no extra
+      // tags, so emoji-only messages would otherwise lose their emoji tag.
+      if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(channel.id),
@@ -304,11 +318,13 @@ export function useSendMessageMutation(
           channel.id,
           content,
           parentEventId ?? null,
-          mediaTags,
+          imetaTags,
           mentionPubkeys,
+          undefined,
+          emojiTags,
         );
 
-        // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta.
+        // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
         // For replies, buildReplyTags already includes ["p", author] and ["h", channel].
         // For non-replies (media-only), we add them ourselves.
         const replyTags = parentEventId
@@ -341,7 +357,8 @@ export function useSendMessageMutation(
                   identity.pubkey,
                 ).map((pk) => ["p", pk])
               : []),
-            ...(mediaTags ?? []),
+            ...imetaTags,
+            ...emojiTags,
           ],
           content: content.trim(),
           sig: "",
@@ -412,6 +429,7 @@ export function useSendMessageMutation(
 }
 
 export function useToggleReactionMutation() {
+  const queryClient = useQueryClient();
   return useMutation<
     void,
     Error,
@@ -427,7 +445,14 @@ export function useToggleReactionMutation() {
         return;
       }
 
-      await addReaction(eventId, emoji);
+      // Custom-emoji reaction: emoji is `:shortcode:`. Resolve its image URL
+      // from the cached workspace palette so the kind:7 carries the NIP-30
+      // `["emoji", shortcode, url]` tag. Unicode reactions resolve to no URL.
+      const emojiUrl = reactionEmojiUrl(
+        emoji,
+        queryClient.getQueryData<CustomEmoji[]>(customEmojiQueryKey),
+      );
+      await addReaction(eventId, emoji, emojiUrl);
     },
   });
 }
@@ -458,16 +483,23 @@ export function useEditMessageMutation(channel: Channel | null) {
     {
       eventId: string;
       content: string;
+      mediaTags?: string[][];
     }
   >({
-    mutationFn: async ({ eventId, content }) => {
+    mutationFn: async ({ eventId, content, mediaTags }) => {
       if (!channel) {
         throw new Error("No channel selected.");
       }
 
-      await editMessage(channel.id, eventId, content);
+      // `mediaTags` arrives as the merged outgoing set (imeta + NIP-30 emoji).
+      // Split so each rides its own validated Tauri arg — emoji tags must NOT
+      // go through the imeta-only `mediaTags` channel (the Rust `imeta_tags`
+      // guard rejects any non-imeta prefix), mirroring the send path.
+      const { mediaTags: imetaTags, emojiTags } = splitOutgoingTags(mediaTags);
+
+      await editMessage(channel.id, eventId, content, imetaTags, emojiTags);
     },
-    onSuccess: (_data, { eventId, content }) => {
+    onSuccess: (_data, { eventId, content, mediaTags }) => {
       if (!channel) {
         return;
       }
@@ -475,9 +507,20 @@ export function useEditMessageMutation(channel: Channel | null) {
       queryClient.setQueryData<RelayEvent[]>(
         channelMessagesKey(channel.id),
         (current = []) =>
-          current.map((message) =>
-            message.id === eventId ? { ...message, content } : message,
-          ),
+          current.map((message) => {
+            if (message.id !== eventId) return message;
+            // Apply-on-success cache update: reflect the edit's new content
+            // and imeta tag set immediately, so the local cache matches
+            // what the receiver overlay (formatTimelineMessages) will
+            // produce when the edit event arrives back from the relay.
+            // (Not a true optimistic update — runs in onSuccess, not
+            // onMutate. Worth bearing the cost only because the edit event
+            // round-trip can lag perceptibly.)
+            const nextTags = mediaTags
+              ? applyEditTagOverlay(message.tags, mediaTags)
+              : message.tags;
+            return { ...message, content, tags: nextTags };
+          }),
       );
     },
   });

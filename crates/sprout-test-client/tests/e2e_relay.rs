@@ -1789,3 +1789,218 @@ async fn test_membership_notification_mixed_filter_rejected() {
 
     client.disconnect().await.expect("disconnect");
 }
+
+// ─── Private channel membership permission tests ───────────────────────────────
+
+/// Create a private channel over WebSocket and return the channel UUID.
+async fn create_private_channel_ws(client: &mut SproutTestClient, keys: &Keys) -> String {
+    let channel_uuid = uuid::Uuid::new_v4().to_string();
+    let channel_name = format!("relay-e2e-private-{}", channel_uuid);
+
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_uuid]).unwrap(),
+            Tag::parse(["name", &channel_name]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", "private"]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap();
+
+    let ok = client
+        .send_event(event)
+        .await
+        .expect("create private channel");
+    assert!(
+        ok.accepted,
+        "private channel creation failed: {}",
+        ok.message
+    );
+    channel_uuid
+}
+
+/// Submit a kind:9000 PUT_USER event over WebSocket.
+async fn add_member_ws(
+    client: &mut SproutTestClient,
+    channel_id: &str,
+    target_pubkey_hex: &str,
+    signer: &Keys,
+) -> (bool, String) {
+    let h_tag = Tag::parse(["h", channel_id]).unwrap();
+    let p_tag = Tag::parse(["p", target_pubkey_hex]).unwrap();
+    let event = EventBuilder::new(Kind::Custom(9000), "")
+        .tags([h_tag, p_tag])
+        .sign_with_keys(signer)
+        .unwrap();
+
+    let ok = client.send_event(event).await.expect("send PUT_USER event");
+    (ok.accepted, ok.message)
+}
+
+/// Submit a kind:9000 PUT_USER event with a role tag over WebSocket.
+async fn add_member_with_role_ws(
+    client: &mut SproutTestClient,
+    channel_id: &str,
+    target_pubkey_hex: &str,
+    role: &str,
+    signer: &Keys,
+) -> (bool, String) {
+    let h_tag = Tag::parse(["h", channel_id]).unwrap();
+    let p_tag = Tag::parse(["p", target_pubkey_hex]).unwrap();
+    let role_tag = Tag::parse(["role", role]).unwrap();
+    let event = EventBuilder::new(Kind::Custom(9000), "")
+        .tags([h_tag, p_tag, role_tag])
+        .sign_with_keys(signer)
+        .unwrap();
+
+    let ok = client
+        .send_event(event)
+        .await
+        .expect("send PUT_USER event with role");
+    (ok.accepted, ok.message)
+}
+
+/// Any member of a private channel can invite another user (Slack model).
+#[tokio::test]
+#[ignore]
+async fn test_private_channel_any_member_can_invite() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let member_keys = Keys::generate();
+    let invitee_keys = Keys::generate();
+
+    // Connect as owner and create a private channel.
+    let mut owner_client = SproutTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+
+    // Owner adds member_keys as a regular member.
+    let (accepted, msg) = add_member_ws(
+        &mut owner_client,
+        &channel_id,
+        &member_keys.public_key().to_hex(),
+        &owner_keys,
+    )
+    .await;
+    assert!(accepted, "owner should add member, got: {msg}");
+
+    // Connect as the regular member.
+    let mut member_client = SproutTestClient::connect(&url, &member_keys)
+        .await
+        .expect("connect as member");
+
+    // Regular member invites a third user — this should succeed.
+    let (accepted, msg) = add_member_ws(
+        &mut member_client,
+        &channel_id,
+        &invitee_keys.public_key().to_hex(),
+        &member_keys,
+    )
+    .await;
+    assert!(
+        accepted,
+        "regular member should be able to invite to private channel, got: {msg}"
+    );
+
+    owner_client.disconnect().await.expect("disconnect owner");
+    member_client.disconnect().await.expect("disconnect member");
+}
+
+/// A non-member cannot invite someone to a private channel.
+#[tokio::test]
+#[ignore]
+async fn test_private_channel_non_member_cannot_invite() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let outsider_keys = Keys::generate();
+    let target_keys = Keys::generate();
+
+    // Owner creates a private channel.
+    let mut owner_client = SproutTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+
+    // Connect as outsider (not a member of the channel).
+    let mut outsider_client = SproutTestClient::connect(&url, &outsider_keys)
+        .await
+        .expect("connect as outsider");
+
+    // Outsider tries to add someone — should be rejected.
+    let (accepted, msg) = add_member_ws(
+        &mut outsider_client,
+        &channel_id,
+        &target_keys.public_key().to_hex(),
+        &outsider_keys,
+    )
+    .await;
+    assert!(
+        !accepted,
+        "non-member should NOT be able to invite to private channel, but it was accepted"
+    );
+    assert!(
+        msg.contains("not authorized") || msg.contains("not a channel member"),
+        "rejection should mention authorization or membership, got: {msg}"
+    );
+
+    owner_client.disconnect().await.expect("disconnect owner");
+    outsider_client
+        .disconnect()
+        .await
+        .expect("disconnect outsider");
+}
+
+/// Regular members cannot grant elevated roles (owner/admin) in private channels.
+#[tokio::test]
+#[ignore]
+async fn test_private_channel_member_cannot_grant_admin() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let member_keys = Keys::generate();
+    let target_keys = Keys::generate();
+
+    // Owner creates a private channel and adds a regular member.
+    let mut owner_client = SproutTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+
+    let (accepted, msg) = add_member_ws(
+        &mut owner_client,
+        &channel_id,
+        &member_keys.public_key().to_hex(),
+        &owner_keys,
+    )
+    .await;
+    assert!(accepted, "owner should add member, got: {msg}");
+
+    // Connect as the regular member.
+    let mut member_client = SproutTestClient::connect(&url, &member_keys)
+        .await
+        .expect("connect as member");
+
+    // Regular member tries to add someone with admin role — should fail.
+    let (accepted, msg) = add_member_with_role_ws(
+        &mut member_client,
+        &channel_id,
+        &target_keys.public_key().to_hex(),
+        "admin",
+        &member_keys,
+    )
+    .await;
+    assert!(
+        !accepted,
+        "regular member should NOT grant admin role, but it was accepted"
+    );
+    assert!(
+        msg.contains("elevated")
+            || msg.contains("owner")
+            || msg.contains("admin")
+            || msg.contains("grant"),
+        "rejection should mention elevated roles, got: {msg}"
+    );
+
+    owner_client.disconnect().await.expect("disconnect owner");
+    member_client.disconnect().await.expect("disconnect member");
+}

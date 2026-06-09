@@ -4,13 +4,10 @@ import { installRelayBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { assertRelaySeeded } from "../helpers/seed";
 
 const isCi = Boolean(process.env.CI);
-const relayDeliveryTimeoutMs = isCi ? 15_000 : 5_000;
 const relaySeedHookTimeoutMs = isCi ? 90_000 : 30_000;
 
 async function expectTimelineToContain(page: Page, text: string) {
-  await expect(page.getByTestId("message-timeline")).toContainText(text, {
-    timeout: relayDeliveryTimeoutMs,
-  });
+  await expect(page.getByTestId("message-timeline")).toContainText(text);
 }
 
 async function getTimelineMetrics(page: Page) {
@@ -169,8 +166,8 @@ test("loads the home feed from the relay", async ({ browser }) => {
     await page.goto("/");
     await senderPage.goto("/");
 
-    await expect(page.getByTestId("chat-title")).toHaveText("Home");
     await expect(page.getByTestId("home-inbox")).toBeVisible();
+    await expect(page.getByTestId("home-inbox-list")).toBeVisible();
 
     await sendChannelMessage(senderPage, {
       channelName: "general",
@@ -178,9 +175,7 @@ test("loads the home feed from the relay", async ({ browser }) => {
       mentionPubkeys: [TEST_IDENTITIES.tyler.pubkey],
     });
 
-    await expect(page.getByTestId("home-inbox-list")).toContainText(message, {
-      timeout: relayDeliveryTimeoutMs,
-    });
+    await expect(page.getByTestId("home-inbox-list")).toContainText(message);
     await expect(page.getByTestId("home-inbox-detail")).toBeVisible();
   } finally {
     await targetContext.close();
@@ -210,9 +205,7 @@ test("shows sent inbox replies immediately in the inbox detail pane", async ({
       mentionPubkeys: [TEST_IDENTITIES.tyler.pubkey],
     });
 
-    await page.getByTestId("home-inbox-list").getByText(message).click({
-      timeout: relayDeliveryTimeoutMs,
-    });
+    await page.getByTestId("home-inbox-list").getByText(message).click();
     await expect(page.getByTestId("home-inbox-detail")).toBeVisible();
     await expect(page.getByTestId("message-input")).toBeEnabled();
 

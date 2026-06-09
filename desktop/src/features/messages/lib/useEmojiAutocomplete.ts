@@ -3,12 +3,16 @@ import * as React from "react";
 import { init, SearchIndex } from "emoji-mart";
 import data from "@emoji-mart/data";
 
+import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import type { AutocompleteEdit } from "./useRichTextEditor";
 
 export type EmojiSuggestion = {
   id: string;
   name: string;
   native: string;
+  /** Set for custom (image) emoji; absent for standard unicode emoji. */
+  url?: string;
 };
 
 const EMOJI_DEBOUNCE_MS = 120;
@@ -39,11 +43,16 @@ function detectEmojiQuery(
   return { query, startIndex };
 }
 
-export function useEmojiAutocomplete() {
+export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
   const [emojiQuery, setEmojiQuery] = React.useState<string | null>(null);
   const [emojiStartIndex, setEmojiStartIndex] = React.useState(0);
   const [emojiSelectedIndex, setEmojiSelectedIndex] = React.useState(0);
   const [suggestions, setSuggestions] = React.useState<EmojiSuggestion[]>([]);
+
+  // Keep the latest custom emoji list in a ref so the search effect can read it
+  // without re-running on every list-identity change.
+  const customEmojiRef = React.useRef(customEmoji);
+  customEmojiRef.current = customEmoji;
 
   const debounceTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -68,6 +77,19 @@ export function useEmojiAutocomplete() {
     }
 
     let cancelled = false;
+
+    // Custom emoji match by shortcode prefix/substring (case-insensitive).
+    const q = emojiQuery.toLowerCase();
+    const customMatches: EmojiSuggestion[] = customEmojiRef.current
+      .filter((e) => e.shortcode.toLowerCase().includes(q))
+      .slice(0, MAX_RESULTS)
+      .map((e) => ({
+        id: e.shortcode,
+        name: e.shortcode,
+        native: "",
+        url: rewriteRelayUrl(e.url),
+      }));
+
     SearchIndex.search(emojiQuery)
       .then(
         (
@@ -78,21 +100,24 @@ export function useEmojiAutocomplete() {
           }> | null,
         ) => {
           if (cancelled) return;
-          const mapped: EmojiSuggestion[] = (results ?? [])
-            .slice(0, MAX_RESULTS)
+          const standard: EmojiSuggestion[] = (results ?? [])
             .map((emoji) => ({
               id: emoji.id,
               name: emoji.name,
               native: emoji.skins[0]?.native ?? "",
             }))
             .filter((e) => e.native !== "");
-          setSuggestions(mapped);
+          // Custom emoji first (workspace-specific), then standard, capped.
+          const merged = [...customMatches, ...standard].slice(0, MAX_RESULTS);
+          setSuggestions(merged);
           setEmojiSelectedIndex(0);
         },
       )
       .catch(() => {
         if (cancelled) return;
-        setSuggestions([]);
+        // emoji-mart failed; still surface custom matches.
+        setSuggestions(customMatches);
+        setEmojiSelectedIndex(0);
       });
 
     return () => {
@@ -109,7 +134,11 @@ export function useEmojiAutocomplete() {
         debounceTimerRef.current = null;
       }
 
-      const insertText = `${suggestion.native} `;
+      // Custom emoji insert as a selectable atom node (id == shortcode);
+      // standard emoji insert their native unicode. Both get a trailing
+      // space.
+      const isCustom = Boolean(suggestion.url);
+      const insertText = isCustom ? " " : `${suggestion.native} `;
 
       setEmojiQuery(null);
       setEmojiSelectedIndex(0);
@@ -118,6 +147,7 @@ export function useEmojiAutocomplete() {
         replaceFromOffset: emojiStartIndex,
         replaceToOffset: selectionEnd,
         insertText,
+        ...(isCustom ? { customEmojiShortcode: suggestion.id } : {}),
       };
     },
     [emojiStartIndex],

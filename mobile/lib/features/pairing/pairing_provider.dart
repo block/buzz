@@ -154,8 +154,8 @@ class PairingNotifier extends Notifier<PairingState> {
       final relayWsUrl = qr.relays.first;
 
       // 2. Generate ephemeral keypair.
-      final keychain = nostr.Keychain.generate();
-      _ephemeralPrivkey = keychain.private;
+      final keychain = nostr.Keys.generate();
+      _ephemeralPrivkey = keychain.secret;
       _ephemeralPubkey = keychain.public;
 
       // 3. Derive session ID and SAS immediately (we know source pubkey from QR).
@@ -302,7 +302,7 @@ class PairingNotifier extends Notifier<PairingState> {
       // NIP-AB §Event Validation: verify event signature (NIP-01).
       // The nostr package's Event.fromJson verifies id + sig on construction.
       try {
-        final event = nostr.Event.fromJson(eventJson);
+        final event = nostr.Event.fromJson(jsonEncode(eventJson));
         if (event.id != eventId) return; // id mismatch
       } catch (_) {
         return; // invalid signature or malformed event
@@ -507,11 +507,11 @@ class PairingNotifier extends Notifier<PairingState> {
       kind: kind,
       content: content,
       tags: tags,
-      privkey: _ephemeralPrivkey!,
+      secretKey: _ephemeralPrivkey!,
       createdAt: createdAt,
     );
 
-    _socket?.publishEvent(event.toJson());
+    _socket?.publishEvent(event.toMap());
   }
 
   void _handleDisconnected(Object? error) {

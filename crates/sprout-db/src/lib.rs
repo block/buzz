@@ -102,7 +102,7 @@ pub async fn insert_mentions(
     }
 
     // Single multi-row INSERT ... ON CONFLICT DO NOTHING — one round-trip regardless of mention count.
-    let mut qb: QueryBuilder<'_, sqlx::Postgres> = QueryBuilder::new(
+    let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         "INSERT INTO event_mentions \
          (pubkey_hex, event_id, event_created_at, channel_id, event_kind) ",
     );

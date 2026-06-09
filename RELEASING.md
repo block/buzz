@@ -1,51 +1,77 @@
 # Releasing Sprout Desktop
 
-This document describes how to create a new OSS release of the Sprout
-desktop app.
+## Quick Start
+
+```sh
+# Regular release (next patch version)
+just release
+
+# Patch release
+just release patch
+
+# Minor release
+just release 0.4.0
+
+# Any explicit version
+just release 1.0.0
+```
+
+This creates a `version-bump/<version>` PR that bumps all version manifests, regenerates lockfiles, and appends a changelog entry. Merge the PR to trigger the build automatically.
 
 ---
 
-## Prerequisites
+## How It Works
 
-- **Write access** to the `block/sprout` GitHub repository. Only
-  collaborators with push permissions can trigger the release workflow.
-- The following **GitHub Actions secrets** must be configured on the repo
-  (Settings > Secrets and variables > Actions):
+1. **`just release`** runs locally on `main` — computes the next version, creates a `version-bump/<version>` branch, bumps versions in all manifests, regenerates lockfiles, generates a changelog entry, commits, pushes, and opens a PR.
 
-  | Secret | Purpose |
-  |--------|---------|
-  | `SPROUT_UPDATER_PUBLIC_KEY` | Tauri updater public key (minisign) |
-  | `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater private key (used to sign the update archive) |
-  | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the private key |
+2. **Merge the PR** — the `auto-tag-on-release-pr-merge` workflow detects the `version-bump/*` branch merge and pushes a `v<version>` tag.
+
+3. **Tag triggers `release.yml`** — the existing release workflow builds, signs, notarizes, and publishes the desktop app for macOS and Linux.
 
 ---
 
-## Creating a Release
+## Release Types
 
-1. Go to **Actions > Release** in the GitHub UI:\
-   `https://github.com/block/sprout/actions/workflows/release.yml`
+| Command | Version | Example |
+|---------|---------|---------|
+| `just release` | Next patch | `0.3.0` → `0.3.1` |
+| `just release patch` | Next patch | `0.3.0` → `0.3.1` |
+| `just release 0.4.0` | Explicit minor | `0.3.1` → `0.4.0` |
+| `just release 1.0.0` | Explicit | `1.0.0` |
 
-2. Click **"Run workflow"**.
+---
 
-3. Fill in the inputs:
-   - **version** — a semver version string, e.g. `0.4.0` or `1.0.0-beta.1`.
-     Do not include a `v` prefix.
-   - **ref** — the branch, tag, or commit SHA to build from. Defaults to
-     `main`.
+## Version Files
 
-4. Click **"Run workflow"** to start the build.
+`just bump-version <version>` updates these files:
 
-The workflow will:
+| File | Field |
+|------|-------|
+| `desktop/package.json` | `"version"` |
+| `desktop/src-tauri/tauri.conf.json` | `"version"` |
+| `desktop/src-tauri/Cargo.toml` | `version` (under `[package]`) |
+| `mobile/pubspec.yaml` | `version:` (preserves build number) |
 
-- Validate the version string
-- Check out the specified ref
-- Patch the version into `package.json`, `tauri.conf.json`, and `Cargo.toml`
-- Build all sidecar binaries (`sprout-acp`, `sprout-mcp`,
-  `git-credential-nostr`)
-- Build the Tauri desktop app with updater signing enabled
-- Create a versioned GitHub release (`v0.4.0`) with the `.dmg` installer
-- Update the rolling `sprout-desktop-latest` release with the signed
-  update archive and `latest.json` manifest for the auto-updater
+It also regenerates `pnpm-lock.yaml`, `desktop/src-tauri/Cargo.lock`, and `mobile/pubspec.lock`.
+
+---
+
+## Manual Fallback
+
+If the automated flow isn't suitable (e.g., building from a non-main ref):
+
+1. Go to **Actions > Release** in the GitHub UI
+2. Click **Run workflow**
+3. Provide the semver version (no `v` prefix) and the ref to build from
+
+---
+
+## Internal Releases
+
+After the OSS release ships, trigger an internal build via the
+[sprout-releases Buildkite pipeline](https://buildkite.com/runway/sprout-releases).
+See the [sprout-releases README](https://github.com/squareup/sprout-releases#cutting-a-release)
+for the full step-by-step instructions and input field reference.
 
 ---
 
@@ -53,13 +79,12 @@ The workflow will:
 
 Each release produces two GitHub releases:
 
-1. **`v<version>`** (e.g. `v0.4.0`) — the user-facing release with the
-   `.dmg` installer. This is what users download manually.
+1. **`v<version>`** — the user-facing release with the `.dmg` installer
+   (macOS).
 
-2. **`sprout-desktop-latest`** — a rolling pre-release used by the Tauri
-   auto-updater. Contains `latest.json`, the signed `.tar.gz` archive,
-   and its `.sig` signature. Users should not download from this release
-   directly.
+2. **`sprout-desktop-latest`** — a rolling pre-release for the Tauri
+   auto-updater containing `latest.json`, the signed `.tar.gz` archive,
+   and its `.sig` signature.
 
 ---
 
@@ -71,45 +96,32 @@ Silicon (`darwin-aarch64`, the `release` job) and Intel
 `.AppImage`. Both macOS DMGs are codesigned, notarized, and attached to
 the same `v<version>` release. Intel users download the `_x64.dmg`.
 
-## Code Signing (macOS)
-
-OSS release builds use **ad-hoc code signing** (`signingIdentity: "-"`)
-rather than a Developer ID certificate. This means the app is not
-notarized by Apple.
-
-On first launch, macOS Gatekeeper will block the app with a "damaged" or
-"unidentified developer" message. Users can bypass this by
-**right-clicking the app > Open** (or via System Settings > Privacy &
-Security). After the first launch the app will open normally.
-
 ---
 
-## Auto-Updater
+## Prerequisites
 
-The desktop app checks for updates by fetching `latest.json` from the
-`sprout-desktop-latest` release:
+- **Write access** to the `block/sprout` GitHub repository
+- **`gh` CLI** authenticated (`gh auth status`)
+- The following **GitHub Actions secrets** must be configured:
 
-```
-https://github.com/block/sprout/releases/download/sprout-desktop-latest/latest.json
-```
-
-When a new version is available, the app downloads the signed archive,
-verifies the signature against the embedded public key, and applies the
-update.
+  | Secret | Purpose |
+  |--------|---------|
+  | `SPROUT_UPDATER_PUBLIC_KEY` | Tauri updater public key (minisign) |
+  | `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater private key |
+  | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the private key |
 
 ---
 
 ## Troubleshooting
 
-### Build fails at "Validate version"
-The version string must be valid semver: `MAJOR.MINOR.PATCH` with an
-optional pre-release suffix (e.g. `1.0.0-beta.1`). Do not include a `v`
-prefix.
+### `just release` fails with "must be on main branch"
+Switch to `main` and pull latest before running `just release`.
 
-### Build fails at "Build Tauri app"
-Check that the signing secrets are configured correctly. The build
-requires `TAURI_SIGNING_PRIVATE_KEY` and
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` to be set.
+### `just release` fails with "working tree is dirty"
+Commit or stash your changes before running `just release`.
+
+### Build fails at "Validate version"
+The version string must be valid semver: `MAJOR.MINOR.PATCH` with an optional pre-release suffix. Do not include a `v` prefix.
 
 ### Auto-updater reports "no update available"
 Verify that the `sprout-desktop-latest` release exists and contains a

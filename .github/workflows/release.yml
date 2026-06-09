@@ -1,13 +1,16 @@
 name: Release
 
 on:
+  push:
+    tags:
+      - 'v[0-9]*'
   workflow_dispatch:
     inputs:
       version:
-        description: "Semver version (e.g. 0.4.0)"
+        description: "Semver version (e.g. 0.4.0) — only for manual runs"
         required: true
       ref:
-        description: "Branch, tag, or SHA to build"
+        description: "Branch, tag, or SHA to build — only for manual runs"
         default: main
         required: true
 
@@ -19,19 +22,34 @@ jobs:
     permissions:
       contents: write
       id-token: write # required by block/apple-codesign-action for OIDC
-    env:
-      VERSION: ${{ inputs.version }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
+      - name: Determine version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$INPUT_VERSION"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Validate version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
             echo "::error::Invalid version '$VERSION'. Expected semver (e.g. 0.4.0 or 1.0.0-beta.1)"
             exit 1
           fi
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
           persist-credentials: false
 
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
@@ -40,6 +58,8 @@ jobs:
         run: just desktop-install-ci
 
       - name: Patch version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
           cd src-tauri && cargo update --workspace
@@ -52,8 +72,48 @@ jobs:
 
       - name: Build sidecars
         run: |
-          cargo build --release -p sprout-acp -p sprout-mcp -p sprout-agent -p sprout-dev-mcp -p git-credential-nostr -p sprout-cli
+          cargo build --release -p sprout-acp -p sprout-agent -p sprout-dev-mcp -p git-credential-nostr -p sprout-cli
           ./scripts/bundle-sidecars.sh
+
+      # Mesh rev derived from Cargo.lock (no lockstep edit on dep bump); cache key tracks it.
+      - name: Resolve mesh-llm rev
+        id: mesh_rev
+        run: |
+          set -euo pipefail
+          REV=$(grep -oE 'mesh-llm\.git\?rev=[0-9a-f]{40}' Cargo.lock | head -1 | grep -oE '[0-9a-f]{40}')
+          [[ -n "$REV" ]] || { echo "::error::could not resolve mesh-llm rev from Cargo.lock"; exit 1; }
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
+          echo "short=${REV:0:7}" >> "$GITHUB_OUTPUT"
+      - name: Restore mesh llama build cache
+        id: llama_cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ github.workspace }}/.cache/mesh-llama
+          key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
+      - name: Build mesh llama native libraries
+        if: steps.llama_cache.outputs.cache-hit != 'true'
+        env:
+          MESH_REV_SHORT: ${{ steps.mesh_rev.outputs.short }}
+        run: |
+          set -euo pipefail
+          cargo fetch --manifest-path desktop/src-tauri/Cargo.toml
+          SHORT="$MESH_REV_SHORT"
+          MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path "*/$SHORT" -type d -name "$SHORT" | head -1)
+          if [[ -z "$MESH_ROOT" ]]; then
+            echo "::error::mesh-llm checkout for $SHORT not found after cargo fetch"
+            exit 1
+          fi
+          export LLAMA_STAGE_BACKEND=metal
+          export LLAMA_STAGE_BUILD_DIR="$GITHUB_WORKSPACE/.cache/mesh-llama/build-stage-abi-metal"
+          export CMAKE_OSX_DEPLOYMENT_TARGET=10.15
+          "$MESH_ROOT/scripts/prepare-llama.sh" pinned
+          "$MESH_ROOT/scripts/build-llama.sh" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
+      - name: Save mesh llama build cache
+        if: steps.llama_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ github.workspace }}/.cache/mesh-llama
+          key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
 
       - name: Build unsigned Tauri app
         run: cd desktop && pnpm tauri build --verbose --no-sign --config src-tauri/tauri.release.conf.json
@@ -63,6 +123,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
+          CMAKE_OSX_DEPLOYMENT_TARGET: "10.15"
+          LLAMA_STAGE_BACKEND: metal
+          LLAMA_STAGE_BUILD_DIR: ${{ github.workspace }}/.cache/mesh-llama/build-stage-abi-metal
+          SKIPPY_LLAMA_AUTO_BUILD: "0"
 
       - name: Locate unsigned DMG
         id: unsigned
@@ -153,20 +218,29 @@ jobs:
             > latest.json
           cat latest.json
         env:
+          VERSION: ${{ steps.version.outputs.version }}
           SIG_PATH: ${{ steps.artifacts.outputs.sig }}
           ARCHIVE_NAME: ${{ steps.artifacts.outputs.archive_name }}
 
       - name: Create versioned GitHub release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DMG_PATH: ${{ steps.artifacts.outputs.dmg }}
         run: |
           RELEASE_SHA=$(git rev-parse HEAD)
+          NOTES=""
+          if [[ -f CHANGELOG.md ]]; then
+            NOTES=$(awk "/^## v${VERSION}$/,/^## v/" CHANGELOG.md | sed '$d')
+          fi
+          if [[ -z "$NOTES" ]]; then
+            NOTES="Sprout Desktop v${VERSION}"
+          fi
           gh release create "v${VERSION}" \
             --target "$RELEASE_SHA" \
             --title "Sprout Desktop v${VERSION}" \
-            --notes "Sprout Desktop v${VERSION}" \
+            --notes "$NOTES" \
             "$DMG_PATH"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DMG_PATH: ${{ steps.artifacts.outputs.dmg }}
 
       - name: Update rolling release for auto-updater
         run: |
@@ -194,12 +268,12 @@ jobs:
       contents: write
       id-token: write # required by block/apple-codesign-action for OIDC
     env:
-      VERSION: ${{ inputs.version }}
+      VERSION: ${{ needs.release.outputs.version }}
       TARGET: x86_64-apple-darwin
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
           persist-credentials: false
 
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
@@ -223,7 +297,7 @@ jobs:
 
       - name: Build sidecars
         run: |
-          cargo build --release --target "$TARGET" -p sprout-acp -p sprout-mcp -p sprout-agent -p sprout-dev-mcp -p git-credential-nostr -p sprout-cli
+          cargo build --release --target "$TARGET" -p sprout-acp -p sprout-agent -p sprout-dev-mcp -p git-credential-nostr -p sprout-cli
           ./scripts/bundle-sidecars.sh "$TARGET"
 
       - name: Build unsigned Tauri app
@@ -234,6 +308,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
+          CMAKE_OSX_DEPLOYMENT_TARGET: "10.15"
 
       - name: Locate unsigned DMG
         id: unsigned
@@ -295,12 +371,10 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: write
-    env:
-      VERSION: ${{ inputs.version }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
           persist-credentials: false
 
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
@@ -308,6 +382,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: desktop/src-tauri
+          lookup-only: true
 
       - name: Install Tauri dependencies (Linux)
         env:
@@ -339,13 +414,15 @@ jobs:
         run: just desktop-install-ci
 
       - name: Patch version
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
         run: |
           cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
           cd src-tauri && cargo update --workspace
 
       - name: Build sidecars
         run: |
-          cargo build --release -p sprout-acp -p sprout-mcp -p sprout-agent -p sprout-dev-mcp -p git-credential-nostr -p sprout-cli
+          cargo build --release -p sprout-acp -p sprout-agent -p sprout-dev-mcp -p git-credential-nostr -p sprout-cli
           ./scripts/bundle-sidecars.sh
 
       - name: Build Linux Tauri app
@@ -373,12 +450,13 @@ jobs:
           echo "appimage=$APPIMAGE" >> "$GITHUB_OUTPUT"
 
       - name: Upload Linux artifacts to versioned GitHub release
-        run: |
-          gh release upload "v${VERSION}" \
-            "$DEB_PATH" \
-            "$APPIMAGE_PATH" \
-            --clobber
         env:
+          VERSION: ${{ needs.release.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEB_PATH: ${{ steps.linux-artifacts.outputs.deb }}
           APPIMAGE_PATH: ${{ steps.linux-artifacts.outputs.appimage }}
+        run: |
+          gh release upload "v$VERSION" \
+            "$DEB_PATH" \
+            "$APPIMAGE_PATH" \
+            --clobber

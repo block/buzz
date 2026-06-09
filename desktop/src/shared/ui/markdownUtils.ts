@@ -1,12 +1,25 @@
 import * as React from "react";
 
 /**
- * Classifies an array of React children into image vs non-image buckets.
- * Used by both the `p` component and `ImageGalleryGrouper` to detect
- * image-only paragraphs for gallery rendering.
+ * Returns true when a React element is a block-level media wrapper (image or
+ * video). The `img` component in `createMarkdownComponents` marks its output
+ * with a `data-block-media` prop so we can reliably distinguish media from
+ * other custom components (links, mentions, etc.) that also have non-string
+ * types in react-markdown v10.
+ */
+function isBlockMedia(child: React.ReactNode): boolean {
+  return (
+    React.isValidElement(child) &&
+    (child.props as Record<string, unknown>)?.["data-block-media"] != null
+  );
+}
+
+/**
+ * Classifies an array of React children into media vs non-media buckets.
+ * Used by the `p` component to detect image-only paragraphs for gallery
+ * rendering.
  *
- * "Image children" = any React element whose type is not a plain HTML string
- * (i.e. a React component like DialogPrimitive.Root wrapping an img).
+ * "Image children" = elements marked with `data-block-media` (images/videos).
  * "Non-image children" = everything else, excluding whitespace-only strings
  * and `<br>` elements (injected by remarkBreaks between images).
  */
@@ -14,12 +27,10 @@ export function classifyChildren(childArray: React.ReactNode[]): {
   imageChildren: React.ReactNode[];
   nonImageChildren: React.ReactNode[];
 } {
-  const imageChildren = childArray.filter(
-    (child) => React.isValidElement(child) && typeof child.type !== "string",
-  );
+  const imageChildren = childArray.filter(isBlockMedia);
   const nonImageChildren = childArray.filter(
     (child) =>
-      !(React.isValidElement(child) && typeof child.type !== "string") &&
+      !isBlockMedia(child) &&
       !(typeof child === "string" && child.trim() === "") &&
       !(React.isValidElement(child) && child.type === "br"),
   );

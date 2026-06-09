@@ -8,6 +8,7 @@ import {
   List,
   ListOrdered,
   Quote,
+  SquareCode,
   Strikethrough,
 } from "lucide-react";
 
@@ -24,6 +25,7 @@ type ActiveStates = {
   italic: boolean;
   strike: boolean;
   code: boolean;
+  codeBlock: boolean;
   link: boolean;
   bulletList: boolean;
   orderedList: boolean;
@@ -36,6 +38,7 @@ function getActiveStates(editor: Editor): ActiveStates {
     italic: editor.isActive("italic"),
     strike: editor.isActive("strike"),
     code: editor.isActive("code"),
+    codeBlock: editor.isActive("codeBlock"),
     link: editor.isActive("link"),
     bulletList: editor.isActive("bulletList"),
     orderedList: editor.isActive("orderedList"),
@@ -86,6 +89,10 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
 
   const toggleCode = React.useCallback(() => {
     editor?.chain().focus().toggleCode().run();
+  }, [editor]);
+
+  const toggleCodeBlock = React.useCallback(() => {
+    editor?.chain().focus().toggleCodeBlock().run();
   }, [editor]);
 
   const toggleLink = React.useCallback(() => {
@@ -155,6 +162,12 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
       shortcut: "⌘E",
       action: toggleCode,
       active: activeStates.code,
+    },
+    {
+      icon: SquareCode,
+      label: "Code block",
+      action: toggleCodeBlock,
+      active: activeStates.codeBlock,
     },
     {
       icon: Link,

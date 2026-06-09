@@ -92,6 +92,22 @@ pub async fn cmd_open_dm(client: &SproutClient, pubkeys: &[String]) -> Result<()
     Ok(())
 }
 
+/// Hide a DM channel — sign and submit a kind:41012 event with h-tag.
+pub async fn cmd_hide_dm(client: &SproutClient, channel_id: &str) -> Result<(), CliError> {
+    let channel_uuid = parse_uuid(channel_id)?;
+
+    use nostr::{EventBuilder, Kind, Tag};
+    let tags = vec![Tag::parse(["h", &channel_uuid.to_string()])
+        .map_err(|e| CliError::Other(format!("tag error: {e}")))?];
+    let builder =
+        EventBuilder::new(Kind::Custom(sprout_sdk::kind::KIND_DM_HIDE as u16), "").tags(tags);
+    let event = client.sign_event(builder)?;
+
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
+}
+
 /// Add a member to a DM group — sign and submit a kind:41011 event.
 pub async fn cmd_add_dm_member(
     client: &SproutClient,
@@ -99,6 +115,7 @@ pub async fn cmd_add_dm_member(
     pubkey: &str,
 ) -> Result<(), CliError> {
     let channel_uuid = parse_uuid(channel_id)?;
+    validate_hex64(pubkey)?;
 
     let builder = sprout_sdk::build_dm_add_member(channel_uuid, pubkey).map_err(sdk_err)?;
     let event = client.sign_event(builder)?;
@@ -118,5 +135,6 @@ pub async fn dispatch(cmd: crate::DmsCmd, client: &SproutClient) -> Result<(), C
         DmsCmd::List { limit } => cmd_list_dms(client, limit).await,
         DmsCmd::Open { pubkeys } => cmd_open_dm(client, &pubkeys).await,
         DmsCmd::AddMember { channel, pubkey } => cmd_add_dm_member(client, &channel, &pubkey).await,
+        DmsCmd::Hide { channel } => cmd_hide_dm(client, &channel).await,
     }
 }

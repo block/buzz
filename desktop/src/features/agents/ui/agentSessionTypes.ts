@@ -28,6 +28,7 @@ export type TranscriptItem =
       title: string;
       text: string;
       timestamp: string;
+      authorPubkey?: string | null;
       channelId?: string | null;
     }
   | {

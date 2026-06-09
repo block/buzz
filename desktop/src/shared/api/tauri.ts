@@ -28,7 +28,6 @@ import type {
   SendChannelMessageResult,
   SetCanvasInput,
   SetCanvasResult,
-  SetPresenceResult,
   SetChannelPurposeInput,
   SetChannelTopicInput,
   UpdateProfileInput,
@@ -40,7 +39,7 @@ import type {
   AgentModelsResponse,
   UpdateManagedAgentInput,
   AcpAvailabilityStatus,
-  AcpProviderCatalogEntry,
+  AcpRuntimeCatalogEntry,
   CommandAvailability,
   InstallRuntimeResult,
   OpenDmInput,
@@ -83,11 +82,6 @@ type RawSearchUsersResponse = {
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
 
-type RawSetPresenceResult = {
-  status: PresenceStatus;
-  ttl_seconds: number;
-};
-
 type RawChannel = {
   id: string;
   name: string;
@@ -97,6 +91,7 @@ type RawChannel = {
   topic: string | null;
   purpose: string | null;
   member_count: number;
+  member_pubkeys: string[];
   last_message_at: string | null;
   archived_at: string | null;
   participants: string[];
@@ -247,7 +242,7 @@ type RawManagedAgentLog = {
   log_path: string;
 };
 
-export type RawAcpProviderCatalogEntry = {
+export type RawAcpRuntimeCatalogEntry = {
   id: string;
   label: string;
   avatar_url: string;
@@ -355,6 +350,7 @@ function fromRawChannel(channel: RawChannel): Channel {
     topic: channel.topic,
     purpose: channel.purpose,
     memberCount: channel.member_count,
+    memberPubkeys: channel.member_pubkeys ?? [],
     lastMessageAt: channel.last_message_at,
     archivedAt: channel.archived_at,
     participants: channel.participants,
@@ -522,19 +518,6 @@ export async function getPresence(pubkeys: string[]): Promise<PresenceLookup> {
       status,
     ]),
   );
-}
-
-export async function setPresence(
-  status: PresenceStatus,
-): Promise<SetPresenceResult> {
-  const response = await invokeTauri<RawSetPresenceResult>("set_presence", {
-    status,
-  });
-
-  return {
-    status: response.status,
-    ttlSeconds: response.ttl_seconds,
-  };
 }
 
 export function getDefaultRelayUrl(): Promise<string> {
@@ -724,6 +707,7 @@ export async function sendChannelMessage(
   mediaTags?: string[][],
   mentionPubkeys?: string[],
   kind?: number,
+  emojiTags?: string[][],
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -732,6 +716,7 @@ export async function sendChannelMessage(
       content,
       parentEventId,
       mediaTags: mediaTags ?? null,
+      emojiTags: emojiTags ?? null,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
     },
@@ -757,6 +742,8 @@ export type BlobDescriptor = {
   thumb?: string;
   duration?: number;
   image?: string;
+  /** Original filename captured client-side. */
+  filename?: string;
 };
 
 export async function uploadMedia(
@@ -775,16 +762,25 @@ export async function pickAndUploadMedia(): Promise<BlobDescriptor[]> {
 
 export async function uploadMediaBytes(
   data: number[],
+  filename?: string,
 ): Promise<BlobDescriptor> {
-  return invokeTauri<BlobDescriptor>("upload_media_bytes", { data });
+  return invokeTauri<BlobDescriptor>("upload_media_bytes", { data, filename });
 }
 
 export async function editMessage(
   channelId: string,
   eventId: string,
   content: string,
+  mediaTags?: string[][],
+  emojiTags?: string[][],
 ): Promise<void> {
-  await invokeTauri("edit_message", { channelId, eventId, content });
+  await invokeTauri("edit_message", {
+    channelId,
+    eventId,
+    content,
+    mediaTags: mediaTags ?? [],
+    emojiTags: emojiTags ?? [],
+  });
 }
 
 export async function deleteMessage(eventId: string): Promise<void> {
@@ -794,8 +790,9 @@ export async function deleteMessage(eventId: string): Promise<void> {
 export async function addReaction(
   eventId: string,
   emoji: string,
+  emojiUrl?: string,
 ): Promise<void> {
-  await invokeTauri("add_reaction", { eventId, emoji });
+  await invokeTauri("add_reaction", { eventId, emoji, emojiUrl });
 }
 
 export async function removeReaction(
@@ -872,9 +869,9 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
   };
 }
 
-function fromRawAcpProviderCatalogEntry(
-  entry: RawAcpProviderCatalogEntry,
-): AcpProviderCatalogEntry {
+function fromRawAcpRuntimeCatalogEntry(
+  entry: RawAcpRuntimeCatalogEntry,
+): AcpRuntimeCatalogEntry {
   return {
     id: entry.id,
     label: entry.label,
@@ -1008,10 +1005,10 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         backend: input.backend,
         respondTo: input.respondTo,
         respondToAllowlist: input.respondToAllowlist,
+        relayMesh: input.relayMesh,
       },
     },
   );
-
   return {
     agent: fromRawManagedAgent(response.agent),
     privateKeyNsec: response.private_key_nsec,
@@ -1059,20 +1056,18 @@ export async function getManagedAgentLog(pubkey: string, lineCount?: number) {
   };
 }
 
-export async function discoverAcpProviders(): Promise<
-  AcpProviderCatalogEntry[]
-> {
+export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
   return (
-    await invokeTauri<RawAcpProviderCatalogEntry[]>("discover_acp_providers")
-  ).map(fromRawAcpProviderCatalogEntry);
+    await invokeTauri<RawAcpRuntimeCatalogEntry[]>("discover_acp_providers")
+  ).map(fromRawAcpRuntimeCatalogEntry);
 }
 
 export async function installAcpRuntime(
-  providerId: string,
+  runtimeId: string,
 ): Promise<InstallRuntimeResult> {
   const raw = await invokeTauri<RawInstallRuntimeResult>(
     "install_acp_runtime",
-    { providerId },
+    { runtimeId },
   );
   return fromRawInstallRuntimeResult(raw);
 }

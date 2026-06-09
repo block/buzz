@@ -42,20 +42,22 @@ fn main() {
     let dir = PathBuf::from(&model_dir);
     let p = |name: &str| dir.join(name).to_string_lossy().into_owned();
 
-    let mut cfg = OfflineTtsConfig::default();
-    cfg.model = OfflineTtsModelConfig {
-        pocket: OfflineTtsPocketModelConfig {
-            lm_main: Some(p("lm_main.int8.onnx")),
-            lm_flow: Some(p("lm_flow.int8.onnx")),
-            encoder: Some(p("encoder.onnx")),
-            decoder: Some(p("decoder.int8.onnx")),
-            text_conditioner: Some(p("text_conditioner.onnx")),
-            vocab_json: Some(p("vocab.json")),
-            token_scores_json: Some(p("token_scores.json")),
-            voice_embedding_cache_capacity: 16,
+    let cfg = OfflineTtsConfig {
+        model: OfflineTtsModelConfig {
+            pocket: OfflineTtsPocketModelConfig {
+                lm_main: Some(p("lm_main.int8.onnx")),
+                lm_flow: Some(p("lm_flow.int8.onnx")),
+                encoder: Some(p("encoder.onnx")),
+                decoder: Some(p("decoder.int8.onnx")),
+                text_conditioner: Some(p("text_conditioner.onnx")),
+                vocab_json: Some(p("vocab.json")),
+                token_scores_json: Some(p("token_scores.json")),
+                voice_embedding_cache_capacity: 16,
+            },
+            num_threads: 1,
+            debug: false,
+            ..Default::default()
         },
-        num_threads: 1,
-        debug: false,
         ..Default::default()
     };
     let engine = OfflineTts::create(&cfg).expect("engine create");

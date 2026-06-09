@@ -40,46 +40,45 @@ async function ensureTimelineScrollable(
   expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight + 160);
 }
 
-async function openSearchDialogWithShortcut(
+async function focusTopbarSearchWithShortcut(
   page: import("@playwright/test").Page,
 ) {
-  const searchDialog = page.getByTestId("search-dialog");
   const openSearchButton = page.getByTestId("open-search");
 
   await expect(openSearchButton).toBeVisible();
-  await expect
-    .poll(async () => {
-      if (await searchDialog.isVisible()) {
-        return true;
-      }
-
-      await page.evaluate(() => {
-        const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
-        window.dispatchEvent(
-          new KeyboardEvent("keydown", {
-            bubbles: true,
-            cancelable: true,
-            code: "KeyK",
-            ctrlKey: !isMac,
-            key: "k",
-            metaKey: isMac,
-          }),
-        );
-      });
-      return searchDialog.isVisible();
-    })
-    .toBe(true);
+  await page.evaluate(() => {
+    const isMac = /mac|iphone|ipad|ipod/i.test(navigator.platform);
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "KeyK",
+        ctrlKey: !isMac,
+        key: "k",
+        metaKey: isMac,
+      }),
+    );
+  });
+  await expect(openSearchButton).toBeFocused();
+  await expect(page.getByTestId("search-results")).toBeVisible();
+  await expect(page.getByTestId("search-dialog")).toHaveCount(0);
 }
 
-async function openSearchDialogWithButton(
-  page: import("@playwright/test").Page,
-) {
-  const searchDialog = page.getByTestId("search-dialog");
-  const openSearchButton = page.getByTestId("open-search");
+async function expectHomeView(page: import("@playwright/test").Page) {
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+}
 
-  await expect(openSearchButton).toBeVisible();
-  await openSearchButton.click();
-  await expect(searchDialog).toBeVisible();
+async function selectHomeInboxFilter(
+  page: import("@playwright/test").Page,
+  label: "Activity" | "Agents",
+) {
+  await page
+    .getByTestId("home-inbox")
+    .getByRole("button", {
+      name: /^(All|Mentions|Needs Action|Activity|Agents)$/,
+    })
+    .click();
+  await page.getByRole("menuitemradio", { name: label }).click();
 }
 
 test.beforeEach(async ({ page }) => {
@@ -107,7 +106,7 @@ test("creates a new mocked stream", async ({ page }) => {
   await page.getByTestId("create-channel-submit").click();
 
   await expect(page.getByTestId("stream-list")).toContainText(channelName);
-  await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+  await expect(page.getByTestId("chat-title")).toContainText(channelName);
 });
 
 test("create agent supports parallelism and system prompt overrides", async ({
@@ -149,7 +148,7 @@ test("opens a mocked channel from the home feed", async ({ page }) => {
 
   await page.goto("/");
 
-  await expect(page.getByTestId("chat-title")).toHaveText("Home");
+  await expectHomeView(page);
   await expect(inboxList).toContainText("Please review the release checklist.");
 
   await inboxList
@@ -171,18 +170,12 @@ test("home feed shows channel and agent activity sections", async ({
 
   await page.goto("/");
 
-  await page
-    .getByTestId("home-inbox")
-    .getByRole("button", { name: "Activity" })
-    .click();
+  await selectHomeInboxFilter(page, "Activity");
   await expect(inboxList).toContainText(
     "Engineering shipped the desktop build.",
   );
 
-  await page
-    .getByTestId("home-inbox")
-    .getByRole("button", { name: "Agents" })
-    .click();
+  await selectHomeInboxFilter(page, "Agents");
   await expect(inboxList).toContainText(
     "Agent progress: channel index complete.",
   );
@@ -197,10 +190,7 @@ test("opens a mocked forum activity item from the home feed", async ({
 }) => {
   await page.goto("/");
 
-  await page
-    .getByTestId("home-inbox")
-    .getByRole("button", { name: "Activity" })
-    .click();
+  await selectHomeInboxFilter(page, "Activity");
   await expect(page.getByTestId("home-inbox-list")).toContainText(
     "Engineering shipped the desktop build.",
   );
@@ -220,14 +210,14 @@ test("home feed renders resolved author labels", async ({ page }) => {
   await expect(page.getByTestId("home-inbox-list")).not.toContainText("You");
 });
 
-test("opens relay-backed search from the sidebar and loads the exact result", async ({
+test("opens topbar search with the shortcut and loads the exact result", async ({
   page,
 }) => {
   await page.goto("/");
 
-  await openSearchDialogWithShortcut(page);
+  await focusTopbarSearchWithShortcut(page);
 
-  await page.getByTestId("search-input").fill("shipped");
+  await page.getByTestId("open-search").fill("shipped");
   await expect(page.getByTestId("search-results")).toContainText(
     "Engineering shipped the desktop build.",
   );
@@ -249,9 +239,9 @@ test("opens relay-backed search from the sidebar and loads the exact result", as
 test("opens channel matches from search", async ({ page }) => {
   await page.goto("/");
 
-  await openSearchDialogWithButton(page);
+  await focusTopbarSearchWithShortcut(page);
 
-  await page.getByTestId("search-input").fill("engineering");
+  await page.getByTestId("open-search").fill("engineering");
   const results = page.getByTestId("search-results");
 
   await expect(results).toContainText("engineering");
@@ -281,9 +271,9 @@ test("search results use your resolved profile label instead of You", async ({
 }) => {
   await page.goto("/");
 
-  await openSearchDialogWithButton(page);
+  await focusTopbarSearchWithShortcut(page);
 
-  await page.getByTestId("search-input").fill("welcome");
+  await page.getByTestId("open-search").fill("welcome");
   const results = page.getByTestId("search-results");
 
   await expect(results).toContainText("Welcome to #general");
@@ -296,9 +286,9 @@ test("opens accessible unjoined channels from search in read-only mode", async (
 }) => {
   await page.goto("/");
 
-  await openSearchDialogWithButton(page);
+  await focusTopbarSearchWithShortcut(page);
 
-  await page.getByTestId("search-input").fill("critique");
+  await page.getByTestId("open-search").fill("critique");
   const results = page.getByTestId("search-results");
 
   await expect(results).toContainText(

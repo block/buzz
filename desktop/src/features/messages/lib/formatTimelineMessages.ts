@@ -31,6 +31,9 @@ import {
 } from "@/shared/constants/kinds";
 import { resolveEventAuthorPubkey } from "@/shared/lib/authors";
 import { formatTime } from "@/features/messages/lib/dateFormatters";
+// Pure overlay helper lives in a sibling .mjs so node:test (no TS loader)
+// can exercise the exact same source the renderer uses.
+import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
 
 const HEX_RE = /^[0-9a-f]+$/i;
 
@@ -156,11 +159,14 @@ export function formatTimelineMessages(
     }
   }
 
-  // Build a map of latest edit per original message: targetId → { content, createdAt }.
+  // Build a map of latest edit per original message: targetId → { content, tags, createdAt }.
   // When multiple edits exist for the same message, the most recent one wins.
+  // The edit's own tags are kept so the renderer can overlay imeta tags
+  // (attachments) from the edit onto the original event — non-imeta tags on
+  // the original (`h`, `p` mentions, etc.) stay untouched.
   const editsByTargetId = new Map<
     string,
-    { content: string; createdAt: number }
+    { content: string; tags: string[][]; createdAt: number }
   >();
   for (const event of events) {
     if (
@@ -179,6 +185,7 @@ export function formatTimelineMessages(
     if (!existing || event.created_at > existing.createdAt) {
       editsByTargetId.set(targetId, {
         content: event.content,
+        tags: event.tags,
         createdAt: event.created_at,
       });
     }
@@ -194,6 +201,7 @@ export function formatTimelineMessages(
       targetId: string;
       actorPubkey: string;
       emoji: string;
+      emojiUrl?: string;
     }
   >();
 
@@ -214,18 +222,34 @@ export function formatTimelineMessages(
       requireChannelTagForPTags: true,
     }).toLowerCase();
     const emoji = event.content.trim() || "+";
+    // Custom-emoji reaction (NIP-30): content is `:shortcode:` and the URL
+    // rides on a matching `["emoji", shortcode, url]` tag.
+    let emojiUrl: string | undefined;
+    if (emoji.startsWith(":") && emoji.endsWith(":")) {
+      const shortcode = emoji.slice(1, -1);
+      emojiUrl = event.tags.find(
+        (t) => t[0] === "emoji" && t[1] === shortcode && t[2],
+      )?.[2];
+    }
     reactionPresence.set(`${targetId}:${actorPubkey}:${emoji}`, {
       targetId,
       actorPubkey,
       emoji,
+      emojiUrl,
     });
   }
 
   const reactionsByEventId = new Map<string, Map<string, TimelineReaction>>();
-  for (const { targetId, actorPubkey, emoji } of reactionPresence.values()) {
+  for (const {
+    targetId,
+    actorPubkey,
+    emoji,
+    emojiUrl,
+  } of reactionPresence.values()) {
     const current = reactionsByEventId.get(targetId) ?? new Map();
     const existing = current.get(emoji) ?? {
       emoji,
+      emojiUrl,
       count: 0,
       reactedByCurrentUser: false,
       users: [],
@@ -238,9 +262,11 @@ export function formatTimelineMessages(
 
     const profile = profiles?.[actorPubkey];
     const displayName =
-      profile?.displayName?.trim() ||
-      profile?.nip05Handle?.trim() ||
-      `${actorPubkey.slice(0, 8)}…`;
+      currentPubkeyLower && actorPubkey === currentPubkeyLower
+        ? "You"
+        : profile?.displayName?.trim() ||
+          profile?.nip05Handle?.trim() ||
+          `${actorPubkey.slice(0, 8)}…`;
     existing.users.push({
       pubkey: actorPubkey,
       displayName,
@@ -348,7 +374,11 @@ export function formatTimelineMessages(
       pending: event.pending,
       edited: edit !== undefined,
       kind: event.kind,
-      tags: event.tags,
+      // When edited, swap the original event's imeta tags for the edit's
+      // imeta tags. All non-imeta tags on the original are preserved.
+      // Logic lives in `applyEditTagOverlay.mjs` so prod and tests share
+      // a single source.
+      tags: applyEditTagOverlay(event.tags, edit?.tags),
       reactions: (() => {
         const reactions = reactionsByEventId.get(event.id);
         return reactions ? [...reactions.values()] : undefined;

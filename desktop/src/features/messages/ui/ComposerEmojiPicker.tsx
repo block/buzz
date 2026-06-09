@@ -1,8 +1,7 @@
-import * as React from "react";
-import Picker from "@emoji-mart/react";
-import data from "@emoji-mart/data";
 import { SmilePlus } from "lucide-react";
+import * as React from "react";
 
+import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -48,18 +47,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
         side="top"
         sideOffset={10}
       >
-        <Picker
-          data={data}
-          onEmojiSelect={(emoji: { native: string }) =>
-            onEmojiSelect(emoji.native)
-          }
-          theme="auto"
-          previewPosition="none"
-          skinTonePosition="search"
-          set="native"
-          maxFrequentRows={2}
-          perLine={8}
-        />
+        <EmojiPicker onSelect={onEmojiSelect} />
       </PopoverContent>
     </Popover>
   );

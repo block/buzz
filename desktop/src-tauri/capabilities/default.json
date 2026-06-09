@@ -7,6 +7,8 @@
     "core:default",
     "core:webview:allow-set-webview-zoom",
     "core:window:allow-set-badge-count",
+    "core:window:allow-set-badge-label",
+    "core:window:allow-request-user-attention",
     "core:window:allow-set-focus",
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",

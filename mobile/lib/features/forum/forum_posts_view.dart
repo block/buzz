@@ -51,6 +51,7 @@ class ForumPostsView extends HookConsumerWidget {
             backgroundColor: Colors.transparent,
             floatingActionButton: canPost && !isComposing.value
                 ? FloatingActionButton(
+                    heroTag: 'forum-fab',
                     onPressed: () => isComposing.value = true,
                     tooltip: 'New post',
                     shape: const CircleBorder(),

@@ -31,6 +31,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { EditAgentDialog } from "./EditAgentDialog";
+import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { ModelPicker } from "./ModelPicker";
 import { truncatePubkey } from "./agentUi";
@@ -73,7 +74,7 @@ export function ManagedAgentRow({
   const isActive = agent.status === "running" || agent.status === "deployed";
   const isLocal = agent.backend.type === "local";
   const runtimeSource =
-    agent.backend.type === "provider" ? `Provider ${agent.backend.id}` : null;
+    agent.backend.type === "provider" ? `Remote (${agent.backend.id})` : null;
   const personaLabel = agent.personaId
     ? (personaLabelsById[agent.personaId] ?? null)
     : null;
@@ -86,14 +87,19 @@ export function ManagedAgentRow({
         : isLocal
           ? "Ready to launch"
           : "Managed remotely";
+  // When the harness recovered a meaningful error string from the agent's
+  // log tail (Max's seam in `managed_agents/storage.rs`), promote it to
+  // user-visible copy below the process detail. Specifically renders the
+  // friendly "Relay mesh denied this agent — check your relay membership."
+  // for auth failures so the user knows it's a membership thing, not a
+  // crash. Generic exits stay verbatim so we don't lie about other failures.
+  const friendlyError = friendlyAgentLastError(agent.lastError);
 
   return (
     <div
       className={cn(
-        "overflow-hidden rounded-xl border bg-card/70 transition-colors",
-        isLogSelected
-          ? "border-primary/40 bg-primary/5 shadow-xs"
-          : "border-border/70 hover:bg-muted/20",
+        "overflow-hidden transition-colors",
+        isLogSelected ? "bg-primary/5" : "hover:bg-muted/20",
       )}
       data-testid={`managed-agent-${agent.pubkey}`}
     >
@@ -117,6 +123,7 @@ export function ManagedAgentRow({
                 presenceStatus={presenceStatus}
               />
               <StatusBlock
+                friendlyError={friendlyError}
                 presenceLoaded={presenceLoaded}
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
@@ -137,6 +144,7 @@ export function ManagedAgentRow({
                 presenceStatus={presenceStatus}
               />
               <StatusBlock
+                friendlyError={friendlyError}
                 presenceLoaded={presenceLoaded}
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
@@ -234,7 +242,11 @@ function AgentSummary({
           {channelNames.length > 0 ? (
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
               {channelNames.map((name) => (
-                <Badge className="normal-case" key={name} variant="secondary">
+                <Badge
+                  className="normal-case tracking-normal"
+                  key={name}
+                  variant="outline"
+                >
                   # {name}
                 </Badge>
               ))}
@@ -247,11 +259,13 @@ function AgentSummary({
 }
 
 function StatusBlock({
+  friendlyError,
   presenceLoaded,
   presenceStatus,
   processDetail,
   status,
 }: {
+  friendlyError: ReturnType<typeof friendlyAgentLastError>;
   presenceLoaded: boolean;
   presenceStatus: PresenceStatus | undefined;
   processDetail: string;
@@ -268,6 +282,19 @@ function StatusBlock({
         status={status}
       />
       <p className="text-xs text-muted-foreground">{processDetail}</p>
+      {friendlyError ? (
+        <p
+          className={cn(
+            "text-xs",
+            friendlyError.severity === "denied"
+              ? "text-destructive"
+              : "text-muted-foreground",
+          )}
+          data-testid="managed-agent-last-error"
+        >
+          {friendlyError.copy}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -325,7 +352,9 @@ function AgentActionsMenu({
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <button
+            aria-label={`Agent actions for ${agent.name}`}
             className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            data-testid={`managed-agent-actions-${agent.pubkey}`}
             type="button"
           >
             <Ellipsis className="h-4 w-4" />

@@ -3,6 +3,9 @@ ignore = [
     # instant 0.1.13 — unmaintained crate. Transitive dep: nostr → instant.
     # Will be resolved when nostr crate updates its dependencies.
     { id = "RUSTSEC-2024-0384", reason = "transitive dep via nostr; no upstream fix available" },
+    # paste 1.0.15 — unmaintained. Transitive dep: mesh-llm → iroh → netlink-* → paste.
+    # No safe upgrade available; tracked for upstream (iroh/netlink) replacement.
+    { id = "RUSTSEC-2024-0436", reason = "transitive dep via mesh-llm → iroh → netlink; no upstream fix available" },
 ]
 
 [licenses]
@@ -22,8 +25,52 @@ allow = [
     "MITNFA",
     "MPL-2.0",
     "BSL-1.0",
+    "Unlicense",
+    # bzip2/libbzip2's permissive BSD-like license. New via desktop zip/bzip2
+    # transitive deps; compatible with Apache-2.0 distribution.
+    "bzip2-1.0.6",
 ]
 confidence-threshold = 0.8
+
+# mesh-llm workspace crates (pinned git dep) omit a per-crate `license` field in
+# their manifests, so cargo-deny reports them as unlicensed. The mesh-llm repo is
+# licensed "MIT OR Apache-2.0" (workspace Cargo.toml + top-level LICENSE = Apache-2.0);
+# clarify each pulled-in member to that expression. Remove once mesh sets the field
+# upstream (filed).
+[[licenses.clarify]]
+crate = "mesh-llm-config"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "mesh-llm-gpu-bench"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "mesh-llm-host-runtime"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "mesh-llm-plugin"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "mesh-llm-system"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "mesh-mixture-of-agents"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+crate = "sprout-desktop"
+expression = "Apache-2.0"
+license-files = []
 
 [licenses.private]
 ignore = true

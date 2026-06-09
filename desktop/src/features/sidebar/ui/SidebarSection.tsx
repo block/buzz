@@ -1,13 +1,21 @@
 import type * as React from "react";
-import { ChevronDown, CircleDot, FileText, Hash, Lock, X } from "lucide-react";
+import {
+  BellOff,
+  ChevronDown,
+  CircleDot,
+  FileText,
+  Hash,
+  Lock,
+  X,
+} from "lucide-react";
 
 import {
   ContextMenu,
   ContextMenuContent,
-  ContextMenuItem,
   ContextMenuTrigger,
 } from "@/shared/ui/context-menu";
 
+import { ChannelContextMenuItems } from "@/features/sidebar/ui/CustomChannelSection";
 import { getEphemeralChannelDisplay } from "@/features/channels/lib/ephemeralChannel";
 import { EphemeralChannelBadge } from "@/features/channels/ui/EphemeralChannelBadge";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -18,7 +26,6 @@ import {
   SidebarGroupContent,
   SidebarGroupLabel,
   SidebarMenu,
-  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/shared/ui/sidebar";
@@ -29,6 +36,10 @@ const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
 const SECTION_LABEL_CHEVRON_CLASS =
   "h-2.5 w-2.5 shrink-0 opacity-0 text-sidebar-foreground/45 transition-[color,opacity,transform] group-hover/section-label:opacity-100 group-hover/section-label:text-sidebar-foreground group-focus-visible/section-label:opacity-100 group-focus-visible/section-label:text-sidebar-foreground";
+const SIDEBAR_ROW_ACTION_VISIBILITY_CLASS =
+  "group-focus-within/menu-item:opacity-100 group-hover/menu-item:opacity-100 md:opacity-0";
+const SIDEBAR_ROW_ICON_ACTION_CLASS =
+  "flex size-6 items-center justify-center p-1 text-sidebar-foreground/45 transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-sidebar-ring peer-data-[active=true]/menu-button:text-sidebar-active-foreground/75 peer-data-[active=true]/menu-button:hover:text-sidebar-active-foreground [&>svg]:size-4 [&>svg]:shrink-0";
 
 export type SidebarDmParticipant = {
   avatarUrl: string | null;
@@ -59,7 +70,7 @@ function DmChannelIcon({
       <span className="relative flex h-5 w-5 shrink-0 items-center justify-center">
         <ProfileAvatar
           avatarUrl={primaryParticipant.avatarUrl}
-          className="h-5 w-5 rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-[9px] text-sidebar-foreground shadow-none"
+          className="h-5 w-5 rounded-[6px] border border-sidebar-border/80 bg-sidebar-accent/80 text-[9px] text-sidebar-foreground shadow-none"
           iconClassName="h-3 w-3"
           label={primaryParticipant.label}
         />
@@ -80,13 +91,13 @@ function DmChannelIcon({
     <span className="relative flex h-5 w-7 shrink-0 items-center">
       <ProfileAvatar
         avatarUrl={primaryParticipant.avatarUrl}
-        className="absolute left-0 top-0 h-[18px] w-[18px] rounded-full border-2 border-sidebar bg-sidebar-accent/80 text-[8px] text-sidebar-foreground shadow-none"
+        className="absolute left-0 top-0 h-[18px] w-[18px] rounded-[6px] border-2 border-sidebar bg-sidebar-accent/80 text-[8px] text-sidebar-foreground shadow-none"
         iconClassName="h-2.5 w-2.5"
         label={primaryParticipant.label}
       />
       <ProfileAvatar
         avatarUrl={secondaryParticipant.avatarUrl}
-        className="absolute bottom-0 right-0 h-[18px] w-[18px] rounded-full border-2 border-sidebar bg-sidebar-accent/80 text-[8px] text-sidebar-foreground shadow-none"
+        className="absolute bottom-0 right-0 h-[18px] w-[18px] rounded-[6px] border-2 border-sidebar bg-sidebar-accent/80 text-[8px] text-sidebar-foreground shadow-none"
         iconClassName="h-2.5 w-2.5"
         label={secondaryParticipant.label}
       />
@@ -140,6 +151,7 @@ export function ChannelMenuButton({
   label,
   isActive,
   hasUnread,
+  isMuted,
   dmParticipants,
   presenceStatus,
   onSelectChannel,
@@ -148,6 +160,7 @@ export function ChannelMenuButton({
   label?: string;
   isActive: boolean;
   hasUnread: boolean;
+  isMuted?: boolean;
   dmParticipants?: SidebarDmParticipant[];
   presenceStatus?: PresenceStatus;
   onSelectChannel: (channelId: string) => void;
@@ -158,9 +171,13 @@ export function ChannelMenuButton({
   return (
     <SidebarMenuButton
       className={cn(
+        isActive
+          ? "group-hover/menu-item:bg-sidebar-active group-hover/menu-item:text-sidebar-active-foreground"
+          : "group-hover/menu-item:bg-sidebar-accent group-hover/menu-item:text-sidebar-accent-foreground",
         !isActive &&
           hasUnread &&
           "font-semibold text-sidebar-foreground hover:text-sidebar-foreground",
+        !isActive && isMuted && !hasUnread && "opacity-50",
       )}
       data-channel-id={channel.id}
       data-testid={`channel-${channel.name}`}
@@ -180,6 +197,16 @@ export function ChannelMenuButton({
           display={ephemeralDisplay}
           testId={`channel-ephemeral-${channel.name}`}
           variant="sidebar"
+        />
+      ) : null}
+      {isMuted ? (
+        <BellOff
+          className={cn(
+            "ml-auto h-3 w-3 shrink-0",
+            isActive
+              ? "text-sidebar-active-foreground/60"
+              : "text-sidebar-foreground/40",
+          )}
         />
       ) : null}
       {hasUnread && !isActive && channel.channelType !== "dm" ? (
@@ -207,9 +234,13 @@ export function SidebarSection({
   testId,
   unreadChannelIds,
   onHideDm,
+  onMarkChannelRead,
   onMarkChannelUnread,
   onSelectChannel,
   onToggleCollapsed,
+  mutedChannelIds,
+  onMuteChannel,
+  onUnmuteChannel,
 }: {
   action?: React.ReactNode;
   dmParticipantsByChannelId?: Record<string, SidebarDmParticipant[]>;
@@ -222,14 +253,18 @@ export function SidebarSection({
   selectedChannelId: string | null;
   title: string;
   testId: string;
-  unreadChannelIds: Set<string>;
+  unreadChannelIds: ReadonlySet<string>;
   onHideDm?: (channelId: string) => void;
-  onMarkChannelUnread?: (
+  onMarkChannelRead?: (
     channelId: string,
     lastMessageAt: string | null | undefined,
   ) => void;
+  onMarkChannelUnread?: (channelId: string) => void;
   onSelectChannel: (channelId: string) => void;
   onToggleCollapsed?: () => void;
+  mutedChannelIds?: ReadonlySet<string>;
+  onMuteChannel?: (channelId: string) => void;
+  onUnmuteChannel?: (channelId: string) => void;
 }) {
   if (items.length === 0 && !action && !emptyState) {
     return null;
@@ -279,6 +314,7 @@ export function SidebarSection({
                       channel={channel}
                       dmParticipants={dmParticipantsByChannelId?.[channel.id]}
                       hasUnread={unreadChannelIds.has(channel.id)}
+                      isMuted={mutedChannelIds?.has(channel.id)}
                       isActive={
                         isActiveChannel && selectedChannelId === channel.id
                       }
@@ -296,30 +332,45 @@ export function SidebarSection({
                       />
                     ) : null}
                     {channel.channelType === "dm" && onHideDm ? (
-                      <SidebarMenuAction
+                      <button
                         aria-label="Close direct message"
+                        className={cn(
+                          "absolute right-1 top-1/2 z-10 -translate-y-1/2 after:absolute after:-inset-2 after:md:hidden group-data-[collapsible=icon]:hidden",
+                          SIDEBAR_ROW_ICON_ACTION_CLASS,
+                          SIDEBAR_ROW_ACTION_VISIBILITY_CLASS,
+                        )}
+                        data-sidebar="menu-action"
                         data-testid={`hide-dm-${channel.name}`}
-                        onClick={() => onHideDm(channel.id)}
-                        showOnHover
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onHideDm(channel.id);
+                        }}
+                        type="button"
                       >
                         <X />
-                      </SidebarMenuAction>
+                      </button>
                     ) : null}
                   </SidebarMenuItem>
                 );
 
-                return onMarkChannelUnread ? (
+                const hasContextAction =
+                  (unreadChannelIds.has(channel.id) && onMarkChannelRead) ||
+                  (!unreadChannelIds.has(channel.id) && onMarkChannelUnread) ||
+                  (onMuteChannel && onUnmuteChannel);
+
+                return hasContextAction ? (
                   <ContextMenu key={channel.id}>
                     <ContextMenuTrigger asChild>{menuItem}</ContextMenuTrigger>
                     <ContextMenuContent>
-                      <ContextMenuItem
-                        onClick={() =>
-                          onMarkChannelUnread(channel.id, channel.lastMessageAt)
-                        }
-                      >
-                        <CircleDot className="h-4 w-4" />
-                        Mark unread
-                      </ContextMenuItem>
+                      <ChannelContextMenuItems
+                        channel={channel}
+                        hasUnread={unreadChannelIds.has(channel.id)}
+                        isMuted={mutedChannelIds?.has(channel.id)}
+                        onMarkChannelRead={onMarkChannelRead}
+                        onMarkChannelUnread={onMarkChannelUnread}
+                        onMuteChannel={onMuteChannel}
+                        onUnmuteChannel={onUnmuteChannel}
+                      />
                     </ContextMenuContent>
                   </ContextMenu>
                 ) : (

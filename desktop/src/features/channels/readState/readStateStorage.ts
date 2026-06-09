@@ -3,11 +3,13 @@ import {
   localIsoToUnixSeconds,
   localPublishableContextKey,
   localReadStateKey,
+  localSourceCreatedAtKey,
 } from "@/features/channels/readState/readStateFormat";
 
 export type StoredReadState = {
   contexts: Map<string, number>;
   publishableContextIds: Set<string>;
+  contextSourceCreatedAt: Map<string, number>;
 };
 
 function mergeLocalStorageKey(
@@ -29,7 +31,8 @@ function mergeLocalStorageKey(
         contexts.set(channelId, unixSeconds);
       }
     }
-  } catch {
+  } catch (error) {
+    console.debug("[ReadStateManager] storage: contexts JSON corrupt:", error);
     // Corrupt localStorage, ignore.
   }
 }
@@ -48,7 +51,36 @@ function readPublishableContextIds(pubkey: string): Set<string> {
         result.add(value);
       }
     }
-  } catch {
+  } catch (error) {
+    console.debug(
+      "[ReadStateManager] storage: publishableContextIds JSON corrupt:",
+      error,
+    );
+    // Corrupt localStorage, ignore.
+  }
+
+  return result;
+}
+
+function readContextSourceCreatedAt(pubkey: string): Map<string, number> {
+  const result = new Map<string, number>();
+  const raw = localStorage.getItem(localSourceCreatedAtKey(pubkey));
+  if (!raw) return result;
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!isPlainRecord(parsed)) return result;
+
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === "number" && Number.isInteger(value) && value >= 0) {
+        result.set(key, value);
+      }
+    }
+  } catch (error) {
+    console.debug(
+      "[ReadStateManager] storage: sourceCreatedAt JSON corrupt:",
+      error,
+    );
     // Corrupt localStorage, ignore.
   }
 
@@ -62,6 +94,7 @@ export function readStoredReadState(pubkey: string): StoredReadState {
   return {
     contexts,
     publishableContextIds: readPublishableContextIds(pubkey),
+    contextSourceCreatedAt: readContextSourceCreatedAt(pubkey),
   };
 }
 
@@ -69,6 +102,7 @@ export function writeStoredReadState(
   pubkey: string,
   contexts: ReadonlyMap<string, number>,
   publishableContextIds: ReadonlySet<string>,
+  contextSourceCreatedAt: ReadonlyMap<string, number>,
 ): void {
   const state: Record<string, string> = {};
   for (const [contextId, timestamp] of contexts) {
@@ -79,5 +113,14 @@ export function writeStoredReadState(
   localStorage.setItem(
     localPublishableContextKey(pubkey),
     JSON.stringify([...publishableContextIds]),
+  );
+
+  const sourceState: Record<string, number> = {};
+  for (const [contextId, createdAt] of contextSourceCreatedAt) {
+    sourceState[contextId] = createdAt;
+  }
+  localStorage.setItem(
+    localSourceCreatedAtKey(pubkey),
+    JSON.stringify(sourceState),
   );
 }

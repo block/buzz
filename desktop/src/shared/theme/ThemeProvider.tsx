@@ -87,6 +87,8 @@ function applyAccentColor(value: string) {
     root.style.setProperty("--primary-foreground", background);
     root.style.setProperty("--sidebar-primary", foreground);
     root.style.setProperty("--sidebar-primary-foreground", background);
+    root.style.setProperty("--sidebar-active", foreground);
+    root.style.setProperty("--sidebar-active-foreground", background);
     return;
   }
 
@@ -97,6 +99,8 @@ function applyAccentColor(value: string) {
   root.style.setProperty("--primary-foreground", fgHsl);
   root.style.setProperty("--sidebar-primary", accentHsl);
   root.style.setProperty("--sidebar-primary-foreground", fgHsl);
+  root.style.setProperty("--sidebar-active", accentHsl);
+  root.style.setProperty("--sidebar-active-foreground", fgHsl);
 }
 
 /** Apply cached CSS vars synchronously to prevent FOUC. */

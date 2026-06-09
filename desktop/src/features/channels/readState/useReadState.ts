@@ -4,7 +4,7 @@ import type { RelayClient } from "@/shared/api/relayClientSession";
 
 const noopGetTimestamp = () => null;
 const noopMarkRead = () => {};
-const noopMarkUnread = () => {};
+const noopDrainAdvances = (): ReadonlySet<string> => new Set<string>();
 
 /**
  * React hook that creates and manages a ReadStateManager instance.
@@ -64,19 +64,16 @@ export function useReadState(
     [],
   );
 
-  const markContextUnread = React.useCallback(
-    (contextId: string, lastMessageUnix: number): void => {
-      managerRef.current?.markContextUnread(contextId, lastMessageUnix);
-    },
-    [],
-  );
-
   const seedContextRead = React.useCallback(
     (contextId: string, unixTimestamp: number): void => {
       managerRef.current?.seedContextRead(contextId, unixTimestamp);
     },
     [],
   );
+
+  const drainSyncedAdvances = React.useCallback((): ReadonlySet<string> => {
+    return managerRef.current?.drainSyncedAdvances() ?? new Set<string>();
+  }, []);
 
   const isReady = Boolean(
     pubkey && relayClient && initializedPubkey === pubkey,
@@ -87,8 +84,8 @@ export function useReadState(
       getEffectiveTimestamp: noopGetTimestamp,
       isReady: false,
       markContextRead: noopMarkRead,
-      markContextUnread: noopMarkUnread,
       seedContextRead: noopMarkRead,
+      drainSyncedAdvances: noopDrainAdvances,
       readStateVersion: 0,
     };
   }
@@ -97,8 +94,8 @@ export function useReadState(
     getEffectiveTimestamp,
     isReady,
     markContextRead,
-    markContextUnread,
     seedContextRead,
+    drainSyncedAdvances,
     readStateVersion,
   };
 }

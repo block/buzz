@@ -209,11 +209,7 @@ pub struct CliArgs {
     )]
     pub agent_args: Vec<String>,
 
-    #[arg(
-        long,
-        env = "SPROUT_ACP_MCP_COMMAND",
-        default_value = "sprout-mcp-server"
-    )]
+    #[arg(long, env = "SPROUT_ACP_MCP_COMMAND", default_value = "")]
     pub mcp_command: String,
 
     /// Idle timeout: max seconds of silence before killing a turn.
@@ -330,27 +326,40 @@ pub struct CliArgs {
 
     /// Enable NIP-AE agent core memory injection.
     ///
-    /// Memory injection is off by default for now. When enabled, the harness
+    /// Memory injection is on by default. When enabled, the harness
     /// fetches the agent's per-session core engram and renders it as an
     /// `[Agent Memory — core]` prompt section (or renders the onboarding nudge
     /// when the relay confirms no core engram exists). The `sprout mem` CLI
     /// and the relay's acceptance of kind:30174 engrams are unaffected — this
     /// flag controls prompt-time injection in the ACP harness only.
-    #[arg(long, env = "SPROUT_ACP_MEMORY", conflicts_with = "no_memory")]
+    /// Pass `--no-memory` / `SPROUT_ACP_NO_MEMORY=true` to disable.
+    #[arg(
+        long,
+        env = "SPROUT_ACP_MEMORY",
+        conflicts_with = "no_memory",
+        default_value_t = true
+    )]
     pub memory: bool,
 
     /// Disable NIP-AE agent core memory injection.
     ///
-    /// Deprecated compatibility alias for the previous default-on behavior.
-    /// The flag/env var is still accepted, but memory injection is already off
-    /// unless `--memory` / `SPROUT_ACP_MEMORY=true` is provided.
+    /// Memory injection is on by default; set this flag/env var to opt out.
+    #[arg(long, env = "SPROUT_ACP_NO_MEMORY", conflicts_with = "memory")]
+    pub no_memory: bool,
+
+    /// Disable the [Base] platform-context section prepended to every prompt.
+    /// When set, agents receive only the persona [System] prompt with no Sprout orientation.
+    #[arg(long, env = "SPROUT_ACP_NO_BASE_PROMPT")]
+    pub no_base_prompt: bool,
+
+    /// Path to a custom base prompt file. Overrides the compiled-in default.
+    /// Mutually exclusive with --no-base-prompt.
     #[arg(
         long,
-        env = "SPROUT_ACP_NO_MEMORY",
-        conflicts_with = "memory",
-        hide = true
+        env = "SPROUT_ACP_BASE_PROMPT_FILE",
+        conflicts_with = "no_base_prompt"
     )]
-    pub no_memory: bool,
+    pub base_prompt_file: Option<PathBuf>,
 
     /// Desired LLM model ID. Applied to every new ACP session after creation.
     /// Use `sprout-acp models` to discover available model IDs.
@@ -442,8 +451,8 @@ pub struct Config {
     pub typing_enabled: bool,
     /// Whether NIP-AE agent core memory injection is enabled. When false,
     /// the harness skips the per-session core engram fetch and renders no
-    /// `[Agent Memory — core]` section. Mirrors the `--memory` /
-    /// `SPROUT_ACP_MEMORY` opt-in.
+    /// `[Agent Memory — core]` section. On by default; disabled via the
+    /// `--no-memory` / `SPROUT_ACP_NO_MEMORY` opt-out.
     pub memory_enabled: bool,
     /// Desired LLM model ID. Applied after every `session_new_full()`.
     pub model: Option<String>,
@@ -461,6 +470,12 @@ pub struct Config {
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
+    /// Disable the [Base] platform-context section prepended to every prompt.
+    pub no_base_prompt: bool,
+    /// Resolved content from `--base-prompt-file`, read and validated in
+    /// `from_cli()`. `None` when using the compiled-in default or when
+    /// `--no-base-prompt` is set.
+    pub base_prompt_content: Option<String>,
 }
 
 /// Validate and deduplicate allowlist entries: each must be exactly 64 hex chars.
@@ -586,6 +601,22 @@ impl Config {
             Some(text)
         } else if let Some(ref path) = args.heartbeat_prompt_file {
             Some(std::fs::read_to_string(path)?)
+        } else {
+            None
+        };
+
+        let base_prompt_content = if args.no_base_prompt {
+            None
+        } else if let Some(ref path) = args.base_prompt_file {
+            let content = std::fs::read_to_string(path)?;
+            if content.len() > 1_048_576 {
+                return Err(ConfigError::ConfigFile(format!(
+                    "base prompt file {} exceeds 1 MB limit ({} bytes)",
+                    path.display(),
+                    content.len()
+                )));
+            }
+            Some(content)
         } else {
             None
         };
@@ -798,6 +829,8 @@ impl Config {
             persona_env_vars,
             relay_observer: args.relay_observer,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
+            no_base_prompt: args.no_base_prompt,
+            base_prompt_content,
         };
 
         Ok(config)
@@ -1133,7 +1166,7 @@ mod tests {
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
-            mcp_command: "sprout-mcp-server".into(),
+            mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: 3600,
             agents: 1,
@@ -1153,7 +1186,7 @@ mod tests {
             max_turns_per_session: 0,
             presence_enabled: true,
             typing_enabled: true,
-            memory_enabled: false,
+            memory_enabled: true,
             model: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
@@ -1161,6 +1194,8 @@ mod tests {
             persona_env_vars: vec![],
             relay_observer: false,
             agent_owner: None,
+            no_base_prompt: false,
+            base_prompt_content: None,
         }
     }
 
@@ -1740,21 +1775,21 @@ channels = "ALL"
     // ── memory toggle ───────────────────────────────────────────────────────
 
     #[test]
-    fn test_memory_enabled_default_false() {
+    fn test_memory_enabled_default_true() {
         let config = test_config(SubscribeMode::Mentions);
         assert!(
-            !config.memory_enabled,
-            "memory_enabled should default to false"
+            config.memory_enabled,
+            "memory_enabled should default to true"
         );
     }
 
     #[test]
-    fn test_summary_includes_memory_disabled() {
+    fn test_summary_includes_memory_enabled() {
         let config = test_config(SubscribeMode::Mentions);
         let s = config.summary();
         assert!(
-            s.contains("memory=false"),
-            "summary should include memory=false by default, got: {s}"
+            s.contains("memory=true"),
+            "summary should include memory=true by default, got: {s}"
         );
     }
 

@@ -154,6 +154,11 @@ pub struct PersonaConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
+    /// Preferred ACP runtime ID (e.g., 'goose', 'claude'). Maps to PersonaRecord.runtime during
+    /// pack import.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
 
@@ -200,6 +205,7 @@ struct Frontmatter {
     #[serde(alias = "respond_to")]
     triggers: Option<RespondTo>,
     model: Option<String>,
+    runtime: Option<String>,
     temperature: Option<f64>,
     max_context_tokens: Option<u64>,
     thread_replies: Option<bool>,
@@ -260,6 +266,7 @@ pub fn parse_persona_md(content: &str) -> Result<PersonaConfig, PersonaError> {
         subscribe: fm.subscribe,
         triggers: fm.triggers,
         model: fm.model,
+        runtime: fm.runtime,
         temperature: fm.temperature,
         max_context_tokens: fm.max_context_tokens,
         thread_replies: fm.thread_replies,

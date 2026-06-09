@@ -6,6 +6,32 @@ code style, PR process, architecture), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
+## Ecosystem
+
+Sprout spans five repos. This one (`block/sprout`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
+
+| Repo | Purpose |
+|------|---------|
+| [block/sprout](https://github.com/block/sprout) | OSS source — relay, desktop app, mobile app, CLI, agent harness |
+| [squareup/sprout-releases](https://github.com/squareup/sprout-releases) | Buildkite pipeline producing Block-signed macOS + iOS builds with `-block` version suffix |
+| [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | CI pipeline building the relay Docker image and pushing to internal ECR |
+| [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Terraform + ArgoCD deploying the relay to the staging Kubernetes cluster |
+| [squareup/sprout-backend-blox](https://github.com/squareup/sprout-backend-blox) | Desktop backend provider script connecting Blox workstation agents to the relay |
+
+```
+block/sprout (source)
+  ├─► sprout-releases    (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
+  ├─► sprout-oss         (relay Docker image → ECR)
+  │     └─► block-coder-tf-stacks  (Helm chart → ArgoCD → staging cluster)
+  └─── sprout-backend-blox         (Blox compute provider for Desktop agent launch)
+```
+
+See [RELEASING.md](RELEASING.md) for the desktop release flow and
+[CONTRIBUTING.md § Ecosystem](CONTRIBUTING.md#ecosystem) for contributor
+access information.
+
+---
+
 ## Repo Structure
 
 ```
@@ -20,7 +46,6 @@ crates/
   sprout-audit        # Hash-chain audit log
   sprout-media        # Blossom/S3 media storage
   # Agent surface
-  sprout-mcp          # MCP server providing AI agent tools (being phased out in favor of the CLI)
   sprout-acp          # ACP harness bridging Sprout events to AI agents
   sprout-agent        # Minimal ACP-compliant agent (non-streaming, tool-calls-as-output)
   sprout-dev-mcp      # Developer MCP server — shell + file-edit tools
@@ -36,6 +61,7 @@ crates/
   sprout-cli          # Agent-first CLI
   sprout-sdk          # Typed Nostr event builders
   sprout-admin        # Operator CLI for relay administration
+  sprout-ws-client    # Shared NIP-42 WebSocket client (connect, auth, publish)
   sprout-test-client  # Integration test client and E2E test suite
   sprig               # All-in-one harness bundling ACP, agent, and dev MCP
 
@@ -70,6 +96,16 @@ unit tests + builds. Clippy passing does not mean fmt passes; run both.
 
 Run `just test` for integration tests if you touched `sprout-relay`,
 `sprout-db`, or `sprout-auth` — these require a running Postgres and Redis.
+
+**Pre-commit hooks** are installed automatically by `just setup` and auto-fix
+formatting via `stage_fixed`. Pre-commit runs fix variants in parallel (Rust
+fmt, Tauri Rust fmt, desktop biome fix, web biome fix, mobile dart format).
+Auto-fixable issues are fixed and re-staged; unfixable lint issues block the
+commit. **Pre-push hooks** run clippy (workspace + Tauri) and fast unit tests
+in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter) — no overlap with
+pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix all formatting
+in one shot. Run `just ci` for the full local gate. Run `just hooks` to
+re-install hooks after env changes.
 
 Additional rules:
 - No `unsafe` code
@@ -110,11 +146,7 @@ first, then implement handling in the relay.
 **Channel scoping**: Channels use `h` tags (NIP-29 group tag), not `e` tags.
 Filters and queries must scope to `h` tags when operating within a channel.
 
-**MCP tools — dual transport**: The MCP server in `sprout-mcp` uses two
-patterns: write operations send signed Nostr events over WebSocket; read
-operations call REST endpoints (see `relay_client.rs` for the HTTP helpers).
-Add the REST endpoint or event handler first, then add the MCP tool that calls
-it. Do not implement logic directly in MCP handlers.
+**Agent-facing operations go in `sprout-cli`**: New agent-facing features belong in `sprout-cli` — add a subcommand there first, then wire the REST/WebSocket call in `client.rs`. `sprout-dev-mcp` (shell + file tools for `sprout-agent`) is separate.
 
 **Workflow conditions**: `sprout-workflow` uses
 [evalexpr](https://docs.rs/evalexpr) for condition evaluation. Keep expressions
@@ -128,14 +160,41 @@ check existing reply handlers for the pattern.
 
 ## Agent CLI (`sprout-cli`)
 
-`sprout` is the agent-first CLI replacing `sprout-mcp`. Auth env vars
-(`SPROUT_RELAY_URL`, `SPROUT_PRIVATE_KEY`) are auto-injected by the ACP
-harness into managed agent subprocesses.
+`sprout` is the agent-first CLI. Auth env vars
+(`SPROUT_RELAY_URL`, `SPROUT_PRIVATE_KEY`, `SPROUT_AUTH_TAG`) are auto-injected
+by the ACP harness into managed agent subprocesses. In development, set
+`SPROUT_PRIVATE_KEY` and `SPROUT_RELAY_URL` in your environment manually.
+
+### Building the CLI
+
+```bash
+cargo build --release -p sprout-cli
+```
+
+Binary location: `./target/release/sprout`. Add `./target/release` to `PATH`
+or invoke with the full path.
+
+### Deep Links
+
+`sprout://message?channel=<uuid>&id=<hex>` links reference a specific message
+thread. To read the linked thread:
+
+```bash
+sprout messages thread --channel <uuid> --event <hex> --format compact
+```
+
+Extract `channel` and `id` from the URL query parameters. The optional
+`thread` parameter (root event ID) can be ignored — `messages thread` resolves
+the full thread from the event ID alone.
 
 All reads return sig-stripped JSON arrays; all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
-0=ok, 1=input error, 3=auth missing. See `crates/sprout-cli/TESTING.md`
-for the full live-testing runbook.
+0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
+
+`--format compact` is a **global** flag — it goes before the subcommand:
+`sprout --format compact channels list`, NOT `sprout channels list --format compact`.
+
+See `crates/sprout-cli/TESTING.md` for the full live-testing runbook.
 
 ---
 
@@ -149,7 +208,6 @@ just test         # full integration suite (requires Postgres + Redis)
 E2E tests live in `crates/sprout-test-client/tests/`:
 - `e2e_relay.rs` — WebSocket relay protocol
 - `e2e_rest_api.rs` — REST endpoint coverage
-- `e2e_mcp.rs` — MCP tool surface
 - `e2e_tokens.rs` — auth token flows
 - `e2e_workflows.rs` — workflow engine
 - `e2e_media.rs` — media upload/download (Blossom)
@@ -160,14 +218,162 @@ Desktop E2E: `cd desktop && pnpm exec playwright test`
 
 See [TESTING.md](TESTING.md) for the full multi-agent E2E guide.
 
+### Desktop Screenshots (Playwright)
+
+> **Do NOT use `sprout upload`, the relay media endpoint, or any third-party
+> image host for PR screenshots.** Relay media URLs fail through GitHub's camo
+> proxy. Always use `scripts/post-screenshots.sh` — see the `desktop-screenshot`
+> skill for the full workflow.
+
+The desktop app requires the E2E mock bridge to render — it cannot run in a plain
+browser. Use `just desktop-screenshot` to capture screenshots (builds frontend,
+starts preview server, runs Playwright automatically):
+
+```bash
+just desktop-screenshot --name home
+just desktop-screenshot --name channel --route /channels/general
+just desktop-screenshot --name search --click open-search
+just desktop-screenshot --name settings --click open-settings
+```
+
+Options: `--name` (filename), `--route` (client route), `--active-channel`
+(channel to view), `--click` (left-click data-testid or CSS selector),
+`--right-click` (right-click for context menus), `--hover` (hover before
+capture), `--clip` (crop region as `x,y,w,h` — e.g. `0,0,256,720` for sidebar
+only), `--wait` (ms, default 2000), `--viewport` (WxH, default 1280x720),
+`--outdir` (default `test-results/screenshots`), `--messages` (JSON file path).
+Output is a PNG path on stdout.
+
+Use `--messages` to inject content into a channel before capture. The JSON file
+is an array of objects — `channelName` and `content` are required, all other
+fields are optional and passed through to `__SPROUT_E2E_EMIT_MOCK_MESSAGE__`:
+
+```json
+[
+  {
+    "channelName": "random",
+    "content": "Hey @tyler check this out",
+    "pubkey": "953d...",
+    "kind": 40002,
+    "mentionPubkeys": ["deadbeef..."],
+    "extraTags": [["broadcast", "1"], ["e", "some-root-id"]],
+    "parentEventId": "abc123"
+  }
+]
+```
+
+Without `--active-channel`, all messages must target the same channel and the
+helper navigates to that channel (useful for showing message content). With
+`--active-channel`, messages can target multiple channels while the "camera"
+stays on the specified channel (useful for unread indicators, badges, etc.).
+
+```bash
+# Messages in the channel you're viewing (code blocks, formatting, etc.)
+just desktop-screenshot --name code-blocks --messages /tmp/msgs.json
+
+# Messages in OTHER channels to trigger unread state
+just desktop-screenshot --name unread-dot \
+  --active-channel general --messages /tmp/badge-msgs.json
+
+# Cropped to sidebar only (256px wide)
+just desktop-screenshot --name sidebar-unread \
+  --active-channel general --messages /tmp/badge-msgs.json \
+  --clip 0,0,256,720
+
+# Context menu on an unread channel (wider crop to include popup)
+just desktop-screenshot --name ctx-mark-read \
+  --active-channel general --messages /tmp/badge-msgs.json \
+  --right-click channel-random --clip 0,200,320,300
+
+# Hover state (e.g. copy button reveal)
+just desktop-screenshot --name copy-hover \
+  --messages /tmp/code-msgs.json --hover "[data-testid='copy-code']"
+```
+
+Available mock channels: `general`, `random`, `design`, `sales`, `engineering`,
+`agents`, `watercooler`, `announcements`, `alice-tyler`, `bob-tyler`.
+
+`scripts/post-screenshots.sh` hosts PNGs on a per-developer branch
+(`agent-screenshots/<github-username>`) and posts a PR comment with
+commit-SHA-based image URLs (immutable — safe from later overwrites):
+
+```bash
+./scripts/post-screenshots.sh 803 test-results/screenshots
+./scripts/post-screenshots.sh 803 test-results/screenshots body.md  # custom body prepended
+```
+
+The body file supports `{{filename}}` placeholders (without `.png`) to inline
+images at specific positions. Images not referenced by any placeholder are
+appended at the end. Without placeholders, all images are appended (backward
+compatible).
+
+```markdown
+### Unread dot
+A message arrives in `#random`.
+
+{{01-unread-dot}}
+
+### Context menu
+Right-click shows "Mark as read".
+
+{{02-context-menu}}
+```
+
+Re-runs for the same PR overwrite previous images. Cleanup:
+`git push origin --delete agent-screenshots/<username>`.
+
+### Writing E2E Screenshot Specs
+
+When screenshots need seeded state, live messages, or UI interaction before
+capture, write a Playwright spec instead of using `just desktop-screenshot`.
+Add specs to `desktop/tests/e2e/` and register them in `playwright.config.ts`
+(`smoke` project `testMatch`). Every test calls `installMockBridge(page)` for
+mock Tauri IPC. Mock pubkey, channel names, and UUIDs live in `e2eBridge.ts`.
+
+**Stale server:** `reuseExistingServer: true` means a previous build's server
+serves old code. Kill port 4173 and `pnpm run build` before re-running tests
+after code changes.
+
+**`addInitScript` before bridge:** `page.addInitScript` (localStorage seeding)
+must run BEFORE `installMockBridge(page)` — React reads state on mount, the
+bridge triggers mount.
+
+**Live messages:** Call `waitForMockLiveSubscription(page, channelName)` before
+`__SPROUT_E2E_EMIT_MOCK_MESSAGE__` — messages are silently dropped without a
+subscription. Navigate to the channel first (triggers subscription), then away
+(so unread indicators appear), then inject.
+
+**Animation timing:** Radix components animate in via CSS. `toBeVisible()`
+resolves mid-animation — wait for completion before screenshotting:
+
+```ts
+await menuItem.evaluate((el) =>
+  Promise.all(
+    el.closest("[data-state]")?.getAnimations().map((a) => a.finished) ?? [],
+  ),
+);
+```
+
+**Cropping:** Use `clip` — full-window (1280x720) screenshots are unreadable
+for sidebar features. Sidebar = 256px; context menus ~450px.
+
+**`general` has pre-seeded messages** making `hasUnread` always true. Use
+`engineering` for "muted + no unread" visual states.
+
+**PR comments:** Use a body template (3rd arg to `post-screenshots.sh`) with
+`{{filename}}` placeholders. Each screenshot gets a `###` heading + one-line
+description. See [PR #803](https://github.com/block/sprout/pull/803).
+
 ---
 
 ## Common Gotchas
 
 1. **Kind `39000` for channel metadata, not `41`** — kind 41 is NIP-01 (unused). All kinds defined in `sprout-core/src/kind.rs`.
 2. **Relay queries must specify `kinds`** — omitting `kinds` triggers the p-gate (403). Always include explicit kind filters.
-3. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
-4. **Desktop fmt check fails in worktrees** — run `just desktop-tauri-fmt-check` from the main checkout. CI is unaffected.
+3. **`messages search` must include `--kinds`** — an open-ended search (no kinds) hits the relay p-gate and returns 403. Pass at least `--kinds 9,45001,45003` to scope the query.
+4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
+5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
+6. **Desktop Tauri fmt fails in worktrees and blocks commits** — the pre-commit hook runs `just desktop-tauri-fmt`, which fails in git worktrees because `cargo fmt` resolves workspace paths relative to the worktree root. Run `just desktop-tauri-fmt` from the main checkout to apply the fix, then re-stage and commit. CI is unaffected.
 
 ---
 
@@ -178,7 +384,7 @@ organized under `desktop/src/features/`. Biome handles linting and formatting.
 
 ```bash
 just desktop-dev   # web-only dev server (faster iteration)
-just desktop-app   # full Tauri app with native shell
+just dev           # full Tauri app with native shell
 ```
 
 ### Workspace Switching
@@ -248,7 +454,13 @@ flutter analyze
 flutter test
 ```
 
-Or from repo root: `just mobile-check` and `just mobile-test`.
+Or from repo root: `just mobile-fmt` (auto-fix), `just mobile-check` (lint + fmt check), `just mobile-test` (tests).
+
+To run the app locally (starts Docker, relay, iOS simulator automatically):
+
+```bash
+just mobile-dev
+```
 
 ### Testing Conventions
 
@@ -263,7 +475,8 @@ Or from repo root: `just mobile-check` and `just mobile-test`.
 
 ## See Also
 
-- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / MCP tools / API endpoints
+- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / CLI subcommands / API endpoints
 - [TESTING.md](TESTING.md) — multi-agent E2E test guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
+- [RELEASING.md](RELEASING.md) — release process: `just release`, auto-tag, internal builds
 - [README.md](README.md) — project overview and quick start

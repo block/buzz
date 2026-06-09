@@ -8,6 +8,8 @@ import {
   getUsersBatch,
   updateProfile,
 } from "@/shared/api/tauri";
+import { getContactList, setContactList } from "@/shared/api/social";
+import type { ContactListResponse } from "@/shared/api/socialTypes";
 import type {
   Profile,
   UpdateProfileInput,
@@ -16,6 +18,9 @@ import type {
 } from "@/shared/api/types";
 
 export const profileQueryKey = ["profile"] as const;
+export const contactListQueryKey = (pubkey: string) =>
+  ["contact-list", pubkey] as const;
+export const allPulseTimelinesQueryKey = ["pulse-timeline"] as const;
 
 export function useProfileQuery(enabled = true) {
   return useQuery({
@@ -23,6 +28,71 @@ export function useProfileQuery(enabled = true) {
     queryKey: profileQueryKey,
     queryFn: getProfile,
     staleTime: 30_000,
+  });
+}
+
+export function useContactListQuery(pubkey?: string) {
+  return useQuery<ContactListResponse>({
+    queryKey: contactListQueryKey(pubkey ?? ""),
+    // biome-ignore lint/style/noNonNullAssertion: guarded by enabled: !!pubkey
+    queryFn: () => getContactList(pubkey!),
+    enabled: !!pubkey,
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
+  });
+}
+
+/**
+ * Follow mutation re-fetches the contact list inside the mutationFn to prevent
+ * race conditions when clicking Follow on multiple users quickly. The kind:3
+ * contact list is a full-snapshot replaceable event — stale reads cause data loss.
+ */
+export function useFollowMutation(currentPubkey?: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (targetPubkey: string) => {
+      if (!currentPubkey) throw new Error("No identity");
+      const current = await getContactList(currentPubkey);
+      if (current.contacts.some((c) => c.pubkey === targetPubkey)) {
+        return;
+      }
+      const updated = [...current.contacts, { pubkey: targetPubkey }];
+      return setContactList(updated);
+    },
+    onSuccess: () => {
+      if (currentPubkey) {
+        void queryClient.invalidateQueries({
+          queryKey: contactListQueryKey(currentPubkey),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: allPulseTimelinesQueryKey,
+        });
+      }
+    },
+  });
+}
+
+export function useUnfollowMutation(currentPubkey?: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (targetPubkey: string) => {
+      if (!currentPubkey) throw new Error("No identity");
+      const current = await getContactList(currentPubkey);
+      const updated = current.contacts.filter((c) => c.pubkey !== targetPubkey);
+      return setContactList(updated);
+    },
+    onSuccess: () => {
+      if (currentPubkey) {
+        void queryClient.invalidateQueries({
+          queryKey: contactListQueryKey(currentPubkey),
+        });
+        void queryClient.invalidateQueries({
+          queryKey: allPulseTimelinesQueryKey,
+        });
+      }
+    },
   });
 }
 

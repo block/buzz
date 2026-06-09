@@ -295,14 +295,11 @@ async fn pairing_ws_task_inner(
                     let mut guard = session.lock().await;
                     let Some(s) = guard.as_mut() else { break };
 
-                    match s.handle_abort(&event) {
-                        Ok(reason) => {
-                            let _ = app.emit("pairing-aborted", PairingAbortedPayload {
-                                reason: format!("{reason:?}"),
-                            });
-                            break;
-                        }
-                        Err(_) => {}
+                    if let Ok(reason) = s.handle_abort(&event) {
+                        let _ = app.emit("pairing-aborted", PairingAbortedPayload {
+                            reason: format!("{reason:?}"),
+                        });
+                        break;
                     }
 
                     if let Ok(sas) = s.handle_offer(&event) {

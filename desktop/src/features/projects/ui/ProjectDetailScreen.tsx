@@ -10,12 +10,12 @@ import {
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { ChatHeader } from "@/features/chat/ui/ChatHeader";
 import { useProjectQuery } from "@/features/projects/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { isSafeUrl } from "@/shared/lib/url";
 import { Button } from "@/shared/ui/button";
+import { TopChromeBackdrop } from "@/shared/ui/TopChromeBackdrop";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 function CloneUrlRow({ url }: { url: string }) {
@@ -71,66 +71,50 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
 
   if (projectQuery.isError) {
     return (
-      <>
-        <ChatHeader
-          description=""
-          mode="projects"
-          overlaysContent
-          title="Error"
-        />
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
-          <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
-          <p className="text-sm text-red-400">Failed to load project</p>
-          <div className="flex items-center gap-2">
-            <Button
-              onClick={() => void projectQuery.refetch()}
-              size="sm"
-              variant="outline"
-            >
-              Retry
-            </Button>
-            <Button
-              onClick={() => {
-                void goProjects();
-              }}
-              size="sm"
-              variant="ghost"
-            >
-              <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
-              Back to Projects
-            </Button>
-          </div>
-        </div>
-      </>
-    );
-  }
-
-  if (!project) {
-    return (
-      <>
-        <ChatHeader
-          description=""
-          mode="projects"
-          overlaysContent
-          title="Project not found"
-        />
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
-          <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
-          <p className="text-sm text-muted-foreground">
-            This project could not be found.
-          </p>
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
+        <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
+        <p className="text-sm text-red-400">Failed to load project</p>
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={() => void projectQuery.refetch()}
+            size="sm"
+            variant="outline"
+          >
+            Retry
+          </Button>
           <Button
             onClick={() => {
               void goProjects();
             }}
             size="sm"
-            variant="outline"
+            variant="ghost"
           >
             <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
             Back to Projects
           </Button>
         </div>
-      </>
+      </div>
+    );
+  }
+
+  if (!project) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
+        <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
+        <p className="text-sm text-muted-foreground">
+          This project could not be found.
+        </p>
+        <Button
+          onClick={() => {
+            void goProjects();
+          }}
+          size="sm"
+          variant="outline"
+        >
+          <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
+          Back to Projects
+        </Button>
+      </div>
     );
   }
 
@@ -140,14 +124,8 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
   );
 
   return (
-    <>
-      <ChatHeader
-        description={project.description}
-        mode="projects"
-        overlaysContent
-        title={project.name}
-      />
-
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <TopChromeBackdrop />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4 pt-14">
         <div className="mb-4">
           <Button
@@ -252,6 +230,6 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
           </section>
         </div>
       </div>
-    </>
+    </div>
   );
 }

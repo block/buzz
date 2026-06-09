@@ -8,6 +8,7 @@ import {
 } from "@/features/agents/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { PresenceBadge } from "@/features/presence/ui/PresenceBadge";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
@@ -171,12 +172,12 @@ export function UserProfilePopover({
             {profile?.avatarUrl ? (
               <img
                 alt={profile.displayName ?? "User avatar"}
-                className="h-10 w-10 shrink-0 rounded-xl object-cover shadow-xs"
+                className="h-10 w-10 shrink-0 rounded-lg object-cover shadow-xs"
                 referrerPolicy="no-referrer"
                 src={rewriteRelayUrl(profile.avatarUrl)}
               />
             ) : (
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-secondary text-xs font-semibold text-secondary-foreground shadow-xs">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-secondary text-xs font-semibold text-secondary-foreground shadow-xs">
                 {(profile?.displayName ?? pubkey.slice(0, 2))
                   .slice(0, 2)
                   .toUpperCase()}
@@ -217,7 +218,10 @@ export function UserProfilePopover({
               data-testid="user-profile-status"
             >
               {userStatus.emoji ? (
-                <span className="mr-1">{userStatus.emoji}</span>
+                <StatusEmoji
+                  className="mr-1 h-3.5 w-3.5"
+                  value={userStatus.emoji}
+                />
               ) : null}
               {userStatus.text}
             </p>

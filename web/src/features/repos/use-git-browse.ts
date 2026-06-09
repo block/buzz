@@ -11,8 +11,9 @@ import {
   ensureClone,
   findReadme,
   getCommitLog,
-  readFileContent,
+  readBlobView,
   readTreeEntries,
+  resolveHtmlAssets,
 } from "./git-client";
 
 /**
@@ -41,7 +42,8 @@ export function useGitTree(
   return useQuery({
     queryKey: ["git-tree", owner, repoName, ref, path ?? ""],
     queryFn: async () => {
-      const { fs, dir } = cloneQuery.data!;
+      if (!cloneQuery.data) throw new Error("unreachable: enabled guards data");
+      const { fs, dir } = cloneQuery.data;
       const oid = await resolveRef({ fs, dir, ref });
       const entries = await readTreeEntries(fs, dir, oid, path || undefined);
 
@@ -64,7 +66,8 @@ export function useGitLog(owner: string, repoName: string, ref: string) {
   return useQuery({
     queryKey: ["git-log", owner, repoName, ref],
     queryFn: async () => {
-      const { fs, dir } = cloneQuery.data!;
+      if (!cloneQuery.data) throw new Error("unreachable: enabled guards data");
+      const { fs, dir } = cloneQuery.data;
       return getCommitLog(fs, dir, ref);
     },
     enabled: !!cloneQuery.data,
@@ -79,7 +82,8 @@ export function useGitReadme(owner: string, repoName: string, ref: string) {
   return useQuery({
     queryKey: ["git-readme", owner, repoName, ref],
     queryFn: async () => {
-      const { fs, dir } = cloneQuery.data!;
+      if (!cloneQuery.data) throw new Error("unreachable: enabled guards data");
+      const { fs, dir } = cloneQuery.data;
       return findReadme(fs, dir, ref);
     },
     enabled: !!cloneQuery.data,
@@ -87,7 +91,7 @@ export function useGitReadme(owner: string, repoName: string, ref: string) {
   });
 }
 
-/** Read a single file's content. */
+/** Read a single file's content as a classified `BlobView`. */
 export function useGitBlob(
   owner: string,
   repoName: string,
@@ -99,11 +103,41 @@ export function useGitBlob(
   return useQuery({
     queryKey: ["git-blob", owner, repoName, ref, filepath],
     queryFn: async () => {
-      const { fs, dir } = cloneQuery.data!;
+      if (!cloneQuery.data) throw new Error("unreachable: enabled guards data");
+      const { fs, dir } = cloneQuery.data;
       const oid = await resolveRef({ fs, dir, ref });
-      return readFileContent(fs, dir, oid, filepath);
+      return readBlobView(fs, dir, oid, filepath);
     },
     enabled: !!cloneQuery.data && !!filepath,
+    staleTime: 5 * 60_000,
+  });
+}
+
+/**
+ * Resolve an HTML file into a self-contained doc (relative assets inlined),
+ * ready to drop into a sandboxed iframe. Lazy: `enabled` is caller-gated so
+ * we only do the inlining work when the user clicks "Run". The decoded HTML
+ * is passed in (the blob view already has it) to avoid a second read.
+ */
+export function useGitHtmlDoc(
+  owner: string,
+  repoName: string,
+  ref: string,
+  filepath: string,
+  html: string,
+  enabled: boolean,
+) {
+  const cloneQuery = useGitClone(owner, repoName, ref);
+
+  return useQuery({
+    queryKey: ["git-html-doc", owner, repoName, ref, filepath],
+    queryFn: async () => {
+      if (!cloneQuery.data) throw new Error("unreachable: enabled guards data");
+      const { fs, dir } = cloneQuery.data;
+      const oid = await resolveRef({ fs, dir, ref });
+      return resolveHtmlAssets(fs, dir, oid, filepath, html);
+    },
+    enabled: enabled && !!cloneQuery.data && !!filepath,
     staleTime: 5 * 60_000,
   });
 }

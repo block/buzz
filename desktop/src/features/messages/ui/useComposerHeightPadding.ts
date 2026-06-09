@@ -11,8 +11,10 @@ import * as React from "react";
 export function useComposerHeightPadding(
   scrollContainerRef: React.RefObject<HTMLElement | null>,
   composerRef: React.RefObject<HTMLElement | null>,
+  resetKey?: unknown,
 ) {
   React.useEffect(() => {
+    void resetKey;
     const scrollEl = scrollContainerRef.current;
     const composerEl = composerRef.current;
 
@@ -28,26 +30,41 @@ export function useComposerHeightPadding(
       );
     };
 
-    const observer = new ResizeObserver(([entry]) => {
-      const height =
-        entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
-      // Add a small buffer (8px) so the last message isn't flush against the composer
-      const padding = Math.ceil(height) + 8;
+    let lastPadding: number | null = null;
+
+    const applyPadding = (height: number) => {
+      const padding = Math.ceil(height);
+      if (lastPadding !== null && Math.abs(padding - lastPadding) <= 1) {
+        return;
+      }
+
+      const previousPadding = lastPadding;
       const wasAtBottom = isNearBottom();
 
       scrollEl.style.paddingBottom = `${padding}px`;
+      lastPadding = padding;
 
-      if (wasAtBottom) {
+      if (
+        wasAtBottom &&
+        (previousPadding === null || padding > previousPadding)
+      ) {
         scrollEl.scrollTop = scrollEl.scrollHeight;
       }
+    };
+
+    const observer = new ResizeObserver(([entry]) => {
+      const height =
+        entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+      applyPadding(height);
     });
 
     observer.observe(composerEl);
+    applyPadding(composerEl.getBoundingClientRect().height);
 
     return () => {
       observer.disconnect();
       // Reset to a sensible default when unmounting
       scrollEl.style.paddingBottom = "";
     };
-  }, [scrollContainerRef, composerRef]);
+  }, [scrollContainerRef, composerRef, resetKey]);
 }

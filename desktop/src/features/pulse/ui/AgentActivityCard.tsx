@@ -2,6 +2,7 @@ import { Bot, ChevronDown, ChevronRight } from "lucide-react";
 import * as React from "react";
 
 import type { AgentNoteGroup } from "@/features/pulse/lib/groupAgentNotes";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import type { UserProfileSummary } from "@/shared/api/types";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -54,10 +55,20 @@ export function AgentActivityCard({
     <div className="rounded-2xl px-1 py-4 sm:px-2">
       {/* Header */}
       <div className="flex items-center gap-3">
-        <div className="relative shrink-0 pt-1">
-          <UserAvatar avatarUrl={avatarUrl} displayName={displayName} />
-          <Bot className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-background p-0.5 text-muted-foreground" />
-        </div>
+        <UserProfilePopover
+          botIdenticonValue={displayName}
+          pubkey={group.pubkey}
+          role={"bot" as const}
+        >
+          <button
+            aria-label={`Open profile for ${displayName}`}
+            className="relative flex shrink-0 rounded-xl pt-1 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            type="button"
+          >
+            <UserAvatar avatarUrl={avatarUrl} displayName={displayName} />
+            <Bot className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-background p-0.5 text-muted-foreground" />
+          </button>
+        </UserProfilePopover>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="truncate text-sm font-semibold leading-none">

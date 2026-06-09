@@ -10,6 +10,8 @@
 //!   FAKE_MCP_DESC_SIZE=N     — every tool description is N bytes (overrides HUGE_DESC)
 //!   FAKE_MCP_TOOL_DELAY=N    — `tools/call` sleeps N seconds before replying
 //!                              (use a large value, e.g. 999, to simulate hang)
+//!   FAKE_MCP_RESULT_SIZE=N   — `tools/call` returns an N-byte text result
+//!                              (default: the literal "ok"); grows history
 //!   FAKE_MCP_PID_FILE=path   — write the child PID to `path` on startup
 //!                              (for tests that want to verify the child died)
 //!   FAKE_MCP_SPAWN_GRANDCHILD=1
@@ -123,6 +125,9 @@ fn main() {
         "fake tool".to_owned()
     };
     let tool_delay_secs = env_u64("FAKE_MCP_TOOL_DELAY", 0);
+    // Tool-call result text size in bytes (default: the literal "ok"). Lets a
+    // test grow session history by a controlled amount via a tool result.
+    let result_size = env_u64("FAKE_MCP_RESULT_SIZE", 0) as usize;
     let stop_hook = env_flag("FAKE_MCP_STOP_HOOK");
     let stop_text = std::env::var("FAKE_MCP_STOP_TEXT").unwrap_or_else(|_| "keep going".to_owned());
     let stop_delay_secs = env_u64("FAKE_MCP_STOP_DELAY", 0);
@@ -266,10 +271,15 @@ fn main() {
                 if tool_delay_secs > 0 {
                     std::thread::sleep(std::time::Duration::from_secs(tool_delay_secs));
                 }
+                let result_text = if result_size > 0 {
+                    "x".repeat(result_size)
+                } else {
+                    "ok".to_owned()
+                };
                 write_response(
                     id,
                     json!({
-                        "content": [{ "type": "text", "text": "ok" }],
+                        "content": [{ "type": "text", "text": result_text }],
                         "isError": false,
                     }),
                 );

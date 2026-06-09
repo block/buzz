@@ -120,12 +120,12 @@ export function MembersSidebar({
     (member: ChannelMember) => {
       return (
         (selfMember?.role === "admin" && member.pubkey !== currentPubkey) ||
-        (selfMember?.role === "owner" && isBot(member)) ||
+        (selfMember?.role === "owner" && member.role !== "owner") ||
         Boolean(selfMember && isMyBot(member)) ||
         member.pubkey === currentPubkey
       );
     },
-    [currentPubkey, isBot, isMyBot, selfMember],
+    [currentPubkey, isMyBot, selfMember],
   );
   const removableManagedBots = React.useMemo(
     () =>
@@ -220,7 +220,7 @@ export function MembersSidebar({
           data-testid="members-sidebar"
           side="right"
         >
-          <SheetHeader className="relative z-10 space-y-2 bg-background/25 px-6 py-6 text-left shadow-[0_4px_24px_rgba(0,0,0,0.06)] backdrop-blur-xl supports-[backdrop-filter]:bg-background/20 dark:shadow-[0_4px_24px_rgba(0,0,0,0.25)]">
+          <SheetHeader className="relative z-10 space-y-2 bg-background/25 px-6 py-6 text-left backdrop-blur-xl supports-[backdrop-filter]:bg-background/20">
             <SheetTitle>Members</SheetTitle>
             <SheetDescription>
               People and bots in {channel.name}.
@@ -228,9 +228,10 @@ export function MembersSidebar({
           </SheetHeader>
 
           <div className="flex-1 space-y-6 overflow-y-auto px-6 py-6">
-            {(canManageMembers || channel.visibility === "open") &&
+            {(selfMember !== null || channel.visibility === "open") &&
             channel.channelType !== "dm" ? (
               <ChannelMemberInviteCard
+                canAssignElevatedRoles={canManageMembers}
                 existingMembers={rawMembers}
                 isPending={addMembersMutation.isPending}
                 onSubmit={(input) => addMembersMutation.mutateAsync(input)}

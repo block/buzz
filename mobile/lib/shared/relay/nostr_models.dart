@@ -6,6 +6,8 @@ import 'package:flutter/foundation.dart';
 ///
 /// Keep in sync with `desktop/src/shared/constants/kinds.ts`.
 abstract final class EventKind {
+  static const note = 1;
+  static const contactList = 3;
   static const deletion = 5;
   static const reaction = 7;
   static const streamMessage = 9;

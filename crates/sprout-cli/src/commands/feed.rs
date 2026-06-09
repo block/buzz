@@ -3,11 +3,14 @@ use std::cmp::Reverse;
 use crate::client::{normalize_events, SproutClient};
 use crate::error::CliError;
 
+const VALID_FEED_TYPES: &[&str] = &["mentions", "needs_action", "activity", "agent_activity"];
+
 /// Get activity feed — query events mentioning our pubkey (via p-tag).
 pub async fn cmd_get_feed(
     client: &SproutClient,
     since: Option<i64>,
     limit: Option<u32>,
+    types: Option<&str>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     let my_pk = client.keys().public_key().to_hex();
@@ -20,6 +23,19 @@ pub async fn cmd_get_feed(
 
     if let Some(s) = since {
         filter["since"] = serde_json::json!(s);
+    }
+
+    if let Some(types_str) = types {
+        let type_list: Vec<&str> = types_str.split(',').map(str::trim).collect();
+        for t in &type_list {
+            if !VALID_FEED_TYPES.contains(t) {
+                return Err(crate::error::CliError::Usage(format!(
+                    "invalid feed type {t:?} — must be one of: {}",
+                    VALID_FEED_TYPES.join(", ")
+                )));
+            }
+        }
+        filter["feed_types"] = serde_json::json!(type_list);
     }
 
     let resp = client.query(&filter).await?;
@@ -59,6 +75,10 @@ pub async fn dispatch(
 ) -> Result<(), CliError> {
     use crate::FeedCmd;
     match cmd {
-        FeedCmd::Get { since, limit } => cmd_get_feed(client, since, limit, format).await,
+        FeedCmd::Get {
+            since,
+            limit,
+            types,
+        } => cmd_get_feed(client, since, limit, types.as_deref(), format).await,
     }
 }

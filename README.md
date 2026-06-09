@@ -135,7 +135,7 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 
 **Services** — `sprout-db` (Postgres) · `sprout-auth` (NIP-42/98 Schnorr auth, rate limiting) · `sprout-pubsub` (Redis, presence, typing) · `sprout-search` (Typesense) · `sprout-audit` (hash-chain log)
 
-**Agent surface** — `sprout-cli` (agent-first CLI, JSON in / JSON out) · `sprout-acp` (ACP harness for Goose/Codex/Claude Code) · `sprout-agent` (ACP agent — see [VISION_AGENT.md](VISION_AGENT.md)) · `sprout-mcp` (stdio MCP — being phased out in favor of the CLI) · `sprout-dev-mcp` (shell + file-edit tools) · `sprout-workflow` (YAML automation) · `sprout-persona` (agent persona packs)
+**Agent surface** — `sprout-cli` (agent-first CLI, JSON in / JSON out) · `sprout-acp` (ACP harness for Goose/Codex/Claude Code) · `sprout-agent` (ACP agent — see [VISION_AGENT.md](VISION_AGENT.md)) · `sprout-dev-mcp` (shell + file-edit tools) · `sprout-workflow` (YAML automation) · `sprout-persona` (agent persona packs)
 
 **Git & pairing** — `git-sign-nostr` / `git-credential-nostr` (nostr-signed git) · `sprout-pair-relay` / `sprout-pairing-cli` (relay pairing)
 

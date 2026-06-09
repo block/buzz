@@ -2,7 +2,7 @@
 
 [package]
 name = "sprout-desktop"
-version = "0.1.0"
+version = "0.3.14"
 description = "Sprout desktop app"
 authors = ["you"]
 edition = "2021"
@@ -16,17 +16,26 @@ edition = "2021"
 name = "sprout_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+mesh-llm = ["dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+ctrlc = { version = "3", features = ["termination"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHapticFeedback"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dependencies]
 atomic-write-file = "0.3"
+anyhow = "1"
 dirs = "6"
 tauri = { version = "2", features = [] }
 tauri-plugin-deep-link = "2"
@@ -47,6 +56,7 @@ opus = "0.3"
 neteq = { version = "0.8", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 nostr = { version = "0.44", features = ["nip44"] }
 zeroize = "1"
 reqwest = { version = "0.13", features = ["json", "query", "stream"] }
@@ -54,6 +64,8 @@ url = "2"
 sprout-core = { path = "../../crates/sprout-core" }
 sprout-persona = { path = "../../crates/sprout-persona" }
 sprout-sdk = { path = "../../crates/sprout-sdk" }
+mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ebc3ab4c4b5f4a45d5bc942c66c18583800c3f82", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
+mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ebc3ab4c4b5f4a45d5bc942c66c18583800c3f82", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }
 base64 = "0.22"
 sha2 = "0.11"
 tar = "0.4"
@@ -72,5 +84,6 @@ earshot = "1.0"
 rubato = "3.0"
 audioadapter-buffers = "3.0"
 tempfile = "3"
+strip-ansi-escapes = "0.2"
 
 [dev-dependencies]

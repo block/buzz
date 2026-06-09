@@ -84,7 +84,7 @@ pub(crate) async fn maybe_start_stt_pipeline(
     if !models::is_stt_ready() {
         return Ok(false); // Models not downloaded yet — voice-only mode.
     }
-    let model_dir = models::stt_model_dir().ok_or_else(|| "STT model directory not found")?;
+    let model_dir = models::stt_model_dir().ok_or("STT model directory not found")?;
 
     let channel_uuid = parse_channel_uuid(ephemeral_channel_id)?;
 
@@ -269,7 +269,7 @@ pub(crate) fn spawn_transcription_task(
                 .clone();
 
             let p_tags: Vec<&str> = agent_pubkeys.iter().map(|s| s.as_str()).collect();
-            let builder = match events::build_message(channel_uuid, &t, None, &p_tags, &[]) {
+            let builder = match events::build_message(channel_uuid, &t, None, &p_tags, &[], &[]) {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("sprout-desktop: STT build_message: {e}");

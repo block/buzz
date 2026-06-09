@@ -271,7 +271,7 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
 
   static String _decodePrivkey(String nsec) {
     try {
-      final privHex = nostr.Nip19.decodePrivkey(nsec);
+      final privHex = nostr.Nip19.decode(payload: nsec).data;
       if (privHex.isEmpty) {
         throw const FormatException('empty private key');
       }
@@ -283,7 +283,7 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
 
   static String _derivePubkey(String privHex) {
     try {
-      return nostr.Keychain(privHex).public;
+      return nostr.Keys(privHex).public;
     } catch (_) {
       throw const FormatException('failed to derive pubkey');
     }

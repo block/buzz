@@ -13,19 +13,22 @@ class ReadStateState {
   final String? pubkey;
   final Map<String, int> contexts;
   final int version;
+  final Set<String> locallyForcedChannelIds;
 
   const ReadStateState({
     required this.isReady,
     required this.pubkey,
     required this.contexts,
     required this.version,
+    this.locallyForcedChannelIds = const {},
   });
 
   const ReadStateState.inert()
     : isReady = false,
       pubkey = null,
       contexts = const {},
-      version = 0;
+      version = 0,
+      locallyForcedChannelIds = const {};
 
   int? effectiveTimestamp(String contextId) => contexts[contextId];
 
@@ -40,6 +43,7 @@ class ReadStateState {
       pubkey: pubkey,
       contexts: Map.unmodifiable({...contexts, contextId: timestamp}),
       version: version + 1,
+      locallyForcedChannelIds: locallyForcedChannelIds,
     );
   }
 }
@@ -47,15 +51,17 @@ class ReadStateState {
 class ReadStateNotifier extends Notifier<ReadStateState> {
   ReadStateManager? _manager;
   bool _isInitialized = false;
+  final Set<String> _locallyForcedChannelIds = {};
 
   @override
   ReadStateState build() {
     _manager?.dispose(flushPending: false);
     _manager = null;
     _isInitialized = false;
+    _locallyForcedChannelIds.clear();
 
     final relayConfig = ref.watch(relayConfigProvider);
-    final sessionState = ref.watch(relaySessionProvider);
+    ref.watch(relaySessionProvider);
     final activeWorkspace = ref.watch(activeWorkspaceProvider).value;
 
     final nsec = relayConfig.nsec?.trim();
@@ -87,7 +93,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       crypto: crypto,
       relaySession: ref.read(relaySessionProvider.notifier),
       signedEventRelay: signedRelay,
-      remoteEnabled: sessionState.status == SessionStatus.connected,
+      remoteEnabled: true,
       onChanged: () => _emitManagerState(manager),
     );
     _manager = manager;
@@ -107,6 +113,13 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       }
     });
 
+    ref.listen(relaySessionProvider, (prev, next) {
+      if (prev?.status != SessionStatus.connected &&
+          next.status == SessionStatus.connected) {
+        unawaited(manager.reinitializeRemote());
+      }
+    });
+
     Future.microtask(() async {
       await manager.initialize();
       if (_manager != manager) return;
@@ -118,7 +131,19 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   }
 
   void markContextRead(String contextId, int unixTimestamp) {
+    _locallyForcedChannelIds.remove(contextId);
     _manager?.markContextRead(contextId, unixTimestamp);
+  }
+
+  void markContextUnread(String contextId) {
+    final manager = _manager;
+    if (manager == null) return;
+    _locallyForcedChannelIds.add(contextId);
+    state = _stateFromManager(
+      manager,
+      isReady: _isInitialized,
+      previousVersion: state.version,
+    );
   }
 
   void seedContextRead(String contextId, int unixTimestamp) {
@@ -127,6 +152,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
 
   void _emitManagerState(ReadStateManager manager) {
     if (_manager != manager) return;
+    final advances = manager.drainSyncedAdvances();
+    _locallyForcedChannelIds.removeAll(advances);
     state = _stateFromManager(
       manager,
       isReady: _isInitialized,
@@ -144,6 +171,9 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       pubkey: manager.pubkey,
       contexts: manager.effectiveContexts,
       version: (previousVersion ?? 0) + 1,
+      locallyForcedChannelIds: Set.unmodifiable(
+        Set<String>.from(_locallyForcedChannelIds),
+      ),
     );
   }
 }
@@ -163,7 +193,8 @@ String? _normalizePubkey(String? value) {
 String? _safeDerivedPubkey(SignedEventRelay relay) {
   try {
     return _normalizePubkey(relay.pubkey);
-  } catch (_) {
+  } catch (e) {
+    debugPrint('[ReadStateManager] pubkey derivation failed: $e');
     return null;
   }
 }

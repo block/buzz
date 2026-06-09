@@ -22,12 +22,13 @@ class ReadStateCrypto {
     required String pubkey,
   }) {
     try {
-      final privkeyHex = nostr.Nip19.decodePrivkey(nsec);
+      final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
       if (privkeyHex.isEmpty || pubkey.isEmpty) {
         return null;
       }
       return ReadStateCrypto._(getConversationKey(privkeyHex, pubkey));
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[ReadStateManager] crypto init failed: $e');
       return null;
     }
   }
@@ -37,6 +38,8 @@ class ReadStateCrypto {
   String decrypt(String ciphertext) =>
       nip44Decrypt(conversationKey, ciphertext);
 }
+
+enum _ApplyRemoteContextResult { unchanged, advanced }
 
 class ReadStateManager {
   final String pubkey;
@@ -59,8 +62,11 @@ class ReadStateManager {
   bool _initialized = false;
   bool _disposed = false;
   bool _isPublishing = false;
+  Completer<void>? _publishCompleter;
   bool _remoteUnsupported = false;
   int _maxFetchedCreatedAt = 0;
+  final Map<String, int> _contextSourceCreatedAt = {};
+  final Set<String> _pendingSyncedAdvances = {};
 
   ReadStateManager({
     required this.pubkey,
@@ -88,6 +94,9 @@ class ReadStateManager {
   Future<void> initialize() async {
     if (_initialized || _disposed) return;
     _initialized = true;
+    debugPrint(
+      '[ReadStateManager] initialize pubkey=${pubkey.substring(0, 8)}… clientId=${_clientId.substring(0, 8)}… slotId=$_slotId',
+    );
 
     if (!_remoteEnabled || _relaySession == null) {
       _onChanged();
@@ -101,10 +110,17 @@ class ReadStateManager {
     }
 
     _onChanged();
+    debugPrint(
+      '[ReadStateManager] initialize complete maxFetchedCreatedAt=$_maxFetchedCreatedAt contexts=${_effectiveState.length}',
+    );
   }
 
   void markContextRead(String contextId, int unixTimestamp) {
     _advanceContext(contextId, unixTimestamp, publishable: true);
+    _contextSourceCreatedAt[contextId] = max(
+      currentUnixSeconds(),
+      _maxFetchedCreatedAt + 1,
+    );
   }
 
   void seedContextRead(String contextId, int unixTimestamp) {
@@ -116,6 +132,22 @@ class ReadStateManager {
     _debounceTimer = null;
     if (!_remoteEnabled || _remoteUnsupported || _disposed) return;
     await _publish();
+  }
+
+  Future<void> reinitializeRemote() async {
+    if (_disposed || !_remoteEnabled || !_initialized) return;
+    debugPrint('[ReadStateManager] reinitializeRemote');
+    if (_isPublishing) {
+      await _publishCompleter?.future;
+    }
+    _unsubscribeLive?.call();
+    _unsubscribeLive = null;
+    await _fetchAndMerge();
+    await _startLiveSubscription();
+    if (!_isIdenticalToLastPublished(_currentContexts())) {
+      _schedulePublish();
+    }
+    _onChanged();
   }
 
   void dispose({bool flushPending = true}) {
@@ -184,8 +216,8 @@ class ReadStateManager {
       _mergeEvents(events);
       _persistLocalState();
       _onChanged();
-    } catch (_) {
-      // Local state remains usable when relay history is unavailable.
+    } catch (e) {
+      debugPrint('[ReadStateManager] fetchAndMerge failed: $e');
     }
   }
 
@@ -199,11 +231,11 @@ class ReadStateManager {
         pubkey: pubkey,
         decrypt: _crypto.decrypt,
       );
-      if (decoded == null) {
-        continue;
-      }
+      if (decoded == null) continue;
 
-      _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
+      if (_isPlausibleCreatedAt(event.createdAt)) {
+        _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
+      }
 
       if (decoded.dTag == '$readStateDTagPrefix$_slotId' &&
           decoded.blob.clientId != _clientId) {
@@ -211,11 +243,15 @@ class ReadStateManager {
       }
 
       for (final entry in decoded.blob.contexts.entries) {
-        final current = _effectiveState[entry.key] ?? 0;
-        if (entry.value > current) {
-          _effectiveState[entry.key] = entry.value;
+        final result = _applyRemoteContextTimestamp(
+          contextId: entry.key,
+          timestamp: entry.value,
+          eventCreatedAt: event.createdAt,
+        );
+        if (result == _ApplyRemoteContextResult.advanced) {
+          _pendingSyncedAdvances.add(entry.key);
+          _publishableContextIds.add(entry.key);
         }
-        _publishableContextIds.add(entry.key);
       }
 
       if (decoded.blob.clientId == _clientId &&
@@ -233,7 +269,7 @@ class ReadStateManager {
 
   Future<void> _startLiveSubscription() async {
     try {
-      _unsubscribeLive = await _relaySession!.subscribe(
+      final unsub = await _relaySession!.subscribe(
         NostrFilter(
           kinds: const [EventKind.readState],
           authors: [pubkey],
@@ -244,24 +280,33 @@ class ReadStateManager {
         ),
         _handleIncomingEvent,
       );
-    } catch (_) {
-      // Non-fatal; history and local writes still work.
+      if (_disposed) {
+        unsub.call();
+        return;
+      }
+      _unsubscribeLive = unsub;
+      debugPrint('[ReadStateManager] live subscription established');
+    } catch (e) {
+      debugPrint('[ReadStateManager] live subscription FAILED: $e');
     }
   }
 
   void _handleIncomingEvent(NostrEvent event) {
     if (_disposed) return;
+    debugPrint(
+      '[ReadStateManager] incoming event=${event.id.substring(0, 8)}… created_at=${event.createdAt}',
+    );
 
     final decoded = decodeReadStateEvent(
       event,
       pubkey: pubkey,
       decrypt: _crypto.decrypt,
     );
-    if (decoded == null) {
-      return;
-    }
+    if (decoded == null) return;
 
-    _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
+    if (_isPlausibleCreatedAt(event.createdAt)) {
+      _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
+    }
 
     if (decoded.dTag == '$readStateDTagPrefix$_slotId' &&
         decoded.blob.clientId != _clientId) {
@@ -270,15 +315,22 @@ class ReadStateManager {
 
     var changed = false;
     for (final entry in decoded.blob.contexts.entries) {
-      final current = _effectiveState[entry.key] ?? 0;
-      if (entry.value > current) {
-        _effectiveState[entry.key] = entry.value;
+      final result = _applyRemoteContextTimestamp(
+        contextId: entry.key,
+        timestamp: entry.value,
+        eventCreatedAt: event.createdAt,
+      );
+      if (result == _ApplyRemoteContextResult.advanced) {
+        _pendingSyncedAdvances.add(entry.key);
         changed = true;
       }
       if (_publishableContextIds.add(entry.key)) {
         changed = true;
       }
     }
+    debugPrint(
+      '[ReadStateManager] incoming result changed=$changed clientId=${decoded.blob.clientId.substring(0, min(8, decoded.blob.clientId.length))}…',
+    );
 
     if (decoded.blob.clientId == _clientId) {
       _lastPublishedContexts = Map<String, int>.from(decoded.blob.contexts);
@@ -290,9 +342,30 @@ class ReadStateManager {
     }
 
     if (decoded.blob.clientId != _clientId &&
-        _contextsExceedLastPublished(decoded.blob.contexts)) {
+        !_isIdenticalToLastPublished(_currentContexts())) {
       _schedulePublish();
     }
+  }
+
+  _ApplyRemoteContextResult _applyRemoteContextTimestamp({
+    required String contextId,
+    required int timestamp,
+    required int eventCreatedAt,
+  }) {
+    final sourceCreatedAt = _contextSourceCreatedAt[contextId] ?? 0;
+    final current = _effectiveState[contextId] ?? 0;
+    final next = max(current, timestamp);
+    final result = next == current
+        ? _ApplyRemoteContextResult.unchanged
+        : _ApplyRemoteContextResult.advanced;
+
+    if (result == _ApplyRemoteContextResult.advanced) {
+      _effectiveState[contextId] = next;
+    }
+    if (eventCreatedAt > sourceCreatedAt) {
+      _contextSourceCreatedAt[contextId] = eventCreatedAt;
+    }
+    return result;
   }
 
   void _schedulePublish() {
@@ -314,7 +387,10 @@ class ReadStateManager {
     }
     if (_isPublishing) return;
 
+    final completer = Completer<void>();
+    _publishCompleter = completer;
     _isPublishing = true;
+    debugPrint('[ReadStateManager] publish starting slotId=$_slotId');
     try {
       await _fetchOwnBlobBeforePublish();
 
@@ -336,9 +412,16 @@ class ReadStateManager {
         ],
         createdAt: createdAt,
       );
+      debugPrint('[ReadStateManager] publish accepted createdAt=$createdAt');
 
+      for (final key in contexts.keys) {
+        if (_lastPublishedContexts[key] != contexts[key]) {
+          _contextSourceCreatedAt[key] = createdAt;
+        }
+      }
       _lastPublishedContexts = contexts;
       _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, createdAt);
+      _persistLocalState();
     } catch (error) {
       if (_isPermanentReadStateRemoteError(error)) {
         _remoteUnsupported = true;
@@ -353,6 +436,10 @@ class ReadStateManager {
       debugPrint('[ReadStateManager] publish failed: $error');
     } finally {
       _isPublishing = false;
+      completer.complete();
+      if (_publishCompleter == completer) {
+        _publishCompleter = null;
+      }
     }
   }
 
@@ -375,19 +462,9 @@ class ReadStateManager {
       if (!_disposed) {
         _onChanged();
       }
-    } catch (_) {
-      // Per NIP-RS, proceed with reachable data and merge later.
+    } catch (e) {
+      debugPrint('[ReadStateManager] fetchOwnBlobBeforePublish failed: $e');
     }
-  }
-
-  bool _contextsExceedLastPublished(Map<String, int> contexts) {
-    for (final entry in contexts.entries) {
-      final last = _lastPublishedContexts[entry.key];
-      if (last == null || entry.value > last) {
-        return true;
-      }
-    }
-    return false;
   }
 
   bool _isIdenticalToLastPublished(Map<String, int> contexts) {
@@ -400,6 +477,12 @@ class ReadStateManager {
       }
     }
     return true;
+  }
+
+  Set<String> drainSyncedAdvances() {
+    final drained = Set<String>.from(_pendingSyncedAdvances);
+    _pendingSyncedAdvances.clear();
+    return drained;
   }
 
   Map<String, int> _currentContexts() {
@@ -420,17 +503,28 @@ class ReadStateManager {
     _publishableContextIds
       ..clear()
       ..addAll(stored.publishableContextIds);
+    _contextSourceCreatedAt
+      ..clear()
+      ..addAll(stored.sourceCreatedAt);
     _persistLocalState();
   }
 
   void _persistLocalState() {
-    _storage.write(pubkey, _effectiveState, _publishableContextIds);
+    _storage.write(
+      pubkey,
+      _effectiveState,
+      _publishableContextIds,
+      _contextSourceCreatedAt,
+    );
   }
 
   void _rotateSlotId() {
     _slotId = generateReadStateSlotId();
     _storage.writeSlotId(pubkey, _slotId);
   }
+
+  bool _isPlausibleCreatedAt(int createdAt) =>
+      createdAt <= currentUnixSeconds() + readStateMaxClockDriftSeconds;
 
   bool _isPermanentReadStateRemoteError(Object error) {
     // Relay rejections come back as `Exception("<message>")` from the

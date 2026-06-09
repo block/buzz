@@ -1,5 +1,7 @@
 export type TimelineReaction = {
   emoji: string;
+  /** Custom (image) emoji URL from the reaction's NIP-30 `emoji` tag, if any. */
+  emojiUrl?: string;
   count: number;
   reactedByCurrentUser?: boolean;
   users: Array<{

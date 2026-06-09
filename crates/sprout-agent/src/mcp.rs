@@ -822,7 +822,7 @@ fn valid_name(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-fn truncate_at_boundary(s: &str, max: usize) -> &str {
+pub(crate) fn truncate_at_boundary(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
     }

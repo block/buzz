@@ -35,12 +35,14 @@ function formatSearchUserSecondary(user: UserSearchResult) {
 }
 
 export function ChannelMemberInviteCard({
+  canAssignElevatedRoles,
   existingMembers,
   isPending,
   onSubmit,
   open,
   requestErrorMessage,
 }: {
+  canAssignElevatedRoles: boolean;
   existingMembers: ChannelMember[];
   isPending: boolean;
   onSubmit: (input: {
@@ -62,6 +64,28 @@ export function ChannelMemberInviteCard({
   const [submissionErrors, setSubmissionErrors] = React.useState<
     AddChannelMembersResult["errors"]
   >([]);
+
+  // Only owners/admins may grant the elevated "admin" role — the relay rejects
+  // it for everyone else. Hide it from the dropdown so we never offer a role
+  // the server will refuse. "member", "guest", and "bot" are non-elevated and
+  // any channel member may grant them.
+  const availableRoles = React.useMemo<
+    Exclude<ChannelMember["role"], "owner">[]
+  >(
+    () =>
+      canAssignElevatedRoles
+        ? ["member", "admin", "guest", "bot"]
+        : ["member", "guest", "bot"],
+    [canAssignElevatedRoles],
+  );
+
+  // Guard against a stale elevated selection if the caller's permissions change
+  // while the card is mounted (e.g. the member gets demoted).
+  React.useEffect(() => {
+    if (!availableRoles.includes(inviteRole)) {
+      setInviteRole("member");
+    }
+  }, [availableRoles, inviteRole]);
 
   const deferredInviteQuery = React.useDeferredValue(inviteQuery.trim());
   const selectedInviteePubkeys = React.useMemo(
@@ -329,7 +353,7 @@ export function ChannelMemberInviteCard({
             }
             value={inviteRole}
           >
-            {["member", "admin", "guest", "bot"].map((role) => (
+            {availableRoles.map((role) => (
               <option key={role} value={role}>
                 {role}
               </option>
