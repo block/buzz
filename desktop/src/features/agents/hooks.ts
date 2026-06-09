@@ -238,9 +238,28 @@ export function useUpdateManagedAgentMutation() {
         },
       );
     },
-    onSettled: async () => {
-      await queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
-      await queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey });
+    onSettled: async (_data, _error, variables) => {
+      // Backend republishes kind:0 on a name change (sync_managed_agent_profile),
+      // so the relay has fresh profile data — but the desktop's React Query cache
+      // for ["user-profile", pubkey] has a 60s staleTime and will not refetch on
+      // its own. Invalidate explicitly so the profile pane re-renders against
+      // the new display name / about / NIP-05 immediately. Also poke any
+      // ["users-batch", ...] entries that include this pubkey so sidebar member
+      // rows, channel header chips, and message author labels refresh too.
+      const lowerPubkey = variables.pubkey.toLowerCase();
+
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
+        queryClient.invalidateQueries({
+          queryKey: ["user-profile", lowerPubkey],
+        }),
+        queryClient.invalidateQueries({
+          predicate: (query) =>
+            query.queryKey[0] === "users-batch" &&
+            query.queryKey.includes(lowerPubkey),
+        }),
+      ]);
     },
   });
 }
