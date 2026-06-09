@@ -60,7 +60,7 @@ async fn create_test_channel(keys: &Keys) -> String {
         .unwrap();
 
     let resp = client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&event).unwrap())
@@ -91,7 +91,7 @@ async fn send_rest_message(keys: &Keys, channel_id: &str, content: &str) -> Stri
         .sign_with_keys(keys)
         .unwrap();
     let resp = client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&event).unwrap())
@@ -107,15 +107,25 @@ async fn send_rest_message(keys: &Keys, channel_id: &str, content: &str) -> Stri
     body["event_id"].as_str().expect("event_id").to_string()
 }
 
-/// Create a DM via REST and return the channel_id UUID string.
+/// Create a DM via a signed kind:41010 (DM open) command event and return the
+/// channel_id UUID string parsed from the relay's `response:{...}` message.
 async fn create_dm(requester_keys: &Keys, other_pubkey_hex: &str) -> String {
     let client = reqwest::Client::new();
-    let url = format!("{}/api/dms", relay_http_url());
     let pubkey_hex = requester_keys.public_key().to_hex();
+    // Backdate the initial open so a later re-open kind:41010 with identical
+    // tags in the same wall-clock second does not produce an identical event id
+    // (which the relay would dedupe as "duplicate: already processed").
+    let backdated = nostr::Timestamp::from(nostr::Timestamp::now().as_secs() - 10);
+    let event = EventBuilder::new(Kind::Custom(41010), "")
+        .tags(vec![Tag::parse(["p", other_pubkey_hex]).unwrap()])
+        .custom_created_at(backdated)
+        .sign_with_keys(requester_keys)
+        .unwrap();
     let resp = client
-        .post(&url)
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &pubkey_hex)
-        .json(&serde_json::json!({ "pubkeys": [other_pubkey_hex] }))
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&event).unwrap())
         .send()
         .await
         .expect("create DM request");
@@ -125,7 +135,17 @@ async fn create_dm(requester_keys: &Keys, other_pubkey_hex: &str) -> String {
         resp.status()
     );
     let body: serde_json::Value = resp.json().await.expect("parse DM response");
-    body["channel_id"].as_str().expect("channel_id").to_string()
+    assert!(
+        body["accepted"].as_bool().unwrap_or(false),
+        "DM open not accepted: {body}"
+    );
+    let msg = body["message"].as_str().expect("message");
+    let payload = msg.strip_prefix("response:").expect("response: prefix");
+    let parsed: serde_json::Value = serde_json::from_str(payload).expect("response JSON");
+    parsed["channel_id"]
+        .as_str()
+        .expect("channel_id")
+        .to_string()
 }
 
 /// Submit a signed command event via REST and assert it was accepted.
@@ -137,7 +157,7 @@ async fn post_signed_event(keys: &Keys, kind: u16, tags: Vec<Tag>) {
         .sign_with_keys(keys)
         .unwrap();
     let resp = client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&event).unwrap())
@@ -376,7 +396,7 @@ async fn test_nip10_thread_reply_creates_metadata() {
     // Query thread via REST to verify reply is recorded.
     let http_client = reqwest::Client::new();
     let thread_url = format!(
-        "{}/api/channels/{}/threads/{}",
+        "{}/channels/{}/threads/{}",
         relay_http_url(),
         channel,
         root_event_id
@@ -835,7 +855,7 @@ async fn test_nip10_thread_reply_not_in_top_level() {
     // Query top-level messages via REST.
     let http_client = reqwest::Client::new();
     let messages_url = format!(
-        "{}/api/channels/{}/messages?limit=50",
+        "{}/channels/{}/messages?limit=50",
         relay_http_url(),
         channel
     );
@@ -1321,7 +1341,7 @@ async fn test_nipdv_snapshot_is_private_to_owner() {
         "limit": 1,
     }]);
     let resp = client
-        .post(format!("{}/api/query", relay_http_url()))
+        .post(format!("{}/query", relay_http_url()))
         .header("X-Pubkey", &b_pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&filters).unwrap())
@@ -1488,7 +1508,7 @@ async fn test_nipdv_ids_query_rejects_third_party() {
     let client = reqwest::Client::new();
     let filters = serde_json::json!([{ "ids": [snapshot_id], "limit": 1 }]);
     let resp = client
-        .post(format!("{}/api/query", relay_http_url()))
+        .post(format!("{}/query", relay_http_url()))
         .header("X-Pubkey", &b_pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&filters).unwrap())
@@ -1542,7 +1562,7 @@ async fn test_nipdv_explicit_kind_query_forbidden_for_third_party() {
     let client = reqwest::Client::new();
     let filters = serde_json::json!([{ "kinds": [30622], "ids": [snapshot_id], "limit": 1 }]);
     let resp = client
-        .post(format!("{}/api/query", relay_http_url()))
+        .post(format!("{}/query", relay_http_url()))
         .header("X-Pubkey", &b_pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&filters).unwrap())
