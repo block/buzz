@@ -42,7 +42,6 @@ created: 2026-01-15
 - **Cite sources** — no claim without a path, link, or reference
 - **Don't overwrite** — append or create new files; don't silently clobber existing work
 - **`.scratch/` is disposable** — don't rely on it across sessions
-- **Never push without approval** — do not `git push` to any remote
 - **Stay on task** — only stage files relevant to your current work
 
 ## Git Commit Identity
