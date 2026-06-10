@@ -11,7 +11,7 @@ FROM --platform=linux/amd64 node:24-bookworm-slim AS web-builder
 WORKDIR /build
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY web/ web/
-RUN corepack enable && pnpm install --frozen-lockfile --filter sprout-web
+RUN corepack enable && pnpm install --frozen-lockfile --filter buzz-web
 RUN pnpm -C web build
 
 # ── Runtime stage ───────────────────────────────────────────

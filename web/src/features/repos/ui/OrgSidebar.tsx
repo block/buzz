@@ -24,7 +24,7 @@ export function OrgSidebar({ repos }: { repos: Repo[] }) {
 
   return (
     <div className="space-y-6">
-      {/* Open in Sprout */}
+      {/* Open in Buzz */}
       <ConnectButton className="w-full" />
 
       {/* People section */}

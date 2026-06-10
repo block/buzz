@@ -43,7 +43,7 @@
     },
     "deep-link": {
       "desktop": {
-        "schemes": ["sprout"]
+        "schemes": ["sprout", "buzz"]
       }
     }
   },

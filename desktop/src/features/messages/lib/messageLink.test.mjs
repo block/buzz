@@ -15,7 +15,7 @@ const THREAD =
 
 test("buildMessageLink → parseMessageLink round-trips without thread", () => {
   const url = buildMessageLink({ channelId: CHANNEL, messageId: MESSAGE });
-  assert.equal(url, `sprout://message?channel=${CHANNEL}&id=${MESSAGE}`);
+  assert.equal(url, `buzz://message?channel=${CHANNEL}&id=${MESSAGE}`);
 
   const parsed = parseMessageLink(url);
   assert.equal(parsed.ok, true);
@@ -52,8 +52,8 @@ test("buildMessageLink treats null/empty thread as absent", () => {
     messageId: MESSAGE,
     threadRootId: "",
   });
-  assert.equal(a, `sprout://message?channel=${CHANNEL}&id=${MESSAGE}`);
-  assert.equal(b, `sprout://message?channel=${CHANNEL}&id=${MESSAGE}`);
+  assert.equal(a, `buzz://message?channel=${CHANNEL}&id=${MESSAGE}`);
+  assert.equal(b, `buzz://message?channel=${CHANNEL}&id=${MESSAGE}`);
 });
 
 test("buildMessageLink rejects missing required params", () => {
@@ -61,7 +61,7 @@ test("buildMessageLink rejects missing required params", () => {
   assert.throws(() => buildMessageLink({ channelId: CHANNEL, messageId: "" }));
 });
 
-test("parseMessageLink rejects non-sprout schemes", () => {
+test("parseMessageLink rejects unsupported schemes", () => {
   const r = parseMessageLink(
     `https://example.com/?channel=${CHANNEL}&id=${MESSAGE}`,
   );
@@ -69,20 +69,20 @@ test("parseMessageLink rejects non-sprout schemes", () => {
   assert.equal(r.ok === false && r.reason, "wrong-scheme");
 });
 
-test("parseMessageLink rejects sprout:// with wrong host", () => {
-  const r = parseMessageLink(`sprout://connect?relay=wss://example.com`);
+test("parseMessageLink rejects buzz:// with wrong host", () => {
+  const r = parseMessageLink(`buzz://connect?relay=wss://example.com`);
   assert.equal(r.ok, false);
   assert.equal(r.ok === false && r.reason, "wrong-host");
 });
 
 test("parseMessageLink rejects missing channel", () => {
-  const r = parseMessageLink(`sprout://message?id=${MESSAGE}`);
+  const r = parseMessageLink(`buzz://message?id=${MESSAGE}`);
   assert.equal(r.ok, false);
   assert.equal(r.ok === false && r.reason, "missing-channel");
 });
 
 test("parseMessageLink rejects missing id", () => {
-  const r = parseMessageLink(`sprout://message?channel=${CHANNEL}`);
+  const r = parseMessageLink(`buzz://message?channel=${CHANNEL}`);
   assert.equal(r.ok, false);
   assert.equal(r.ok === false && r.reason, "missing-id");
 });
@@ -93,11 +93,28 @@ test("parseMessageLink rejects malformed URL strings", () => {
   assert.equal(r.ok === false && r.reason, "invalid-url");
 });
 
-test("isMessageLink matches only sprout://message", () => {
+test("parseMessageLink accepts legacy sprout://message links", () => {
+  const r = parseMessageLink(
+    `sprout://message?channel=${CHANNEL}&id=${MESSAGE}`,
+  );
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.ok && r.value, {
+    channelId: CHANNEL,
+    messageId: MESSAGE,
+    threadRootId: null,
+  });
+});
+
+test("isMessageLink matches buzz://message and legacy sprout://message", () => {
+  assert.equal(
+    isMessageLink(`buzz://message?channel=${CHANNEL}&id=${MESSAGE}`),
+    true,
+  );
   assert.equal(
     isMessageLink(`sprout://message?channel=${CHANNEL}&id=${MESSAGE}`),
     true,
   );
+  assert.equal(isMessageLink("buzz://connect?relay=wss://x"), false);
   assert.equal(isMessageLink("sprout://connect?relay=wss://x"), false);
   assert.equal(isMessageLink("https://example.com"), false);
   assert.equal(isMessageLink(undefined), false);

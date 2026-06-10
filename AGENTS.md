@@ -176,7 +176,7 @@ or invoke with the full path.
 
 ### Deep Links
 
-`sprout://message?channel=<uuid>&id=<hex>` links reference a specific message
+`buzz://message?channel=<uuid>&id=<hex>` links reference a specific message
 thread. To read the linked thread:
 
 ```bash

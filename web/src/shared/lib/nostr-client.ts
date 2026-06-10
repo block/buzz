@@ -82,7 +82,7 @@ export function queryEvents(
 
     ws.addEventListener("open", () => {
       // Wait briefly for an AUTH challenge before sending REQ.
-      // Sprout relays always send AUTH, but other relays may not.
+      // Buzz relays always send AUTH, but other relays may not.
       setTimeout(() => sendReq(), 100);
     });
 

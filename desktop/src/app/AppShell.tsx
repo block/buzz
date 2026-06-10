@@ -524,7 +524,7 @@ export function AppShell() {
     unreadChannelIds.size,
   ]);
 
-  // Dispatch `sprout://message` deep links into the router.
+  // Dispatch `buzz://message` deep links into the router.
   useMessageDeepLinks();
 
   React.useEffect(() => {

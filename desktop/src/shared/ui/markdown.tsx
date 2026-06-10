@@ -120,7 +120,7 @@ function useStableArray<T>(arr: T[]): T[] {
 }
 
 /**
- * `urlTransform` for `<ReactMarkdown>` that preserves `sprout://message?…`
+ * `urlTransform` for `<ReactMarkdown>` that preserves `buzz://message?…`
  * links. The default transform strips unknown schemes (returns `""`) before
  * the `a` component override can see them, which would break copy → paste →
  * click end-to-end. Everything else delegates to `defaultUrlTransform`.
@@ -709,7 +709,7 @@ function createMarkdownComponents(
         );
       }
 
-      // Intercept `sprout://message?channel=…&id=…` links so a click navigates
+      // Intercept `buzz://message?channel=…&id=…` links so a click navigates
       // in-app instead of opening the URL in the OS browser. http(s) links
       // continue to use the existing target="_blank" behavior.
       if (isMessageLink(href)) {
@@ -730,7 +730,7 @@ function createMarkdownComponents(
             </a>
           );
         }
-        // Malformed sprout://message link — fall through to the default
+        // Malformed message deep link — fall through to the default
         // anchor (renders as a normal external link).
       }
       return (
@@ -991,7 +991,7 @@ function createMarkdownComponents(
       const href = String(children ?? "");
       const parsed = parseMessageLink(href);
       if (!parsed.ok) {
-        // Malformed `sprout://message?…` — render the raw URL as plain text
+        // Malformed `buzz://message?…` — render the raw URL as plain text
         // rather than a misleading clickable pill.
         return <span data-message-link="">{href}</span>;
       }

@@ -1,4 +1,4 @@
-import { BookMarked, GitBranch, Sprout } from "lucide-react";
+import { BookMarked, GitBranch, Hexagon } from "lucide-react";
 import { toast } from "sonner";
 import { useEffect, useMemo, useState } from "react";
 
@@ -45,14 +45,14 @@ function RelayEmptyState() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-4 text-center">
       <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10">
-        <Sprout className="h-8 w-8 text-primary" />
+        <Hexagon className="h-8 w-8 text-primary" />
       </div>
       <h1 className="mt-6 text-2xl font-semibold tracking-tight">
         This relay is empty
       </h1>
       <p className="mt-2 max-w-md text-sm leading-relaxed text-muted-foreground">
         Repositories pushed to this relay will show up here. Open this relay in
-        the Sprout desktop app to start pushing code.
+        the Buzz desktop app to start pushing code.
       </p>
       <ConnectButton className="mt-6" />
     </div>

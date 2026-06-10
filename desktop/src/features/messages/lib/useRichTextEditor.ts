@@ -304,10 +304,11 @@ export function useRichTextEditor({
           openOnClick: false,
           autolink: true,
           linkOnPaste: true,
-          // Allow `sprout://` (used by Copy-link-to-message + sprout://connect)
-          // through TipTap's URL sanitiser. http(s) and mailto are accepted by
-          // default; non-listed protocols are stripped on paste/typed input.
-          protocols: ["sprout"],
+          // Allow Buzz message links through TipTap's URL sanitiser. Keep the
+          // legacy Sprout protocol so already-copied links survive paste.
+          // http(s) and mailto are accepted by default; non-listed protocols are
+          // stripped on paste/typed input.
+          protocols: ["buzz", "sprout"],
           HTMLAttributes: {
             class: "text-primary underline underline-offset-4 cursor-pointer",
           },

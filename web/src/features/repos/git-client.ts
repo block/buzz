@@ -28,7 +28,7 @@ import { relayHttpBaseUrl } from "@/shared/lib/relay-url";
 
 /** Get a repo-specific LightningFS instance backed by IndexedDB. */
 export function getFs(owner: string, repoName: string): LightningFS {
-  return new LightningFS(`sprout-git-${owner}-${repoName}`);
+  return new LightningFS(`buzz-git-${owner}-${repoName}`);
 }
 
 /** Working directory inside the virtual FS. */
