@@ -660,4 +660,62 @@ mod tests {
         let result = resolve_model(None, None);
         assert!(result.is_none());
     }
+
+    // ── Gap 5: Timeout config validation ───────────────────────────────────
+
+    /// Build a valid Config for validation testing. All fields pass validation;
+    /// tests override one field to zero and assert the specific error.
+    fn valid_config() -> Config {
+        Config {
+            provider: Provider::OpenAi,
+            system_prompt: "test".into(),
+            max_rounds: 10,
+            max_output_tokens: 1024,
+            llm_timeout: Duration::from_secs(10),
+            llm_body_chunk_timeout: Duration::from_secs(10),
+            stream_chunk_timeout: Duration::from_secs(10),
+            tool_timeout: Duration::from_secs(10),
+            mcp_init_timeout: Duration::from_secs(10),
+            mcp_max_restart_attempts: 1,
+            mcp_restart_base_ms: 100,
+            mcp_restart_max_ms: 1000,
+            max_sessions: 1,
+            max_line_bytes: 1024 * 1024,
+            max_history_bytes: 16 * 1024 * 1024,
+            max_context_tokens: 200_000,
+            max_handoffs: 1,
+            max_parallel_tools: 1,
+            hook_timeout: Duration::from_secs(1),
+            stop_max_rejections: 0,
+            hook_servers: HookServers::None,
+            api_key: "key".into(),
+            model: "model".into(),
+            base_url: "http://example.invalid".into(),
+            anthropic_api_version: "2023-06-01".into(),
+            openai_api: OpenAiApi::Chat,
+            hints_enabled: true,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_zero_stream_chunk_timeout() {
+        let mut c = valid_config();
+        c.stream_chunk_timeout = Duration::from_secs(0);
+        let err = c.validate().unwrap_err();
+        assert!(
+            err.contains("SPROUT_AGENT_STREAM_CHUNK_TIMEOUT_SECS must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_body_chunk_timeout() {
+        let mut c = valid_config();
+        c.llm_body_chunk_timeout = Duration::from_secs(0);
+        let err = c.validate().unwrap_err();
+        assert!(
+            err.contains("SPROUT_AGENT_LLM_BODY_CHUNK_TIMEOUT_SECS must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
 }

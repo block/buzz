@@ -853,6 +853,21 @@ impl StreamEmitter {
             session_id: String::new(),
         }
     }
+
+    /// Test helper that keeps the receiver live so emitted chunks can be
+    /// asserted. Returns (emitter, receiver) — drain the receiver to verify
+    /// which `agent_message_chunk` messages were sent.
+    #[cfg(test)]
+    pub fn test_channel() -> (Self, tokio::sync::mpsc::Receiver<wire::WireMsg>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        (
+            Self {
+                wire: tx,
+                session_id: "test-session".into(),
+            },
+            rx,
+        )
+    }
 }
 
 // ── SSE Parser ──────────────────────────────────────────────────────────────
@@ -3235,6 +3250,260 @@ mod tests {
             attempts.load(Ordering::SeqCst),
             1,
             "auth error should not trigger retries"
+        );
+    }
+
+    // ── Chunk-emission assertion ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stream_emits_one_chunk_per_text_delta() {
+        // Feed 3 text deltas through the OpenAI-Chat consumer with a test
+        // emitter; assert the receiver gets exactly 3 chunks with matching text.
+        let events = vec![
+            json!({"choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{"content":"!"},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10}}),
+        ];
+        let mut sse_body = String::new();
+        for ev in &events {
+            sse_body.push_str(&format!("data: {}\n\n", ev));
+        }
+        sse_body.push_str("data: [DONE]\n\n");
+
+        let resp = sse_response(sse_body).await;
+        let (emitter, mut rx) = StreamEmitter::test_channel();
+        let c = cfg(Provider::OpenAi);
+        let llm = Llm::new(&c).unwrap();
+        let result = llm.consume_sse_openai_chat(resp, &emitter).await.unwrap();
+        assert_eq!(result.text, "Hello world!");
+
+        // Drain the receiver and extract chunk texts.
+        drop(emitter);
+        let mut chunks = Vec::new();
+        while let Some(wire::WireMsg::Notify(msg)) = rx.recv().await {
+            if let Some(text) = msg
+                .pointer("/params/update/content/text")
+                .and_then(Value::as_str)
+            {
+                chunks.push(text.to_owned());
+            }
+        }
+        assert_eq!(chunks, vec!["Hello", " world", "!"]);
+    }
+
+    #[tokio::test]
+    async fn stream_emits_no_chunk_for_empty_text() {
+        // A delta with empty content and non-content events emit nothing.
+        let events = vec![
+            json!({"choices":[{"index":0,"delta":{"content":""},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5}}),
+        ];
+        let mut sse_body = String::new();
+        for ev in &events {
+            sse_body.push_str(&format!("data: {}\n\n", ev));
+        }
+        sse_body.push_str("data: [DONE]\n\n");
+
+        let resp = sse_response(sse_body).await;
+        let (emitter, mut rx) = StreamEmitter::test_channel();
+        let c = cfg(Provider::OpenAi);
+        let llm = Llm::new(&c).unwrap();
+        let result = llm.consume_sse_openai_chat(resp, &emitter).await.unwrap();
+        assert_eq!(result.text, "");
+
+        drop(emitter);
+        // Nothing should have been emitted.
+        assert!(rx.try_recv().is_err(), "expected no chunks emitted");
+    }
+
+    // ── Streaming Auto→Responses upgrade ───────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_auto_upgrades_to_responses_on_required_error() {
+        // Auto mode with a non-OpenAI host: first /chat/completions attempt
+        // returns 400 with an is_responses_required body; the code retries on
+        // /responses and succeeds with valid SSE.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_srv = attempts.clone();
+        let paths: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let paths_srv = paths.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                attempts_srv.fetch_add(1, Ordering::SeqCst);
+                // Read request and extract path.
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                let req_str = String::from_utf8_lossy(&buf);
+                let path = req_str
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("")
+                    .to_owned();
+                paths_srv.lock().unwrap().push(path.clone());
+
+                if path.contains("/chat/completions") {
+                    // Return 400 with is_responses_required body.
+                    let body = r#"{"error":{"message":"Please use the Responses API instead","type":"invalid_request_error"}}"#;
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                } else {
+                    // /responses — return valid SSE
+                    let sse_body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"upgraded\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5}}}\n\n";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+                        sse_body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                }
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let mut c = cfg(Provider::OpenAi);
+        c.openai_api = OpenAiApi::Auto;
+        c.base_url = format!("http://{addr}");
+        let llm = Llm::new(&c).unwrap();
+        let emitter = StreamEmitter::noop();
+
+        let result = llm
+            .complete_stream(&c, "system", &[], &[], &emitter)
+            .await
+            .unwrap();
+        assert_eq!(result.text, "upgraded");
+
+        let recorded_paths = paths.lock().unwrap().clone();
+        assert!(
+            recorded_paths.iter().any(|p| p.contains("/chat/completions")),
+            "should have tried /chat/completions first: {recorded_paths:?}"
+        );
+        assert!(
+            recorded_paths.iter().any(|p| p.contains("/responses")),
+            "should have retried on /responses: {recorded_paths:?}"
+        );
+        // auto_upgraded should now be set
+        assert!(
+            llm.auto_upgraded.load(Ordering::Relaxed),
+            "auto_upgraded should be set after upgrade"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_auto_upgrade_sticky_across_calls() {
+        // After upgrade, subsequent complete_stream calls go directly to
+        // /responses without touching /chat/completions.
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let paths: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let paths_srv = paths.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                let req_str = String::from_utf8_lossy(&buf);
+                let path = req_str
+                    .lines()
+                    .next()
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .unwrap_or("")
+                    .to_owned();
+                paths_srv.lock().unwrap().push(path.clone());
+
+                if path.contains("/chat/completions") {
+                    // First call: 400 with upgrade-required body
+                    let body = r#"{"error":{"message":"use /v1/responses for this model"}}"#;
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                } else {
+                    // /responses — always succeed
+                    let sse_body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":3}}}\n\n";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+                        sse_body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                }
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let mut c = cfg(Provider::OpenAi);
+        c.openai_api = OpenAiApi::Auto;
+        c.base_url = format!("http://{addr}");
+        let llm = Llm::new(&c).unwrap();
+        let emitter = StreamEmitter::noop();
+
+        // First call: triggers upgrade (chat → 400 → responses → success)
+        let r1 = llm
+            .complete_stream(&c, "system", &[], &[], &emitter)
+            .await
+            .unwrap();
+        assert_eq!(r1.text, "ok");
+
+        // Clear recorded paths to isolate the second call.
+        paths.lock().unwrap().clear();
+
+        // Second call: should go directly to /responses (sticky upgrade)
+        let r2 = llm
+            .complete_stream(&c, "system", &[], &[], &emitter)
+            .await
+            .unwrap();
+        assert_eq!(r2.text, "ok");
+
+        let second_call_paths = paths.lock().unwrap().clone();
+        assert!(
+            !second_call_paths
+                .iter()
+                .any(|p| p.contains("/chat/completions")),
+            "second call should NOT hit /chat/completions: {second_call_paths:?}"
+        );
+        assert!(
+            second_call_paths.iter().any(|p| p.contains("/responses")),
+            "second call should hit /responses: {second_call_paths:?}"
         );
     }
 }
