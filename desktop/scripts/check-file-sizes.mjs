@@ -32,7 +32,7 @@ const rules = [
 const overrides = new Map([
   ["src-tauri/src/commands/agents.rs", 1287],
   ["src-tauri/src/managed_agents/nest.rs", 1420],
-  ["src-tauri/src/managed_agents/runtime.rs", 1900],
+  ["src-tauri/src/managed_agents/runtime.rs", 1940],
   ["src-tauri/src/managed_agents/personas.rs", 1080],
   ["src-tauri/src/managed_agents/persona_card.rs", 1050],
   ["src-tauri/src/huddle/tts.rs", 1364],

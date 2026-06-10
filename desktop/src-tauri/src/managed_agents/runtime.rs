@@ -386,8 +386,10 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
 
     #[repr(C)]
     struct BSDInfo {
-        _pad: [u8; 20],
-        pbi_uid: u32,
+        _flags_status_xstatus: [u8; 12], // pbi_flags + pbi_status + pbi_xstatus
+        pbi_pid: u32,                    // offset 12
+        pbi_ppid: u32,                   // offset 16
+        pbi_uid: u32,                    // offset 20
         _rest: [u8; 112],
     }
     const _: () = assert!(std::mem::size_of::<BSDInfo>() == 136);
@@ -436,7 +438,7 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         if !process_belongs_to_us(upid) {
             continue;
         }
-        // Verify UID to avoid killing another user's identically-named binary.
+        // Verify UID and PPID via proc_pidinfo.
         let mut info = std::mem::MaybeUninit::<BSDInfo>::zeroed();
         let ret = unsafe {
             proc_pidinfo(
@@ -454,6 +456,10 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         if info.pbi_uid != my_uid {
             continue;
         }
+        // Live child of a tracked harness — not an orphan.
+        if skip_pids.contains(&info.pbi_ppid) {
+            continue;
+        }
         if !process_has_sprout_marker(upid, instance_id) {
             continue;
         }
@@ -467,6 +473,18 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         );
         sigterm_then_sigkill(&orphans);
     }
+}
+
+/// Read the parent PID of a process from /proc/<pid>/stat.
+/// The comm field (field 2) may contain spaces and parens, so we find the last
+/// ')' and parse fields after it. Field 1 after ')' is state, field 2 is PPID.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_ppid_linux(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(')')?.1;
+    // Fields after ')': " S ppid pgid ..."
+    let ppid_str = after_comm.split_whitespace().nth(1)?;
+    ppid_str.parse::<u32>().ok()
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -501,9 +519,16 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         if meta.uid() != my_uid {
             continue;
         }
-        if process_belongs_to_us(upid) && process_has_sprout_marker(upid, instance_id) {
-            orphans.push(pid);
+        if !process_belongs_to_us(upid) || !process_has_sprout_marker(upid, instance_id) {
+            continue;
         }
+        // Live child of a tracked harness — not an orphan.
+        if let Some(ppid) = read_ppid_linux(upid) {
+            if skip_pids.contains(&ppid) {
+                continue;
+            }
+        }
+        orphans.push(pid);
     }
 
     if !orphans.is_empty() {
@@ -573,8 +598,10 @@ pub(crate) fn collect_same_instance_orphans(
 
     #[repr(C)]
     struct BSDInfo {
-        _pad: [u8; 20],
-        pbi_uid: u32,
+        _flags_status_xstatus: [u8; 12], // pbi_flags + pbi_status + pbi_xstatus
+        pbi_pid: u32,                    // offset 12
+        pbi_ppid: u32,                   // offset 16
+        pbi_uid: u32,                    // offset 20
         _rest: [u8; 112],
     }
     const _: () = assert!(std::mem::size_of::<BSDInfo>() == 136);
@@ -635,6 +662,10 @@ pub(crate) fn collect_same_instance_orphans(
         if info.pbi_uid != my_uid {
             continue;
         }
+        // Live child of a tracked harness — not an orphan.
+        if skip_pids.contains(&info.pbi_ppid) {
+            continue;
+        }
         if process_has_sprout_marker(upid, instance_id) {
             orphans.insert(upid);
         }
@@ -676,9 +707,16 @@ pub(crate) fn collect_same_instance_orphans(
         if meta.uid() != my_uid {
             continue;
         }
-        if process_belongs_to_us(upid) && process_has_sprout_marker(upid, instance_id) {
-            orphans.insert(upid);
+        if !process_belongs_to_us(upid) || !process_has_sprout_marker(upid, instance_id) {
+            continue;
         }
+        // Live child of a tracked harness — not an orphan.
+        if let Some(ppid) = read_ppid_linux(upid) {
+            if skip_pids.contains(&ppid) {
+                continue;
+            }
+        }
+        orphans.insert(upid);
     }
     orphans
 }
@@ -703,8 +741,9 @@ fn is_desktop_binary(name: &str) -> bool {
 
 /// Check whether `buf` contains `id` as a complete identifier — not as a
 /// prefix of a longer dotted name. The identifier appears in the Tauri config
-/// JSON as `"identifier":"xyz.block.sprout.app.dev"`, so a valid match is
-/// followed by a non-identifier byte (not `[A-Za-z0-9._-]`). This prevents
+/// JSON as `"identifier":"xyz.block.sprout.app.dev"` and in environment entries
+/// as `KEY=...app.dev\0`, so a valid match is followed by a non-identifier byte
+/// (not `[A-Za-z0-9._-]`) or sits at the end of the buffer. This prevents
 /// `xyz.block.sprout.app` from matching inside `xyz.block.sprout.app.dev`.
 fn buffer_contains_identifier(buf: &[u8], id: &[u8]) -> bool {
     if id.is_empty() {
@@ -714,17 +753,14 @@ fn buffer_contains_identifier(buf: &[u8], id: &[u8]) -> bool {
         if w != id {
             return false;
         }
-        // Check the byte immediately after the match.
-        let after_idx = i + id.len();
-        if after_idx >= buf.len() {
-            // End of buffer — no trailing context to confirm boundary.
-            // Treat as non-match to be conservative (the JSON always has a
-            // closing quote after the identifier).
-            return false;
+        // Boundary check on the byte immediately after the match: end-of-buffer
+        // or any byte that can't continue a dotted reverse-DNS identifier.
+        match buf.get(i + id.len()) {
+            None => true,
+            Some(&next) => {
+                !next.is_ascii_alphanumeric() && next != b'.' && next != b'_' && next != b'-'
+            }
         }
-        let next = buf[after_idx];
-        // Identifier chars that would indicate a longer id continues.
-        !next.is_ascii_alphanumeric() && next != b'.' && next != b'_' && next != b'-'
     })
 }
 

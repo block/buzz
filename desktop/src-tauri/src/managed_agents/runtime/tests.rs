@@ -37,11 +37,22 @@ fn identifier_match_with_null_boundary() {
 }
 
 #[test]
-fn identifier_at_end_of_buffer_does_not_match() {
-    // No trailing byte to confirm boundary — conservative non-match.
+fn identifier_exact_match_at_end_of_buffer() {
+    // Exact match with end-of-buffer as the boundary — Thufir's case 1.
     let buf = b"xyz.block.sprout.app.dev";
     let id = b"xyz.block.sprout.app.dev";
-    assert!(!super::buffer_contains_identifier(buf, id));
+    assert!(super::buffer_contains_identifier(buf, id));
+}
+
+#[test]
+fn longer_id_matches_when_short_prefix_also_present() {
+    // Searching for the longer ID finds it even when a shorter prefix token
+    // appears earlier — Thufir's "longer-of-prefix must match" case.
+    let mut buf = b"xyz.block.sprout.app".to_vec();
+    buf.push(0);
+    buf.extend_from_slice(br#""identifier":"xyz.block.sprout.app.dev""#);
+    let id = b"xyz.block.sprout.app.dev";
+    assert!(super::buffer_contains_identifier(&buf, id));
 }
 
 #[test]
