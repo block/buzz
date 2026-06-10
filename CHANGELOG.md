@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.3.16
+
+34c8bdab1 fix(desktop): land live presence updates for not-yet-cached pubkeys (#947)
+5c0af0bc9 fix(release): make `just release` idempotent for re-runs (#948)
+e9cd1c392 Improve mentions for agents + people  (#942)
+384eb6cba feat: agent memory viewer (read-only) in profile panel (#917)
+2dc466fe0 Fix channel visibility controls (#940)
+3e56331e9 fix(delete): make agent-deleted messages disappear from desktop UI immediately (#918)
+e08937cdd Fix emoji message rendering (#938)
+ba2fdbf69 refactor(desktop): consolidate packs into teams (#852)
+384a34ec3 Update README.md wording
+fe14daa5d Fix post-compact handoff context for OpenAI providers (#931)
+
+
 ## v0.3.15
 
 877048d68fb fix: persona is source of truth at spawn + thread-depth conventions (#930)

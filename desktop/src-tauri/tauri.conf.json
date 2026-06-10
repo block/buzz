@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Sprout",
-  "version": "0.3.15",
+  "version": "0.3.16",
   "identifier": "xyz.block.sprout.app",
   "build": {
     "beforeDevCommand": {
