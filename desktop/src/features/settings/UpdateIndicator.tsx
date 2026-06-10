@@ -7,9 +7,7 @@ import { useUpdaterContext } from "./hooks/UpdaterProvider";
 import type { UpdateStatus } from "./hooks/use-updater";
 
 const indicatorButtonClass =
-  "relative h-8 w-8 text-muted-foreground/80 hover:bg-muted/60 hover:text-foreground";
-
-const iconClass = "h-4 w-4";
+  "relative text-muted-foreground/80 hover:bg-muted/60 hover:text-foreground";
 
 const variants: Record<
   "available" | "downloading" | "installing" | "ready",
@@ -17,32 +15,30 @@ const variants: Record<
     Icon: typeof RefreshCcw;
     label: string;
     badgeColor: string;
-    iconClass: string;
+    spin?: boolean;
   }
 > = {
   available: {
     Icon: RefreshCcw,
     label: "Update available",
     badgeColor: "bg-primary",
-    iconClass: iconClass,
   },
   downloading: {
     Icon: Loader2,
     label: "Downloading update\u2026",
     badgeColor: "bg-primary",
-    iconClass: `${iconClass} animate-spin`,
+    spin: true,
   },
   installing: {
     Icon: Loader2,
     label: "Installing update\u2026",
     badgeColor: "bg-primary",
-    iconClass: `${iconClass} animate-spin`,
+    spin: true,
   },
   ready: {
     Icon: RotateCw,
     label: "Restart to update",
     badgeColor: "bg-emerald-500",
-    iconClass: iconClass,
   },
 };
 
@@ -66,7 +62,7 @@ export function UpdateIndicator({ className }: { className?: string }) {
     return null;
   }
 
-  const { Icon, label, badgeColor, iconClass: variantIconClass } = variant;
+  const { Icon, label, badgeColor, spin } = variant;
   const isActionable = status.state === "available" || status.state === "ready";
   const handleClick =
     status.state === "ready"
@@ -91,7 +87,7 @@ export function UpdateIndicator({ className }: { className?: string }) {
           type="button"
           variant="ghost"
         >
-          <Icon className={variantIconClass} />
+          <Icon className={spin ? "animate-spin" : undefined} />
           <span
             className={`absolute right-1 top-1 h-1.5 w-1.5 rounded-full ${badgeColor} animate-pulse`}
           />

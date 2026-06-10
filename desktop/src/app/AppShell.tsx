@@ -21,8 +21,8 @@ import {
   useHideDmMutation,
   useOpenDmMutation,
 } from "@/features/channels/hooks";
-import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
+import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
 import {
@@ -66,6 +66,9 @@ import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
 import { joinChannel } from "@/shared/api/tauri";
 import type { Channel, RelayEvent, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
+import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
+import { MAIN_INSET_CHROME_VARS_CLASS } from "@/shared/layout/chromeLayout";
+import { cn } from "@/shared/lib/cn";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
@@ -182,6 +185,7 @@ export function AppShell() {
     React.useState<BrowseDialogType>(null);
   const [isNewDmOpen, setIsNewDmOpen] = React.useState(false);
   const [isCreateChannelOpen, setIsCreateChannelOpen] = React.useState(false);
+  const mainInsetRef = React.useRef<HTMLElement>(null);
   const location = useLocation();
   const queryClient = useQueryClient();
   const {
@@ -863,9 +867,17 @@ export function AppShell() {
                       onUnstarChannel={unstarChannel}
                     />
 
-                    <SidebarInset className="min-h-0 min-w-0 overflow-hidden">
-                      <Outlet />
-                    </SidebarInset>
+                    <MainInsetProvider mainInsetRef={mainInsetRef}>
+                      <SidebarInset
+                        ref={mainInsetRef}
+                        className={cn(
+                          "min-h-0 min-w-0 overflow-hidden",
+                          MAIN_INSET_CHROME_VARS_CLASS,
+                        )}
+                      >
+                        <Outlet />
+                      </SidebarInset>
+                    </MainInsetProvider>
                   </>
                 )}
 

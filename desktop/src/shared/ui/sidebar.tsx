@@ -403,7 +403,7 @@ const SidebarTrigger = React.forwardRef<
       data-sidebar="trigger"
       variant="ghost"
       size="icon"
-      className={cn("h-7 w-7", className)}
+      className={className}
       onClick={(event) => {
         onClick?.(event);
         toggleSidebar();
@@ -593,7 +593,7 @@ const SidebarRail = React.forwardRef<
 SidebarRail.displayName = "SidebarRail";
 
 const SidebarInset = React.forwardRef<
-  HTMLDivElement,
+  HTMLElement,
   React.ComponentProps<"main">
 >(({ className, ...props }, ref) => {
   return (

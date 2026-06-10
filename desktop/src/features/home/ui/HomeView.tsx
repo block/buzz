@@ -23,7 +23,6 @@ import {
   INBOX_SINGLE_COLUMN_BREAKPOINT_PX,
   useResizableInboxListWidth,
 } from "@/features/home/useResizableInboxListWidth";
-import { HomeChannelActions } from "@/features/home/ui/HomeChannelActions";
 import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
 import { InboxListPane } from "@/features/home/ui/InboxListPane";
@@ -31,16 +30,17 @@ import {
   useChannelMessagesQuery,
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
-import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import {
   collectMessageMentionPubkeys,
   formatTimelineMessages,
 } from "@/features/messages/lib/formatTimelineMessages";
+import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
 import type { HomeFeedResponse } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
+import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
 import { useElementWidth } from "@/shared/hooks/use-mobile";
@@ -333,11 +333,6 @@ export function HomeView({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-      <HomeChannelActions
-        channel={selectedChannel}
-        currentPubkey={currentPubkey}
-        onOpenChannel={onOpenChannel}
-      />
       <div
         className={cn(
           "relative grid min-h-0 w-full flex-1",
@@ -371,7 +366,8 @@ export function HomeView({
         <button
           aria-label="Resize inbox list"
           className={cn(
-            "group absolute inset-y-0 z-40 w-3 -translate-x-1/2 cursor-col-resize",
+            "group absolute bottom-0 z-40 w-3 -translate-x-1/2 cursor-col-resize",
+            topChromeInset.top,
             showListPane && showDetailPane ? "block" : "hidden",
           )}
           data-testid="home-inbox-list-resize-handle"
@@ -387,7 +383,7 @@ export function HomeView({
           }
           type="button"
         >
-          <span className="absolute bottom-0 left-1/2 top-10 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border/80 group-focus-visible:bg-border/80" />
+          <span className="absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border/80 group-focus-visible:bg-border/80" />
         </button>
 
         {showDetailPane ? (
@@ -398,7 +394,9 @@ export function HomeView({
                 availableChannelIds.has(selectedItem.item.channelId),
             )}
             canReply={canReply}
+            channel={selectedChannel}
             contextChannelName={selectedChannel?.name ?? null}
+            currentPubkey={currentPubkey}
             disabledReplyReason={disabledReplyReason}
             isDeletingMessage={isDeletingMessage}
             isDone={
@@ -434,6 +432,7 @@ export function HomeView({
                   setIsDeletingMessage(false);
                 });
             }}
+            onOpenChannel={onOpenChannel}
             onOpenContext={onOpenContext}
             onSendReply={async ({
               content,

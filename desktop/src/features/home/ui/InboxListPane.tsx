@@ -5,10 +5,11 @@ import {
   type InboxFilter,
   type InboxItem,
 } from "@/features/home/lib/inbox";
+import { topChromeInset } from "@/shared/layout/chromeLayout";
+import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
-import { TopChromeBackdrop } from "@/shared/ui/TopChromeBackdrop";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -51,52 +52,54 @@ export function InboxListPane({
     <section
       className={cn(
         "relative flex min-h-0 min-w-0 flex-col overflow-hidden bg-background/60",
-        showRightDivider &&
-          "after:pointer-events-none after:absolute after:bottom-0 after:right-0 after:top-10 after:z-40 after:w-px after:bg-border/35 after:content-['']",
+        showRightDivider && topChromeInset.verticalDivider,
       )}
     >
-      <TopChromeBackdrop className="h-[76px]" />
-      <div className="absolute inset-x-0 top-[42px] z-40 min-h-[32px] px-5 py-[4px]">
-        <div className="flex min-w-0 items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-[6px]">
-            <Inbox className="h-[14px] w-[14px] shrink-0 text-muted-foreground" />
-            <h2 className="translate-y-px truncate text-sm font-semibold leading-5 tracking-tight">
-              Inbox
-            </h2>
+      <TopChromeInsetHeader>
+        <div className="px-5 py-1">
+          <div className="flex min-w-0 items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-[6px]">
+              <Inbox className="h-[14px] w-[14px] shrink-0 text-muted-foreground" />
+              <h2 className="translate-y-px truncate text-sm font-semibold leading-5 tracking-tight">
+                Inbox
+              </h2>
+            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border-border/70 bg-background/70 px-2.5 text-[11px] font-medium leading-none text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/60 hover:text-foreground"
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <span>{activeFilter?.label ?? "All"}</span>
+                  <ChevronDown className="h-3 w-3" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-40">
+                <DropdownMenuRadioGroup
+                  onValueChange={(value) =>
+                    onFilterChange(value as InboxFilter)
+                  }
+                  value={filter}
+                >
+                  {FILTER_OPTIONS.map((option) => (
+                    <DropdownMenuRadioItem
+                      key={option.value}
+                      value={option.value}
+                    >
+                      {option.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full border-border/70 bg-background/70 px-2.5 text-[11px] font-medium leading-[1] text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/60 hover:text-foreground"
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                <span>{activeFilter?.label ?? "All"}</span>
-                <ChevronDown className="h-3 w-3" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="min-w-[10rem]">
-              <DropdownMenuRadioGroup
-                onValueChange={(value) => onFilterChange(value as InboxFilter)}
-                value={filter}
-              >
-                {FILTER_OPTIONS.map((option) => (
-                  <DropdownMenuRadioItem
-                    key={option.value}
-                    value={option.value}
-                  >
-                    {option.label}
-                  </DropdownMenuRadioItem>
-                ))}
-              </DropdownMenuRadioGroup>
-            </DropdownMenuContent>
-          </DropdownMenu>
         </div>
-      </div>
+      </TopChromeInsetHeader>
 
       <div
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain pt-[76px]"
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
         data-testid="home-inbox-list"
       >
         {items.length === 0 ? (
@@ -168,7 +171,7 @@ export function InboxListPane({
 
                     <div
                       className={cn(
-                        "mt-0.5 line-clamp-2 text-sm leading-5 [&_*]:inline [&_a]:font-medium [&_a]:text-current [&_br]:hidden [&_p]:inline",
+                        "mt-0.5 line-clamp-2 text-sm leading-5 **:inline [&_a]:font-medium [&_a]:text-current [&_br]:hidden [&_p]:inline",
                         isDone
                           ? "font-normal text-muted-foreground"
                           : "font-semibold text-foreground",

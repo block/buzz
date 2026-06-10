@@ -3,7 +3,6 @@ import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion } from "motion/react";
 import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
 
-import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -84,26 +83,18 @@ export const MessageComposerToolbar = React.memo(
                 >
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <button
-                        type="button"
+                      <Button
                         aria-label="Toggle formatting"
                         aria-pressed={isFormattingOpen}
                         disabled={composerDisabled}
                         onClick={() => onFormattingToggle(!isFormattingOpen)}
                         onMouseDown={onCaptureSelection}
-                        className={cn(
-                          "inline-flex h-8 min-w-8 items-center justify-center rounded-md px-2 text-sm font-medium transition-colors",
-                          "hover:bg-muted hover:text-foreground",
-                          "focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
-                          "disabled:pointer-events-none disabled:opacity-50",
-                          "[&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
-                          isFormattingOpen
-                            ? "bg-primary text-primary-foreground"
-                            : "bg-transparent text-muted-foreground",
-                        )}
+                        size="icon"
+                        type="button"
+                        variant={isFormattingOpen ? "default" : "ghost"}
                       >
-                        <ALargeSmall className="h-4 w-4" />
-                      </button>
+                        <ALargeSmall />
+                      </Button>
                     </TooltipTrigger>
                     <TooltipContent>Formatting</TooltipContent>
                   </Tooltip>
@@ -125,9 +116,9 @@ export const MessageComposerToolbar = React.memo(
                         size="icon"
                         type="button"
                         variant="ghost"
-                        className="h-7 w-7 shrink-0"
+                        className="shrink-0"
                       >
-                        <X className="h-3.5 w-3.5" />
+                        <X />
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent>Close formatting</TooltipContent>
@@ -171,7 +162,7 @@ export const MessageComposerToolbar = React.memo(
                       type="button"
                       variant="ghost"
                     >
-                      <AtSign className="h-4 w-4" />
+                      <AtSign />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Mention someone</TooltipContent>
@@ -187,11 +178,7 @@ export const MessageComposerToolbar = React.memo(
                       type="button"
                       variant="ghost"
                     >
-                      {isUploading ? (
-                        <Spinner className="h-4 w-4" />
-                      ) : (
-                        <Paperclip className="h-4 w-4" />
-                      )}
+                      {isUploading ? <Spinner /> : <Paperclip />}
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Attach image</TooltipContent>
@@ -211,26 +198,18 @@ export const MessageComposerToolbar = React.memo(
                 >
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <button
-                        type="button"
+                      <Button
                         aria-label="Toggle formatting"
                         aria-pressed={isFormattingOpen}
                         disabled={composerDisabled}
                         onClick={() => onFormattingToggle(!isFormattingOpen)}
                         onMouseDown={onCaptureSelection}
-                        className={cn(
-                          "inline-flex h-8 min-w-8 items-center justify-center rounded-md px-2 text-sm font-medium transition-colors",
-                          "hover:bg-muted hover:text-foreground",
-                          "focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
-                          "disabled:pointer-events-none disabled:opacity-50",
-                          "[&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
-                          isFormattingOpen
-                            ? "bg-primary text-primary-foreground"
-                            : "bg-transparent text-muted-foreground",
-                        )}
+                        size="icon"
+                        type="button"
+                        variant={isFormattingOpen ? "default" : "ghost"}
                       >
-                        <ALargeSmall className="h-4 w-4" />
-                      </button>
+                        <ALargeSmall />
+                      </Button>
                     </TooltipTrigger>
                     <TooltipContent>Formatting</TooltipContent>
                   </Tooltip>
@@ -256,7 +235,7 @@ export const MessageComposerToolbar = React.memo(
                 className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"
               />
             ) : (
-              <ArrowUp aria-hidden className="h-4 w-4" />
+              <ArrowUp aria-hidden />
             )}
           </Button>
         </div>

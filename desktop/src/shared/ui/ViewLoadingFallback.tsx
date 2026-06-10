@@ -2,6 +2,7 @@ import { Card } from "@/shared/ui/card";
 import { useSidebar } from "@/shared/ui/sidebar";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { cn } from "@/shared/lib/cn";
+import { channelChrome } from "@/shared/layout/chromeLayout";
 
 type ViewLoadingFallbackKind =
   | "agents"
@@ -64,7 +65,7 @@ function MessageRowsSkeleton() {
 
 function AgentsLoadingBody() {
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-14 sm:px-6">
       <div className="space-y-6">
         <section className="space-y-4">
           <div className="flex items-center justify-between gap-3">
@@ -139,7 +140,7 @@ function AgentsLoadingBody() {
 
 function CardListLoadingBody() {
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-14 sm:px-6">
       <div className="mb-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Skeleton className="h-6 w-28" />
@@ -179,8 +180,13 @@ function CardListLoadingBody() {
 function ChannelLoadingBody() {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <div className="flex-1 overflow-y-auto px-4 py-3 sm:px-6">
-        <div className="flex w-full flex-col gap-4">
+      <div className="flex-1 overflow-y-auto px-4 pt-1 sm:px-6">
+        <div
+          className={cn(
+            "flex w-full flex-col gap-4",
+            channelChrome.contentPadding,
+          )}
+        >
           <MessageRowsSkeleton />
         </div>
       </div>

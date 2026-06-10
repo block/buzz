@@ -14,6 +14,7 @@ import type {
   InboxItem,
   InboxReply,
 } from "@/features/home/lib/inbox";
+import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
 import { formatInboxTypeLabel } from "@/features/home/lib/inbox";
 import {
   type InboxDisplayMessage,
@@ -21,6 +22,9 @@ import {
 } from "@/features/home/ui/InboxMessageRow";
 import type { TimelineMessage } from "@/features/messages/types";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
+import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
+import type { Channel } from "@/shared/api/types";
+import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
@@ -30,7 +34,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { TopChromeBackdrop } from "@/shared/ui/TopChromeBackdrop";
 import {
   Tooltip,
   TooltipContent,
@@ -51,9 +54,12 @@ type InboxDetailPaneProps = {
   item: InboxItem | null;
   messages?: InboxContextMessage[];
   replies?: InboxReply[];
+  channel: Channel | null;
   contextChannelName?: string | null;
+  currentPubkey?: string;
   onBack?: () => void;
   onDelete: () => void;
+  onOpenChannel: (channelId: string) => void;
   onOpenContext?: (channelId: string, messageId: string) => void;
   onSendReply: (input: {
     content: string;
@@ -82,9 +88,12 @@ export function InboxDetailPane({
   item,
   messages = [],
   replies = [],
+  channel,
   contextChannelName = null,
+  currentPubkey,
   onBack,
   onDelete,
+  onOpenChannel,
   onOpenContext,
   onSendReply,
   onToggleReaction,
@@ -200,13 +209,13 @@ export function InboxDetailPane({
           id: replyTarget.id,
         }
       : null;
+  const channelContextName = contextChannelName ?? item.channelLabel;
   const composerChannelType =
     item.item.channelType === "dm" ||
     item.item.channelType === "stream" ||
     item.item.channelType === "forum"
       ? item.item.channelType
       : null;
-  const channelContextName = contextChannelName ?? item.channelLabel;
   const contextLabel = channelContextName ?? formatInboxTypeLabel(item);
   const hasChannelContext = Boolean(channelContextName);
   const contextChannelId = item.item.channelId;
@@ -224,100 +233,90 @@ export function InboxDetailPane({
       data-testid="home-inbox-detail"
       ref={detailPaneRef}
     >
-      <div className="relative min-h-0 flex-1 overflow-hidden">
-        <TopChromeBackdrop className="h-[76px]" />
-        <div
-          className={cn(
-            "absolute inset-x-0 top-[42px] z-40 min-h-[32px] py-[4px] pr-3",
-            "pl-5",
-          )}
-        >
-          <div className="flex min-w-0 items-center justify-between gap-3">
-            <div
-              className={cn(
-                "flex min-w-0 -translate-y-[4px] items-center",
-                isSinglePanelView ? "gap-[4px]" : "gap-1",
-              )}
-            >
-              {onBack ? (
-                isSinglePanelView ? (
-                  <div className="relative h-[14px] w-[14px] shrink-0">
-                    <Button
-                      aria-label="Back to inbox list"
-                      className="absolute left-1/2 top-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2 rounded-full p-0 text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-                      onClick={onBack}
-                      size="icon"
-                      type="button"
-                      variant="ghost"
-                    >
-                      <ArrowLeft className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                ) : (
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+        <TopChromeInsetHeader>
+          <div className="px-5 py-1 pr-3">
+            <div className="flex min-w-0 items-center justify-between gap-3">
+              <div
+                className={cn(
+                  "flex min-w-0 items-center",
+                  isSinglePanelView ? "gap-[4px]" : "gap-1",
+                )}
+              >
+                {onBack ? (
                   <Button
                     aria-label="Back to inbox list"
-                    className="h-6 w-6 rounded-full p-0 text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                    className="rounded-full text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                     onClick={onBack}
                     size="icon"
                     type="button"
                     variant="ghost"
                   >
-                    <ArrowLeft className="h-3.5 w-3.5" />
+                    <ArrowLeft />
                   </Button>
-                )
-              ) : null}
-              <div className="min-w-0">
-                {canOpenChannel && contextChannelId && onOpenContext ? (
-                  <button
-                    className="flex min-w-0 items-center gap-[4px] text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                    onClick={() => onOpenContext(contextChannelId, item.id)}
-                    title={item.fullTimestampLabel}
-                    type="button"
-                  >
-                    {hasChannelContext ? (
-                      <Hash
-                        className="h-[14px] w-[14px] shrink-0"
-                        color="gray"
-                      />
-                    ) : null}
-                    <span className="min-w-0 translate-y-px truncate">
-                      {contextLabel}
-                    </span>
-                  </button>
-                ) : (
-                  <h2
-                    className="flex min-w-0 items-center gap-[4px] text-sm font-semibold leading-5 tracking-tight text-foreground"
-                    title={item.fullTimestampLabel}
-                  >
-                    {hasChannelContext ? (
-                      <Hash
-                        className="h-[14px] w-[14px] shrink-0"
-                        color="gray"
-                      />
-                    ) : null}
-                    <span className="min-w-0 translate-y-px truncate">
-                      {contextLabel}
-                    </span>
-                  </h2>
-                )}
+                ) : null}
+                <div className="min-w-0">
+                  {canOpenChannel && contextChannelId && onOpenContext ? (
+                    <button
+                      className="flex min-w-0 items-center gap-[4px] text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                      onClick={() => onOpenContext(contextChannelId, item.id)}
+                      title={item.fullTimestampLabel}
+                      type="button"
+                    >
+                      {hasChannelContext ? (
+                        <Hash
+                          className="h-[14px] w-[14px] shrink-0"
+                          color="gray"
+                        />
+                      ) : null}
+                      <span className="min-w-0 translate-y-px truncate">
+                        {contextLabel}
+                      </span>
+                    </button>
+                  ) : (
+                    <h2
+                      className="flex min-w-0 items-center gap-[4px] text-sm font-semibold leading-5 tracking-tight text-foreground"
+                      title={item.fullTimestampLabel}
+                    >
+                      {hasChannelContext ? (
+                        <Hash
+                          className="h-[14px] w-[14px] shrink-0"
+                          color="gray"
+                        />
+                      ) : null}
+                      <span className="min-w-0 translate-y-px truncate">
+                        {contextLabel}
+                      </span>
+                    </h2>
+                  )}
+                </div>
               </div>
+
+              <TooltipProvider delayDuration={200}>
+                <div className="flex shrink-0 items-center gap-1">
+                  <UpdateIndicator />
+                  {channel ? (
+                    <ChannelMembersBar
+                      channel={channel}
+                      currentPubkey={currentPubkey}
+                      onManageChannel={() => onOpenChannel(channel.id)}
+                      onToggleMembers={() => onOpenChannel(channel.id)}
+                    />
+                  ) : null}
+                  <HeaderMoreMenu
+                    canDelete={canDelete}
+                    isDeletingMessage={isDeletingMessage}
+                    isDone={isDone}
+                    onDelete={onDelete}
+                    onToggleDone={onToggleDone}
+                  />
+                </div>
+              </TooltipProvider>
             </div>
-
-            <TooltipProvider delayDuration={200}>
-              <div className="flex shrink-0 items-center gap-1">
-                <HeaderMoreMenu
-                  canDelete={canDelete}
-                  isDeletingMessage={isDeletingMessage}
-                  isDone={isDone}
-                  onDelete={onDelete}
-                  onToggleDone={onToggleDone}
-                />
-              </div>
-            </TooltipProvider>
           </div>
-        </div>
+        </TopChromeInsetHeader>
 
-        <div className="absolute inset-0 overflow-y-auto overscroll-contain pb-32 pt-[76px]">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32">
           <div>
             {isThreadContextLoading ? (
               <div className="px-6 pb-3 text-[11px] text-muted-foreground">
@@ -394,12 +393,12 @@ function HeaderMoreMenu({
   const trigger = (
     <Button
       aria-label="More actions"
-      className="h-8 w-8 rounded-full p-0 text-muted-foreground"
+      className="rounded-full text-muted-foreground"
       size="icon"
       type="button"
       variant="ghost"
     >
-      <MoreHorizontal className="h-4 w-4" />
+      <MoreHorizontal />
     </Button>
   );
 

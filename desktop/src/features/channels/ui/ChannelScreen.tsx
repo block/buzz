@@ -46,11 +46,13 @@ import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 import { AgentSessionProvider } from "@/shared/context/AgentSessionContext";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
 import {
-  useElementWidth,
-  useIsThreadPanelOverlay,
-} from "@/shared/hooks/use-mobile";
+  CHANNEL_CONTENT_TOP_PADDING_DEFAULT,
+  SPROUT_CHANNEL_CONTENT_TOP_PADDING_VAR,
+} from "@/shared/layout/chromeLayout";
+import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
+import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
+import { useElementWidth } from "@/shared/hooks/use-mobile";
 import {
-  THREAD_PANEL_MIN_WIDTH_PX,
   THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX,
   useThreadPanelWidth,
 } from "@/shared/hooks/useThreadPanelWidth";
@@ -65,7 +67,6 @@ import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760;
-const HEADER_ACTIONS_SPLIT_GUTTER_PX = 12;
 
 export function ChannelScreen({
   activeChannel,
@@ -98,7 +99,6 @@ export function ChannelScreen({
     widthPx: threadPanelWidthPx,
   } = useThreadPanelWidth();
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
-  const isThreadPanelOverlay = useIsThreadPanelOverlay();
   const [channelContentRef, channelContentWidthPx] =
     useElementWidth<HTMLDivElement>();
   const [openThreadHeadId, setOpenThreadHeadId] = React.useState<string | null>(
@@ -116,6 +116,8 @@ export function ChannelScreen({
     string | null
   >(null);
   const [editTargetId, setEditTargetId] = React.useState<string | null>(null);
+  const channelHeaderChromeRef = React.useRef<HTMLDivElement>(null);
+  const mainInsetRef = useMainInsetRef();
   const currentPubkey = currentIdentity?.pubkey;
   const activeChannelId = activeChannel?.id ?? null;
   const messagesQuery = useChannelMessagesQuery(activeChannel);
@@ -483,58 +485,65 @@ export function ChannelScreen({
     isNarrowPanelViewport &&
     activeChannel?.channelType !== "forum" &&
     hasAuxiliaryPanel;
-  const hasSplitRightPanel =
-    !isSinglePanelView && !isThreadPanelOverlay && hasAuxiliaryPanel;
   const shouldCompactHeaderActions =
     hasAuxiliaryPanel &&
     channelContentWidthPx > 0 &&
     channelContentWidthPx < HEADER_ACTIONS_COMPACT_BREAKPOINT_PX;
-  const splitRightPanelInset = hasSplitRightPanel
-    ? `min(${threadPanelWidthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`
-    : undefined;
-  const headerActionsRightInset = splitRightPanelInset
-    ? `calc(${splitRightPanelInset} + ${HEADER_ACTIONS_SPLIT_GUTTER_PX}px)`
-    : undefined;
+  useMeasuredCssVariable({
+    sourceRef: channelHeaderChromeRef,
+    targetRef: mainInsetRef,
+    cssVariable: SPROUT_CHANNEL_CONTENT_TOP_PADDING_VAR,
+    resetValue: CHANNEL_CONTENT_TOP_PADDING_DEFAULT,
+    resetKey: activeChannelId,
+    enabled: !isSinglePanelView,
+  });
   React.useEffect(() => {
     setTopbarSearchHidden(isSinglePanelView);
-    return () => setTopbarSearchHidden(false);
+    return () => {
+      setTopbarSearchHidden(false);
+    };
   }, [isSinglePanelView, setTopbarSearchHidden]);
+
+  const channelHeader = (
+    <ChannelScreenHeader
+      activeChannel={activeChannel}
+      activeChannelEphemeralDisplay={activeChannelEphemeralDisplay}
+      activeChannelTitle={activeChannelTitle}
+      actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
+      activeDmAvatarUrl={activeDmAvatarUrl}
+      activeDmPresenceStatus={activeDmPresenceStatus}
+      chromeWrapperRef={channelHeaderChromeRef}
+      currentPubkey={currentPubkey}
+      isJoining={joinChannelMutation.isPending}
+      onJoinChannel={joinChannelMutation.mutateAsync}
+      onManageChannel={openChannelManagement}
+      onToggleMembers={() => setIsMembersSidebarOpen((prev) => !prev)}
+      showHeaderContent={!isSinglePanelView}
+    />
+  );
 
   return (
     <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>
       <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
-        <ChannelScreenHeader
-          activeChannel={activeChannel}
-          activeChannelEphemeralDisplay={activeChannelEphemeralDisplay}
-          activeChannelTitle={activeChannelTitle}
-          actionsRightInset={headerActionsRightInset}
-          actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
-          activeDmAvatarUrl={activeDmAvatarUrl}
-          activeDmPresenceStatus={activeDmPresenceStatus}
-          currentPubkey={currentPubkey}
-          isJoining={joinChannelMutation.isPending}
-          onJoinChannel={joinChannelMutation.mutateAsync}
-          onManageChannel={openChannelManagement}
-          onToggleMembers={() => setIsMembersSidebarOpen((prev) => !prev)}
-          showHeaderContent={!isSinglePanelView}
-        />
-
         <div
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
           ref={channelContentRef}
         >
           {activeChannel ? (
             activeChannel.channelType === "forum" ? (
-              <React.Suspense fallback={<ViewLoadingFallback kind="forum" />}>
-                <ForumView
-                  channel={activeChannel}
-                  currentPubkey={currentPubkey}
-                  onClosePost={onCloseForumPost}
-                  onSelectPost={onSelectForumPost}
-                  selectedPostId={selectedForumPostId}
-                  targetReplyId={targetForumReplyId}
-                />
-              </React.Suspense>
+              <>
+                {channelHeader}
+                <React.Suspense fallback={<ViewLoadingFallback kind="forum" />}>
+                  <ForumView
+                    channel={activeChannel}
+                    currentPubkey={currentPubkey}
+                    onClosePost={onCloseForumPost}
+                    onSelectPost={onSelectForumPost}
+                    selectedPostId={selectedForumPostId}
+                    targetReplyId={targetForumReplyId}
+                  />
+                </React.Suspense>
+              </>
             ) : (
               <React.Suspense fallback={<ViewLoadingFallback kind="channel" />}>
                 <ChannelPane
@@ -546,6 +555,7 @@ export function ChannelScreen({
                   currentPubkey={currentPubkey}
                   canResetThreadPanelWidth={canResetThreadPanelWidth}
                   fetchOlder={fetchOlder}
+                  header={channelHeader}
                   hasOlderMessages={hasOlderMessages}
                   isFetchingOlder={isFetchingOlder}
                   editTarget={

@@ -11,6 +11,7 @@ import {
 } from "@/features/agents/hooks";
 import { useChannelMembersQuery } from "@/features/channels/hooks";
 import type { Channel } from "@/shared/api/types";
+import { channelChrome } from "@/shared/layout/chromeLayout";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
@@ -114,13 +115,13 @@ export function ChannelMembersBar({
         <DropdownMenuTrigger asChild>
           <Button
             aria-label="Channel actions"
-            className="h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
+            className={channelChrome.headerIconButton}
             data-testid="channel-actions-menu-trigger"
             size="icon"
             type="button"
             variant="ghost"
           >
-            <EllipsisVertical className="size-5" />
+            <EllipsisVertical />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-48" forceMount>
@@ -158,7 +159,7 @@ export function ChannelMembersBar({
       <div className="flex items-center gap-[6px]">
         <Button
           aria-label="Add agent"
-          className="h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
+          className={channelChrome.headerIconButton}
           data-testid="channel-add-bot-trigger"
           disabled={!canAddAgents}
           onClick={() => {
@@ -168,19 +169,19 @@ export function ChannelMembersBar({
           type="button"
           variant="ghost"
         >
-          <Plus className="size-5" />
+          <Plus />
         </Button>
 
         <Button
           aria-label={`View channel members (${memberCount})`}
-          className="h-8 gap-1 rounded-lg border border-border/40 px-2.5 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
+          className={channelChrome.headerMembersButton}
           data-testid="channel-members-trigger"
           onClick={onToggleMembers}
           type="button"
           variant="ghost"
         >
-          <Users className="size-5" />
-          <span className="min-w-[1ch] text-[11px] font-medium tabular-nums">
+          <Users />
+          <span className="min-w-[1ch] text-sm font-medium tabular-nums">
             {memberCount}
           </span>
         </Button>
@@ -189,14 +190,14 @@ export function ChannelMembersBar({
 
         <Button
           aria-label="Manage channel"
-          className="h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
+          className={channelChrome.headerIconButton}
           data-testid="channel-management-trigger"
           onClick={onManageChannel}
           size="icon"
           type="button"
           variant="ghost"
         >
-          <Settings2 className="size-5" />
+          <Settings2 />
         </Button>
       </div>
     );

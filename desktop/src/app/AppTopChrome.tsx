@@ -2,7 +2,6 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import type { Channel, SearchHit } from "@/shared/api/types";
-import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { SidebarTrigger, useSidebar } from "@/shared/ui/sidebar";
 
@@ -25,8 +24,11 @@ function GlobalTopDivider() {
   return (
     <div
       aria-hidden="true"
-      className="pointer-events-none fixed right-0 top-10 z-40 h-px bg-border/35"
-      style={{ left: state === "expanded" ? "var(--sidebar-width)" : 0 }}
+      className="pointer-events-none fixed top-10 z-40 h-px bg-border/35"
+      style={{
+        left: state === "expanded" ? "var(--sidebar-width)" : 0,
+        right: 0,
+      }}
     />
   );
 }
@@ -49,12 +51,13 @@ function CenterColumnTopbarSearch({
 
   return (
     <div
-      className={cn(
-        "pointer-events-none fixed right-0 top-[7px] z-[45] flex justify-center px-24",
-        !isResizing && "transition-[left] duration-200 ease-linear",
-      )}
+      className="pointer-events-none fixed top-[7px] z-45 flex justify-center px-24 transition-[left] duration-200 ease-linear data-[resizing=true]:transition-none"
       data-testid="topbar-search-column"
-      style={{ left: state === "expanded" ? "var(--sidebar-width)" : 0 }}
+      data-resizing={isResizing}
+      style={{
+        left: state === "expanded" ? "var(--sidebar-width)" : 0,
+        right: 0,
+      }}
     >
       <TopbarSearch
         channels={channels}
@@ -69,7 +72,7 @@ function CenterColumnTopbarSearch({
 }
 
 const TOP_CHROME_ICON_BUTTON_CLASS =
-  "size-6 rounded-[4px] p-1 text-muted-foreground/70 hover:bg-border/45 hover:text-foreground";
+  "rounded-[4px] text-muted-foreground/70 hover:bg-border/45 hover:text-foreground";
 
 export function AppTopChrome({
   canGoBack,
@@ -91,7 +94,7 @@ export function AppTopChrome({
         data-tauri-drag-region
       />
       <GlobalTopDivider />
-      <div className="fixed left-[80px] top-[9px] z-[45] flex items-center gap-0.5">
+      <div className="fixed left-[80px] top-[9px] z-45 flex items-center gap-0.5">
         <SidebarTrigger className={TOP_CHROME_ICON_BUTTON_CLASS} />
         <Button
           aria-label="Go back"
@@ -102,7 +105,7 @@ export function AppTopChrome({
           size="icon"
           variant="ghost"
         >
-          <ChevronLeft className="h-4 w-4" />
+          <ChevronLeft />
         </Button>
         <Button
           aria-label="Go forward"
@@ -113,7 +116,7 @@ export function AppTopChrome({
           size="icon"
           variant="ghost"
         >
-          <ChevronRight className="h-4 w-4" />
+          <ChevronRight />
         </Button>
       </div>
       {searchHidden ? null : (

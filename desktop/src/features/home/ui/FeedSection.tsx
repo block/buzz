@@ -243,9 +243,9 @@ export function FeedSection({
                     size="icon"
                     type="button"
                     variant="ghost"
-                    className={`pointer-events-auto absolute right-1.5 top-1.5 h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 ${isDone ? "text-green-500 opacity-100" : "text-muted-foreground"}`}
+                    className={`pointer-events-auto absolute right-1.5 top-1.5 opacity-0 transition-opacity group-hover:opacity-100 ${isDone ? "text-green-500 opacity-100" : "text-muted-foreground"}`}
                   >
-                    <Check className="h-3.5 w-3.5" />
+                    <Check />
                   </Button>
                 ) : null}
               </div>

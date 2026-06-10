@@ -6,6 +6,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
+import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
@@ -174,7 +175,8 @@ export const MessageTimeline = React.memo(function MessageTimeline({
         >
           <div
             className={cn(
-              "flex w-full flex-col gap-2 pt-[92px]",
+              "flex w-full flex-col gap-2",
+              channelChrome.contentPadding,
               (showDirectMessageIntro || showGenericEmpty) && "min-h-full",
             )}
             ref={contentRef}

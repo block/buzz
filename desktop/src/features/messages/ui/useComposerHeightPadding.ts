@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { observeElementBlockSize } from "@/shared/layout/observeElementBlockSize";
+
 /**
  * Observes the height of the composer overlay and sets the scroll
  * container's `paddingBottom` to match, so content is never hidden
@@ -18,7 +20,7 @@ export function useComposerHeightPadding(
     const scrollEl = scrollContainerRef.current;
     const composerEl = composerRef.current;
 
-    if (!scrollEl || !composerEl || typeof ResizeObserver === "undefined") {
+    if (!scrollEl || !composerEl) {
       return;
     }
 
@@ -52,18 +54,10 @@ export function useComposerHeightPadding(
       }
     };
 
-    const observer = new ResizeObserver(([entry]) => {
-      const height =
-        entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
-      applyPadding(height);
-    });
-
-    observer.observe(composerEl);
-    applyPadding(composerEl.getBoundingClientRect().height);
+    const disconnect = observeElementBlockSize(composerEl, applyPadding);
 
     return () => {
-      observer.disconnect();
-      // Reset to a sensible default when unmounting
+      disconnect();
       scrollEl.style.paddingBottom = "";
     };
   }, [scrollContainerRef, composerRef, resetKey]);
