@@ -1009,3 +1009,30 @@ async fn test_ws_count_returns_zero_for_other_users_reminders() {
 
     ws_other.disconnect().await.expect("disconnect");
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_reminder_rejected_not_before_too_far_in_future() {
+    let client = http_client();
+    let keys = Keys::generate();
+    let d_tag = uuid::Uuid::new_v4().to_string();
+
+    // Set not_before to 2 years from now (exceeds default 1-year max_not_before_delta)
+    let two_years_from_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 63_072_000; // ~2 years
+
+    let event = build_reminder(
+        &keys,
+        &d_tag,
+        vec![Tag::parse(["not_before", &two_years_from_now.to_string()]).unwrap()],
+    );
+    let (accepted, msg) = submit_event_http(&client, &keys, &event).await;
+    assert!(!accepted, "should reject not_before too far in future");
+    assert!(
+        msg.contains("not_before too far in future"),
+        "unexpected message: {msg}"
+    );
+}
