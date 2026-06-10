@@ -672,7 +672,7 @@ Those behaviors remain normative in this document and in the Rust implementation
 Run the proof with:
 
 ```bash
-tamarin-prover --prove crates/sprout-core/src/pairing/NIP-AB.spthy
+tamarin-prover --prove crates/buzz-core/src/pairing/NIP-AB.spthy
 ```
 
 ## Cryptographic Primitives
@@ -746,7 +746,7 @@ transcript_hash = HKDF-SHA256(IKM=transcript, salt=session_secret, info="nostr-p
   d662818ff8911fc60a2d025f8b8b4756107104e85888dd202d28db5ca2cf28d3
 ```
 
-Implementations MUST validate against these vectors. They can be reproduced with `sprout-pair test-vectors`.
+Implementations MUST validate against these vectors. They can be reproduced with `buzz-pair test-vectors`.
 
 A future external vector file (`nip-ab.vectors.json`) with a sha256 checksum committed in this document is planned. When published, it will include categorized intermediate-value vectors for each derivation step and negative/invalid test cases. The sha256 checksum will be the canonical commitment; implementations MUST verify against the checksum before using the file.
 

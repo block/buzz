@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Typesense-backed full-text search for Sprout"
+description = "Typesense-backed full-text search for Buzz"
 
 [dependencies]
 buzz-core = { workspace = true }

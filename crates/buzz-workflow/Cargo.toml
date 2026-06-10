@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "YAML-as-code workflow engine for Sprout"
+description = "YAML-as-code workflow engine for Buzz"
 
 [dependencies]
 buzz-core = { workspace = true }

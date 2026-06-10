@@ -1,11 +1,11 @@
-# sprout-acp
+# buzz-acp
 
-ACP harness that connects AI agents to Sprout. The harness listens for @mentions on the relay, prompts your agent, and the agent replies using the Sprout CLI.
+ACP harness that connects AI agents to Buzz. The harness listens for @mentions on the relay, prompts your agent, and the agent replies using the Buzz CLI.
 
 ```
-Sprout Relay ──WS──→ sprout-acp ──stdio──→ Your Agent
+Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                                │
-                                          Sprout CLI
+                                          Buzz CLI
                                        (send_message, etc.)
 ```
 
@@ -13,22 +13,22 @@ Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdi
 
 ## Prerequisites
 
-- A running Sprout relay (`just relay` starts Docker services automatically, or use a hosted instance)
+- A running Buzz relay (`just relay` starts Docker services automatically, or use a hosted instance)
 - A Nostr keypair for the agent (see [Generating Keys](#generating-keys))
 
 Build:
 
 ```bash
-cargo build --release -p sprout-acp
+cargo build --release -p buzz-acp
 export PATH="$PWD/target/release:$PATH"
 ```
 
 ## Generating Keys
 
-Each agent needs a Nostr keypair — this is the agent's identity in Sprout. Use `sprout-admin` to mint one:
+Each agent needs a Nostr keypair — this is the agent's identity in Buzz. Use `buzz-admin` to mint one:
 
 ```bash
-cargo run -p sprout-admin -- mint-token --name "my-agent" --scopes "messages:read,messages:write,channels:read"
+cargo run -p buzz-admin -- mint-token --name "my-agent" --scopes "messages:read,messages:write,channels:read"
 ```
 
 This prints an `nsec1...` private key and an API token. **Save both immediately — they're shown only once.**
@@ -41,7 +41,7 @@ The harness discovers channels by querying the relay with the agent's authentica
 
 By default, the harness discovers only channels the agent is a **member** of (`GET /api/channels?member=true`). When the agent is added to a new channel, the membership notification subscription auto-subscribes to it.
 
-**Private channels** require explicit membership. The relay doesn't yet have a REST/event API for managing channel members — this is a known gap. For now, use `create_channel` via the Sprout CLI to create new channels (the creator is automatically a member).
+**Private channels** require explicit membership. The relay doesn't yet have a REST/event API for managing channel members — this is a known gap. For now, use `create_channel` via the Buzz CLI to create new channels (the creator is automatically a member).
 
 ## Quick Start (goose)
 
@@ -50,10 +50,10 @@ export BUZZ_PRIVATE_KEY="nsec1..."   # your agent's key (see "Generating Keys")
 export BUZZ_RELAY_URL="ws://localhost:3000"
 export GOOSE_MODE=auto
 
-sprout-acp
+buzz-acp
 ```
 
-That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent, goose receives the message and can reply using the Sprout CLI that the harness configures automatically.
+That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent, goose receives the message and can reply using the Buzz CLI that the harness configures automatically.
 
 ## Running with Codex
 
@@ -68,7 +68,7 @@ export OPENAI_API_KEY="sk-..."   # required — use an OpenAI API key, not a Cha
 export BUZZ_ACP_AGENT_COMMAND="/path/to/codex-acp/target/release/codex-acp"
 export BUZZ_ACP_AGENT_ARGS='-c,permissions.approval_policy="never"'
 
-sprout-acp
+buzz-acp
 ```
 
 > **API key note:** `codex-acp` always attempts a ChatGPT WebSocket login first, which logs a `426 Upgrade Required` error. This is expected and non-fatal — it falls back to `OPENAI_API_KEY` automatically. Set `OPENAI_API_KEY` to ensure it has a working fallback.
@@ -85,10 +85,10 @@ npm install -g @agentclientprotocol/claude-agent-acp
 export ANTHROPIC_API_KEY="sk-ant-..."
 export BUZZ_ACP_AGENT_COMMAND="claude-agent-acp"
 
-sprout-acp
+buzz-acp
 ```
 
-Older installs that still expose `claude-code-acp` are also supported. `sprout-acp`
+Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
 
 ## Configuration
@@ -147,39 +147,39 @@ The gate applies to **all** inbound events — @mentions, DMs, thread replies, a
 
 ```bash
 # Default: only respond to owner
-sprout-acp
+buzz-acp
 
 # Respond to a team of three users (owner always included automatically)
-sprout-acp --respond-to allowlist \
+buzz-acp --respond-to allowlist \
   --respond-to-allowlist "abc123...64hex,def456...64hex,789abc...64hex"
 
 # Respond to anyone (open agent)
-sprout-acp --respond-to anyone
+buzz-acp --respond-to anyone
 
 # Broadcast-only: post on heartbeat, ignore all inbound events
-sprout-acp --respond-to nobody --heartbeat-interval 300
+buzz-acp --respond-to nobody --heartbeat-interval 300
 ```
 
 ### Configuration Examples
 
 **Single agent, no heartbeat (default):**
 ```bash
-sprout-acp
+buzz-acp
 ```
 
 **Four agents, no heartbeat (high-throughput event processing):**
 ```bash
-sprout-acp --agents 4
+buzz-acp --agents 4
 ```
 
 **Two agents with 5-minute heartbeat:**
 ```bash
-sprout-acp --agents 2 --heartbeat-interval 300
+buzz-acp --agents 2 --heartbeat-interval 300
 ```
 
 **Custom heartbeat prompt:**
 ```bash
-sprout-acp --agents 2 --heartbeat-interval 300 \
+buzz-acp --agents 2 --heartbeat-interval 300 \
   --heartbeat-prompt "Check get_feed_actions() for pending approvals, then get_feed_mentions() for unanswered mentions. If nothing actionable, end your turn immediately."
 ```
 
@@ -208,12 +208,12 @@ By default, the ACP harness subscribes to stream message kinds (9, 46010, 40007)
 
 **CLI flags:**
 ```bash
-sprout-acp --kinds 9,46010,40007,45001,45002,45003 --no-mention-filter
+buzz-acp --kinds 9,46010,40007,45001,45002,45003 --no-mention-filter
 ```
 
 **Or with `--subscribe all`:**
 ```bash
-sprout-acp --subscribe all --kinds 9,46010,40007,45001,45002,45003
+buzz-acp --subscribe all --kinds 9,46010,40007,45001,45002,45003
 ```
 
 **Per-channel config:**
@@ -236,7 +236,7 @@ Forum event kinds:
 2. **Channel discovery** — Queries the relay REST API for accessible channels, subscribes to each.
 3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue per channel.
 4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
-5. **Agent response** — The agent processes the prompt and uses the Sprout CLI (`send_message`, `get_messages`, etc.) to interact with Sprout.
+5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
 
 Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.

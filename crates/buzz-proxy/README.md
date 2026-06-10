@@ -1,9 +1,9 @@
-# sprout-proxy
+# buzz-proxy
 
-NIP-28 compatibility proxy for [Sprout](../../VISION.md). Lets standard Nostr clients (Coracle, Amethyst, nak, etc.) connect to a Sprout relay using familiar NIP-28 channel events.
+NIP-28 compatibility proxy for [Buzz](../../VISION.md). Lets standard Nostr clients (Coracle, Amethyst, nak, etc.) connect to a Buzz relay using familiar NIP-28 channel events.
 
 ```
-Client (NIP-28)  ←→  sprout-proxy :4869  ←→  sprout-relay :3000
+Client (NIP-28)  ←→  buzz-proxy :4869  ←→  buzz-relay :3000
 ```
 
 **Supported NIPs:** NIP-01, NIP-11, NIP-28, NIP-42
@@ -29,8 +29,8 @@ The token's `--pubkey` must match the public key derived from `BUZZ_PROXY_SERVER
 nak key public <BUZZ_PROXY_SERVER_KEY>
 
 # Mint the token with that pubkey
-cargo run -p sprout-admin -- mint-token \
-  --name "sprout-proxy" \
+cargo run -p buzz-admin -- mint-token \
+  --name "buzz-proxy" \
   --scopes "proxy:submit,channels:read,messages:read" \
   --pubkey <derived-pubkey>
 ```
@@ -96,13 +96,13 @@ ws://localhost:4869?token=<invite_token>
 
 | Variable | Required | Default | Description |
 |----------|:--------:|---------|-------------|
-| `BUZZ_UPSTREAM_URL` | ✅ | — | WebSocket URL of the Sprout relay |
+| `BUZZ_UPSTREAM_URL` | ✅ | — | WebSocket URL of the Buzz relay |
 | `BUZZ_PROXY_SERVER_KEY` | ✅ | — | Hex nsec for the proxy server keypair |
 | `BUZZ_PROXY_SALT` | ✅ | — | Hex 32-byte salt for shadow key derivation (keep stable) |
-| `BUZZ_PROXY_API_TOKEN` | ✅ | — | Sprout API token with `proxy:submit`, `channels:read`, and `messages:read` scopes |
+| `BUZZ_PROXY_API_TOKEN` | ✅ | — | Buzz API token with `proxy:submit`, `channels:read`, and `messages:read` scopes |
 | `BUZZ_PROXY_BIND_ADDR` | ❌ | `0.0.0.0:4869` | Listen address |
 | `BUZZ_PROXY_ADMIN_SECRET` | ❌ | — | Bearer secret for `POST /admin/invite` (unset = dev mode, no auth) |
-| `RUST_LOG` | ❌ | `sprout_proxy=info` | Log level |
+| `RUST_LOG` | ❌ | `buzz_proxy=info` | Log level |
 
 ---
 
@@ -128,7 +128,7 @@ Create an invite token. Requires `Authorization: Bearer <BUZZ_PROXY_ADMIN_SECRET
 **Response:**
 ```json
 {
-  "token": "sprout_invite_<uuid>",
+  "token": "buzz_invite_<uuid>",
   "channels": ["<uuid1>", "<uuid2>"],
   "expires_at": "2026-03-12T22:00:00Z",
   "max_uses": 10

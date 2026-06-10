@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Hash-chain audit log for Sprout"
+description = "Hash-chain audit log for Buzz"
 
 [dependencies]
 buzz-core = { workspace = true }

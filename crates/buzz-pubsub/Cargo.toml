@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Redis pub/sub fan-out, presence, and typing indicators for Sprout"
+description = "Redis pub/sub fan-out, presence, and typing indicators for Buzz"
 
 [dependencies]
 buzz-core = { workspace = true }

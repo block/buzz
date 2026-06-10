@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Authentication and authorization for Sprout"
+description = "Authentication and authorization for Buzz"
 
 [features]
 test-utils = []

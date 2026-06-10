@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Operator CLI for Sprout relay administration"
+description = "Operator CLI for Buzz relay administration"
 
 [[bin]]
 name = "buzz-admin"

@@ -461,7 +461,7 @@ transfer:
   accepted v1 tradeoff named in §Scope).
 
 **Current code status (verified provenance).** The full S3-CAS implementation
-exists in code at PR #726's tip (`crates/sprout-relay/src/api/git/`), with the
+exists in code at PR #726's tip (`crates/buzz-relay/src/api/git/`), with the
 relay lib green, clippy `--tests -D warnings` clean, fmt clean, and the live
 MinIO e2e — clone/push/fetch/force-push roundtrip + N-way concurrent-push
 no-fork — green on the assembled tip. (Line numbers below are pinned at

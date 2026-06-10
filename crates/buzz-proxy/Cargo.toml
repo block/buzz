@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Nostr client compatibility proxy for Sprout"
+description = "Nostr client compatibility proxy for Buzz"
 
 [dependencies]
 buzz-core = { workspace = true }

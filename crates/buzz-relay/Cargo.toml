@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "WebSocket relay server for the Sprout communications platform"
+description = "WebSocket relay server for the Buzz communications platform"
 
 [[bin]]
 name = "buzz-relay"

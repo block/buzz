@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Typed Nostr event builders for Sprout operations"
+description = "Typed Nostr event builders for Buzz operations"
 
 [dependencies]
 buzz-core = { workspace = true }

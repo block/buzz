@@ -20,7 +20,7 @@ path = "src/main.rs"
 [dependencies]
 # Base64 armor encoding/decoding for NIP-GS signature envelopes.
 # Not in workspace deps — each crate pins independently (same pattern as
-# sprout-relay, sprout-cli, git-credential-nostr).
+# buzz-relay, buzz-cli, git-credential-nostr).
 base64 = "0.22"
 
 # Hex encoding for BIP-340 signatures and public keys.

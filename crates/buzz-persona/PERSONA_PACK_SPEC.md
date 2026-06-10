@@ -3,7 +3,7 @@
 ## 1. Overview & Goals
 
 A **Persona Pack** is a portable, self-contained bundle that defines one or more AI agent personas
-for deployment in Sprout. It is a **superset of the [Open Plugin Spec](https://open-plugin-spec.org)**
+for deployment in Buzz. It is a **superset of the [Open Plugin Spec](https://open-plugin-spec.org)**
 — every valid Persona Pack is also a valid OPS package, but not vice versa.
 
 A pack contains: personas (identity + system prompt), skills (on-demand instruction sets), MCP
@@ -11,17 +11,17 @@ server config, pack-level instructions, lifecycle hooks, and distribution metada
 
 ### Design Goals
 
-1. **Portable** — zip file or git repo; no Sprout tooling required to inspect
+1. **Portable** — zip file or git repo; no Buzz tooling required to inspect
 2. **Composable** — skills and MCP servers shared across agents; per-agent overrides additive
 3. **OPS-compatible** — discoverable by any OPS-compatible tool
-4. **Harness-honest** — explicit about what the agent runtime does vs. what sprout-acp does
+4. **Harness-honest** — explicit about what the agent runtime does vs. what buzz-acp does
 
 ---
 
 ## 2. Open Plugin Spec Compatibility
 
 A Persona Pack is a valid OPS package. The `.plugin/plugin.json` manifest follows the OPS schema,
-and Sprout-specific extensions live alongside the OPS fields at the top level. Since the Open
+and Buzz-specific extensions live alongside the OPS fields at the top level. Since the Open
 Plugin Spec defines no model configuration fields, there are no collisions. OPS consumers safely
 ignore unknown fields.
 
@@ -33,13 +33,13 @@ ignore unknown fields.
   "id": "com.example.meadow-security-team",
   "name": "Meadow Security Team",
   "version": "1.2.0",
-  "description": "A four-agent security review team for Sprout.",
+  "description": "A four-agent security review team for Buzz.",
   "author": "Meadow Engineering",
   "license": "MIT",
   "homepage": "https://github.com/example/meadow-security-team",
-  "keywords": ["security", "code-review", "sprout"],
+  "keywords": ["security", "code-review", "buzz"],
   "engines": {
-    "sprout": ">=0.9.0"
+    "buzz": ">=0.9.0"
   },
   "personas": [
     "agents/pip.persona.md",
@@ -88,12 +88,12 @@ none of them override it.
 
 - **OPS consumers**: see standard metadata; safely ignore unknown fields including `personas`,
   `defaults`, `pack_instructions`, `mcp_config`, and `hooks_config`.
-- **Sprout**: reads both OPS fields and the Sprout-specific fields; `personas` is authoritative.
-- **Version negotiation**: `engines.sprout` specifies minimum required Sprout version; sprout-acp
+- **Buzz**: reads both OPS fields and the Buzz-specific fields; `personas` is authoritative.
+- **Version negotiation**: `engines.buzz` specifies minimum required Buzz version; buzz-acp
   rejects packs requiring a newer version.
-- **Extension mechanism**: Sprout-specific fields sit at the top level of `plugin.json` alongside
+- **Extension mechanism**: Buzz-specific fields sit at the top level of `plugin.json` alongside
   OPS fields. No OPS core field is overloaded.
-- **`defaults`**: ignored entirely by OPS consumers. sprout-acp resolves it at deploy time before
+- **`defaults`**: ignored entirely by OPS consumers. buzz-acp resolves it at deploy time before
   constructing per-persona configurations (see Section 10 and Section 12).
 
 ---
@@ -122,7 +122,7 @@ my-pack/
 ├── instructions.md           # Pack-level instructions (injected by harness)
 ├── pack.lock                 # Version lock (Phase 1+)
 ├── README.md                 # Human-readable description
-└── my-pack-1.2.0.sproutpack.sha256  # Checksum (required for zip distribution)
+└── my-pack-1.2.0.buzzpack.sha256  # Checksum (required for zip distribution)
 ```
 
 ### Directory Conventions
@@ -175,7 +175,7 @@ mcp_servers:
     env:
       SEMGREP_TOKEN: "${SEMGREP_TOKEN}"
 
-# === Behavioral Config (Sprout-specific) ===
+# === Behavioral Config (Buzz-specific) ===
 subscribe:
   - "#security-reviews"
   - "#code-reviews"
@@ -202,7 +202,7 @@ You are Lep, a security-focused code reviewer on the Meadow team.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | ✅ | Machine name / agent ID. Lowercase, no spaces, unique within pack. |
-| `display_name` | string | ✅ | Human-readable name shown in Sprout UI. |
+| `display_name` | string | ✅ | Human-readable name shown in Buzz UI. |
 | `avatar` | string | ❌ | Pack-relative path to avatar image. |
 | `description` | string | ✅ | One-line description. |
 | `version` | string | ❌ | Semver. Defaults to pack version if omitted. |
@@ -230,7 +230,7 @@ files (agent runtimes typically do not read them).
 
 ## 5. Two-Layer Prompt Architecture
 
-sprout-acp assembles the agent's context from two distinct prompt layers before sending each
+buzz-acp assembles the agent's context from two distinct prompt layers before sending each
 message. Understanding this layering is essential for persona authors — content that belongs in
 one layer should not be duplicated in the other.
 
@@ -240,7 +240,7 @@ Each message delivered to the agent runtime includes these sections in order:
 
 ```
 [Base]
-<platform orientation — injected by sprout-acp>
+<platform orientation — injected by buzz-acp>
 
 [System]
 <persona prompt — markdown body of .persona.md>
@@ -255,27 +255,27 @@ Each message delivered to the agent runtime includes these sections in order:
 [Thread/Conversation Context]
 <recent message history, if applicable>
 
-[Sprout event]
+[Buzz event]
 <the triggering message or event>
 ```
 
 ### The `[Base]` Layer
 
-The `[Base]` layer is compiled into sprout-acp and is **identical for every agent**. It covers:
+The `[Base]` layer is compiled into buzz-acp and is **identical for every agent**. It covers:
 
 | Content | Purpose |
 |---------|---------|
-| Platform identity | Tells the agent it is running inside Sprout and what that means |
+| Platform identity | Tells the agent it is running inside Buzz and what that means |
 | MCP tool reference | Documents the tools available via the connected MCP servers |
 | Workspace layout | Describes `$AGENT_CWD`, skill discovery paths, and file conventions |
 | Message polling | Explains how to check for new messages proactively |
 
-Pack authors do not write or configure the `[Base]` layer — it is maintained by the Sprout team
-and updated in sprout-acp releases.
+Pack authors do not write or configure the `[Base]` layer — it is maintained by the Buzz team
+and updated in buzz-acp releases.
 
 **Disabling or customizing the base layer**: Set `BUZZ_ACP_NO_BASE_PROMPT` to omit the `[Base]`
 section entirely. To replace the compiled-in default with custom content, set
-`BUZZ_ACP_BASE_PROMPT_FILE` to a file path — sprout-acp reads it at startup and uses it instead.
+`BUZZ_ACP_BASE_PROMPT_FILE` to a file path — buzz-acp reads it at startup and uses it instead.
 
 ### The `[System]` Layer
 
@@ -300,7 +300,7 @@ What belongs in `[System]`:
 - How to use MCP tools (covered by `[Base]`)
 - How to poll for new messages or use the `since` parameter (covered by `[Base]`)
 - Workspace layout or skill loading mechanics (covered by `[Base]`)
-- That the agent is running inside Sprout (covered by `[Base]`)
+- That the agent is running inside Buzz (covered by `[Base]`)
 
 Focus persona prompts on what makes this agent unique: its role, personality, domain expertise,
 and team-specific protocols.
@@ -321,13 +321,13 @@ the agent how to perform a specific task.
 The agent runtime discovers skills from these directories relative to the session working directory
 (`$AGENT_CWD` — see definition below):
 
-> **Note**: `.agents/skills/` is sprout-acp's canonical skill location. The other paths shown
+> **Note**: `.agents/skills/` is buzz-acp's canonical skill location. The other paths shown
 > (`.goose/skills/`, `.claude/skills/`) are agent-runtime-specific and listed for reference only.
 
 ```
 $AGENT_CWD/.goose/skills/<skill-name>/SKILL.md
 $AGENT_CWD/.claude/skills/<skill-name>/SKILL.md
-$AGENT_CWD/.agents/skills/<skill-name>/SKILL.md   ← sprout-acp uses this one
+$AGENT_CWD/.agents/skills/<skill-name>/SKILL.md   ← buzz-acp uses this one
 ```
 
 > **Note**: `$AGENT_CWD/skills/` is NOT scanned. Skills placed at the pack root `skills/` directory
@@ -339,12 +339,12 @@ Throughout this spec, **`$AGENT_CWD`** refers to the `cwd` field in the ACP `New
 — the working directory passed to the agent runtime when creating a session. The value is delivered via the ACP protocol.
 
 However, operators can control this value by setting the `AGENT_CWD` environment variable on the
-sprout-acp process. sprout-acp determines what value to pass as `NewSessionRequest.cwd` in this
+buzz-acp process. buzz-acp determines what value to pass as `NewSessionRequest.cwd` in this
 order:
 
-1. The `AGENT_CWD` environment variable on the sprout-acp process, if set.
+1. The `AGENT_CWD` environment variable on the buzz-acp process, if set.
 2. `std::env::current_dir()` as a fallback.
-3. If both fail, sprout-acp logs an error and **refuses to start**.
+3. If both fail, buzz-acp logs an error and **refuses to start**.
 
 The agent runtime stores this value as `session.working_dir` and uses it for all skill discovery.
 
@@ -386,7 +386,7 @@ with other agents. If you want a skill available to all agents AND explicitly li
 ### Collision Handling
 
 If a skill with the same load key already exists in `$AGENT_CWD/.agents/skills/`, the pack skill
-is **not overwritten**. This allows operators to pin custom skill versions. sprout-acp **must log
+is **not overwritten**. This allows operators to pin custom skill versions. buzz-acp **must log
 a warning** when a pack skill is skipped due to a collision:
 
 ```
@@ -401,7 +401,7 @@ Skills are not auto-loaded into context. The agent must explicitly load them:
 load(source: "security-review")
 ```
 
-sprout-acp lists available skills in the user message prefix so the agent knows what's available.
+buzz-acp lists available skills in the user message prefix so the agent knows what's available.
 See Section 12 for the full message format.
 
 ### Skill File Format
@@ -418,7 +418,7 @@ description: "Reviews code for security vulnerabilities using OWASP Top 10 and s
 ```
 
 Both `name:` and `description:` are **required**. A skill missing either field is silently skipped
-by the agent runtime. `sprout pack validate` warns on skill name mismatches but does not yet
+by the agent runtime. `buzz pack validate` warns on skill name mismatches but does not yet
 enforce required metadata fields (see PF-5).
 
 ---
@@ -427,7 +427,7 @@ enforce required metadata fields (see PF-5).
 
 MCP servers provide external tool access (GitHub, Semgrep, databases, etc.). Configuration is
 defined at two levels: pack-level (shared across all agents) and per-persona (agent-specific).
-sprout-acp merges them and passes the result via the ACP protocol — no filesystem placement required.
+buzz-acp merges them and passes the result via the ACP protocol — no filesystem placement required.
 
 > **Transport Warning**: Only `stdio` and `streamable_http` transports are supported. SSE transport
 > is rejected by the ACP runtime with the error `"SSE is unsupported, migrate to streamable_http"` and
@@ -477,22 +477,22 @@ mcp_servers:
 > yet implemented. In the current release, `${VAR_NAME}` strings are passed through as literals
 > to the agent runtime, which may resolve them via its own MCP server configuration handling.
 
-When implemented, all `env` values will be scanned for `${VAR_NAME}`. sprout-acp will resolve
+When implemented, all `env` values will be scanned for `${VAR_NAME}`. buzz-acp will resolve
 from the process environment **before** passing to the agent runtime. Unresolved variables will
 cause a startup error.
 
 ### Delivery
 
-sprout-acp passes the merged config via `NewSessionRequest.mcp_servers`. **No `.mcp.json` is written to the agent's working directory.**
+buzz-acp passes the merged config via `NewSessionRequest.mcp_servers`. **No `.mcp.json` is written to the agent's working directory.**
 
 ---
 
 ## 8. Pack-Level Instructions
 
 `instructions.md` contains shared rules, coding standards, and team norms that apply to all agents
-in the pack. sprout-acp appends it to the persona prompt in the user message prefix.
+in the pack. buzz-acp appends it to the persona prompt in the user message prefix.
 
-sprout-acp appends `instructions.md` to the persona prompt in the user message prefix (see
+buzz-acp appends `instructions.md` to the persona prompt in the user message prefix (see
 Section 12). **No file is written to disk.**
 
 **What does NOT work**: `.mdc` rule files (agent runtimes typically don't read them), `rules/` directory (no
@@ -510,7 +510,7 @@ contributors only).
 > **Implementation note**: Hooks are parsed and validated at pack load time but not yet executed.
 > Hook execution is planned for a future release.
 
-Hooks are shell commands fired by sprout-acp at agent lifecycle points. **Agent runtimes typically have no hook system**
+Hooks are shell commands fired by buzz-acp at agent lifecycle points. **Agent runtimes typically have no hook system**
 — hooks are entirely a harness feature.
 
 ### `hooks/hooks.json`
@@ -546,7 +546,7 @@ hooks:
 
 ### Hook Execution
 
-Hooks run as the sprout-acp user; working directory is `$AGENT_CWD`; agent env vars are available.
+Hooks run as the buzz-acp user; working directory is `$AGENT_CWD`; agent env vars are available.
 Exit codes: `on_start` non-zero → abort startup; `on_stop` non-zero → logged only; `on_message`
 non-zero → message dropped and error logged.
 
@@ -554,7 +554,7 @@ non-zero → message dropped and error logged.
 
 The `on_message` hook receives the incoming message content via **stdin** (UTF-8 text). It is a
 **read-only side-effect hook** — it cannot modify the message. If you need message transformation,
-that must be implemented directly in sprout-acp's dispatch loop, not via a hook.
+that must be implemented directly in buzz-acp's dispatch loop, not via a hook.
 
 - **Timeout**: 5 seconds. Hooks that exceed this are killed (SIGKILL) and the message is dropped.
 - **Non-zero exit**: Message is dropped and an error is logged. The agent does not see the message.
@@ -562,19 +562,19 @@ that must be implemented directly in sprout-acp's dispatch loop, not via a hook.
 
 ### `on_stop` Crash Caveat
 
-`on_stop` fires on normal exit and on handled errors. It **will not fire** if sprout-acp crashes
+`on_stop` fires on normal exit and on handled errors. It **will not fire** if buzz-acp crashes
 (SIGSEGV, OOM, etc.). For critical cleanup (lock files, external resource release), use a
 systemd/supervisor cleanup unit or a process supervisor that runs cleanup unconditionally.
 
-**Hooks are NOT agent runtime features.** They are implemented entirely in sprout-acp. Bypassing
-sprout-acp means no hooks fire.
+**Hooks are NOT agent runtime features.** They are implemented entirely in buzz-acp. Bypassing
+buzz-acp means no hooks fire.
 
 ---
 
 ## 10. Behavioral Configuration
 
 The behavioral config fields in a persona's frontmatter control how the agent participates in
-Sprout conversations. These are all Sprout-specific — the agent runtime has no awareness of them. They sit
+Buzz conversations. These are all Buzz-specific — the agent runtime has no awareness of them. They sit
 at the top level of the frontmatter alongside identity fields like `name` and `description`.
 
 ### Pack Defaults
@@ -631,28 +631,28 @@ Result:
 
 ### Precedence Model
 
-In this spec, **"deploy time"** means when sprout-acp loads the pack and constructs per-persona
-session configurations — typically at sprout-acp process startup. For git-based packs, this occurs
-each time sprout-acp starts and reads the installed pack directory.
+In this spec, **"deploy time"** means when buzz-acp loads the pack and constructs per-persona
+session configurations — typically at buzz-acp process startup. For git-based packs, this occurs
+each time buzz-acp starts and reads the installed pack directory.
 
-When sprout-acp resolves the effective configuration for a persona, it applies this order (highest
+When buzz-acp resolves the effective configuration for a persona, it applies this order (highest
 wins):
 
 ```
 1. Operator env vars           — e.g. GOOSE_MODEL, GOOSE_PROVIDER (agent-runtime-specific)
                                  already set in the parent process environment
-2. Desktop UI per-agent        — overrides set in the Sprout desktop app per-agent settings
+2. Desktop UI per-agent        — overrides set in the Buzz desktop app per-agent settings
 3. Per-persona frontmatter     — behavioral config fields set directly in the persona's frontmatter
 4. Pack-level defaults         — the `defaults` object in plugin.json
-5. Built-in defaults           — sprout-acp's hardcoded fallback values
+5. Built-in defaults           — buzz-acp's hardcoded fallback values
 ```
 
-sprout-acp resolves levels 3–5 at deploy time (when the pack is loaded and sessions are
+buzz-acp resolves levels 3–5 at deploy time (when the pack is loaded and sessions are
 constructed). Levels 1–2 are applied at runtime and are outside the pack's control.
 
-**Level 1 — Operator env vars**: If the operator has already set env vars for model, provider, temperature, or context limit in the parent process environment, sprout-acp MUST NOT override them with pack/persona values. sprout-acp only injects env vars for fields that are NOT already set in the parent environment. This ensures operators can always override pack configuration.
+**Level 1 — Operator env vars**: If the operator has already set env vars for model, provider, temperature, or context limit in the parent process environment, buzz-acp MUST NOT override them with pack/persona values. buzz-acp only injects env vars for fields that are NOT already set in the parent environment. This ensures operators can always override pack configuration.
 
-**Implementation**: when constructing the child process environment, sprout-acp checks
+**Implementation**: when constructing the child process environment, buzz-acp checks
 `std::env::var(key)` for each env var. If the parent already has it set, skip injection. If not,
 inject the resolved pack/persona value.
 
@@ -764,15 +764,15 @@ apply to both.
 | `triggers.keywords` | string[] | `[]` | Any strings | Respond when message contains any keyword (case-insensitive). |
 | `triggers.all_messages` | bool | `false` | `true` / `false` | Respond to every message in subscribed channels. |
 | `model` | string | none (agent runtime uses operator default) | `"provider:model-id"` format | Model to use. Split on first `:` for provider + model env vars. |
-| `temperature` | float | `0.7` | Provider-dependent (typically 0.0–2.0). sprout-acp passes through without range validation; `sprout pack validate` checks type only (must be a number), not range. | Passed as env var to agent runtime. |
+| `temperature` | float | `0.7` | Provider-dependent (typically 0.0–2.0). buzz-acp passes through without range validation; `buzz pack validate` checks type only (must be a number), not range. | Passed as env var to agent runtime. |
 | `max_context_tokens` | int | none (provider default) | Positive integer | Passed as env var to agent runtime. |
 | `thread_replies` | bool | `true` | `true` / `false` | Reply in-thread when the triggering message is in a thread. |
 | `broadcast_replies` | bool | `false` | `true` / `false` | Also surface thread replies to the main channel. |
 
-**Unknown keys** in `defaults` (in `plugin.json`) are **validation warnings** in `sprout pack
+**Unknown keys** in `defaults` (in `plugin.json`) are **validation warnings** in `buzz pack
 validate` — this catches typos like `temprature` at validate time. Unknown keys in persona
 frontmatter are **hard errors** (via `deny_unknown_fields` in the YAML parser). At deploy time,
-sprout-acp logs a `WARN` and ignores unknown manifest keys, remaining fail-soft:
+buzz-acp logs a `WARN` and ignores unknown manifest keys, remaining fail-soft:
 
 ```
 WARN: Unknown key "temprature" in defaults (plugin.json); ignoring
@@ -805,18 +805,18 @@ broadcast_replies: false
 
 ### Channel Name `#` Convention
 
-The `#` prefix in `subscribe` entries is a **display convention only**. Channel names in the Sprout
-relay are stored and queried **without** the `#` prefix. sprout-acp strips the leading `#` before
+The `#` prefix in `subscribe` entries is a **display convention only**. Channel names in the Buzz
+relay are stored and queried **without** the `#` prefix. buzz-acp strips the leading `#` before
 making any relay API calls. `"#security-reviews"` and `"security-reviews"` are equivalent in this
 field.
 
 ### Env Var Mapping
 
-sprout-acp resolves pack defaults and per-persona overrides (precedence levels 3–5) into a single
+buzz-acp resolves pack defaults and per-persona overrides (precedence levels 3–5) into a single
 effective configuration per persona **before** injecting environment variables into the child
 process. The env vars set reflect the fully-resolved values — not the raw persona frontmatter.
 
-sprout-acp translates persona behavioral config fields to agent configuration via environment
+buzz-acp translates persona behavioral config fields to agent configuration via environment
 variables injected into the child process at spawn time:
 
 | Persona field | Env var(s) | Notes |
@@ -825,20 +825,20 @@ variables injected into the child process at spawn time:
 | `temperature: 0.3` | `GOOSE_TEMPERATURE=0.3` | Read by agent runtime at startup |
 | `max_context_tokens: 128000` | `GOOSE_CONTEXT_LIMIT=128000` | Read by agent runtime at startup |
 
-If `model` is omitted from both the persona frontmatter and `defaults`, sprout-acp does not set
+If `model` is omitted from both the persona frontmatter and `defaults`, buzz-acp does not set
 `GOOSE_PROVIDER` or `GOOSE_MODEL`, and the agent runtime uses its configured operator default.
 
-> **Implementation note**: `AcpClient::spawn` accepts per-persona env vars via the `extra_env` parameter. sprout-acp checks `std::env::var(key)` before injecting each var — if the parent environment already has the key set, injection is skipped (operator precedence, level 1).
+> **Implementation note**: `AcpClient::spawn` accepts per-persona env vars via the `extra_env` parameter. buzz-acp checks `std::env::var(key)` before injecting each var — if the parent environment already has the key set, injection is skipped (operator precedence, level 1).
 
 See the Canonical Behavioral Config Field Schema table above for the full field reference.
 
 > **Built-in defaults note**: The "Built-in Default" column in the Canonical Behavioral Config
-> Field Schema table lists sprout-acp's built-in fallbacks (precedence level 5). If `defaults` is
+> Field Schema table lists buzz-acp's built-in fallbacks (precedence level 5). If `defaults` is
 > present in `plugin.json`, those values take precedence over the built-in defaults (level 4 >
 > level 5). The built-in defaults only apply when neither the persona nor the pack defaults specify
 > a value.
 
-All fields are consumed entirely by sprout-acp. None are passed to the agent runtime directly — they are projected as env vars or used by the harness's subscription/dispatch logic.
+All fields are consumed entirely by buzz-acp. None are passed to the agent runtime directly — they are projected as env vars or used by the harness's subscription/dispatch logic.
 
 ---
 
@@ -846,19 +846,19 @@ All fields are consumed entirely by sprout-acp. None are passed to the agent run
 
 ### Phase 1: Zip File
 
-A pack is distributed as a `.sproutpack` file (zip archive):
+A pack is distributed as a `.buzzpack` file (zip archive):
 
 ```bash
-sprout pack validate ./my-pack
-sprout pack ./my-pack --output my-pack-1.2.0.sproutpack
-sprout install ./my-pack-1.2.0.sproutpack
-sprout install https://example.com/releases/my-pack-1.2.0.sproutpack
+buzz pack validate ./my-pack
+buzz pack ./my-pack --output my-pack-1.2.0.buzzpack
+buzz install ./my-pack-1.2.0.buzzpack
+buzz install https://example.com/releases/my-pack-1.2.0.buzzpack
 ```
 
 #### Pack Integrity (Required)
 
-Zip packs **must** ship with `<pack-name>-<version>.sproutpack.sha256` containing `sha256sum`
-output (`<hex-digest>  <filename>`). sprout-acp **must** verify before installation and refuse on
+Zip packs **must** ship with `<pack-name>-<version>.buzzpack.sha256` containing `sha256sum`
+output (`<hex-digest>  <filename>`). buzz-acp **must** verify before installation and refuse on
 mismatch. For HTTP installs, the checksum file is fetched from the same base URL.
 
 #### `pack.lock` for Phase 1
@@ -868,7 +868,7 @@ Phase 1 installs record the installed pack in `pack.lock` alongside the pack dir
 ```json
 {
   "com.example.meadow-security-team": {
-    "source": "https://example.com/releases/my-pack-1.2.0.sproutpack",
+    "source": "https://example.com/releases/my-pack-1.2.0.buzzpack",
     "sha256": "a3f1c2d4e5b6...",
     "version": "1.2.0",
     "installed_at": "2026-04-10T11:00:00Z"
@@ -879,9 +879,9 @@ Phase 1 installs record the installed pack in `pack.lock` alongside the pack dir
 ### Phase 2: Git Repository
 
 ```bash
-sprout install github:example/meadow-security-team
-sprout install github:example/meadow-security-team@v1.2.0
-sprout install git+https://gitlab.example.com/team/pack.git
+buzz install github:example/meadow-security-team
+buzz install github:example/meadow-security-team@v1.2.0
+buzz install git+https://gitlab.example.com/team/pack.git
 ```
 
 `pack.lock` for git installs records the resolved commit SHA:
@@ -899,17 +899,17 @@ sprout install git+https://gitlab.example.com/team/pack.git
 
 ### Phase 3: App Store UI
 
-A Sprout-hosted registry and in-app browser for discovering and installing packs. API-compatible
+A Buzz-hosted registry and in-app browser for discovering and installing packs. API-compatible
 with OPS registries. Details TBD.
 
 ### Installed Pack Location
 
-Installed packs live at `~/.sprout/packs/<pack-id>/`. sprout-acp reads packs from this location
+Installed packs live at `~/.buzz/packs/<pack-id>/`. buzz-acp reads packs from this location
 at agent startup.
 
 ### Desktop App Import
 
-The Sprout desktop app can import persona packs via the Import button:
+The Buzz desktop app can import persona packs via the Import button:
 
 - **My Agents → Import**: Accepts `.persona.md` files (individual personas) or `.zip` files
   (persona packs detected by `.plugin/plugin.json`). Pack zips are resolved in a temp directory;
@@ -930,16 +930,16 @@ How each pack component reaches the running agent:
 
 | Component | Delivery Method | Mechanism | Filesystem Write? |
 |-----------|----------------|-----------|-------------------|
-| Skills | Copy at deploy time (planned) | sprout-acp will copy `skills/` → `$AGENT_CWD/.agents/skills/` | ✅ Yes (only one) |
+| Skills | Copy at deploy time (planned) | buzz-acp will copy `skills/` → `$AGENT_CWD/.agents/skills/` | ✅ Yes (only one) |
 | MCP servers | ACP protocol | `NewSessionRequest.mcp_servers` | ❌ No |
-| Persona prompt | User message prefix | `[System]` block prepended to user message text by sprout-acp | ❌ No |
+| Persona prompt | User message prefix | `[System]` block prepended to user message text by buzz-acp | ❌ No |
 | Pack instructions | User message prefix | Appended to `[System]` block in user message text | ❌ No |
-| Lifecycle hooks | Harness internal | sprout-acp fires shell commands directly | ❌ No |
+| Lifecycle hooks | Harness internal | buzz-acp fires shell commands directly | ❌ No |
 | Model/provider | Child process env vars | Agent-runtime-specific env vars (e.g. `GOOSE_PROVIDER`, `GOOSE_MODEL`) | ❌ No |
-| Behavioral config | Harness internal | sprout-acp subscription + dispatch logic | ❌ No |
-| Pack defaults (`defaults`) | Harness internal | Resolved at deploy time by sprout-acp into per-persona effective config; never passed to the agent runtime directly | ❌ No |
+| Behavioral config | Harness internal | buzz-acp subscription + dispatch logic | ❌ No |
+| Pack defaults (`defaults`) | Harness internal | Resolved at deploy time by buzz-acp into per-persona effective config; never passed to the agent runtime directly | ❌ No |
 
-> **Pack defaults are resolved at deploy time**, not at runtime. When sprout-acp loads a pack and
+> **Pack defaults are resolved at deploy time**, not at runtime. When buzz-acp loads a pack and
 > constructs per-persona session configurations, it merges the `defaults` object with each persona's
 > frontmatter behavioral config fields (per the precedence model in Section 10) and stores the
 > resulting effective configuration. The `defaults` object itself is not forwarded to the agent runtime or
@@ -947,8 +947,8 @@ How each pack component reaches the running agent:
 
 ### The `[System]` Block — Current Implementation
 
-sprout-acp's `format_prompt()` in `queue.rs` prepends a `[System]` block to the **user message
-text** before sending it to the agent runtime. This is a **sprout-acp feature, not an agent runtime
+buzz-acp's `format_prompt()` in `queue.rs` prepends a `[System]` block to the **user message
+text** before sending it to the agent runtime. This is a **buzz-acp feature, not an agent runtime
 feature**. The agent sees the `[System]` prefix as part of the user message content — it is NOT
 injected into the agent's actual system prompt.
 
@@ -996,23 +996,23 @@ The `[System]` prefix re-sends the full persona prompt on every turn. True syste
 
 Never embed secrets in pack files. Use `${VAR_NAME}` references in all `env` blocks. Currently,
 `${VAR_NAME}` strings are passed through as literals to the agent runtime (see Section 7). When
-harness-side interpolation is implemented, sprout-acp will resolve them from the process
+harness-side interpolation is implemented, buzz-acp will resolve them from the process
 environment at startup and refuse to start if any are unresolved. Inject secrets via your
 deployment mechanism (systemd env files, Vault, Kubernetes secrets, etc.).
 
 ### Pack Integrity
 
-- **Phase 1 (zip)**: Packs **must** ship with `<pack-name>-<version>.sproutpack.sha256` containing
-  `sha256sum` output (`<hex-digest>  <filename>`). sprout-acp **must** verify before installation
+- **Phase 1 (zip)**: Packs **must** ship with `<pack-name>-<version>.buzzpack.sha256` containing
+  `sha256sum` output (`<hex-digest>  <filename>`). buzz-acp **must** verify before installation
   and refuse on mismatch.
-- **Phase 2 (git)**: `pack.lock` pins the resolved commit SHA; sprout-acp verifies on install.
+- **Phase 2 (git)**: `pack.lock` pins the resolved commit SHA; buzz-acp verifies on install.
 - **Phase 3 (registry)**: Registry signatures TBD.
 
 ### Hook Execution
 
-Hooks run with sprout-acp's privileges — significant attack surface. Only install packs from
-trusted sources. Review all hook commands before installing. Consider sandboxing sprout-acp
-(container, restricted user) for untrusted packs. sprout-acp should display hook commands before
+Hooks run with buzz-acp's privileges — significant attack surface. Only install packs from
+trusted sources. Review all hook commands before installing. Consider sandboxing buzz-acp
+(container, restricted user) for untrusted packs. buzz-acp should display hook commands before
 first execution (Phase 2 feature).
 
 ### MCP Server and Skill Trust
@@ -1025,28 +1025,28 @@ both with the same caution as any untrusted prompt content.
 
 ## 14. Migration Path
 
-### From V6 (sprout-namespaced) Format
+### From V6 (buzz-namespaced) Format
 
 Field mapping from V6 `.persona.md` to current `.persona.md`:
 
 | V6 location | Current location |
 |---|---|
-| `sprout.model` | `model` (top-level frontmatter) |
-| `sprout.temperature` | `temperature` (top-level frontmatter) |
-| `sprout.max_context_tokens` | `max_context_tokens` (top-level frontmatter) |
-| `sprout.subscribe` | `subscribe` (top-level frontmatter) |
-| `sprout.respond_to` | `triggers` (top-level frontmatter) |
-| `sprout.thread_replies` | `thread_replies` (top-level frontmatter) |
-| `sprout.broadcast_replies` | `broadcast_replies` (top-level frontmatter) |
-| `plugin.json` → `sprout.defaults` | `plugin.json` → `defaults` (top-level) |
-| `plugin.json` → `sprout.personas` | `plugin.json` → `personas` (top-level) |
-| `plugin.json` → `sprout.pack_instructions` | `plugin.json` → `pack_instructions` (top-level) |
-| `plugin.json` → `sprout.mcp_config` | `plugin.json` → `mcp_config` (top-level) |
-| `plugin.json` → `sprout.hooks_config` | `plugin.json` → `hooks_config` (top-level) |
+| `buzz.model` | `model` (top-level frontmatter) |
+| `buzz.temperature` | `temperature` (top-level frontmatter) |
+| `buzz.max_context_tokens` | `max_context_tokens` (top-level frontmatter) |
+| `buzz.subscribe` | `subscribe` (top-level frontmatter) |
+| `buzz.respond_to` | `triggers` (top-level frontmatter) |
+| `buzz.thread_replies` | `thread_replies` (top-level frontmatter) |
+| `buzz.broadcast_replies` | `broadcast_replies` (top-level frontmatter) |
+| `plugin.json` → `buzz.defaults` | `plugin.json` → `defaults` (top-level) |
+| `plugin.json` → `buzz.personas` | `plugin.json` → `personas` (top-level) |
+| `plugin.json` → `buzz.pack_instructions` | `plugin.json` → `pack_instructions` (top-level) |
+| `plugin.json` → `buzz.mcp_config` | `plugin.json` → `mcp_config` (top-level) |
+| `plugin.json` → `buzz.hooks_config` | `plugin.json` → `hooks_config` (top-level) |
 
 **V6 persona frontmatter** (before):
 ```yaml
-sprout:
+buzz:
   model: "anthropic:claude-sonnet-4-20250514"
   temperature: 0.3
   subscribe:
@@ -1063,7 +1063,7 @@ subscribe:
 
 **V6 `plugin.json`** (before):
 ```json
-"sprout": {
+"buzz": {
   "personas": ["agents/pip.persona.md"],
   "defaults": { "model": "anthropic:claude-sonnet-4-20250514" }
 }
@@ -1093,11 +1093,11 @@ Field mapping from flat JSON (`personas/lep.json`) to `.persona.md`:
 2. For each persona JSON → create `agents/<name>.persona.md` using the mapping above
 3. Move skills to `skills/<skill-name>/SKILL.md`; ensure each has `name:` and `description:` frontmatter
 4. Create `instructions.md` from any shared prompt content
-5. Run `sprout pack validate ./my-pack`
+5. Run `buzz pack validate ./my-pack`
 
 ### Backward Compatibility
 
-The V6 namespaced `sprout:` block format is not supported. Only the current flat top-level fields format is accepted. The `respond_to` key is accepted as a legacy alias for `triggers` in both persona frontmatter and `plugin.json` defaults.
+The V6 namespaced `buzz:` block format is not supported. Only the current flat top-level fields format is accepted. The `respond_to` key is accepted as a legacy alias for `triggers` in both persona frontmatter and `plugin.json` defaults.
 
 ---
 
@@ -1106,13 +1106,13 @@ The V6 namespaced `sprout:` block format is not supported. Only the current flat
 ### Unresolved
 
 1. **`session/set_model` as env var alternative**: The ACP runtime implements `on_set_model()` (ACP
-   unstable feature). sprout-acp could call `session/set_model` after `session/new` to set the
+   unstable feature). buzz-acp could call `session/set_model` after `session/new` to set the
    model per-session without env var injection. This avoids the `AcpClient::spawn` limitation for
    model (but not provider, temperature, or context limit). Deferred pending stability of the ACP
    unstable feature.
 
 2. **`CONTEXT_FILE_NAMES` env var**: The goose agent runtime supports this env var to control which filenames are
-   scanned for hints. Should sprout-acp set this to include pack-specific filenames? Deferred
+   scanned for hints. Should buzz-acp set this to include pack-specific filenames? Deferred
    pending use case.
 
 3. **Skill versioning**: Skills are identified by load key only. If two packs provide a skill with
@@ -1127,7 +1127,7 @@ The V6 namespaced `sprout:` block format is not supported. Only the current flat
 
 ### Future Work
 
-`sprout pack init` scaffolding; hot reload of skills/instructions; skill marketplace; pack dependencies; agent-to-agent handoff within a pack.
+`buzz pack init` scaffolding; hot reload of skills/instructions; skill marketplace; pack dependencies; agent-to-agent handoff within a pack.
 
 ---
 
@@ -1138,11 +1138,11 @@ Features required by this spec but not yet implemented.
 | ID | What | Where |
 |----|------|-------|
 | PF-1 | True system prompt injection via the ACP protocol's `on_new_session()`. Current `[System]` prefix re-sends persona prompt on every turn; true injection fires once at session creation. | ACP server `on_new_session()` |
-| PF-2 | `sprout pack validate` CLI: **Implemented.** Schema-validates `plugin.json`; checks `.persona.md` required identity fields; validates behavioral config fields; warns on unknown keys and skill name mismatches. Remaining: verify `skills:` and `hooks:` paths exist; error on `SKILL.md` missing `name:` or `description:`. | `sprout-cli` / `sprout-admin` |
-| PF-3 | Skill collision warning: emit `WARN` when a pack skill is skipped because a skill with the same load key already exists in `.agents/skills/`. | sprout-acp skill copy logic |
-| PF-4 | `$AGENT_CWD` resolution: determine `NewSessionRequest.cwd` from (1) `AGENT_CWD` env var, (2) `std::env::current_dir()`, (3) error and refuse to start. | sprout-acp startup / session init |
-| PF-5 | Skill parse failure warning: emit `WARN` when `parse_skill_content` returns `None` (missing `name:`, missing `description:`, or malformed frontmatter). Currently the agent runtime silently skips. sprout-acp should pre-validate during skill copy. | sprout-acp skill copy logic |
-| PF-6 | Per-subprocess env var injection: **Implemented.** `AcpClient::spawn` accepts `extra_env: &[(String, String)]` injected via `Command::env()`. sprout-acp checks `std::env::var(key)` before injecting — operator env vars take precedence (level 1). | `sprout-acp/src/acp.rs` `AcpClient::spawn()` |
+| PF-2 | `buzz pack validate` CLI: **Implemented.** Schema-validates `plugin.json`; checks `.persona.md` required identity fields; validates behavioral config fields; warns on unknown keys and skill name mismatches. Remaining: verify `skills:` and `hooks:` paths exist; error on `SKILL.md` missing `name:` or `description:`. | `buzz-cli` / `buzz-admin` |
+| PF-3 | Skill collision warning: emit `WARN` when a pack skill is skipped because a skill with the same load key already exists in `.agents/skills/`. | buzz-acp skill copy logic |
+| PF-4 | `$AGENT_CWD` resolution: determine `NewSessionRequest.cwd` from (1) `AGENT_CWD` env var, (2) `std::env::current_dir()`, (3) error and refuse to start. | buzz-acp startup / session init |
+| PF-5 | Skill parse failure warning: emit `WARN` when `parse_skill_content` returns `None` (missing `name:`, missing `description:`, or malformed frontmatter). Currently the agent runtime silently skips. buzz-acp should pre-validate during skill copy. | buzz-acp skill copy logic |
+| PF-6 | Per-subprocess env var injection: **Implemented.** `AcpClient::spawn` accepts `extra_env: &[(String, String)]` injected via `Command::env()`. buzz-acp checks `std::env::var(key)` before injecting — operator env vars take precedence (level 1). | `buzz-acp/src/acp.rs` `AcpClient::spawn()` |
 
 ---
 

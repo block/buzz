@@ -1,16 +1,16 @@
-# sprout-agent
+# buzz-agent
 
 > Minimal, unbreakable ACP-compliant LLM agent. Stdio in, tool calls out. Non-streaming. No persistence. No cleverness.
 
-[ACP](https://agentclientprotocol.com) is the Agent Client Protocol — JSON-RPC 2.0 over stdio between a client (Zed, JetBrains, sprout-acp, …) and an agent. [MCP](https://modelcontextprotocol.io) is how the agent talks to its tools.
+[ACP](https://agentclientprotocol.com) is the Agent Client Protocol — JSON-RPC 2.0 over stdio between a client (Zed, JetBrains, buzz-acp, …) and an agent. [MCP](https://modelcontextprotocol.io) is how the agent talks to its tools.
 
-`sprout-agent` is the agent.
+`buzz-agent` is the agent.
 
 ## What It Is
 
 ```
         +--------+   stdio (JSON-RPC 2.0)   +---------------+
-        | client | <----------------------> |  sprout-agent |
+        | client | <----------------------> |  buzz-agent |
         +--------+        ACP frames        +---------------+
                                               │            │
                                               │            │ rmcp (stdio)
@@ -35,26 +35,26 @@ The agent's **output is its tool calls**. Generated text is forwarded to the cli
 
 ```bash
 # Build
-cargo build --release -p sprout-agent
+cargo build --release -p buzz-agent
 
 # Run against Anthropic
 BUZZ_AGENT_PROVIDER=anthropic \
 ANTHROPIC_API_KEY=sk-ant-... \
 ANTHROPIC_MODEL=claude-sonnet-4-5 \
-  ./target/release/sprout-agent
+  ./target/release/buzz-agent
 
 # Or any OpenAI-compatible endpoint
 BUZZ_AGENT_PROVIDER=openai \
 OPENAI_COMPAT_API_KEY=sk-... \
 OPENAI_COMPAT_MODEL=gpt-5 \
 OPENAI_COMPAT_BASE_URL=https://api.openai.com/v1 \
-  ./target/release/sprout-agent
+  ./target/release/buzz-agent
 
 # Or Databricks model serving via OAuth 2.0 PKCE
 BUZZ_AGENT_PROVIDER=databricks \
 DATABRICKS_HOST=https://dbc-...cloud.databricks.com \
 DATABRICKS_MODEL=goose-claude-4-6-sonnet \
-  ./target/release/sprout-agent
+  ./target/release/buzz-agent
 ```
 
 That's the whole setup. The agent reads JSON-RPC frames from stdin, writes them to stdout, and logs to stderr.
@@ -73,7 +73,7 @@ A complete round-trip. Lines starting with `→` are client→agent (stdin); `�
       "promptCapabilities":{"image":false,"audio":false,"embeddedContext":false},
       "mcpCapabilities":{"http":false,"sse":false}
     },
-    "agentInfo":{"name":"sprout-agent","version":"0.1.0"}
+    "agentInfo":{"name":"buzz-agent","version":"0.1.0"}
   }}
 
 // 2. Open a session. The client passes the MCP servers to spawn.
@@ -157,7 +157,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 ## Providers
 
-`sprout-agent` speaks two HTTP dialects. Pick with `BUZZ_AGENT_PROVIDER`.
+`buzz-agent` speaks two HTTP dialects. Pick with `BUZZ_AGENT_PROVIDER`.
 
 | Provider | `BUZZ_AGENT_PROVIDER` | Endpoint (auto) | Tested with |
 |---|---|---|---|
@@ -285,13 +285,13 @@ One reader, one writer, up to 8 concurrent prompt tasks (one per session).
 ## Building
 
 ```bash
-cargo build --release -p sprout-agent
+cargo build --release -p buzz-agent
 ```
 
 ## Testing
 
 ```bash
-cargo test -p sprout-agent
+cargo test -p buzz-agent
 ```
 
 Test strategy is **real subprocess, no mocks**:

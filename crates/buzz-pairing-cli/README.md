@@ -1,17 +1,17 @@
-# sprout-pair
+# buzz-pair
 
-CLI tool for testing the [NIP-AB device pairing protocol](../sprout-core/src/pairing/NIP-AB.md) end-to-end. Exercises the full protocol over a live Nostr relay — designed for interop testing and NIP submission, not production use.
+CLI tool for testing the [NIP-AB device pairing protocol](../buzz-core/src/pairing/NIP-AB.md) end-to-end. Exercises the full protocol over a live Nostr relay — designed for interop testing and NIP submission, not production use.
 
 ## Quick Start
 
 ```bash
-cargo build --release -p sprout-pairing-cli
+cargo build --release -p buzz-pairing-cli
 
 # Terminal 1 — source (holds the secret)
-./target/release/sprout-pair source --relay wss://relay.damus.io
+./target/release/buzz-pair source --relay wss://relay.damus.io
 
 # Terminal 2 — target (receives the secret)
-./target/release/sprout-pair target --show-secret
+./target/release/buzz-pair target --show-secret
 # paste the QR URI from terminal 1 when prompted
 ```
 
@@ -24,7 +24,7 @@ Both sides display a 6-digit SAS code. Confirm they match on each side, and the 
 Acts as the device holding the secret. Generates an ephemeral keypair and session secret, displays a `nostrpair://` QR URI, waits for a target to connect, performs SAS verification, and sends the payload.
 
 ```
-sprout-pair source --relay <RELAY_URL> [--nsec <BECH32_NSEC>]
+buzz-pair source --relay <RELAY_URL> [--nsec <BECH32_NSEC>]
 ```
 
 - `--relay` — WebSocket relay URL (default: `wss://relay.damus.io`)
@@ -35,7 +35,7 @@ sprout-pair source --relay <RELAY_URL> [--nsec <BECH32_NSEC>]
 Acts as the receiving device. Reads a `nostrpair://` URI from stdin, connects to the relay encoded in the URI, sends an offer, verifies SAS, and receives the payload.
 
 ```
-sprout-pair target [--relay <OVERRIDE_URL>] [--show-secret]
+buzz-pair target [--relay <OVERRIDE_URL>] [--show-secret]
 ```
 
 - `--relay` — Override the relay URL from the QR code
@@ -46,24 +46,24 @@ sprout-pair target [--relay <OVERRIDE_URL>] [--show-secret]
 Prints all derived cryptographic values from the NIP-AB spec's fixed test keys. Useful for verifying implementations against the spec.
 
 ```
-sprout-pair test-vectors
+buzz-pair test-vectors
 ```
 
-## Testing Against a Local Sprout Relay
+## Testing Against a Local Buzz Relay
 
-The CLI supports NIP-42 authentication, so it works with Sprout relays out of the box.
+The CLI supports NIP-42 authentication, so it works with Buzz relays out of the box.
 
 ### Prerequisites
 
 - Docker running (for Postgres, Redis, etc.)
-- Sprout relay built: `cargo build --release -p sprout-relay`
+- Buzz relay built: `cargo build --release -p buzz-relay`
 
 ### Start the relay
 
 ```bash
 just setup                          # Docker services + schema
 cargo build --release --workspace
-screen -dmS relay bash -c "./target/release/sprout-relay 2>&1 | tee /tmp/sprout-relay.log"
+screen -dmS relay bash -c "./target/release/buzz-relay 2>&1 | tee /tmp/buzz-relay.log"
 sleep 3 && curl -s http://localhost:3000/health   # → "ok"
 ```
 
@@ -91,10 +91,10 @@ This spawns source and target as PTY-driven subprocesses, feeds the QR URI betwe
 
 ```bash
 # Terminal 1
-./target/release/sprout-pair source --relay ws://localhost:3000
+./target/release/buzz-pair source --relay ws://localhost:3000
 
 # Terminal 2
-./target/release/sprout-pair target --show-secret
+./target/release/buzz-pair target --show-secret
 # paste the nostrpair:// URI, confirm SAS on both sides
 ```
 

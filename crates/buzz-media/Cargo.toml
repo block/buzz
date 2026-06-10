@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Media storage, validation, and thumbnail generation for Sprout"
+description = "Media storage, validation, and thumbnail generation for Buzz"
 
 [dependencies]
 buzz-core = { workspace = true }
