@@ -50,7 +50,7 @@ impl DevMcp {
 
     #[tool(
         name = "read_file",
-        description = "Read a text file and return its contents with line numbers. Returns lines in `{number}\\t{content}` format. Use `offset` (0-based) and `limit` (default 2000) to window into large files. Path resolved relative to workdir (defaults to server cwd). Prefer over cat/head/tail."
+        description = "Read a text file and return its contents with line numbers. Returns lines in `{number}:{content}` format. Use `offset` (0-based) and `limit` (default 2000) to window into large files. Path resolved relative to workdir (defaults to server cwd). Prefer over cat/head/tail."
     )]
     async fn read_file(
         &self,
