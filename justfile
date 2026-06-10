@@ -445,7 +445,7 @@ bump-version version:
     (unset GIT_DIR GIT_WORK_TREE; cd mobile && flutter pub get)
     echo "Bumped all manifests to {{ version }} and regenerated lockfiles"
 
-# Create a release PR that bumps version and generates changelog
+# Create or update a release PR that bumps version and generates changelog
 release *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -479,9 +479,19 @@ release *ARGS:
         echo "Error: working tree is dirty. Commit or stash changes first."
         exit 1
     fi
-    # Create version-bump branch
+    # Switch to version-bump branch (create if needed, reset to main if it exists)
     BRANCH="version-bump/${VERSION}"
-    git switch -c "$BRANCH"
+    if git rev-parse --verify "refs/heads/$BRANCH" >/dev/null 2>&1; then
+        echo "Branch '$BRANCH' already exists — resetting to origin/main..."
+        git switch "$BRANCH"
+        git reset --hard origin/main
+    elif git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+        echo "Branch '$BRANCH' exists on remote — checking out and resetting to origin/main..."
+        git switch -c "$BRANCH" --track "origin/$BRANCH"
+        git reset --hard origin/main
+    else
+        git switch -c "$BRANCH"
+    fi
     # Bump versions and lockfiles
     just bump-version "$VERSION"
     # Generate changelog
@@ -513,9 +523,14 @@ release *ARGS:
       mobile/pubspec.lock \
       pnpm-lock.yaml \
       CHANGELOG.md
-    git commit -m "chore(release): release version ${VERSION}"
+    RELEASE_MSG="chore(release): release version ${VERSION}"
+    if [[ "$(git log -1 --format='%s' 2>/dev/null)" == "$RELEASE_MSG" ]]; then
+        git commit --amend --no-edit
+    else
+        git commit -m "$RELEASE_MSG"
+    fi
     # Push and open PR
-    git push -u origin "$BRANCH"
+    git push --force-with-lease -u origin "$BRANCH"
     # Build PR body
     PR_BODY="## Release v${VERSION}"$'\n\n'
     if [[ -n "$LAST_TAG" ]]; then
@@ -525,11 +540,21 @@ release *ARGS:
         PR_BODY+="Initial release."$'\n\n'
     fi
     PR_BODY+="**To release:** merge this PR. The tag and build will happen automatically."
-    PR_URL=$(gh pr create \
-        --title "chore(release): release version ${VERSION}" \
-        --body "$PR_BODY")
-    echo ""
-    echo "Release PR opened: ${PR_URL}"
+    EXISTING_PR=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null || true)
+    if [[ -n "$EXISTING_PR" ]]; then
+        gh pr edit "$BRANCH" \
+            --title "chore(release): release version ${VERSION}" \
+            --body "$PR_BODY"
+        PR_URL="$EXISTING_PR"
+        echo ""
+        echo "Updated existing release PR: ${PR_URL}"
+    else
+        PR_URL=$(gh pr create \
+            --title "chore(release): release version ${VERSION}" \
+            --body "$PR_BODY")
+        echo ""
+        echo "Release PR opened: ${PR_URL}"
+    fi
     echo "Merge it to trigger the release build."
 
 # ─── Agent Harness ────────────────────────────────────────────────────────────
