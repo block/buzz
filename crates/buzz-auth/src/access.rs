@@ -1,7 +1,7 @@
 //! Channel access enforcement.
 //!
-//! Defines [`ChannelAccessChecker`] so `sprout-auth` can enforce access
-//! without depending on `sprout-db` directly.
+//! Defines [`ChannelAccessChecker`] so `buzz-auth` can enforce access
+//! without depending on `buzz-db` directly.
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -14,9 +14,9 @@ use crate::scope::Scope;
 
 /// Async trait for checking channel membership.
 ///
-/// Implemented by the database layer (`sprout-db`) in production. The `sprout-auth`
+/// Implemented by the database layer (`buzz-db`) in production. The `buzz-auth`
 /// crate defines the trait so it can enforce access rules without a direct dependency
-/// on `sprout-db`.
+/// on `buzz-db`.
 pub trait ChannelAccessChecker: Send + Sync {
     /// Return the set of channel UUIDs accessible to `pubkey`.
     fn accessible_channel_ids(

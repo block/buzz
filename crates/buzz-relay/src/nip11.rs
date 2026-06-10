@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn auth_required_is_advertised_true() {
         // REQ, EVENT, and COUNT all unconditionally require
-        // `AuthState::Authenticated` (see `crates/sprout-relay/src/handlers/`),
+        // `AuthState::Authenticated` (see `crates/buzz-relay/src/handlers/`),
         // so the NIP-11 doc must advertise it.
         assert!(relay_limitation().auth_required);
     }

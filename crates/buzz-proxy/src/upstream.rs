@@ -1,6 +1,6 @@
-//! Upstream relay client — single persistent WebSocket connection to the Sprout relay.
+//! Upstream relay client — single persistent WebSocket connection to the Buzz relay.
 //!
-//! Maintains one authenticated connection to the upstream Sprout relay, authenticated
+//! Maintains one authenticated connection to the upstream Buzz relay, authenticated
 //! via a `proxy:submit` API token. Handles NIP-42 auth automatically and reconnects
 //! with exponential backoff on disconnect.
 
@@ -47,7 +47,7 @@ struct Inner {
 }
 
 /// Manages a single persistent, authenticated WebSocket connection to the upstream
-/// Sprout relay.
+/// Buzz relay.
 ///
 /// Clone-friendly: all state is behind an `Arc`.
 ///
@@ -58,7 +58,7 @@ struct Inner {
 /// # use tokio::sync::mpsc;
 /// # async fn example() {
 /// let (inbound_tx, mut inbound_rx) = mpsc::channel(256);
-/// let client = UpstreamClient::new("ws://localhost:3000", "sprout_mytoken123");
+/// let client = UpstreamClient::new("ws://localhost:3000", "buzz_mytoken123");
 ///
 /// // Spawn the connection loop in the background.
 /// let client2 = client.clone();
@@ -79,8 +79,8 @@ pub struct UpstreamClient {
 impl UpstreamClient {
     /// Create a new [`UpstreamClient`].
     ///
-    /// `relay_url` — WebSocket URL of the upstream Sprout relay (e.g. `ws://localhost:3000`).
-    /// `api_token` — A `sprout_*` API token with the `proxy:submit` scope.
+    /// `relay_url` — WebSocket URL of the upstream Buzz relay (e.g. `ws://localhost:3000`).
+    /// `api_token` — A `buzz_*` API token with the `proxy:submit` scope.
     pub fn new(relay_url: impl Into<String>, api_token: impl Into<String>) -> Self {
         Self::with_keys(relay_url, api_token, Keys::generate())
     }
@@ -443,7 +443,7 @@ mod tests {
 
     #[test]
     fn new_client_starts_disconnected() {
-        let client = UpstreamClient::new("ws://localhost:3000", "sprout_test");
+        let client = UpstreamClient::new("ws://localhost:3000", "buzz_test");
         assert!(!client.is_connected());
     }
 
@@ -451,7 +451,7 @@ mod tests {
     fn send_methods_queue_correctly_formatted_json() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let client = UpstreamClient::new("ws://localhost:3000", "sprout_test");
+            let client = UpstreamClient::new("ws://localhost:3000", "buzz_test");
 
             // Queue an EVENT message.
             let keys = Keys::generate();
@@ -502,7 +502,7 @@ mod tests {
         rt.block_on(async {
             let inner = Inner {
                 relay_url: "ws://localhost:3000".into(),
-                api_token: "sprout_mytoken".into(),
+                api_token: "buzz_mytoken".into(),
                 auth_keys: Keys::generate(),
                 connected: RwLock::new(false),
                 auth_event_id: tokio::sync::Mutex::new(None),
@@ -522,7 +522,7 @@ mod tests {
                 msg.contains("test-challenge-abc"),
                 "expected challenge in: {msg}"
             );
-            assert!(msg.contains("sprout_mytoken"), "expected token in: {msg}");
+            assert!(msg.contains("buzz_mytoken"), "expected token in: {msg}");
             assert!(
                 msg.contains("ws://localhost:3000"),
                 "expected relay url in: {msg}"
@@ -536,7 +536,7 @@ mod tests {
         rt.block_on(async {
             let inner = Inner {
                 relay_url: "ws://localhost:3000".into(),
-                api_token: "sprout_mytoken".into(),
+                api_token: "buzz_mytoken".into(),
                 auth_keys: Keys::generate(),
                 connected: RwLock::new(false),
                 auth_event_id: tokio::sync::Mutex::new(None),
@@ -572,7 +572,7 @@ mod tests {
     fn send_req_tracks_subscription() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let client = UpstreamClient::new("ws://localhost:3000", "sprout_test");
+            let client = UpstreamClient::new("ws://localhost:3000", "buzz_test");
 
             assert_eq!(client.inner.active_subs.len(), 0);
 

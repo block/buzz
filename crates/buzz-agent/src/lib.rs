@@ -73,7 +73,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `sprout-agent auth <provider>` — run the interactive auth flow for a
+/// `buzz-agent auth <provider>` — run the interactive auth flow for a
 /// provider and persist the result, then exit. Today the only provider is
 /// `databricks` (OAuth 2.0 PKCE). Reads `DATABRICKS_HOST` from env; needs
 /// a browser on the machine.
@@ -95,13 +95,11 @@ async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             };
             let src = auth::PkceOAuthTokenSource::new(pkce)?;
             src.interactive_login().await?;
-            eprintln!(
-                "Authenticated. Token cached under ~/.config/sprout-agent/oauth/databricks/."
-            );
+            eprintln!("Authenticated. Token cached under ~/.config/buzz-agent/oauth/databricks/.");
             Ok(())
         }
         Some(other) => Err(format!("auth: unknown provider {other:?}").into()),
-        None => Err("auth: provider required (try: sprout-agent auth databricks)".into()),
+        None => Err("auth: provider required (try: buzz-agent auth databricks)".into()),
     }
 }
 

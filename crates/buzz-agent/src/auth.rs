@@ -65,7 +65,7 @@ impl TokenSource for StaticTokenSource {
 ///
 /// The `discovery_url` must return a JSON document with at least
 /// `authorization_endpoint` and `token_endpoint` (RFC 8414). The
-/// `cache_namespace` is the directory under `~/.config/sprout-agent/oauth/`
+/// `cache_namespace` is the directory under `~/.config/buzz-agent/oauth/`
 /// the token JSON lives in — separates providers' caches cleanly.
 #[derive(Debug, Clone)]
 pub struct PkceOAuthConfig {
@@ -74,7 +74,7 @@ pub struct PkceOAuthConfig {
     pub scopes: Vec<String>,
     pub cache_namespace: String,
     /// When `Some`, the engine writes tokens here instead of
-    /// `~/.config/sprout-agent/oauth/<cache_namespace>/`. Production code
+    /// `~/.config/buzz-agent/oauth/<cache_namespace>/`. Production code
     /// leaves this `None`. Integration tests use it to avoid stomping on
     /// a shared `$HOME` when running in parallel.
     pub cache_dir_override: Option<PathBuf>,
@@ -525,7 +525,7 @@ mod tests {
             cache_dir_override: None,
         };
         let p = cache_path_for(&cfg).unwrap();
-        assert!(p.to_string_lossy().contains("/sprout-agent/oauth/demo/"));
+        assert!(p.to_string_lossy().contains("/buzz-agent/oauth/demo/"));
         assert!(p.extension().and_then(|s| s.to_str()) == Some("json"));
     }
 

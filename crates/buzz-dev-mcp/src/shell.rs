@@ -35,7 +35,7 @@ pub struct SharedState {
 impl SharedState {
     pub fn new(cwd: PathBuf, shim: Shim) -> std::io::Result<Self> {
         let session_dir = tempfile::Builder::new()
-            .prefix("sprout-dev-mcp-session-")
+            .prefix("buzz-dev-mcp-session-")
             .tempdir()?;
         let bootstrap_instructions = build_bootstrap(&cwd);
         Ok(Self {
@@ -60,18 +60,17 @@ impl SharedState {
 
 fn build_bootstrap(cwd: &Path) -> String {
     let stack = detect_stack(cwd);
-    let sprout_hint = if std::env::var("BUZZ_RELAY_URL").is_ok()
-        && std::env::var("BUZZ_PRIVATE_KEY").is_ok()
-    {
-        "\nSprout relay configured. Run `buzz --help` to see available commands.\n"
-    } else {
-        ""
-    };
+    let buzz_hint =
+        if std::env::var("BUZZ_RELAY_URL").is_ok() && std::env::var("BUZZ_PRIVATE_KEY").is_ok() {
+            "\nBuzz relay configured. Run `buzz --help` to see available commands.\n"
+        } else {
+            ""
+        };
     format!(
         "Working directory: {}\n\
          Detected stack: {}\n\
          Pass `workdir` per call rather than `cd`.\n\
-         {sprout_hint}",
+         {buzz_hint}",
         cwd.display(),
         stack,
     )
@@ -149,7 +148,7 @@ pub async fn run(
     cmd.current_dir(&workdir);
     cmd.env("PATH", &state.shim.path_env);
     // NOSTR_PRIVATE_KEY is already removed from this process's env (shim.rs).
-    // BUZZ_PRIVATE_KEY is intentionally inherited — the sprout CLI needs it.
+    // BUZZ_PRIVATE_KEY is intentionally inherited — the buzz CLI needs it.
     for (k, v) in &state.shim.git_env {
         cmd.env(k, v);
     }

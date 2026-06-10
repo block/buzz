@@ -2,11 +2,11 @@
 //!
 //! No browser dance — we cover the silent-refresh and cache-hit paths
 //! against a stubbed OIDC server (axum). The interactive browser flow is
-//! exercised manually via the `sprout-agent auth databricks` subcommand
+//! exercised manually via the `buzz-agent auth databricks` subcommand
 //! (see `lib.rs::auth_subcommand`).
 //!
 //! The second test module (further down) is an ACP-level envelope
-//! regression: it spawns the real `sprout-agent` binary with
+//! regression: it spawns the real `buzz-agent` binary with
 //! `DATABRICKS_TOKEN` set and a stub HTTP server, then asserts the wire
 //! shape we send to Databricks.
 
@@ -17,9 +17,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::Form;
 use axum::{routing::get, routing::post, Json, Router};
+use buzz_agent::auth::{PkceOAuthConfig, PkceOAuthTokenSource, TokenSource};
 use serde::Deserialize;
 use serde_json::json;
-use buzz_agent::auth::{PkceOAuthConfig, PkceOAuthTokenSource, TokenSource};
 use tempfile::TempDir;
 
 #[derive(Deserialize)]
@@ -211,7 +211,7 @@ async fn refreshed_token_is_persisted_to_disk() {
 // ────────────────────────────────────────────────────────────────────────────
 // ACP-level envelope regression test.
 //
-// Boots the real sprout-agent binary with `DATABRICKS_TOKEN` set (so the
+// Boots the real buzz-agent binary with `DATABRICKS_TOKEN` set (so the
 // OAuth dance is skipped) pointed at a stub HTTP server that captures every
 // inbound request. Asserts the wire-level shape Databricks model serving
 // requires: path is `/serving-endpoints/<model>/invocations`, Authorization
@@ -332,7 +332,7 @@ impl Drop for AgentHarness {
 
 impl AgentHarness {
     async fn spawn_databricks(base_url: &str, model: &str) -> Self {
-        let bin = env!("CARGO_BIN_EXE_sprout-agent");
+        let bin = env!("CARGO_BIN_EXE_buzz-agent");
         let mut cmd = tokio::process::Command::new(bin);
         cmd.env("BUZZ_AGENT_PROVIDER", "databricks")
             .env("DATABRICKS_HOST", base_url)
@@ -346,7 +346,7 @@ impl AgentHarness {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().expect("spawn sprout-agent");
+        let mut child = cmd.spawn().expect("spawn buzz-agent");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Self {

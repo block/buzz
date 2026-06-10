@@ -39,9 +39,9 @@ pub enum ManifestError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Engines {
-    /// Semver range the Sprout runtime must satisfy (e.g. `">=0.9.0"`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sprout: Option<String>,
+    /// Semver range the Buzz runtime must satisfy (e.g. `">=0.9.0"`).
+    #[serde(skip_serializing_if = "Option::is_none", alias = "sprout")]
+    pub buzz: Option<String>,
 }
 
 /// Pack-wide behavioral defaults.
@@ -254,7 +254,7 @@ mod tests {
         let m = parse_manifest(json).unwrap();
         assert_eq!(m.id, "full-pack");
         assert_eq!(m.keywords, vec!["ai", "bot"]);
-        assert_eq!(m.engines.unwrap().sprout.as_deref(), Some(">=0.9.0"));
+        assert_eq!(m.engines.unwrap().buzz.as_deref(), Some(">=0.9.0"));
         assert_eq!(m.personas.len(), 2);
         assert_eq!(m.pack_instructions.as_deref(), Some("instructions.md"));
         let d = m.defaults.unwrap();

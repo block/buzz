@@ -15,6 +15,13 @@ use std::time::Duration;
 
 use acp::{AcpClient, EnvVar, McpServer};
 use anyhow::Result;
+use buzz_core::kind::{
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
+    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+};
+use buzz_core::observer::{
+    decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
+};
 use clap::Parser;
 use config::{Config, DedupMode, ModelsArgs, MultipleEventHandling, RespondTo, SubscribeMode};
 use filter::SubscriptionRule;
@@ -26,13 +33,6 @@ use pool::{
 };
 use queue::{prepend_base_prompt, EventQueue, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
-use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-};
-use buzz_core::observer::{
-    decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
-};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -46,12 +46,12 @@ use uuid::Uuid;
 /// `ModelsArgs` parser; the default path uses the existing `CliArgs`.
 ///
 /// **Constraint**: subcommand must be argv[1] — flags before the subcommand
-/// name (e.g., `sprout-acp --verbose models`) are not supported.
+/// name (e.g., `buzz-acp --verbose models`) are not supported.
 fn is_subcommand(name: &str) -> bool {
     std::env::args().nth(1).map(|a| a == name).unwrap_or(false)
 }
 
-/// Timeout for the `sprout-acp models` subcommand (spawn + init + session/new).
+/// Timeout for the `buzz-acp models` subcommand (spawn + init + session/new).
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ── Presence helper ───────────────────────────────────────────────────────────
@@ -69,8 +69,8 @@ async fn publish_presence(
     keys: &nostr::Keys,
     status: &str,
 ) -> Result<(), relay::RelayError> {
-    use nostr::{EventBuilder, Kind};
     use buzz_core::kind::KIND_PRESENCE_UPDATE;
+    use nostr::{EventBuilder, Kind};
 
     let event = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
         .tags([])
@@ -795,7 +795,7 @@ async fn tokio_main() -> Result<()> {
         .init();
 
     let mut config = Config::from_cli().map_err(|e| anyhow::anyhow!("configuration error: {e}"))?;
-    tracing::info!("sprout-acp starting: {}", config.summary());
+    tracing::info!("buzz-acp starting: {}", config.summary());
 
     let observer = config
         .relay_observer
@@ -889,7 +889,7 @@ async fn tokio_main() -> Result<()> {
     tracing::info!("agent_pool_ready agents={}", live_count);
     let mut pool = AgentPool::from_slots(agent_slots);
 
-    // ── Step 2: Connect to Sprout relay ──────────────────────────────────────
+    // ── Step 2: Connect to Buzz relay ──────────────────────────────────────
     //
     // Finding #22: capture a startup watermark BEFORE connecting to the relay.
     // This timestamp is used for membership notification replay (via
@@ -1865,7 +1865,7 @@ async fn tokio_main() -> Result<()> {
     // for the background task to finish, rather than aborting immediately (#40).
     relay.shutdown().await;
 
-    tracing::info!("sprout-acp stopped");
+    tracing::info!("buzz-acp stopped");
     Ok(())
 }
 
@@ -2499,7 +2499,7 @@ async fn spawn_and_init(
 
 // ── run_models ─────────────────────────────────────────────────────────────────
 
-/// `sprout-acp models` — spawn an agent, query its available models, exit.
+/// `buzz-acp models` — spawn an agent, query its available models, exit.
 ///
 /// Flow: spawn → initialize → session/new → print models → shutdown.
 /// No relay connection, no MCP servers, no subscriptions. ~2-5s total.
@@ -2833,7 +2833,7 @@ mod build_mcp_servers_tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
-            config_path: std::path::PathBuf::from("./sprout-acp.toml"),
+            config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
             presence_enabled: true,
@@ -2871,7 +2871,7 @@ mod build_mcp_servers_tests {
     }
 
     #[test]
-    fn session_new_mcp_server_forwards_sprout_auth_tag() {
+    fn session_new_mcp_server_forwards_buzz_auth_tag() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_AUTH_TAG", "test-attestation-tag");
         let config = test_config();
@@ -2888,7 +2888,7 @@ mod build_mcp_servers_tests {
     }
 
     #[test]
-    fn session_new_mcp_server_skips_empty_sprout_auth_tag() {
+    fn session_new_mcp_server_skips_empty_buzz_auth_tag() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_AUTH_TAG", "");
         let config = test_config();
@@ -2897,10 +2897,7 @@ mod build_mcp_servers_tests {
 
         let server = &servers[0];
         let has_auth_tag = server.env.iter().any(|e| e.name == "BUZZ_AUTH_TAG");
-        assert!(
-            !has_auth_tag,
-            "empty BUZZ_AUTH_TAG should not be forwarded"
-        );
+        assert!(!has_auth_tag, "empty BUZZ_AUTH_TAG should not be forwarded");
     }
 
     #[test]

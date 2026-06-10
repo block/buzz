@@ -4,7 +4,7 @@
 //! not talk to relays or filesystems. Callers wire it to a transport and a
 //! key source.
 //!
-//! Shared by `sprout-cli` (`buzz mem …`) and `sprout-acp` (core injection
+//! Shared by `buzz-cli` (`buzz mem …`) and `buzz-acp` (core injection
 //! at session creation).
 
 use hmac::digest::KeyInit;

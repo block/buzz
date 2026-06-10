@@ -568,7 +568,7 @@ fn format_hook_output_body(hook: &str, server: &str, text: &str) -> String {
 /// be unique per pair so the LLM wire format (which keys tool results by
 /// id) stays valid across multiple objections in one session.
 fn synthetic_hook_id(hook: &str, server: &str, ordinal: u64) -> String {
-    format!("sprout_hook_{hook}_{server}_{ordinal}")
+    format!("buzz_hook_{hook}_{server}_{ordinal}")
 }
 
 /// Append a synthetic Assistant tool-call + ToolResult pair for each hook

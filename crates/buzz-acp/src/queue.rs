@@ -1,4 +1,4 @@
-//! Event queue state machine for sprout-acp.
+//! Event queue state machine for buzz-acp.
 //!
 //! Manages per-channel event queues with per-channel in-flight tracking.
 //! When the harness is ready to prompt the agent, it flushes the channel with
@@ -2447,7 +2447,7 @@ mod tests {
         );
         // Hint should point to the thread command, not get.
         assert!(
-            prompt.contains("sprout messages thread"),
+            prompt.contains("buzz messages thread"),
             "DM reply hint should mention `buzz messages thread`, got:\n{prompt}"
         );
         // Thread structural info should be present.
@@ -2487,11 +2487,11 @@ mod tests {
         );
         assert!(prompt.contains("Scope: dm"));
         assert!(
-            prompt.contains("sprout messages get"),
+            prompt.contains("buzz messages get"),
             "DM non-reply hint should mention `buzz messages get`"
         );
         assert!(
-            !prompt.contains("sprout messages thread"),
+            !prompt.contains("buzz messages thread"),
             "DM non-reply should NOT mention `buzz messages thread`"
         );
     }

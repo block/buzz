@@ -62,7 +62,7 @@ pub fn event_to_document(event: &StoredEvent) -> Result<Value, SearchError> {
     //
     // NOTE: existing kind:0 docs indexed before this change won't have the
     // appended tokens. Running `just reindex-search` (or the
-    // `sprout-relay reindex-search` admin path) repopulates them. New /
+    // `buzz-relay reindex-search` admin path) repopulates them. New /
     // updated profiles get the tokens automatically.
     let content_indexed = if event_kind_i32(nostr_event) == 0 {
         flatten_kind0_for_indexing(nostr_event.content.as_str())
@@ -295,8 +295,8 @@ pub async fn delete_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind};
     use buzz_core::event::StoredEvent;
+    use nostr::{EventBuilder, Keys, Kind};
     use uuid::Uuid;
 
     fn make_stored_event(content: &str, kind: Kind, channel_id: Option<Uuid>) -> StoredEvent {

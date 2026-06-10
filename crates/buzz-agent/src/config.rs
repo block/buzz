@@ -17,7 +17,7 @@ pub const HANDOFF_PROMPT_MAX_BYTES: usize = 32 * 1024;
 pub const HANDOFF_MAX_TOOL_NAMES: usize = 20;
 
 const DEFAULT_SYSTEM_PROMPT: &str =
-    "You are sprout-agent. Use the provided tools to act. Tool calls are your only output.";
+    "You are buzz-agent. Use the provided tools to act. Tool calls are your only output.";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Provider {
@@ -97,7 +97,7 @@ impl Config {
         // Universal model override — any provider will use this when its own
         // model env var is absent. Useful for wrapper scripts that set a single
         // var regardless of which provider is active.
-        let sprout_agent_model = env("BUZZ_AGENT_MODEL");
+        let buzz_agent_model = env("BUZZ_AGENT_MODEL");
 
         // OPENAI_COMPAT_API is only read when provider=openai, so a stray
         // bad value can't break an Anthropic-only deployment.
@@ -110,7 +110,7 @@ impl Config {
                 req("ANTHROPIC_API_KEY")?,
                 resolve_model(
                     env("ANTHROPIC_MODEL").as_deref(),
-                    sprout_agent_model.as_deref(),
+                    buzz_agent_model.as_deref(),
                 )
                 .ok_or_else(|| "config: ANTHROPIC_MODEL required".to_string())?,
                 env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
@@ -120,7 +120,7 @@ impl Config {
                 req("OPENAI_COMPAT_API_KEY")?,
                 resolve_model(
                     env("OPENAI_COMPAT_MODEL").as_deref(),
-                    sprout_agent_model.as_deref(),
+                    buzz_agent_model.as_deref(),
                 )
                 .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
                 env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
@@ -128,7 +128,7 @@ impl Config {
             ),
             Provider::Databricks => (
                 env("DATABRICKS_TOKEN").unwrap_or_default(),
-                resolve_model(databricks_model.as_deref(), sprout_agent_model.as_deref())
+                resolve_model(databricks_model.as_deref(), buzz_agent_model.as_deref())
                     .ok_or_else(|| "config: DATABRICKS_MODEL required".to_string())?,
                 databricks_host.ok_or_else(|| "config: DATABRICKS_HOST required".to_string())?,
                 OpenAiApi::Chat, // Databricks invocations is chat-shaped
@@ -166,10 +166,7 @@ impl Config {
             max_context_tokens: parse_env("BUZZ_AGENT_MAX_CONTEXT_TOKENS", 200_000u64)?,
             max_handoffs: parse_env("BUZZ_AGENT_MAX_HANDOFFS", 10)?,
             max_parallel_tools: parse_env("BUZZ_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
-            hook_timeout: Duration::from_millis(parse_env(
-                "BUZZ_AGENT_HOOK_TIMEOUT_MS",
-                2500u64,
-            )?),
+            hook_timeout: Duration::from_millis(parse_env("BUZZ_AGENT_HOOK_TIMEOUT_MS", 2500u64)?),
             stop_max_rejections: parse_env("BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
@@ -228,7 +225,8 @@ impl Config {
         }
         if self.mcp_restart_max_ms < self.mcp_restart_base_ms {
             return Err(
-                "config: BUZZ_AGENT_MCP_RESTART_MAX_MS must be >= BUZZ_AGENT_MCP_RESTART_BASE_MS".into(),
+                "config: BUZZ_AGENT_MCP_RESTART_MAX_MS must be >= BUZZ_AGENT_MCP_RESTART_BASE_MS"
+                    .into(),
             );
         }
         Ok(())

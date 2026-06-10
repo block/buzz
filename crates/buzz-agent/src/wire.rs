@@ -83,7 +83,7 @@ pub fn classify(msg: &Value) -> Inbound {
             params,
         },
         (Some(m), None) => Inbound::Notification { method: m, params },
-        // Bare responses (id present, no method) are unexpected — sprout-agent
+        // Bare responses (id present, no method) are unexpected — buzz-agent
         // does not issue requests to the client. Ignore silently.
         (None, Some(_)) => Inbound::Ignored,
         (None, None) => Inbound::Invalid {

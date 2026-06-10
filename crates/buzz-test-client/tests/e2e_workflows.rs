@@ -9,7 +9,7 @@
 //! Start the relay, then run:
 //!
 //! ```text
-//! RELAY_URL=ws://localhost:3001 cargo test -p sprout-test-client --test e2e_workflows -- --ignored
+//! RELAY_URL=ws://localhost:3001 cargo test -p buzz-test-client --test e2e_workflows -- --ignored
 //! ```
 //!
 //! # Auth
@@ -55,13 +55,13 @@ const CHANNEL_GENERAL: &str = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 ///
 /// Workflow creation requires the owner pubkey to exist in `users` (FK constraint).
 /// The relay does not auto-create users on first auth — users are created via
-/// `sprout-admin mint-token` or WebSocket metadata events. This pubkey is present
+/// `buzz-admin mint-token` or WebSocket metadata events. This pubkey is present
 /// in the dev database after the initial seed.
 ///
 /// If tests fail with 500 "FK constraint fails", run:
 /// ```
-/// DATABASE_URL=postgres://sprout:sprout_dev@localhost:5432/sprout \
-///   cargo run -p sprout-admin -- mint-token --name e2e-test --scopes messages:read \
+/// DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
+///   cargo run -p buzz-admin -- mint-token --name e2e-test --scopes messages:read \
 ///   --pubkey 0b5c83782cf123e698131ac976179f8366224e03db932c9da0074512aed2388d
 /// ```
 const SEEDED_PUBKEY: &str = "0b5c83782cf123e698131ac976179f8366224e03db932c9da0074512aed2388d";
@@ -318,8 +318,8 @@ async fn test_trigger_workflow_and_check_run() {
 #[tokio::test]
 #[ignore = "requires running relay"]
 async fn test_event_driven_workflow_execution() {
-    use nostr::{Kind, Tag};
     use buzz_test_client::BuzzTestClient;
+    use nostr::{Kind, Tag};
 
     let client = http_client();
     let pubkey_hex: &str = SEEDED_PUBKEY;
@@ -413,8 +413,8 @@ steps:
 #[tokio::test]
 #[ignore = "requires running relay with WF-07 filter evaluation"]
 async fn test_event_driven_workflow_with_filter() {
-    use nostr::{Kind, Tag};
     use buzz_test_client::BuzzTestClient;
+    use nostr::{Kind, Tag};
 
     let client = http_client();
     let pubkey_hex: &str = SEEDED_PUBKEY;

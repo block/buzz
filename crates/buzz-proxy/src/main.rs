@@ -1,4 +1,4 @@
-//! sprout-proxy binary — NIP-28 guest relay proxy for standard Nostr clients.
+//! buzz-proxy binary — NIP-28 guest relay proxy for standard Nostr clients.
 
 use std::sync::Arc;
 
@@ -31,11 +31,11 @@ fn env_or(name: &str, default: &str) -> String {
 
 #[tokio::main]
 async fn main() {
-    // Init tracing — respects RUST_LOG; falls back to info for sprout_proxy and tower_http.
+    // Init tracing — respects RUST_LOG; falls back to info for buzz_proxy and tower_http.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "sprout_proxy=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "buzz_proxy=info,tower_http=info".into()),
         )
         .init();
 
@@ -195,7 +195,7 @@ async fn main() {
 
     // ── Bind listener ─────────────────────────────────────────────────────────
 
-    info!("sprout-proxy starting on {bind_addr} → upstream {upstream_url}");
+    info!("buzz-proxy starting on {bind_addr} → upstream {upstream_url}");
 
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
@@ -217,7 +217,7 @@ async fn main() {
         }
     }
 
-    info!("sprout-proxy shut down");
+    info!("buzz-proxy shut down");
 }
 
 // ── Graceful shutdown ─────────────────────────────────────────────────────────

@@ -203,7 +203,7 @@ static FILTER_EVAL_SEMAPHORE: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
 ///   `node.eval_boolean_with_context()` instead of re-parsing the expression
 ///   string on every call (finding #34).
 /// - Registers custom string helpers: `str_contains`, `str_starts_with`,
-///   `str_ends_with`, `str_len` (duplicated intentionally from sprout-workflow).
+///   `str_ends_with`, `str_len` (duplicated intentionally from buzz-workflow).
 pub async fn evaluate_filter(
     expr: &str,
     ctx: &FilterContext,
@@ -269,8 +269,8 @@ pub async fn evaluate_filter(
 /// | `timestamp`  | int    | `event.created_at`        |
 ///
 /// Also registers `str_contains`, `str_starts_with`, `str_ends_with`,
-/// `str_len` — duplicated from sprout-workflow intentionally so this crate
-/// has no runtime dependency on sprout-workflow.
+/// `str_len` — duplicated from buzz-workflow intentionally so this crate
+/// has no runtime dependency on buzz-workflow.
 fn build_eval_context(ctx: &FilterContext) -> Result<evalexpr::HashMapContext, String> {
     use evalexpr::*;
 

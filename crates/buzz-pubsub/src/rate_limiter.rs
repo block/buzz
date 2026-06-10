@@ -1,6 +1,6 @@
 //! Redis-backed rate limiter using atomic Lua script (INCR + EXPIRE).
 //!
-//! Implements the [`RateLimiter`] trait from `sprout-auth`.
+//! Implements the [`RateLimiter`] trait from `buzz-auth`.
 //! Uses a single Lua script to atomically INCR and conditionally EXPIRE,
 //! eliminating the crash window where a key could exist without a TTL.
 //!
@@ -9,12 +9,12 @@
 
 use std::net::IpAddr;
 
-use nostr::PublicKey;
-use redis::Script;
 use buzz_auth::{
     error::AuthError,
     rate_limit::{LimitType, RateLimitResult, RateLimiter},
 };
+use nostr::PublicKey;
+use redis::Script;
 
 /// Atomically INCR the key, set EXPIRE on first call, and return (count, ttl).
 ///

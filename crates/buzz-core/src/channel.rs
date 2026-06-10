@@ -1,6 +1,6 @@
 //! Channel and membership enums shared across crates.
 //!
-//! These live in `sprout-core` (zero I/O deps) so both the SDK (client-side)
+//! These live in `buzz-core` (zero I/O deps) so both the SDK (client-side)
 //! and the DB layer (server-side) can use the same types without pulling in
 //! sqlx/tokio.
 

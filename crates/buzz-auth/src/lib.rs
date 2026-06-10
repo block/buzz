@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! `sprout-auth` — Authentication and authorization for the Sprout relay.
+//! `buzz-auth` — Authentication and authorization for the Buzz relay.
 //!
 //! ## Auth paths
 //!
@@ -137,7 +137,7 @@ impl AuthService {
 
 /// Derive a deterministic Nostr pubkey from a username string.
 ///
-/// Uses `SHA-256("sprout-test-key:{username}")` as the secret key material.
+/// Uses `SHA-256("buzz-test-key:{username}")` as the secret key material.
 /// This matches the derivation used by the desktop's `set_test_identity` function,
 /// allowing the relay to resolve usernames to Nostr pubkeys in dev mode.
 ///
@@ -151,7 +151,7 @@ impl AuthService {
 #[cfg(any(test, feature = "dev"))]
 pub fn derive_pubkey_from_username(username: &str) -> Result<nostr::PublicKey, AuthError> {
     use sha2::{Digest, Sha256};
-    let seed = format!("sprout-test-key:{username}");
+    let seed = format!("buzz-test-key:{username}");
     let hash: [u8; 32] = Sha256::digest(seed.as_bytes()).into();
     let secret_key = nostr::SecretKey::from_slice(&hash)
         .map_err(|e| AuthError::Internal(format!("key derivation failed: {e}")))?;

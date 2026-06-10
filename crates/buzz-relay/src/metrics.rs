@@ -53,7 +53,7 @@ pub fn install(port: u16) {
         .set_buckets_for_metric(Matcher::Suffix("_seconds".to_owned()), &DURATION_BUCKETS_S)
         .expect("valid seconds bucket boundaries")
         .set_buckets_for_metric(
-            Matcher::Full("sprout_fanout_recipients".to_owned()),
+            Matcher::Full("buzz_fanout_recipients".to_owned()),
             &FANOUT_BUCKETS,
         )
         .expect("valid fanout bucket boundaries")

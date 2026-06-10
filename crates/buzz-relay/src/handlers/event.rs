@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use tracing::{debug, error, info, warn};
 
-use nostr::{Event, PublicKey};
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
     event_kind_u32, is_ephemeral, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP,
@@ -15,6 +14,7 @@ use buzz_core::observer::{
     OBSERVER_FRAME_TELEMETRY,
 };
 use buzz_core::verification::verify_event;
+use nostr::{Event, PublicKey};
 
 use crate::connection::{AuthState, ConnectionState};
 use crate::protocol::RelayMessage;
@@ -115,7 +115,7 @@ pub(crate) async fn dispatch_persistent_event(
 
     let matches = state.sub_registry.fan_out(stored_event);
     let matches = filter_fanout_by_access(state, stored_event, matches).await;
-    metrics::histogram!("sprout_fanout_recipients").record(matches.len() as f64);
+    metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     debug!(
         event_id = %event_id_hex,
         channel_id = ?stored_event.channel_id,
@@ -171,7 +171,7 @@ pub(crate) async fn dispatch_persistent_event(
             .try_send(stored_event.clone())
             .is_err()
     {
-        metrics::counter!("sprout_search_index_errors_total").increment(1);
+        metrics::counter!("buzz_search_index_errors_total").increment(1);
         warn!(event_id = %event_id_hex, "Search index channel full — dropping event");
     }
 
@@ -451,7 +451,7 @@ async fn handle_ephemeral_event(
 
         let stored_event = StoredEvent::new(event.clone(), None);
         let matches = state.sub_registry.fan_out(&stored_event);
-        metrics::histogram!("sprout_fanout_recipients").record(matches.len() as f64);
+        metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
         let event_json = serde_json::to_string(&event)
             .expect("nostr::Event serialization is infallible for well-formed events");
         let mut drop_count = 0u32;
@@ -541,7 +541,7 @@ async fn handle_ephemeral_event(
         // Pass the channel_id so fan_out() uses the channel-kind index.
         let stored_event = StoredEvent::new(event.clone(), Some(ch_id));
         let matches = state.sub_registry.fan_out(&stored_event);
-        metrics::histogram!("sprout_fanout_recipients").record(matches.len() as f64);
+        metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
         let event_json = serde_json::to_string(&event)
             .expect("nostr::Event serialization is infallible for well-formed events");
         let mut drop_count = 0u32;
@@ -578,7 +578,7 @@ async fn handle_ephemeral_event(
         // Pass channel_id=None so fan_out() uses the global subscriber index.
         let stored_event = StoredEvent::new(event.clone(), None);
         let matches = state.sub_registry.fan_out(&stored_event);
-        metrics::histogram!("sprout_fanout_recipients").record(matches.len() as f64);
+        metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
         let event_json = serde_json::to_string(&event)
             .expect("nostr::Event serialization is infallible for well-formed events");
         let mut drop_count = 0u32;
@@ -770,7 +770,7 @@ async fn handle_agent_observer_event(
 
     let stored_event = StoredEvent::new(event.clone(), None);
     let matches = state.sub_registry.fan_out(&stored_event);
-    metrics::histogram!("sprout_fanout_recipients").record(matches.len() as f64);
+    metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     debug!(
         event_id = %event_id_hex,
         agent = %route.agent.to_hex(),
@@ -863,7 +863,6 @@ fn single_tag_content<'a>(event: &'a Event, tag_name: &str) -> Result<&'a str, S
 
 #[cfg(test)]
 mod tests {
-    use nostr::{EventBuilder, Keys, Kind, Tag};
     use buzz_core::kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST,
         KIND_FORUM_VOTE, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF,
@@ -872,6 +871,7 @@ mod tests {
         encrypt_observer_payload, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
         OBSERVER_FRAME_TELEMETRY,
     };
+    use nostr::{EventBuilder, Keys, Kind, Tag};
 
     #[test]
     fn channel_scoped_content_kinds_require_h_tags() {
@@ -981,8 +981,8 @@ mod tests {
         use std::sync::atomic::AtomicU8;
         use std::sync::Arc;
 
-        use nostr::{EventBuilder, Keys, Kind};
         use buzz_core::StoredEvent;
+        use nostr::{EventBuilder, Keys, Kind};
         use tokio::sync::{mpsc, Mutex};
         use tokio_util::sync::CancellationToken;
         use uuid::Uuid;

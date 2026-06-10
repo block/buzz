@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! sprout-db — Postgres event store for Sprout.
+//! buzz-db — Postgres event store for Sprout.
 //!
 //! ## Design invariants
 //! - AUTH events (kind 22242) are never stored — they carry bearer tokens.
@@ -150,7 +150,7 @@ impl Default for DbConfig {
     /// At 20 main + 5 audit = 25/pod, four relay pods fit within the PG limit.
     fn default() -> Self {
         Self {
-            database_url: "postgres://sprout:sprout_dev@localhost:5432/sprout".to_string(),
+            database_url: "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string(),
             max_connections: 20,
             min_connections: 2,
             acquire_timeout_secs: 3,

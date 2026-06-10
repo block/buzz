@@ -22,11 +22,11 @@
 
 use std::sync::Arc;
 
-use nostr::{EventBuilder, Kind, Tag};
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
     event_kind_u32, KIND_MESH_CALL_ME_NOW, KIND_MESH_CONNECT_REQUEST, KIND_MESH_STATUS_REPORT,
 };
+use nostr::{EventBuilder, Kind, Tag};
 
 use crate::api::relay_members::{check_relay_membership, MembershipDecision};
 use crate::state::AppState;
@@ -317,7 +317,7 @@ async fn publish_channelless_ephemeral(state: &Arc<AppState>, event: &nostr::Eve
     }
     let stored = StoredEvent::new(event.clone(), None);
     let matches = state.sub_registry.fan_out(&stored);
-    metrics::histogram!("sprout_fanout_recipients").record(matches.len() as f64);
+    metrics::histogram!("buzz_fanout_recipients").record(matches.len() as f64);
     if let Ok(event_json) = serde_json::to_string(event) {
         for (target_conn_id, sub_id) in &matches {
             let msg = format!(r#"["EVENT","{sub_id}",{event_json}]"#);

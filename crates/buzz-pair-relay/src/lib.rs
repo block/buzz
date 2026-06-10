@@ -1019,7 +1019,7 @@ async fn http_service(
 pub async fn run_server(listener: TcpListener, relay: Arc<Relay>) {
     let addr = listener.local_addr().ok();
     if let Some(a) = addr {
-        eprintln!("sprout-pair-relay listening on {a}");
+        eprintln!("buzz-pair-relay listening on {a}");
     }
     loop {
         let (tcp, _peer) = match listener.accept().await {

@@ -12,7 +12,7 @@ use zeroize::Zeroize;
 /// 3. Prepends the shim dir to PATH
 ///
 /// Shell children receive `path_env`, `git_env`, and `BUZZ_PRIVATE_KEY` (for
-/// the sprout CLI). `NOSTR_PRIVATE_KEY` is removed from the process env after
+/// the buzz CLI). `NOSTR_PRIVATE_KEY` is removed from the process env after
 /// the keyfile is written — git helpers read from the keyfile only.
 /// Cleaned up on drop (TempDir).
 pub struct Shim {
@@ -23,9 +23,7 @@ pub struct Shim {
 
 impl Shim {
     pub fn install() -> std::io::Result<Self> {
-        let dir = tempfile::Builder::new()
-            .prefix("sprout-dev-mcp-")
-            .tempdir()?;
+        let dir = tempfile::Builder::new().prefix("buzz-dev-mcp-").tempdir()?;
         set_owner_only(dir.path())?;
 
         let self_exe = std::env::current_exe()?;
@@ -34,7 +32,7 @@ impl Shim {
         for name in [
             "rg",
             "tree",
-            "sprout",
+            "buzz",
             "git-credential-nostr",
             "git-sign-nostr",
         ] {
@@ -93,7 +91,7 @@ fn write_keyfile(shim_dir: &Path, raw: &str) -> Option<KeyInfo> {
         Ok(k) => k,
         Err(e) => {
             eprintln!(
-                "sprout-dev-mcp: warning: NOSTR_PRIVATE_KEY is set but invalid ({e}); \
+                "buzz-dev-mcp: warning: NOSTR_PRIVATE_KEY is set but invalid ({e}); \
                  git auth/signing will be disabled"
             );
             return None;
@@ -108,14 +106,16 @@ fn write_keyfile(shim_dir: &Path, raw: &str) -> Option<KeyInfo> {
     let keyfile = shim_dir.join(".nostr-key");
     if write_keyfile_atomic(&keyfile, raw.as_bytes()).is_err() {
         eprintln!(
-            "sprout-dev-mcp: warning: failed to write nostr keyfile; git auth/signing disabled"
+            "buzz-dev-mcp: warning: failed to write nostr keyfile; git auth/signing disabled"
         );
         return None;
     }
     let keyfile_path = match keyfile.to_str() {
         Some(s) => s.to_owned(),
         None => {
-            eprintln!("sprout-dev-mcp: warning: tempdir path is not valid UTF-8; git auth/signing disabled");
+            eprintln!(
+                "buzz-dev-mcp: warning: tempdir path is not valid UTF-8; git auth/signing disabled"
+            );
             return None;
         }
     };
@@ -148,8 +148,8 @@ fn write_keyfile_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// Derive a NIP-05-style email from the pubkey and relay URL.
-/// Format: `<hex_pubkey>@<relay_host>` (e.g., `ab12...cd@relay.sprout.dev`).
-/// Falls back to `<hex_pubkey>@sprout` if no relay URL is configured.
+/// Format: `<hex_pubkey>@<relay_host>` (e.g., `ab12...cd@relay.buzz.dev`).
+/// Falls back to `<hex_pubkey>@buzz` if no relay URL is configured.
 fn derive_git_email(pubkey_hex: &str) -> String {
     let host = std::env::var("BUZZ_RELAY_URL")
         .ok()
@@ -166,13 +166,13 @@ fn derive_git_email(pubkey_hex: &str) -> String {
             Some(host_port.split(':').next().unwrap_or(host_port).to_owned())
         })
         .filter(|h| !h.is_empty() && !h.starts_with("localhost") && !h.starts_with("127."))
-        .unwrap_or_else(|| "sprout".to_owned());
+        .unwrap_or_else(|| "buzz".to_owned());
     format!("{pubkey_hex}@{host}")
 }
 
 /// Build GIT_CONFIG_COUNT/KEY/VALUE env vars for ephemeral nostr git config.
 /// Composes with any existing GIT_CONFIG_COUNT in the environment. When launched
-/// via sprout-agent (which clears env), the base is always 0 — composition only
+/// via buzz-agent (which clears env), the base is always 0 — composition only
 /// matters when dev-mcp is run directly with pre-existing GIT_CONFIG vars.
 fn build_git_env(info: &KeyInfo) -> Vec<(String, String)> {
     let email = derive_git_email(&info.pubkey_hex);
@@ -184,7 +184,7 @@ fn build_git_env(info: &KeyInfo) -> Vec<(String, String)> {
         // remotes (exits 0, no credential), so git falls through to system
         // helpers (osxkeychain, store, etc.) for GitHub/GitLab/etc.
         ("credential.helper", "nostr".into()),
-        // Required: Sprout relay verifies NIP-98 against the full repo-root URL.
+        // Required: Buzz relay verifies NIP-98 against the full repo-root URL.
         // Without useHttpPath, git only passes the host and auth is rejected.
         ("credential.useHttpPath", "true".into()),
         ("nostr.keyfile", info.keyfile_path.clone()),

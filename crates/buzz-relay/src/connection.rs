@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
-use nostr::Filter;
 use buzz_auth::{generate_challenge, AuthContext};
+use nostr::Filter;
 
 use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
@@ -85,7 +85,7 @@ impl ConnectionState {
                 let count = self.backpressure_count.fetch_add(1, Ordering::Relaxed) + 1;
                 if count >= SLOW_CLIENT_GRACE_LIMIT {
                     warn!(conn_id = %self.conn_id, count, "sustained backpressure — closing slow client");
-                    metrics::counter!("sprout_ws_backpressure_disconnects_total").increment(1);
+                    metrics::counter!("buzz_ws_backpressure_disconnects_total").increment(1);
                     self.cancel.cancel();
                 } else {
                     warn!(conn_id = %self.conn_id, count, grace = SLOW_CLIENT_GRACE_LIMIT, "send buffer full — grace {count}/{SLOW_CLIENT_GRACE_LIMIT}");
@@ -139,7 +139,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
     });
 
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
-    metrics::counter!("sprout_ws_connections_total").increment(1);
+    metrics::counter!("buzz_ws_connections_total").increment(1);
 
     let challenge_msg = RelayMessage::auth_challenge(&challenge);
     if tx
@@ -153,7 +153,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
 
     // Gauge incremented AFTER challenge send succeeds — early disconnects
     // don't leak. Decremented in the cleanup path below.
-    metrics::gauge!("sprout_ws_connections_active").increment(1.0);
+    metrics::gauge!("buzz_ws_connections_active").increment(1.0);
 
     // Register after challenge succeeds — avoids leaked entries on early disconnect.
     state.conn_manager.register(
@@ -200,7 +200,7 @@ pub async fn handle_connection(socket: WebSocket, state: Arc<AppState>, addr: So
             let _ = state.pubsub.clear_presence(&auth_ctx.pubkey).await;
         }
     }
-    metrics::gauge!("sprout_ws_connections_active").decrement(1.0);
+    metrics::gauge!("buzz_ws_connections_active").decrement(1.0);
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection closed");
 
     drop(permit);

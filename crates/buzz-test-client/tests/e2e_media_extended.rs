@@ -1,7 +1,7 @@
 //! Extended media upload integration tests — auth edge cases, content validation,
 //! multi-format uploads, WebSocket imeta validation.
 //!
-//! Run: cargo test -p sprout-test-client --test e2e_media_extended -- --ignored --nocapture
+//! Run: cargo test -p buzz-test-client --test e2e_media_extended -- --ignored --nocapture
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};

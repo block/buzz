@@ -1,4 +1,4 @@
-//! Configuration for the sprout-acp harness.
+//! Configuration for the buzz-acp harness.
 //!
 //! CLI-first: every option is a CLI flag with env var fallback.
 //! Config file (TOML) for complex subscription rules.
@@ -19,7 +19,7 @@ use crate::filter::SubscriptionRule;
 /// deprecated `--turn-timeout` is set.
 ///
 /// Sized for slow turns where the agent may go silent on its outer ACP channel
-/// while running long sub-tools (e.g. a sprout-agent running another agent, or
+/// while running long sub-tools (e.g. a buzz-agent running another agent, or
 /// codex/claude doing multi-minute single tool calls). 900s gives 300s of
 /// breathing room above the 600s max shell timeout, so legitimate long-running
 /// tool calls don't race the idle deadline.
@@ -153,14 +153,14 @@ impl std::fmt::Display for PermissionMode {
 
 // ── Models subcommand ─────────────────────────────────────────────────────────
 
-/// CLI args for `sprout-acp models` — query available models from an agent.
+/// CLI args for `buzz-acp models` — query available models from an agent.
 ///
 /// This is a standalone `Parser` (not a subcommand variant) because the
 /// `models` path must bypass `Config::from_cli()` entirely — no relay,
 /// no private key, no harness setup.
 #[derive(Debug, Parser)]
 #[command(
-    name = "sprout-acp models",
+    name = "buzz-acp models",
     about = "Query available models from the configured agent"
 )]
 pub struct ModelsArgs {
@@ -286,7 +286,7 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_MENTION_FILTER")]
     pub no_mention_filter: bool,
 
-    #[arg(long, env = "BUZZ_ACP_CONFIG", default_value = "./sprout-acp.toml")]
+    #[arg(long, env = "BUZZ_ACP_CONFIG", default_value = "./buzz-acp.toml")]
     pub config: PathBuf,
 
     #[arg(long, env = "BUZZ_ACP_DEDUP", default_value = "queue", value_enum)]
@@ -364,7 +364,7 @@ pub struct CliArgs {
     pub base_prompt_file: Option<PathBuf>,
 
     /// Desired LLM model ID. Applied to every new ACP session after creation.
-    /// Use `sprout-acp models` to discover available model IDs.
+    /// Use `buzz-acp models` to discover available model IDs.
     #[arg(long, env = "BUZZ_ACP_MODEL")]
     pub model: Option<String>,
 
@@ -1183,7 +1183,7 @@ mod tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
-            config_path: PathBuf::from("./sprout-acp.toml"),
+            config_path: PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
             presence_enabled: true,
@@ -1309,7 +1309,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_sprout_agent_args_to_empty() {
+    fn normalizes_buzz_agent_args_to_empty() {
         assert_eq!(
             normalize_agent_args("buzz-agent", Vec::new()),
             Vec::<String>::new()
@@ -1556,7 +1556,7 @@ mod tests {
 
     #[test]
     fn test_load_rules_valid_toml() {
-        let dir = std::env::temp_dir().join("sprout-acp-test-valid");
+        let dir = std::env::temp_dir().join("buzz-acp-test-valid");
         let path = dir.join("rules.toml");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1579,7 +1579,7 @@ require_mention = false
 
     #[test]
     fn test_load_rules_empty_name_rejected() {
-        let dir = std::env::temp_dir().join("sprout-acp-test-empty-name");
+        let dir = std::env::temp_dir().join("buzz-acp-test-empty-name");
         let path = dir.join("rules.toml");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1599,7 +1599,7 @@ channels = "all"
 
     #[test]
     fn test_load_rules_duplicate_name_rejected() {
-        let dir = std::env::temp_dir().join("sprout-acp-test-dup-name");
+        let dir = std::env::temp_dir().join("buzz-acp-test-dup-name");
         let path = dir.join("rules.toml");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1623,7 +1623,7 @@ channels = "all"
 
     #[test]
     fn test_load_rules_invalid_filter_rejected() {
-        let dir = std::env::temp_dir().join("sprout-acp-test-bad-filter");
+        let dir = std::env::temp_dir().join("buzz-acp-test-bad-filter");
         let path = dir.join("rules.toml");
         std::fs::create_dir_all(&dir).unwrap();
         // evalexpr rejects unbalanced parens at parse time.
@@ -1645,7 +1645,7 @@ filter = "((("
 
     #[test]
     fn test_load_rules_channel_scope_typo_rejected() {
-        let dir = std::env::temp_dir().join("sprout-acp-test-scope-typo");
+        let dir = std::env::temp_dir().join("buzz-acp-test-scope-typo");
         let path = dir.join("rules.toml");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -1665,7 +1665,7 @@ channels = "ALL"
 
     #[test]
     fn test_load_rules_too_many_rules_rejected() {
-        let dir = std::env::temp_dir().join("sprout-acp-test-too-many");
+        let dir = std::env::temp_dir().join("buzz-acp-test-too-many");
         let path = dir.join("rules.toml");
         std::fs::create_dir_all(&dir).unwrap();
         let mut toml = String::new();
@@ -1683,7 +1683,7 @@ channels = "ALL"
 
     #[test]
     fn test_load_rules_filter_too_long_rejected() {
-        let dir = std::env::temp_dir().join("sprout-acp-test-long-filter");
+        let dir = std::env::temp_dir().join("buzz-acp-test-long-filter");
         let path = dir.join("rules.toml");
         std::fs::create_dir_all(&dir).unwrap();
         let long_expr = format!("\"{}\"", "a".repeat(4097));

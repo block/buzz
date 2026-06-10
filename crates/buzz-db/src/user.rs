@@ -372,7 +372,7 @@ mod tests {
     use crate::Db;
     use nostr::Keys;
 
-    const TEST_DB_URL: &str = "postgres://sprout:sprout_dev@localhost:5432/sprout";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
 
     async fn setup_db() -> Db {
         let pool = PgPool::connect(TEST_DB_URL)

@@ -97,7 +97,7 @@ You are a test bot.
 // ── Test 2: Sprout-agent persona emits BUZZ_AGENT_* vars ───────────────────
 
 #[test]
-fn resolve_pack_sprout_agent_persona_emits_sprout_agent_vars() {
+fn resolve_pack_buzz_agent_persona_emits_buzz_agent_vars() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
@@ -153,11 +153,11 @@ You are a test bot.
     // Must NOT contain GOOSE_* keys
     assert!(
         !env.contains_key("GOOSE_MODEL"),
-        "sprout-agent runtime must not emit GOOSE_MODEL"
+        "buzz-agent runtime must not emit GOOSE_MODEL"
     );
     assert!(
         !env.contains_key("GOOSE_PROVIDER"),
-        "sprout-agent runtime must not emit GOOSE_PROVIDER"
+        "buzz-agent runtime must not emit GOOSE_PROVIDER"
     );
 }
 
@@ -239,7 +239,7 @@ fn full_pipeline_two_runtimes_different_env_vars() {
   "version": "1.0.0",
   "personas": [
     "agents/goose-bot.persona.md",
-    "agents/sprout-bot.persona.md"
+    "agents/buzz-bot.persona.md"
   ],
   "defaults": {}
 }"#,
@@ -262,15 +262,15 @@ You are a goose bot.
 
     // Sprout-agent persona
     fs::write(
-        root.join("agents/sprout-bot.persona.md"),
+        root.join("agents/buzz-bot.persona.md"),
         r#"---
-name: "sprout-bot"
+name: "buzz-bot"
 display_name: "Sprout Bot"
-description: "A sprout-agent runtime bot"
+description: "A buzz-agent runtime bot"
 runtime: "buzz-agent"
 model: "openai:gpt-4o"
 ---
-You are a sprout bot.
+You are a buzz bot.
 "#,
     )
     .unwrap();
@@ -283,11 +283,11 @@ You are a sprout bot.
         .iter()
         .find(|p| p.name == "goose-bot")
         .expect("goose-bot should exist");
-    let sprout = pack
+    let buzz = pack
         .personas
         .iter()
-        .find(|p| p.name == "sprout-bot")
-        .expect("sprout-bot should exist");
+        .find(|p| p.name == "buzz-bot")
+        .expect("buzz-bot should exist");
 
     // Goose persona gets GOOSE_* env vars
     let goose_env: std::collections::HashMap<_, _> = goose
@@ -310,20 +310,20 @@ You are a sprout bot.
     );
 
     // Sprout-agent persona gets BUZZ_AGENT_* env vars
-    let sprout_env: std::collections::HashMap<_, _> = sprout
+    let buzz_env: std::collections::HashMap<_, _> = buzz
         .runtime_env_vars
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    assert_eq!(sprout_env.get("BUZZ_AGENT_MODEL"), Some(&"gpt-4o"));
-    assert_eq!(sprout_env.get("BUZZ_AGENT_PROVIDER"), Some(&"openai"));
+    assert_eq!(buzz_env.get("BUZZ_AGENT_MODEL"), Some(&"gpt-4o"));
+    assert_eq!(buzz_env.get("BUZZ_AGENT_PROVIDER"), Some(&"openai"));
     assert!(
-        !sprout_env.contains_key("GOOSE_MODEL"),
-        "sprout-agent persona must not emit GOOSE_MODEL"
+        !buzz_env.contains_key("GOOSE_MODEL"),
+        "buzz-agent persona must not emit GOOSE_MODEL"
     );
     assert!(
-        !sprout_env.contains_key("GOOSE_PROVIDER"),
-        "sprout-agent persona must not emit GOOSE_PROVIDER"
+        !buzz_env.contains_key("GOOSE_PROVIDER"),
+        "buzz-agent persona must not emit GOOSE_PROVIDER"
     );
 }
 

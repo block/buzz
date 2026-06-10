@@ -1,6 +1,6 @@
-//! Harness-side Sprout relay client.
+//! Harness-side Buzz relay client.
 //!
-//! Connects to the Sprout relay via NIP-01 WebSocket, authenticates via NIP-42,
+//! Connects to the Buzz relay via NIP-01 WebSocket, authenticates via NIP-42,
 //! discovers channels via REST API, and streams events back to the harness main
 //! loop. Also publishes ephemeral events (typing indicators) via the same
 //! WebSocket connection.
@@ -61,13 +61,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 use std::time::Instant;
 
-use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
-use serde_json::{json, Value};
 use buzz_core::kind::{
     KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_TYPING_INDICATOR,
 };
+use futures_util::{SinkExt, StreamExt};
+use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
+use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -408,7 +408,7 @@ type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Harness-side relay client.
 ///
-/// Connects to the Sprout relay, authenticates via NIP-42, and streams
+/// Connects to the Buzz relay, authenticates via NIP-42, and streams
 /// matching events for subscribed channels.
 ///
 /// A background tokio task owns the WebSocket connection and responds to

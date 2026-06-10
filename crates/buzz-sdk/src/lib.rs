@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! `sprout-sdk` — typed Nostr event builders for Sprout operations.
+//! `buzz-sdk` — typed Nostr event builders for Sprout operations.
 //!
 //! # Mental Model
 //!
@@ -18,7 +18,7 @@ pub mod nip_oa;
 
 pub use builders::*;
 
-/// Re-export kind constants so consumers don't need sprout-core directly.
+/// Re-export kind constants so consumers don't need buzz-core directly.
 pub use buzz_core::kind;
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -76,7 +76,7 @@ pub struct CustomEmoji {
     pub url: String,
 }
 
-// ── Channel / Member enums (re-exported from sprout-core) ────────────────────
+// ── Channel / Member enums (re-exported from buzz-core) ────────────────────
 
 /// Channel type.
 pub use buzz_core::channel::ChannelType as ChannelKind;

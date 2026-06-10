@@ -27,7 +27,7 @@ pub const LIST_MAX_LIMIT: i64 = 1000;
 /// SHA-256 hash of a raw approval token. Returns the 32-byte digest.
 ///
 /// Approval tokens are stored hashed so that a DB read does not expose
-/// the raw token (same pattern as API tokens in sprout-auth).
+/// the raw token (same pattern as API tokens in buzz-auth).
 fn hash_approval_token(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }

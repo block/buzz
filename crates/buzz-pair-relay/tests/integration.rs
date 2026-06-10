@@ -1,4 +1,4 @@
-//! Integration tests for sprout-pair-relay.
+//! Integration tests for buzz-pair-relay.
 //!
 //! Each test spins up a relay on a random port (`:0`), connects one or more
 //! WebSocket clients, and exercises the observable protocol surface.

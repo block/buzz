@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
         .with(EnvFilter::from_default_env().add_directive("buzz_relay=info".parse()?))
         .init();
 
-    info!("Starting sprout-relay");
+    info!("Starting buzz-relay");
 
     let config = Config::from_env().map_err(|e| {
         error!("Invalid configuration: {e}");
@@ -292,10 +292,8 @@ async fn main() -> anyhow::Result<()> {
                 if attempt > 0 {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
-                match buzz_relay::handlers::side_effects::reconcile_channel_events(
-                    &reconcile_state,
-                )
-                .await
+                match buzz_relay::handlers::side_effects::reconcile_channel_events(&reconcile_state)
+                    .await
                 {
                     Ok(()) => {}
                     Err(e) => {
@@ -362,12 +360,11 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     // Update NIP-29 discovery events so clients see the archived state.
-                    if let Err(e) =
-                        buzz_relay::handlers::side_effects::emit_group_discovery_events(
-                            &reaper_state,
-                            *channel_id,
-                        )
-                        .await
+                    if let Err(e) = buzz_relay::handlers::side_effects::emit_group_discovery_events(
+                        &reaper_state,
+                        *channel_id,
+                    )
+                    .await
                     {
                         error!(channel = %channel_id, "reaper discovery update failed: {e}");
                     }
@@ -414,7 +411,7 @@ async fn main() -> anyhow::Result<()> {
                             matches,
                         )
                         .await;
-                        metrics::counter!("sprout_multinode_fanout_total").increment(1);
+                        metrics::counter!("buzz_multinode_fanout_total").increment(1);
                         if matches.is_empty() {
                             continue;
                         }
@@ -444,7 +441,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        metrics::counter!("sprout_multinode_fanout_lag_total").increment(n);
+                        metrics::counter!("buzz_multinode_fanout_lag_total").increment(n);
                         tracing::warn!("Multi-node fan-out lagged by {n} messages");
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -524,7 +521,7 @@ async fn serve(
     let tcp_listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind {}: {e}", config.bind_addr))?;
-    info!(addr = %config.bind_addr, "sprout-relay TCP listening");
+    info!(addr = %config.bind_addr, "buzz-relay TCP listening");
 
     // ── App listener (UDS, optional) ─────────────────────────────────────────
     #[cfg(unix)]
@@ -543,7 +540,7 @@ async fn serve(
         }
         let uds_listener = tokio::net::UnixListener::bind(uds_path)
             .map_err(|e| anyhow::anyhow!("Failed to bind UDS {uds_path}: {e}"))?;
-        info!(path = %uds_path, "sprout-relay UDS listening");
+        info!(path = %uds_path, "buzz-relay UDS listening");
 
         let router_uds = router.clone();
         let mut uds_rx = shutdown_tx.subscribe();

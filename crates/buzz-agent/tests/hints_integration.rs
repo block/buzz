@@ -94,7 +94,7 @@ struct Harness {
 
 impl Harness {
     async fn spawn_with_env(base_url: &str, extra: &[(&str, &str)]) -> Self {
-        let bin = env!("CARGO_BIN_EXE_sprout-agent");
+        let bin = env!("CARGO_BIN_EXE_buzz-agent");
         let mut cmd = tokio::process::Command::new(bin);
         cmd.env("BUZZ_AGENT_PROVIDER", "openai")
             .env("OPENAI_COMPAT_API_KEY", "test")
@@ -111,7 +111,7 @@ impl Harness {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().expect("spawn sprout-agent");
+        let mut child = cmd.spawn().expect("spawn buzz-agent");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Self {

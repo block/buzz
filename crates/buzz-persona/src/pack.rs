@@ -113,7 +113,7 @@ pub struct PackManifestData {
     pub pack_instructions: Option<String>,
     pub mcp_config: Option<String>,
     // hooks_config is intentionally omitted: hooks are a runtime concern loaded
-    // separately by sprout-acp, not a pack-parsing concern.
+    // separately by buzz-acp, not a pack-parsing concern.
     /// Raw defaults block.
     pub defaults: Option<serde_json::Value>,
 }

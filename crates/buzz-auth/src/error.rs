@@ -1,4 +1,4 @@
-//! Error types for sprout-auth.
+//! Error types for buzz-auth.
 
 /// All errors that can occur during authentication and authorization.
 ///

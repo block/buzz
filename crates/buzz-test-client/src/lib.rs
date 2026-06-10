@@ -1,7 +1,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-//! Minimal NIP-01 WebSocket test client for the Sprout relay.
+//! Minimal NIP-01 WebSocket test client for the Buzz relay.
 
 use std::time::Duration;
 
@@ -80,7 +80,7 @@ impl From<nostr::event::builder::Error> for TestClientError {
     }
 }
 
-/// WebSocket test client for integration testing against a running Sprout relay.
+/// WebSocket test client for integration testing against a running Buzz relay.
 pub struct BuzzTestClient {
     inner: NostrWsConnection,
 }

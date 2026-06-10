@@ -1,11 +1,11 @@
-//! `sprout-pair` — NIP-AB device pairing interop testing CLI.
+//! `buzz-pair` — NIP-AB device pairing interop testing CLI.
 //!
 //! # Usage
 //!
 //! ```text
-//! sprout-pair source --relay wss://relay.example.com [--nsec nsec1...]
-//! sprout-pair target [--relay wss://relay.example.com]
-//! sprout-pair test-vectors
+//! buzz-pair source --relay wss://relay.example.com [--nsec nsec1...]
+//! buzz-pair target [--relay wss://relay.example.com]
+//! buzz-pair test-vectors
 //! ```
 //!
 //! The `source` subcommand acts as the secret-holding device; `target` acts
@@ -15,9 +15,6 @@
 use std::io::{self, BufRead, Write};
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
-use futures_util::{SinkExt, StreamExt};
-use nostr::{Event, EventBuilder, Keys, RelayUrl, SecretKey, ToBech32};
 use buzz_core::kind::KIND_PAIRING;
 use buzz_core::pairing::session::PairingSession;
 use buzz_core::pairing::{
@@ -26,6 +23,9 @@ use buzz_core::pairing::{
     types::PayloadType,
     PairingError,
 };
+use clap::{Parser, Subcommand};
+use futures_util::{SinkExt, StreamExt};
+use nostr::{Event, EventBuilder, Keys, RelayUrl, SecretKey, ToBech32};
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use zeroize::Zeroizing;

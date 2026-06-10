@@ -33,7 +33,7 @@ pub struct MediaConfig {
     pub public_base_url: String,
     /// Server authority for BUD-11 server tag validation.
     /// Format: `host` for default ports, `host:port` for non-default ports.
-    /// Examples: "sprout.example.com", "localhost:3000", "relay.example.com:8080".
+    /// Examples: "buzz.example.com", "localhost:3000", "relay.example.com:8080".
     /// If None, auth events carrying `server` tags are rejected (fail-closed).
     /// Must match the authority the desktop signer derives from the relay URL.
     pub server_domain: Option<String>,

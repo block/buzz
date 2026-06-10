@@ -6,13 +6,13 @@
 //! # Running
 //!
 //! ```text
-//! cargo test -p sprout-test-client --test e2e_media -- --ignored --nocapture
+//! cargo test -p buzz-test-client --test e2e_media -- --ignored --nocapture
 //! ```
 //!
 //! Override the relay URL:
 //!
 //! ```text
-//! RELAY_HTTP_URL=http://localhost:3000 cargo test -p sprout-test-client --test e2e_media -- --ignored
+//! RELAY_HTTP_URL=http://localhost:3000 cargo test -p buzz-test-client --test e2e_media -- --ignored
 //! ```
 
 use std::time::Duration;

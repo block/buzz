@@ -321,7 +321,7 @@ mod tests {
     // -------- Live MinIO + real git roundtrip ----------------------------------
     //
     // Run manually:
-    //   BUZZ_GIT_S3_PROBE=1 cargo test -p sprout-relay --lib \
+    //   BUZZ_GIT_S3_PROBE=1 cargo test -p buzz-relay --lib \
     //     api::git::hydrate::tests::live -- --nocapture --test-threads=1
 
     fn probe_enabled() -> bool {
@@ -331,8 +331,8 @@ mod tests {
     fn store() -> GitStore {
         GitStore::new(
             "http://localhost:9000",
-            "sprout_dev",
-            "sprout_dev_secret",
+            "buzz_dev",
+            "buzz_dev_secret",
             "sprout-git",
         )
         .expect("connect minio")

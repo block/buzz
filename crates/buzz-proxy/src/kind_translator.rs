@@ -25,27 +25,27 @@ impl KindTranslator {
         Self
     }
 
-    /// Translate a standard Nostr kind to the equivalent Sprout kind.
+    /// Translate a standard Nostr kind to the equivalent Buzz kind.
     /// Unknown kinds pass through unchanged.
     ///
     /// # ⚠️ Lossy mapping — round-tripping is NOT lossless
     ///
-    /// Multiple standard Nostr kinds collapse onto the same Sprout kind.
+    /// Multiple standard Nostr kinds collapse onto the same Buzz kind.
     /// This is intentional: Sprout's internal kind space is smaller than the
     /// full Nostr kind space, and the proxy re-signs events anyway (see module
     /// doc), so the original kind is not preserved.
     ///
-    /// **Do not use `to_standard(to_sprout(k))` expecting to recover `k`.**
+    /// **Do not use `to_standard(to_buzz(k))` expecting to recover `k`.**
     /// The round-trip is only lossless for kinds that have a 1-to-1 mapping.
     ///
-    /// | Standard kind(s)       | Sprout kind               | Lossy? |
+    /// | Standard kind(s)       | Buzz kind               | Lossy? |
     /// |------------------------|---------------------------|--------|
     /// | 1, 40, 42              | `KIND_STREAM_MESSAGE`     | ✅ yes |
     /// | 41, 44                 | `KIND_STREAM_MESSAGE_EDIT`| ✅ yes |
     /// | 4                      | `KIND_DM_CREATED`         | no     |
     /// | 43                     | `KIND_NIP29_DELETE_EVENT` | no     |
     /// | anything else          | unchanged (pass-through)  | no     |
-    pub fn to_sprout(&self, standard_kind: u32) -> u32 {
+    pub fn to_buzz(&self, standard_kind: u32) -> u32 {
         match standard_kind {
             1 => KIND_STREAM_MESSAGE,
             4 => KIND_DM_CREATED,
@@ -58,11 +58,11 @@ impl KindTranslator {
         }
     }
 
-    /// Translate a Sprout kind back to the canonical standard Nostr kind.
+    /// Translate a Buzz kind back to the canonical standard Nostr kind.
     /// Unknown kinds pass through unchanged.
     ///
-    /// Returns the **canonical** standard kind for each Sprout kind. Because
-    /// `to_sprout` is lossy (multiple standard kinds map to one Sprout kind),
+    /// Returns the **canonical** standard kind for each Buzz kind. Because
+    /// `to_buzz` is lossy (multiple standard kinds map to one Buzz kind),
     /// this function always returns the primary/canonical standard kind — it
     /// cannot recover the original kind if it was one of the secondary mappings.
     ///
@@ -70,7 +70,7 @@ impl KindTranslator {
     /// channel message), not `1` or `40`, even if the event was originally
     /// kind 1 or 40.
     ///
-    /// | Sprout kind                | Standard kind | Notes                     |
+    /// | Buzz kind                | Standard kind | Notes                     |
     /// |----------------------------|---------------|---------------------------|
     /// | `KIND_STREAM_MESSAGE`      | 42            | NIP-28 channel message    |
     /// | `KIND_STREAM_MESSAGE_V2`   | 42            | Rich format → plain 42    |
@@ -78,8 +78,8 @@ impl KindTranslator {
     /// | `KIND_DM_CREATED`          | 4             | Encrypted DM              |
     /// | `KIND_NIP29_DELETE_EVENT`  | 43            | NIP-29 delete             |
     /// | anything else              | unchanged     | pass-through              |
-    pub fn to_standard(&self, sprout_kind: u32) -> u32 {
-        match sprout_kind {
+    pub fn to_standard(&self, buzz_kind: u32) -> u32 {
+        match buzz_kind {
             k if k == KIND_STREAM_MESSAGE => 42, // NIP-28 channel message (was 1)
             k if k == KIND_STREAM_MESSAGE_V2 => 42, // Rich format → plain kind:42
             k if k == KIND_STREAM_MESSAGE_EDIT => 41,
@@ -91,7 +91,7 @@ impl KindTranslator {
 
     /// Returns `true` if `kind` has a non-identity mapping in either direction.
     pub fn is_translatable(&self, kind: u32) -> bool {
-        self.to_sprout(kind) != kind || self.to_standard(kind) != kind
+        self.to_buzz(kind) != kind || self.to_standard(kind) != kind
     }
 }
 
@@ -109,16 +109,16 @@ mod tests {
     };
 
     #[test]
-    fn standard_to_sprout() {
+    fn standard_to_buzz() {
         let t = KindTranslator::new();
-        assert_eq!(t.to_sprout(1), KIND_STREAM_MESSAGE);
-        assert_eq!(t.to_sprout(4), KIND_DM_CREATED);
-        assert_eq!(t.to_sprout(40), KIND_STREAM_MESSAGE);
-        assert_eq!(t.to_sprout(41), KIND_STREAM_MESSAGE_EDIT);
+        assert_eq!(t.to_buzz(1), KIND_STREAM_MESSAGE);
+        assert_eq!(t.to_buzz(4), KIND_DM_CREATED);
+        assert_eq!(t.to_buzz(40), KIND_STREAM_MESSAGE);
+        assert_eq!(t.to_buzz(41), KIND_STREAM_MESSAGE_EDIT);
     }
 
     #[test]
-    fn sprout_to_standard() {
+    fn buzz_to_standard() {
         let t = KindTranslator::new();
         assert_eq!(t.to_standard(KIND_STREAM_MESSAGE), 42);
         assert_eq!(t.to_standard(KIND_STREAM_MESSAGE_V2), 42);
@@ -130,14 +130,14 @@ mod tests {
     fn stream_message_v2_round_trip() {
         let t = KindTranslator::new();
         // kind:42 → KIND_STREAM_MESSAGE (lossy collapse), then back → 42
-        assert_eq!(t.to_standard(t.to_sprout(42)), 42);
+        assert_eq!(t.to_standard(t.to_buzz(42)), 42);
     }
 
     #[test]
     fn unknown_kinds_pass_through() {
         let t = KindTranslator::new();
-        assert_eq!(t.to_sprout(9999), 9999);
-        assert_eq!(t.to_sprout(0), 0);
+        assert_eq!(t.to_buzz(9999), 9999);
+        assert_eq!(t.to_buzz(0), 0);
         assert_eq!(t.to_standard(12345), 12345);
         assert_eq!(t.to_standard(0), 0);
     }

@@ -6,7 +6,7 @@
 //! # Running
 //!
 //! ```text
-//! cargo test -p sprout-test-client --test e2e_media_video -- --ignored --nocapture
+//! cargo test -p buzz-test-client --test e2e_media_video -- --ignored --nocapture
 //! ```
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};

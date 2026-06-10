@@ -7,7 +7,7 @@
 //! which is exactly the loopback variant we can prove on one box.
 //!
 //! Usage:
-//!   cargo run -p sprout-relay --example mesh_serve_smoke -- <path-to.gguf>
+//!   cargo run -p buzz-relay --example mesh_serve_smoke -- <path-to.gguf>
 use std::time::Duration;
 
 use mesh_llm_sdk::{serve, MeshDiscoveryMode};

@@ -24,11 +24,11 @@ use buzz_core::event::StoredEvent;
 /// | Field        | Environment variable    | Default (dev only)       |
 /// |--------------|-------------------------|--------------------------|
 /// | `url`        | `TYPESENSE_URL`         | `http://localhost:8108`  |
-/// | `api_key`    | `TYPESENSE_API_KEY`     | `sprout_dev_key`         |
+/// | `api_key`    | `TYPESENSE_API_KEY`     | `buzz_dev_key`         |
 /// | `collection` | `TYPESENSE_COLLECTION`  | `events`                 |
 ///
 /// In production, always set `TYPESENSE_API_KEY` explicitly. The fallback
-/// value `sprout_dev_key` is intentionally weak and only suitable for local
+/// value `buzz_dev_key` is intentionally weak and only suitable for local
 /// development with a locally-running Typesense instance.
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
@@ -44,7 +44,7 @@ impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             url: std::env::var("TYPESENSE_URL").unwrap_or_else(|_| "http://localhost:8108".into()),
-            api_key: std::env::var("TYPESENSE_API_KEY").unwrap_or_else(|_| "sprout_dev_key".into()),
+            api_key: std::env::var("TYPESENSE_API_KEY").unwrap_or_else(|_| "buzz_dev_key".into()),
             collection: std::env::var("TYPESENSE_COLLECTION").unwrap_or_else(|_| "events".into()),
         }
     }
@@ -163,7 +163,7 @@ mod integration_tests {
         let client = reqwest::Client::new();
         client
             .get("http://localhost:8108/health")
-            .header("X-TYPESENSE-API-KEY", "sprout_dev_key")
+            .header("X-TYPESENSE-API-KEY", "buzz_dev_key")
             .timeout(std::time::Duration::from_secs(2))
             .send()
             .await
@@ -174,7 +174,7 @@ mod integration_tests {
     fn make_service(collection: &str) -> SearchService {
         SearchService::new(SearchConfig {
             url: "http://localhost:8108".into(),
-            api_key: "sprout_dev_key".into(),
+            api_key: "buzz_dev_key".into(),
             collection: collection.to_string(),
         })
     }
@@ -227,7 +227,7 @@ mod integration_tests {
         let service = make_service(&collection);
         service.ensure_collection().await.unwrap();
 
-        let unique_token = format!("sprout_search_test_{}", Uuid::new_v4().simple());
+        let unique_token = format!("buzz_search_test_{}", Uuid::new_v4().simple());
         let stored = make_stored_event(&format!("hello {}", unique_token), Kind::TextNote);
         let event_id = stored.event.id.to_string();
 

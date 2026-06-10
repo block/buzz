@@ -122,7 +122,7 @@ fn sign_nip98(
 
 pub struct BuzzClient {
     http: reqwest::Client,
-    relay_url: String, // base URL, no trailing slash, e.g. "https://relay.sprout.place"
+    relay_url: String, // base URL, no trailing slash, e.g. "https://relay.buzz.place"
     keys: Keys,
     /// Optional NIP-OA auth tag injected into every signed event.
     auth_tag: Option<Tag>,

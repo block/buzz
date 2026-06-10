@@ -2,7 +2,7 @@
 //!
 //! # Overview
 //!
-//! The proxy sits between standard Nostr clients (NIP-28) and the Sprout relay.
+//! The proxy sits between standard Nostr clients (NIP-28) and the Buzz relay.
 //! Sprout stores messages as kind:9 events with `#h <uuid>` channel tags.
 //! NIP-28 clients expect kind:42 events with `#e <kind40_event_id>` channel tags.
 //!
@@ -17,12 +17,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use moka::sync::Cache;
-use nostr::prelude::*;
 use buzz_core::kind::{
     event_kind_u32, KIND_DELETION, KIND_REACTION, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_EDIT,
     KIND_STREAM_MESSAGE_V2,
 };
+use moka::sync::Cache;
+use nostr::prelude::*;
 use uuid::Uuid;
 
 use crate::channel_map::{ChannelInfo, ChannelMap};
@@ -496,16 +496,16 @@ impl Translator {
         }
 
         // Translate kind number.
-        let sprout_kind = self.kind_translator.to_sprout(kind_u32);
+        let buzz_kind = self.kind_translator.to_buzz(kind_u32);
 
         // Re-sign with the shadow key for the external user.
         let shadow_keys = self.shadow_keys.get_or_create(external_pubkey)?;
 
-        // SAFETY: sprout_kind is derived from KindTranslator which maps to known Sprout kinds (9, 40002, 40003) that fit in u16
+        // SAFETY: buzz_kind is derived from KindTranslator which maps to known Buzz kinds (9, 40002, 40003) that fit in u16
         let translated = EventBuilder::new(
             Kind::Custom(
-                u16::try_from(sprout_kind)
-                    .expect("SAFETY: sprout kind values (9, 40002, 40003) always fit in u16"),
+                u16::try_from(buzz_kind)
+                    .expect("SAFETY: buzz kind values (9, 40002, 40003) always fit in u16"),
             ),
             &event.content,
         )
@@ -671,7 +671,7 @@ impl Translator {
     /// - Injects `#h` tag filters from `allowed_channels` so the client can
     ///   only receive events from channels they have access to.
     ///
-    /// The returned filter is ready to be forwarded to the upstream Sprout relay.
+    /// The returned filter is ready to be forwarded to the upstream Buzz relay.
     pub fn translate_filter_inbound(&self, filter: &Filter, allowed_channels: &[Uuid]) -> Filter {
         // Start with a clone and rebuild the kinds set.
         let mut f = filter.clone();
@@ -681,11 +681,10 @@ impl Translator {
                 .iter()
                 .map(|k| {
                     let k_u32 = k.as_u16() as u32;
-                    let sprout_k = self.kind_translator.to_sprout(k_u32);
-                    // SAFETY: sprout kind values (9, 40002, 40003) always fit in u16
+                    let buzz_k = self.kind_translator.to_buzz(k_u32);
+                    // SAFETY: buzz kind values (9, 40002, 40003) always fit in u16
                     Kind::Custom(
-                        u16::try_from(sprout_k)
-                            .expect("SAFETY: sprout kind values always fit in u16"),
+                        u16::try_from(buzz_k).expect("SAFETY: buzz kind values always fit in u16"),
                     )
                 })
                 .collect();
@@ -798,7 +797,7 @@ mod tests {
             shadow_mgr,
             channel_map.clone(),
             "http://localhost:3000",
-            "sprout_test",
+            "buzz_test",
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         );
 
@@ -1045,7 +1044,7 @@ mod tests {
         // The #e filter must be removed from the translated filter.
         assert!(
             !translated.generic_tags.contains_key(&e_tag_key),
-            "#e tag filter must be removed from translated filter (would cause zero matches on Sprout relay)"
+            "#e tag filter must be removed from translated filter (would cause zero matches on Buzz relay)"
         );
 
         // The #h filter must be present and contain the channel UUID.
@@ -1400,7 +1399,7 @@ mod tests {
         let (translator, _) = make_translator();
         let author_keys = Keys::generate();
 
-        // A kind:9999 event (unknown Sprout kind) should be dropped.
+        // A kind:9999 event (unknown Buzz kind) should be dropped.
         let h_tag = Tag::parse(["h", TEST_UUID]).unwrap();
         let event = EventBuilder::new(Kind::Custom(9999), "internal stuff")
             .tags([h_tag])

@@ -374,7 +374,7 @@ impl AcpClient {
     ///
     /// Used for slash-command pass-through: ACP connectors detect commands via
     /// the **first** block's text starting with `/`, so the harness sends
-    /// `["/cmd args", "<sprout context>"]` instead of one wrapped block.
+    /// `["/cmd args", "<buzz context>"]` instead of one wrapped block.
     pub async fn session_prompt_blocks_with_idle_timeout(
         &mut self,
         session_id: &str,

@@ -94,7 +94,7 @@ pub fn router(state: ProxyState) -> Router {
 ///
 /// Uses `axum::extract::Request` to manually attempt the WS upgrade so that
 /// plain HTTP GET requests (NIP-11 clients, browser visits) are not rejected
-/// by the extractor. Mirrors the pattern used in `sprout-relay/src/router.rs`.
+/// by the extractor. Mirrors the pattern used in `buzz-relay/src/router.rs`.
 async fn root_handler(
     State(state): State<ProxyState>,
     headers: HeaderMap,
@@ -858,7 +858,7 @@ async fn create_invite(
             .into_response();
     }
 
-    let token_str = format!("sprout_invite_{}", Uuid::new_v4().simple());
+    let token_str = format!("buzz_invite_{}", Uuid::new_v4().simple());
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(req.hours as i64);
 
     let token = crate::InviteToken::new(&token_str, channel_ids.clone(), expires_at, req.max_uses);
@@ -1056,10 +1056,10 @@ mod tests {
             shadow_keys,
             channel_map.clone(),
             "http://localhost:3000",
-            "sprout_test",
+            "buzz_test",
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         ));
-        let upstream = Arc::new(UpstreamClient::new("ws://localhost:3000", "sprout_test"));
+        let upstream = Arc::new(UpstreamClient::new("ws://localhost:3000", "buzz_test"));
         ProxyState {
             channel_map,
             guest_store,

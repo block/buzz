@@ -97,7 +97,7 @@ struct Harness {
 
 impl Harness {
     async fn spawn_with_env(base_url: &str, extra: &[(&str, &str)]) -> Self {
-        let bin = env!("CARGO_BIN_EXE_sprout-agent");
+        let bin = env!("CARGO_BIN_EXE_buzz-agent");
         let mut cmd = tokio::process::Command::new(bin);
         cmd.env("BUZZ_AGENT_PROVIDER", "openai")
             .env("OPENAI_COMPAT_API_KEY", "test")
@@ -114,7 +114,7 @@ impl Harness {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().expect("spawn sprout-agent");
+        let mut child = cmd.spawn().expect("spawn buzz-agent");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Self {
@@ -1344,20 +1344,20 @@ async fn hook_stop_timeout_failopen() {
 }
 
 /// When a session is cancelled while a tool call is in-flight, the agent
-/// sends `notifications/cancelled` to the MCP server. With sprout-dev-mcp,
+/// sends `notifications/cancelled` to the MCP server. With buzz-dev-mcp,
 /// this cancels the CancellationToken and kills the running shell process
 /// group. We verify:
 ///   1. The prompt completes in under 5s (not 60s).
 ///   2. The `sleep 60` process is actually dead after cancel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_kills_inflight_tool_via_mcp_notification() {
-    // sprout-dev-mcp is a separate crate; locate its binary relative to
-    // the sprout-agent test binary (they share the same target dir).
-    let self_bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_sprout-agent"));
+    // buzz-dev-mcp is a separate crate; locate its binary relative to
+    // the buzz-agent test binary (they share the same target dir).
+    let self_bin = std::path::PathBuf::from(env!("CARGO_BIN_EXE_buzz-agent"));
     let dev_mcp_bin = self_bin.parent().unwrap().join("buzz-dev-mcp");
     if !dev_mcp_bin.exists() {
         eprintln!(
-            "SKIP: sprout-dev-mcp not built at {}; run `cargo build -p sprout-dev-mcp` first",
+            "SKIP: buzz-dev-mcp not built at {}; run `cargo build -p buzz-dev-mcp` first",
             dev_mcp_bin.display()
         );
         return;
@@ -1366,7 +1366,7 @@ async fn cancel_kills_inflight_tool_via_mcp_notification() {
 
     // Use a unique marker (PID + timestamp) to avoid stale-file collisions.
     let marker = format!(
-        "sprout_cancel_test_{}_{:x}",
+        "buzz_cancel_test_{}_{:x}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1467,14 +1467,14 @@ async fn cancel_kills_inflight_tool_via_mcp_notification() {
 }
 
 /// Protocol-level test: verify that `notifications/cancelled` is sent to
-/// any MCP server (not just sprout-dev-mcp) when a session is cancelled
+/// any MCP server (not just buzz-dev-mcp) when a session is cancelled
 /// during an in-flight tool call. Uses fake_mcp with FAKE_MCP_CANCEL_LOG
 /// to capture the raw notification on stdin.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_sends_notifications_cancelled_to_any_mcp_server() {
     let cancel_log = std::env::temp_dir()
         .join(format!(
-            "sprout_cancel_proto_{}_{:x}.log",
+            "buzz_cancel_proto_{}_{:x}.log",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -768,7 +768,7 @@ mod probe {
     //! Empirical probe of rust-s3 + `fail-on-err` + MinIO surfacing of 412.
     //!
     //! Run manually:
-    //!   BUZZ_GIT_S3_PROBE=1 cargo test -p sprout-relay --lib \
+    //!   BUZZ_GIT_S3_PROBE=1 cargo test -p buzz-relay --lib \
     //!     api::git::store::probe -- --nocapture --test-threads=1
     //!
     //! Pre-req: `docker compose up minio` and the `sprout-git` bucket exists.
@@ -782,8 +782,8 @@ mod probe {
     fn store() -> GitStore {
         GitStore::new(
             "http://localhost:9000",
-            "sprout_dev",
-            "sprout_dev_secret",
+            "buzz_dev",
+            "buzz_dev_secret",
             "sprout-git",
         )
         .expect("connect minio")

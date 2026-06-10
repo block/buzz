@@ -147,7 +147,7 @@ mod tests {
             Tag::parse(["x", sha256]).unwrap(),
             Tag::parse(["expiration", &exp_str]).unwrap(),
         ];
-        EventBuilder::new(Kind::from(24242), "Upload sprout-media")
+        EventBuilder::new(Kind::from(24242), "Upload buzz-media")
             .tags(tags)
             .sign_with_keys(keys)
             .unwrap()
@@ -241,7 +241,7 @@ mod tests {
             .unwrap();
         // Should fail — server tag present but doesn't match our domain
         assert!(matches!(
-            verify_blossom_upload_auth(&event, &sha256, Some("sprout.example.com"), 600),
+            verify_blossom_upload_auth(&event, &sha256, Some("buzz.example.com"), 600),
             Err(MediaError::ServerMismatch)
         ));
         // Should pass when our domain matches

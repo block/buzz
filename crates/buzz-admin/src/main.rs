@@ -7,9 +7,9 @@
 //! This binary is retained as a placeholder for future admin tooling.
 
 use anyhow::Result;
+use buzz_db::{Db, DbConfig};
 use clap::{Parser, Subcommand};
 use nostr::Keys;
-use buzz_db::{Db, DbConfig};
 
 #[derive(Parser)]
 #[command(name = "buzz-admin", about = "Buzz instance administration")]
@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
 
 async fn connect_db() -> Result<Db> {
     let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://sprout:sprout_dev@localhost:5432/sprout".to_string());
+        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
     let db = Db::new(&DbConfig {
         database_url: db_url,
         ..DbConfig::default()
@@ -103,15 +103,14 @@ async fn connect_db() -> Result<Db> {
 }
 
 async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
-    use nostr::{EventBuilder, Kind, Tag};
     use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
     use buzz_db::event::EventQuery;
+    use nostr::{EventBuilder, Kind, Tag};
 
     let db = connect_db().await?;
 
     // Resolve relay signing key: arg > env > ephemeral
-    let relay_keys = match relay_key_arg.or_else(|| std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok())
-    {
+    let relay_keys = match relay_key_arg.or_else(|| std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok()) {
         Some(key_hex) => {
             Keys::parse(&key_hex).map_err(|e| anyhow::anyhow!("invalid relay key: {e}"))?
         }

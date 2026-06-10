@@ -51,8 +51,8 @@ where
 
 #[derive(Parser)]
 #[command(
-    name = "sprout",
-    about = "Buzz CLI — interact with a Sprout relay",
+    name = "buzz",
+    about = "Buzz CLI — interact with a Buzz relay",
     long_about = "\
 Buzz CLI — interact with a Buzz relay
 
@@ -68,11 +68,7 @@ Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"
 )]
 struct Cli {
     /// Relay URL (http:// or https://). Overrides BUZZ_RELAY_URL env var.
-    #[arg(
-        long,
-        env = "BUZZ_RELAY_URL",
-        default_value = "http://localhost:3000"
-    )]
+    #[arg(long, env = "BUZZ_RELAY_URL", default_value = "http://localhost:3000")]
     relay: String,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
@@ -230,10 +226,10 @@ enum Cmd {
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  sprout messages send --channel <UUID> --content \"hello\"\n  sprout messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | sprout messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
     )]
     Send {
-        /// Channel UUID (from 'sprout channels list')
+        /// Channel UUID (from 'buzz channels list')
         #[arg(long)]
         channel: String,
         /// Message text — supports @mentions and markdown. Use '-' to read from stdin.
@@ -308,7 +304,7 @@ pub enum MessagesCmd {
     },
     /// Retrieve messages from a channel
     #[command(
-        after_help = "Examples:\n  sprout messages get --channel <UUID>\n  sprout messages get --channel <UUID> --limit 50 --kinds 1,1984"
+        after_help = "Examples:\n  buzz messages get --channel <UUID>\n  buzz messages get --channel <UUID> --limit 50 --kinds 1,1984"
     )]
     Get {
         /// Channel UUID
@@ -370,7 +366,7 @@ pub enum MessagesCmd {
 pub enum ChannelsCmd {
     /// List channels visible to the current identity
     #[command(
-        after_help = "Examples:\n  sprout channels list\n  sprout channels list --visibility open"
+        after_help = "Examples:\n  buzz channels list\n  buzz channels list --visibility open"
     )]
     List {
         /// Filter by visibility
@@ -391,7 +387,7 @@ pub enum ChannelsCmd {
     },
     /// Search channels by human-readable name
     #[command(
-        after_help = "Examples:\n  sprout channels search --query composer\n  sprout channels search --query sprout-chat-composer --exact\n  sprout channels search --query design --include-archived"
+        after_help = "Examples:\n  buzz channels search --query composer\n  buzz channels search --query sprout-chat-composer --exact\n  buzz channels search --query design --include-archived"
     )]
     Search {
         /// Search query (case-insensitive substring of channel name)
@@ -409,7 +405,7 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  sprout channels create --name general --type stream --visibility open\n  sprout channels create --name design --type forum --visibility open --description \"Design discussions\""
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\""
     )]
     Create {
         /// Channel name
@@ -755,7 +751,7 @@ pub enum WorkflowsCmd {
     },
     /// Trigger a workflow run
     #[command(
-        after_help = "Examples:\n  sprout workflows trigger --workflow <UUID>\n  sprout workflows trigger --workflow <UUID> --inputs '{\"key\":\"value\"}'"
+        after_help = "Examples:\n  buzz workflows trigger --workflow <UUID>\n  buzz workflows trigger --workflow <UUID> --inputs '{\"key\":\"value\"}'"
     )]
     Trigger {
         /// Workflow UUID
@@ -776,7 +772,7 @@ pub enum WorkflowsCmd {
     },
     /// Approve or deny a workflow step
     #[command(
-        after_help = "Examples:\n  sprout workflows approve --token <UUID>\n  sprout workflows approve --token <UUID> --approved false --note \"needs revision\""
+        after_help = "Examples:\n  buzz workflows approve --token <UUID>\n  buzz workflows approve --token <UUID> --approved false --note \"needs revision\""
     )]
     Approve {
         /// The approval token UUID (from the approval request)
@@ -905,7 +901,7 @@ pub enum NotesCmd {
     /// title is carried forward when `--title` is omitted, and `--title ""`
     /// explicitly clears it.
     #[command(
-        after_help = "Examples:\n  echo '# Hello' | sprout notes set --name hello --title 'Hello' --content -\n  sprout notes set --name hello --tag onboarding --content - < draft.md"
+        after_help = "Examples:\n  echo '# Hello' | buzz notes set --name hello --title 'Hello' --content -\n  buzz notes set --name hello --tag onboarding --content - < draft.md"
     )]
     Set {
         /// Slug — becomes the `d` tag. `[a-z0-9._-]{1,80}`.

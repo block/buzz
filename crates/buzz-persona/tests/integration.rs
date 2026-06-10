@@ -1,4 +1,4 @@
-//! Integration tests for the sprout-persona crate.
+//! Integration tests for the buzz-persona crate.
 //!
 //! These exercise the full pipeline: build a pack on disk → load it →
 //! parse personas → resolve defaults → merge config → validate.

@@ -9,7 +9,7 @@
 //! Start the relay, then run:
 //!
 //! ```text
-//! RELAY_URL=ws://localhost:3000 cargo test -p sprout-test-client --test e2e_tokens -- --ignored
+//! RELAY_URL=ws://localhost:3000 cargo test -p buzz-test-client --test e2e_tokens -- --ignored
 //! ```
 //!
 //! # Auth
@@ -52,7 +52,7 @@ fn http_client() -> Client {
 /// Build a `Authorization: Nostr <base64>` header value for NIP-98 HTTP Auth.
 ///
 /// Uses kind 27235 (`Kind::HttpAuth`) with `u`, `method`, and `payload` tags
-/// following the pattern in `sprout-auth/src/nip98.rs`.
+/// following the pattern in `buzz-auth/src/nip98.rs`.
 fn build_nip98_header(keys: &Keys, url: &str, method: &str, body: &[u8]) -> String {
     let payload_hash = hex::encode(Sha256::digest(body));
 

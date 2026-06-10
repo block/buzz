@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! `sprout-proxy` — Guest relay proxy for Nostr client compatibility.
+//! `buzz-proxy` — Guest relay proxy for Nostr client compatibility.
 //!
 //! Translates standard Nostr kinds ↔ Sprout custom kinds, derives deterministic
 //! shadow keypairs for external users, and authenticates guests via invite tokens.

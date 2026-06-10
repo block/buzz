@@ -130,7 +130,7 @@ impl Config {
             .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))?;
 
         let database_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://sprout:sprout_dev@localhost:5432/sprout".to_string());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
 
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
@@ -139,7 +139,7 @@ impl Config {
             std::env::var("TYPESENSE_URL").unwrap_or_else(|_| "http://localhost:8108".to_string());
 
         let typesense_key =
-            std::env::var("TYPESENSE_API_KEY").unwrap_or_else(|_| "sprout_dev_key".to_string());
+            std::env::var("TYPESENSE_API_KEY").unwrap_or_else(|_| "buzz_dev_key".to_string());
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -232,11 +232,10 @@ impl Config {
             s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
             s3_access_key: std::env::var("BUZZ_S3_ACCESS_KEY")
-                .unwrap_or_else(|_| "sprout_dev".to_string()),
+                .unwrap_or_else(|_| "buzz_dev".to_string()),
             s3_secret_key: std::env::var("BUZZ_S3_SECRET_KEY")
-                .unwrap_or_else(|_| "sprout_dev_secret".to_string()),
-            s3_bucket: std::env::var("BUZZ_S3_BUCKET")
-                .unwrap_or_else(|_| "sprout-media".to_string()),
+                .unwrap_or_else(|_| "buzz_dev_secret".to_string()),
+            s3_bucket: std::env::var("BUZZ_S3_BUCKET").unwrap_or_else(|_| "buzz-media".to_string()),
             max_image_bytes: std::env::var("BUZZ_MAX_IMAGE_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -338,10 +337,7 @@ impl Config {
                     dir.display()
                 )));
             }
-            tracing::info!(
-                "BUZZ_WEB_DIR={} — serving web UI from relay",
-                dir.display()
-            );
+            tracing::info!("BUZZ_WEB_DIR={} — serving web UI from relay", dir.display());
         }
 
         // Reject explicitly-configured secrets that are too short.
@@ -464,7 +460,7 @@ mod tests {
         let _guard = ENV_MUTEX.lock().unwrap();
         // Pick a path under temp_dir that definitely doesn't exist yet.
         let base = std::env::temp_dir().join(format!(
-            "sprout-test-git-repo-path-{}-{}",
+            "buzz-test-git-repo-path-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

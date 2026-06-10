@@ -14,7 +14,7 @@
 //! ```text
 //! cargo build --release -p git-credential-nostr
 //! GIT_CREDENTIAL_NOSTR_BIN=$PWD/target/release/git-credential-nostr \
-//!   cargo test -p sprout-test-client --test e2e_git -- --ignored --nocapture
+//!   cargo test -p buzz-test-client --test e2e_git -- --ignored --nocapture
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -121,13 +121,13 @@ impl GitS3Probe {
             .unwrap_or_else(|_| "http://localhost:9000".to_string());
         let access_key = std::env::var("BUZZ_GIT_S3_ACCESS_KEY")
             .or_else(|_| std::env::var("BUZZ_S3_ACCESS_KEY"))
-            .unwrap_or_else(|_| "sprout_dev".to_string());
+            .unwrap_or_else(|_| "buzz_dev".to_string());
         let secret_key = std::env::var("BUZZ_GIT_S3_SECRET_KEY")
             .or_else(|_| std::env::var("BUZZ_S3_SECRET_KEY"))
-            .unwrap_or_else(|_| "sprout_dev_secret".to_string());
+            .unwrap_or_else(|_| "buzz_dev_secret".to_string());
         let bucket = std::env::var("BUZZ_GIT_S3_BUCKET")
             .or_else(|_| std::env::var("BUZZ_S3_BUCKET"))
-            .unwrap_or_else(|_| "sprout-media".to_string());
+            .unwrap_or_else(|_| "buzz-media".to_string());
 
         let region = Region::Custom {
             region: "us-east-1".into(),
@@ -348,7 +348,7 @@ async fn git_concurrent_push_one_wins_and_repo_recovers() {
     post_event(&announce).await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    let tmp = tempdir_named("sprout-e2e-git-concurrent");
+    let tmp = tempdir_named("buzz-e2e-git-concurrent");
     let url = format!("{}/git/{}/{}", relay_http_url(), owner_hex, repo);
 
     git(&["clone", "--quiet", &url, "seed"], tmp.path(), &owner_nsec);
@@ -462,7 +462,7 @@ impl Drop for TempDir {
     }
 }
 fn tempdir() -> TempDir {
-    tempdir_named("sprout-e2e-git")
+    tempdir_named("buzz-e2e-git")
 }
 
 fn tempdir_named(prefix: &str) -> TempDir {

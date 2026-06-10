@@ -1,11 +1,11 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! `sprout-pubsub` — Redis pub/sub fan-out, presence tracking, and typing indicators.
+//! `buzz-pubsub` — Redis pub/sub fan-out, presence tracking, and typing indicators.
 //!
 //! # Architecture
 //!
 //! ```text
-//! sprout-relay process
+//! buzz-relay process
 //!   │
 //!   ├── deadpool-redis pool → PUBLISH, SET, ZADD, etc.
 //!   │
@@ -66,7 +66,7 @@ impl PubSubConfig {
     }
 }
 
-/// Central pub/sub manager for a Sprout relay instance.
+/// Central pub/sub manager for a Buzz relay instance.
 pub struct PubSubManager {
     pool: deadpool_redis::Pool,
     /// Redis URL used by the reconnect loop to re-establish pub/sub connections.

@@ -19,11 +19,11 @@
 //!
 //! Usage:
 //!   # default model is a ~100MB instruct model, downloaded on first run:
-//!   cargo run -p sprout-relay --example mesh_serve_client_smoke
+//!   cargo run -p buzz-relay --example mesh_serve_client_smoke
 //!
 //!   # or point at any local .gguf / hf model ref (e.g. the on-hardware 35B):
 //!   MESH_SMOKE_MODEL=/path/to/model.gguf \
-//!     cargo run -p sprout-relay --example mesh_serve_client_smoke
+//!     cargo run -p buzz-relay --example mesh_serve_client_smoke
 use std::time::Duration;
 
 use mesh_llm_sdk::{client, serve, MeshDiscoveryMode};

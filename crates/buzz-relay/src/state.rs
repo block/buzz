@@ -12,7 +12,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use deadpool_redis;
 use buzz_audit::AuditService;
 use buzz_auth::AuthService;
 use buzz_core::event::StoredEvent;
@@ -21,6 +20,7 @@ use buzz_media::MediaStorage;
 use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
+use deadpool_redis;
 
 use crate::audio::AudioRoomManager;
 use crate::config::Config;
@@ -145,7 +145,7 @@ impl ConnectionManager {
                     let count = conn.backpressure_count.fetch_add(1, Ordering::Relaxed) + 1;
                     if count >= SLOW_CLIENT_GRACE_LIMIT {
                         tracing::warn!(conn_id = %conn_id, count, "fan-out: sustained backpressure — cancelling slow client");
-                        metrics::counter!("sprout_ws_backpressure_disconnects_total").increment(1);
+                        metrics::counter!("buzz_ws_backpressure_disconnects_total").increment(1);
                         conn.cancel.cancel();
                     } else {
                         tracing::warn!(conn_id = %conn_id, count, grace = SLOW_CLIENT_GRACE_LIMIT, "fan-out: send buffer full — grace {count}/{SLOW_CLIENT_GRACE_LIMIT}");
@@ -292,11 +292,11 @@ impl AppState {
                 let t = std::time::Instant::now();
                 match search_for_worker.index_event(&stored_event).await {
                     Ok(()) => {
-                        metrics::histogram!("sprout_search_index_seconds")
+                        metrics::histogram!("buzz_search_index_seconds")
                             .record(t.elapsed().as_secs_f64());
                     }
                     Err(e) => {
-                        metrics::counter!("sprout_search_index_errors_total").increment(1);
+                        metrics::counter!("buzz_search_index_errors_total").increment(1);
                         tracing::error!(
                             event_id = %stored_event.event.id.to_hex(),
                             "Search index failed: {e}"
@@ -435,10 +435,10 @@ impl AppState {
     ) -> Result<bool, buzz_db::DbError> {
         let key = (channel_id, pubkey.to_vec());
         if let Some(cached) = self.membership_cache.get(&key) {
-            metrics::counter!("sprout_membership_cache_hits_total").increment(1);
+            metrics::counter!("buzz_membership_cache_hits_total").increment(1);
             return Ok(cached);
         }
-        metrics::counter!("sprout_membership_cache_misses_total").increment(1);
+        metrics::counter!("buzz_membership_cache_misses_total").increment(1);
         let result = self.db.is_member(channel_id, pubkey).await?;
         self.membership_cache.insert(key, result);
         Ok(result)
@@ -480,10 +480,10 @@ impl AppState {
     ) -> Result<Vec<Uuid>, buzz_db::DbError> {
         let key = pubkey.to_vec();
         if let Some(cached) = self.accessible_channels_cache.get(&key) {
-            metrics::counter!("sprout_accessible_channels_cache_hits_total").increment(1);
+            metrics::counter!("buzz_accessible_channels_cache_hits_total").increment(1);
             return Ok(cached);
         }
-        metrics::counter!("sprout_accessible_channels_cache_misses_total").increment(1);
+        metrics::counter!("buzz_accessible_channels_cache_misses_total").increment(1);
         let result = self.db.get_accessible_channel_ids(pubkey).await?;
         self.accessible_channels_cache.insert(key, result.clone());
         Ok(result)
@@ -544,10 +544,10 @@ impl AuditShutdownHandle {
 async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::NewAuditEntry) {
     let t = std::time::Instant::now();
     if let Err(e) = audit.log(entry).await {
-        metrics::counter!("sprout_audit_log_errors_total").increment(1);
+        metrics::counter!("buzz_audit_log_errors_total").increment(1);
         tracing::error!("Audit log failed: {e}");
     } else {
-        metrics::histogram!("sprout_audit_log_seconds").record(t.elapsed().as_secs_f64());
+        metrics::histogram!("buzz_audit_log_seconds").record(t.elapsed().as_secs_f64());
     }
 }
 

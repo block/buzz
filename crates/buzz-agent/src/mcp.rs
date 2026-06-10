@@ -44,7 +44,7 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "GIT_CONFIG_GLOBAL",
     // Sprout identity — dev-mcp writes NOSTR_PRIVATE_KEY to a keyfile then
     // removes it from its own env (children never see it). BUZZ_PRIVATE_KEY
-    // and BUZZ_RELAY_URL are kept for the sprout CLI.
+    // and BUZZ_RELAY_URL are kept for the buzz CLI.
     "NOSTR_PRIVATE_KEY",
     "BUZZ_PRIVATE_KEY",
     "BUZZ_RELAY_URL",

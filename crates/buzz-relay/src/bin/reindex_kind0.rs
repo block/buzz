@@ -11,7 +11,7 @@
 //! Usage (from the repo root, with .env sourced):
 //!
 //! ```
-//! cargo run --release -p sprout-relay --bin sprout-reindex-kind0
+//! cargo run --release -p buzz-relay --bin sprout-reindex-kind0
 //! ```
 //!
 //! Idempotent — Typesense uses upsert semantics, so running twice is safe.

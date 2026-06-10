@@ -67,7 +67,7 @@ impl SubscriptionRegistry {
             .entry(conn_id)
             .or_default()
             .insert(sub_id.clone(), (filters.clone(), channel_id));
-        metrics::gauge!("sprout_subscriptions_active").increment(1.0);
+        metrics::gauge!("buzz_subscriptions_active").increment(1.0);
 
         if let Some(ch_id) = channel_id {
             match extract_kinds_from_filters(&filters) {
@@ -136,7 +136,7 @@ impl SubscriptionRegistry {
         if let Some(mut conn_subs) = self.subs.get_mut(&conn_id) {
             if let Some((filters, channel_id)) = conn_subs.remove(sub_id) {
                 self.remove_from_index(conn_id, sub_id, &filters, channel_id);
-                metrics::gauge!("sprout_subscriptions_active").decrement(1.0);
+                metrics::gauge!("buzz_subscriptions_active").decrement(1.0);
             }
         }
     }
@@ -148,7 +148,7 @@ impl SubscriptionRegistry {
             for (sub_id, (filters, channel_id)) in &conn_subs {
                 self.remove_from_index(conn_id, sub_id, filters, *channel_id);
             }
-            metrics::gauge!("sprout_subscriptions_active").decrement(count as f64);
+            metrics::gauge!("buzz_subscriptions_active").decrement(count as f64);
         }
     }
 
@@ -457,9 +457,9 @@ fn extract_kinds_from_filters(filters: &[Filter]) -> Option<Vec<Kind>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use buzz_core::StoredEvent;
     use chrono::Utc;
     use nostr::{EventBuilder, Keys, Kind, Tag};
-    use buzz_core::StoredEvent;
 
     fn make_stored_event(kind: Kind, channel_id: Option<Uuid>) -> StoredEvent {
         let keys = Keys::generate();

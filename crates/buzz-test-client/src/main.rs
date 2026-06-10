@@ -1,9 +1,9 @@
-//! `sprout-test-cli` — Manual testing CLI for the Sprout relay.
+//! `buzz-test-cli` — Manual testing CLI for the Buzz relay.
 //!
 //! # Usage
 //!
 //! ```text
-//! sprout-test-cli [OPTIONS]
+//! buzz-test-cli [OPTIONS]
 //!
 //! Options:
 //!   --url <URL>        Relay WebSocket URL [default: ws://localhost:3000]
@@ -17,25 +17,25 @@
 //!
 //! Send a message:
 //! ```text
-//! sprout-test-cli --channel my-channel --send "Hello, Sprout!"
+//! buzz-test-cli --channel my-channel --send "Hello, Buzz!"
 //! ```
 //!
 //! Subscribe and watch events:
 //! ```text
-//! sprout-test-cli --channel my-channel --subscribe
+//! buzz-test-cli --channel my-channel --subscribe
 //! ```
 
 use std::time::Duration;
 
+use buzz_test_client::{BuzzTestClient, RelayMessage};
 use nostr::{Filter, Keys};
-use buzz_test_client::{RelayMessage, BuzzTestClient};
 
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "sprout_test_client=debug".to_string())
+                .unwrap_or_else(|_| "buzz_test_client=debug".to_string())
                 .as_str(),
         )
         .init();
@@ -209,10 +209,10 @@ fn parse_args(args: &[String]) -> CliOpts {
 
 fn print_help() {
     println!(
-        r#"sprout-test-cli — Manual testing CLI for the Sprout relay
+        r#"buzz-test-cli — Manual testing CLI for the Buzz relay
 
 USAGE:
-    sprout-test-cli [OPTIONS]
+    buzz-test-cli [OPTIONS]
 
 OPTIONS:
     --url <URL>        Relay WebSocket URL [default: ws://localhost:3000]
@@ -224,13 +224,13 @@ OPTIONS:
 
 EXAMPLES:
     # Send a message to a channel
-    sprout-test-cli --channel my-channel --send "Hello, Sprout!"
+    buzz-test-cli --channel my-channel --send "Hello, Buzz!"
 
     # Subscribe and watch live events
-    sprout-test-cli --channel my-channel --subscribe
+    buzz-test-cli --channel my-channel --subscribe
 
     # Use a different relay URL
-    sprout-test-cli --url ws://relay.example.com --channel test --subscribe
+    buzz-test-cli --url ws://relay.example.com --channel test --subscribe
 "#
     );
 }

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::error::{DbError, Result};
 
-// Re-export the canonical enum definitions from sprout-core.
+// Re-export the canonical enum definitions from buzz-core.
 // These live in core (zero I/O deps) so the SDK can share them
 // without pulling in sqlx/tokio.
 pub use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
@@ -1225,7 +1225,7 @@ mod tests {
     use crate::user::{ensure_user, set_agent_owner};
     use nostr::Keys;
 
-    const TEST_DB_URL: &str = "postgres://sprout:sprout_dev@localhost:5432/sprout";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
 
     async fn setup_pool() -> PgPool {
         PgPool::connect(TEST_DB_URL)

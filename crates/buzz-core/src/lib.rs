@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! `sprout-core` — zero-I/O foundation types for the Sprout relay.
+//! `buzz-core` — zero-I/O foundation types for the Buzz relay.
 //!
 //! Provides [`StoredEvent`], filter matching, kind constants, and event
 //! verification. All other Sprout crates depend on this one.

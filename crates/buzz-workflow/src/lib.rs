@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
-//! `sprout-workflow` — Workflow engine for Sprout.
+//! `buzz-workflow` — Workflow engine for Sprout.
 //!
 //! Channel-scoped automations with sequential execution, variable substitution,
 //! conditional logic, and execution traces.
@@ -41,11 +41,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use chrono::{DateTime, Utc};
-use dashmap::DashMap;
 use buzz_core::kind::{event_kind_u32, is_workflow_execution_kind, KIND_REACTION};
 use buzz_db::workflow::RunStatus;
 use buzz_db::Db;
+use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 

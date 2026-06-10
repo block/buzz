@@ -9,7 +9,7 @@
 //! Start the relay, then run:
 //!
 //! ```text
-//! RELAY_URL=ws://localhost:3001 cargo test -p sprout-test-client --test e2e_rest_api -- --ignored
+//! RELAY_URL=ws://localhost:3001 cargo test -p buzz-test-client --test e2e_rest_api -- --ignored
 //! ```
 //!
 //! # Auth
@@ -27,9 +27,9 @@
 
 use std::time::Duration;
 
+use buzz_test_client::BuzzTestClient;
 use nostr::{EventBuilder, Keys, Kind, Tag};
 use reqwest::Client;
-use buzz_test_client::BuzzTestClient;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

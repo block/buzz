@@ -155,7 +155,7 @@ pub const KIND_NIP29_GROUP_ROLES: u32 = 39003;
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
 
-/// Mesh-LLM relay status (relay-signed, parameterized replaceable, d=sprout-relay-mesh).
+/// Mesh-LLM relay status (relay-signed, parameterized replaceable, d=buzz-relay-mesh).
 ///
 /// Published only by the relay. Carries a sanitized, member-readable projection
 /// of mesh status, including EndpointAddr dial pointers for serving nodes.

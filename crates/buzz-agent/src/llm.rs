@@ -12,7 +12,7 @@ use crate::types::{
 
 /// Databricks OAuth client_id — the public Databricks-published CLI client.
 /// PKCE-only, no secret. Same identifier goose uses, so a user's browser
-/// consent for `databricks-cli` covers sprout-agent too.
+/// consent for `databricks-cli` covers buzz-agent too.
 const DATABRICKS_CLIENT_ID: &str = "databricks-cli";
 const DATABRICKS_OAUTH_SCOPES: &[&str] = &["all-apis", "offline_access"];
 

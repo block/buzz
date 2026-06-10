@@ -8,10 +8,10 @@
 
 use std::sync::Arc;
 
+use buzz_core::kind::KIND_MESH_LLM_RELAY_STATUS;
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use buzz_core::kind::KIND_MESH_LLM_RELAY_STATUS;
 use tracing::info;
 
 use crate::handlers::event::dispatch_persistent_event;
@@ -23,7 +23,7 @@ use crate::state::AppState;
 /// d_tag)`, and the author is always the relay key here). This avoids two
 /// members' reports clobbering each other and sidesteps any read-modify-write
 /// race on a single shared note. Discovery reads all notes with the `k` tag.
-pub const MESH_STATUS_D_TAG_PREFIX: &str = "sprout-relay-mesh";
+pub const MESH_STATUS_D_TAG_PREFIX: &str = "buzz-relay-mesh";
 
 /// Build the per-reporter d-tag for a mesh status note.
 pub fn mesh_status_d_tag(reporter_pubkey_hex: &str) -> String {

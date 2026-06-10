@@ -1,4 +1,4 @@
-//! Integration test: fake LLM HTTP server + sprout-agent subprocess.
+//! Integration test: fake LLM HTTP server + buzz-agent subprocess.
 //!
 //! Drives the agent through the ACP wire protocol and verifies:
 //!   - initialize / session/new responses
@@ -70,7 +70,7 @@ struct Harness {
 
 impl Harness {
     async fn spawn(base_url: &str) -> Self {
-        let bin = env!("CARGO_BIN_EXE_sprout-agent");
+        let bin = env!("CARGO_BIN_EXE_buzz-agent");
         let mut cmd = tokio::process::Command::new(bin);
         cmd.env("BUZZ_AGENT_PROVIDER", "openai")
             .env("OPENAI_COMPAT_API_KEY", "test")
@@ -83,7 +83,7 @@ impl Harness {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
-        let mut child = cmd.spawn().expect("spawn sprout-agent");
+        let mut child = cmd.spawn().expect("spawn buzz-agent");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Self {
@@ -313,7 +313,7 @@ async fn rejects_oversized_line() {
     // Set a tiny max line and send something larger; agent must abort with an
     // io error and not OOM.
     let url = spawn_fake_llm(vec![]).await;
-    let bin = env!("CARGO_BIN_EXE_sprout-agent");
+    let bin = env!("CARGO_BIN_EXE_buzz-agent");
     let mut cmd = tokio::process::Command::new(bin);
     cmd.env("BUZZ_AGENT_PROVIDER", "openai")
         .env("OPENAI_COMPAT_API_KEY", "test")

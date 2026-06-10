@@ -6,7 +6,7 @@
 //!   2. accepts a POST to /responses, replies 200 with a Responses-shaped
 //!      JSON envelope.
 //!
-//! Spawns `sprout-agent` with `provider=openai` + `OPENAI_COMPAT_API=auto`
+//! Spawns `buzz-agent` with `provider=openai` + `OPENAI_COMPAT_API=auto`
 //! pointed at the fake server, drives one prompt through the ACP wire
 //! protocol, and verifies the prompt completes with `stopReason=end_turn`
 //! — which can only happen if the second (Responses) request succeeded.
@@ -127,7 +127,7 @@ fn spawn_fake_provider() -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
 async fn openai_auto_upgrades_chat_to_responses_on_databricks_signal() {
     let (base_url, chat_hits, resp_hits) = spawn_fake_provider();
 
-    let bin = env!("CARGO_BIN_EXE_sprout-agent");
+    let bin = env!("CARGO_BIN_EXE_buzz-agent");
     let mut cmd = Command::new(bin);
     cmd.env("BUZZ_AGENT_PROVIDER", "openai")
         .env("OPENAI_COMPAT_API_KEY", "test")
@@ -144,7 +144,7 @@ async fn openai_auto_upgrades_chat_to_responses_on_databricks_signal() {
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
 
-    let mut child = cmd.spawn().expect("spawn sprout-agent");
+    let mut child = cmd.spawn().expect("spawn buzz-agent");
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
 

@@ -9,7 +9,6 @@ use chrono::Utc;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use nostr::Event;
 use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
@@ -34,6 +33,7 @@ use buzz_core::kind::{
     RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
 };
 use buzz_core::verification::verify_event;
+use nostr::Event;
 
 use crate::state::AppState;
 
@@ -897,7 +897,7 @@ fn validate_engram_envelope(event: &Event) -> Result<(), String> {
 /// decryption happen at the reader. The intent is to refuse obvious junk so a
 /// malformed event cannot win NIP-33 replacement against a valid head and then
 /// be silently skipped by `validate_and_decrypt`. Mirrors the validator in
-/// `sprout-pair-relay::validate_nip44_content`.
+/// `buzz-pair-relay::validate_nip44_content`.
 fn validate_engram_nip44_content(content: &str) -> Result<(), String> {
     if content.is_empty() {
         return Err("agent-engram content must not be empty (NIP-44 ciphertext)".to_string());
