@@ -78,7 +78,7 @@ impl Llm {
             http_stream,
             auto_upgraded: AtomicBool::new(false),
             auth,
-            chunk_timeout: cfg.llm_stream_chunk_timeout,
+            chunk_timeout: cfg.llm_body_chunk_timeout,
             stream_chunk_timeout: cfg.stream_chunk_timeout,
             first_byte_timeout: cfg.llm_timeout,
         })
@@ -1696,7 +1696,7 @@ mod tests {
             max_rounds: 10,
             max_output_tokens: 1024,
             llm_timeout: Duration::from_secs(10),
-            llm_stream_chunk_timeout: Duration::from_secs(120),
+            llm_body_chunk_timeout: Duration::from_secs(120),
             stream_chunk_timeout: Duration::from_secs(30),
             tool_timeout: Duration::from_secs(10),
             mcp_init_timeout: Duration::from_secs(10),

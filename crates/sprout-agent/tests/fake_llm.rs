@@ -16,6 +16,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+mod common;
+use common::openai_to_sse_events;
+
 // ─── Fake LLM server ────────────────────────────────────────────────────────
 
 async fn spawn_fake_llm(responses: Vec<Value>) -> String {
@@ -105,71 +108,6 @@ async fn spawn_fake_llm(responses: Vec<Value>) -> String {
     });
     url
 }
-
-/// Convert a canned OpenAI Chat Completions response into SSE delta events.
-fn openai_to_sse_events(response: &Value) -> Vec<String> {
-    let mut events = Vec::new();
-    let choice = &response["choices"][0];
-    let msg = &choice["message"];
-
-    // Text content
-    if let Some(content) = msg.get("content").and_then(Value::as_str) {
-        if !content.is_empty() {
-            events.push(
-                json!({
-                    "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": null}]
-                })
-                .to_string(),
-            );
-        }
-    }
-
-    // Tool calls
-    if let Some(tcs) = msg.get("tool_calls").and_then(Value::as_array) {
-        for (i, tc) in tcs.iter().enumerate() {
-            let id = tc.get("id").and_then(Value::as_str).unwrap_or("");
-            let name = tc["function"]
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let args = tc["function"]
-                .get("arguments")
-                .and_then(Value::as_str)
-                .unwrap_or("{}");
-            // First chunk: id + name
-            events.push(json!({
-                "choices": [{"index": 0, "delta": {
-                    "tool_calls": [{"index": i, "id": id, "function": {"name": name, "arguments": ""}}]
-                }, "finish_reason": null}]
-            }).to_string());
-            // Second chunk: arguments
-            events.push(
-                json!({
-                    "choices": [{"index": 0, "delta": {
-                        "tool_calls": [{"index": i, "function": {"arguments": args}}]
-                    }, "finish_reason": null}]
-                })
-                .to_string(),
-            );
-        }
-    }
-
-    // Final chunk with finish_reason
-    let finish = choice
-        .get("finish_reason")
-        .and_then(Value::as_str)
-        .unwrap_or("stop");
-    events.push(
-        json!({
-            "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
-        })
-        .to_string(),
-    );
-
-    events
-}
-
 // ─── ACP harness ────────────────────────────────────────────────────────────
 
 struct Harness {
