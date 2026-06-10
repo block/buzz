@@ -53,8 +53,15 @@ pub fn run(state: &SharedState, p: ReadFileParams) -> Result<String, ErrorData> 
     );
     for (i, line) in slice.iter().enumerate() {
         let line_number = offset + i + 1;
-        out.push_str(&format!("{line_number}\t{line}\n"));
+        out.push_str(&format!("{line_number}:{line}\n"));
     }
+
+    if end_line < total {
+        out.push_str(&format!(
+            "[showing lines {start_line}-{end_line} of {total}; use offset={end_line} to continue]\n"
+        ));
+    }
+
     Ok(out)
 }
 
@@ -83,11 +90,15 @@ mod tests {
         };
         let out = run(&state, p).expect("ok");
         assert!(out.contains("lines 1-5 of 5"), "out: {out}");
-        assert!(out.contains("1\tline1"), "out: {out}");
-        assert!(out.contains("2\tline2"), "out: {out}");
-        assert!(out.contains("3\tline3"), "out: {out}");
-        assert!(out.contains("4\tline4"), "out: {out}");
-        assert!(out.contains("5\tline5"), "out: {out}");
+        assert!(out.contains("1:line1"), "out: {out}");
+        assert!(out.contains("2:line2"), "out: {out}");
+        assert!(out.contains("3:line3"), "out: {out}");
+        assert!(out.contains("4:line4"), "out: {out}");
+        assert!(out.contains("5:line5"), "out: {out}");
+        assert!(
+            !out.contains("[showing lines"),
+            "full file should have no truncation footer: {out}"
+        );
     }
 
     #[test]
@@ -105,10 +116,12 @@ mod tests {
         };
         let out = run(&state, p).expect("ok");
         assert!(out.contains("lines 4-5 of 10"), "out: {out}");
-        let line_count = out.lines().skip(1).count(); // skip header
-        assert_eq!(line_count, 2, "expected 2 data lines, got: {out}");
-        assert!(out.contains("4\tline4"), "out: {out}");
-        assert!(out.contains("5\tline5"), "out: {out}");
+        assert!(out.contains("4:line4"), "out: {out}");
+        assert!(out.contains("5:line5"), "out: {out}");
+        assert!(
+            out.contains("[showing lines 4-5 of 10; use offset=5 to continue]"),
+            "out: {out}"
+        );
     }
 
     #[test]
@@ -209,6 +222,6 @@ mod tests {
         };
         let out = run(&state, p).expect("ok");
         assert!(out.contains("lines 1-3 of 3"), "out: {out}");
-        assert!(out.contains("3\tline3"), "out: {out}");
+        assert!(out.contains("3:line3"), "out: {out}");
     }
 }
