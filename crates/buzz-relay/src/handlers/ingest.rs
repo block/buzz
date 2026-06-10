@@ -1037,6 +1037,20 @@ fn validate_event_reminder(event: &Event) -> Result<(), &'static str> {
     // `not_before` is optional — terminal states (done/cancelled) and bookmarks
     // omit it. The ordering check only applies when both are present.
     if let Some(nb) = not_before {
+        // Reject reminders scheduled beyond the configured horizon. The same
+        // SPROUT_MAX_NOT_BEFORE_DELTA env var is advertised in NIP-11.
+        let max_delta: u64 = std::env::var("SPROUT_MAX_NOT_BEFORE_DELTA")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(31_536_000); // 1 year default
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if nb > now + max_delta {
+            return Err("not_before too far in future");
+        }
+
         if let Some(exp) = expiration {
             if let Ok(exp) = exp.parse::<u64>() {
                 if exp <= nb {
@@ -2456,6 +2470,17 @@ mod tests {
         // Terminal states (done/cancelled) and bookmarks omit not_before
         let ev = make_reminder(&[&["d", "abc"]]);
         assert!(validate_event_reminder(&ev).is_ok());
+    }
+
+    #[test]
+    fn reminder_rejects_not_before_too_far_in_future() {
+        // `not_before` beyond the max horizon (default 1 year) is rejected.
+        let far_future = (chrono::Utc::now().timestamp() as u64) + 63_072_000; // ~2 years
+        let ev = make_reminder(&[&["d", "abc"], &["not_before", &far_future.to_string()]]);
+        assert_eq!(
+            validate_event_reminder(&ev),
+            Err("not_before too far in future")
+        );
     }
 
     #[test]

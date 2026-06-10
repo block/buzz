@@ -32,6 +32,9 @@ pub struct RelayInfo {
     pub contact: Option<String>,
     /// NIPs supported by this relay.
     pub supported_nips: Vec<u32>,
+    /// Draft/extension protocol identifiers supported by this relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supported_extensions: Option<Vec<String>>,
     /// URL of the relay software repository.
     pub software: String,
     /// Relay software version string.
@@ -65,6 +68,12 @@ pub struct RelayLimitation {
     pub payment_required: bool,
     /// Whether writes are restricted to authorized pubkeys.
     pub restricted_writes: bool,
+    /// NIP-ER: how the relay delivers due reminders ("push" or "lazy").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub due_delivery_mode: Option<String>,
+    /// NIP-ER: maximum allowed `not_before` horizon in seconds from now.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_not_before_delta: Option<u64>,
 }
 
 /// Canonical `RelayLimitation` advertised by this relay.
@@ -74,6 +83,11 @@ pub struct RelayLimitation {
 /// `AuthState::Authenticated`. This is independent of the REST API token
 /// toggle (`config.require_auth_token`).
 fn relay_limitation() -> RelayLimitation {
+    let max_not_before_delta: u64 = std::env::var("SPROUT_MAX_NOT_BEFORE_DELTA")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(31_536_000); // 1 year default
+
     RelayLimitation {
         max_message_length: Some(MAX_FRAME_BYTES as u64),
         max_subscriptions: Some(1024),
@@ -84,6 +98,8 @@ fn relay_limitation() -> RelayLimitation {
         auth_required: true,
         payment_required: false,
         restricted_writes: true,
+        due_delivery_mode: Some("push".to_string()),
+        max_not_before_delta: Some(max_not_before_delta),
     }
 }
 
@@ -119,6 +135,7 @@ impl RelayInfo {
             pubkey: None,
             contact: None,
             supported_nips,
+            supported_extensions: Some(vec!["nip-er".to_string()]),
             software: "https://github.com/block/sprout".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             limitation: Some(relay_limitation()),

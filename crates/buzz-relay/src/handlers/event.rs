@@ -61,6 +61,23 @@ pub async fn filter_fanout_by_access(
     stored_event: &StoredEvent,
     matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
 ) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
+    // Author-only kinds: only the event's author may receive fan-out.
+    // Checked before channel gating so it applies to all delivery paths
+    // (local dispatch, cross-pod subscribe_local, scheduler-published events).
+    let kind_u32 = event_kind_u32(&stored_event.event);
+    if AUTHOR_ONLY_KINDS.contains(&kind_u32) {
+        let author_bytes = stored_event.event.pubkey.to_bytes();
+        return matches
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                state
+                    .conn_manager
+                    .pubkey_for_conn(*conn_id)
+                    .is_some_and(|pk| pk.as_slice() == author_bytes.as_slice())
+            })
+            .collect();
+    }
+
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
     };
@@ -1128,6 +1145,32 @@ mod tests {
             let out =
                 filter_fanout_by_access(&state, &channel_event(Some(channel_id)), matches).await;
             assert_eq!(out, vec![(member, "m".to_string())]);
+        }
+
+        #[tokio::test]
+        async fn author_only_kind_delivers_only_to_author() {
+            let state = test_state().await;
+            let author_keys = Keys::generate();
+            let author_pk = author_keys.public_key().to_bytes().to_vec();
+            let other_pk = vec![99u8; 32];
+
+            let author_conn = register_conn(&state, Some(author_pk.clone()));
+            let other_conn = register_conn(&state, Some(other_pk));
+            let unauthed_conn = register_conn(&state, None);
+
+            // Build a kind:30300 (event reminder) — an author-only kind.
+            let event = EventBuilder::new(Kind::Custom(30300), "encrypted-content")
+                .sign_with_keys(&author_keys)
+                .expect("sign event");
+            let stored = StoredEvent::new(event, None);
+
+            let matches = vec![
+                (author_conn, "a".to_string()),
+                (other_conn, "o".to_string()),
+                (unauthed_conn, "u".to_string()),
+            ];
+            let out = filter_fanout_by_access(&state, &stored, matches).await;
+            assert_eq!(out, vec![(author_conn, "a".to_string())]);
         }
     }
 }
