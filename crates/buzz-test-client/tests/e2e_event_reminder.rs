@@ -145,18 +145,17 @@ async fn test_reminder_accepted_with_valid_not_before() {
 
 #[tokio::test]
 #[ignore]
-async fn test_reminder_rejected_missing_not_before() {
+async fn test_reminder_accepted_missing_not_before() {
     let client = http_client();
     let keys = Keys::generate();
     let d_tag = uuid::Uuid::new_v4().to_string();
 
-    // No not_before tag at all
+    // No not_before tag — valid for terminal states (done/cancelled) and bookmarks
     let event = build_reminder(&keys, &d_tag, vec![]);
-    let (accepted, msg) = submit_event_http(&client, &keys, &event).await;
-    assert!(!accepted, "should reject missing not_before");
+    let (accepted, _msg) = submit_event_http(&client, &keys, &event).await;
     assert!(
-        msg.contains("malformed not_before"),
-        "unexpected message: {msg}"
+        accepted,
+        "should accept missing not_before (bookmark/terminal)"
     );
 }
 
@@ -336,6 +335,93 @@ async fn test_reminder_accepted_with_malformed_expiration() {
     assert!(
         accepted,
         "malformed expiration should not block reminder: {msg}"
+    );
+}
+
+// ── d-tag validation tests ──────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore]
+async fn test_reminder_rejected_missing_d_tag() {
+    let client = http_client();
+    let keys = Keys::generate();
+
+    // Build event without d tag
+    let tags = vec![Tag::parse(["not_before", "1717000000"]).unwrap()];
+    let event = EventBuilder::new(
+        Kind::Custom(KIND_EVENT_REMINDER),
+        "nip44-ciphertext-placeholder",
+    )
+    .tags(tags)
+    .sign_with_keys(&keys)
+    .unwrap();
+    let (accepted, msg) = submit_event_http(&client, &keys, &event).await;
+    assert!(!accepted, "should reject missing d tag");
+    assert!(msg.contains("missing d tag"), "unexpected message: {msg}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_reminder_rejected_empty_d_tag() {
+    let client = http_client();
+    let keys = Keys::generate();
+
+    let tags = vec![
+        Tag::parse(["d", ""]).unwrap(),
+        Tag::parse(["not_before", "1717000000"]).unwrap(),
+    ];
+    let event = EventBuilder::new(
+        Kind::Custom(KIND_EVENT_REMINDER),
+        "nip44-ciphertext-placeholder",
+    )
+    .tags(tags)
+    .sign_with_keys(&keys)
+    .unwrap();
+    let (accepted, msg) = submit_event_http(&client, &keys, &event).await;
+    assert!(!accepted, "should reject empty d tag");
+    assert!(msg.contains("empty d tag"), "unexpected message: {msg}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_reminder_rejected_duplicate_d_tag() {
+    let client = http_client();
+    let keys = Keys::generate();
+
+    let tags = vec![
+        Tag::parse(["d", "abc"]).unwrap(),
+        Tag::parse(["d", "def"]).unwrap(),
+        Tag::parse(["not_before", "1717000000"]).unwrap(),
+    ];
+    let event = EventBuilder::new(
+        Kind::Custom(KIND_EVENT_REMINDER),
+        "nip44-ciphertext-placeholder",
+    )
+    .tags(tags)
+    .sign_with_keys(&keys)
+    .unwrap();
+    let (accepted, msg) = submit_event_http(&client, &keys, &event).await;
+    assert!(!accepted, "should reject duplicate d tag");
+    assert!(msg.contains("duplicate d tag"), "unexpected message: {msg}");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_reminder_accepted_expiration_without_not_before() {
+    // Terminal/bookmark with expiration but no not_before — no ordering check applies
+    let client = http_client();
+    let keys = Keys::generate();
+    let d_tag = uuid::Uuid::new_v4().to_string();
+
+    let event = build_reminder(
+        &keys,
+        &d_tag,
+        vec![Tag::parse(["expiration", "1777542730"]).unwrap()],
+    );
+    let (accepted, msg) = submit_event_http(&client, &keys, &event).await;
+    assert!(
+        accepted,
+        "expiration without not_before should be accepted: {msg}"
     );
 }
 

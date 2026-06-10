@@ -987,13 +987,16 @@ fn validate_not_before(tag_value: &str) -> Result<u64, &'static str> {
 /// reaches NIP-33 parameterized replacement.
 ///
 /// The relay never decrypts the reminder; it only enforces the public schedule
-/// tags. A reminder MUST carry exactly one valid `not_before`, and — when an
-/// optional NIP-40 `expiration` is present — `expiration` MUST be strictly after
-/// `not_before` (an `expiration <= not_before` window would expire the reminder
-/// before it ever became due).
+/// tags. A reminder carries at most one `not_before` (omitted on terminal
+/// states), and — when both `not_before` and an optional NIP-40 `expiration`
+/// are present — `expiration` MUST be strictly after `not_before` (an
+/// `expiration <= not_before` window would expire the reminder before it ever
+/// became due).
 fn validate_event_reminder(event: &Event) -> Result<(), &'static str> {
     let mut not_before: Option<u64> = None;
     let mut expiration: Option<&str> = None;
+    let mut d_count = 0u8;
+    let mut d_empty = false;
 
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
@@ -1010,20 +1013,35 @@ fn validate_event_reminder(event: &Event) -> Result<(), &'static str> {
                 not_before = Some(validate_not_before(&parts[1])?);
             }
             "expiration" => expiration = Some(&parts[1]),
+            "d" => {
+                d_count = d_count.saturating_add(1);
+                if parts[1].is_empty() {
+                    d_empty = true;
+                }
+            }
             _ => {}
         }
     }
 
-    let not_before = not_before.ok_or("malformed not_before")?;
+    // d-tag: must have exactly one, non-empty
+    if d_count == 0 {
+        return Err("missing d tag");
+    }
+    if d_count > 1 {
+        return Err("duplicate d tag");
+    }
+    if d_empty {
+        return Err("empty d tag");
+    }
 
-    // `expiration` is optional and governed by NIP-40, not this validator.
-    // We enforce only the spec's ordering rule (line 130), and only when the
-    // value parses — an unparseable `expiration` is NIP-40's concern, so we
-    // must not assert a false ordering reason for it.
-    if let Some(exp) = expiration {
-        if let Ok(exp) = exp.parse::<u64>() {
-            if exp <= not_before {
-                return Err("expiration before not_before");
+    // `not_before` is optional — terminal states (done/cancelled) and bookmarks
+    // omit it. The ordering check only applies when both are present.
+    if let Some(nb) = not_before {
+        if let Some(exp) = expiration {
+            if let Ok(exp) = exp.parse::<u64>() {
+                if exp <= nb {
+                    return Err("expiration before not_before");
+                }
             }
         }
     }
@@ -2434,9 +2452,10 @@ mod tests {
     }
 
     #[test]
-    fn reminder_rejects_missing_not_before() {
+    fn reminder_accepts_missing_not_before() {
+        // Terminal states (done/cancelled) and bookmarks omit not_before
         let ev = make_reminder(&[&["d", "abc"]]);
-        assert_eq!(validate_event_reminder(&ev), Err("malformed not_before"));
+        assert!(validate_event_reminder(&ev).is_ok());
     }
 
     #[test]
@@ -2499,5 +2518,43 @@ mod tests {
         assert!(is_global_only_kind(KIND_EVENT_REMINDER));
         assert!(!requires_h_channel_scope(KIND_EVENT_REMINDER));
         assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER));
+    }
+
+    #[test]
+    fn reminder_accepts_expiration_without_not_before() {
+        // A terminal/bookmark with expiration but no not_before is valid —
+        // no ordering check applies when not_before is absent.
+        let ev = make_reminder(&[&["d", "abc"], &["expiration", "1777542730"]]);
+        assert!(validate_event_reminder(&ev).is_ok());
+    }
+
+    #[test]
+    fn reminder_rejects_missing_d_tag() {
+        let ev = make_event_with_tags(
+            KIND_EVENT_REMINDER,
+            "ciphertext",
+            &[&["not_before", "1717000000"]],
+        );
+        assert_eq!(validate_event_reminder(&ev), Err("missing d tag"));
+    }
+
+    #[test]
+    fn reminder_rejects_empty_d_tag() {
+        let ev = make_event_with_tags(
+            KIND_EVENT_REMINDER,
+            "ciphertext",
+            &[&["d", ""], &["not_before", "1717000000"]],
+        );
+        assert_eq!(validate_event_reminder(&ev), Err("empty d tag"));
+    }
+
+    #[test]
+    fn reminder_rejects_duplicate_d_tag() {
+        let ev = make_event_with_tags(
+            KIND_EVENT_REMINDER,
+            "ciphertext",
+            &[&["d", "abc"], &["d", "def"], &["not_before", "1717000000"]],
+        );
+        assert_eq!(validate_event_reminder(&ev), Err("duplicate d tag"));
     }
 }
