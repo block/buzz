@@ -2801,4 +2801,440 @@ mod tests {
             "unexpected error: {err_msg}"
         );
     }
+
+    // ── Delayed-write TCP server helper ────────────────────────────────────
+    //
+    // Spawns a one-shot HTTP server that writes SSE chunks with configurable
+    // delays between them. Used by Gap 1 (split-boundary) and Gap 3 (timeout
+    // switchover) tests.
+
+    /// A scheduled piece of an SSE response: write `data` after waiting `delay`.
+    struct ScheduledWrite {
+        data: String,
+        delay: Duration,
+    }
+
+    /// Spawn a TCP server that accepts one connection, drains the HTTP request,
+    /// sends SSE response headers, then writes each `ScheduledWrite` in order
+    /// (delay first, then data). Returns the server address.
+    async fn spawn_delayed_sse_server(writes: Vec<ScheduledWrite>) -> std::net::SocketAddr {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            // Drain the HTTP request headers.
+            loop {
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                if n == 0 {
+                    return;
+                }
+                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let header =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            let _ = sock.write_all(header.as_bytes()).await;
+            let _ = sock.flush().await;
+            for w in writes {
+                if !w.delay.is_zero() {
+                    tokio::time::sleep(w.delay).await;
+                }
+                let _ = sock.write_all(w.data.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+            let _ = sock.shutdown().await;
+        });
+        addr
+    }
+
+    // ── Gap 3: Dual-timeout switchover ─────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_timeout_uses_first_byte_before_content() {
+        // first_byte=80ms, stream_chunk=20ms. A non-content event arrives,
+        // then a 50ms gap, then a content delta. The 80ms first_byte window
+        // governs until content arrives, so the 50ms gap is fine.
+        let events = vec![
+            ScheduledWrite {
+                data: "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10}}}\n\n".into(),
+                delay: Duration::ZERO,
+            },
+            ScheduledWrite {
+                data: "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n".into(),
+                delay: Duration::from_millis(50),
+            },
+            ScheduledWrite {
+                data: "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n".into(),
+                delay: Duration::ZERO,
+            },
+        ];
+        let addr = spawn_delayed_sse_server(events).await;
+
+        let mut c = cfg(Provider::Anthropic);
+        c.llm_timeout = Duration::from_millis(80);
+        c.stream_chunk_timeout = Duration::from_millis(20);
+        let llm = Llm::new(&c).unwrap();
+        let emitter = StreamEmitter::noop();
+
+        let resp = reqwest::get(format!("http://{addr}")).await.unwrap();
+        let result = llm.consume_sse_anthropic(resp, &emitter).await.unwrap();
+        assert_eq!(result.text, "hello");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_timeout_switches_to_stream_chunk_after_content() {
+        // first_byte=500ms, stream_chunk=30ms. One content delta arrives,
+        // then a 50ms stall. The tighter stream_chunk timeout (30ms) should
+        // fire because we already saw content.
+        let events = vec![
+            ScheduledWrite {
+                data: "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n".into(),
+                delay: Duration::ZERO,
+            },
+            ScheduledWrite {
+                // This arrives after 50ms, but stream_chunk is only 30ms.
+                data: "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n".into(),
+                delay: Duration::from_millis(50),
+            },
+        ];
+        let addr = spawn_delayed_sse_server(events).await;
+
+        let mut c = cfg(Provider::Anthropic);
+        c.llm_timeout = Duration::from_millis(500);
+        c.stream_chunk_timeout = Duration::from_millis(30);
+        let llm = Llm::new(&c).unwrap();
+        let emitter = StreamEmitter::noop();
+
+        let resp = reqwest::get(format!("http://{addr}")).await.unwrap();
+        let result = llm.consume_sse_anthropic(resp, &emitter).await;
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("stalled"),
+            "expected stall error, got: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_timeout_first_byte_fires_when_no_content_arrives() {
+        // first_byte=30ms. Server sends nothing then closes after 100ms.
+        // The first_byte timeout should fire within ~30ms.
+        let events = vec![
+            ScheduledWrite {
+                data: String::new(), // nothing useful
+                delay: Duration::from_millis(100),
+            },
+        ];
+        let addr = spawn_delayed_sse_server(events).await;
+
+        let mut c = cfg(Provider::Anthropic);
+        c.llm_timeout = Duration::from_millis(30);
+        c.stream_chunk_timeout = Duration::from_millis(500);
+        let llm = Llm::new(&c).unwrap();
+        let emitter = StreamEmitter::noop();
+
+        let resp = reqwest::get(format!("http://{addr}")).await.unwrap();
+        let start = tokio::time::Instant::now();
+        let result = llm.consume_sse_anthropic(resp, &emitter).await;
+        let elapsed = start.elapsed();
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("stalled"), "expected stall error, got: {err}");
+        // Should fire around 30ms, not wait for the full 100ms server delay.
+        assert!(
+            elapsed < Duration::from_millis(80),
+            "timeout fired too late: {elapsed:?}"
+        );
+    }
+
+    // ── Gap 1: SseReader split-boundary framing ────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sse_reader_event_split_across_chunks() {
+        // The "\n\n" event boundary is split across two TCP writes.
+        let events = vec![
+            ScheduledWrite {
+                data: "data: {\"type\":\"first\"}\n".into(),
+                delay: Duration::ZERO,
+            },
+            ScheduledWrite {
+                // Second write starts with the second \n completing the boundary,
+                // then delivers the next event.
+                data: "\ndata: {\"type\":\"second\"}\n\n".into(),
+                delay: Duration::from_millis(5),
+            },
+        ];
+        let addr = spawn_delayed_sse_server(events).await;
+
+        let resp = reqwest::get(format!("http://{addr}")).await.unwrap();
+        let mut reader = SseReader::new(resp);
+
+        let ev1 = reader.next_event().await.unwrap().unwrap();
+        assert_eq!(ev1, "{\"type\":\"first\"}");
+
+        let ev2 = reader.next_event().await.unwrap().unwrap();
+        assert_eq!(ev2, "{\"type\":\"second\"}");
+
+        assert!(reader.next_event().await.unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sse_reader_data_field_split_mid_keyword() {
+        // The "data:" prefix is split across two TCP writes: "da" | "ta: value"
+        let events = vec![
+            ScheduledWrite {
+                data: "da".into(),
+                delay: Duration::ZERO,
+            },
+            ScheduledWrite {
+                data: "ta: {\"split\":true}\n\n".into(),
+                delay: Duration::from_millis(5),
+            },
+        ];
+        let addr = spawn_delayed_sse_server(events).await;
+
+        let resp = reqwest::get(format!("http://{addr}")).await.unwrap();
+        let mut reader = SseReader::new(resp);
+
+        let ev = reader.next_event().await.unwrap().unwrap();
+        assert_eq!(ev, "{\"split\":true}");
+
+        assert!(reader.next_event().await.unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sse_reader_trailing_data_without_boundary() {
+        // Stream ends with data but no trailing \n\n — the drain path should
+        // still yield the event.
+        let events = vec![
+            ScheduledWrite {
+                data: "data: {\"type\":\"complete\"}\n\n".into(),
+                delay: Duration::ZERO,
+            },
+            ScheduledWrite {
+                // Trailing data without a boundary before EOF.
+                data: "data: {\"type\":\"trailing\"}".into(),
+                delay: Duration::from_millis(5),
+            },
+        ];
+        let addr = spawn_delayed_sse_server(events).await;
+
+        let resp = reqwest::get(format!("http://{addr}")).await.unwrap();
+        let mut reader = SseReader::new(resp);
+
+        let ev1 = reader.next_event().await.unwrap().unwrap();
+        assert_eq!(ev1, "{\"type\":\"complete\"}");
+
+        let ev2 = reader.next_event().await.unwrap().unwrap();
+        assert_eq!(ev2, "{\"type\":\"trailing\"}");
+
+        assert!(reader.next_event().await.unwrap().is_none());
+    }
+
+    // ── Gap 6: send_stream_with_retry ──────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_retry_on_5xx_then_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_srv = attempts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = attempts_srv.fetch_add(1, Ordering::SeqCst);
+                // Drain request.
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                if n == 0 {
+                    // First attempt: 503
+                    let resp = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                } else {
+                    // Second attempt: 200 with valid SSE
+                    let body = "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n";
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{}",
+                        body
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                }
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let c = cfg(Provider::Anthropic);
+        let llm = Llm::new(&c).unwrap();
+        let emitter = StreamEmitter::noop();
+
+        let url = format!("http://{addr}/v1/messages");
+        let body_bytes = b"{}".to_vec();
+        let resp = llm
+            .send_stream_with_retry(|| {
+                llm.http_stream
+                    .post(&url)
+                    .header("content-type", "application/json")
+                    .body(body_bytes.clone())
+            })
+            .await
+            .unwrap();
+        let result = llm.consume_sse_anthropic(resp, &emitter).await.unwrap();
+        assert_eq!(result.text, "ok");
+        assert!(
+            attempts.load(Ordering::SeqCst) >= 2,
+            "should have retried at least once"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_retry_exhausted_surfaces_error() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_srv = attempts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                attempts_srv.fetch_add(1, Ordering::SeqCst);
+                // Drain request.
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                // Always 503.
+                let resp = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let c = cfg(Provider::Anthropic);
+        let llm = Llm::new(&c).unwrap();
+
+        let url = format!("http://{addr}/v1/messages");
+        let body_bytes = b"{}".to_vec();
+        let result = llm
+            .send_stream_with_retry(|| {
+                llm.http_stream
+                    .post(&url)
+                    .header("content-type", "application/json")
+                    .body(body_bytes.clone())
+            })
+            .await;
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("503") || err.contains("exhausted"),
+            "expected 503 or exhausted error, got: {err}"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            MAX_RETRIES,
+            "should have exhausted all retries"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_auth_error_does_not_retry() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_srv = attempts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                attempts_srv.fetch_add(1, Ordering::SeqCst);
+                // Drain request.
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                // 401 Unauthorized — should not retry.
+                let body = "invalid api key";
+                let resp = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let c = cfg(Provider::Anthropic);
+        let llm = Llm::new(&c).unwrap();
+
+        let url = format!("http://{addr}/v1/messages");
+        let body_bytes = b"{}".to_vec();
+        let result = llm
+            .send_stream_with_retry(|| {
+                llm.http_stream
+                    .post(&url)
+                    .header("content-type", "application/json")
+                    .body(body_bytes.clone())
+            })
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentError::LlmAuth(msg) => {
+                assert!(
+                    msg.contains("invalid api key"),
+                    "expected auth error body, got: {msg}"
+                );
+            }
+            other => panic!("expected LlmAuth error, got: {other:?}"),
+        }
+        // Auth errors should NOT retry — only 1 attempt.
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "auth error should not trigger retries"
+        );
+    }
 }
