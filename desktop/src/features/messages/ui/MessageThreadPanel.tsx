@@ -12,9 +12,9 @@ import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
 import { cn } from "@/shared/lib/cn";
 import {
   AuxiliaryPanelHeader,
-  auxiliaryPanelCloseButtonClass,
+  AuxiliaryPanelHeaderGroup,
+  AuxiliaryPanelTitle,
   auxiliaryPanelContentPaddingClass,
-  auxiliaryPanelTitleClass,
 } from "@/shared/layout/AuxiliaryPanelHeader";
 import { Button } from "@/shared/ui/button";
 import {
@@ -346,28 +346,45 @@ export function MessageThreadPanel({
     </>
   );
 
+  const threadHeaderContent = (
+    <>
+      <AuxiliaryPanelHeaderGroup>
+        {isSinglePanelView ? (
+          <Button
+            aria-label="Back to conversation"
+            className="shrink-0"
+            data-testid="message-thread-back"
+            onClick={onClose}
+            size="icon"
+            type="button"
+            variant="outline"
+          >
+            <ArrowLeft />
+          </Button>
+        ) : null}
+        <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
+      </AuxiliaryPanelHeaderGroup>
+      <Button
+        aria-label="Close thread"
+        className="ml-auto"
+        data-testid="message-thread-close"
+        onClick={onClose}
+        size="icon"
+        type="button"
+        variant="ghost"
+      >
+        <X />
+      </Button>
+    </>
+  );
+
   if (isSplitLayout) {
     return (
       <div
         className="relative flex min-h-0 flex-1 flex-col"
         data-testid="message-thread-panel"
       >
-        <AuxiliaryPanelHeader>
-          <div className="flex min-w-0 items-center gap-1.5">
-            <h2 className={auxiliaryPanelTitleClass}>Thread</h2>
-          </div>
-          <Button
-            aria-label="Close thread"
-            className={cn("ml-auto", auxiliaryPanelCloseButtonClass)}
-            data-testid="message-thread-close"
-            onClick={onClose}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            <X />
-          </Button>
-        </AuxiliaryPanelHeader>
+        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
         {threadScrollRegion}
         {threadFooter}
       </div>
@@ -399,53 +416,7 @@ export function MessageThreadPanel({
           )}
           data-tauri-drag-region
         >
-          <div
-            className={cn(
-              "flex min-w-0 items-center",
-              isSinglePanelView ? "gap-[4px]" : "gap-1.5",
-            )}
-          >
-            {isSinglePanelView ? (
-              <div className="relative h-[14px] w-[14px] shrink-0">
-                <Button
-                  aria-label="Back to conversation"
-                  className="absolute left-1/2 top-1/2 h-6 w-6 -translate-x-1/2 -translate-y-1/2 text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-                  data-testid="message-thread-back"
-                  onClick={onClose}
-                  size="icon"
-                  type="button"
-                  variant="ghost"
-                >
-                  <ArrowLeft className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            ) : null}
-            <h2
-              className={
-                isSinglePanelView
-                  ? "translate-y-px text-base font-semibold leading-6 tracking-tight"
-                  : "text-sm font-semibold leading-5 tracking-tight"
-              }
-            >
-              Thread
-            </h2>
-          </div>
-          <Button
-            aria-label="Close thread"
-            className={cn(
-              "ml-auto",
-              isSinglePanelView || isOverlay
-                ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground"
-                : auxiliaryPanelCloseButtonClass,
-            )}
-            data-testid="message-thread-close"
-            onClick={onClose}
-            size="icon"
-            type="button"
-            variant="ghost"
-          >
-            <X />
-          </Button>
+          {threadHeaderContent}
         </div>
 
         {threadScrollRegion}

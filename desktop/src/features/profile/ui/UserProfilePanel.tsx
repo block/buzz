@@ -33,11 +33,10 @@ import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
 import {
   AuxiliaryPanelHeader,
-  auxiliaryPanelCloseButtonClass,
+  AuxiliaryPanelHeaderGroup,
+  AuxiliaryPanelTitle,
   auxiliaryPanelContentPaddingClass,
-  auxiliaryPanelTitleClass,
 } from "@/shared/layout/AuxiliaryPanelHeader";
-import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
@@ -139,8 +138,6 @@ export function UserProfilePanel({
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
-  const usesChannelSplitChrome =
-    splitPaneClamp && !isOverlay && !isSinglePanelView;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const [view, setView] = React.useState<ProfilePanelView>("summary");
@@ -251,84 +248,38 @@ export function UserProfilePanel({
     : undefined;
 
   const headerLeftContent = (
-    <div className="flex min-w-0 items-center gap-1.5">
+    <AuxiliaryPanelHeaderGroup>
       {view !== "summary" ? (
         <Button
           aria-label="Back to profile"
-          className={cn(
-            "shrink-0",
-            isSplitLayout
-              ? auxiliaryPanelCloseButtonClass
-              : usesChannelSplitChrome
-                ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground"
-                : "h-7 w-7 rounded-full text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-          )}
+          className="shrink-0"
           data-testid="user-profile-panel-back"
           onClick={() => setView("summary")}
           size="icon"
           type="button"
-          variant="ghost"
+          variant="outline"
         >
-          <ArrowLeft
-            className={cn(
-              !isSplitLayout &&
-                (usesChannelSplitChrome ? "size-4" : "size-3.5"),
-            )}
-          />
+          <ArrowLeft />
         </Button>
       ) : null}
-      <h2
-        className={cn(
-          "translate-y-px font-semibold tracking-tight",
-          isSplitLayout
-            ? auxiliaryPanelTitleClass
-            : usesChannelSplitChrome
-              ? "text-base leading-6"
-              : "text-sm leading-5",
-        )}
-      >
-        {panelTitle}
-      </h2>
-    </div>
+      <AuxiliaryPanelTitle>{panelTitle}</AuxiliaryPanelTitle>
+    </AuxiliaryPanelHeaderGroup>
   );
 
   const headerActions = (
     <div className="ml-auto flex shrink-0 items-center gap-2">
       {view === "memories" && isOwner === true ? (
-        <MemoryRefreshButton
-          agentPubkey={pubkey}
-          className={cn(
-            isSplitLayout
-              ? auxiliaryPanelCloseButtonClass
-              : usesChannelSplitChrome
-                ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground"
-                : "h-4 w-4 rounded-full text-foreground hover:bg-muted/60 hover:text-foreground",
-          )}
-          iconClassName={cn(
-            !isSplitLayout && !usesChannelSplitChrome && "h-2.5 w-2.5",
-          )}
-        />
+        <MemoryRefreshButton agentPubkey={pubkey} variant="outline" />
       ) : null}
       <Button
         aria-label="Close profile"
-        className={cn(
-          isSplitLayout
-            ? auxiliaryPanelCloseButtonClass
-            : usesChannelSplitChrome
-              ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground"
-              : "h-4 w-4 rounded-full text-foreground hover:bg-muted/60 hover:text-foreground",
-        )}
         data-testid="user-profile-panel-close"
         onClick={onClose}
         size="icon"
         type="button"
         variant="ghost"
       >
-        <X
-          className={cn(
-            !isSplitLayout && !usesChannelSplitChrome && "h-2.5 w-2.5",
-          )}
-        />
+        <X />
       </Button>
     </div>
   );
@@ -338,11 +289,7 @@ export function UserProfilePanel({
       className={cn(
         "min-h-0 flex-1 overflow-y-auto px-4 pb-6",
         isSplitLayout && auxiliaryPanelContentPaddingClass,
-        !isSplitLayout &&
-          !isFloatingOverlay &&
-          (usesChannelSplitChrome
-            ? channelChrome.contentPadding
-            : "pt-[4.75rem]"),
+        !isSplitLayout && !isFloatingOverlay && "pt-[4.75rem]",
       )}
     >
       {view === "summary" ? (
@@ -458,12 +405,7 @@ export function UserProfilePanel({
         {!isOverlay ? (
           <div
             aria-hidden="true"
-            className={cn(
-              "pointer-events-none absolute inset-x-0 top-0 z-40 bg-background/80 backdrop-blur-md after:absolute after:left-0 after:right-0 after:top-10 after:h-px after:bg-border/35 supports-[backdrop-filter]:bg-background/70 peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55",
-              usesChannelSplitChrome
-                ? channelChrome.headerHeight
-                : "h-[4.75rem]",
-            )}
+            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[4.75rem] bg-background/80 backdrop-blur-md after:absolute after:left-0 after:right-0 after:top-10 after:h-px after:bg-border/35 supports-[backdrop-filter]:bg-background/70 peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
           />
         ) : null}
 
@@ -474,12 +416,7 @@ export function UserProfilePanel({
               ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[4.75rem] min-h-[4.75rem] shrink-0 gap-2.5 bg-transparent pb-1 pl-4 pr-2 pt-[2.625rem] sm:pl-6 sm:pr-3`
               : isOverlay
                 ? "relative z-50 min-h-11 shrink-0 gap-3 bg-background/80 px-3 py-1.5 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
-                : cn(
-                    "absolute inset-x-0 z-50 bg-transparent after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80",
-                    usesChannelSplitChrome
-                      ? "top-12 h-8 gap-2.5 py-0 pl-4 pr-2 sm:pr-3"
-                      : "top-[2.625rem] min-h-8 gap-3 px-3 py-1",
-                  ),
+                : "absolute inset-x-0 top-[2.625rem] z-50 min-h-8 gap-3 bg-transparent px-3 py-1 after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80",
           )}
           data-tauri-drag-region
         >

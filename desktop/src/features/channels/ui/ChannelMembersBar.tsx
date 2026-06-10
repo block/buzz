@@ -11,7 +11,6 @@ import {
 } from "@/features/agents/hooks";
 import { useChannelMembersQuery } from "@/features/channels/hooks";
 import type { Channel } from "@/shared/api/types";
-import { channelChrome } from "@/shared/layout/chromeLayout";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
@@ -115,11 +114,10 @@ export function ChannelMembersBar({
         <DropdownMenuTrigger asChild>
           <Button
             aria-label="Channel actions"
-            className={channelChrome.headerIconButton}
             data-testid="channel-actions-menu-trigger"
             size="icon"
             type="button"
-            variant="ghost"
+            variant="outline"
           >
             <EllipsisVertical />
           </Button>
@@ -159,7 +157,6 @@ export function ChannelMembersBar({
       <div className="flex items-center gap-[6px]">
         <Button
           aria-label="Add agent"
-          className={channelChrome.headerIconButton}
           data-testid="channel-add-bot-trigger"
           disabled={!canAddAgents}
           onClick={() => {
@@ -167,18 +164,18 @@ export function ChannelMembersBar({
           }}
           size="icon"
           type="button"
-          variant="ghost"
+          variant="outline"
         >
           <Plus />
         </Button>
 
         <Button
           aria-label={`View channel members (${memberCount})`}
-          className={channelChrome.headerMembersButton}
+          className="h-8 px-2.5"
           data-testid="channel-members-trigger"
           onClick={onToggleMembers}
           type="button"
-          variant="ghost"
+          variant="outline"
         >
           <Users />
           <span className="min-w-[1ch] text-sm font-medium tabular-nums">
@@ -190,12 +187,11 @@ export function ChannelMembersBar({
 
         <Button
           aria-label="Manage channel"
-          className={channelChrome.headerIconButton}
           data-testid="channel-management-trigger"
           onClick={onManageChannel}
           size="icon"
           type="button"
-          variant="ghost"
+          variant="outline"
         >
           <Settings2 />
         </Button>

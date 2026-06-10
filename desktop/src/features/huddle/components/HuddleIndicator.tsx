@@ -5,7 +5,6 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
-import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
@@ -251,13 +250,13 @@ export function HuddleIndicator({
       <>
         <Button
           aria-label="Start huddle"
-          className={cn(channelChrome.headerIconButton, className)}
+          className={className}
           data-testid="channel-start-huddle-trigger"
           disabled={startDisabled || isStarting}
           onClick={() => headphonesGate.gate(() => onStart())}
           size="icon"
           type="button"
-          variant="ghost"
+          variant="outline"
         >
           <Headphones />
         </Button>
@@ -311,16 +310,12 @@ export function HuddleIndicator({
         <TooltipTrigger asChild>
           <Button
             aria-label={`Join active huddle (${participantCount} participant${participantCount !== 1 ? "s" : ""})`}
-            className={cn(
-              "relative",
-              channelChrome.headerIconButton,
-              className,
-            )}
+            className={cn("relative", className)}
             disabled={isJoining || isStarting}
             onClick={() => headphonesGate.gate(() => void doJoin())}
             size="icon"
             type="button"
-            variant="ghost"
+            variant="outline"
           >
             <Headphones />
             <span className="absolute inset-0 animate-pulse rounded-lg ring-2 ring-border/70" />

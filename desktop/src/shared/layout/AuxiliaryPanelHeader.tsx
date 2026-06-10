@@ -4,6 +4,8 @@ import { channelChrome, topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 
 type AuxiliaryPanelHeaderProps = React.ComponentProps<"div">;
+type AuxiliaryPanelHeaderGroupProps = React.ComponentProps<"div">;
+type AuxiliaryPanelTitleProps = React.ComponentProps<"h2">;
 
 /** Compact title/action row for right auxiliary panels in split layouts. */
 export function AuxiliaryPanelHeader({
@@ -31,7 +33,37 @@ export function AuxiliaryPanelHeader({
   );
 }
 
-export const auxiliaryPanelTitleClass = channelChrome.splitPanelTitle;
-export const auxiliaryPanelCloseButtonClass =
-  channelChrome.splitPanelCloseButton;
 export const auxiliaryPanelContentPaddingClass = channelChrome.contentPadding;
+
+export function AuxiliaryPanelHeaderGroup({
+  className,
+  children,
+  ...props
+}: AuxiliaryPanelHeaderGroupProps) {
+  return (
+    <div
+      className={cn("flex min-w-0 flex-1 items-center gap-1.5", className)}
+      {...props}
+    >
+      {children}
+    </div>
+  );
+}
+
+export function AuxiliaryPanelTitle({
+  className,
+  children,
+  ...props
+}: AuxiliaryPanelTitleProps) {
+  return (
+    <h2
+      className={cn(
+        "min-w-0 flex-1 translate-y-px truncate text-base font-semibold leading-6 tracking-tight",
+        className,
+      )}
+      {...props}
+    >
+      {children}
+    </h2>
+  );
+}

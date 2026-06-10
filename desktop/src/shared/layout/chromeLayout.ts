@@ -47,16 +47,4 @@ export const channelChrome = {
   headerHeight: "h-(--sprout-channel-content-top-padding,5.75rem)",
   /** Negative margin for overlaid channel chrome that should not affect flow. */
   negativeMargin: "-mb-(--sprout-channel-content-top-padding,5.75rem)",
-  /** Visual chrome for channel header icon actions (pair with `size="icon"`). */
-  headerIconButton:
-    "rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground",
-  /** Channel header members button with icon + count label. */
-  headerMembersButton:
-    "h-8 gap-1.5 rounded-lg border border-border/40 px-2.5 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-4.5",
-  /** Icon button sizing for right auxiliary panel header close actions. */
-  splitPanelCloseButton:
-    "rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground",
-  /** Title typography for right auxiliary panel headers. */
-  splitPanelTitle:
-    "translate-y-px text-base font-semibold leading-6 tracking-tight",
 } as const;

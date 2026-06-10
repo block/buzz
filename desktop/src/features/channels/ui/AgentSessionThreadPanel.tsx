@@ -11,9 +11,9 @@ import { useStickToBottom } from "@/shared/hooks/useStickToBottom";
 import { cn } from "@/shared/lib/cn";
 import {
   AuxiliaryPanelHeader,
-  auxiliaryPanelCloseButtonClass,
+  AuxiliaryPanelHeaderGroup,
+  AuxiliaryPanelTitle,
   auxiliaryPanelContentPaddingClass,
-  auxiliaryPanelTitleClass,
 } from "@/shared/layout/AuxiliaryPanelHeader";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
@@ -77,7 +77,7 @@ export function AgentSessionThreadPanel({
   }
 
   const agentHeaderActions = (
-    <div className="flex shrink-0 items-center gap-2">
+    <div className="ml-auto flex shrink-0 items-center gap-2">
       {isLive && isWorking ? (
         <Badge
           className="shrink-0 gap-1 px-2 py-0 text-[10px]"
@@ -115,22 +115,35 @@ export function AgentSessionThreadPanel({
       ) : null}
       <Button
         aria-label="Close activity panel"
-        className={
-          isSplitLayout || isSinglePanelView
-            ? auxiliaryPanelCloseButtonClass
-            : "h-6 w-6 text-foreground hover:bg-muted/60 hover:text-foreground"
-        }
         data-testid="agent-session-close"
         onClick={onClose}
         size="icon"
         type="button"
         variant="ghost"
       >
-        <X
-          className={cn(!isSplitLayout && !isSinglePanelView && "h-3.5 w-3.5")}
-        />
+        <X />
       </Button>
     </div>
+  );
+
+  const agentHeaderContent = (
+    <>
+      <AuxiliaryPanelHeaderGroup>
+        <Button
+          aria-label="Back from activity"
+          className="shrink-0"
+          data-testid="agent-session-back"
+          onClick={onBackToProfile}
+          size="icon"
+          type="button"
+          variant="outline"
+        >
+          <ArrowLeft />
+        </Button>
+        <AuxiliaryPanelTitle>Activity</AuxiliaryPanelTitle>
+      </AuxiliaryPanelHeaderGroup>
+      {agentHeaderActions}
+    </>
   );
 
   const agentBody = (
@@ -161,30 +174,7 @@ export function AgentSessionThreadPanel({
         className="flex min-h-0 flex-1 flex-col"
         data-testid="agent-session-thread-panel"
       >
-        <AuxiliaryPanelHeader>
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">
-            <Button
-              aria-label="Back from activity"
-              className={cn("shrink-0", auxiliaryPanelCloseButtonClass)}
-              data-testid="agent-session-back"
-              onClick={onBackToProfile}
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              <ArrowLeft />
-            </Button>
-            <h2
-              className={cn(
-                "min-w-0 flex-1 truncate",
-                auxiliaryPanelTitleClass,
-              )}
-            >
-              Activity
-            </h2>
-          </div>
-          {agentHeaderActions}
-        </AuxiliaryPanelHeader>
+        <AuxiliaryPanelHeader>{agentHeaderContent}</AuxiliaryPanelHeader>
         {agentBody}
       </div>
     );
@@ -222,35 +212,7 @@ export function AgentSessionThreadPanel({
           )}
           data-tauri-drag-region
         >
-          <div className="flex min-w-0 flex-1 items-center gap-1.5">
-            <Button
-              aria-label="Back from activity"
-              className={cn(
-                "shrink-0",
-                isSinglePanelView
-                  ? auxiliaryPanelCloseButtonClass
-                  : "h-7 w-7 rounded-full text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-              )}
-              data-testid="agent-session-back"
-              onClick={onBackToProfile}
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              <ArrowLeft className={cn(!isSinglePanelView && "size-3.5")} />
-            </Button>
-            <h2
-              className={cn(
-                "min-w-0 flex-1 truncate",
-                isSinglePanelView
-                  ? auxiliaryPanelTitleClass
-                  : "text-sm font-semibold leading-5 tracking-tight",
-              )}
-            >
-              Activity
-            </h2>
-            {agentHeaderActions}
-          </div>
+          {agentHeaderContent}
         </div>
 
         {agentBody}
