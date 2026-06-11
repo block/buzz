@@ -286,12 +286,12 @@ async fn test_video_upload_and_get() {
     assert_eq!(body.len(), mp4.len());
 }
 
-/// Upload an MP4 as Content-Type: image/jpeg — should be rejected.
-/// This tests the Content-Type spoofing fix: validate_content() rejects
-/// video/mp4 from the image path.
+/// The relay ignores the Content-Type header and sniffs magic bytes. MP4
+/// uploaded with a spoofed image/jpeg header is detected as video/mp4 and
+/// accepted via the generic file path.
 #[tokio::test]
 #[ignore]
-async fn test_video_content_type_spoofing_rejected() {
+async fn test_video_content_type_header_ignored() {
     let client = http_client();
     let keys = Keys::generate();
     let mp4 = build_test_mp4();
@@ -311,12 +311,16 @@ async fn test_video_content_type_spoofing_rejected() {
         .await
         .expect("upload request");
 
-    // Should be rejected — either 415 (DisallowedContentType) or 400
-    assert!(
-        resp.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE
-            || resp.status() == StatusCode::BAD_REQUEST,
-        "MP4 uploaded as image/jpeg should be rejected, got {}",
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "MP4 with spoofed Content-Type should be accepted, got {}",
         resp.status()
+    );
+    let desc: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(desc["type"].as_str().unwrap(), "video/mp4");
+    println!(
+        "✅ MP4 with spoofed Content-Type → 200 as video/mp4 (header ignored, magic bytes used)"
     );
 }
 
@@ -492,7 +496,7 @@ async fn test_video_poster_imeta_accepted_via_ws() {
         .sign_with_keys(&keys)
         .unwrap();
     let resp = client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&create_event).unwrap())
@@ -591,7 +595,7 @@ async fn test_video_poster_imeta_rejects_video_as_poster() {
         .sign_with_keys(&keys)
         .unwrap();
     let resp = client
-        .post(format!("{}/api/events", relay_http_url()))
+        .post(format!("{}/events", relay_http_url()))
         .header("X-Pubkey", &pubkey_hex)
         .header("Content-Type", "application/json")
         .body(serde_json::to_string(&create_event).unwrap())
