@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.3.17
+
+79bcee55cb7 docs: finish Buzz rename cleanup (#974)
+6f3733d43b4 fix(desktop): let channel members bypass mention agent gate (#965)
+8f580f308cc Rename desktop app to Buzz (#960)
+dcb2639b355 feat(desktop): open profile panel from MembersSidebar rows (#962)
+4e4dc723e4c feat(desktop): per-event notification sounds and alert controls (#968)
+1ca16c898c7 fix(desktop): make header chrome zoom-correct and tidy split-pane (#941)
+8c8312932af fix(desktop): rename SPROUT_ env vars to BUZZ_ for child agent processes (#971)
+31b0665cff7 fix(justfile): complete buzz rename in dev and staging recipes (#966)
+d99ad131f17 refactor: rename sprout backend to buzz (#958)
+53e3f094858 fix(desktop): reap orphaned agent processes across instances (#954)
+c5a54dcc390 Rename web app to Buzz (#959)
+510009c11db fix(desktop): allow restarting saved relay-mesh agents from the UI (#956)
+60c8c5036a2 feat(acp): agent timeout resilience — idle margin, tool-call reset, death notices, keepalive (#935)
+c63e018b05b Rename mobile app to Buzz (#955)
+929cc8861ee fix(desktop): repair team-persona mismatch and deduplicate legacy imports (#949)
+b792aa4704a fix(desktop): populate last_message_at in channel browser (#951)
+e5f0c32648b Kit/circular avatars (#927)
+dbe973dacd0 fix(relay): accept mesh signaling kinds (24620/24621) via POST /events (#946)
+f49cdcdd300 feat(sprout-dev-mcp): add read_file tool and replace_all to str_replace (#928)
+
+
 ## v0.3.16
 
 34c8bdab1 fix(desktop): land live presence updates for not-yet-cached pubkeys (#947)

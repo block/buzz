@@ -1,7 +1,7 @@
 name: buzz
 description: Buzz mobile client
 publish_to: 'none'
-version: 0.3.16+1
+version: 0.3.17+1
 
 environment:
   sdk: ^3.11.4

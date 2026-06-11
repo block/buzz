@@ -846,7 +846,7 @@ dependencies = [
 
 [[package]]
 name = "buzz-desktop"
-version = "0.3.16"
+version = "0.3.17"
 dependencies = [
  "anyhow",
  "atomic-write-file",
