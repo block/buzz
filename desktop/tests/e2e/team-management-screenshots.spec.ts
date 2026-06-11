@@ -60,7 +60,7 @@ async function invokeMockCommand(
 }
 
 async function activatePersonas(page: import("@playwright/test").Page) {
-  for (const id of ["builtin:solo", "builtin:kit", "builtin:scout"]) {
+  for (const id of ["builtin:fizz"]) {
     await invokeMockCommand(page, "set_persona_active", { id, active: true });
   }
 }

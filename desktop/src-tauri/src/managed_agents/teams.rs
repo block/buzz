@@ -50,10 +50,10 @@ struct BuiltInTeam {
 }
 
 const BUILT_IN_TEAMS: &[BuiltInTeam] = &[BuiltInTeam {
-    id: "builtin-team:kit-scout",
-    name: "Kit & Scout",
-    description: Some("Kit orchestrates and builds; Scout researches, plans, and reviews."),
-    persona_ids: &["builtin:kit", "builtin:scout"],
+    id: "builtin-team:fizz",
+    name: "Fizz",
+    description: Some("Fizz works carefully and collaboratively."),
+    persona_ids: &["builtin:fizz"],
 }];
 
 fn built_in_team_records(now: &str) -> Vec<TeamRecord> {
@@ -890,12 +890,12 @@ mod tests {
         let json = serde_json::json!({
             "version": 1,
             "type": "team",
-            "name": "Solo",
+            "name": "Fizz",
         });
         let bytes = serde_json::to_vec(&json).unwrap();
         let parsed = parse_team_json(&bytes).unwrap();
         assert!(parsed.personas.is_empty());
-        assert_eq!(parsed.name, "Solo");
+        assert_eq!(parsed.name, "Fizz");
     }
 
     // -----------------------------------------------------------------------
@@ -910,24 +910,24 @@ mod tests {
         assert_eq!(records.len(), BUILT_IN_TEAMS.len());
         assert!(records.iter().all(|record| record.is_builtin));
         let names: Vec<&str> = records.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["Kit & Scout"]);
+        assert_eq!(names, vec!["Fizz"]);
     }
 
     #[test]
     fn merge_teams_preserves_user_customizations_to_builtin() {
-        let mut customized = team("builtin-team:kit-scout", "Kit & Scout (mine)");
+        let mut customized = team("builtin-team:fizz", "Fizz (mine)");
         customized.is_builtin = true;
-        customized.persona_ids = vec!["builtin:kit".to_string()];
+        customized.persona_ids = vec!["builtin:fizz".to_string()];
 
         let (records, _changed) = merge_teams(vec![customized], "2026-05-07T00:00:00Z");
 
-        let kit_scout = records
+        let fizz = records
             .iter()
-            .find(|t| t.id == "builtin-team:kit-scout")
-            .expect("Kit & Scout built-in should exist");
-        assert_eq!(kit_scout.name, "Kit & Scout (mine)");
-        assert_eq!(kit_scout.persona_ids, vec!["builtin:kit".to_string()]);
-        assert!(kit_scout.is_builtin);
+            .find(|t| t.id == "builtin-team:fizz")
+            .expect("Fizz built-in should exist");
+        assert_eq!(fizz.name, "Fizz (mine)");
+        assert_eq!(fizz.persona_ids, vec!["builtin:fizz".to_string()]);
+        assert!(fizz.is_builtin);
     }
 
     #[test]
@@ -936,7 +936,7 @@ mod tests {
         let (records, _changed) = merge_teams(vec![user_team], "2026-05-07T00:00:00Z");
 
         assert!(records.iter().any(|t| t.id == "user-uuid"));
-        assert!(records.iter().any(|t| t.id == "builtin-team:kit-scout"));
+        assert!(records.iter().any(|t| t.id == "builtin-team:fizz"));
     }
 
     #[test]
@@ -959,22 +959,22 @@ mod tests {
     fn merge_teams_repromotes_existing_builtin_marked_as_custom() {
         // If someone hand-edits the store and flips is_builtin to false on a
         // canonical built-in id, merge_teams should restore the flag.
-        let mut downgraded = team("builtin-team:kit-scout", "Kit & Scout");
+        let mut downgraded = team("builtin-team:fizz", "Fizz");
         downgraded.is_builtin = false;
 
         let (records, changed) = merge_teams(vec![downgraded], "2026-05-07T00:00:00Z");
 
         assert!(changed);
-        let kit_scout = records
+        let fizz = records
             .iter()
-            .find(|t| t.id == "builtin-team:kit-scout")
-            .expect("Kit & Scout should exist");
-        assert!(kit_scout.is_builtin);
+            .find(|t| t.id == "builtin-team:fizz")
+            .expect("Fizz should exist");
+        assert!(fizz.is_builtin);
     }
 
     #[test]
     fn validate_team_deletion_rejects_built_ins() {
-        let mut built_in = team("builtin-team:kit-scout", "Kit & Scout");
+        let mut built_in = team("builtin-team:fizz", "Fizz");
         built_in.is_builtin = true;
 
         let err = validate_team_deletion(&built_in).unwrap_err();
