@@ -621,6 +621,14 @@ pub enum EmojiCmd {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+    /// Republish your set under the current d-tag, carrying forward any emoji
+    /// from the pre-rebrand (sprout) d-tag. Run once after the sprout->buzz
+    /// rename; a no-op if you have nothing under the legacy tag.
+    Migrate {
+        /// Print what would be published without writing
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------

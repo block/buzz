@@ -7,6 +7,9 @@ use buzz_sdk::CustomEmoji;
 /// d-tag for a member's own custom emoji set (kind:30030). Mirrors the SDK
 /// constant; the workspace palette is the union of every member's own set.
 const CUSTOM_EMOJI_SET_D_TAG: &str = buzz_sdk::CUSTOM_EMOJI_SET_D_TAG;
+/// Pre-rebrand d-tag (#958). Read paths union it with the current tag so
+/// emoji published before the sprout->buzz rename keep resolving.
+const LEGACY_CUSTOM_EMOJI_SET_D_TAG: &str = buzz_sdk::LEGACY_CUSTOM_EMOJI_SET_D_TAG;
 
 /// Custom emoji entry in CLI output.
 #[derive(Debug, serde::Serialize)]
@@ -63,7 +66,7 @@ fn union_custom_emoji(events: &[serde_json::Value]) -> Vec<EmojiEntry> {
 async fn cmd_list(client: &BuzzClient) -> Result<(), CliError> {
     let filter = serde_json::json!({
         "kinds": [buzz_sdk::kind::KIND_EMOJI_SET],
-        "#d": [CUSTOM_EMOJI_SET_D_TAG],
+        "#d": [CUSTOM_EMOJI_SET_D_TAG, LEGACY_CUSTOM_EMOJI_SET_D_TAG],
     });
     let raw = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
@@ -80,24 +83,28 @@ async fn fetch_own_emoji(client: &BuzzClient) -> Result<Vec<CustomEmoji>, CliErr
     let me = client.keys().public_key().to_hex();
     let filter = serde_json::json!({
         "kinds": [buzz_sdk::kind::KIND_EMOJI_SET],
-        "#d": [CUSTOM_EMOJI_SET_D_TAG],
+        "#d": [CUSTOM_EMOJI_SET_D_TAG, LEGACY_CUSTOM_EMOJI_SET_D_TAG],
         "authors": [me],
-        "limit": 1,
     });
     let raw = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
         .map_err(|e| CliError::Other(format!("failed to parse own emoji set: {e}")))?;
-    // The relay keeps only the latest per (pubkey, d_tag), but be defensive.
-    let Some(event) = events.last() else {
-        return Ok(vec![]);
-    };
-    Ok(emoji_tags_of(event)
-        .into_iter()
-        .map(|e| CustomEmoji {
-            shortcode: e.shortcode,
-            url: e.url,
-        })
-        .collect())
+    // The caller may hold both a current and a legacy (pre-rename) set; union
+    // them, deduping by shortcode, so a read-modify-write republish under the
+    // current tag carries the caller's pre-rename emoji forward.
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for event in &events {
+        for e in emoji_tags_of(event) {
+            if seen.insert(e.shortcode.clone()) {
+                out.push(CustomEmoji {
+                    shortcode: e.shortcode,
+                    url: e.url,
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Publish the caller's own (replaced) kind:30030 set, signed as the caller.
@@ -203,7 +210,7 @@ async fn cmd_export(
         crate::EmojiScope::Workspace => {
             let filter = serde_json::json!({
                 "kinds": [buzz_sdk::kind::KIND_EMOJI_SET],
-                "#d": [CUSTOM_EMOJI_SET_D_TAG],
+                "#d": [CUSTOM_EMOJI_SET_D_TAG, LEGACY_CUSTOM_EMOJI_SET_D_TAG],
             });
             let raw = client.query(&filter).await?;
             let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
@@ -298,6 +305,45 @@ async fn cmd_import(
 // Dispatch
 // ---------------------------------------------------------------------------
 
+/// Republish the caller's own set under the current d-tag. Because
+/// `fetch_own_emoji` already unions the legacy (pre-rename) tag, this carries
+/// any sprout-era emoji forward. A no-op write is skipped so a member with
+/// nothing to migrate doesn't churn the relay.
+async fn cmd_migrate(client: &BuzzClient, dry_run: bool) -> Result<(), CliError> {
+    let me = client.keys().public_key().to_hex();
+    let filter = serde_json::json!({
+        "kinds": [buzz_sdk::kind::KIND_EMOJI_SET],
+        "#d": [LEGACY_CUSTOM_EMOJI_SET_D_TAG],
+        "authors": [me],
+    });
+    let raw = client.query(&filter).await?;
+    let legacy: Vec<serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse legacy emoji set: {e}")))?;
+    if legacy.iter().all(|ev| emoji_tags_of(ev).is_empty()) {
+        println!(
+            "{}",
+            serde_json::json!({"accepted": true, "message": "nothing to migrate"})
+        );
+        return Ok(());
+    }
+    let emojis = fetch_own_emoji(client).await?;
+    if dry_run {
+        let entries: Vec<EmojiEntry> = emojis
+            .iter()
+            .map(|e| EmojiEntry {
+                shortcode: e.shortcode.clone(),
+                url: e.url.clone(),
+            })
+            .collect();
+        let output = serde_json::to_string(&serde_json::json!({ "emojis": entries }))
+            .map_err(|e| CliError::Other(format!("serialization failed: {e}")))?;
+        println!("{output}");
+        eprintln!("(dry run — not published)");
+        return Ok(());
+    }
+    publish_own_set(client, &emojis).await
+}
+
 pub async fn dispatch(cmd: crate::EmojiCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::EmojiCmd;
     match cmd {
@@ -310,6 +356,7 @@ pub async fn dispatch(cmd: crate::EmojiCmd, client: &BuzzClient) -> Result<(), C
             replace,
             dry_run,
         } => cmd_import(client, file.as_deref(), replace, dry_run).await,
+        EmojiCmd::Migrate { dry_run } => cmd_migrate(client, dry_run).await,
     }
 }
 

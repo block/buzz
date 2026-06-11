@@ -434,6 +434,12 @@ pub fn build_remove_reaction(reaction_event_id: nostr::EventId) -> Result<EventB
 /// client-side union of every member's set.
 pub const CUSTOM_EMOJI_SET_D_TAG: &str = "buzz:custom-emoji";
 
+/// Pre-rebrand d-tag (#958 renamed sprout->buzz). Emoji sets published before
+/// the rename still live on the relay under this key. Reads union both tags so
+/// existing emoji survive; writes always use the current tag, so a re-save
+/// migrates a member's set forward.
+pub const LEGACY_CUSTOM_EMOJI_SET_D_TAG: &str = "sprout:custom-emoji";
+
 /// Build a member's own custom emoji set event (kind:30030, NIP-30/NIP-51).
 ///
 /// User-signed and parameterized-replaceable, keyed by `(pubkey, 30030,
