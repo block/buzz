@@ -388,9 +388,9 @@ async fn test_auth_server_tag_correct() {
 
 #[tokio::test]
 #[ignore]
-async fn test_upload_svg_accepted_as_octet_stream() {
-    // SVG with XML declaration has no magic bytes that `infer` recognises,
-    // so it routes through the generic file path as application/octet-stream.
+async fn test_upload_svg_accepted_as_text_xml() {
+    // SVG with XML declaration is detected by `infer` as text/xml (not image/svg+xml),
+    // which is not in the blocked list, so it routes through the generic file path.
     let client = http_client();
     let keys = Keys::generate();
     let svg = b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"></svg>";
@@ -401,8 +401,8 @@ async fn test_upload_svg_accepted_as_octet_stream() {
         "SVG (undetected) should succeed via file path, got {status}"
     );
     let desc: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(desc["type"].as_str().unwrap(), "application/octet-stream");
-    println!("✅ SVG (XML declaration) → 200 as octet-stream");
+    assert_eq!(desc["type"].as_str().unwrap(), "text/xml");
+    println!("✅ SVG (XML declaration) → 200 as text/xml");
 }
 
 #[tokio::test]
