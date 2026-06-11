@@ -61,7 +61,7 @@ The chart **template-fails** if either invariant is broken. No silent degradatio
 
 Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. `helm upgrade` is the entire upgrade procedure.
 
-If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false` and run `buzz-admin migrate` (separate Pod / one-shot Job) before upgrading. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
+If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
 
 ## Backups
 
