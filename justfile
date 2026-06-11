@@ -279,10 +279,10 @@ dev *ARGS: _ensure-sidecar-stubs
     source ../scripts/instance-env.sh
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.
-    INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.SPROUT_TAURI_CONFIG).identifier)")
+    INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID"' EXIT
-    echo "Starting on Vite port ${SPROUT_VITE_PORT}, relay ${SPROUT_RELAY_URL}"
-    pnpm exec tauri dev --features mesh-llm --config "$SPROUT_TAURI_CONFIG" {{ARGS}}
+    echo "Starting on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
+    pnpm exec tauri dev --features mesh-llm --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
 staging *ARGS: _ensure-sidecar-stubs
@@ -297,13 +297,13 @@ staging *ARGS: _ensure-sidecar-stubs
     chmod +x "desktop/src-tauri/binaries/sprout-${TARGET}"
     cd {{desktop_dir}}
     source ../scripts/instance-env.sh
-    export SPROUT_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
+    export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.
-    INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.SPROUT_TAURI_CONFIG).identifier)")
+    INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID"' EXIT
-    echo "Starting staging on Vite port ${SPROUT_VITE_PORT}, relay ${SPROUT_RELAY_URL}"
-    pnpm exec tauri dev --features mesh-llm --config "$SPROUT_TAURI_CONFIG" {{ARGS}}
+    echo "Starting staging on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
+    pnpm exec tauri dev --features mesh-llm --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop frontend dev server (port derived from worktree)
 desktop-dev:
