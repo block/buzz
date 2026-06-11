@@ -27,7 +27,9 @@ import {
 
 export type { DesktopNotificationPermissionState } from "./lib/desktop";
 
-const NOTIFICATION_SETTINGS_STORAGE_KEY = "sprout-notification-settings.v1";
+// v2: settings model reworked around per-event rows (flutter default sound,
+// slotAlertsEnabled, no singleSound/soundEnabled) — v1 values are abandoned.
+const NOTIFICATION_SETTINGS_STORAGE_KEY = "sprout-notification-settings.v2";
 const HOME_FEED_SEEN_MAX_ITEMS = 500;
 
 export type NotificationSettings = {
@@ -68,18 +70,8 @@ function sanitizeSoundsMap(value: unknown): SlotSounds {
   return result;
 }
 
-function sanitizeSlotAlertsEnabled(
-  value: unknown,
-  legacy: { mentions?: unknown; needsAction?: unknown },
-): Record<SoundSlot, boolean> {
+function sanitizeSlotAlertsEnabled(value: unknown): Record<SoundSlot, boolean> {
   const result = { ...DEFAULT_SLOT_ALERTS_ENABLED };
-  // Migrate the pre-per-event top-level toggles when present.
-  if (typeof legacy.mentions === "boolean") {
-    result.mention = legacy.mentions;
-  }
-  if (typeof legacy.needsAction === "boolean") {
-    result.needs_action = legacy.needsAction;
-  }
   if (!value || typeof value !== "object") return result;
   const candidate = value as Partial<Record<SoundSlot, unknown>>;
   for (const slot of SOUND_SLOTS) {
@@ -100,11 +92,7 @@ function sanitizeNotificationSettings(value: unknown): NotificationSettings {
     return DEFAULT_NOTIFICATION_SETTINGS;
   }
 
-  // Includes legacy fields (`mentions`, `needsAction`) that migrated into
-  // slotAlertsEnabled.
-  const candidate = value as Partial<
-    NotificationSettings & { mentions: boolean; needsAction: boolean }
-  >;
+  const candidate = value as Partial<NotificationSettings>;
   return {
     desktopEnabled:
       typeof candidate.desktopEnabled === "boolean"
@@ -119,14 +107,11 @@ function sanitizeNotificationSettings(value: unknown): NotificationSettings {
         ? candidate.notifyWhileViewing
         : DEFAULT_NOTIFICATION_SETTINGS.notifyWhileViewing,
     sounds: sanitizeSoundsMap(candidate.sounds),
-    slotAlertsEnabled: sanitizeSlotAlertsEnabled(candidate.slotAlertsEnabled, {
-      mentions: candidate.mentions,
-      needsAction: candidate.needsAction,
-    }),
+    slotAlertsEnabled: sanitizeSlotAlertsEnabled(candidate.slotAlertsEnabled),
     slotAlertsSnapshot:
       candidate.slotAlertsSnapshot != null &&
       typeof candidate.slotAlertsSnapshot === "object"
-        ? sanitizeSlotAlertsEnabled(candidate.slotAlertsSnapshot, {})
+        ? sanitizeSlotAlertsEnabled(candidate.slotAlertsSnapshot)
         : null,
   };
 }
