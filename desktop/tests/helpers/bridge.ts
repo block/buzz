@@ -158,6 +158,8 @@ type BridgeOptions = {
 
 const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX =
   "sprout-onboarding-complete.v1:";
+const WELCOME_CHANNEL_ENSURED_STORAGE_KEY_PREFIX =
+  "sprout-welcome-channel-ensured.v2:";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const DEFAULT_RELAY_WS_URL = "ws://localhost:3000";
 
@@ -276,12 +278,17 @@ async function seedOnboardingCompletionForKnownIdentities(page: Page) {
     ...Object.values(TEST_IDENTITIES).map(({ pubkey }) => pubkey),
   ];
   await page.addInitScript(
-    ({ prefix, pubkeys: pubkeysToSeed }) => {
+    ({ onboardingPrefix, pubkeys: pubkeysToSeed, welcomePrefix }) => {
       for (const pubkey of pubkeysToSeed) {
-        window.localStorage.setItem(`${prefix}${pubkey}`, "true");
+        window.localStorage.setItem(`${onboardingPrefix}${pubkey}`, "true");
+        window.localStorage.setItem(`${welcomePrefix}${pubkey}`, "true");
       }
     },
-    { prefix: ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX, pubkeys },
+    {
+      onboardingPrefix: ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX,
+      pubkeys,
+      welcomePrefix: WELCOME_CHANNEL_ENSURED_STORAGE_KEY_PREFIX,
+    },
   );
 }
 
