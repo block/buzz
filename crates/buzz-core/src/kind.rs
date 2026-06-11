@@ -110,6 +110,15 @@ pub const KIND_EVENT_REMINDER: u32 = 30300;
 /// a compile-time bitset or sorted array with binary search for hot-path use.
 pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER];
 
+/// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).
+///
+/// Persona definition event published by the workspace owner. Addressed by
+/// `(pubkey, kind, d_tag)` where `d_tag` is the plaintext persona slug.
+/// Content is a JSON body containing persona fields (system_prompt,
+/// display_name, avatar_url, runtime, model, provider, name_pool, env_vars).
+/// Designed for discoverability and sharing — d-tag is not blinded.
+pub const KIND_PERSONA: u32 = 30175;
+
 // NIP-29 group admin events
 /// NIP-29: Add a user to a group.
 pub const KIND_NIP29_PUT_USER: u32 = 9000;
@@ -391,6 +400,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_AGENT_PROFILE,
     KIND_AGENT_ENGRAM,
     KIND_EVENT_REMINDER,
+    KIND_PERSONA,
     KIND_NIP29_PUT_USER,
     KIND_NIP29_REMOVE_USER,
     KIND_NIP29_EDIT_METADATA,
@@ -573,6 +583,7 @@ pub fn event_kind_i32(event: &nostr::Event) -> i32 {
 
 // Compile-time: new kinds are in the expected ranges.
 const _: () = assert!(is_replaceable(KIND_AGENT_PROFILE)); // 10100 ∈ 10000–19999
+const _: () = assert!(is_parameterized_replaceable(KIND_PERSONA)); // 30175 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_MESH_LLM_RELAY_STATUS)); // 30621 ∈ 30000–39999

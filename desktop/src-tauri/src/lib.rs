@@ -535,15 +535,27 @@ pub fn run() {
             migration::reconcile_legacy_command_names(&app_handle);
             migration::reconcile_provider_mcp_commands(&app_handle);
 
-            if let Err(e) = managed_agents::sync_team_personas(&app_handle) {
-                eprintln!("buzz-desktop: sync-team-personas: {e}");
-            }
-
             // Resolve persisted identity key (env var → file → generate+save).
             // This is fatal — the app should not start with an ephemeral identity
             // that will be lost on restart, as that silently breaks channel
             // memberships, DMs, and relay identity.
             let state = app_handle.state::<AppState>();
+            resolve_persisted_identity(&app_handle, &state)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+            // Persona-event migration signs every retained event with the
+            // owner's keys, so it must run after the persisted identity is
+            // resolved (not before — at that point keys may still be ephemeral).
+            let owner_keys = state
+                .keys
+                .lock()
+                .map(|k| k.clone())
+                .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
+            migration::migrate_personas_to_events(&app_handle, &owner_keys);
+
+            if let Err(e) = managed_agents::sync_team_personas(&app_handle) {
+                eprintln!("buzz-desktop: sync-team-personas: {e}");
+            }
 
             // Store the AppHandle so huddle commands can emit `huddle-state-changed`
             // events via `huddle::emit_huddle_state` without threading the handle
@@ -551,9 +563,6 @@ pub fn run() {
             if let Ok(mut guard) = state.app_handle.lock() {
                 *guard = Some(app_handle.clone());
             }
-
-            resolve_persisted_identity(&app_handle, &state)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
             // Bring up the runtime-owned relay-mesh call-me-now listener now,
             // before any saved agent restore can request a connection. Its

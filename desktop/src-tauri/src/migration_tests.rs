@@ -1060,3 +1060,98 @@ fn migrate_legacy_nest_preserves_user_edited_agents_md() {
         "a user-edited live AGENTS.md must never be clobbered"
     );
 }
+
+/// Helper: write a `personas.json` directly in `base_dir` (the migration
+/// reads `base_dir/personas.json`, where `base_dir` is the `agents` dir).
+fn write_base_personas(base_dir: &Path, records: &serde_json::Value) {
+    std::fs::write(
+        base_dir.join("personas.json"),
+        serde_json::to_string_pretty(records).unwrap(),
+    )
+    .unwrap();
+}
+
+fn one_persona() -> serde_json::Value {
+    serde_json::json!([{
+        "id": "code-reviewer",
+        "display_name": "Code Reviewer",
+        "system_prompt": "You review code.",
+        "is_builtin": false,
+        "is_active": true,
+        "name_pool": [],
+        "env_vars": {},
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-01T00:00:00Z"
+    }])
+}
+
+#[test]
+fn migrate_personas_writes_signed_retention_rows() {
+    use crate::managed_agents::retention::{get_retained_personas, open_retention_db};
+
+    let base = tempfile::tempdir().unwrap();
+    write_base_personas(base.path(), &one_persona());
+    let keys = nostr::Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+
+    let migrated = migrate_personas_in_dir(base.path(), &keys).unwrap();
+    assert_eq!(migrated, 1);
+
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let rows = get_retained_personas(&conn, &pubkey).unwrap();
+    assert_eq!(rows.len(), 1);
+    // Row holds a real signed event for the owner — not a placeholder.
+    assert_eq!(rows[0].pubkey, pubkey);
+    let event: nostr::Event = nostr::JsonUtil::from_json(&rows[0].raw_event).unwrap();
+    assert!(event.verify().is_ok());
+    assert!(rows[0].pending_sync);
+}
+
+#[test]
+fn migrate_personas_skips_builtins() {
+    use crate::managed_agents::retention::{get_retained_personas, open_retention_db};
+
+    let base = tempfile::tempdir().unwrap();
+    write_base_personas(
+        base.path(),
+        &serde_json::json!([{
+            "id": "builtin:solo",
+            "display_name": "Solo",
+            "system_prompt": "x",
+            "is_builtin": true,
+            "is_active": true,
+            "name_pool": [],
+            "env_vars": {},
+            "created_at": "2025-01-01T00:00:00Z",
+            "updated_at": "2025-01-01T00:00:00Z"
+        }]),
+    );
+    let keys = nostr::Keys::generate();
+
+    let migrated = migrate_personas_in_dir(base.path(), &keys).unwrap();
+    assert_eq!(migrated, 0);
+
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let rows = get_retained_personas(&conn, &keys.public_key().to_hex()).unwrap();
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn migrate_personas_skips_when_retention_already_populated() {
+    let base = tempfile::tempdir().unwrap();
+    write_base_personas(base.path(), &one_persona());
+    let keys = nostr::Keys::generate();
+
+    // First run migrates; second run is a no-op (retention rows are the
+    // sentinel — no separate sentinel file).
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 0);
+    assert!(!base.path().join("migration_state.json").exists());
+}
+
+#[test]
+fn migrate_personas_no_file_is_noop() {
+    let base = tempfile::tempdir().unwrap();
+    let keys = nostr::Keys::generate();
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 0);
+}

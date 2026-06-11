@@ -3,7 +3,12 @@ use std::{fs, path::PathBuf};
 use tauri::AppHandle;
 
 use crate::{
-    managed_agents::{managed_agents_base_dir, PersonaRecord},
+    managed_agents::{
+        managed_agents_base_dir,
+        persona_events::persona_from_event,
+        retention::{get_retained_personas, has_retained_personas, open_retention_db},
+        PersonaRecord,
+    },
     util::now_iso,
 };
 
@@ -325,6 +330,54 @@ pub fn validate_persona_activation_change(
     }
 
     Ok(())
+}
+
+/// Path to the retention SQLite database.
+#[allow(dead_code)]
+fn retention_db_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(managed_agents_base_dir(app)?.join("retention.db"))
+}
+
+/// Load personas from the retention store, returning them as PersonaRecords.
+///
+/// Returns `Ok(None)` if the retention DB doesn't exist or has no personas
+/// for the current user pubkey.
+#[allow(dead_code)]
+fn load_from_retention(
+    app: &AppHandle,
+    pubkey: &str,
+) -> Result<Option<Vec<PersonaRecord>>, String> {
+    let db_path = retention_db_path(app)?;
+    if !db_path.exists() {
+        return Ok(None);
+    }
+
+    let conn = open_retention_db(&db_path)?;
+    if !has_retained_personas(&conn, pubkey)? {
+        return Ok(None);
+    }
+
+    let retained = get_retained_personas(&conn, pubkey)?;
+    let mut records = Vec::with_capacity(retained.len());
+    for row in &retained {
+        let event: nostr::Event = serde_json::from_str(&row.raw_event)
+            .map_err(|e| format!("failed to parse retained event: {e}"))?;
+        match persona_from_event(&event) {
+            Ok(record) => records.push(record),
+            Err(e) => {
+                eprintln!(
+                    "sprout-desktop: retention: skipping malformed persona event (d_tag={}): {e}",
+                    row.d_tag
+                );
+            }
+        }
+    }
+
+    if records.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(records))
+    }
 }
 
 pub fn load_personas(app: &AppHandle) -> Result<Vec<PersonaRecord>, String> {
