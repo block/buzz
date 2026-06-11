@@ -1,7 +1,6 @@
--- Buzz Postgres schema reference.
+-- Buzz initial Postgres schema.
 --
--- Runtime migrations live under migrations/ and are applied by sqlx. Keep this
--- file in sync as a human-readable snapshot of the desired schema.
+-- This migration is the source of truth for fresh database setup.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 

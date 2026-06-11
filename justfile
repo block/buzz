@@ -148,13 +148,9 @@ _ensure-services:
     echo " timed out"
     exit 1
 
-# Apply database migrations if pgschema is available
+# Apply database migrations if the dev database is running
 _ensure-migrations: _ensure-services
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -x bin/pgschema && -f schema/schema.sql ]]; then
-        bin/pgschema apply --file schema/schema.sql --auto-approve || true
-    fi
+    cargo run -p buzz-admin -- migrate
 
 # Run clippy on the desktop Tauri Rust crate
 desktop-tauri-clippy: _ensure-sidecar-stubs
@@ -388,9 +384,9 @@ mobile-dev:
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 
-# Apply schema migrations via pgschema
+# Apply database migrations
 migrate: _ensure-services
-    ./bin/pgschema apply --file schema/schema.sql --auto-approve
+    cargo run -p buzz-admin -- migrate
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
 

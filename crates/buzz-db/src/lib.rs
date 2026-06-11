@@ -23,6 +23,8 @@ pub mod error;
 pub mod event;
 /// Home feed queries.
 pub mod feed;
+/// Embedded database migrations.
+pub mod migration;
 /// Monthly table partition management.
 pub mod partition;
 /// Reaction persistence.
@@ -194,6 +196,11 @@ impl Db {
     /// Creates a `Db` from an existing `PgPool` (useful in tests).
     pub fn from_pool(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Run pending database migrations.
+    pub async fn migrate(&self) -> Result<()> {
+        migration::run_migrations(&self.pool).await
     }
 
     /// Returns `true` if the database is reachable (used by readiness probes).

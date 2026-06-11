@@ -55,6 +55,19 @@ async fn main() -> anyhow::Result<()> {
     })?;
     info!("Postgres connected");
 
+    let auto_migrate = std::env::var("BUZZ_AUTO_MIGRATE")
+        .map(|value| value != "false")
+        .unwrap_or(true);
+    if auto_migrate {
+        db.migrate().await.map_err(|e| {
+            error!("Failed to run database migrations: {e}");
+            anyhow::anyhow!("Database migration failed: {e}")
+        })?;
+        info!("Database migrations complete");
+    } else {
+        info!("Skipping database migrations because BUZZ_AUTO_MIGRATE=false");
+    }
+
     if let Err(e) = db.ensure_future_partitions(3).await {
         error!("Failed to ensure partitions: {e}");
     }
