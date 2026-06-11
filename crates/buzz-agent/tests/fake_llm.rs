@@ -335,3 +335,37 @@ async fn rejects_oversized_line() {
         .await
         .expect("agent didn't exit after oversized line");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_new_rejects_oversized_system_prompt() {
+    // A systemPrompt exceeding 512KB must produce a JSON-RPC error, not a panic.
+    let url = spawn_fake_llm(vec![]).await;
+    let mut h = Harness::spawn(&url).await;
+    h.send(
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{}}),
+    )
+    .await;
+    let r = h.recv().await;
+    assert_eq!(r["result"]["protocolVersion"], 1);
+
+    // 600KB payload — exceeds the 512KB limit.
+    let big_prompt = "x".repeat(600 * 1024);
+    let id = h
+        .send(
+            "session/new",
+            json!({"cwd":"/tmp","mcpServers":[],"systemPrompt": big_prompt}),
+        )
+        .await;
+    let r = h.recv_until(|v| v["id"] == json!(id)).await;
+    assert!(
+        r.get("error").is_some(),
+        "expected JSON-RPC error for oversized systemPrompt, got: {r}"
+    );
+    let err_msg = r["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        err_msg.contains("512KB limit"),
+        "error message should mention 512KB limit, got: {err_msg}"
+    );
+    h.shutdown().await;
+}

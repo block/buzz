@@ -405,9 +405,9 @@ async fn create_session_and_apply_model(
     // user messages into the proper system role via session/new.
     let combined_system_prompt: Option<String> = if agent.acp.supports_system_prompt {
         match (ctx.base_prompt, ctx.system_prompt.as_deref()) {
-            (Some(bp), Some(sp)) => Some(format!("[Base]\n{}\n\n[System]\n{sp}", bp.trim_end())),
-            (Some(bp), None) => Some(format!("[Base]\n{}", bp.trim_end())),
-            (None, Some(sp)) => Some(format!("[System]\n{sp}")),
+            (Some(bp), Some(sp)) => Some(format!("{}\n\n{sp}", bp.trim_end())),
+            (Some(bp), None) => Some(bp.trim_end().to_string()),
+            (None, Some(sp)) => Some(sp.to_string()),
             (None, None) => None,
         }
     } else {

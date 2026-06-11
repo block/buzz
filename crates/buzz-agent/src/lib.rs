@@ -18,7 +18,7 @@ use tokio::io::BufReader;
 use tokio::sync::{mpsc, watch, Mutex};
 
 use crate::agent::RunCtx;
-use crate::config::{Config, PROTOCOL_VERSION};
+use crate::config::{Config, MAX_SYSTEM_PROMPT_BYTES, PROTOCOL_VERSION};
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
 use crate::types::HistoryItem;
@@ -280,7 +280,6 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             }
         }
         // Reject combined prompts exceeding 512KB.
-        const MAX_SYSTEM_PROMPT_BYTES: usize = 512 * 1024;
         if prompt.len() > MAX_SYSTEM_PROMPT_BYTES {
             return reject(
                 wire_tx,

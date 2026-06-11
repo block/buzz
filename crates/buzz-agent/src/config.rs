@@ -3,6 +3,7 @@ use std::time::Duration;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
+pub const MAX_SYSTEM_PROMPT_BYTES: usize = 512 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 64;
 

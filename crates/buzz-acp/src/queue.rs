@@ -1074,6 +1074,9 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> String 
     }
 
     // 1b. NIP-AE agent core memory (rendered by `engram_fetch::build_core_section`).
+    // agent_core is always in user messages because it is resolved per-channel
+    // after session creation. A future session/update mechanism could move it
+    // to the system role.
     if let Some(core) = args.agent_core {
         sections.push(core.to_string());
     }

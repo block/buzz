@@ -223,4 +223,16 @@ mod tests {
         assert_eq!(params.cwd, "/tmp/test");
         assert!(params.system_prompt.is_none());
     }
+
+    #[test]
+    fn session_new_params_empty_string_system_prompt() {
+        // An explicit empty string is distinct from absent — deserializes to Some("").
+        let json = serde_json::json!({
+            "cwd": "/tmp/test",
+            "mcpServers": [],
+            "systemPrompt": ""
+        });
+        let params: SessionNewParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.system_prompt, Some(String::new()));
+    }
 }
