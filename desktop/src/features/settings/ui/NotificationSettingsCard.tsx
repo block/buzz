@@ -169,81 +169,97 @@ export function NotificationSettingsCard({
                 </SettingsOptionRow>
               </SettingsOptionGroup>
 
-              <SettingsOptionGroup>
-                {visibleSlots.map((slot) => {
-                  const comingSoon = COMING_SOON_SLOTS.has(slot);
-                  const alertsOn = notificationSettings.slotAlertsEnabled[slot];
-                  return (
-                    <SettingsOptionRow
-                      aria-disabled={comingSoon || undefined}
-                      className={cn(
-                        comingSoon && "cursor-not-allowed opacity-40",
-                      )}
-                      key={slot}
-                    >
-                      <div className="min-w-0">
-                        <span className="flex items-center gap-2 text-sm font-medium">
-                          {SLOT_LABELS[slot]}
-                          {comingSoon ? (
-                            <span className="rounded-full bg-muted/70 px-2 py-0.5 text-[10px] font-normal uppercase tracking-wide text-muted-foreground">
-                              Coming soon
+              <AnimatePresence initial={false} mode="popLayout">
+                {anyAlertsOn ? (
+                  <motion.div
+                    animate={{ opacity: 1 }}
+                    className="flex flex-col gap-4"
+                    exit={{ opacity: 0 }}
+                    initial={{ opacity: 0 }}
+                    key="event-rows"
+                    layout
+                  >
+                    <SettingsOptionGroup>
+                      {visibleSlots.map((slot) => {
+                        const comingSoon = COMING_SOON_SLOTS.has(slot);
+                        const alertsOn =
+                          notificationSettings.slotAlertsEnabled[slot];
+                        return (
+                          <SettingsOptionRow
+                            aria-disabled={comingSoon || undefined}
+                            className={cn(
+                              comingSoon && "cursor-not-allowed opacity-40",
+                            )}
+                            key={slot}
+                          >
+                            <div className="min-w-0">
+                              <span className="flex items-center gap-2 text-sm font-medium">
+                                {SLOT_LABELS[slot]}
+                                {comingSoon ? (
+                                  <span className="rounded-full bg-muted/70 px-2 py-0.5 text-[10px] font-normal uppercase tracking-wide text-muted-foreground">
+                                    Coming soon
+                                  </span>
+                                ) : null}
+                              </span>
+                              <p className="text-sm font-normal text-muted-foreground">
+                                {SLOT_DESCRIPTIONS[slot]}
+                              </p>
+                            </div>
+                            <span className="flex items-center gap-3">
+                              <span
+                                className={cn(
+                                  "transition-opacity duration-200",
+                                  !alertsOn && "pointer-events-none opacity-40",
+                                )}
+                              >
+                                <SoundPicker
+                                  disabled={comingSoon || !alertsOn}
+                                  onChange={(next) =>
+                                    onSetSoundForSlot(slot, next)
+                                  }
+                                  recommended={RECOMMENDED_SOUND_BY_SLOT[slot]}
+                                  value={notificationSettings.sounds[slot]}
+                                />
+                              </span>
+                              <Switch
+                                checked={alertsOn && !comingSoon}
+                                data-testid={`notifications-alerts-enabled-${slot}`}
+                                disabled={comingSoon}
+                                id={`alerts-enabled-${slot}-switch`}
+                                onCheckedChange={(checked) => {
+                                  onSetSlotAlertsEnabled(slot, checked);
+                                }}
+                              />
                             </span>
-                          ) : null}
-                        </span>
-                        <p className="text-sm font-normal text-muted-foreground">
-                          {SLOT_DESCRIPTIONS[slot]}
-                        </p>
-                      </div>
-                      <span className="flex items-center gap-3">
-                        <span
-                          className={cn(
-                            "transition-opacity duration-200",
-                            !alertsOn && "pointer-events-none opacity-40",
-                          )}
-                        >
-                          <SoundPicker
-                            disabled={comingSoon || !alertsOn}
-                            onChange={(next) => onSetSoundForSlot(slot, next)}
-                            recommended={RECOMMENDED_SOUND_BY_SLOT[slot]}
-                            value={notificationSettings.sounds[slot]}
-                          />
-                        </span>
-                        <Switch
-                          checked={alertsOn && !comingSoon}
-                          data-testid={`notifications-alerts-enabled-${slot}`}
-                          disabled={comingSoon}
-                          id={`alerts-enabled-${slot}-switch`}
-                          onCheckedChange={(checked) => {
-                            onSetSlotAlertsEnabled(slot, checked);
-                          }}
-                        />
-                      </span>
-                    </SettingsOptionRow>
-                  );
-                })}
-              </SettingsOptionGroup>
+                          </SettingsOptionRow>
+                        );
+                      })}
+                    </SettingsOptionGroup>
 
-              <div className="flex justify-center">
-                <Button
-                  data-testid="notifications-toggle-coming-soon"
-                  onClick={() => setShowComingSoon((current) => !current)}
-                  size="sm"
-                  type="button"
-                  variant="secondary"
-                >
-                  {showComingSoon ? (
-                    <>
-                      <ChevronUp className="h-3.5 w-3.5" />
-                      Show less
-                    </>
-                  ) : (
-                    <>
-                      <ChevronDown className="h-3.5 w-3.5" />
-                      View all
-                    </>
-                  )}
-                </Button>
-              </div>
+                    <div className="flex justify-center">
+                      <Button
+                        data-testid="notifications-toggle-coming-soon"
+                        onClick={() => setShowComingSoon((current) => !current)}
+                        size="sm"
+                        type="button"
+                        variant="secondary"
+                      >
+                        {showComingSoon ? (
+                          <>
+                            <ChevronUp className="h-3.5 w-3.5" />
+                            Show less
+                          </>
+                        ) : (
+                          <>
+                            <ChevronDown className="h-3.5 w-3.5" />
+                            View all
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </motion.div>
+                ) : null}
+              </AnimatePresence>
             </motion.div>
           ) : null}
         </AnimatePresence>
