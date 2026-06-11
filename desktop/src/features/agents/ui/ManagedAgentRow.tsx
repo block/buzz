@@ -277,7 +277,7 @@ function AgentSummary({
                   key={`working-${name}`}
                   variant="default"
                 >
-                  Working in # {name}
+                  Working in #{name}
                 </Badge>
               ))}
             </div>

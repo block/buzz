@@ -7,8 +7,6 @@ import {
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { ObserverEvent } from "./ui/agentSessionTypes";
 
-/** Mark a turn as possibly stale after 20s of no activity. */
-const STALE_AFTER_MS = 20_000;
 /** Remove a turn entirely after 90s of no activity. */
 const REMOVE_AFTER_MS = 90_000;
 /** Maximum concurrent active turns tracked per agent (matches pool size). */
@@ -23,11 +21,6 @@ type ActiveTurn = {
   lastActivityAt: number;
 };
 
-export type ActiveTurnInfo = {
-  channelId: string;
-  stale: boolean;
-};
-
 // Module-level state: agentPubkey → turnId → ActiveTurn
 const activeTurnsByAgent = new Map<string, Map<string, ActiveTurn>>();
 const listeners = new Set<() => void>();
@@ -35,7 +28,6 @@ const listeners = new Set<() => void>();
 // Cached snapshots for useSyncExternalStore reference stability.
 // Only regenerated when the underlying turn map for an agent actually changes.
 const cachedChannelSets = new Map<string, Set<string>>();
-const cachedDetailedMaps = new Map<string, Map<string, ActiveTurnInfo>>();
 
 // Track which observer events we've already processed (by seq per agent)
 const lastProcessedSeq = new Map<string, number>();
@@ -44,7 +36,6 @@ let pruneInterval: ReturnType<typeof setInterval> | null = null;
 
 function invalidateCache(agentKey: string) {
   cachedChannelSets.delete(agentKey);
-  cachedDetailedMaps.delete(agentKey);
 }
 
 function notifyListeners() {
@@ -143,11 +134,7 @@ function pruneExpired() {
       activeTurnsByAgent.delete(agentKey);
     }
   }
-  // Staleness flag is time-derived — invalidate detailed caches so consumers
-  // see updated stale values on next read.
-  const hadDetailedCaches = cachedDetailedMaps.size > 0;
-  cachedDetailedMaps.clear();
-  if (changed || hadDetailedCaches) {
+  if (changed) {
     notifyListeners();
   }
 }
@@ -158,7 +145,15 @@ function pruneExpired() {
 function processEvent(agentPubkey: string, event: ObserverEvent) {
   const key = normalizePubkey(agentPubkey);
   const lastSeq = lastProcessedSeq.get(key) ?? 0;
-  if (event.seq <= lastSeq) return;
+
+  // Detect agent restart: harness always starts seq at 1, so seeing seq=1
+  // after processing higher values means the agent restarted.
+  if (event.seq === 1 && lastSeq > 1) {
+    lastProcessedSeq.set(key, 0);
+  } else if (event.seq <= lastSeq) {
+    return;
+  }
+
   lastProcessedSeq.set(key, event.seq);
 
   switch (event.kind) {
@@ -213,30 +208,7 @@ export function subscribeActiveAgentTurns(listener: () => void) {
   };
 }
 
-export function getActiveTurnsForAgent(
-  agentPubkey: string | null | undefined,
-): Map<string, ActiveTurnInfo> {
-  if (!agentPubkey) return EMPTY_MAP;
-  const key = normalizePubkey(agentPubkey);
-  const agentTurns = activeTurnsByAgent.get(key);
-  if (!agentTurns || agentTurns.size === 0) return EMPTY_MAP;
-
-  const cached = cachedDetailedMaps.get(key);
-  if (cached) return cached;
-
-  const now = Date.now();
-  const result = new Map<string, ActiveTurnInfo>();
-  for (const [turnId, turn] of agentTurns) {
-    result.set(turnId, {
-      channelId: turn.channelId,
-      stale: now - turn.lastActivityAt > STALE_AFTER_MS,
-    });
-  }
-  cachedDetailedMaps.set(key, result);
-  return result;
-}
-
-/** Convenience: returns just the set of channel IDs (ignoring stale flag). */
+/** Returns the set of channel IDs where the given agent has active turns. */
 export function getActiveChannelsForAgent(
   agentPubkey: string | null | undefined,
 ): Set<string> {
@@ -253,7 +225,6 @@ export function getActiveChannelsForAgent(
   return result;
 }
 
-const EMPTY_MAP: Map<string, ActiveTurnInfo> = new Map();
 const EMPTY_SET: Set<string> = new Set();
 
 /**
@@ -267,21 +238,6 @@ export function syncAgentTurnsFromEvents(
   for (const event of events) {
     processEvent(agentPubkey, event);
   }
-}
-
-/**
- * Hook: returns a map of turnId → { channelId, stale } for the given agent.
- * Re-renders when the map changes. Use for detailed turn state display.
- */
-export function useActiveAgentTurnsDetailed(
-  agentPubkey: string | null | undefined,
-): Map<string, ActiveTurnInfo> {
-  const getSnapshot = React.useCallback(
-    () => getActiveTurnsForAgent(agentPubkey),
-    [agentPubkey],
-  );
-
-  return React.useSyncExternalStore(subscribeActiveAgentTurns, getSnapshot);
 }
 
 /**
@@ -324,6 +280,5 @@ export function resetActiveAgentTurnsStore() {
   activeTurnsByAgent.clear();
   lastProcessedSeq.clear();
   cachedChannelSets.clear();
-  cachedDetailedMaps.clear();
   notifyListeners();
 }

@@ -1976,18 +1976,9 @@ impl Drop for TurnCompletionGuard {
                 "turn_completed",
                 self.agent_index,
                 &context,
-                serde_json::json!({ "outcome": "dropped" }),
+                serde_json::json!({}),
             );
         }
-    }
-}
-
-impl TurnCompletionGuard {
-    /// Consume the guard without emitting, for paths that emit a more specific
-    /// completion event themselves (e.g., `turn_error`, `agent_panic` in lib.rs).
-    #[allow(dead_code)]
-    fn disarm(mut self) {
-        self.observer = None;
     }
 }
 
