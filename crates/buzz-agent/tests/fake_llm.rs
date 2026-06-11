@@ -463,7 +463,7 @@ async fn system_prompt_reaches_llm_system_role() {
     let (url, captures) = spawn_capturing_fake_llm(vec![openai_text("done")]).await;
     let mut h = Harness::spawn(&url).await;
 
-    // initialize — verify the agent advertises systemPrompt capability.
+    // initialize.
     h.send(
         "initialize",
         json!({"protocolVersion":1,"clientCapabilities":{}}),
@@ -471,11 +471,6 @@ async fn system_prompt_reaches_llm_system_role() {
     .await;
     let r = h.recv().await;
     assert_eq!(r["result"]["protocolVersion"], 1);
-    assert_eq!(
-        r["result"]["agentCapabilities"]["promptCapabilities"]["systemPrompt"],
-        json!(true),
-        "agent must advertise systemPrompt capability"
-    );
 
     // session/new with systemPrompt containing the canary.
     let sn_id = h
