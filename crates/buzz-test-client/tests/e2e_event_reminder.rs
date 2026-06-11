@@ -16,10 +16,10 @@
 
 use std::time::Duration;
 
+use buzz_test_client::{BuzzTestClient, RelayMessage};
 use nostr::{EventBuilder, Filter, Keys, Kind, Tag};
 use reqwest::Client;
 use serde_json::Value;
-use buzz_test_client::{BuzzTestClient, RelayMessage};
 
 const KIND_EVENT_REMINDER: u16 = 30300;
 
@@ -577,9 +577,7 @@ async fn test_author_can_subscribe_to_own_reminders_ws() {
     assert!(accepted, "setup failed: {msg}");
 
     // Subscribe via WebSocket as the author
-    let mut ws = BuzzTestClient::connect(&url, &keys)
-        .await
-        .expect("connect");
+    let mut ws = BuzzTestClient::connect(&url, &keys).await.expect("connect");
     let sid = sub_id("author-read");
     let filter = Filter::new()
         .kind(Kind::Custom(KIND_EVENT_REMINDER))

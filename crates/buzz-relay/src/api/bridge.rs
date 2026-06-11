@@ -593,10 +593,8 @@ pub async fn count_events(
                 match state.db.query_events(&q).await {
                     Ok(stored_events) => {
                         for se in stored_events {
-                            if !buzz_core::filter::filters_match(
-                                std::slice::from_ref(filter),
-                                &se,
-                            ) {
+                            if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se)
+                            {
                                 continue;
                             }
                             if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes)
@@ -642,10 +640,8 @@ pub async fn count_events(
                 match state.db.query_events(&query).await {
                     Ok(stored_events) => {
                         for se in stored_events {
-                            if !buzz_core::filter::filters_match(
-                                std::slice::from_ref(filter),
-                                &se,
-                            ) {
+                            if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se)
+                            {
                                 continue;
                             }
                             if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes)
