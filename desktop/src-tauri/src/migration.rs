@@ -1163,11 +1163,11 @@ pub fn migrate_personas_to_events(app: &tauri::AppHandle, keys: &nostr::Keys) {
         Ok(0) => {}
         Ok(migrated) => {
             eprintln!(
-                "sprout-desktop: persona-event-migration: {migrated} personas migrated to retention"
+                "buzz-desktop: persona-event-migration: {migrated} personas migrated to retention"
             );
         }
         Err(e) => {
-            eprintln!("sprout-desktop: persona-event-migration: {e}");
+            eprintln!("buzz-desktop: persona-event-migration: {e}");
         }
     }
 }
@@ -1184,7 +1184,7 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
         PersonaRecord,
     };
     use nostr::JsonUtil;
-    use sprout_core::kind::KIND_PERSONA;
+    use buzz_core_pkg::kind::KIND_PERSONA;
 
     let pubkey = keys.public_key().to_hex();
 

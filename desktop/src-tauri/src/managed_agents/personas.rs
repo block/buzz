@@ -366,7 +366,7 @@ fn load_from_retention(
             Ok(record) => records.push(record),
             Err(e) => {
                 eprintln!(
-                    "sprout-desktop: retention: skipping malformed persona event (d_tag={}): {e}",
+                    "buzz-desktop: retention: skipping malformed persona event (d_tag={}): {e}",
                     row.d_tag
                 );
             }

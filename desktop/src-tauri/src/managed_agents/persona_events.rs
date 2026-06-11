@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
-use sprout_core::kind::KIND_PERSONA;
+use buzz_core_pkg::kind::KIND_PERSONA;
 
 use super::PersonaRecord;
 use crate::app_state::AppState;
