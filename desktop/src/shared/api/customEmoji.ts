@@ -105,25 +105,30 @@ export function customEmojiFromEvent(event: RelayEvent | null): CustomEmoji[] {
 /**
  * Union every member's kind:30030 set into the workspace palette, collapsed to
  * one entry per shortcode. When members disagree on a shortcode's URL, the
- * winner is the lexicographically-smallest URL: deterministic and stable across
- * reloads, so the same set of events always yields the same palette (no picker
- * reshuffle, no ambiguous shortcode→url resolution downstream). Output is
- * sorted by shortcode.
+ * most recently published set wins (`created_at` is signed event data, so this
+ * is as deterministic and fetch-order-independent as any pure function of the
+ * events); equal timestamps tie-break to the lexicographically-smallest URL so
+ * the same set of events always yields the same palette. Output is sorted by
+ * shortcode.
  */
 export function unionCustomEmoji(
   events: ReadonlyArray<RelayEvent>,
 ): CustomEmoji[] {
-  const urlByShortcode = new Map<string, string>();
+  const byShortcode = new Map<string, { url: string; createdAt: number }>();
   for (const event of events) {
     for (const { shortcode, url } of customEmojiFromTags(event.tags)) {
-      const existing = urlByShortcode.get(shortcode);
-      if (existing === undefined || url < existing) {
-        urlByShortcode.set(shortcode, url);
+      const winner = byShortcode.get(shortcode);
+      if (
+        winner === undefined ||
+        event.created_at > winner.createdAt ||
+        (event.created_at === winner.createdAt && url < winner.url)
+      ) {
+        byShortcode.set(shortcode, { url, createdAt: event.created_at });
       }
     }
   }
-  return [...urlByShortcode]
-    .map(([shortcode, url]) => ({ shortcode, url }))
+  return [...byShortcode]
+    .map(([shortcode, { url }]) => ({ shortcode, url }))
     .sort((a, b) => a.shortcode.localeCompare(b.shortcode));
 }
 
