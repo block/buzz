@@ -10,12 +10,11 @@ import {
   type DesktopNotificationPermissionState,
 } from "./lib/desktop";
 import {
+  DEFAULT_SLOT_ALERTS_ENABLED,
   DEFAULT_SOUND_OVERRIDES,
   RECOMMENDED_SINGLE_SOUND,
-  SOUND_MODES,
   SOUND_NAMES,
   SOUND_SLOTS,
-  type SoundMode,
   type SoundName,
   type SoundOverrides,
   type SoundSlot,
@@ -34,27 +33,21 @@ const HOME_FEED_SEEN_MAX_ITEMS = 500;
 export type NotificationSettings = {
   desktopEnabled: boolean;
   homeBadgeEnabled: boolean;
-  mentions: boolean;
-  needsAction: boolean;
   notifyWhileViewing: boolean;
   soundEnabled: boolean;
-  jobProgressSoundEnabled: boolean;
-  soundMode: SoundMode;
   singleSound: SoundName;
   sounds: SoundOverrides;
+  slotAlertsEnabled: Record<SoundSlot, boolean>;
 };
 
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   desktopEnabled: true,
   homeBadgeEnabled: true,
-  mentions: true,
-  needsAction: true,
   notifyWhileViewing: false,
   soundEnabled: true,
-  jobProgressSoundEnabled: false,
-  soundMode: "single",
   singleSound: RECOMMENDED_SINGLE_SOUND,
   sounds: { ...DEFAULT_SOUND_OVERRIDES },
+  slotAlertsEnabled: { ...DEFAULT_SLOT_ALERTS_ENABLED },
 };
 
 const SOUND_NAME_SET = new Set<SoundName>(SOUND_NAMES);
@@ -66,14 +59,35 @@ function sanitizeSoundsMap(value: unknown): SoundOverrides {
   for (const slot of SOUND_SLOTS) {
     const picked = candidate[slot];
     if (picked === null) {
-      // Explicitly "Default" — distinct from a missing slot, which keeps
-      // the recommended override.
       result[slot] = null;
     } else if (
       typeof picked === "string" &&
       SOUND_NAME_SET.has(picked as SoundName)
     ) {
       result[slot] = picked as SoundName;
+    }
+  }
+  return result;
+}
+
+function sanitizeSlotAlertsEnabled(
+  value: unknown,
+  legacy: { mentions?: unknown; needsAction?: unknown },
+): Record<SoundSlot, boolean> {
+  const result = { ...DEFAULT_SLOT_ALERTS_ENABLED };
+  // Migrate the pre-per-event top-level toggles when present.
+  if (typeof legacy.mentions === "boolean") {
+    result.mention = legacy.mentions;
+  }
+  if (typeof legacy.needsAction === "boolean") {
+    result.needs_action = legacy.needsAction;
+  }
+  if (!value || typeof value !== "object") return result;
+  const candidate = value as Partial<Record<SoundSlot, unknown>>;
+  for (const slot of SOUND_SLOTS) {
+    const picked = candidate[slot];
+    if (typeof picked === "boolean") {
+      result[slot] = picked;
     }
   }
   return result;
@@ -88,7 +102,11 @@ function sanitizeNotificationSettings(value: unknown): NotificationSettings {
     return DEFAULT_NOTIFICATION_SETTINGS;
   }
 
-  const candidate = value as Partial<NotificationSettings>;
+  // Includes legacy fields (`mentions`, `needsAction`) that migrated into
+  // slotAlertsEnabled.
+  const candidate = value as Partial<
+    NotificationSettings & { mentions: boolean; needsAction: boolean }
+  >;
   return {
     desktopEnabled:
       typeof candidate.desktopEnabled === "boolean"
@@ -98,14 +116,6 @@ function sanitizeNotificationSettings(value: unknown): NotificationSettings {
       typeof candidate.homeBadgeEnabled === "boolean"
         ? candidate.homeBadgeEnabled
         : DEFAULT_NOTIFICATION_SETTINGS.homeBadgeEnabled,
-    mentions:
-      typeof candidate.mentions === "boolean"
-        ? candidate.mentions
-        : DEFAULT_NOTIFICATION_SETTINGS.mentions,
-    needsAction:
-      typeof candidate.needsAction === "boolean"
-        ? candidate.needsAction
-        : DEFAULT_NOTIFICATION_SETTINGS.needsAction,
     notifyWhileViewing:
       typeof candidate.notifyWhileViewing === "boolean"
         ? candidate.notifyWhileViewing
@@ -114,19 +124,16 @@ function sanitizeNotificationSettings(value: unknown): NotificationSettings {
       typeof candidate.soundEnabled === "boolean"
         ? candidate.soundEnabled
         : DEFAULT_NOTIFICATION_SETTINGS.soundEnabled,
-    jobProgressSoundEnabled:
-      typeof candidate.jobProgressSoundEnabled === "boolean"
-        ? candidate.jobProgressSoundEnabled
-        : DEFAULT_NOTIFICATION_SETTINGS.jobProgressSoundEnabled,
-    soundMode: SOUND_MODES.includes(candidate.soundMode as SoundMode)
-      ? (candidate.soundMode as SoundMode)
-      : DEFAULT_NOTIFICATION_SETTINGS.soundMode,
     singleSound:
       typeof candidate.singleSound === "string" &&
       SOUND_NAME_SET.has(candidate.singleSound as SoundName)
         ? (candidate.singleSound as SoundName)
         : DEFAULT_NOTIFICATION_SETTINGS.singleSound,
     sounds: sanitizeSoundsMap(candidate.sounds),
+    slotAlertsEnabled: sanitizeSlotAlertsEnabled(candidate.slotAlertsEnabled, {
+      mentions: candidate.mentions,
+      needsAction: candidate.needsAction,
+    }),
   };
 }
 
@@ -279,20 +286,6 @@ export function useNotificationSettings(pubkey?: string) {
     }));
   }, []);
 
-  const setMentionsEnabled = React.useCallback((enabled: boolean) => {
-    setSettings((current) => ({
-      ...current,
-      mentions: enabled,
-    }));
-  }, []);
-
-  const setNeedsActionEnabled = React.useCallback((enabled: boolean) => {
-    setSettings((current) => ({
-      ...current,
-      needsAction: enabled,
-    }));
-  }, []);
-
   const setNotifyWhileViewing = React.useCallback((enabled: boolean) => {
     setSettings((current) => ({
       ...current,
@@ -307,19 +300,15 @@ export function useNotificationSettings(pubkey?: string) {
     }));
   }, []);
 
-  const setJobProgressSoundEnabled = React.useCallback((enabled: boolean) => {
-    setSettings((current) => ({
-      ...current,
-      jobProgressSoundEnabled: enabled,
-    }));
-  }, []);
-
-  const setSoundMode = React.useCallback((mode: SoundMode) => {
-    setSettings((current) => ({
-      ...current,
-      soundMode: mode,
-    }));
-  }, []);
+  const setSlotAlertsEnabled = React.useCallback(
+    (slot: SoundSlot, enabled: boolean) => {
+      setSettings((current) => ({
+        ...current,
+        slotAlertsEnabled: { ...current.slotAlertsEnabled, [slot]: enabled },
+      }));
+    },
+    [],
+  );
 
   const setSingleSound = React.useCallback((name: SoundName) => {
     setSettings((current) => ({
@@ -344,14 +333,11 @@ export function useNotificationSettings(pubkey?: string) {
     permission,
     setDesktopEnabled,
     setHomeBadgeEnabled,
-    setJobProgressSoundEnabled,
-    setMentionsEnabled,
-    setNeedsActionEnabled,
     setNotifyWhileViewing,
     setSingleSound,
+    setSlotAlertsEnabled,
     setSoundEnabled,
     setSoundForSlot,
-    setSoundMode,
     settings,
   };
 }

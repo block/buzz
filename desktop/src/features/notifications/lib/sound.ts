@@ -46,6 +46,17 @@ export const SLOT_LABELS: Record<SoundSlot, string> = {
   job_error: "Agent: job error",
 };
 
+// The agent job protocol (kinds 43001-43006) is defined and queryable but
+// nothing emits the events yet — buzz-acp publishes plain stream messages.
+// These slots stay wired (resolver, defaults, settings) but render disabled
+// with a "coming soon" badge until an emitter exists.
+export const COMING_SOON_SLOTS: ReadonlySet<SoundSlot> = new Set([
+  "job_accepted",
+  "job_progress",
+  "job_result",
+  "job_error",
+]);
+
 export const SLOT_DESCRIPTIONS: Record<SoundSlot, string> = {
   dm: "When someone messages you directly.",
   mention: "When someone tags you in a channel.",
@@ -68,9 +79,6 @@ export const RECOMMENDED_SOUND_BY_SLOT: Record<SoundSlot, SoundName> = {
   job_error: "oh-no",
 };
 
-export const SOUND_MODES = ["single", "custom"] as const;
-export type SoundMode = (typeof SOUND_MODES)[number];
-
 export const RECOMMENDED_SINGLE_SOUND: SoundName = "unison";
 
 /** Per-slot overrides; null inherits the default sound. */
@@ -80,15 +88,30 @@ export const DEFAULT_SOUND_OVERRIDES: SoundOverrides = {
   dm: null,
   mention: null,
   thread_reply: null,
-  needs_action: "doodone",
-  job_accepted: "boo",
-  job_progress: "dng",
-  job_result: "unison",
-  job_error: "oh-no",
+  needs_action: null,
+  job_accepted: null,
+  job_progress: null,
+  job_result: null,
+  job_error: null,
+};
+
+/**
+ * Per-event alerts (notification + sound) on/off. Applies in both sound
+ * modes — this gates whether the event notifies at all, not which sound
+ * plays.
+ */
+export const DEFAULT_SLOT_ALERTS_ENABLED: Record<SoundSlot, boolean> = {
+  dm: true,
+  mention: true,
+  thread_reply: true,
+  needs_action: true,
+  job_accepted: true,
+  job_progress: false,
+  job_result: true,
+  job_error: true,
 };
 
 export type SoundPreferences = {
-  soundMode: SoundMode;
   singleSound: SoundName;
   sounds: SoundOverrides;
 };
@@ -97,8 +120,7 @@ export function resolveSlotSound(
   prefs: SoundPreferences,
   slot: SoundSlot,
 ): SoundName {
-  const override = prefs.soundMode === "custom" ? prefs.sounds[slot] : null;
-  return override ?? prefs.singleSound;
+  return prefs.sounds[slot] ?? prefs.singleSound;
 }
 
 export function slotForFeedKind(

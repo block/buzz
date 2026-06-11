@@ -119,14 +119,11 @@ export function SettingsView({
   onSectionChange,
   onSetDesktopNotificationsEnabled,
   onSetHomeBadgeEnabled,
-  onSetJobProgressSoundEnabled,
-  onSetMentionNotificationsEnabled,
-  onSetNeedsActionNotificationsEnabled,
+  onSetSlotAlertsEnabled,
   onSetNotifyWhileViewing,
   onSetSingleSound,
   onSetSoundEnabled,
   onSetSoundForSlot,
-  onSetSoundMode,
   section,
 }: SettingsViewProps) {
   const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
@@ -294,14 +291,11 @@ export function SettingsView({
                 notificationSettings,
                 onSetDesktopNotificationsEnabled,
                 onSetHomeBadgeEnabled,
-                onSetJobProgressSoundEnabled,
-                onSetMentionNotificationsEnabled,
-                onSetNeedsActionNotificationsEnabled,
+                onSetSlotAlertsEnabled,
                 onSetNotifyWhileViewing,
                 onSetSingleSound,
                 onSetSoundEnabled,
                 onSetSoundForSlot,
-                onSetSoundMode,
               })}
             </div>
           </section>

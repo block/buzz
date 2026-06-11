@@ -238,7 +238,12 @@ export function AppShell() {
 
   const handleDmNotification = React.useEffectEvent(
     (event: RelayEvent, channel: Channel) => {
-      if (!notificationSettings.settings.desktopEnabled) {
+      // The Sound master switch cascades the per-event rows off entirely.
+      if (
+        !notificationSettings.settings.desktopEnabled ||
+        !notificationSettings.settings.soundEnabled ||
+        !notificationSettings.settings.slotAlertsEnabled.dm
+      ) {
         return;
       }
 
@@ -268,11 +273,9 @@ export function AppShell() {
         },
       }).then((didSend) => {
         if (!didSend) return;
-        if (notificationSettings.settings.soundEnabled) {
-          playNotificationSound(
-            resolveSlotSound(notificationSettings.settings, "dm"),
-          );
-        }
+        playNotificationSound(
+          resolveSlotSound(notificationSettings.settings, "dm"),
+        );
         void requestDockBounce();
       });
     },
@@ -299,7 +302,12 @@ export function AppShell() {
 
   const handleThreadReplyDesktopNotification = React.useEffectEvent(
     (channelId: string, event: RelayEvent) => {
-      if (!notificationSettings.settings.desktopEnabled) {
+      // The Sound master switch cascades the per-event rows off entirely.
+      if (
+        !notificationSettings.settings.desktopEnabled ||
+        !notificationSettings.settings.soundEnabled ||
+        !notificationSettings.settings.slotAlertsEnabled.thread_reply
+      ) {
         return;
       }
 
@@ -337,11 +345,9 @@ export function AppShell() {
         },
       }).then((didSend) => {
         if (!didSend) return;
-        if (notificationSettings.settings.soundEnabled) {
-          playNotificationSound(
-            resolveSlotSound(notificationSettings.settings, "thread_reply"),
-          );
-        }
+        playNotificationSound(
+          resolveSlotSound(notificationSettings.settings, "thread_reply"),
+        );
         void requestDockBounce();
       });
     },
@@ -780,14 +786,8 @@ export function AppShell() {
                       onSetHomeBadgeEnabled={
                         notificationSettings.setHomeBadgeEnabled
                       }
-                      onSetJobProgressSoundEnabled={
-                        notificationSettings.setJobProgressSoundEnabled
-                      }
-                      onSetMentionNotificationsEnabled={
-                        notificationSettings.setMentionsEnabled
-                      }
-                      onSetNeedsActionNotificationsEnabled={
-                        notificationSettings.setNeedsActionEnabled
+                      onSetSlotAlertsEnabled={
+                        notificationSettings.setSlotAlertsEnabled
                       }
                       onSetNotifyWhileViewing={
                         notificationSettings.setNotifyWhileViewing
@@ -795,7 +795,6 @@ export function AppShell() {
                       onSetSingleSound={notificationSettings.setSingleSound}
                       onSetSoundEnabled={notificationSettings.setSoundEnabled}
                       onSetSoundForSlot={notificationSettings.setSoundForSlot}
-                      onSetSoundMode={notificationSettings.setSoundMode}
                       section={settingsSection}
                     />
                   </React.Suspense>

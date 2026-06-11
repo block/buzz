@@ -1,10 +1,6 @@
 import type { DesktopNotificationPermissionState } from "@/features/notifications/hooks";
 import type { NotificationSettings } from "@/features/notifications/hooks";
-import type {
-  SoundMode,
-  SoundName,
-  SoundSlot,
-} from "@/features/notifications/lib/sound";
+import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import { SettingsView } from "@/features/settings/ui/SettingsView";
 
@@ -19,14 +15,11 @@ type SettingsScreenProps = {
   onSectionChange: (section: SettingsSection) => void;
   onSetDesktopNotificationsEnabled: (enabled: boolean) => Promise<boolean>;
   onSetHomeBadgeEnabled: (enabled: boolean) => void;
-  onSetJobProgressSoundEnabled: (enabled: boolean) => void;
-  onSetMentionNotificationsEnabled: (enabled: boolean) => void;
-  onSetNeedsActionNotificationsEnabled: (enabled: boolean) => void;
+  onSetSlotAlertsEnabled: (slot: SoundSlot, enabled: boolean) => void;
   onSetNotifyWhileViewing: (enabled: boolean) => void;
   onSetSingleSound: (name: SoundName) => void;
   onSetSoundEnabled: (enabled: boolean) => void;
   onSetSoundForSlot: (slot: SoundSlot, name: SoundName | null) => void;
-  onSetSoundMode: (mode: SoundMode) => void;
   section: SettingsSection;
 };
 
@@ -41,14 +34,11 @@ export function SettingsScreen({
   onSectionChange,
   onSetDesktopNotificationsEnabled,
   onSetHomeBadgeEnabled,
-  onSetJobProgressSoundEnabled,
-  onSetMentionNotificationsEnabled,
-  onSetNeedsActionNotificationsEnabled,
+  onSetSlotAlertsEnabled,
   onSetNotifyWhileViewing,
   onSetSingleSound,
   onSetSoundEnabled,
   onSetSoundForSlot,
-  onSetSoundMode,
   section,
 }: SettingsScreenProps) {
   return (
@@ -63,16 +53,11 @@ export function SettingsScreen({
       onSectionChange={onSectionChange}
       onSetDesktopNotificationsEnabled={onSetDesktopNotificationsEnabled}
       onSetHomeBadgeEnabled={onSetHomeBadgeEnabled}
-      onSetJobProgressSoundEnabled={onSetJobProgressSoundEnabled}
-      onSetMentionNotificationsEnabled={onSetMentionNotificationsEnabled}
-      onSetNeedsActionNotificationsEnabled={
-        onSetNeedsActionNotificationsEnabled
-      }
+      onSetSlotAlertsEnabled={onSetSlotAlertsEnabled}
       onSetNotifyWhileViewing={onSetNotifyWhileViewing}
       onSetSingleSound={onSetSingleSound}
       onSetSoundEnabled={onSetSoundEnabled}
       onSetSoundForSlot={onSetSoundForSlot}
-      onSetSoundMode={onSetSoundMode}
       section={section}
     />
   );
