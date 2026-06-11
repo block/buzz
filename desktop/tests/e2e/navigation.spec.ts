@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { openSettings } from "../helpers/settings";
 
 const ENGINEERING_CHANNEL_ID = "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9";
 const WATERCOLOR_CHANNEL_ID = "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11";
@@ -228,6 +229,41 @@ test("home inbox selection survives reload and back restores it", async ({
 
   await page.getByTestId("global-back").click();
   await expect.poll(() => page.url()).toBe(defaultUrl);
+});
+
+test("settings is a route: section survives reload, closing returns to the previous panel state", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  // Open a channel with a thread panel so there's panel state to come back to.
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const rootMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .first();
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  const channelUrl = page.url();
+
+  await openSettings(page);
+  await expect(page).toHaveURL(/#\/settings/);
+
+  // Section switches rewrite the settings entry (replace, not push).
+  await page.getByTestId("settings-nav-notifications").click();
+  await expect(page).toHaveURL(/section=notifications/);
+
+  await page.reload();
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await expect(page).toHaveURL(/section=notifications/);
+
+  await page.getByTestId("settings-back-to-app").click();
+  await expect.poll(() => page.url()).toBe(channelUrl);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(threadPanel).toBeVisible();
 });
 
 test("message deep links survive reload", async ({ page }) => {
