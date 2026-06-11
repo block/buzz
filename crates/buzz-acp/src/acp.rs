@@ -253,6 +253,16 @@ impl AcpClient {
         self.observer_context = context;
     }
 
+    /// Return a clone of the observer handle, if attached.
+    pub(crate) fn observer_handle(&self) -> Option<ObserverHandle> {
+        self.observer.clone()
+    }
+
+    /// Return the pool slot index for this agent process.
+    pub(crate) fn observer_agent_index(&self) -> Option<usize> {
+        self.observer_agent_index
+    }
+
     /// Emit a semantic event to the local observer feed, if enabled.
     pub fn observe(&self, kind: impl Into<String>, payload: serde_json::Value) {
         if let Some(observer) = &self.observer {

@@ -2078,16 +2078,6 @@ fn handle_prompt_result(
                 outcome = outcome_label,
                 "agent_returned"
             );
-            if let Some(ref observer) = observer {
-                observer.emit(
-                    "turn_completed",
-                    Some(agent_index),
-                    &observer::context_for(channel_id, None, None),
-                    serde_json::json!({
-                        "outcome": outcome_label,
-                    }),
-                );
-            }
             pool.return_agent(result.agent);
         }
         // Fatal outcomes: the agent subprocess is dead or poisoned — respawn it.
@@ -2146,16 +2136,6 @@ fn handle_prompt_result(
                 outcome = outcome_label,
                 "agent_returned (cancelled)"
             );
-            if let Some(ref observer) = observer {
-                observer.emit(
-                    "turn_completed",
-                    Some(agent_index),
-                    &observer::context_for(channel_id, None, None),
-                    serde_json::json!({
-                        "outcome": outcome_label,
-                    }),
-                );
-            }
             pool.return_agent(result.agent);
         }
         PromptOutcome::Error(ref e) => {

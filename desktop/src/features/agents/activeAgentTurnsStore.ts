@@ -7,23 +7,35 @@ import {
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { ObserverEvent } from "./ui/agentSessionTypes";
 
-/** How long before a turn is considered stale if no completion event arrives. */
-const STALENESS_TIMEOUT_MS = 5 * 60 * 1000;
+/** Mark a turn as possibly stale after 20s of no activity. */
+const STALE_AFTER_MS = 20_000;
+/** Remove a turn entirely after 90s of no activity. */
+const REMOVE_AFTER_MS = 90_000;
+/** Maximum concurrent active turns tracked per agent (matches pool size). */
+const MAX_TURNS_PER_AGENT = 4;
+/** Interval for pruning stale/expired turns. */
+const PRUNE_INTERVAL_MS = 5_000;
 
 type ActiveTurn = {
   turnId: string;
   channelId: string;
   startedAt: number;
+  lastActivityAt: number;
 };
 
-// Module-level state: agentPubkey → channelId → ActiveTurn
+export type ActiveTurnInfo = {
+  channelId: string;
+  stale: boolean;
+};
+
+// Module-level state: agentPubkey → turnId → ActiveTurn
 const activeTurnsByAgent = new Map<string, Map<string, ActiveTurn>>();
 const listeners = new Set<() => void>();
 
 // Track which observer events we've already processed (by seq per agent)
 const lastProcessedSeq = new Map<string, number>();
 
-let cleanupInterval: ReturnType<typeof setInterval> | null = null;
+let pruneInterval: ReturnType<typeof setInterval> | null = null;
 
 function notifyListeners() {
   for (const listener of listeners) {
@@ -43,33 +55,74 @@ function startTurn(
     agentTurns = new Map();
     activeTurnsByAgent.set(key, agentTurns);
   }
-  agentTurns.set(channelId, {
+
+  // Cap at MAX_TURNS_PER_AGENT — evict oldest if exceeded
+  if (agentTurns.size >= MAX_TURNS_PER_AGENT && !agentTurns.has(turnId)) {
+    let oldestKey: string | null = null;
+    let oldestTime = Number.POSITIVE_INFINITY;
+    for (const [tid, turn] of agentTurns) {
+      if (turn.startedAt < oldestTime) {
+        oldestTime = turn.startedAt;
+        oldestKey = tid;
+      }
+    }
+    if (oldestKey) {
+      agentTurns.delete(oldestKey);
+    }
+  }
+
+  const now = Date.parse(timestamp) || Date.now();
+  agentTurns.set(turnId, {
     turnId,
     channelId,
-    startedAt: Date.parse(timestamp) || Date.now(),
+    startedAt: now,
+    lastActivityAt: now,
   });
 }
 
-function endTurn(agentPubkey: string, channelId: string | null) {
+function recordActivity(agentPubkey: string, turnId: string | null) {
+  if (!turnId) return;
+  const key = normalizePubkey(agentPubkey);
+  const agentTurns = activeTurnsByAgent.get(key);
+  if (!agentTurns) return;
+  const turn = agentTurns.get(turnId);
+  if (turn) {
+    turn.lastActivityAt = Date.now();
+  }
+}
+
+function endTurn(
+  agentPubkey: string,
+  turnId: string | null,
+  channelId: string | null,
+) {
   const key = normalizePubkey(agentPubkey);
   const agentTurns = activeTurnsByAgent.get(key);
   if (!agentTurns) return;
 
-  if (channelId) {
-    agentTurns.delete(channelId);
+  if (turnId) {
+    agentTurns.delete(turnId);
+  } else if (channelId) {
+    // Fallback: remove by channelId if turnId not available
+    for (const [tid, turn] of agentTurns) {
+      if (turn.channelId === channelId) {
+        agentTurns.delete(tid);
+        break;
+      }
+    }
   }
   if (agentTurns.size === 0) {
     activeTurnsByAgent.delete(key);
   }
 }
 
-function pruneStale() {
+function pruneExpired() {
   const now = Date.now();
   let changed = false;
   for (const [agentKey, agentTurns] of activeTurnsByAgent) {
-    for (const [channelId, turn] of agentTurns) {
-      if (now - turn.startedAt > STALENESS_TIMEOUT_MS) {
-        agentTurns.delete(channelId);
+    for (const [turnId, turn] of agentTurns) {
+      if (now - turn.lastActivityAt > REMOVE_AFTER_MS) {
+        agentTurns.delete(turnId);
         changed = true;
       }
     }
@@ -88,33 +141,40 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
   if (event.seq <= lastSeq) return;
   lastProcessedSeq.set(key, event.seq);
 
-  if (event.kind === "turn_started" && event.channelId) {
-    startTurn(
-      agentPubkey,
-      event.channelId,
-      event.turnId ?? `seq-${event.seq}`,
-      event.timestamp,
-    );
-    notifyListeners();
-  } else if (
-    event.kind === "turn_completed" ||
-    event.kind === "turn_error" ||
-    event.kind === "agent_panic"
-  ) {
-    endTurn(agentPubkey, event.channelId);
-    notifyListeners();
+  switch (event.kind) {
+    case "turn_started":
+      if (event.channelId) {
+        startTurn(
+          agentPubkey,
+          event.channelId,
+          event.turnId ?? `seq-${event.seq}`,
+          event.timestamp,
+        );
+        notifyListeners();
+      }
+      break;
+    case "turn_completed":
+    case "turn_error":
+    case "agent_panic":
+      endTurn(agentPubkey, event.turnId ?? null, event.channelId ?? null);
+      notifyListeners();
+      break;
+    case "acp_read":
+    case "acp_write":
+      recordActivity(agentPubkey, event.turnId ?? null);
+      break;
   }
 }
 
-function ensureCleanupInterval() {
-  if (cleanupInterval) return;
-  cleanupInterval = setInterval(pruneStale, 30_000);
+function ensurePruneInterval() {
+  if (pruneInterval) return;
+  pruneInterval = setInterval(pruneExpired, PRUNE_INTERVAL_MS);
 }
 
-function stopCleanupInterval() {
-  if (cleanupInterval) {
-    clearInterval(cleanupInterval);
-    cleanupInterval = null;
+function stopPruneInterval() {
+  if (pruneInterval) {
+    clearInterval(pruneInterval);
+    pruneInterval = null;
   }
 }
 
@@ -123,16 +183,36 @@ function stopCleanupInterval() {
 export function subscribeActiveAgentTurns(listener: () => void) {
   listeners.add(listener);
   if (listeners.size === 1) {
-    ensureCleanupInterval();
+    ensurePruneInterval();
   }
   return () => {
     listeners.delete(listener);
     if (listeners.size === 0) {
-      stopCleanupInterval();
+      stopPruneInterval();
     }
   };
 }
 
+export function getActiveTurnsForAgent(
+  agentPubkey: string | null | undefined,
+): Map<string, ActiveTurnInfo> {
+  if (!agentPubkey) return EMPTY_MAP;
+  const key = normalizePubkey(agentPubkey);
+  const agentTurns = activeTurnsByAgent.get(key);
+  if (!agentTurns || agentTurns.size === 0) return EMPTY_MAP;
+
+  const now = Date.now();
+  const result = new Map<string, ActiveTurnInfo>();
+  for (const [turnId, turn] of agentTurns) {
+    result.set(turnId, {
+      channelId: turn.channelId,
+      stale: now - turn.lastActivityAt > STALE_AFTER_MS,
+    });
+  }
+  return result;
+}
+
+/** Convenience: returns just the set of channel IDs (ignoring stale flag). */
 export function getActiveChannelsForAgent(
   agentPubkey: string | null | undefined,
 ): Set<string> {
@@ -140,15 +220,15 @@ export function getActiveChannelsForAgent(
   const key = normalizePubkey(agentPubkey);
   const agentTurns = activeTurnsByAgent.get(key);
   if (!agentTurns || agentTurns.size === 0) return EMPTY_SET;
-  return new Set(agentTurns.keys());
+  return new Set([...agentTurns.values()].map((t) => t.channelId));
 }
 
+const EMPTY_MAP: Map<string, ActiveTurnInfo> = new Map();
 const EMPTY_SET: Set<string> = new Set();
 
 /**
  * Synchronize the active-turns store with the latest observer events for a
- * given agent. Call this from within a React component that has access to the
- * observer snapshot.
+ * given agent.
  */
 export function syncAgentTurnsFromEvents(
   agentPubkey: string,
@@ -157,6 +237,21 @@ export function syncAgentTurnsFromEvents(
   for (const event of events) {
     processEvent(agentPubkey, event);
   }
+}
+
+/**
+ * Hook: returns a map of turnId → { channelId, stale } for the given agent.
+ * Re-renders when the map changes. Use for detailed turn state display.
+ */
+export function useActiveAgentTurnsDetailed(
+  agentPubkey: string | null | undefined,
+): Map<string, ActiveTurnInfo> {
+  const getSnapshot = React.useCallback(
+    () => getActiveTurnsForAgent(agentPubkey),
+    [agentPubkey],
+  );
+
+  return React.useSyncExternalStore(subscribeActiveAgentTurns, getSnapshot);
 }
 
 /**
@@ -181,7 +276,6 @@ export function useActiveAgentTurns(
 export function useActiveAgentTurnsBridge(
   agents: readonly { pubkey: string; status: string }[],
 ) {
-  // Subscribe to observer store changes and sync active turns
   React.useEffect(() => {
     function syncAll() {
       for (const agent of agents) {
