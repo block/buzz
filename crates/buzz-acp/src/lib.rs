@@ -31,7 +31,7 @@ use pool::{
     AgentPool, CancelMode, OwnedAgent, PromptContext, PromptOutcome, PromptResult, PromptSource,
     SessionState,
 };
-use queue::{prepend_base_prompt, EventQueue, QueuedEvent, ThreadTags};
+use queue::{EventQueue, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
@@ -2350,10 +2350,8 @@ fn dispatch_heartbeat(
         .heartbeat_prompt
         .clone()
         .unwrap_or_else(default_heartbeat_prompt);
-    let prompt_text = match ctx.base_prompt {
-        Some(bp) => prepend_base_prompt(bp, &prompt_text),
-        None => prompt_text,
-    };
+    // base_prompt is delivered via system role in session/new — no need
+    // to prepend it to the heartbeat user message.
     let result_tx = pool.result_tx();
     let ctx_clone = Arc::clone(ctx);
     let agent_index = agent.index;

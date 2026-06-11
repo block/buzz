@@ -35,8 +35,8 @@ use crate::acp::{
 use crate::config::{DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
-    prepend_base_prompt, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
-    PromptProfile, PromptProfileLookup,
+    ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo, PromptProfile,
+    PromptProfileLookup,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -826,11 +826,9 @@ pub async fn run_prompt_task(
                 target: "pool::session",
                 "sending initial_message to session {session_id} for channel {cid}"
             );
-            // Prepend base prompt to initial_message for platform orientation.
-            let init_msg = match ctx.base_prompt {
-                Some(bp) => prepend_base_prompt(bp, initial_msg),
-                None => initial_msg.to_string(),
-            };
+            // base_prompt is delivered via system role in session/new — no need
+            // to prepend it to the user message.
+            let init_msg = initial_msg.to_string();
             let init_result = agent
                 .acp
                 .session_prompt_with_idle_timeout(
@@ -982,12 +980,11 @@ pub async fn run_prompt_task(
         crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
-                base_prompt: ctx.base_prompt,
-                system_prompt: ctx.system_prompt.as_deref(),
                 agent_core: agent_core_section.as_deref(),
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
                 profile_lookup: profile_lookup.as_ref(),
+                ..Default::default()
             },
         )
     } else {
