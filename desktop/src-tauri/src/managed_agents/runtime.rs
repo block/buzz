@@ -116,7 +116,7 @@ pub(crate) fn process_belongs_to_us(_pid: u32) -> bool {
     false
 }
 
-/// The value stamped into the `SPROUT_MANAGED_AGENT` env var of every agent we
+/// The value stamped into the `BUZZ_MANAGED_AGENT` env var of every agent we
 /// spawn, identifying *which* desktop instance owns it. We use the app's bundle
 /// identifier (`xyz.block.sprout.app` for release, `xyz.block.sprout.app.dev`
 /// for `just dev`) because it is stable across restarts — a relaunched dev
@@ -128,15 +128,15 @@ pub(crate) fn current_instance_id(app: &AppHandle) -> String {
     app.config().identifier.clone()
 }
 
-/// Build the full `SPROUT_MANAGED_AGENT=<instance-id>` env entry we match
+/// Build the full `BUZZ_MANAGED_AGENT=<instance-id>` env entry we match
 /// against when scanning processes. Kept here so the spawn stamp and the sweep
 /// matcher can never drift apart.
 fn sprout_marker_entry(instance_id: &str) -> Vec<u8> {
-    format!("SPROUT_MANAGED_AGENT={instance_id}").into_bytes()
+    format!("BUZZ_MANAGED_AGENT={instance_id}").into_bytes()
 }
 
 /// Check if a running process is one of *our* managed agents: it must carry
-/// `SPROUT_MANAGED_AGENT=<instance_id>` in its environment, where `instance_id`
+/// `BUZZ_MANAGED_AGENT=<instance_id>` in its environment, where `instance_id`
 /// is this desktop instance's id. A process stamped with a *different* instance
 /// id belongs to another live Sprout app and must never be reaped here.
 #[cfg(target_os = "macos")]
@@ -398,7 +398,7 @@ const _: () = assert!(std::mem::size_of::<BSDInfo>() == 136);
 const PROC_PIDTBSDINFO: libc::c_int = 3;
 
 /// Enumerate all processes on the system owned by the current user and kill any
-/// agent binary stamped with *this* instance's `SPROUT_MANAGED_AGENT` marker
+/// agent binary stamped with *this* instance's `BUZZ_MANAGED_AGENT` marker
 /// (`instance_id`) that isn't in `skip_pids`. This catches orphans that escaped
 /// PID-file-based cleanup (e.g. agent workers spawned with their own process
 /// group whose parent harness already exited and had its PID file removed),
@@ -762,11 +762,11 @@ fn buffer_contains_identifier(buf: &[u8], id: &[u8]) -> bool {
     })
 }
 
-/// Extract the `SPROUT_MANAGED_AGENT` value from a process's environment.
+/// Extract the `BUZZ_MANAGED_AGENT` value from a process's environment.
 /// Returns `None` if the process doesn't have the marker or can't be read.
 #[cfg(target_os = "macos")]
 fn extract_sprout_marker_value(pid: u32) -> Option<String> {
-    let prefix = b"SPROUT_MANAGED_AGENT=";
+    let prefix = b"BUZZ_MANAGED_AGENT=";
 
     let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
     let mut buf_size: libc::size_t = 0;
@@ -843,7 +843,7 @@ fn extract_sprout_marker_value(pid: u32) -> Option<String> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn extract_sprout_marker_value(pid: u32) -> Option<String> {
-    let prefix = b"SPROUT_MANAGED_AGENT=";
+    let prefix = b"BUZZ_MANAGED_AGENT=";
     let data = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
     for entry in data.split(|&b| b == 0) {
         if entry.starts_with(prefix) {
@@ -1022,7 +1022,7 @@ fn desktop_is_alive_for_instance(_instance_id: &str) -> bool {
 
 /// Reap agent processes belonging to dead Sprout desktop instances.
 ///
-/// Scans all user processes for `SPROUT_MANAGED_AGENT=*`, groups them by
+/// Scans all user processes for `BUZZ_MANAGED_AGENT=*`, groups them by
 /// instance ID, and for each foreign instance (≠ `our_instance_id`) checks
 /// whether a Sprout desktop binary is still alive for that instance. If not,
 /// all agents from that dead instance are reaped.
@@ -1404,29 +1404,29 @@ pub(crate) fn build_respond_to_env(
     let mut remove: Vec<&'static str> = Vec::new();
 
     set.push((
-        "SPROUT_ACP_RESPOND_TO",
+        "BUZZ_ACP_RESPOND_TO",
         record.respond_to.as_str().to_string(),
     ));
 
     if record.respond_to == super::types::RespondTo::Allowlist {
-        set.push(("SPROUT_ACP_RESPOND_TO_ALLOWLIST", normalized.join(",")));
+        set.push(("BUZZ_ACP_RESPOND_TO_ALLOWLIST", normalized.join(",")));
     } else {
-        remove.push("SPROUT_ACP_RESPOND_TO_ALLOWLIST");
+        remove.push("BUZZ_ACP_RESPOND_TO_ALLOWLIST");
     }
 
     // Legacy fallback: agents created before NIP-OA lack `auth_tag`. Without
     // it the harness can't resolve the owner, and owner-dependent gate modes
     // would drop every event. Forwarding the workspace owner pubkey via
-    // SPROUT_ACP_AGENT_OWNER keeps those records functional. Modern records
-    // (`auth_tag = Some(...)`) use `SPROUT_AUTH_TAG` as before.
+    // BUZZ_ACP_AGENT_OWNER keeps those records functional. Modern records
+    // (`auth_tag = Some(...)`) use `BUZZ_AUTH_TAG` as before.
     if record.auth_tag.is_none() {
         if let Some(owner) = owner_hex {
-            set.push(("SPROUT_ACP_AGENT_OWNER", owner.to_string()));
+            set.push(("BUZZ_ACP_AGENT_OWNER", owner.to_string()));
         } else {
-            remove.push("SPROUT_ACP_AGENT_OWNER");
+            remove.push("BUZZ_ACP_AGENT_OWNER");
         }
     } else {
-        remove.push("SPROUT_ACP_AGENT_OWNER");
+        remove.push("BUZZ_ACP_AGENT_OWNER");
     }
 
     Ok((set, remove))
@@ -1535,16 +1535,16 @@ pub fn spawn_agent_child(
         command.env("PATH", path);
     }
     command.env("RUST_LOG", child_rust_log_filter());
-    command.env("SPROUT_PRIVATE_KEY", &record.private_key_nsec);
-    command.env("SPROUT_RELAY_URL", &record.relay_url);
-    command.env("SPROUT_ACP_AGENT_COMMAND", &resolved_agent_command);
-    command.env("SPROUT_ACP_AGENT_ARGS", agent_args.join(","));
+    command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
+    command.env("BUZZ_RELAY_URL", &record.relay_url);
+    command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
+    command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
     match &resolved_mcp_command {
         Some(mcp_cmd) => {
-            command.env("SPROUT_ACP_MCP_COMMAND", mcp_cmd);
+            command.env("BUZZ_ACP_MCP_COMMAND", mcp_cmd);
         }
         None => {
-            command.env("SPROUT_ACP_MCP_COMMAND", "");
+            command.env("BUZZ_ACP_MCP_COMMAND", "");
         }
     }
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
@@ -1553,23 +1553,23 @@ pub fn spawn_agent_child(
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
-    // Only emit SPROUT_ACP_IDLE_TIMEOUT when the user has explicitly set an
+    // Only emit BUZZ_ACP_IDLE_TIMEOUT when the user has explicitly set an
     // override. When unset, the sprout-acp harness applies its own default
     // (see `DEFAULT_IDLE_TIMEOUT_SECS` in crates/sprout-acp/src/config.rs),
     // which is the single source of truth. The previously-emitted
-    // `SPROUT_ACP_TURN_TIMEOUT` is deprecated upstream and was pinning every
+    // `BUZZ_ACP_TURN_TIMEOUT` is deprecated upstream and was pinning every
     // agent to the desktop's stale default (320s), bypassing harness bumps.
     if let Some(idle) = record.idle_timeout_seconds {
-        command.env("SPROUT_ACP_IDLE_TIMEOUT", idle.to_string());
+        command.env("BUZZ_ACP_IDLE_TIMEOUT", idle.to_string());
     }
 
     let max_dur = record
         .max_turn_duration_seconds
         .unwrap_or(super::types::DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS);
-    command.env("SPROUT_ACP_MAX_TURN_DURATION", max_dur.to_string());
-    command.env("SPROUT_ACP_AGENTS", record.parallelism.to_string());
-    command.env("SPROUT_ACP_MULTIPLE_EVENT_HANDLING", "owner-interrupt");
-    command.env("SPROUT_ACP_DEDUP", "queue");
+    command.env("BUZZ_ACP_MAX_TURN_DURATION", max_dur.to_string());
+    command.env("BUZZ_ACP_AGENTS", record.parallelism.to_string());
+    command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "owner-interrupt");
+    command.env("BUZZ_ACP_DEDUP", "queue");
     if let Some(meta) = runtime_meta {
         for (key, value) in meta.default_env {
             if std::env::var(key).is_err() {
@@ -1580,8 +1580,8 @@ pub fn spawn_agent_child(
     if let (Some(team_dir), Some(persona_name)) =
         (&record.persona_team_dir, &record.persona_name_in_team)
     {
-        command.env("SPROUT_ACP_PERSONA_PACK", team_dir);
-        command.env("SPROUT_ACP_PERSONA_NAME", persona_name);
+        command.env("BUZZ_ACP_PERSONA_PACK", team_dir);
+        command.env("BUZZ_ACP_PERSONA_NAME", persona_name);
     }
 
     // Resolve system prompt, model, and provider: the linked persona is the
@@ -1598,14 +1598,14 @@ pub fn spawn_agent_child(
         );
 
     if let Some(prompt) = &effective_prompt {
-        command.env("SPROUT_ACP_SYSTEM_PROMPT", prompt);
+        command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
     } else {
-        command.env_remove("SPROUT_ACP_SYSTEM_PROMPT");
+        command.env_remove("BUZZ_ACP_SYSTEM_PROMPT");
     }
     if let Some(model) = &effective_model {
-        command.env("SPROUT_ACP_MODEL", model);
+        command.env("BUZZ_ACP_MODEL", model);
     } else {
-        command.env_remove("SPROUT_ACP_MODEL");
+        command.env_remove("BUZZ_ACP_MODEL");
     }
     if let Some(meta) = runtime_meta {
         for (key, value) in runtime_metadata_env_vars(
@@ -1619,18 +1619,18 @@ pub fn spawn_agent_child(
         }
     }
     if let Some(toolsets) = &record.mcp_toolsets {
-        command.env("SPROUT_TOOLSETS", toolsets);
+        command.env("BUZZ_TOOLSETS", toolsets);
     } else {
-        command.env("SPROUT_TOOLSETS", "default,canvas,forums,dms,media");
+        command.env("BUZZ_TOOLSETS", "default,canvas,forums,dms,media");
     }
-    command.env_remove("SPROUT_ACP_PRIVATE_KEY");
-    command.env_remove("SPROUT_ACP_API_TOKEN");
-    command.env_remove("SPROUT_API_TOKEN");
+    command.env_remove("BUZZ_ACP_PRIVATE_KEY");
+    command.env_remove("BUZZ_ACP_API_TOKEN");
+    command.env_remove("BUZZ_API_TOKEN");
 
     if let Some(ref auth_tag) = record.auth_tag {
-        command.env("SPROUT_AUTH_TAG", auth_tag);
+        command.env("BUZZ_AUTH_TAG", auth_tag);
     } else {
-        command.env_remove("SPROUT_AUTH_TAG");
+        command.env_remove("BUZZ_AUTH_TAG");
     }
 
     // Inbound author gate: who is this agent allowed to respond to?
@@ -1645,7 +1645,7 @@ pub fn spawn_agent_child(
         command.env_remove(key);
     }
 
-    command.env("SPROUT_ACP_RELAY_OBSERVER", "true");
+    command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
 
     // ── Git credential helper for Sprout relay ──────────────────────────
     //
@@ -1657,7 +1657,7 @@ pub fn spawn_agent_child(
     // filesystem writes) scoped to the relay's git URL so we don't
     // interfere with other remotes (e.g. GitHub).
     //
-    // NOSTR_PRIVATE_KEY mirrors SPROUT_PRIVATE_KEY — keep in sync.
+    // NOSTR_PRIVATE_KEY mirrors BUZZ_PRIVATE_KEY — keep in sync.
     if let Some(cred_helper) = resolve_command("git-credential-nostr") {
         let relay_http_url = crate::relay::relay_http_base_url(&record.relay_url);
 
@@ -1692,9 +1692,9 @@ pub fn spawn_agent_child(
     //
     // Precedence: desktop parent env < persona env_vars < agent env_vars.
     // These writes go LAST so user-provided values win over every Sprout-set
-    // env above — EXCEPT reserved keys (SPROUT_PRIVATE_KEY, NOSTR_PRIVATE_KEY,
-    // SPROUT_AUTH_TAG, SPROUT_API_TOKEN, SPROUT_ACP_PRIVATE_KEY,
-    // SPROUT_ACP_API_TOKEN), which `merged_user_env` strips. Those carry
+    // env above — EXCEPT reserved keys (BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY,
+    // BUZZ_AUTH_TAG, BUZZ_API_TOKEN, BUZZ_ACP_PRIVATE_KEY,
+    // BUZZ_ACP_API_TOKEN), which `merged_user_env` strips. Those carry
     // Sprout's identity and must never be GUI-overridable.
     // Fail closed on persona-lookup errors: persona env_vars carry API
     // credentials, so silently substituting an empty map would spawn an
@@ -1710,7 +1710,7 @@ pub fn spawn_agent_child(
     // agents). Propagates automatically through the full tree (sprout-acp →
     // goose → MCP servers) because neither sprout-acp nor goose calls
     // env_clear().
-    command.env("SPROUT_MANAGED_AGENT", current_instance_id(app));
+    command.env("BUZZ_MANAGED_AGENT", current_instance_id(app));
 
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.

@@ -52,7 +52,7 @@ fn agent_preset_runs_on_sprout_agent_not_goose() {
     assert_eq!(
         preset
             .env_vars
-            .get("SPROUT_AGENT_PROVIDER")
+            .get("BUZZ_AGENT_PROVIDER")
             .map(String::as_str),
         Some("openai")
     );

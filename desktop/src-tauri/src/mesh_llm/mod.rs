@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_MESH_API_PORT: u16 = 9337;
 const DEFAULT_MESH_CONSOLE_PORT: u16 = 3131;
 const MESH_STATUS_KIND: u64 = 30_621;
-const MESH_API_PORT_ENV: &str = "SPROUT_MESH_API_PORT";
-const MESH_CONSOLE_PORT_ENV: &str = "SPROUT_MESH_CONSOLE_PORT";
+const MESH_API_PORT_ENV: &str = "BUZZ_MESH_API_PORT";
+const MESH_CONSOLE_PORT_ENV: &str = "BUZZ_MESH_CONSOLE_PORT";
 const RELAY_MESH_API_KEY_PLACEHOLDER: &str = "sprout-mesh-local";
 /// ACP provider relay-mesh agents run on. Sources of truth for its command +
 /// MCP live in the runtime catalog (`known_acp_runtime_exact`); these are

@@ -29,7 +29,7 @@ fn identifier_exact_match_with_quote_boundary() {
 #[test]
 fn identifier_match_with_null_boundary() {
     // In KERN_PROCARGS2, entries are null-delimited.
-    let mut buf = b"SPROUT_MANAGED_AGENT=xyz.block.sprout.app.dev".to_vec();
+    let mut buf = b"BUZZ_MANAGED_AGENT=xyz.block.sprout.app.dev".to_vec();
     buf.push(0);
     buf.extend_from_slice(b"OTHER_VAR=value");
     let id = b"xyz.block.sprout.app.dev";
@@ -71,7 +71,7 @@ fn marker_entry_is_namespaced_by_instance_id() {
     // release build's (`...app`) agents.
     assert_eq!(
         super::sprout_marker_entry("xyz.block.sprout.app"),
-        b"SPROUT_MANAGED_AGENT=xyz.block.sprout.app".to_vec()
+        b"BUZZ_MANAGED_AGENT=xyz.block.sprout.app".to_vec()
     );
     assert_ne!(
         super::sprout_marker_entry("xyz.block.sprout.app"),
@@ -167,13 +167,13 @@ fn build_env_owner_only_sets_mode_and_removes_others() {
     let (set, remove) = build_respond_to_env(&rec, Some("owner")).unwrap();
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
-        set_map.get("SPROUT_ACP_RESPOND_TO").map(String::as_str),
+        set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
         Some("owner-only")
     );
-    assert!(!set_map.contains_key("SPROUT_ACP_RESPOND_TO_ALLOWLIST"));
-    assert!(remove.contains(&"SPROUT_ACP_RESPOND_TO_ALLOWLIST"));
+    assert!(!set_map.contains_key("BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
+    assert!(remove.contains(&"BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
     // auth_tag is present → no AGENT_OWNER fallback fires.
-    assert!(remove.contains(&"SPROUT_ACP_AGENT_OWNER"));
+    assert!(remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
 }
 
 #[test]
@@ -188,12 +188,12 @@ fn build_env_allowlist_sets_both_envs_and_joins() {
     let (set, _remove) = build_respond_to_env(&rec, Some("owner")).unwrap();
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
-        set_map.get("SPROUT_ACP_RESPOND_TO").map(String::as_str),
+        set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
         Some("allowlist")
     );
     assert_eq!(
         set_map
-            .get("SPROUT_ACP_RESPOND_TO_ALLOWLIST")
+            .get("BUZZ_ACP_RESPOND_TO_ALLOWLIST")
             .map(String::as_str),
         Some(format!("{a},{b}").as_str()),
     );
@@ -205,11 +205,11 @@ fn build_env_anyone_omits_allowlist_var() {
     let (set, remove) = build_respond_to_env(&rec, Some("owner")).unwrap();
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
-        set_map.get("SPROUT_ACP_RESPOND_TO").map(String::as_str),
+        set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
         Some("anyone")
     );
-    assert!(!set_map.contains_key("SPROUT_ACP_RESPOND_TO_ALLOWLIST"));
-    assert!(remove.contains(&"SPROUT_ACP_RESPOND_TO_ALLOWLIST"));
+    assert!(!set_map.contains_key("BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
+    assert!(remove.contains(&"BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
 }
 
 #[test]
@@ -218,10 +218,10 @@ fn build_env_legacy_record_without_auth_tag_emits_agent_owner() {
     let (set, remove) = build_respond_to_env(&rec, Some("ownerhex")).unwrap();
     let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
     assert_eq!(
-        set_map.get("SPROUT_ACP_AGENT_OWNER").map(String::as_str),
+        set_map.get("BUZZ_ACP_AGENT_OWNER").map(String::as_str),
         Some("ownerhex")
     );
-    assert!(!remove.contains(&"SPROUT_ACP_AGENT_OWNER"));
+    assert!(!remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
 }
 
 #[test]
@@ -230,7 +230,7 @@ fn build_env_legacy_record_without_owner_hex_removes_agent_owner() {
     // env var from the parent.
     let rec = fixture(RespondTo::OwnerOnly, vec![], None);
     let (_set, remove) = build_respond_to_env(&rec, None).unwrap();
-    assert!(remove.contains(&"SPROUT_ACP_AGENT_OWNER"));
+    assert!(remove.contains(&"BUZZ_ACP_AGENT_OWNER"));
 }
 
 #[test]
@@ -377,8 +377,8 @@ fn runtime_metadata_env_vars_injects_model_even_with_acp_model_switching() {
     // sprout-agent has supports_acp_model_switching=true but we still inject
     // the model env var because ACP model switching is post-bootstrap
     let vars = runtime_metadata_env_vars(
-        Some("SPROUT_AGENT_MODEL"),
-        Some("SPROUT_AGENT_PROVIDER"),
+        Some("BUZZ_AGENT_MODEL"),
+        Some("BUZZ_AGENT_PROVIDER"),
         false,
         Some("goose-claude-4-6-opus"),
         Some("databricks"),
@@ -386,8 +386,8 @@ fn runtime_metadata_env_vars_injects_model_even_with_acp_model_switching() {
     assert_eq!(
         vars,
         vec![
-            ("SPROUT_AGENT_MODEL", "goose-claude-4-6-opus"),
-            ("SPROUT_AGENT_PROVIDER", "databricks"),
+            ("BUZZ_AGENT_MODEL", "goose-claude-4-6-opus"),
+            ("BUZZ_AGENT_PROVIDER", "databricks"),
         ]
     );
 }

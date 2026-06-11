@@ -83,8 +83,8 @@ pub async fn get_agent_models(
         }
         cmd.arg("models")
             .arg("--json")
-            .env("SPROUT_ACP_AGENT_COMMAND", &agent_command)
-            .env("SPROUT_ACP_AGENT_ARGS", agent_args.join(","));
+            .env("BUZZ_ACP_AGENT_COMMAND", &agent_command)
+            .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
         if let Some(meta) = known_acp_runtime(&agent_command) {
             for (key, value) in meta.default_env {
                 if std::env::var(key).is_err() {

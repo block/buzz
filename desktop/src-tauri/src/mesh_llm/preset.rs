@@ -53,7 +53,7 @@ pub fn agent_preset(request: MeshAgentPresetRequest) -> Result<MeshAgentPreset, 
         mcp_command,
         model: model.to_string(),
         env_vars: BTreeMap::from([
-            ("SPROUT_AGENT_PROVIDER".to_string(), "openai".to_string()),
+            ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
             (
                 "OPENAI_COMPAT_BASE_URL".to_string(),
                 relay_mesh_api_base_url()?,
