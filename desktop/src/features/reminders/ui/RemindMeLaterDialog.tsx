@@ -1,10 +1,11 @@
-import { Clock } from "lucide-react";
+import { CalendarClock, Clock } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
 import { createReminder } from "@/features/reminders/lib/reminderService";
 import type { ReminderTarget } from "@/features/reminders/lib/reminderTypes";
 import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
 import {
   Dialog,
   DialogContent,
@@ -58,6 +59,14 @@ const TIME_PRESETS: TimePreset[] = [
   },
 ];
 
+function todayDateString(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 export function RemindMeLaterDialog({
   open,
   onOpenChange,
@@ -69,6 +78,8 @@ export function RemindMeLaterDialog({
 }) {
   const [note, setNote] = React.useState("");
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const [customDate, setCustomDate] = React.useState(todayDateString);
+  const [customTime, setCustomTime] = React.useState("09:00");
 
   const handleSelect = async (preset: TimePreset) => {
     if (!target || isSubmitting) return;
@@ -81,6 +92,29 @@ export function RemindMeLaterDialog({
     } catch (error) {
       toast.error("Failed to create reminder");
       console.error("[RemindMeLaterDialog] create failed:", error);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleCustomSubmit = async () => {
+    if (!target || isSubmitting || !customDate || !customTime) return;
+    setIsSubmitting(true);
+    try {
+      const timestamp = Math.floor(
+        new Date(`${customDate}T${customTime}`).getTime() / 1_000,
+      );
+      if (Number.isNaN(timestamp)) {
+        toast.error("Invalid date or time");
+        return;
+      }
+      await createReminder(target, timestamp, note || undefined);
+      toast.success("Reminder set");
+      onOpenChange(false);
+      setNote("");
+    } catch (error) {
+      toast.error("Failed to create reminder");
+      console.error("[RemindMeLaterDialog] custom create failed:", error);
     } finally {
       setIsSubmitting(false);
     }
@@ -111,6 +145,38 @@ export function RemindMeLaterDialog({
               {preset.label}
             </Button>
           ))}
+        </div>
+
+        <div className="space-y-3 border-t pt-3">
+          <p className="text-sm font-medium flex items-center gap-2">
+            <CalendarClock className="h-4 w-4" />
+            Custom date & time
+          </p>
+          <div className="flex gap-2">
+            <Input
+              type="date"
+              value={customDate}
+              onChange={(e) => setCustomDate(e.target.value)}
+              min={todayDateString()}
+              className="flex-1"
+              aria-label="Reminder date"
+            />
+            <Input
+              type="time"
+              value={customTime}
+              onChange={(e) => setCustomTime(e.target.value)}
+              className="w-[120px]"
+              aria-label="Reminder time"
+            />
+          </div>
+          <Button
+            variant="default"
+            className="w-full"
+            disabled={isSubmitting || !customDate || !customTime}
+            onClick={() => void handleCustomSubmit()}
+          >
+            Set reminder
+          </Button>
         </div>
 
         <div className="space-y-2">
