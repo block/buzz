@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# =============================================================================
+# start-relay-for-tests.sh — Start the Buzz relay and its backing services
+# =============================================================================
+# Shared script for CI jobs that need a running relay. Starts docker compose
+# services, waits for health, applies the schema, builds the relay, starts it,
+# and polls readiness.
+#
+# Usage:
+#   ./scripts/start-relay-for-tests.sh [--profile <cargo-profile>]
+#
+# Options:
+#   --profile <profile>   Cargo build profile (default: ci)
+#
+# Exports:
+#   RELAY_URL=ws://localhost:3000
+# =============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+
+CARGO_PROFILE="${CARGO_PROFILE:-ci}"
+
+# ── Parse args ────────────────────────────────────────────────────────────────
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --profile)
+      CARGO_PROFILE="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+# ── Colors ────────────────────────────────────────────────────────────────────
+
+BLUE='\033[0;34m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+log()   { echo -e "${BLUE}[relay-test]${NC} $*"; }
+ok()    { echo -e "${GREEN}[relay-test]${NC} $*"; }
+err()   { echo -e "${RED}[relay-test]${NC} $*" >&2; }
+
+# ── Start docker compose services ────────────────────────────────────────────
+
+cd "${REPO_ROOT}"
+
+log "Starting docker compose services..."
+docker compose up -d postgres redis typesense minio minio-init
+
+# ── Wait for services to be healthy ──────────────────────────────────────────
+
+wait_healthy() {
+  local service="$1"
+  local container="$2"
+  log "Waiting for ${service}..."
+  for attempt in $(seq 1 60); do
+    status=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "not_found")
+    if [ "${status}" = "healthy" ]; then
+      ok "${service} is healthy"
+      return 0
+    fi
+    sleep 2
+  done
+  err "${service} did not become healthy within 120s"
+  docker logs "${container}" || true
+  return 1
+}
+
+wait_healthy "Postgres" "buzz-postgres"
+wait_healthy "Redis" "buzz-redis"
+wait_healthy "Typesense" "buzz-typesense"
+wait_healthy "MinIO" "buzz-minio"
+
+# ── Apply database schema ────────────────────────────────────────────────────
+
+log "Applying database schema..."
+export PGHOST=localhost
+export PGPORT=5432
+export PGUSER=buzz
+export PGPASSWORD=buzz_dev
+export PGDATABASE=buzz
+
+./bin/pgschema apply --file schema/schema.sql --auto-approve
+ok "Schema applied"
+
+# ── Build relay ──────────────────────────────────────────────────────────────
+
+log "Building relay (profile: ${CARGO_PROFILE})..."
+cargo build --profile "${CARGO_PROFILE}" -p buzz-relay
+ok "Relay built"
+
+# ── Start relay ──────────────────────────────────────────────────────────────
+
+log "Starting relay..."
+nohup env \
+  DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
+  REDIS_URL=redis://localhost:6379 \
+  TYPESENSE_URL=http://localhost:8108 \
+  TYPESENSE_API_KEY=buzz_dev_key \
+  RELAY_URL=ws://localhost:3000 \
+  BUZZ_BIND_ADDR=0.0.0.0:3000 \
+  BUZZ_REQUIRE_AUTH_TOKEN=false \
+  BUZZ_RECONCILE_CHANNELS=true \
+  BUZZ_GIT_PROBE_WRITERS=8 \
+  "./target/${CARGO_PROFILE}/buzz-relay" > /tmp/buzz-relay.log 2>&1 &
+echo $! > /tmp/buzz-relay.pid
+
+# ── Poll readiness ───────────────────────────────────────────────────────────
+
+log "Waiting for relay readiness..."
+for attempt in $(seq 1 60); do
+  if ! kill -0 "$(cat /tmp/buzz-relay.pid)" 2>/dev/null; then
+    err "Relay process died"
+    cat /tmp/buzz-relay.log
+    exit 1
+  fi
+  status_code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/_readiness || true)
+  if [ "${status_code}" = "200" ]; then
+    ok "Relay is ready at ws://localhost:3000"
+    export RELAY_URL=ws://localhost:3000
+    exit 0
+  fi
+  sleep 1
+done
+
+err "Relay did not become ready within 60s"
+cat /tmp/buzz-relay.log
+exit 1
