@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/reminders";
@@ -16,6 +17,7 @@ test.describe("reminders screenshots", () => {
 
     const remindersNav = page.getByTestId("open-reminders-view");
     await expect(remindersNav).toBeVisible();
+    await waitForAnimations(page);
 
     await page.screenshot({
       path: `${SHOTS}/01-sidebar-reminders-nav.png`,
@@ -41,13 +43,15 @@ test.describe("reminders screenshots", () => {
       name: "Remind me later",
     });
     await expect(remindItem).toBeVisible();
+    await waitForAnimations(page);
 
     await page.screenshot({
       path: `${SHOTS}/02-message-action-remind-later.png`,
+      clip: { x: 0, y: 0, width: 450, height: 720 },
     });
   });
 
-  test("03 — Remind me later dialog", async ({ page }) => {
+  test("03 — Remind me later dialog with time presets", async ({ page }) => {
     await page.goto("/");
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -63,16 +67,19 @@ test.describe("reminders screenshots", () => {
     const remindItem = page.getByRole("menuitem", {
       name: "Remind me later",
     });
+    await expect(remindItem).toBeVisible();
+    await waitForAnimations(page);
     await remindItem.click();
 
-    // Wait for the dialog to appear
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText("Remind me later")).toBeVisible();
     await expect(dialog.getByText("In 30 minutes")).toBeVisible();
+    await waitForAnimations(page);
 
     await page.screenshot({
       path: `${SHOTS}/03-remind-me-later-dialog.png`,
+      clip: { x: 300, y: 100, width: 680, height: 520 },
     });
   });
 
@@ -81,14 +88,13 @@ test.describe("reminders screenshots", () => {
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-    // Navigate to reminders via sidebar button
     await page.getByTestId("open-reminders-view").click();
-
-    // Wait for the panel to render (empty state)
     await expect(page.getByText("No pending reminders")).toBeVisible();
+    await waitForAnimations(page);
 
     await page.screenshot({
       path: `${SHOTS}/04-reminders-panel-empty.png`,
+      clip: { x: 0, y: 0, width: 900, height: 720 },
     });
   });
 });
