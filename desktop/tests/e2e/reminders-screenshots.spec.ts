@@ -69,7 +69,6 @@ test.describe("reminders screenshots", () => {
 
     await page.screenshot({
       path: `${SHOTS}/02-message-action-remind-later.png`,
-      clip: { x: 0, y: 0, width: 900, height: 720 },
     });
   });
 
