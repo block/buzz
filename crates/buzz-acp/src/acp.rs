@@ -148,6 +148,9 @@ pub struct AcpClient {
     observer_agent_index: Option<usize>,
     /// Best-effort context attached to raw ACP wire events.
     observer_context: ObserverContext,
+    /// Whether the agent advertises `systemPrompt` support in its
+    /// `promptCapabilities`. Set after `initialize()` returns.
+    pub supports_system_prompt: bool,
 }
 
 impl AcpClient {
@@ -239,6 +242,7 @@ impl AcpClient {
             observer: None,
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
+            supports_system_prompt: false,
         })
     }
 
@@ -280,23 +284,38 @@ impl AcpClient {
         });
         let result = self.send_request("initialize", params).await?;
         tracing::debug!(target: "acp::init", "initialize response: {result}");
+
+        // Parse promptCapabilities.systemPrompt from agent's init response.
+        self.supports_system_prompt = result
+            .pointer("/agentCapabilities/promptCapabilities/systemPrompt")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         Ok(result)
     }
 
     /// Send `session/new` and return the full response alongside the session ID.
     ///
     /// `cwd` must be an absolute path. `mcp_servers` may be empty.
+    /// `system_prompt` is passed to the agent when `supports_system_prompt` is true.
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
     pub async fn session_new_full(
         &mut self,
         cwd: &str,
         mcp_servers: Vec<McpServer>,
+        system_prompt: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
         });
+        // Only include systemPrompt when the agent advertises support.
+        if self.supports_system_prompt {
+            if let Some(sp) = system_prompt {
+                params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+            }
+        }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
             .as_str()
@@ -317,8 +336,12 @@ impl AcpClient {
         &mut self,
         cwd: &str,
         mcp_servers: Vec<McpServer>,
+        system_prompt: Option<&str>,
     ) -> Result<String, AcpError> {
-        Ok(self.session_new_full(cwd, mcp_servers).await?.session_id)
+        Ok(self
+            .session_new_full(cwd, mcp_servers, system_prompt)
+            .await?
+            .session_id)
     }
 
     /// Send `session/set_config_option` (stable ACP path).
@@ -2019,6 +2042,65 @@ mod tests {
         assert!(
             matches!(result, Err(AcpError::IdleTimeout(_))),
             "expected IdleTimeout after silence, got {result:?}"
+        );
+    }
+
+    // ── systemPrompt capability parsing ──────────────────────────────────
+
+    #[tokio::test]
+    async fn initialize_parses_system_prompt_capability() {
+        // Agent responds with systemPrompt: true in promptCapabilities.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"systemPrompt":true}}}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let _result = client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(
+            client.supports_system_prompt,
+            "should detect systemPrompt capability"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_defaults_system_prompt_false_when_absent() {
+        // Agent responds without systemPrompt in promptCapabilities.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{"promptCapabilities":{"image":false}}}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let _result = client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(
+            !client.supports_system_prompt,
+            "should default to false when systemPrompt absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_defaults_system_prompt_false_when_no_capabilities() {
+        // Agent responds with no agentCapabilities at all.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let _result = client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        assert!(
+            !client.supports_system_prompt,
+            "should default to false when no agentCapabilities"
         );
     }
 }

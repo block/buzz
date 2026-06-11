@@ -1015,6 +1015,9 @@ pub struct FormatPromptArgs<'a> {
     pub channel_info: Option<&'a PromptChannelInfo>,
     pub conversation_context: Option<&'a ConversationContext>,
     pub profile_lookup: Option<&'a PromptProfileLookup>,
+    /// When true, `[Base]` and `[System]` sections are omitted from the prompt
+    /// because they were already passed via `session/new`'s `systemPrompt` field.
+    pub system_prompt_via_session: bool,
 }
 
 /// Prepend the `[Base]` platform-context section to a prompt body.
@@ -1055,13 +1058,19 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> String 
     let mut sections: Vec<String> = Vec::with_capacity(7);
 
     // 0. Base prompt (platform-level, always first).
-    if let Some(bp) = args.base_prompt {
-        sections.push(format!("[Base]\n{}", bp.trim_end()));
+    // Skipped when systemPrompt was passed via session/new.
+    if !args.system_prompt_via_session {
+        if let Some(bp) = args.base_prompt {
+            sections.push(format!("[Base]\n{}", bp.trim_end()));
+        }
     }
 
     // 1. System prompt.
-    if let Some(sp) = args.system_prompt {
-        sections.push(format!("[System]\n{sp}"));
+    // Skipped when systemPrompt was passed via session/new.
+    if !args.system_prompt_via_session {
+        if let Some(sp) = args.system_prompt {
+            sections.push(format!("[System]\n{sp}"));
+        }
     }
 
     // 1b. NIP-AE agent core memory (rendered by `engram_fetch::build_core_section`).
@@ -1651,6 +1660,70 @@ mod tests {
             "[Context] must come before [Thread Context]"
         );
     }
+    // ── Test 11d: system_prompt_via_session skips [Base] and [System] ─────────
+
+    #[test]
+    fn test_format_prompt_system_prompt_via_session_skips_base_and_system() {
+        let ch = Uuid::new_v4();
+        let event = make_event("hello");
+
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+        };
+
+        // With system_prompt_via_session=true, [Base] and [System] are omitted.
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                base_prompt: Some("Platform base."),
+                system_prompt: Some("Role prompt."),
+                system_prompt_via_session: true,
+                ..Default::default()
+            },
+        );
+        assert!(!prompt.contains("[Base]"), "should not contain [Base]");
+        assert!(!prompt.contains("[System]"), "should not contain [System]");
+        assert!(
+            prompt.starts_with("[Context]"),
+            "should start with [Context]"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_system_prompt_via_session_false_includes_base_and_system() {
+        let ch = Uuid::new_v4();
+        let event = make_event("hello");
+
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+        };
+
+        // With system_prompt_via_session=false (default), [Base] and [System] are included.
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                base_prompt: Some("Platform base."),
+                system_prompt: Some("Role prompt."),
+                system_prompt_via_session: false,
+                ..Default::default()
+            },
+        );
+        assert!(prompt.contains("[Base]\nPlatform base."));
+        assert!(prompt.contains("[System]\nRole prompt."));
+    }
+
     // ── Test 12: drop mode discards in-flight channel events ─────────────────
 
     #[test]

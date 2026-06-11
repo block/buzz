@@ -400,9 +400,27 @@ async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
 ) -> Result<String, AcpError> {
+    // Combine base_prompt + system_prompt into a single systemPrompt value
+    // when the agent supports it. This moves system-level content from
+    // user messages into the proper system role via session/new.
+    let combined_system_prompt: Option<String> = if agent.acp.supports_system_prompt {
+        match (ctx.base_prompt, ctx.system_prompt.as_deref()) {
+            (Some(bp), Some(sp)) => Some(format!("[Base]\n{}\n\n[System]\n{sp}", bp.trim_end())),
+            (Some(bp), None) => Some(format!("[Base]\n{}", bp.trim_end())),
+            (None, Some(sp)) => Some(format!("[System]\n{sp}")),
+            (None, None) => None,
+        }
+    } else {
+        None
+    };
+
     let resp = agent
         .acp
-        .session_new_full(&ctx.cwd, ctx.mcp_servers.clone())
+        .session_new_full(
+            &ctx.cwd,
+            ctx.mcp_servers.clone(),
+            combined_system_prompt.as_deref(),
+        )
         .await?;
 
     // Populate model capabilities on first session creation.
@@ -811,10 +829,16 @@ pub async fn run_prompt_task(
                 target: "pool::session",
                 "sending initial_message to session {session_id} for channel {cid}"
             );
-            // Prepend base prompt to initial_message for platform orientation.
-            let init_msg = match ctx.base_prompt {
-                Some(bp) => prepend_base_prompt(bp, initial_msg),
-                None => initial_msg.to_string(),
+            // Prepend base prompt to initial_message for platform orientation,
+            // but only when the agent doesn't support systemPrompt (in which
+            // case [Base] was already passed via session/new).
+            let init_msg = if agent.acp.supports_system_prompt {
+                initial_msg.to_string()
+            } else {
+                match ctx.base_prompt {
+                    Some(bp) => prepend_base_prompt(bp, initial_msg),
+                    None => initial_msg.to_string(),
+                }
             };
             let init_result = agent
                 .acp
@@ -973,6 +997,7 @@ pub async fn run_prompt_task(
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
                 profile_lookup: profile_lookup.as_ref(),
+                system_prompt_via_session: agent.acp.supports_system_prompt,
             },
         )
     } else {

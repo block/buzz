@@ -224,7 +224,7 @@ async fn initialize(id: Value, params: Value, wire_tx: &WireSender) {
                 "protocolVersion": PROTOCOL_VERSION,
                 "agentCapabilities": {
                     "loadSession": false,
-                    "promptCapabilities": { "image": false, "audio": false, "embeddedContext": false },
+                    "promptCapabilities": { "image": false, "audio": false, "embeddedContext": false, "systemPrompt": true },
                     "mcpCapabilities": { "http": false, "sse": false },
                 },
                 "agentInfo": { "name": "buzz-agent", "version": env!("CARGO_PKG_VERSION") },
@@ -261,15 +261,40 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             .await;
         }
     }
-    let effective_system_prompt: Arc<str> = if app.cfg.hints_enabled {
-        let hints = hints::build_hints_section(std::path::Path::new(&p.cwd));
-        if hints.is_empty() {
-            Arc::from(app.cfg.system_prompt.as_str())
+    let effective_system_prompt: Arc<str> = {
+        let mut prompt = if app.cfg.hints_enabled {
+            let hints = hints::build_hints_section(std::path::Path::new(&p.cwd));
+            if hints.is_empty() {
+                app.cfg.system_prompt.clone()
+            } else {
+                format!("{}\n\n{}", app.cfg.system_prompt, hints)
+            }
         } else {
-            Arc::from(format!("{}\n\n{}", app.cfg.system_prompt, hints))
+            app.cfg.system_prompt.clone()
+        };
+        // Append client-provided systemPrompt (additive semantics per ACP spec).
+        if let Some(ref client_prompt) = p.system_prompt {
+            if !client_prompt.is_empty() {
+                prompt.push_str("\n\n");
+                prompt.push_str(client_prompt);
+            }
         }
-    } else {
-        Arc::from(app.cfg.system_prompt.as_str())
+        // Reject combined prompts exceeding 512KB.
+        const MAX_SYSTEM_PROMPT_BYTES: usize = 512 * 1024;
+        if prompt.len() > MAX_SYSTEM_PROMPT_BYTES {
+            return reject(
+                wire_tx,
+                id,
+                INVALID_PARAMS,
+                &format!(
+                    "session/new: combined system prompt exceeds {}KB limit ({} bytes)",
+                    MAX_SYSTEM_PROMPT_BYTES / 1024,
+                    prompt.len()
+                ),
+            )
+            .await;
+        }
+        Arc::from(prompt.as_str())
     };
     let mcp = match McpRegistry::spawn_all(&app.cfg, &p.mcp_servers, &p.cwd).await {
         Ok(m) => Arc::new(m),
