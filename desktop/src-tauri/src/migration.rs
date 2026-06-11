@@ -7,6 +7,9 @@
 //! instances share the same physical files — edits in any worktree are
 //! immediately visible to all others.
 //!
+//! **Command reconciliation** (`reconcile_legacy_command_names`): Per-launch
+//! fix-up of persisted built-in command names from the Sprout→Buzz rename.
+//!
 //! **Provider reconciliation** (`reconcile_provider_mcp_commands`): Per-launch
 //! fix-up of `mcp_command` values in `managed-agents.json` against the
 //! discovery table. Ensures known providers always have their canonical
@@ -596,6 +599,191 @@ fn reconcile_mcp_commands_in_file(path: &Path) {
     });
 }
 
+fn replace_command_field(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    replacement: String,
+) -> bool {
+    let Some(current) = obj.get(field).and_then(|v| v.as_str()) else {
+        return false;
+    };
+    if current == replacement {
+        return false;
+    }
+    eprintln!(
+        "buzz-desktop: command-rename-reconcile: {:?}: {field} {:?} → {:?}",
+        obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+        current,
+        replacement,
+    );
+    obj.insert(field.to_string(), serde_json::Value::String(replacement));
+    true
+}
+
+fn reconcile_legacy_command_names_in_file(path: &Path) {
+    patch_json_records(path, |obj| {
+        let mut changed = false;
+
+        if let Some(acp_command) = obj
+            .get("acp_command")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            if acp_command == "sprout-acp" {
+                changed |= replace_command_field(obj, "acp_command", "buzz-acp".to_string());
+            }
+        }
+
+        let mut agent_command = obj
+            .get("agent_command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if agent_command == "sprout-agent" {
+            agent_command = "buzz-agent".to_string();
+            changed |= replace_command_field(obj, "agent_command", agent_command.clone());
+        }
+
+        if let Some(mcp_command) = obj
+            .get("mcp_command")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            match mcp_command.as_str() {
+                "sprout-dev-mcp" => {
+                    changed |=
+                        replace_command_field(obj, "mcp_command", "buzz-dev-mcp".to_string());
+                }
+                "sprout-mcp" | "sprout-mcp-server" | "buzz-mcp-server" => {
+                    let replacement = if agent_command == "buzz-agent" {
+                        "buzz-dev-mcp"
+                    } else {
+                        ""
+                    };
+                    changed |= replace_command_field(obj, "mcp_command", replacement.to_string());
+                }
+                _ => {}
+            }
+        }
+
+        changed
+    });
+}
+
+fn reconcile_legacy_persona_runtimes_in_file(path: &Path) {
+    patch_json_records(path, |obj| {
+        let Some(runtime) = obj.get("runtime").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        if runtime != "sprout-agent" {
+            return false;
+        }
+        eprintln!(
+            "buzz-desktop: command-rename-reconcile: persona {:?}: runtime {:?} → {:?}",
+            obj.get("display_name")
+                .or_else(|| obj.get("displayName"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
+            runtime,
+            "buzz-agent",
+        );
+        obj.insert(
+            "runtime".to_string(),
+            serde_json::Value::String("buzz-agent".to_string()),
+        );
+        true
+    });
+}
+
+fn rewrite_legacy_persona_md_runtime(content: &str) -> Option<String> {
+    let (frontmatter, body) = buzz_persona_pkg::persona::split_frontmatter(content).ok()?;
+    let mut value = serde_yaml::from_str::<serde_yaml::Value>(frontmatter).ok()?;
+    let mapping = value.as_mapping_mut()?;
+    let runtime = mapping.get_mut(serde_yaml::Value::String("runtime".to_string()))?;
+    if runtime.as_str()? != "sprout-agent" {
+        return None;
+    }
+    *runtime = serde_yaml::Value::String("buzz-agent".to_string());
+    let frontmatter = serde_yaml::to_string(&value).ok()?;
+    Some(format!("---\n{frontmatter}---\n{body}"))
+}
+
+fn reconcile_legacy_team_persona_runtime_files(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            reconcile_legacy_team_persona_runtime_files(&path);
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".persona.md") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(updated) = rewrite_legacy_persona_md_runtime(&content) else {
+            continue;
+        };
+        if updated == content {
+            continue;
+        }
+        match std::fs::write(&path, updated) {
+            Ok(()) => {
+                eprintln!(
+                    "buzz-desktop: command-rename-reconcile: updated {}",
+                    path.display()
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "buzz-desktop: command-rename-reconcile: failed to update {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Reconcile exact built-in command values persisted before the Sprout→Buzz
+/// rename. Custom commands and explicit paths are left untouched.
+pub fn reconcile_legacy_command_names(app: &tauri::AppHandle) {
+    let Ok(current_dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let mut dirs = vec![current_dir.clone()];
+    if let Some(canonical) = canonical_dev_data_dir(&current_dir) {
+        if canonical.exists() && canonical != current_dir {
+            dirs.push(canonical);
+        }
+    }
+    for dir in dirs {
+        let path = dir.join("agents/managed-agents.json");
+        if path.exists() {
+            reconcile_legacy_command_names_in_file(&path);
+        }
+        let personas_path = dir.join("agents/personas.json");
+        if personas_path.exists() {
+            reconcile_legacy_persona_runtimes_in_file(&personas_path);
+        }
+        let teams_dir = dir.join("agents/teams");
+        if teams_dir.exists() && !teams_dir.is_symlink() {
+            reconcile_legacy_team_persona_runtime_files(&teams_dir);
+        }
+    }
+}
+
 /// Reconcile `mcp_command` values in managed-agents.json against the
 /// discovery table. Known runtimes get their canonical mcp_command;
 /// unknown/custom agents are left untouched. Covers both the current
@@ -646,3 +834,7 @@ pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
 #[cfg(test)]
 #[path = "migration_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "migration_command_tests.rs"]
+mod command_tests;

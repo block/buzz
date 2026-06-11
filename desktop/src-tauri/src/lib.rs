@@ -530,8 +530,9 @@ pub fn run() {
             migration::sync_shared_agent_data(&app_handle);
             migration::migrate_packs_to_teams(&app_handle);
             migration::reconcile_persona_team_dirs(&app_handle);
-            migration::reconcile_provider_mcp_commands(&app_handle);
             migration::migrate_persona_provider_to_runtime(&app_handle);
+            migration::reconcile_legacy_command_names(&app_handle);
+            migration::reconcile_provider_mcp_commands(&app_handle);
 
             if let Err(e) = managed_agents::sync_team_personas(&app_handle) {
                 eprintln!("buzz-desktop: sync-team-personas: {e}");
