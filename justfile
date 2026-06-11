@@ -274,7 +274,7 @@ proxy-release:
 dev *ARGS: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli
+    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     source ../scripts/instance-env.sh
@@ -290,7 +290,7 @@ staging *ARGS: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
     pnpm install
-    cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
