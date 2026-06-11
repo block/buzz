@@ -209,7 +209,11 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (candidate.isAgent && !mentionableAgentPubkeys.has(pubkey)) {
+      if (
+        candidate.isAgent &&
+        !candidate.isMember &&
+        !mentionableAgentPubkeys.has(pubkey)
+      ) {
         return;
       }
 
