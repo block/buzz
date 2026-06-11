@@ -15,8 +15,8 @@
 
 use std::time::Duration;
 
-use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, Timestamp};
 use buzz_test_client::BuzzTestClient;
+use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, Timestamp};
 
 const PERSONA_KIND: u16 = 30175;
 
@@ -61,9 +61,7 @@ async fn test_persona_publish_and_query() {
     })
     .to_string();
 
-    let mut client = BuzzTestClient::connect(&url, &keys)
-        .await
-        .expect("connect");
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     // Publish persona event
     let event = persona_event(&keys, &d_tag, &content);
@@ -108,9 +106,7 @@ async fn test_persona_nip33_replacement_newer_wins() {
     let keys = Keys::generate();
     let d_tag = format!("replace-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
-    let mut client = BuzzTestClient::connect(&url, &keys)
-        .await
-        .expect("connect");
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     // Publish older version
     let old_content = r#"{"name":"old","display_name":"Old","description":"Old version"}"#;
@@ -155,9 +151,7 @@ async fn test_persona_nip33_older_does_not_replace_newer() {
     let keys = Keys::generate();
     let d_tag = format!("no-replace-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
-    let mut client = BuzzTestClient::connect(&url, &keys)
-        .await
-        .expect("connect");
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     // Publish newer version first
     let new_content = r#"{"name":"new","display_name":"New","description":"Newer"}"#;
@@ -204,9 +198,7 @@ async fn test_persona_rejects_empty_d_tag() {
     let url = relay_url();
     let keys = Keys::generate();
 
-    let mut client = BuzzTestClient::connect(&url, &keys)
-        .await
-        .expect("connect");
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     let event = EventBuilder::new(
         Kind::Custom(PERSONA_KIND),
@@ -233,9 +225,7 @@ async fn test_persona_rejects_missing_d_tag() {
     let url = relay_url();
     let keys = Keys::generate();
 
-    let mut client = BuzzTestClient::connect(&url, &keys)
-        .await
-        .expect("connect");
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     // No d-tag at all
     let event = EventBuilder::new(
@@ -257,9 +247,7 @@ async fn test_persona_rejects_d_tag_too_long() {
     let url = relay_url();
     let keys = Keys::generate();
 
-    let mut client = BuzzTestClient::connect(&url, &keys)
-        .await
-        .expect("connect");
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     // 65 characters — exceeds the 64-char limit
     let long_slug = "a".repeat(65);
@@ -288,9 +276,7 @@ async fn test_persona_rejects_d_tag_uppercase() {
     let url = relay_url();
     let keys = Keys::generate();
 
-    let mut client = BuzzTestClient::connect(&url, &keys)
-        .await
-        .expect("connect");
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     let event = persona_event(
         &keys,
@@ -312,9 +298,7 @@ async fn test_persona_rejects_d_tag_special_chars() {
     let url = relay_url();
     let keys = Keys::generate();
 
-    let mut client = BuzzTestClient::connect(&url, &keys)
-        .await
-        .expect("connect");
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     let event = persona_event(
         &keys,
@@ -336,9 +320,7 @@ async fn test_persona_rejects_d_tag_starting_with_underscore() {
     let url = relay_url();
     let keys = Keys::generate();
 
-    let mut client = BuzzTestClient::connect(&url, &keys)
-        .await
-        .expect("connect");
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     // Slug must start with [a-z0-9], not underscore
     let event = persona_event(
@@ -361,9 +343,7 @@ async fn test_persona_accepts_valid_slugs() {
     let url = relay_url();
     let keys = Keys::generate();
 
-    let mut client = BuzzTestClient::connect(&url, &keys)
-        .await
-        .expect("connect");
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     // Various valid slug patterns
     let valid_slugs = [
@@ -400,9 +380,7 @@ async fn test_persona_multiple_per_author() {
     let url = relay_url();
     let keys = Keys::generate();
 
-    let mut client = BuzzTestClient::connect(&url, &keys)
-        .await
-        .expect("connect");
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     // Publish two different personas (different d-tags)
     let slug_a = format!("persona-a-{}", &uuid::Uuid::new_v4().to_string()[..8]);
