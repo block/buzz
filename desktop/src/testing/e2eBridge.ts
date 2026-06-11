@@ -5,6 +5,7 @@ import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { parse as yamlParse } from "yaml";
 
 import type { RelayEvent } from "@/shared/api/types";
+import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import {
   CUSTOM_EMOJI_SET_D_TAG,
   KIND_EMOJI_SET,
@@ -594,6 +595,11 @@ declare global {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
       denyReason?: string;
+    }) => void;
+    __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
+      agentPubkey: string;
+      channelId: string;
+      turnId: string;
     }) => void;
     __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
       clientId: string;
@@ -5867,6 +5873,26 @@ export function maybeInstallE2eTauriMocks() {
     if (mesh.models !== undefined) mockMeshState.models = mesh.models;
     if (mesh.denyReason !== undefined)
       mockMeshState.denyReason = mesh.denyReason;
+  };
+  let seedTurnSeq = Date.now();
+  window.__BUZZ_E2E_SEED_ACTIVE_TURNS__ = ({
+    agentPubkey,
+    channelId,
+    turnId,
+  }) => {
+    seedTurnSeq += 1;
+    syncAgentTurnsFromEvents(agentPubkey, [
+      {
+        seq: seedTurnSeq,
+        timestamp: new Date().toISOString(),
+        kind: "turn_started",
+        agentIndex: 0,
+        channelId,
+        sessionId: null,
+        turnId,
+        payload: null,
+      },
+    ]);
   };
   const meshNodeStatus = (
     state: "off" | "running",

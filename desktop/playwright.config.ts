@@ -31,6 +31,7 @@ export default defineConfig({
         "**/channel-star-screenshots.spec.ts",
         "**/channel-controls-screenshots.spec.ts",
         "**/team-management-screenshots.spec.ts",
+        "**/active-turn-screenshots.spec.ts",
         "**/file-attachment.spec.ts",
         "**/video-attachment.spec.ts",
         "**/mentions.spec.ts",
