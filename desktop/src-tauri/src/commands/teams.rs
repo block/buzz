@@ -2,13 +2,16 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use super::export_util::save_json_with_dialog;
+#[cfg(feature = "legacy_team_sync")]
+use crate::managed_agents::{
+    import_team_from_directory as do_import_team, sync_team_from_dir as do_sync_team, SyncResult,
+};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        delete_team_with_cascade, encode_team_json, ensure_persona_ids_are_active,
-        import_team_from_directory as do_import_team, load_personas, load_teams, parse_team_json,
-        save_teams, sync_team_from_dir as do_sync_team, try_regenerate_nest, CreateTeamRequest,
-        ParsedTeamPreview, SyncResult, TeamRecord, UpdateTeamRequest,
+        delete_team_with_cascade, encode_team_json, ensure_persona_ids_are_active, load_personas,
+        load_teams, parse_team_json, save_teams, try_regenerate_nest, CreateTeamRequest,
+        ParsedTeamPreview, TeamRecord, UpdateTeamRequest,
     },
     util::now_iso,
 };
@@ -114,6 +117,7 @@ pub fn delete_team(id: String, app: AppHandle, state: State<'_, AppState>) -> Re
     Ok(())
 }
 
+#[cfg(feature = "legacy_team_sync")]
 #[tauri::command]
 pub fn install_team_from_directory(
     app: AppHandle,
@@ -134,6 +138,7 @@ pub fn install_team_from_directory(
     Ok(result)
 }
 
+#[cfg(feature = "legacy_team_sync")]
 #[tauri::command]
 pub fn sync_team_directory(
     app: AppHandle,

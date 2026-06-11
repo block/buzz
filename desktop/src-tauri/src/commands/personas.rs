@@ -140,6 +140,19 @@ pub fn update_persona(
         .find(|record| record.id == input.id)
         .ok_or_else(|| format!("persona {} disappeared unexpectedly", input.id))?;
     try_regenerate_nest(&app);
+
+    // Fleet update: propagate persona edits to agent engrams (best-effort).
+    let fleet_app = app.clone();
+    let persona_id = input.id.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) =
+            crate::managed_agents::fleet_update::fleet_update_for_persona(&fleet_app, &persona_id)
+                .await
+        {
+            eprintln!("buzz-desktop: fleet-update-on-save: {e}");
+        }
+    });
+
     Ok(result)
 }
 

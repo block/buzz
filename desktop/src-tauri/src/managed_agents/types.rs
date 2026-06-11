@@ -527,6 +527,7 @@ pub struct UpdateTeamRequest {
 }
 
 /// Result of syncing a directory-backed team with its backing directory.
+#[cfg_attr(not(feature = "legacy_team_sync"), allow(dead_code))]
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncResult {
     pub personas_added: Vec<String>,

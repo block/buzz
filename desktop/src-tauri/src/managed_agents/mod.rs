@@ -1,6 +1,7 @@
 mod backend;
 mod discovery;
 mod env_vars;
+pub(crate) mod fleet_update;
 mod nest;
 mod persona_avatars;
 mod persona_card;

@@ -6,14 +6,18 @@
 use std::collections::BTreeMap;
 
 use buzz_core_pkg::kind::KIND_PERSONA;
-use nostr::{EventBuilder, Kind, Tag};
+use nostr::{EventBuilder, Kind, PublicKey, Tag};
 use serde::{Deserialize, Serialize};
 
 use super::PersonaRecord;
 use crate::app_state::AppState;
 
+/// The slug for the per-agent persona memory engram. The agent stores a
+/// snapshot of the persona it was instantiated from under this memory slot.
+pub const PERSONA_ENGRAM_SLUG: &str = "mem/persona";
+
 /// The JSON body stored in a persona event's content field.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersonaEventContent {
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +133,155 @@ pub async fn fetch_persona_events(state: &AppState) -> Result<Vec<nostr::Event>,
     crate::relay::query_relay(state, &[filter]).await
 }
 
+/// Provenance recorded inside a persona engram's encrypted body. Identifies the
+/// source persona event the agent was instantiated from and a content digest
+/// used by fleet update to detect drift. Kept inside the encrypted body (not as
+/// a plaintext tag) so the engram's blinding guarantee is preserved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonaProvenance {
+    pub owner_pubkey: String,
+    pub kind: u32,
+    pub slug: String,
+    /// SHA-256 of the canonical persona content JSON at the time of the write.
+    pub source_version: String,
+}
+
+/// The decrypted body of a `mem/persona` engram: the persona snapshot plus its
+/// provenance. Serialized as the engram's memory `value` string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonaEngramBody {
+    #[serde(flatten)]
+    pub content: PersonaEventContent,
+    pub provenance: PersonaProvenance,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env_vars: BTreeMap<String, String>,
+}
+
+/// SHA-256 (lowercase hex) of a persona's canonical content JSON.
+///
+/// Fleet update compares this digest, not event timestamps, to decide whether
+/// an agent's engram is stale — timestamps are fragile across clock skew and
+/// export/import round-trips. `PersonaEventContent` field order is fixed by the
+/// struct definition, so `serde_json` produces a stable canonical encoding.
+pub fn persona_content_hash(content: &PersonaEventContent) -> String {
+    use sha2::{Digest, Sha256};
+    let json = serde_json::to_vec(content).unwrap_or_default();
+    let digest = Sha256::digest(&json);
+    hex::encode(digest)
+}
+
+/// Project a `PersonaRecord` onto the content fields published in persona
+/// events and engrams. Centralizes the field mapping so a new persona field is
+/// added in exactly one place.
+pub fn persona_event_content(record: &PersonaRecord) -> PersonaEventContent {
+    PersonaEventContent {
+        display_name: record.display_name.clone(),
+        avatar_url: record.avatar_url.clone(),
+        system_prompt: record.system_prompt.clone(),
+        runtime: record.runtime.clone(),
+        model: record.model.clone(),
+        provider: record.provider.clone(),
+        name_pool: record.name_pool.clone(),
+    }
+}
+
+/// Build the decrypted body for a persona engram from a `PersonaRecord`.
+fn persona_engram_body(record: &PersonaRecord, owner_pubkey: &PublicKey) -> PersonaEngramBody {
+    let content = persona_event_content(record);
+    let source_version = persona_content_hash(&content);
+    let provenance = PersonaProvenance {
+        owner_pubkey: owner_pubkey.to_hex(),
+        kind: KIND_PERSONA,
+        slug: persona_d_tag(record),
+        source_version,
+    };
+    PersonaEngramBody {
+        content,
+        provenance,
+        env_vars: record.env_vars.clone(),
+    }
+}
+
+/// Build a signed `mem/persona` engram (kind:30174) for an agent.
+///
+/// The engram is authored by the agent and addressed to the owner: its content
+/// is NIP-44 encrypted under `ECDH(agent_seckey, owner_pubkey)` and the d-tag is
+/// HMAC-blinded over the `mem/persona` slug. The persona snapshot and its
+/// provenance live inside the encrypted body.
+pub fn build_persona_engram(
+    agent_keys: &nostr::Keys,
+    owner_pubkey: &PublicKey,
+    record: &PersonaRecord,
+    created_at: u64,
+) -> Result<nostr::Event, String> {
+    let body = persona_engram_body(record, owner_pubkey);
+    let value = serde_json::to_string(&body)
+        .map_err(|e| format!("failed to serialize engram body: {e}"))?;
+
+    let engram_body = buzz_core_pkg::engram::Body::Memory {
+        slug: PERSONA_ENGRAM_SLUG.to_string(),
+        value: Some(value),
+    };
+
+    buzz_core_pkg::engram::build_event(agent_keys, owner_pubkey, &engram_body, created_at)
+        .map_err(|e| format!("failed to build persona engram: {e}"))
+}
+
+/// Decode a persona engram body from a relay event, validating the envelope and
+/// decrypting under the agent↔owner conversation key.
+pub fn persona_engram_from_event(
+    event: &nostr::Event,
+    agent_keys: &nostr::Keys,
+    owner_pubkey: &PublicKey,
+) -> Result<PersonaEngramBody, String> {
+    let body = buzz_core_pkg::engram::validate_and_decrypt(
+        event,
+        &agent_keys.public_key(),
+        owner_pubkey,
+        agent_keys.secret_key(),
+        owner_pubkey,
+    )
+    .map_err(|e| format!("failed to validate persona engram: {e}"))?;
+
+    engram_body_from_decrypted(body)
+}
+
+/// Decode a persona engram as the owner (fleet update reads engrams using the
+/// owner's secret key + agent's pubkey — the conversation key is symmetric).
+pub fn persona_engram_from_event_as_owner(
+    event: &nostr::Event,
+    agent_pubkey: &PublicKey,
+    owner_keys: &nostr::Keys,
+) -> Result<PersonaEngramBody, String> {
+    let body = buzz_core_pkg::engram::validate_and_decrypt(
+        event,
+        agent_pubkey,
+        &owner_keys.public_key(),
+        owner_keys.secret_key(),
+        agent_pubkey,
+    )
+    .map_err(|e| format!("failed to validate persona engram: {e}"))?;
+
+    engram_body_from_decrypted(body)
+}
+
+fn engram_body_from_decrypted(
+    body: buzz_core_pkg::engram::Body,
+) -> Result<PersonaEngramBody, String> {
+    match body {
+        buzz_core_pkg::engram::Body::Memory {
+            value: Some(value), ..
+        } => serde_json::from_str(&value)
+            .map_err(|e| format!("failed to parse persona engram body: {e}")),
+        buzz_core_pkg::engram::Body::Memory { value: None, .. } => {
+            Err("persona engram is a tombstone".to_string())
+        }
+        buzz_core_pkg::engram::Body::Core { .. } => {
+            Err("expected memory engram, got core".to_string())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +394,73 @@ mod tests {
         // Deserialized persona is always non-builtin and active
         assert!(!restored.is_builtin);
         assert!(restored.is_active);
+    }
+
+    #[test]
+    fn persona_engram_round_trip() {
+        let record = sample_persona();
+        let agent_keys = nostr::Keys::generate();
+        let owner_keys = nostr::Keys::generate();
+        let owner_pubkey = owner_keys.public_key();
+
+        let now = 1_700_000_000u64;
+        let event = build_persona_engram(&agent_keys, &owner_pubkey, &record, now).unwrap();
+
+        // Verify it's a kind:30174 event
+        assert_eq!(
+            event.kind.as_u16() as u32,
+            buzz_core_pkg::kind::KIND_AGENT_ENGRAM
+        );
+        // Verify it's authored by the agent
+        assert_eq!(event.pubkey, agent_keys.public_key());
+
+        // Decrypt and verify content
+        let body = persona_engram_from_event(&event, &agent_keys, &owner_pubkey).unwrap();
+        assert_eq!(body.content.display_name, "Test Persona");
+        assert_eq!(body.content.system_prompt, "You are a test assistant.");
+        assert_eq!(body.provenance.owner_pubkey, owner_pubkey.to_hex());
+        assert_eq!(body.provenance.kind, KIND_PERSONA);
+        assert_eq!(body.provenance.slug, "test-slug");
+        assert!(!body.provenance.source_version.is_empty());
+        assert_eq!(
+            body.env_vars,
+            BTreeMap::from([("KEY".to_string(), "value".to_string())])
+        );
+    }
+
+    #[test]
+    fn persona_content_hash_is_deterministic() {
+        let content = PersonaEventContent {
+            display_name: "Test".to_string(),
+            avatar_url: None,
+            system_prompt: "Hello".to_string(),
+            runtime: None,
+            model: None,
+            provider: None,
+            name_pool: vec![],
+        };
+        let hash1 = persona_content_hash(&content);
+        let hash2 = persona_content_hash(&content);
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash1.len(), 64); // SHA-256 hex
+    }
+
+    #[test]
+    fn persona_content_hash_changes_on_edit() {
+        let content1 = PersonaEventContent {
+            display_name: "Test".to_string(),
+            avatar_url: None,
+            system_prompt: "Hello".to_string(),
+            runtime: None,
+            model: None,
+            provider: None,
+            name_pool: vec![],
+        };
+        let mut content2 = content1.clone();
+        content2.system_prompt = "Goodbye".to_string();
+        assert_ne!(
+            persona_content_hash(&content1),
+            persona_content_hash(&content2)
+        );
     }
 }
