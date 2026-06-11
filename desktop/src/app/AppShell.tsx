@@ -238,10 +238,8 @@ export function AppShell() {
 
   const handleDmNotification = React.useEffectEvent(
     (event: RelayEvent, channel: Channel) => {
-      // The Sound master switch cascades the per-event rows off entirely.
       if (
         !notificationSettings.settings.desktopEnabled ||
-        !notificationSettings.settings.soundEnabled ||
         !notificationSettings.settings.slotAlertsEnabled.dm
       ) {
         return;
@@ -302,10 +300,8 @@ export function AppShell() {
 
   const handleThreadReplyDesktopNotification = React.useEffectEvent(
     (channelId: string, event: RelayEvent) => {
-      // The Sound master switch cascades the per-event rows off entirely.
       if (
         !notificationSettings.settings.desktopEnabled ||
-        !notificationSettings.settings.soundEnabled ||
         !notificationSettings.settings.slotAlertsEnabled.thread_reply
       ) {
         return;
@@ -792,8 +788,9 @@ export function AppShell() {
                       onSetNotifyWhileViewing={
                         notificationSettings.setNotifyWhileViewing
                       }
-                      onSetSingleSound={notificationSettings.setSingleSound}
-                      onSetSoundEnabled={notificationSettings.setSoundEnabled}
+                      onSetAllSlotAlertsEnabled={
+                        notificationSettings.setAllSlotAlertsEnabled
+                      }
                       onSetSoundForSlot={notificationSettings.setSoundForSlot}
                       section={settingsSection}
                     />

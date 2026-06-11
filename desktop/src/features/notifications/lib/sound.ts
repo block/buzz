@@ -79,27 +79,20 @@ export const RECOMMENDED_SOUND_BY_SLOT: Record<SoundSlot, SoundName> = {
   job_error: "oh-no",
 };
 
-export const RECOMMENDED_SINGLE_SOUND: SoundName = "unison";
+export type SlotSounds = Record<SoundSlot, SoundName>;
 
-/** Per-slot overrides; null inherits the default sound. */
-export type SoundOverrides = Record<SoundSlot, SoundName | null>;
-
-export const DEFAULT_SOUND_OVERRIDES: SoundOverrides = {
-  dm: null,
-  mention: null,
-  thread_reply: null,
-  needs_action: null,
-  job_accepted: null,
-  job_progress: null,
-  job_result: null,
-  job_error: null,
+export const DEFAULT_SLOT_SOUNDS: SlotSounds = {
+  dm: "flutter",
+  mention: "flutter",
+  thread_reply: "flutter",
+  needs_action: "flutter",
+  job_accepted: "flutter",
+  job_progress: "flutter",
+  job_result: "flutter",
+  job_error: "flutter",
 };
 
-/**
- * Per-event alerts (notification + sound) on/off. Applies in both sound
- * modes — this gates whether the event notifies at all, not which sound
- * plays.
- */
+/** Per-event alerts (notification + sound) on/off. */
 export const DEFAULT_SLOT_ALERTS_ENABLED: Record<SoundSlot, boolean> = {
   dm: true,
   mention: true,
@@ -112,15 +105,14 @@ export const DEFAULT_SLOT_ALERTS_ENABLED: Record<SoundSlot, boolean> = {
 };
 
 export type SoundPreferences = {
-  singleSound: SoundName;
-  sounds: SoundOverrides;
+  sounds: SlotSounds;
 };
 
 export function resolveSlotSound(
   prefs: SoundPreferences,
   slot: SoundSlot,
 ): SoundName {
-  return prefs.sounds[slot] ?? prefs.singleSound;
+  return prefs.sounds[slot];
 }
 
 export function slotForFeedKind(

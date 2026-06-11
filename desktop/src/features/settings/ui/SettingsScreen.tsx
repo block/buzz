@@ -17,9 +17,8 @@ type SettingsScreenProps = {
   onSetHomeBadgeEnabled: (enabled: boolean) => void;
   onSetSlotAlertsEnabled: (slot: SoundSlot, enabled: boolean) => void;
   onSetNotifyWhileViewing: (enabled: boolean) => void;
-  onSetSingleSound: (name: SoundName) => void;
-  onSetSoundEnabled: (enabled: boolean) => void;
-  onSetSoundForSlot: (slot: SoundSlot, name: SoundName | null) => void;
+  onSetAllSlotAlertsEnabled: (enabled: boolean) => void;
+  onSetSoundForSlot: (slot: SoundSlot, name: SoundName) => void;
   section: SettingsSection;
 };
 
@@ -36,8 +35,7 @@ export function SettingsScreen({
   onSetHomeBadgeEnabled,
   onSetSlotAlertsEnabled,
   onSetNotifyWhileViewing,
-  onSetSingleSound,
-  onSetSoundEnabled,
+  onSetAllSlotAlertsEnabled,
   onSetSoundForSlot,
   section,
 }: SettingsScreenProps) {
@@ -55,8 +53,7 @@ export function SettingsScreen({
       onSetHomeBadgeEnabled={onSetHomeBadgeEnabled}
       onSetSlotAlertsEnabled={onSetSlotAlertsEnabled}
       onSetNotifyWhileViewing={onSetNotifyWhileViewing}
-      onSetSingleSound={onSetSingleSound}
-      onSetSoundEnabled={onSetSoundEnabled}
+      onSetAllSlotAlertsEnabled={onSetAllSlotAlertsEnabled}
       onSetSoundForSlot={onSetSoundForSlot}
       section={section}
     />

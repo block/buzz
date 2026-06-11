@@ -121,8 +121,7 @@ export function SettingsView({
   onSetHomeBadgeEnabled,
   onSetSlotAlertsEnabled,
   onSetNotifyWhileViewing,
-  onSetSingleSound,
-  onSetSoundEnabled,
+  onSetAllSlotAlertsEnabled,
   onSetSoundForSlot,
   section,
 }: SettingsViewProps) {
@@ -293,8 +292,7 @@ export function SettingsView({
                 onSetHomeBadgeEnabled,
                 onSetSlotAlertsEnabled,
                 onSetNotifyWhileViewing,
-                onSetSingleSound,
-                onSetSoundEnabled,
+                onSetAllSlotAlertsEnabled,
                 onSetSoundForSlot,
               })}
             </div>

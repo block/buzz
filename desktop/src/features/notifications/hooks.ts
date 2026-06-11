@@ -10,13 +10,13 @@ import {
   type DesktopNotificationPermissionState,
 } from "./lib/desktop";
 import {
+  COMING_SOON_SLOTS,
   DEFAULT_SLOT_ALERTS_ENABLED,
-  DEFAULT_SOUND_OVERRIDES,
-  RECOMMENDED_SINGLE_SOUND,
+  DEFAULT_SLOT_SOUNDS,
   SOUND_NAMES,
   SOUND_SLOTS,
+  type SlotSounds,
   type SoundName,
-  type SoundOverrides,
   type SoundSlot,
 } from "./lib/sound";
 import {
@@ -34,9 +34,7 @@ export type NotificationSettings = {
   desktopEnabled: boolean;
   homeBadgeEnabled: boolean;
   notifyWhileViewing: boolean;
-  soundEnabled: boolean;
-  singleSound: SoundName;
-  sounds: SoundOverrides;
+  sounds: SlotSounds;
   slotAlertsEnabled: Record<SoundSlot, boolean>;
 };
 
@@ -44,26 +42,19 @@ const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   desktopEnabled: true,
   homeBadgeEnabled: true,
   notifyWhileViewing: false,
-  soundEnabled: true,
-  singleSound: RECOMMENDED_SINGLE_SOUND,
-  sounds: { ...DEFAULT_SOUND_OVERRIDES },
+  sounds: { ...DEFAULT_SLOT_SOUNDS },
   slotAlertsEnabled: { ...DEFAULT_SLOT_ALERTS_ENABLED },
 };
 
 const SOUND_NAME_SET = new Set<SoundName>(SOUND_NAMES);
 
-function sanitizeSoundsMap(value: unknown): SoundOverrides {
-  const result = { ...DEFAULT_SOUND_OVERRIDES };
+function sanitizeSoundsMap(value: unknown): SlotSounds {
+  const result = { ...DEFAULT_SLOT_SOUNDS };
   if (!value || typeof value !== "object") return result;
   const candidate = value as Partial<Record<SoundSlot, unknown>>;
   for (const slot of SOUND_SLOTS) {
     const picked = candidate[slot];
-    if (picked === null) {
-      result[slot] = null;
-    } else if (
-      typeof picked === "string" &&
-      SOUND_NAME_SET.has(picked as SoundName)
-    ) {
+    if (typeof picked === "string" && SOUND_NAME_SET.has(picked as SoundName)) {
       result[slot] = picked as SoundName;
     }
   }
@@ -120,15 +111,6 @@ function sanitizeNotificationSettings(value: unknown): NotificationSettings {
       typeof candidate.notifyWhileViewing === "boolean"
         ? candidate.notifyWhileViewing
         : DEFAULT_NOTIFICATION_SETTINGS.notifyWhileViewing,
-    soundEnabled:
-      typeof candidate.soundEnabled === "boolean"
-        ? candidate.soundEnabled
-        : DEFAULT_NOTIFICATION_SETTINGS.soundEnabled,
-    singleSound:
-      typeof candidate.singleSound === "string" &&
-      SOUND_NAME_SET.has(candidate.singleSound as SoundName)
-        ? (candidate.singleSound as SoundName)
-        : DEFAULT_NOTIFICATION_SETTINGS.singleSound,
     sounds: sanitizeSoundsMap(candidate.sounds),
     slotAlertsEnabled: sanitizeSlotAlertsEnabled(candidate.slotAlertsEnabled, {
       mentions: candidate.mentions,
@@ -293,11 +275,16 @@ export function useNotificationSettings(pubkey?: string) {
     }));
   }, []);
 
-  const setSoundEnabled = React.useCallback((enabled: boolean) => {
-    setSettings((current) => ({
-      ...current,
-      soundEnabled: enabled,
-    }));
+  const setAllSlotAlertsEnabled = React.useCallback((enabled: boolean) => {
+    setSettings((current) => {
+      const next = { ...current.slotAlertsEnabled };
+      for (const slot of SOUND_SLOTS) {
+        if (!COMING_SOON_SLOTS.has(slot)) {
+          next[slot] = enabled;
+        }
+      }
+      return { ...current, slotAlertsEnabled: next };
+    });
   }, []);
 
   const setSlotAlertsEnabled = React.useCallback(
@@ -310,15 +297,8 @@ export function useNotificationSettings(pubkey?: string) {
     [],
   );
 
-  const setSingleSound = React.useCallback((name: SoundName) => {
-    setSettings((current) => ({
-      ...current,
-      singleSound: name,
-    }));
-  }, []);
-
   const setSoundForSlot = React.useCallback(
-    (slot: SoundSlot, name: SoundName | null) => {
+    (slot: SoundSlot, name: SoundName) => {
       setSettings((current) => ({
         ...current,
         sounds: { ...current.sounds, [slot]: name },
@@ -333,10 +313,9 @@ export function useNotificationSettings(pubkey?: string) {
     permission,
     setDesktopEnabled,
     setHomeBadgeEnabled,
+    setAllSlotAlertsEnabled,
     setNotifyWhileViewing,
-    setSingleSound,
     setSlotAlertsEnabled,
-    setSoundEnabled,
     setSoundForSlot,
     settings,
   };

@@ -7,7 +7,6 @@ import type {
 } from "@/features/notifications/hooks";
 import {
   COMING_SOON_SLOTS,
-  RECOMMENDED_SINGLE_SOUND,
   RECOMMENDED_SOUND_BY_SLOT,
   SLOT_DESCRIPTIONS,
   SLOT_LABELS,
@@ -27,11 +26,10 @@ export function NotificationSettingsCard({
   notificationPermission,
   notificationSettings,
   onSetDesktopNotificationsEnabled,
+  onSetAllSlotAlertsEnabled,
   onSetHomeBadgeEnabled,
   onSetSlotAlertsEnabled,
   onSetNotifyWhileViewing,
-  onSetSingleSound,
-  onSetSoundEnabled,
   onSetSoundForSlot,
 }: {
   isUpdatingDesktopNotifications: boolean;
@@ -39,18 +37,22 @@ export function NotificationSettingsCard({
   notificationPermission: DesktopNotificationPermissionState;
   notificationSettings: NotificationSettings;
   onSetDesktopNotificationsEnabled: (enabled: boolean) => Promise<boolean>;
+  onSetAllSlotAlertsEnabled: (enabled: boolean) => void;
   onSetHomeBadgeEnabled: (enabled: boolean) => void;
   onSetSlotAlertsEnabled: (slot: SoundSlot, enabled: boolean) => void;
   onSetNotifyWhileViewing: (enabled: boolean) => void;
-  onSetSingleSound: (name: SoundName) => void;
-  onSetSoundEnabled: (enabled: boolean) => void;
-  onSetSoundForSlot: (slot: SoundSlot, name: SoundName | null) => void;
+  onSetSoundForSlot: (slot: SoundSlot, name: SoundName) => void;
 }) {
   const permissionBlocked =
     notificationPermission === "denied" ||
     notificationPermission === "unsupported";
-  const soundControlsVisible =
-    notificationSettings.desktopEnabled && notificationSettings.soundEnabled;
+  // The parent Sound switch derives from its children: on when any live
+  // event row is on, and toggling it bulk-sets every live row.
+  const anyAlertsOn = SOUND_SLOTS.some(
+    (slot) =>
+      !COMING_SOON_SLOTS.has(slot) &&
+      notificationSettings.slotAlertsEnabled[slot],
+  );
   const [showComingSoon, setShowComingSoon] = useState(false);
   const visibleSlots = SOUND_SLOTS.filter(
     (slot) => showComingSoon || !COMING_SOON_SLOTS.has(slot),
@@ -142,38 +144,18 @@ export function NotificationSettingsCard({
                 Sound
               </label>
               <p className="text-sm font-normal text-muted-foreground">
-                Play a sound when a desktop notification fires.
+                Alert with a sound for the events below.
               </p>
             </div>
-            <span className="flex items-center gap-3">
-              <span
-                className={cn(
-                  "transition-opacity duration-200",
-                  !soundControlsVisible && "pointer-events-none opacity-40",
-                )}
-              >
-                <SoundPicker
-                  disabled={!soundControlsVisible}
-                  onChange={(next) =>
-                    onSetSingleSound(next ?? RECOMMENDED_SINGLE_SOUND)
-                  }
-                  recommended={RECOMMENDED_SINGLE_SOUND}
-                  value={notificationSettings.singleSound}
-                />
-              </span>
-              <Switch
-                checked={
-                  notificationSettings.desktopEnabled &&
-                  notificationSettings.soundEnabled
-                }
-                data-testid="notifications-sound-toggle"
-                disabled={!notificationSettings.desktopEnabled}
-                id="notification-sound-switch"
-                onCheckedChange={(checked) => {
-                  onSetSoundEnabled(checked);
-                }}
-              />
-            </span>
+            <Switch
+              checked={notificationSettings.desktopEnabled && anyAlertsOn}
+              data-testid="notifications-sound-toggle"
+              disabled={!notificationSettings.desktopEnabled}
+              id="notification-sound-switch"
+              onCheckedChange={(checked) => {
+                onSetAllSlotAlertsEnabled(checked);
+              }}
+            />
           </SettingsOptionRow>
 
           <div
@@ -185,15 +167,11 @@ export function NotificationSettingsCard({
           >
             {visibleSlots.map((slot) => {
               const comingSoon = COMING_SOON_SLOTS.has(slot);
-              // Cascade: the Sound master switch off renders every row
-              // off and inert; stored per-row values are preserved.
-              const alertsOn =
-                soundControlsVisible &&
-                notificationSettings.slotAlertsEnabled[slot];
+              const alertsOn = notificationSettings.slotAlertsEnabled[slot];
               return (
                 <SettingsOptionRow
                   aria-disabled={comingSoon || undefined}
-                  className={cn(comingSoon && "pointer-events-none opacity-40")}
+                  className={cn(comingSoon && "cursor-not-allowed opacity-40")}
                   key={slot}
                 >
                   <div className="min-w-0">
@@ -218,7 +196,6 @@ export function NotificationSettingsCard({
                     >
                       <SoundPicker
                         disabled={comingSoon || !alertsOn}
-                        inheritFrom={notificationSettings.singleSound}
                         onChange={(next) => onSetSoundForSlot(slot, next)}
                         recommended={RECOMMENDED_SOUND_BY_SLOT[slot]}
                         value={notificationSettings.sounds[slot]}
@@ -227,7 +204,9 @@ export function NotificationSettingsCard({
                     <Switch
                       checked={alertsOn && !comingSoon}
                       data-testid={`notifications-alerts-enabled-${slot}`}
-                      disabled={comingSoon || !soundControlsVisible}
+                      disabled={
+                        comingSoon || !notificationSettings.desktopEnabled
+                      }
                       id={`alerts-enabled-${slot}-switch`}
                       onCheckedChange={(checked) => {
                         onSetSlotAlertsEnabled(slot, checked);

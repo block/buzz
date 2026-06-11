@@ -80,9 +80,8 @@ export type SettingsPanelProps = {
   onSetHomeBadgeEnabled: (enabled: boolean) => void;
   onSetSlotAlertsEnabled: (slot: SoundSlot, enabled: boolean) => void;
   onSetNotifyWhileViewing: (enabled: boolean) => void;
-  onSetSingleSound: (name: SoundName) => void;
-  onSetSoundEnabled: (enabled: boolean) => void;
-  onSetSoundForSlot: (slot: SoundSlot, name: SoundName | null) => void;
+  onSetAllSlotAlertsEnabled: (enabled: boolean) => void;
+  onSetSoundForSlot: (slot: SoundSlot, name: SoundName) => void;
 };
 
 export const settingsSections: SettingsSectionDescriptor[] = [
@@ -306,8 +305,7 @@ export function renderSettingsSection(
           onSetHomeBadgeEnabled={props.onSetHomeBadgeEnabled}
           onSetSlotAlertsEnabled={props.onSetSlotAlertsEnabled}
           onSetNotifyWhileViewing={props.onSetNotifyWhileViewing}
-          onSetSingleSound={props.onSetSingleSound}
-          onSetSoundEnabled={props.onSetSoundEnabled}
+          onSetAllSlotAlertsEnabled={props.onSetAllSlotAlertsEnabled}
           onSetSoundForSlot={props.onSetSoundForSlot}
         />
       );

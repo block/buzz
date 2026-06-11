@@ -152,21 +152,19 @@ export function useFeedDesktopNotifications(
     }
 
     const nextSeenItemIds = new Set(seenItemIdsRef.current);
-    // The Sound master switch cascades the per-event rows off entirely.
-    const newItems =
-      settings.desktopEnabled && settings.soundEnabled
-        ? eligibleFeedNotificationItems(feed, {
-            mentions: settings.slotAlertsEnabled.mention,
-            needsAction: settings.slotAlertsEnabled.needs_action,
-          })
-            .filter((item) => !nextSeenItemIds.has(item.id))
-            .filter(
-              (item) =>
-                !item.channelId ||
-                !mutedChannelIds?.has(item.channelId) ||
-                item.category === "mention",
-            )
-        : [];
+    const newItems = settings.desktopEnabled
+      ? eligibleFeedNotificationItems(feed, {
+          mentions: settings.slotAlertsEnabled.mention,
+          needsAction: settings.slotAlertsEnabled.needs_action,
+        })
+          .filter((item) => !nextSeenItemIds.has(item.id))
+          .filter(
+            (item) =>
+              !item.channelId ||
+              !mutedChannelIds?.has(item.channelId) ||
+              item.category === "mention",
+          )
+      : [];
 
     for (const item of currentFeedItems) {
       nextSeenItemIds.add(item.id);
@@ -211,7 +209,6 @@ export function useFeedDesktopNotifications(
     normalizedPubkey,
     profiles,
     settings.desktopEnabled,
-    settings.soundEnabled,
     settings.slotAlertsEnabled.mention,
     settings.slotAlertsEnabled.needs_action,
   ]);

@@ -51,25 +51,18 @@ function Waveform({
   );
 }
 
-// Radio value standing in for "inherit the default sound" (value = null).
-const DEFAULT_SENTINEL = "__default__";
-
 export function SoundPicker({
   recommended,
   value,
   disabled,
-  inheritFrom,
   onChange,
 }: {
   recommended: SoundName;
-  value: SoundName | null;
+  value: SoundName;
   disabled?: boolean;
-  /** When set, offers a "Default" option; a null value inherits this sound. */
-  inheritFrom?: SoundName;
-  onChange: (next: SoundName | null) => void;
+  onChange: (next: SoundName) => void;
 }) {
   const items = sortedSounds(recommended);
-  const resolved = value ?? inheritFrom ?? recommended;
   const [isPlaying, setIsPlaying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -79,7 +72,7 @@ export function SoundPicker({
       setIsPlaying(false);
       return;
     }
-    const audio = playNotificationSound(resolved);
+    const audio = playNotificationSound(value);
     if (!audio) return;
     audioRef.current = audio;
     setIsPlaying(true);
@@ -99,16 +92,9 @@ export function SoundPicker({
             type="button"
             variant="ghost"
           >
-            <span
-              className={cn(
-                "truncate",
-                value == null && "text-muted-foreground",
-              )}
-            >
-              {value ?? "Default"}
-            </span>
+            <span className="truncate">{value}</span>
             <span className="flex items-center gap-1.5">
-              <Waveform className="h-6 w-15 opacity-70" name={resolved} />
+              <Waveform className="h-6 w-15 opacity-70" name={value} />
               <ChevronDown className="h-3 w-3 text-muted-foreground" />
             </span>
           </Button>
@@ -118,24 +104,9 @@ export function SoundPicker({
           className="max-h-80 min-w-72 overflow-y-auto"
         >
           <DropdownMenuRadioGroup
-            onValueChange={(next) =>
-              onChange(next === DEFAULT_SENTINEL ? null : (next as SoundName))
-            }
-            value={value ?? DEFAULT_SENTINEL}
+            onValueChange={(next) => onChange(next as SoundName)}
+            value={value}
           >
-            {inheritFrom != null ? (
-              <DropdownMenuRadioItem value={DEFAULT_SENTINEL}>
-                <span className="flex w-full items-center justify-between gap-3">
-                  <span className="text-muted-foreground">
-                    Default · {inheritFrom}
-                  </span>
-                  <Waveform
-                    className="h-6 w-15 opacity-40"
-                    name={inheritFrom}
-                  />
-                </span>
-              </DropdownMenuRadioItem>
-            ) : null}
             {items.map((name) => (
               <DropdownMenuRadioItem key={name} value={name}>
                 <span className="flex w-full items-center justify-between gap-3">
@@ -155,7 +126,7 @@ export function SoundPicker({
         </DropdownMenuContent>
       </DropdownMenu>
       <Button
-        aria-label={isPlaying ? `Pause ${resolved}` : `Preview ${resolved}`}
+        aria-label={isPlaying ? `Pause ${value}` : `Preview ${value}`}
         className="h-7 w-7 rounded-full border border-border/50 bg-muted/45 p-0 text-foreground shadow-none hover:bg-muted/70"
         disabled={disabled}
         onClick={togglePreview}
