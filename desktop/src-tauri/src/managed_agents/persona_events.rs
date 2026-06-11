@@ -5,9 +5,9 @@
 
 use std::collections::BTreeMap;
 
+use buzz_core_pkg::kind::KIND_PERSONA;
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
-use buzz_core_pkg::kind::KIND_PERSONA;
 
 use super::PersonaRecord;
 use crate::app_state::AppState;

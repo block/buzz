@@ -1183,8 +1183,8 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
         retention::{has_retained_personas, open_retention_db, retain_event, RetainedEvent},
         PersonaRecord,
     };
-    use nostr::JsonUtil;
     use buzz_core_pkg::kind::KIND_PERSONA;
+    use nostr::JsonUtil;
 
     let pubkey = keys.public_key().to_hex();
 

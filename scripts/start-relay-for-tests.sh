@@ -96,7 +96,7 @@ ok "Schema applied"
 # ── Build relay ──────────────────────────────────────────────────────────────
 
 log "Building relay (profile: ${CARGO_PROFILE})..."
-cargo build --profile "${CARGO_PROFILE}" -p buzz-relay
+cargo build --profile "${CARGO_PROFILE}" -p buzz-relay -p git-credential-nostr
 ok "Relay built"
 
 # ── Start relay ──────────────────────────────────────────────────────────────
