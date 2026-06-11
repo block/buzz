@@ -60,7 +60,7 @@ fn create_test_pack(dir: &Path) {
         agents_dir.join("pip.persona.md"),
         r##"---
 name: "pip"
-display_name: "Pip 🌱"
+display_name: "Pip 🐝"
 description: "Orchestration agent"
 model: "anthropic:claude-4-opus-20250514"
 subscribe:
@@ -154,7 +154,7 @@ fn full_pipeline_load_and_validate() {
         .expect("lep persona should be loaded");
 
     // 5. Check pip's overrides.
-    assert_eq!(pip.display_name, "Pip 🌱");
+    assert_eq!(pip.display_name, "Pip 🐝");
     assert_eq!(
         pip.model.as_deref(),
         Some("anthropic:claude-4-opus-20250514"),
@@ -422,7 +422,7 @@ fn resolve_full_pipeline() {
         .expect("lep should be resolved");
 
     // Identity
-    assert_eq!(pip.display_name, "Pip 🌱");
+    assert_eq!(pip.display_name, "Pip 🐝");
     assert_eq!(pip.description, "Orchestration agent");
     assert_eq!(pip.version, "1.0.0"); // defaults to pack version
 
@@ -573,7 +573,7 @@ fn resolve_persona_by_name_found() {
 
     let pip = resolve::resolve_persona_by_name(dir.path(), "pip").unwrap();
     assert_eq!(pip.name, "pip");
-    assert_eq!(pip.display_name, "Pip 🌱");
+    assert_eq!(pip.display_name, "Pip 🐝");
 }
 
 /// resolve_persona_by_name returns error for nonexistent name.

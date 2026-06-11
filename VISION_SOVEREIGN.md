@@ -1,4 +1,4 @@
-# Sprout — Your Project, Your Domain
+# Buzz — Your Project, Your Domain
 
 `myproject.com` is your workspace. Not a GitHub org page that happens to have your
 name on it. Not a Discord server that Discord could delete tomorrow. Your domain.
@@ -31,7 +31,7 @@ and the code is syntax-highlighted. The clone URL sits at the top:
 git clone repoa.myproject.com
 ```
 
-Next to it, a "Connect on Sprout" button.
+Next to it, a "Connect on Buzz" button.
 
 No separate website. No static site generator, no deploy step, no "pages" concept.
 The relay serves rendered HTML to browsers and responds to `git clone` at the same
@@ -41,7 +41,7 @@ A browser gets a rendered page. A git client gets a git server. Same URL.
 You clone it. It works. No special tooling. No new protocol. Git is git. You push
 the same way. Agents clone and push the same way. The repos are repos.
 
-You hit "Connect on Sprout" and the app opens. You're in `#general`. The team is
+You hit "Connect on Buzz" and the app opens. You're in `#general`. The team is
 talking. There's a forum with open issues and design discussions. There's a canvas
 with the architecture doc — updated last week by the docs agent after a refactor
 landed. Three feature branches are active, each one a channel. You're in.
@@ -50,15 +50,15 @@ Everything is here.
 A new contributor finds the project the same way. They browse the code, read the
 README, click into the forum and see the open issues. They read a design doc in the
 canvas. They understand the project before they write a line of code. Then they hit
-"Connect on Sprout" and they're in the community. No separate onboarding flow. No
+"Connect on Buzz" and they're in the community. No separate onboarding flow. No
 "read our wiki at wiki.myproject.com and our forum at forum.myproject.com and our
 chat at discord.gg/..." Everything is at `myproject.com`. That's where everything
 is.
 
 Not every project needs to run its own relay. Most people will just join one that
 someone else runs — the way most people use GitHub instead of running Gitea. And
-you can use Sprout as a collaboration layer on top of GitHub if that's what makes
-sense — work in Sprout channels, push releases to your public repo. The sovereign
+you can use Buzz as a collaboration layer on top of GitHub if that's what makes
+sense — work in Buzz channels, push releases to your public repo. The sovereign
 setup is the full version. But the tools work at every level of commitment.
 
 ---
@@ -72,7 +72,7 @@ a response in seconds. The maintainer sees a pre-processed report, not a raw inb
 They read the triage summary, confirm it's real, assign it. Thirty seconds of their
 time instead of five minutes.
 
-Someone picks up the bug. They create a branch. Sprout creates a channel:
+Someone picks up the bug. They create a branch. Buzz creates a channel:
 `#feat-auth-fix`. They work there. They push commits. The CI agent picks up the
 work — it's watching for pushes, it's just a member with compute — runs the tests,
 posts results back to the channel. Green. The patch lands in the channel as a
@@ -121,7 +121,7 @@ inherits it automatically — no per-branch configuration, no copy-pasting YAML.
 ## The Social Layer
 
 Not everything belongs in the repo. Not everything belongs in a channel. Some
-things are announcements. Some things are essays. Sprout has surfaces for both,
+things are announcements. Some things are essays. Buzz has surfaces for both,
 and they live on the same relay as the code.
 
 Short notes — project announcements, "we just shipped X," the kind of thing you'd
@@ -217,7 +217,7 @@ decade of polish. Some things will feel rough. Some integrations won't exist yet
 You're early, and early means occasionally hitting edges that haven't been smoothed.
 
 Your contributors are early too. Most developers don't have a nostr keypair.
-Onboarding friction is real — not insurmountable, but real. The "Connect on Sprout"
+Onboarding friction is real — not insurmountable, but real. The "Connect on Buzz"
 button is easy. Explaining what a keypair is takes a sentence. But it's a sentence
 you'll have to write, and some contributors won't bother. You'll lose some people
 at the door who would have clicked "sign in with GitHub" without thinking. That's

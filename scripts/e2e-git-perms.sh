@@ -456,7 +456,7 @@ cat > "$BOT1_DIR/index.html" << 'HTML'
     </style>
 </head>
 <body>
-    <h1>🌱 Buzz Collaborative Page</h1>
+    <h1>🐝 Buzz Collaborative Page</h1>
     <p>This page was created by two bots collaborating via Buzz's git server.</p>
     <div class="contributor">
         <strong>Bot 1</strong> — Created the initial page structure

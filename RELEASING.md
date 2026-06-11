@@ -84,7 +84,7 @@ Each release produces two GitHub releases:
 1. **`v<version>`** — the user-facing release with the `.dmg` installer
    (macOS).
 
-2. **`sprout-desktop-latest`** — a rolling pre-release for the Tauri
+2. **`buzz-desktop-latest`** — a rolling pre-release for the Tauri
    auto-updater containing `latest.json`, the signed `.tar.gz` archive,
    and its `.sig` signature.
 
@@ -108,7 +108,7 @@ the same `v<version>` release. Intel users download the `_x64.dmg`.
 
   | Secret | Purpose |
   |--------|---------|
-  | `SPROUT_UPDATER_PUBLIC_KEY` | Tauri updater public key (minisign) |
+  | `BUZZ_UPDATER_PUBLIC_KEY` | Tauri updater public key (minisign) |
   | `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater private key |
   | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the private key |
 
@@ -129,7 +129,7 @@ Re-run `just release` from an up-to-date `main`. It resets the branch to current
 The version string must be valid semver: `MAJOR.MINOR.PATCH` with an optional pre-release suffix. Do not include a `v` prefix.
 
 ### Auto-updater reports "no update available"
-Verify that the `sprout-desktop-latest` release exists and contains a
+Verify that the `buzz-desktop-latest` release exists and contains a
 valid `latest.json`. The auto-updater manifest currently lists
 `darwin-aarch64` only, so Intel and Linux users do not yet receive
 auto-updates — they download new versions manually from the release

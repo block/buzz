@@ -1,4 +1,4 @@
-# Vision: sprout-agent + sprout-dev-mcp
+# Vision: buzz-agent + buzz-dev-mcp
 
 ## The Problem
 
@@ -10,9 +10,9 @@ We wanted something we could read in an afternoon and audit with confidence.
 
 Two binaries, two protocols, no coupling between them.
 
-**sprout-agent** is an ACP agent. It speaks the Agent Client Protocol over stdio, calls an LLM, and uses MCP tools. Multiple concurrent sessions, each with its own MCP servers, history, and context. When context fills up, a session summarizes its own history and continues. It works with Zed, JetBrains, sprout-acp, or anything else that speaks ACP.
+**buzz-agent** is an ACP agent. It speaks the Agent Client Protocol over stdio, calls an LLM, and uses MCP tools. Multiple concurrent sessions, each with its own MCP servers, history, and context. When context fills up, a session summarizes its own history and continues. It works with Zed, JetBrains, buzz-acp, or anything else that speaks ACP.
 
-**sprout-dev-mcp** is an MCP server. It gives any agent a shell and a file editor. Ephemeral processes with process-group kill on every exit path. Bounded output. File edits resolve against the working directory. It works with any agent or client that speaks MCP.
+**buzz-dev-mcp** is an MCP server. It gives any agent a shell and a file editor. Ephemeral processes with process-group kill on every exit path. Bounded output. File edits resolve against the working directory. It works with any agent or client that speaks MCP.
 
 Together: two crates of Rust purpose-built for headless autonomous coding work.
 
@@ -22,20 +22,20 @@ Together: two crates of Rust purpose-built for headless autonomous coding work.
 
 **Correctness at the boundary.** ACP compliance is not a checkbox. We report a concrete protocol version. We emit every required notification. We handle cancellation on every path. We kill process trees on timeout. Key safety properties have regression tests that lock them down.
 
-**Composability through standards.** The agent does not know what MCP server it talks to. The MCP server does not know what agent is calling it. They compose through protocols, not imports. Run ten agents behind sprout with different MCP configurations. Swap the LLM provider with one environment variable. Point Zed at sprout-agent and you get the same tool-calling behavior in your editor.
+**Composability through standards.** The agent does not know what MCP server it talks to. The MCP server does not know what agent is calling it. They compose through protocols, not imports. Run ten agents behind Buzz with different MCP configurations. Swap the LLM provider with one environment variable. Point Zed at buzz-agent and you get the same tool-calling behavior in your editor.
 
 ## The Architecture
 
 ```
-Any ACP client (Zed, JetBrains, sprout-acp, custom)
+Any ACP client (Zed, JetBrains, buzz-acp, custom)
         |
         | stdio ACP (JSON-RPC 2.0)
         v
-  sprout-agent (up to 8 concurrent sessions)
+  buzz-agent (up to 8 concurrent sessions)
         |
         | stdio MCP (JSON-RPC 2.0) — one per session
         v
-  sprout-dev-mcp (or any MCP server)
+  buzz-dev-mcp (or any MCP server)
         |
         v
   shell, str_replace, todo; rg + tree on PATH
@@ -56,7 +56,7 @@ Two pipes. Two protocols. Each session gets its own MCP server instances — ful
 ## What This Enables
 
 - Multiple concurrent sessions in one process — each with independent MCP servers, history, and context (configurable cap, default 8)
-- Ten agents in parallel behind sprout, each with their own MCP configuration
+- Ten agents in parallel behind Buzz, each with their own MCP configuration
 - Any ACP client gets a coding agent without a custom adapter
 - Any MCP server gets a capable caller without a custom adapter
 - A codebase small enough to fork, modify, and understand in a day — two crates, no coupling between them

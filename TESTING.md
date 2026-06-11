@@ -264,7 +264,7 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `BUZZ_BIND_ADDR`                | `0.0.0.0:3000`              | Main app port |
 | `BUZZ_HEALTH_PORT`              | `8080`                      | `/_liveness`, `/_readiness` |
 | `BUZZ_METRICS_PORT`             | `9102`                      | Prometheus `/metrics` |
-| `RELAY_URL`                       | `ws://localhost:3000`       | Advertised in NIP-11 / NIP-42 challenges. **Note: no `SPROUT_` prefix.** |
+| `RELAY_URL`                       | `ws://localhost:3000`       | Advertised in NIP-11 / NIP-42 challenges. **Note: no `BUZZ_` prefix.** |
 | `DATABASE_URL`                    | `postgres://buzz:buzz_dev@localhost:5432/buzz` | |
 | `REDIS_URL`                       | `redis://localhost:6379`    | |
 | `TYPESENSE_URL`                   | `http://localhost:8108`     | |

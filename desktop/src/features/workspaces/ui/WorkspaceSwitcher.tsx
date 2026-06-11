@@ -136,7 +136,7 @@ export function WorkspaceSwitcher({
               : "flex h-5 w-5 shrink-0 items-center justify-center text-xs leading-none"
           }
         >
-          🌱
+          🐝
         </span>
       )}
       <span
