@@ -5,6 +5,7 @@ import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
+import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { KIND_STREAM_MESSAGE_DIFF } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -89,6 +90,7 @@ export const MessageRow = React.memo(
       errorMessage: reactionErrorMessage,
       select: handleReactionSelect,
     } = useReactionHandler(message, onToggleReaction);
+    const { openReminder } = useRemindLater();
     const mentionNames = React.useMemo(
       () => resolveMentionNames(message.tags, profiles),
       [profiles, message.tags],
@@ -278,6 +280,14 @@ export const MessageRow = React.memo(
           onReactionSelect={
             canToggleReactions ? handleReactionSelect : undefined
           }
+          onRemindLater={(msg) => {
+            openReminder({
+              eventId: msg.id,
+              channelId: channelId ?? "",
+              preview: msg.body.slice(0, 100),
+              authorPubkey: msg.pubkey ?? "",
+            });
+          }}
           onReply={onReply}
           onUnfollowThread={onUnfollowThread}
           reactionErrorMessage={reactionErrorMessage}

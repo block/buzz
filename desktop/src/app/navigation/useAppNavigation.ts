@@ -90,6 +90,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goReminders = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/reminders",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goProject = React.useCallback(
     (projectId: string, behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -261,6 +272,7 @@ export function useAppNavigation() {
     goProject,
     goProjects,
     goPulse,
+    goReminders,
     goSettings,
     goWorkflow,
     goWorkflows,
