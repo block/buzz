@@ -3,7 +3,7 @@ use tauri::{AppHandle, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, find_managed_agent_mut, load_managed_agents,
+        build_managed_agent_summary, find_managed_agent_mut, load_managed_agents, load_personas,
         save_managed_agents, sync_managed_agent_processes, ManagedAgentSummary,
     },
     util::now_iso,
@@ -41,5 +41,6 @@ pub fn set_managed_agent_start_on_app_launch(
         .iter()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    build_managed_agent_summary(&app, record, &runtimes)
+    let personas = load_personas(&app).unwrap_or_default();
+    build_managed_agent_summary(&app, record, &runtimes, &personas)
 }

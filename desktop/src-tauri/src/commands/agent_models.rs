@@ -7,8 +7,9 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         build_managed_agent_summary, default_agent_workdir, find_managed_agent_mut,
-        known_acp_runtime, load_managed_agents, managed_agent_avatar_url, missing_command_message,
-        normalize_agent_args, resolve_command, save_managed_agents, sync_managed_agent_processes,
+        known_acp_runtime, load_managed_agents, load_personas, managed_agent_avatar_url,
+        missing_command_message, normalize_agent_args, resolve_command,
+        resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
         try_regenerate_nest, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
         UpdateManagedAgentResponse,
     },
@@ -62,7 +63,17 @@ pub async fn get_agent_models(
             crate::managed_agents::resolve_persona_env(&app, record.persona_id.as_deref())?;
         let env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
 
-        (resolved, resolved_agent, args, record.model.clone(), env)
+        // Resolve the effective model from the linked persona so the ModelPicker
+        // dropdown shows the current persona model as selected.
+        let personas = load_personas(&app).unwrap_or_default();
+        let (_prompt, effective_model, _provider) = resolve_effective_prompt_model_provider(
+            record.persona_id.as_deref(),
+            &personas,
+            record.system_prompt.clone(),
+            record.model.clone(),
+        );
+
+        (resolved, resolved_agent, args, effective_model, env)
     }; // store lock released — subprocess runs without holding the lock
 
     // Clone the env map for redaction below — `merged_env` is moved
@@ -249,7 +260,10 @@ pub async fn update_managed_agent(
             None
         };
 
-        let summary = build_managed_agent_summary(&app, record, &runtimes)?;
+        let summary = {
+            let personas = load_personas(&app).unwrap_or_default();
+            build_managed_agent_summary(&app, record, &runtimes, &personas)?
+        };
         (summary, sync_params)
     }; // lock dropped here
 

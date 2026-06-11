@@ -1278,6 +1278,7 @@ pub fn build_managed_agent_summary(
     app: &AppHandle,
     record: &ManagedAgentRecord,
     runtimes: &HashMap<String, ManagedAgentProcess>,
+    personas: &[crate::managed_agents::types::PersonaRecord],
 ) -> Result<ManagedAgentSummary, String> {
     use crate::managed_agents::BackendKind;
 
@@ -1330,6 +1331,17 @@ pub fn build_managed_agent_summary(
         }
     };
 
+    // Resolve the effective model and system_prompt from the linked persona
+    // (mirrors spawn-time logic) so the UI displays the current persona values,
+    // not the stale record snapshot.
+    let (effective_prompt, effective_model, _effective_provider) =
+        resolve_effective_prompt_model_provider(
+            record.persona_id.as_deref(),
+            personas,
+            record.system_prompt.clone(),
+            record.model.clone(),
+        );
+
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
@@ -1343,8 +1355,8 @@ pub fn build_managed_agent_summary(
         idle_timeout_seconds: record.idle_timeout_seconds,
         max_turn_duration_seconds: record.max_turn_duration_seconds,
         parallelism: record.parallelism,
-        system_prompt: record.system_prompt.clone(),
-        model: record.model.clone(),
+        system_prompt: effective_prompt,
+        model: effective_model,
         mcp_toolsets: record.mcp_toolsets.clone(),
         env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
@@ -1435,7 +1447,7 @@ pub(crate) fn build_respond_to_env(
 /// linked persona always wins so persona edits propagate on the next spawn; the
 /// record snapshot is the fallback only when no persona is linked or it was
 /// deleted. Provider comes from the persona (the record has no provider field).
-fn resolve_effective_prompt_model_provider(
+pub(crate) fn resolve_effective_prompt_model_provider(
     persona_id: Option<&str>,
     personas: &[crate::managed_agents::types::PersonaRecord],
     record_prompt: Option<String>,
