@@ -2358,7 +2358,7 @@ fn dispatch_heartbeat(
     // heartbeat user message since they don't receive it via session/new.
     let prompt_text = if agent.protocol_version < 2 {
         if let Some(bp) = ctx.base_prompt {
-            format!("[Base]\n{}\n\n{prompt_text}", bp.trim_end())
+            format!("{}\n\n{prompt_text}", crate::queue::base_section(bp))
         } else {
             prompt_text
         }

@@ -837,7 +837,7 @@ pub async fn run_prompt_task(
             // Legacy agents receive it via [Base] in the user message instead.
             let init_msg = if agent.protocol_version < 2 {
                 if let Some(bp) = ctx.base_prompt {
-                    format!("[Base]\n{}\n\n{}", bp.trim_end(), initial_msg)
+                    format!("{}\n\n{}", crate::queue::base_section(bp), initial_msg)
                 } else {
                     initial_msg.to_string()
                 }

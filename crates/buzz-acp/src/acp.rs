@@ -280,7 +280,6 @@ impl AcpClient {
         });
         let result = self.send_request("initialize", params).await?;
         tracing::debug!(target: "acp::init", "initialize response: {result}");
-
         Ok(result)
     }
 

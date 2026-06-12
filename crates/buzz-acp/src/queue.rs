@@ -1023,6 +1023,15 @@ pub struct FormatPromptArgs<'a> {
     pub system_prompt: Option<&'a str>,
 }
 
+/// Format the `[Base]` section for the base prompt.
+///
+/// Single source of truth for the `[Base]` framing so the format is defined in
+/// exactly one place across all dispatch paths (batch flush, heartbeat,
+/// initial message).
+pub(crate) fn base_section(base_prompt: &str) -> String {
+    format!("[Base]\n{}", base_prompt.trim_end())
+}
+
 /// Format a [`FlushBatch`] into a prompt string for the agent.
 ///
 /// Produces a stable prompt with these sections (in order):
@@ -1060,7 +1069,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> String 
     // via the system role in session/new.
     if !args.has_system_prompt_support {
         if let Some(bp) = args.base_prompt {
-            sections.push(format!("[Base]\n{}", bp.trim_end()));
+            sections.push(base_section(bp));
         }
         if let Some(sp) = args.system_prompt {
             sections.push(format!("[System]\n{sp}"));
@@ -1204,6 +1213,16 @@ mod tests {
 
     fn any_in_flight(q: &EventQueue) -> bool {
         !q.in_flight_channels.is_empty()
+    }
+
+    #[test]
+    fn test_base_section_prepends_header_and_trims_trailing_whitespace() {
+        // Trailing whitespace/newlines are stripped; the [Base] header is
+        // prepended exactly once with a single newline separator.
+        assert_eq!(base_section("hello  \n\n"), "[Base]\nhello");
+        assert_eq!(base_section("hello"), "[Base]\nhello");
+        // Internal newlines and leading whitespace are preserved verbatim.
+        assert_eq!(base_section("  line1\nline2 "), "[Base]\n  line1\nline2");
     }
 
     // ── Test 1: push + flush_next basic ──────────────────────────────────────
