@@ -329,6 +329,106 @@ describe("activeAgentTurnsStore", () => {
     });
   });
 
+  describe("replayed eviction safety", () => {
+    it("replayed stale turn_error with null turnId does not kill the live turn", () => {
+      // A turn errors out (harness emits turn_error with a null turnId), then a
+      // fresh turn starts in the same channel.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:00Z",
+        }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: null,
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:01Z",
+        }),
+        makeEvent({
+          seq: 3,
+          turnId: "t2",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:02Z",
+        }),
+      ]);
+      assert.equal(getActiveChannelsForAgent(AGENT).size, 1);
+
+      // The full buffer is replayed on the next observer event. The stale
+      // turn_error (below the watermark) must NOT re-run its channel-match
+      // fallback and delete the live turn t2.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:00Z",
+        }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: null,
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:01Z",
+        }),
+        makeEvent({
+          seq: 3,
+          turnId: "t2",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:02Z",
+        }),
+      ]);
+      const channels = getActiveChannelsForAgent(AGENT);
+      assert.equal(
+        channels.size,
+        1,
+        "replayed stale turn_error must not delete the live turn",
+      );
+      assert.ok(channels.has("c1"));
+    });
+
+    it("replaying evictions fires no spurious listener notifications", () => {
+      const buffer = [
+        makeEvent({
+          seq: 1,
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:00Z",
+        }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_error",
+          turnId: null,
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:01Z",
+        }),
+        makeEvent({
+          seq: 3,
+          kind: "agent_panic",
+          turnId: null,
+          channelId: "c2",
+          timestamp: "2024-01-01T00:00:02Z",
+        }),
+      ];
+
+      // Initial pass processes the buffer.
+      syncAgentTurnsFromEvents(AGENT, buffer);
+
+      // Subscribe, then replay the identical buffer. Every event is below the
+      // watermark, so the replay must be a complete no-op.
+      let notified = 0;
+      const unsub = subscribeActiveAgentTurns(() => {
+        notified++;
+      });
+      syncAgentTurnsFromEvents(AGENT, buffer);
+      unsub();
+
+      assert.equal(notified, 0, "replayed evictions must not notify listeners");
+    });
+  });
+
   describe("getActiveChannelsForAgent", () => {
     it("returns EMPTY_SET for null/undefined pubkey", () => {
       assert.equal(getActiveChannelsForAgent(null).size, 0);

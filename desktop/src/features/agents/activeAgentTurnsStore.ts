@@ -149,27 +149,19 @@ function pruneExpired() {
 function processEvent(agentPubkey: string, event: ObserverEvent) {
   const key = normalizePubkey(agentPubkey);
 
-  // turn_completed / turn_error / agent_panic must evict unconditionally —
-  // gating eviction on the watermark would let a replay resurrect a dead turn.
-  // Eviction is idempotent (deleting an absent turn is a no-op), so replays
-  // stay safe.
-  const isEviction =
-    event.kind === "turn_completed" ||
-    event.kind === "turn_error" ||
-    event.kind === "agent_panic";
-
-  // New-turn creation and activity refresh are gated on the watermark: only
-  // process events strictly newer than the last one seen for this agent.
+  // Gate every event kind on the watermark uniformly: process only events
+  // strictly newer than the last one seen for this agent. With sorted buffers
+  // (the documented invariant), this makes full-buffer replays a complete
+  // no-op. Evictions must be gated too — replaying a stale turn_error/
+  // agent_panic (emitted with a null turnId) would otherwise fall back to
+  // deleting the first turn in the channel, killing the live turn. Resurrection
+  // is not a concern: it would require reprocessing a stale start, which the
+  // watermark already blocks.
   const last = lastProcessed.get(key);
-  if (!isEviction && last && compareObserverEvents(event, last) <= 0) {
+  if (last && compareObserverEvents(event, last) <= 0) {
     return;
   }
-
-  // Advance the watermark only for strictly-newer events so out-of-order
-  // evictions don't move it backwards.
-  if (!last || compareObserverEvents(event, last) > 0) {
-    lastProcessed.set(key, event);
-  }
+  lastProcessed.set(key, event);
 
   switch (event.kind) {
     case "turn_started":
