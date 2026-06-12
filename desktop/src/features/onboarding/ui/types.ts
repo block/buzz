@@ -2,6 +2,7 @@ import type { AcpRuntimeCatalogEntry, Profile } from "@/shared/api/types";
 
 export type OnboardingPage =
   | "profile"
+  | "key-import"
   | "avatar"
   | "theme"
   | "setup"
@@ -48,6 +49,7 @@ export type ProfileStepState = {
 export type ProfileStepActions = {
   advanceWithoutSaving: () => void;
   back?: () => void;
+  importExistingKey: () => void;
   clearAvatarDraft: () => void;
   onUploadingChange: (isUploading: boolean) => void;
   skipForNow: () => void;

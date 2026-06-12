@@ -35,8 +35,14 @@ export function ProfileStep({
   transitionEffect = "line-slide",
   state,
 }: ProfileStepProps) {
-  const { advanceWithoutSaving, back, skipForNow, submit, updateDisplayName } =
-    actions;
+  const {
+    advanceWithoutSaving,
+    back,
+    importExistingKey,
+    skipForNow,
+    submit,
+    updateDisplayName,
+  } = actions;
   const { isSaving, name, saveRecovery } = state;
   const displayNameDraft = name.draftValue;
   const hasDisplayNameDraft = displayNameDraft.length > 0;
@@ -78,7 +84,7 @@ export function ProfileStep({
               <span className="relative inline-flex select-none items-center gap-0 text-4xl font-semibold text-muted-foreground/35 sm:text-5xl">
                 <span
                   aria-hidden="true"
-                  className="sprout-onboarding-name-placeholder-caret h-[0.9em] w-0.5 rounded-full bg-primary"
+                  className="buzz-onboarding-name-placeholder-caret h-[0.9em] w-0.5 rounded-full bg-primary"
                 />
                 Name
               </span>
@@ -140,6 +146,17 @@ export function ProfileStep({
             Back
           </Button>
         ) : null}
+
+        <Button
+          className="text-muted-foreground hover:text-accent-foreground"
+          data-testid="onboarding-import-key"
+          disabled={isSaving}
+          onClick={importExistingKey}
+          type="button"
+          variant="ghost"
+        >
+          I already have a key
+        </Button>
 
         <div className="flex min-h-8 items-center gap-2">
           <div className="flex-1" />

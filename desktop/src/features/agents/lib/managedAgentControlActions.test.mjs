@@ -9,7 +9,7 @@ function agent(overrides = {}) {
     name: "Mesh Agent",
     personaId: null,
     relayUrl: "ws://localhost:3000",
-    acpCommand: "sprout-acp",
+    acpCommand: "buzz-acp",
     agentCommand: "goose",
     agentArgs: [],
     mcpCommand: "",
@@ -39,23 +39,33 @@ function agent(overrides = {}) {
   };
 }
 
-test("relay-mesh agents cannot be manually started without a fresh target", async () => {
-  let called = false;
+test("relay-mesh agents delegate start to the backend preflight", async () => {
+  const meshAgent = agent({
+    envVars: {
+      BUZZ_AGENT_PROVIDER: "openai",
+      OPENAI_COMPAT_BASE_URL: "http://127.0.0.1:9337/v1/",
+    },
+  });
+
+  let calledWith = null;
+  await startManagedAgentWithRules({
+    agent: meshAgent,
+    startManagedAgent: async (pubkey) => {
+      calledWith = pubkey;
+    },
+  });
+  assert.equal(calledWith, meshAgent.pubkey);
+
+  // Backend preflight failures (e.g. no live serve target) propagate as-is.
   await assert.rejects(
     startManagedAgentWithRules({
-      agent: agent({
-        envVars: {
-          SPROUT_AGENT_PROVIDER: "openai",
-          OPENAI_COMPAT_BASE_URL: "http://127.0.0.1:9337/v1/",
-        },
-      }),
+      agent: meshAgent,
       startManagedAgent: async () => {
-        called = true;
+        throw new Error("no live serve target is available for this model");
       },
     }),
-    /Relay-mesh agents need a fresh serve target/,
+    /no live serve target/,
   );
-  assert.equal(called, false);
 });
 
 test("ordinary local agents still start normally", async () => {

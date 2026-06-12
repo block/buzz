@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-String channelMutesKey(String pubkey) => 'sprout.channel-mutes.v1:$pubkey';
+String channelMutesKey(String pubkey) => 'buzz.channel-mutes.v1:$pubkey';
 
 class ChannelMuteEntry {
   final bool muted;

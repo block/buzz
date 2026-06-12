@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// Standalone Playwright screenshot helper for the Sprout desktop app.
+// Standalone Playwright screenshot helper for the Buzz desktop app.
 //
 // Launches headless Chromium with the E2E mock bridge pre-injected (same
 // setup as installMockBridge in bridge.ts), navigates to a route, optionally
@@ -67,7 +67,7 @@ function bail(msg) {
 
 const BASE_URL = "http://127.0.0.1:4173";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
-const ONBOARDING_PREFIX = "sprout-onboarding-complete.v1:";
+const ONBOARDING_PREFIX = "buzz-onboarding-complete.v1:";
 
 const TEST_PUBKEYS = [
   DEFAULT_MOCK_PUBKEY,
@@ -92,8 +92,8 @@ await page.addInitScript(() => {
     relayUrl: "ws://localhost:3000",
     addedAt: new Date().toISOString(),
   };
-  window.localStorage.setItem("sprout-workspaces", JSON.stringify([workspace]));
-  window.localStorage.setItem("sprout-active-workspace-id", workspaceId);
+  window.localStorage.setItem("buzz-workspaces", JSON.stringify([workspace]));
+  window.localStorage.setItem("buzz-active-workspace-id", workspaceId);
 });
 
 // Seed onboarding completion for all known identities
@@ -129,8 +129,8 @@ await page.addInitScript(() => {
     writable: true,
   });
 
-  window.__SPROUT_E2E__ = { mode: "mock" };
-  window.__SPROUT_E2E_APP_BADGE_COUNT__ = 0;
+  window.__BUZZ_E2E__ = { mode: "mock" };
+  window.__BUZZ_E2E_APP_BADGE_COUNT__ = 0;
 });
 
 try {
@@ -184,7 +184,7 @@ try {
     for (const ch of targetChannels) {
       await page.waitForFunction(
         (name) =>
-          window.__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
             channelName: name,
           }) ?? false,
         ch,
@@ -195,7 +195,7 @@ try {
     for (const msg of messages) {
       await page.evaluate(
         (m) => {
-          window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.(m);
+          window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.(m);
         },
         { ...msg, pubkey: msg.pubkey ?? DEFAULT_MOCK_PUBKEY },
       );

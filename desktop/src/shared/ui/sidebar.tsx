@@ -27,7 +27,7 @@ import {
 
 const SIDEBAR_COOKIE_NAME = "sidebar_state";
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
-const SIDEBAR_WIDTH_STORAGE_KEY = "sprout-sidebar-width";
+const SIDEBAR_WIDTH_STORAGE_KEY = "buzz-sidebar-width";
 const SIDEBAR_WIDTH_DEFAULT = 300;
 const SIDEBAR_WIDTH_DEFAULT_HAPTIC_THRESHOLD = 2;
 const SIDEBAR_WIDTH_DEFAULT_SNAP_DISTANCE = 8;
@@ -403,7 +403,7 @@ const SidebarTrigger = React.forwardRef<
       data-sidebar="trigger"
       variant="ghost"
       size="icon"
-      className={cn("h-7 w-7", className)}
+      className={className}
       onClick={(event) => {
         onClick?.(event);
         toggleSidebar();
@@ -593,7 +593,7 @@ const SidebarRail = React.forwardRef<
 SidebarRail.displayName = "SidebarRail";
 
 const SidebarInset = React.forwardRef<
-  HTMLDivElement,
+  HTMLElement,
   React.ComponentProps<"main">
 >(({ className, ...props }, ref) => {
   return (

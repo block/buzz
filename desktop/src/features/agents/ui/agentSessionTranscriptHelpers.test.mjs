@@ -25,8 +25,8 @@ test("parsePromptText returns the empty/Prompt fallback for whitespace-only inpu
 
 test("parsePromptText wraps header-less free text in a single Prompt section", () => {
   // Free text with no `[header]` becomes one "Prompt" section. Since no
-  // section is a "Sprout event", there is no event content to surface, so
-  // userText is empty and the title falls through to "Sprout event".
+  // section is a "Buzz event", there is no event content to surface, so
+  // userText is empty and the title falls through to "Buzz event".
   const result = parsePromptText("just some free text");
   assert.deepEqual(
     result.sections.map((s) => s.title),
@@ -34,18 +34,18 @@ test("parsePromptText wraps header-less free text in a single Prompt section", (
   );
   assert.equal(result.sections[0].body, "just some free text");
   assert.equal(result.userText, "");
-  assert.equal(result.userTitle, "Sprout event");
+  assert.equal(result.userTitle, "Buzz event");
   assert.equal(result.userPubkey, null);
 });
 
-// --- parsePromptText: Sprout event section ---
+// --- parsePromptText: Buzz event section ---
 
 test("parsePromptText extracts content, hex pubkey, and a title-cased kind", () => {
   const text = [
     "[System]",
     "system preamble here",
     "",
-    "[Sprout event: @mention]",
+    "[Buzz event: @mention]",
     "Channel: demo",
     `From: Wes (hex: ${HEX})`,
     "Content: hello @Brain please look",
@@ -61,13 +61,13 @@ test("parsePromptText extracts content, hex pubkey, and a title-cased kind", () 
   // Both headers become sections.
   assert.deepEqual(
     result.sections.map((s) => s.title),
-    ["System", "Sprout event: @mention"],
+    ["System", "Buzz event: @mention"],
   );
 });
 
 test("parsePromptText lowercases the extracted hex pubkey", () => {
   const text = [
-    "[Sprout event: dm]",
+    "[Buzz event: dm]",
     `From: Someone (hex: ${HEX_UPPER})`,
     "Content: hi",
   ].join("\n");
@@ -77,7 +77,7 @@ test("parsePromptText lowercases the extracted hex pubkey", () => {
 });
 
 test("parsePromptText yields a null pubkey when From has no hex", () => {
-  const text = ["[Sprout event: note]", "From: Someone", "Content: hi"].join(
+  const text = ["[Buzz event: note]", "From: Someone", "Content: hi"].join(
     "\n",
   );
 
@@ -87,10 +87,10 @@ test("parsePromptText yields a null pubkey when From has no hex", () => {
   assert.equal(result.userTitle, "Note");
 });
 
-test("parsePromptText defaults the title to 'Sprout event' when no kind is present", () => {
-  const text = ["[Sprout event]", "Content: x"].join("\n");
+test("parsePromptText defaults the title to 'Buzz event' when no kind is present", () => {
+  const text = ["[Buzz event]", "Content: x"].join("\n");
   const result = parsePromptText(text);
-  assert.equal(result.userTitle, "Sprout event");
+  assert.equal(result.userTitle, "Buzz event");
 });
 
 test("parsePromptText leading text before a header becomes a Prompt section", () => {

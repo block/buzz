@@ -7,9 +7,9 @@ import 'adaptive_theme.dart';
 import 'color_scheme.dart';
 import 'theme_catalog.dart';
 
-const _themeModeKey = 'sprout_theme_mode';
-const _accentKey = 'sprout_accent_color';
-const _schemeKey = 'sprout_color_scheme';
+const _themeModeKey = 'buzz_theme_mode';
+const _accentKey = 'buzz_accent_color';
+const _schemeKey = 'buzz_color_scheme';
 
 /// Pre-loaded SharedPreferences instance, overridden in main().
 final savedPrefsProvider = Provider<SharedPreferences>(

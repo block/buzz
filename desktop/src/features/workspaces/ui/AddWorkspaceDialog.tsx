@@ -64,8 +64,8 @@ export function AddWorkspaceDialog({
         <DialogHeader>
           <DialogTitle>Add Workspace</DialogTitle>
           <DialogDescription>
-            Connect to another Sprout relay. Each workspace has its own
-            channels, messages, and identity.
+            Connect to another Buzz relay. Each workspace has its own channels,
+            messages, and identity.
           </DialogDescription>
         </DialogHeader>
         <form className="flex flex-col gap-4" onSubmit={handleSubmit}>
@@ -116,7 +116,7 @@ export function AddWorkspaceDialog({
             <Input
               id="ws-token"
               onChange={(e) => setToken(e.target.value)}
-              placeholder="sprout_..."
+              placeholder="buzz_..."
               type="password"
               value={token}
             />

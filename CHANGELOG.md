@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.3.18
+
+05fc69b8408 Video Player Improvements  (#993)
+d9ce0943edb Improve first-run welcome setup (#970)
+50986406ffa fix(release): use legacy updater key secret (#991)
+ea5a0a9b405 Replace built-in personas with Fizz (#987)
+6541765416b docs(buzz-acp): rewrite Communication Patterns for mention accuracy and threading clarity (#982)
+a101fd6ad38 chore(justfile): build git-credential-nostr in dev and staging recipes (#980)
+824c55114ef Fix Buzz command migration for saved agents (#979)
+63738139bac fix(desktop): resolve effective model and prompt from persona in display path (#972)
+1bb8b8d547a docs: clean up remaining Buzz references (#977)
+
+
+## v0.3.17
+
+79bcee55cb7 docs: finish Buzz rename cleanup (#974)
+6f3733d43b4 fix(desktop): let channel members bypass mention agent gate (#965)
+8f580f308cc Rename desktop app to Buzz (#960)
+dcb2639b355 feat(desktop): open profile panel from MembersSidebar rows (#962)
+4e4dc723e4c feat(desktop): per-event notification sounds and alert controls (#968)
+1ca16c898c7 fix(desktop): make header chrome zoom-correct and tidy split-pane (#941)
+8c8312932af fix(desktop): rename SPROUT_ env vars to BUZZ_ for child agent processes (#971)
+31b0665cff7 fix(justfile): complete buzz rename in dev and staging recipes (#966)
+d99ad131f17 refactor: rename sprout backend to buzz (#958)
+53e3f094858 fix(desktop): reap orphaned agent processes across instances (#954)
+c5a54dcc390 Rename web app to Buzz (#959)
+510009c11db fix(desktop): allow restarting saved relay-mesh agents from the UI (#956)
+60c8c5036a2 feat(acp): agent timeout resilience — idle margin, tool-call reset, death notices, keepalive (#935)
+c63e018b05b Rename mobile app to Buzz (#955)
+929cc8861ee fix(desktop): repair team-persona mismatch and deduplicate legacy imports (#949)
+b792aa4704a fix(desktop): populate last_message_at in channel browser (#951)
+e5f0c32648b Kit/circular avatars (#927)
+dbe973dacd0 fix(relay): accept mesh signaling kinds (24620/24621) via POST /events (#946)
+f49cdcdd300 feat(sprout-dev-mcp): add read_file tool and replace_all to str_replace (#928)
+
+
+## v0.3.16
+
+34c8bdab1 fix(desktop): land live presence updates for not-yet-cached pubkeys (#947)
+5c0af0bc9 fix(release): make `just release` idempotent for re-runs (#948)
+e9cd1c392 Improve mentions for agents + people  (#942)
+384eb6cba feat: agent memory viewer (read-only) in profile panel (#917)
+2dc466fe0 Fix channel visibility controls (#940)
+3e56331e9 fix(delete): make agent-deleted messages disappear from desktop UI immediately (#918)
+e08937cdd Fix emoji message rendering (#938)
+ba2fdbf69 refactor(desktop): consolidate packs into teams (#852)
+384a34ec3 Update README.md wording
+fe14daa5d Fix post-compact handoff context for OpenAI providers (#931)
+
+
 ## v0.3.15
 
 877048d68fb fix: persona is source of truth at spawn + thread-depth conventions (#930)

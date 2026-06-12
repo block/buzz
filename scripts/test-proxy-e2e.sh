@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# End-to-end test for sprout-proxy
+# End-to-end test for buzz-proxy
 # Prerequisites:
-#   - Sprout relay running on :3000 (just relay)
-#   - Sprout proxy running on :4869 (just proxy)
+#   - Buzz relay running on :3000 (just relay)
+#   - Buzz proxy running on :4869 (just proxy)
 #   - websocat installed (cargo install websocat)
 #   - curl installed
 #   - jq installed
@@ -12,7 +12,7 @@ PROXY_URL="${PROXY_URL:-ws://localhost:4869}"
 PROXY_HTTP="${PROXY_HTTP:-http://localhost:4869}"
 RELAY_HTTP="${RELAY_HTTP:-http://localhost:3000}"
 
-echo "=== Sprout Proxy E2E Test ==="
+echo "=== Buzz Proxy E2E Test ==="
 echo "Proxy: $PROXY_URL"
 echo "Relay: $RELAY_HTTP"
 

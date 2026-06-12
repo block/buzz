@@ -11,7 +11,7 @@ pub(crate) struct KnownAcpRuntime {
     pub commands: &'static [&'static str],
     pub aliases: &'static [&'static str],
     pub avatar_url: &'static str,
-    /// Legacy MCP server binary field. Vestigial — all agents now use sprout CLI
+    /// Legacy MCP server binary field. Vestigial — all agents now use the bundled CLI.
     /// directly. Will be removed when runtime discovery is simplified.
     pub mcp_command: Option<&'static str>,
     /// Whether to enable MCP hook tools (`_Stop`, `_PostCompact`) for this agent.
@@ -29,8 +29,8 @@ pub(crate) struct KnownAcpRuntime {
     /// Human-readable hint about installing the ACP adapter.
     pub adapter_install_hint: &'static str,
     /// Harness-specific skill discovery directory (e.g. `.goose/skills`).
-    /// `Some(dir)` → Sprout creates a symlink at `<nest>/<dir>/sprout-cli`
-    /// pointing to the canonical `.agents/skills/sprout-cli`. `None` → this
+    /// `Some(dir)` → Buzz creates a symlink at `<nest>/<dir>/buzz-cli`
+    /// pointing to the canonical `.agents/skills/buzz-cli`. `None` → this
     /// runtime reads the canonical path directly or has no skill support.
     pub skill_dir: Option<&'static str>,
     /// Whether this runtime handles model switching via ACP protocol natively.
@@ -47,8 +47,8 @@ pub(crate) struct KnownAcpRuntime {
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
-const SPROUT_AGENT_AVATAR_URL: &str =
-    "https://raw.githubusercontent.com/block/sprout/refs/heads/main/crates/sprout-agent/sprout-agent.png";
+const BUZZ_AGENT_AVATAR_URL: &str =
+    "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
 fn common_binary_paths() -> &'static [PathBuf] {
     use std::sync::OnceLock;
@@ -137,23 +137,23 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         default_env: &[],
     },
     KnownAcpRuntime {
-        id: "sprout-agent",
-        label: "Sprout Agent",
-        commands: &["sprout-agent"],
+        id: "buzz-agent",
+        label: "Buzz Agent",
+        commands: &["buzz-agent"],
         aliases: &[],
-        avatar_url: SPROUT_AGENT_AVATAR_URL,
-        mcp_command: Some("sprout-dev-mcp"),
+        avatar_url: BUZZ_AGENT_AVATAR_URL,
+        mcp_command: Some("buzz-dev-mcp"),
         mcp_hooks: true,
         underlying_cli: None,
         cli_install_commands: &[],
         adapter_install_commands: &[],
-        install_instructions_url: "https://github.com/block/sprout",
-        cli_install_hint: "Ships with the Sprout desktop app.",
+        install_instructions_url: "https://github.com/block/buzz",
+        cli_install_hint: "Ships with the Buzz desktop app.",
         adapter_install_hint: "",
         skill_dir: None,
         supports_acp_model_switching: true,
-        model_env_var: Some("SPROUT_AGENT_MODEL"),
-        provider_env_var: Some("SPROUT_AGENT_PROVIDER"),
+        model_env_var: Some("BUZZ_AGENT_MODEL"),
+        provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
         provider_locked: false,
         default_env: &[],
     },
@@ -232,7 +232,7 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "sprout-agent" => Some(Vec::new()),
+        | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
 }
@@ -288,17 +288,37 @@ fn command_search_dirs() -> Vec<PathBuf> {
     unique
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 fn resolve_workspace_command(command: &str) -> Option<PathBuf> {
     if command_looks_like_path(command) {
         let path = PathBuf::from(command);
-        return path.exists().then_some(path);
+        return is_executable_file(&path).then_some(path);
     }
 
     let file_name = executable_basename(command);
     command_search_dirs()
         .into_iter()
         .map(|dir| dir.join(&file_name))
-        .find(|candidate| candidate.exists())
+        .find(|candidate| is_executable_file(candidate))
 }
 
 fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, Option<PathBuf>>>
@@ -351,7 +371,7 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
     }
 
     for candidate in path_candidates_from_env(command) {
-        if candidate.exists() {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
     }
@@ -361,7 +381,7 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
     }
     for dir in common_binary_paths() {
         let candidate = dir.join(executable_basename(command));
-        if candidate.exists() {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
     }
@@ -401,7 +421,7 @@ fn find_via_login_shell(command: &str) -> Option<PathBuf> {
     let stdout = run_in_login_shell(&["-l", "-c", r#"command -v -- "$1""#, "_", command])?;
     let resolved = stdout.lines().rfind(|line| !line.trim().is_empty())?;
     let path = PathBuf::from(resolved.trim());
-    (path.is_absolute() && path.exists()).then_some(path)
+    (path.is_absolute() && is_executable_file(&path)).then_some(path)
 }
 
 /// Return the user's full PATH from a login shell.
@@ -543,7 +563,7 @@ mod tests {
 
     use super::{
         classify_runtime, find_via_login_shell, managed_agent_avatar_url, normalize_agent_args,
-        CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL, SPROUT_AGENT_AVATAR_URL,
+        BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
     };
     use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -596,25 +616,25 @@ mod tests {
     }
 
     #[test]
-    fn resolves_sprout_agent_avatar() {
+    fn resolves_buzz_agent_avatar() {
         assert_eq!(
-            managed_agent_avatar_url("sprout-agent"),
-            Some(SPROUT_AGENT_AVATAR_URL.to_string())
+            managed_agent_avatar_url("buzz-agent"),
+            Some(BUZZ_AGENT_AVATAR_URL.to_string())
         );
         assert_eq!(
-            managed_agent_avatar_url("/usr/local/bin/sprout-agent"),
-            Some(SPROUT_AGENT_AVATAR_URL.to_string())
+            managed_agent_avatar_url("/usr/local/bin/buzz-agent"),
+            Some(BUZZ_AGENT_AVATAR_URL.to_string())
         );
     }
 
     #[test]
-    fn normalizes_sprout_agent_args_to_empty() {
+    fn normalizes_buzz_agent_args_to_empty() {
         assert_eq!(
-            normalize_agent_args("sprout-agent", Vec::new()),
+            normalize_agent_args("buzz-agent", Vec::new()),
             Vec::<String>::new()
         );
         assert_eq!(
-            normalize_agent_args("sprout-agent", vec!["acp".into()]),
+            normalize_agent_args("buzz-agent", vec!["acp".into()]),
             Vec::<String>::new()
         );
     }
@@ -622,7 +642,7 @@ mod tests {
     #[test]
     fn login_shell_lookup_treats_command_as_data() {
         let marker =
-            std::env::temp_dir().join(format!("sprout-discovery-marker-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("buzz-discovery-marker-{}", uuid::Uuid::new_v4()));
         let payload = format!("doesnotexist; touch {} #", marker.display());
 
         let resolved = find_via_login_shell(&payload);
@@ -635,6 +655,34 @@ mod tests {
             !marker.exists(),
             "shell lookup must not execute injected commands"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_path_resolution_ignores_non_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("buzz-discovery-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let bin = dir.join("buzz-acp");
+        std::fs::write(&bin, "").expect("write placeholder");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod placeholder");
+
+        assert!(
+            super::resolve_workspace_command(bin.to_str().expect("utf8 path")).is_none(),
+            "non-executable placeholder must not resolve"
+        );
+
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod executable");
+        assert_eq!(
+            super::resolve_workspace_command(bin.to_str().expect("utf8 path")),
+            Some(bin.clone())
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -30,7 +30,7 @@ function eventToRepo(event: NostrEvent): Repo {
   const description = getTag(event, "description") || event.content || "";
   const cloneUrls = getAllTags(event, "clone");
   const webUrl = getTag(event, "web") ?? null;
-  const channelId = getTag(event, "sprout-channel") ?? null;
+  const channelId = getTag(event, "buzz-channel") ?? null;
   const contributors = getAllTags(event, "p");
   const owner = event.pubkey;
 

@@ -702,6 +702,466 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
+name = "buzz-acp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "buzz-core",
+ "buzz-persona",
+ "buzz-sdk",
+ "chrono",
+ "clap",
+ "evalexpr",
+ "futures-util",
+ "hex",
+ "nix 0.31.3",
+ "nostr",
+ "reqwest 0.13.3",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-admin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buzz-auth",
+ "buzz-core",
+ "buzz-db",
+ "clap",
+ "hex",
+ "nostr",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "buzz-agent"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "axum",
+ "base64",
+ "getrandom 0.4.2",
+ "hex",
+ "nix 0.31.3",
+ "reqwest 0.13.3",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "urlencoding",
+ "webbrowser",
+]
+
+[[package]]
+name = "buzz-audit"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "chrono",
+ "futures-util",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-auth"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "hex",
+ "nostr",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-cli"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "buzz-core",
+ "buzz-persona",
+ "buzz-sdk",
+ "buzz-ws-client",
+ "clap",
+ "diffy",
+ "hex",
+ "infer",
+ "nostr",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "hmac 0.13.0",
+ "nostr",
+ "percent-encoding",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.18",
+ "url",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "buzz-db"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "chrono",
+ "hex",
+ "nostr",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-dev-mcp"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "buzz-cli",
+ "git-credential-nostr",
+ "git-sign-nostr",
+ "ignore",
+ "image",
+ "nix 0.31.3",
+ "nostr",
+ "reqwest 0.13.3",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "similar",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "zeroize",
+]
+
+[[package]]
+name = "buzz-media"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "blurhash",
+ "buzz-core",
+ "bytes",
+ "chrono",
+ "futures-core",
+ "futures-util",
+ "hex",
+ "image",
+ "imagesize",
+ "infer",
+ "mp4",
+ "nostr",
+ "rust-s3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "buzz-pair-relay"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "parking_lot",
+ "secp256k1 0.31.1",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tokio-util",
+]
+
+[[package]]
+name = "buzz-pairing-cli"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "clap",
+ "futures-util",
+ "hex",
+ "nostr",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "url",
+ "zeroize",
+]
+
+[[package]]
+name = "buzz-persona"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "buzz-proxy"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "buzz-core",
+ "chrono",
+ "dashmap",
+ "futures-util",
+ "hex",
+ "hmac 0.13.0",
+ "moka",
+ "nostr",
+ "rand 0.10.1",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-pubsub"
+version = "0.1.0"
+dependencies = [
+ "buzz-auth",
+ "buzz-core",
+ "chrono",
+ "deadpool-redis",
+ "futures-util",
+ "nostr",
+ "redis",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-relay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "buzz-audit",
+ "buzz-auth",
+ "buzz-core",
+ "buzz-db",
+ "buzz-media",
+ "buzz-pubsub",
+ "buzz-sdk",
+ "buzz-search",
+ "buzz-workflow",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "deadpool-redis",
+ "futures-util",
+ "hex",
+ "hmac 0.13.0",
+ "infer",
+ "mesh-llm-host-runtime",
+ "mesh-llm-sdk",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "moka",
+ "nostr",
+ "rand 0.10.1",
+ "redis",
+ "reqwest 0.13.3",
+ "rust-s3",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.11.0",
+ "sqlx",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-sdk"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "nostr",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-search"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "chrono",
+ "nostr",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-test-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "buzz-core",
+ "buzz-ws-client",
+ "chrono",
+ "futures-util",
+ "hex",
+ "nostr",
+ "rand 0.10.1",
+ "reqwest 0.13.3",
+ "rust-s3",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-workflow"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "buzz-db",
+ "chrono",
+ "cron",
+ "dashmap",
+ "evalexpr",
+ "hex",
+ "nostr",
+ "reqwest 0.13.3",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-ws-client"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "nostr",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1091,10 +1551,10 @@ name = "countdown-bot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "buzz-sdk",
  "futures-util",
  "nostr",
  "serde_json",
- "sprout-sdk",
  "tokio",
  "tokio-tungstenite 0.29.0",
  "url",
@@ -7010,469 +7470,9 @@ dependencies = [
 name = "sprig"
 version = "0.1.0"
 dependencies = [
- "sprout-acp",
- "sprout-agent",
- "sprout-dev-mcp",
-]
-
-[[package]]
-name = "sprout-acp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "clap",
- "evalexpr",
- "futures-util",
- "hex",
- "nix 0.31.3",
- "nostr",
- "reqwest 0.13.3",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sprout-core",
- "sprout-persona",
- "sprout-sdk",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tokio-util",
- "toml 1.1.2+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "sprout-admin"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "hex",
- "nostr",
- "serde_json",
- "sprout-auth",
- "sprout-core",
- "sprout-db",
- "tokio",
-]
-
-[[package]]
-name = "sprout-agent"
-version = "0.1.0"
-dependencies = [
- "arc-swap",
- "async-trait",
- "axum",
- "base64",
- "getrandom 0.4.2",
- "hex",
- "nix 0.31.3",
- "reqwest 0.13.3",
- "rmcp",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.11.0",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "urlencoding",
- "webbrowser",
-]
-
-[[package]]
-name = "sprout-audit"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "futures-util",
- "hex",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sprout-core",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "sprout-auth"
-version = "0.1.0"
-dependencies = [
- "hex",
- "nostr",
- "rand 0.10.1",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sprout-core",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "sprout-cli"
-version = "0.1.0"
-dependencies = [
- "base64",
- "clap",
- "diffy",
- "hex",
- "infer",
- "nostr",
- "reqwest 0.13.3",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sprout-core",
- "sprout-persona",
- "sprout-sdk",
- "sprout-ws-client",
- "thiserror 2.0.18",
- "tokio",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "sprout-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hex",
- "hmac 0.13.0",
- "nostr",
- "percent-encoding",
- "rand 0.10.1",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "subtle",
- "thiserror 2.0.18",
- "url",
- "uuid",
- "zeroize",
-]
-
-[[package]]
-name = "sprout-db"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hex",
- "nostr",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sprout-core",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "sprout-dev-mcp"
-version = "0.1.0"
-dependencies = [
- "base64",
- "git-credential-nostr",
- "git-sign-nostr",
- "ignore",
- "image",
- "nix 0.31.3",
- "nostr",
- "reqwest 0.13.3",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "similar",
- "sprout-cli",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "zeroize",
-]
-
-[[package]]
-name = "sprout-media"
-version = "0.1.0"
-dependencies = [
- "axum",
- "blurhash",
- "bytes",
- "chrono",
- "futures-core",
- "futures-util",
- "hex",
- "image",
- "imagesize",
- "infer",
- "mp4",
- "nostr",
- "rust-s3",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sprout-core",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "sprout-pair-relay"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "http-body-util",
- "hyper",
- "hyper-util",
- "parking_lot",
- "secp256k1 0.31.1",
- "serde_json",
- "sha2 0.11.0",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tokio-util",
-]
-
-[[package]]
-name = "sprout-pairing-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "futures-util",
- "hex",
- "nostr",
- "serde_json",
- "sprout-core",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "url",
- "zeroize",
-]
-
-[[package]]
-name = "sprout-persona"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "sprout-proxy"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "dashmap",
- "futures-util",
- "hex",
- "hmac 0.13.0",
- "moka",
- "nostr",
- "rand 0.10.1",
- "reqwest 0.13.3",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sprout-core",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "sprout-pubsub"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "deadpool-redis",
- "futures-util",
- "nostr",
- "redis",
- "serde",
- "serde_json",
- "sprout-auth",
- "sprout-core",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "sprout-relay"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "base64",
- "bytes",
- "chrono",
- "dashmap",
- "deadpool-redis",
- "futures-util",
- "hex",
- "hmac 0.13.0",
- "infer",
- "mesh-llm-host-runtime",
- "mesh-llm-sdk",
- "metrics",
- "metrics-exporter-prometheus",
- "moka",
- "nostr",
- "rand 0.10.1",
- "redis",
- "reqwest 0.13.3",
- "rust-s3",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2 0.11.0",
- "sprout-audit",
- "sprout-auth",
- "sprout-core",
- "sprout-db",
- "sprout-media",
- "sprout-pubsub",
- "sprout-sdk",
- "sprout-search",
- "sprout-workflow",
- "sqlx",
- "subtle",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "sprout-sdk"
-version = "0.1.0"
-dependencies = [
- "nostr",
- "serde",
- "serde_json",
- "sprout-core",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "sprout-search"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "nostr",
- "reqwest 0.13.3",
- "serde",
- "serde_json",
- "sprout-core",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "sprout-test-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "futures-util",
- "hex",
- "nostr",
- "rand 0.10.1",
- "reqwest 0.13.3",
- "rust-s3",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sprout-core",
- "sprout-ws-client",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "sprout-workflow"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "cron",
- "dashmap",
- "evalexpr",
- "hex",
- "nostr",
- "reqwest 0.13.3",
- "serde",
- "serde_json",
- "serde_yaml",
- "sprout-core",
- "sprout-db",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "sprout-ws-client"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "nostr",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tracing",
- "url",
+ "buzz-acp",
+ "buzz-agent",
+ "buzz-dev-mcp",
 ]
 
 [[package]]

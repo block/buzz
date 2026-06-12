@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sprout_mobile/features/forum/forum_models.dart';
+import 'package:buzz/features/forum/forum_models.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers

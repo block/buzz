@@ -15,7 +15,7 @@ test("empty/whitespace lastError → null", () => {
   assert.equal(friendlyAgentLastError("   "), null);
 });
 
-test("sprout-acp wrapped auth failure → denied copy", () => {
+test("buzz-acp wrapped auth failure → denied copy", () => {
   const result = friendlyAgentLastError(
     "Agent reported error: llm auth: 401 unauthorized: ...",
   );
@@ -25,8 +25,8 @@ test("sprout-acp wrapped auth failure → denied copy", () => {
   });
 });
 
-test("unwrapped sprout-agent prefix → denied copy", () => {
-  // sprout-agent's AgentError::LlmAuth Display is "llm auth: <body>"; if the
+test("unwrapped buzz-agent prefix → denied copy", () => {
+  // buzz-agent's AgentError::LlmAuth Display is "llm auth: <body>"; if the
   // desktop ever picks that up directly (no AcpError wrapper), we should
   // still recognize it as denial.
   const result = friendlyAgentLastError("llm auth: 403 forbidden");

@@ -21,6 +21,11 @@ import { isDmNotifiableKind } from "./isDmNotifiableKind";
 
 export type UseLiveChannelUpdatesOptions = {
   currentPubkey?: string;
+  /**
+   * When true, DM notifications also fire for the channel the user is
+   * currently viewing (normally suppressed).
+   */
+  notifyForActiveChannel?: boolean;
   onDmMessage?: (event: RelayEvent, channel: Channel) => void;
   onLiveMention?: () => void;
   /**
@@ -31,6 +36,16 @@ export type UseLiveChannelUpdatesOptions = {
    */
   onChannelMessage?: (channelId: string, event: RelayEvent) => void;
   onThreadReplyNotification?: (channelId: string, event: RelayEvent) => void;
+  /**
+   * Fired for replies in threads the user authored, participated in, or
+   * follows (non-DM channels only — the DM path owns those). Follows the DM
+   * active-channel rule: suppressed for the channel being viewed unless
+   * notifyForActiveChannel opts in.
+   */
+  onThreadReplyDesktopNotification?: (
+    channelId: string,
+    event: RelayEvent,
+  ) => void;
   onSelfChannelMessage?: (event: RelayEvent) => void;
   participatedRootIds?: ReadonlySet<string>;
   followedRootIds?: ReadonlySet<string>;
@@ -139,8 +154,9 @@ export function useLiveChannelUpdates(
       return;
     }
 
-    // Don't fire a notification for the channel the user is already viewing.
-    if (channelId === activeChannelId) {
+    // Don't fire a notification for the channel the user is already viewing,
+    // unless the notify-while-viewing setting opts in.
+    if (channelId === activeChannelId && !options.notifyForActiveChannel) {
       return;
     }
 
@@ -155,7 +171,8 @@ export function useLiveChannelUpdates(
 
     // Track DM events even for the active channel so the dedup set stays
     // current. The handler itself skips firing the notification callback
-    // when the user is already viewing the DM.
+    // when the user is already viewing the DM (unless opted in via
+    // notifyForActiveChannel).
     handleDmEvent(event);
 
     if (!liveChannelIds.has(channelId)) {
@@ -193,12 +210,18 @@ export function useLiveChannelUpdates(
       })
     ) {
       options.onChannelMessage?.(channelId, event);
-      if (channelId !== activeChannelId) {
-        const ref = getThreadReference(event.tags);
-        const isThreadReply =
-          ref.parentId !== null && !isBroadcastReply(event.tags);
-        if (isThreadReply) {
+      const ref = getThreadReference(event.tags);
+      const isThreadReply =
+        ref.parentId !== null && !isBroadcastReply(event.tags);
+      if (isThreadReply) {
+        if (channelId !== activeChannelId) {
           options.onThreadReplyNotification?.(channelId, event);
+        }
+        if (
+          !dmChannelMap.has(channelId) &&
+          (channelId !== activeChannelId || options.notifyForActiveChannel)
+        ) {
+          options.onThreadReplyDesktopNotification?.(channelId, event);
         }
       }
     }

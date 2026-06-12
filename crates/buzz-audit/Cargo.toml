@@ -1,0 +1,22 @@
+[package]
+name = "buzz-audit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hash-chain audit log for Buzz"
+
+[dependencies]
+buzz-core = { workspace = true }
+sqlx        = { workspace = true }
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+uuid        = { workspace = true }
+chrono      = { workspace = true }
+tracing     = { workspace = true }
+thiserror   = { workspace = true }
+sha2         = { workspace = true }
+hex          = { workspace = true }
+futures-util = { workspace = true }

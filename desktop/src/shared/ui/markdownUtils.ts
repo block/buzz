@@ -8,10 +8,12 @@ import * as React from "react";
  * types in react-markdown v10.
  */
 function isBlockMedia(child: React.ReactNode): boolean {
-  return (
-    React.isValidElement(child) &&
-    (child.props as Record<string, unknown>)?.["data-block-media"] != null
-  );
+  if (!React.isValidElement(child)) return false;
+
+  const props = child.props as Record<string, unknown>;
+  const node = props?.node as { tagName?: unknown } | undefined;
+
+  return props?.["data-block-media"] != null || node?.tagName === "img";
 }
 
 /**

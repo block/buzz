@@ -16,10 +16,15 @@ import {
 } from "@/shared/theme/ThemeProvider";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { ONBOARDING_DEFAULT_THEME_NAME } from "@/shared/theme/theme-loader";
+import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 import { AvatarStep } from "./AvatarStep";
 import { MembershipDenied } from "./MembershipDenied";
-import type { OnboardingTransitionDirection } from "./OnboardingSlideTransition";
+import { NostrKeyImportForm } from "./NostrKeyImportForm";
+import {
+  type OnboardingTransitionDirection,
+  OnboardingSlideTransition,
+} from "./OnboardingSlideTransition";
 import { ProfileStep } from "./ProfileStep";
 import { SetupStep } from "./SetupStep";
 import { ThemeStep, preloadThemePreviewVars } from "./ThemeStep";
@@ -228,6 +233,11 @@ export function OnboardingFlow({
     setCurrentPage("profile");
   }, []);
 
+  const showKeyImportPage = React.useCallback(() => {
+    setTransitionDirection("forward");
+    setCurrentPage("key-import");
+  }, []);
+
   const saveProfileAndContinue = React.useCallback(
     async (nextPage: OnboardingPage) => {
       if (isProfileAdvancePending) {
@@ -364,8 +374,22 @@ export function OnboardingFlow({
         }
       : profileStepState.saveRecovery,
   };
+  const currentStep =
+    currentPage === "profile" || currentPage === "key-import"
+      ? 2
+      : currentPage === "avatar"
+        ? 3
+        : currentPage === "theme"
+          ? 4
+          : 5;
+  const hideFixedProgressOnCompact =
+    currentPage === "avatar" || currentPage === "theme";
 
-  const importDeniedKey = React.useCallback(
+  // Swapping the identity changes the pubkey, which remounts this flow
+  // (keyed on pubkey in App.tsx) and re-runs the onboarding gate: the new
+  // key's relay profile reseeds the steps, and a key that already finished
+  // onboarding on this machine skips straight into the app.
+  const importExistingKey = React.useCallback(
     async (nsec: string) => {
       const identity = await importIdentity(nsec);
       relayClient.disconnect();
@@ -390,7 +414,7 @@ export function OnboardingFlow({
               }
             : undefined
         }
-        onImportKey={canBackToWorkspaceSetup ? undefined : importDeniedKey}
+        onImportKey={canBackToWorkspaceSetup ? undefined : importExistingKey}
         onRetry={() => {
           void saveProfileAndContinue(membershipRetryPage);
         }}
@@ -401,14 +425,17 @@ export function OnboardingFlow({
 
   return (
     <div
-      className={`sprout-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground ${
-        currentPage === "profile" || currentPage === "avatar"
-          ? "sprout-onboarding-neutral-theme"
+      className={`buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground ${
+        currentPage === "profile" ||
+        currentPage === "avatar" ||
+        currentPage === "key-import"
+          ? "buzz-onboarding-neutral-theme"
           : ""
       }`}
       data-testid="onboarding-gate"
       data-system-color-scheme={systemColorScheme}
     >
+      <StartupWindowDragRegion />
       <div
         className={`relative flex w-full flex-col items-center text-center ${
           currentPage === "theme"
@@ -420,25 +447,23 @@ export function OnboardingFlow({
                 : "max-w-[500px]"
         }`}
       >
-        <StepProgress
-          activeSegmentClassName="bg-primary"
-          className={`fixed bottom-12 left-1/2 z-40 -translate-x-1/2 ${
-            currentPage === "avatar" || currentPage === "theme"
-              ? "max-lg:hidden"
-              : ""
+        <OnboardingSlideTransition
+          className="w-auto"
+          containerClassName={`fixed bottom-12 left-1/2 z-40 w-auto -translate-x-1/2 ${
+            hideFixedProgressOnCompact ? "max-lg:hidden" : ""
           }`}
-          completeSegmentClassName="bg-primary/35"
-          currentStep={
-            currentPage === "profile"
-              ? 2
-              : currentPage === "avatar"
-                ? 3
-                : currentPage === "theme"
-                  ? 4
-                  : 5
-          }
-          inactiveSegmentClassName="bg-muted-foreground/25"
-        />
+          direction={transitionDirection}
+          transitionKey={`progress-${currentStep}-${transitionDirection}-${
+            hideFixedProgressOnCompact ? "compact-hidden" : "visible"
+          }`}
+        >
+          <StepProgress
+            activeSegmentClassName="bg-primary"
+            completeSegmentClassName="bg-primary/35"
+            currentStep={currentStep}
+            inactiveSegmentClassName="bg-muted-foreground/25"
+          />
+        </OnboardingSlideTransition>
 
         {currentPage === "profile" ? (
           <ProfileStep
@@ -451,6 +476,7 @@ export function OnboardingFlow({
                   }
                 : undefined,
               clearAvatarDraft: resetAvatarDraft,
+              importExistingKey: showKeyImportPage,
               onUploadingChange: setIsUploadingAvatar,
               skipForNow,
               submit: () => {
@@ -462,6 +488,28 @@ export function OnboardingFlow({
             direction={transitionDirection}
             state={profileStepState}
           />
+        ) : currentPage === "key-import" ? (
+          <OnboardingSlideTransition
+            className="flex w-full flex-col items-center text-center"
+            direction={transitionDirection}
+            transitionKey={`key-import-${transitionDirection}`}
+          >
+            <div className="w-full max-w-[440px]">
+              <h1 className="text-3xl font-semibold tracking-tight">
+                Use your existing key
+              </h1>
+              <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                Import your Nostr private key to use that identity with Buzz. If
+                this key already has a profile on the relay, your name and
+                avatar are restored automatically.
+              </p>
+            </div>
+
+            <NostrKeyImportForm
+              onBack={showProfilePage}
+              onImport={importExistingKey}
+            />
+          </OnboardingSlideTransition>
         ) : currentPage === "avatar" ? (
           <AvatarStep
             actions={{

@@ -2,7 +2,7 @@ use super::ManagedAgentRecord;
 pub use super::RelayMeshConfig;
 
 pub const RELAY_MESH_API_BASE_URL: &str = "http://127.0.0.1:9337/v1";
-pub const RELAY_MESH_API_KEY_PLACEHOLDER: &str = "sprout-mesh-local";
+pub const RELAY_MESH_API_KEY_PLACEHOLDER: &str = "buzz-mesh-local";
 
 /// Resolve a record's relay-mesh config, typed field first.
 ///
@@ -19,7 +19,7 @@ pub fn relay_mesh_config(record: &ManagedAgentRecord) -> Option<RelayMeshConfig>
 }
 
 /// Returns the relay-mesh model id for agents whose provider env points at the
-/// local mesh client endpoint created by Sprout's relay-mesh preset.
+/// local mesh client endpoint created by Buzz's relay-mesh preset.
 ///
 /// Prefer [`relay_mesh_config`]; this remains as a convenience for call sites
 /// that only need the model id.
@@ -37,7 +37,7 @@ fn relay_mesh_model_id_from_env(record: &ManagedAgentRecord) -> Option<String> {
     if base_url.trim_end_matches('/') != RELAY_MESH_API_BASE_URL {
         return None;
     }
-    let provider = record.env_vars.get("SPROUT_AGENT_PROVIDER")?.trim();
+    let provider = record.env_vars.get("BUZZ_AGENT_PROVIDER")?.trim();
     if provider != "openai" {
         return None;
     }
@@ -69,7 +69,7 @@ mod tests {
             auth_tag: Some("tag".into()),
             relay_url: "ws://localhost:3000".into(),
             avatar_url: None,
-            acp_command: "sprout-acp".into(),
+            acp_command: "buzz-acp".into(),
             agent_command: "goose".into(),
             agent_args: vec![],
             mcp_command: String::new(),
@@ -105,7 +105,7 @@ mod tests {
     fn relay_mesh_model_id_detects_mesh_preset_env() {
         let mut rec = fixture();
         rec.env_vars = BTreeMap::from([
-            ("SPROUT_AGENT_PROVIDER".to_string(), "openai".to_string()),
+            ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
             (
                 "OPENAI_COMPAT_BASE_URL".to_string(),
                 "http://127.0.0.1:9337/v1/".to_string(),
@@ -125,7 +125,7 @@ mod tests {
     fn relay_mesh_model_id_ignores_non_mesh_openai_env() {
         let mut rec = fixture();
         rec.env_vars = BTreeMap::from([
-            ("SPROUT_AGENT_PROVIDER".to_string(), "openai".to_string()),
+            ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
             (
                 "OPENAI_COMPAT_BASE_URL".to_string(),
                 "https://api.openai.com/v1".to_string(),
@@ -141,7 +141,7 @@ mod tests {
     fn relay_mesh_model_id_ignores_user_openai_on_same_local_port() {
         let mut rec = fixture();
         rec.env_vars = BTreeMap::from([
-            ("SPROUT_AGENT_PROVIDER".to_string(), "openai".to_string()),
+            ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
             (
                 "OPENAI_COMPAT_BASE_URL".to_string(),
                 "http://127.0.0.1:9337/v1".to_string(),
@@ -181,7 +181,7 @@ mod tests {
             model_ref: "typed-model".to_string(),
         });
         rec.env_vars = BTreeMap::from([
-            ("SPROUT_AGENT_PROVIDER".to_string(), "openai".to_string()),
+            ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
             (
                 "OPENAI_COMPAT_BASE_URL".to_string(),
                 "http://127.0.0.1:9337/v1".to_string(),
@@ -202,7 +202,7 @@ mod tests {
         let mut rec = fixture();
         rec.relay_mesh = None;
         rec.env_vars = BTreeMap::from([
-            ("SPROUT_AGENT_PROVIDER".to_string(), "openai".to_string()),
+            ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
             (
                 "OPENAI_COMPAT_BASE_URL".to_string(),
                 "http://127.0.0.1:9337/v1".to_string(),

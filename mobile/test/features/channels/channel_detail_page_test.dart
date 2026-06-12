@@ -5,18 +5,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:sprout_mobile/features/channels/channel.dart';
-import 'package:sprout_mobile/features/channels/channel_detail_page.dart';
-import 'package:sprout_mobile/features/channels/channel_management_provider.dart';
-import 'package:sprout_mobile/features/channels/channel_messages_provider.dart';
-import 'package:sprout_mobile/features/channels/channel_typing_provider.dart';
-import 'package:sprout_mobile/features/channels/channels_provider.dart';
-import 'package:sprout_mobile/features/channels/read_state/read_state_provider.dart';
-import 'package:sprout_mobile/features/profile/profile_provider.dart';
-import 'package:sprout_mobile/features/profile/user_cache_provider.dart';
-import 'package:sprout_mobile/features/profile/user_profile.dart';
-import 'package:sprout_mobile/shared/relay/relay.dart';
-import 'package:sprout_mobile/shared/theme/theme.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channel_messages_provider.dart';
+import 'package:buzz/features/channels/channel_typing_provider.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/features/profile/profile_provider.dart';
+import 'package:buzz/features/profile/user_cache_provider.dart';
+import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/theme/theme.dart';
 
 // ---------------------------------------------------------------------------
 // Test fixtures

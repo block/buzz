@@ -461,9 +461,9 @@ export function useEmojiMartStyles(
         return;
       }
 
-      if (!shadowRoot.querySelector("#sprout-emoji-mart-style")) {
+      if (!shadowRoot.querySelector("#buzz-emoji-mart-style")) {
         const style = document.createElement("style");
-        style.id = "sprout-emoji-mart-style";
+        style.id = "buzz-emoji-mart-style";
         style.textContent = EMOJI_MART_SHADOW_CSS;
         shadowRoot.appendChild(style);
       }
@@ -492,9 +492,9 @@ export function useEmojiMartThemeVars() {
       );
 
       setThemeVars({
-        "--sprout-emoji-picker-rgb-background": muted ?? "54, 58, 79",
-        "--sprout-emoji-picker-rgb-color": foreground ?? "245, 247, 255",
-        "--sprout-emoji-picker-rgb-input": background ?? "47, 51, 68",
+        "--buzz-emoji-picker-rgb-background": muted ?? "54, 58, 79",
+        "--buzz-emoji-picker-rgb-color": foreground ?? "245, 247, 255",
+        "--buzz-emoji-picker-rgb-input": background ?? "47, 51, 68",
       } as React.CSSProperties);
     };
 

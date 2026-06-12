@@ -4,9 +4,9 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:sprout_mobile/features/channels/read_state/read_state_format.dart';
-import 'package:sprout_mobile/features/channels/read_state/read_state_manager.dart';
-import 'package:sprout_mobile/shared/relay/relay.dart';
+import 'package:buzz/features/channels/read_state/read_state_format.dart';
+import 'package:buzz/features/channels/read_state/read_state_manager.dart';
+import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
   test('dispose flushes a pending publish after marking disposed', () async {

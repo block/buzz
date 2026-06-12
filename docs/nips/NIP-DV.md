@@ -20,7 +20,7 @@ There is no user-signed request kind. The hide/unhide intent is already carried 
 
 ## Motivation
 
-Sprout DMs are surfaced to clients as NIP-29-style group membership (`kind:39002`), where the viewer appears as a `#p` participant. Hiding a DM is presentation state, not membership: the viewer stays in the member list because they can still receive messages and re-open the conversation. So `kind:39002` correctly continues to list the viewer, and a client that rebuilds its DM list from `kind:39002` alone cannot tell which DMs the viewer has hidden.
+Buzz DMs are surfaced to clients as NIP-29-style group membership (`kind:39002`), where the viewer appears as a `#p` participant. Hiding a DM is presentation state, not membership: the viewer stays in the member list because they can still receive messages and re-open the conversation. So `kind:39002` correctly continues to list the viewer, and a client that rebuilds its DM list from `kind:39002` alone cannot tell which DMs the viewer has hidden.
 
 The relay does know — it records `hidden_at` per (viewer, channel) — but never emits that fact as a queryable Nostr event. A thin client is therefore flying blind on a piece of state only the relay holds. The result is the visible bug: a hidden DM is optimistically removed, then reappears on the next conversation-list refetch because the refetch is rebuilt from `kind:39002`, which never carried the hide.
 

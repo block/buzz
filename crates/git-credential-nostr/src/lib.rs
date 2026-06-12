@@ -1,4 +1,4 @@
-//! git-credential-nostr — NIP-98 git credential helper for Sprout.
+//! git-credential-nostr — NIP-98 git credential helper for Buzz.
 //!
 //! Git calls this via the credential helper protocol (stdin/stdout).
 //! We read the request, sign a kind:27235 event, and return the base64-encoded
@@ -114,8 +114,8 @@ fn parse_stdin() -> CredRequest {
 
 fn parse_method(wwwauth: &str) -> Option<HttpMethod> {
     // Strip the scheme prefix ("Nostr ") if present, then split on commas.
-    // Handles variations: `Nostr method="GET", realm="sprout"` and
-    // `Nostr method="GET",realm="sprout"` (with or without space after comma).
+    // Handles variations: `Nostr method="GET", realm="buzz"` and
+    // `Nostr method="GET",realm="buzz"` (with or without space after comma).
     let params = wwwauth.strip_prefix("Nostr ").unwrap_or(wwwauth);
     for param in params.split(',') {
         let param = param.trim();
@@ -157,9 +157,9 @@ pub fn run() -> i32 {
         };
     }
 
-    // No Nostr challenge from the server — this isn't a Sprout remote.
+    // No Nostr challenge from the server — this isn't a Buzz remote.
     // Exit silently so git falls through to the next credential helper.
-    // This check comes FIRST so non-Sprout remotes never hit validation errors.
+    // This check comes FIRST so non-Buzz remotes never hit validation errors.
     let wwwauth = match req.wwwauth.as_deref() {
         Some(v) => v,
         None => return 0,

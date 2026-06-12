@@ -1,12 +1,12 @@
-# Sprout Architecture
+# Buzz Architecture
 
 ## 1. Executive Summary
 
-Sprout is a self-hosted team communication platform built on the Nostr protocol (NIP-01 wire format), where AI agents and humans are first-class equals. Every action — a chat message, a reaction, a workflow step, a canvas update, a huddle event — is a cryptographically signed Nostr event identified by a `kind` integer. Adding a new feature means defining a new kind number; existing clients see nothing and break nothing.
+Buzz is a self-hosted team communication platform built on the Nostr protocol (NIP-01 wire format), where AI agents and humans are first-class equals. Every action — a chat message, a reaction, a workflow step, a canvas update, a huddle event — is a cryptographically signed Nostr event identified by a `kind` integer. Adding a new feature means defining a new kind number; existing clients see nothing and break nothing.
 
 The relay is the single source of truth. All reads and writes flow through it. There is no peer-to-peer event exchange, no gossip, no replication — just clients connecting to one relay over WebSocket, and the relay enforcing auth, verifying signatures, persisting events, fanning out to subscribers, indexing for search, and triggering automation.
 
-Sprout is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
+Buzz is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
 
 ---
 
@@ -16,14 +16,14 @@ Sprout is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
 ┌─────────────────────────────────────────────────────────────────────┐
 │                           CLIENTS                                    │
 │                                                                      │
-│  Human (Nostr app, web, mobile)    Agent (CLI tools via sprout-cli) │
+│  Human (Nostr app, web, mobile)    Agent (CLI tools via buzz-cli)    │
 │           │                                    │                     │
 │           └──────────── WebSocket ─────────────┘                    │
 └─────────────────────────────────────────────────────────────────────┘
                                │
                                ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        sprout-relay (Axum)                          │
+│                         buzz-relay (Axum)                          │
 │                                                                      │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────────────┐ │
 │  │ NIP-42   │  │  EVENT   │  │   REQ    │  │   REST API          │ │
@@ -56,7 +56,7 @@ Sprout is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
      (multi-node fan-out wired; local-echo dedup via AppState.local_event_ids).
 
      ┌──────────────┐
-     │  Typesense   │  ← sprout-search (bounded worker queue)
+     │  Typesense   │  ← buzz-search (bounded worker queue)
      │ (full-text   │
      │   search)    │
      └──────────────┘
@@ -67,33 +67,33 @@ Sprout is a Rust monorepo, licensed Apache 2.0 under Block, Inc.
 ### Crate Dependency Hierarchy
 
 ```
-sprout-core  (zero I/O — types, verification, filter matching, kind registry)
+buzz-core    (zero I/O — types, verification, filter matching, kind registry)
     │
-    ├── sprout-db        (Postgres: events, channels, tokens, workflows, audit)
-    ├── sprout-auth      (NIP-42, NIP-98, API tokens, scopes, rate limiting)
-    ├── sprout-pubsub    (Redis pub/sub, presence, typing indicators)
-    ├── sprout-search    (Typesense: index, query, delete)
-    ├── sprout-audit     (hash-chain tamper-evident log)
-    └── sprout-workflow  (YAML-as-code automation engine)
+    ├── buzz-db          (Postgres: events, channels, tokens, workflows, audit)
+    ├── buzz-auth        (NIP-42, NIP-98, API tokens, scopes, rate limiting)
+    ├── buzz-pubsub      (Redis pub/sub, presence, typing indicators)
+    ├── buzz-search      (Typesense: index, query, delete)
+    ├── buzz-audit       (hash-chain tamper-evident log)
+    └── buzz-workflow    (YAML-as-code automation engine)
          │
-         └── sprout-relay       (ties everything together — the server)
+         └── buzz-relay       (ties everything together — the server)
 
-sprout-acp          (agent harness — bridges relay @mentions → AI agents via ACP/JSON-RPC)
-sprout-proxy        (NIP-28 compatibility proxy — translates standard Nostr clients ↔ Sprout relay)
-sprout-sdk          (typed Nostr event builders — used by sprout-acp and sprout-cli)
-sprout-media        (Blossom/S3 media storage)
-sprout-cli          (agent-first CLI)
-sprout-admin        (operator CLI: relay membership + key generation)
-sprout-test-client  (integration test harness + manual CLI)
+buzz-acp            (agent harness — bridges relay @mentions → AI agents via ACP/JSON-RPC)
+buzz-proxy          (NIP-28 compatibility proxy — translates standard Nostr clients ↔ Buzz relay)
+buzz-sdk            (typed Nostr event builders — used by buzz-acp and buzz-cli)
+buzz-media          (Blossom/S3 media storage)
+buzz-cli            (agent-first CLI)
+buzz-admin          (operator CLI: relay membership + key generation)
+buzz-test-client    (integration test harness + manual CLI)
 ```
 
-**Key architectural principle:** The relay is the single source of truth. `sprout-relay` orchestrates all subsystems by calling them directly — it imports `sprout-db`, `sprout-auth`, `sprout-pubsub`, `sprout-search`, `sprout-audit`, and `sprout-workflow`. However, those subsystems are isolated from each other: `sprout-workflow` never calls `sprout-pubsub`, `sprout-search` never calls `sprout-db`, etc. Cross-subsystem coordination happens only through the relay. `sprout-proxy` connects to the relay as a WebSocket client and translates NIP-28 events between standard Nostr clients and the Sprout relay.
+**Key architectural principle:** The relay is the single source of truth. `buzz-relay` orchestrates all subsystems by calling them directly — it imports `buzz-db`, `buzz-auth`, `buzz-pubsub`, `buzz-search`, `buzz-audit`, and `buzz-workflow`. However, those subsystems are isolated from each other: `buzz-workflow` never calls `buzz-pubsub`, `buzz-search` never calls `buzz-db`, etc. Cross-subsystem coordination happens only through the relay. `buzz-proxy` connects to the relay as a WebSocket client and translates NIP-28 events between standard Nostr clients and the Buzz relay.
 
 ---
 
 ## 2. The Protocol
 
-Sprout uses Nostr NIP-01 on the wire. Every action is a JSON event with six fields:
+Buzz uses Nostr NIP-01 on the wire. Every action is a JSON event with six fields:
 
 ```json
 {
@@ -116,9 +116,9 @@ The `kind` integer is the only dispatch switch. The relay routes, stores, and fa
 | 10000–19999 | Replaceable events (NIP-16) |
 | 20000–29999 | Ephemeral events — not stored, not audited |
 | 30000–39999 | Parameterized replaceable events |
-| 40000–49999 | Sprout custom kinds |
+| 40000–49999 | Buzz custom kinds |
 
-### Sprout Custom Kinds (selected)
+### Buzz Custom Kinds (selected)
 
 | Kind | Name | Description |
 |------|------|-------------|
@@ -132,9 +132,9 @@ The `kind` integer is the only dispatch switch. The relay routes, stores, and fa
 | 46001–46012 | KIND_WORKFLOW_* | Workflow execution events |
 | 20001 | KIND_PRESENCE_UPDATE | Ephemeral presence heartbeat |
 
-`sprout-core` defines all 81 kinds as `pub const KIND_*: u32` and exports `ALL_KINDS: &[u32]`. Kinds are `u32` (NIP-01 specifies unsigned integer; `u32` covers the full range). Sprout uses both standard Nostr kinds (e.g., kind 7 for reactions) and custom ranges (40000+).
+`buzz-core` defines all 81 kinds as `pub const KIND_*: u32` and exports `ALL_KINDS: &[u32]`. Kinds are `u32` (NIP-01 specifies unsigned integer; `u32` covers the full range). Buzz uses both standard Nostr kinds (e.g., kind 7 for reactions) and custom ranges (40000+).
 
-Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `sprout-core/src/kind.rs` and imported by `sprout-relay/src/handlers/event.rs`. `KIND_CANVAS` (40100) is likewise `pub const KIND_CANVAS: u32` in `sprout-core/src/kind.rs`.
+Note: `KIND_AUTH` (22242) is `pub const KIND_AUTH: u32` in `buzz-core/src/kind.rs` and imported by `buzz-relay/src/handlers/event.rs`. `KIND_CANVAS` (40100) is likewise `pub const KIND_CANVAS: u32` in `buzz-core/src/kind.rs`.
 
 ### Wire Protocol (NIP-01 messages)
 
@@ -224,7 +224,7 @@ Steps 10–12 are fire-and-forget. Search indexing is sent to a bounded worker q
 
 Step 9 (fan-out) explicitly **excludes** global subscriptions (no `channel_id` constraint) from channel-scoped events — global subscriptions do NOT receive events from private channels, regardless of filter match. This is a deliberate security boundary: only subscriptions scoped to an accessible `channel_id` receive those events.
 
-Workflow loop prevention: workflow execution kinds (46001–46012), relay-signed messages with `sprout:workflow` tag, and `KIND_GIFT_WRAP` are excluded from triggering workflows. All other stored events (including kind 9 stream messages) trigger workflow evaluation.
+Workflow loop prevention: workflow execution kinds (46001–46012), relay-signed messages with `buzz:workflow` tag, and `KIND_GIFT_WRAP` are excluded from triggering workflows. All other stored events (including kind 9 stream messages) trigger workflow evaluation.
 
 ### Ephemeral Sub-Pipeline (kinds 20000–29999)
 
@@ -312,7 +312,7 @@ After registering, the REQ handler queries Postgres for stored events matching t
 
 ## 6. Crate Reference
 
-### sprout-core — Shared Types and Verification
+### buzz-core — Shared Types and Verification
 
 **Zero I/O.** The foundation every other crate builds on. Explicitly prohibits tokio, sqlx, redis, and axum in its `Cargo.toml`.
 
@@ -341,7 +341,7 @@ pub const ALL_KINDS: &[u32]  // 80 entries (KIND_AUTH excluded — never stored)
 
 ---
 
-### sprout-auth — Authentication and Authorization
+### buzz-auth — Authentication and Authorization
 
 Handles authentication paths, scope enforcement, and token operations.
 
@@ -368,13 +368,13 @@ pub trait RateLimiter: Send + Sync { ... }
 **Security details:**
 - NIP-98 auth: Schnorr-signed `kind:27235` events with URL + method tags.
 - NIP-42 timestamp tolerance: ±60 seconds.
-- Dev-only key derivation: `SHA-256("sprout-test-key:{username}")` — gated behind `#[cfg(any(test, feature = "dev"))]`. The `dev` feature must not be enabled in production relay deployments.
+- Dev-only key derivation: `SHA-256("buzz-test-key:{username}")` — gated behind `#[cfg(any(test, feature = "dev"))]`. The `dev` feature must not be enabled in production relay deployments.
 
 **Does NOT:** implement `RateLimiter` beyond a test stub (`AlwaysAllowRateLimiter`, gated behind `#[cfg(any(test, feature = "test-utils"))]`). No Redis-backed rate limiter exists anywhere in the codebase — rate limiting is not currently enforced. `RateLimitConfig` defines 4 tiers (human, agent-standard, agent-elevated, agent-platform) as a design target.
 
 ---
 
-### sprout-db — Postgres Event Store
+### buzz-db — Postgres Event Store
 
 All database access. Uses `sqlx::query()` (runtime, not compile-time macros) — no `.sqlx/` offline cache required.
 
@@ -412,31 +412,31 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 
 ---
 
-### sprout-pubsub — Redis Pub/Sub, Presence, Typing
+### buzz-pubsub — Redis Pub/Sub, Presence, Typing
 
 Manages Redis pub/sub fan-out, presence tracking, and typing indicators.
 
 **Architecture:**
 
 ```
-Publisher  → pool connection   → PUBLISH sprout:channel:{uuid}
-Subscriber → dedicated PubSub  → PSUBSCRIBE sprout:channel:*
+Publisher  → pool connection   → PUBLISH buzz:channel:{uuid}
+Subscriber → dedicated PubSub  → PSUBSCRIBE buzz:channel:*
                                   → broadcast::channel(4096)
 ```
 
 The subscriber uses a **dedicated** `redis::aio::PubSub` connection — not from the pool. This is intentional: pool connections cannot hold `PSUBSCRIBE` state.
 
-**Current state:** The subscriber loop is spawned in `sprout-relay/src/main.rs` and populates the broadcast channel. A consumer task subscribes via `pubsub.subscribe_local()`, calls `sub_registry.fan_out()` on each received event, and delivers matches to local WebSocket connections via `conn_manager.send_to()`. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
+**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A consumer task subscribes via `pubsub.subscribe_local()`, calls `sub_registry.fan_out()` on each received event, and delivers matches to local WebSocket connections via `conn_manager.send_to()`. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
 
 **Reconnection:** exponential backoff 1s → 30s (`backoff_secs * 2`). Backoff resets to 1s only after a clean stream end, not on each reconnect attempt.
 
-**Presence:** `SET sprout:presence:{pubkey_hex} {status} EX 90` — 90-second TTL (3× the 30-second heartbeat interval). Single missed heartbeat does not cause presence flap.
+**Presence:** `SET buzz:presence:{pubkey_hex} {status} EX 90` — 90-second TTL (3× the 30-second heartbeat interval). Single missed heartbeat does not cause presence flap.
 
 **Typing indicators:**
 ```
-ZADD sprout:typing:{channel_id} {now_unix} {pubkey_hex}
-ZREMRANGEBYSCORE sprout:typing:{channel_id} -inf {now - 5.0}
-EXPIRE sprout:typing:{channel_id} 60
+ZADD buzz:typing:{channel_id} {now_unix} {pubkey_hex}
+ZREMRANGEBYSCORE buzz:typing:{channel_id} -inf {now - 5.0}
+EXPIRE buzz:typing:{channel_id} 60
 ```
 5-second activity window. 60-second key TTL prevents orphaned empty sets.
 
@@ -444,7 +444,7 @@ EXPIRE sprout:typing:{channel_id} 60
 
 ---
 
-### sprout-search — Typesense Integration
+### buzz-search — Typesense Integration
 
 Full-text search via Typesense. All HTTP calls use `reqwest` with `X-TYPESENSE-API-KEY`.
 
@@ -456,13 +456,13 @@ Full-text search via Typesense. All HTTP calls use `reqwest` with `X-TYPESENSE-A
 - Upsert indexing: `POST /documents?action=upsert` (single), `POST /documents/import?action=upsert` (batch JSONL).
 - `delete_event()` validates event ID (64-char hex) before constructing the URL — prevents path injection.
 - `delete_event()` is idempotent: 404 treated as success.
-- Permission filtering is **caller's responsibility** — `sprout-search` provides the `filter_by` mechanism but does not enforce access policy.
+- Permission filtering is **caller's responsibility** — `buzz-search` provides the `filter_by` mechanism but does not enforce access policy.
 
 **Does NOT:** enforce channel membership or access control. Does NOT store events in Postgres.
 
 ---
 
-### sprout-audit — Hash-Chain Audit Log
+### buzz-audit — Hash-Chain Audit Log
 
 Tamper-evident append-only log with SHA-256 hash chaining.
 
@@ -478,7 +478,7 @@ Tamper-evident append-only log with SHA-256 hash chaining.
 
 ---
 
-### sprout-workflow — YAML-as-Code Automation Engine
+### buzz-workflow — YAML-as-Code Automation Engine
 
 Parses, validates, and executes channel-scoped workflow definitions.
 
@@ -529,9 +529,9 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 
 ---
 
-### sprout-proxy — NIP-28 Compatibility Proxy
+### buzz-proxy — NIP-28 Compatibility Proxy
 
-Lets standard Nostr clients (Coracle, nak, Amethyst, nostr-tools, nostr-sdk) read and write Sprout channels using the NIP-28 Public Chat Channels protocol. Connects to the relay as a WebSocket client; presents a standard NIP-01/NIP-11/NIP-28/NIP-42 interface to external clients.
+Lets standard Nostr clients (Coracle, nak, Amethyst, nostr-tools, nostr-sdk) read and write Buzz channels using the NIP-28 Public Chat Channels protocol. Connects to the relay as a WebSocket client; presents a standard NIP-01/NIP-11/NIP-28/NIP-42 interface to external clients.
 
 **Key modules:** `server.rs` (Axum WebSocket server, NIP-11, NIP-42 auth, filter splitting), `translate.rs` (bidirectional kind/tag translation), `upstream.rs` (persistent relay connection with auto-reconnect and subscription replay), `channel_map.rs` (bidirectional UUID ↔ kind:40 event ID mapping), `shadow_keys.rs` (deterministic keypair derivation), `guest_store.rs` (pubkey-based guest registry), `invite_store.rs` (token-based invite system).
 
@@ -539,11 +539,11 @@ Lets standard Nostr clients (Coracle, nak, Amethyst, nostr-tools, nostr-sdk) rea
 
 **Kind translation (lossy):**
 
-`KindTranslator` defines the full mapping between standard Nostr kinds and Sprout kinds. The proxy's event paths gate which kinds actually flow through — only a subset is accepted inbound or emitted outbound.
+`KindTranslator` defines the full mapping between standard Nostr kinds and Buzz kinds. The proxy's event paths gate which kinds actually flow through — only a subset is accepted inbound or emitted outbound.
 
 *Inbound (client → relay) — accepted kinds:*
 
-| Standard Kind | Sprout Kind | Note |
+| Standard Kind | Buzz Kind | Note |
 |--------------|-------------|------|
 | 1, 42 | KIND_STREAM_MESSAGE | Multiple → one (lossy) |
 | 41 | KIND_STREAM_MESSAGE_EDIT | Channel message edit |
@@ -553,7 +553,7 @@ Kind 5 (deletion) is intentionally blocked inbound — the relay's deletion hand
 
 *Outbound (relay → client) — emitted kinds:*
 
-| Sprout Kind | Standard Kind | Note |
+| Buzz Kind | Standard Kind | Note |
 |-------------|--------------|------|
 | KIND_STREAM_MESSAGE | 42 | NIP-28 channel message |
 | KIND_STREAM_MESSAGE_V2 | 42 | Rich format collapses to plain kind:42 |
@@ -561,7 +561,7 @@ Kind 5 (deletion) is intentionally blocked inbound — the relay's deletion hand
 | KIND_REACTION | 7 | Reaction |
 | KIND_DELETION | 5 | Standard NIP-09 deletion |
 
-`to_sprout(to_standard(k))` is NOT lossless for secondary mappings (e.g., kind:1 → KIND_STREAM_MESSAGE → kind:42). Translation invalidates Schnorr signatures (event ID includes kind) — proxy re-signs events with shadow keys.
+`to_buzz(to_standard(k))` is NOT lossless for secondary mappings (e.g., kind:1 → KIND_STREAM_MESSAGE → kind:42). Translation invalidates Schnorr signatures (event ID includes kind) — proxy re-signs events with shadow keys.
 
 **Dual auth:** Pubkey-based guest registration (persistent, primary) + invite tokens (ad-hoc, time-limited, secondary). Both use NIP-42 for the authentication handshake. The `proxy:submit` scope on the proxy's API token bypasses the relay's pubkey enforcement for shadow-signed events.
 
@@ -575,7 +575,7 @@ Kind 5 (deletion) is intentionally blocked inbound — the relay's deletion hand
 
 ### Huddle Audio — WebSocket Opus Relay
 
-Real-time voice lives inside `sprout-relay` (`src/audio/`), not a separate crate. A WebSocket endpoint (`wss://.../huddle/{channel_id}/audio`) authenticates each participant with a NIP-42 challenge, checks channel membership, admits them to an in-memory room, and forwards opaque Opus frames between peers. No external SFU.
+Real-time voice lives inside `buzz-relay` (`src/audio/`), not a separate crate. A WebSocket endpoint (`wss://.../huddle/{channel_id}/audio`) authenticates each participant with a NIP-42 challenge, checks channel membership, admits them to an in-memory room, and forwards opaque Opus frames between peers. No external SFU.
 
 **Frame protocol (v2):** 8-byte big-endian header (sequence `u16`, 48 kHz timestamp `u32`, level dBov `i8`, flags `u8`) followed by an opaque Opus payload. Invalid `level_dbov` values are clamped rather than dropped — losing a metric beats losing audio.
 
@@ -587,7 +587,7 @@ Real-time voice lives inside `sprout-relay` (`src/audio/`), not a separate crate
 
 ---
 
-### sprout-relay — The Server
+### buzz-relay — The Server
 
 Axum WebSocket server. Ties all other crates together. The only crate that imports and orchestrates all subsystems.
 
@@ -678,17 +678,17 @@ pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), 
 
 ---
 
-### sprout-acp — Agent Communication Protocol Harness
+### buzz-acp — Agent Communication Protocol Harness
 
-Standalone binary that bridges Sprout relay events to AI agents via the [Agent Communication Protocol](https://agentclientprotocol.com/) (ACP).
+Standalone binary that bridges Buzz relay events to AI agents via the [Agent Communication Protocol](https://agentclientprotocol.com/) (ACP).
 
 **Architecture:**
 
 ```
-Sprout Relay ──WS──→ sprout-acp ──stdio (ACP/JSON-RPC)──→ Agent (goose/codex/claude)
+Buzz Relay ──WS──→ buzz-acp ──stdio (ACP/JSON-RPC)──→ Agent (goose/codex/claude)
 ```
 
-`sprout-acp` spawns AI agent subprocesses (1–32, default 1), connects to the relay via WebSocket with NIP-42 auth, discovers channels via REST API, and queues `@mention` events per channel. At most one prompt is in-flight per channel. Queued events are batched into a single prompt sent via `session/prompt` over ACP.
+`buzz-acp` spawns AI agent subprocesses (1–32, default 1), connects to the relay via WebSocket with NIP-42 auth, discovers channels via REST API, and queues `@mention` events per channel. At most one prompt is in-flight per channel. Queued events are batched into a single prompt sent via `session/prompt` over ACP.
 
 **Key modules:**
 
@@ -706,13 +706,13 @@ Sprout Relay ──WS──→ sprout-acp ──stdio (ACP/JSON-RPC)──→ Ag
 - Pool of 1–32 agent subprocesses with claim/return lifecycle.
 - Per-channel queuing: at most one prompt in-flight per channel; subsequent @mentions queue until the agent responds.
 - Crash recovery: agent subprocess crashes are detected and the agent is respawned.
-- Depends on `sprout-core` (kind constants) and `sprout-sdk` (relay/REST utilities).
+- Depends on `buzz-core` (kind constants) and `buzz-sdk` (relay/REST utilities).
 
 **Does NOT:** persist state.
 
 ---
 
-### sprout-admin — Operator CLI
+### buzz-admin — Operator CLI
 
 Subcommands:
 
@@ -725,9 +725,9 @@ Subcommands:
 
 ---
 
-### sprout-test-client — Integration Test Harness
+### buzz-test-client — Integration Test Harness
 
-**`SproutTestClient`** wraps a WebSocket connection with a `VecDeque<RelayMessage>` buffer for message interleaving. Methods: `connect`, `connect_unauthenticated`, `authenticate`, `send_event`, `send_text_message`, `subscribe`, `close_subscription`, `recv_event`, `collect_until_eose`, `disconnect`.
+**`BuzzTestClient`** wraps a WebSocket connection with a `VecDeque<RelayMessage>` buffer for message interleaving. Methods: `connect`, `connect_unauthenticated`, `authenticate`, `send_event`, `send_text_message`, `subscribe`, `close_subscription`, `recv_event`, `collect_until_eose`, `disconnect`.
 
 **Test coverage:**
 
@@ -743,7 +743,7 @@ Subcommands:
 
 All e2e tests are `#[ignore]` — require a running relay. Total: **134 e2e tests**.
 
-`src/main.rs` is a manual testing CLI (`sprout-test-cli`) with `--send`, `--subscribe`, `--channel`, `--url`, `--kind` flags.
+`src/main.rs` is a manual testing CLI (`buzz-test-cli`) with `--send`, `--subscribe`, `--channel`, `--url`, `--kind` flags.
 
 Defines `parse_relay_message`, `OkResponse`, `RelayMessage` directly in `src/lib.rs`.
 
@@ -765,7 +765,7 @@ Every security-sensitive operation uses an explicit, verified pattern. No implic
 
 | Concern | Mechanism |
 |---------|-----------|
-| Schnorr signatures | `verify_event()` in `sprout-core` — every event verified before storage |
+| Schnorr signatures | `verify_event()` in `buzz-core` — every event verified before storage |
 | Event ID | SHA-256 of canonical serialization verified independently of signature |
 | Frame size | `MAX_FRAME_BYTES = 65,536` — oversized frames rejected, connection closed |
 | Search event IDs | 64-char hex validation before URL construction — prevents path injection |
@@ -774,12 +774,12 @@ Every security-sensitive operation uses an explicit, verified pattern. No implic
 
 ### SSRF Protection
 
-`is_private_ip()` in `sprout-core` covers:
+`is_private_ip()` in `buzz-core` covers:
 - IPv4: unspecified (0.0.0.0/8), loopback (127.0.0.0/8), private (10/8, 172.16/12, 192.168/16), link-local (169.254/16), CGNAT (100.64/10), benchmarking (198.18/15), broadcast (255.255.255.255)
 - IPv6: loopback (::1), ULA (fc00::/7), link-local (fe80::/10), multicast (ff00::/8), documentation (2001:db8::/32)
 - IPv4-mapped IPv6 (::ffff:0:0/96) — recursively checks the embedded IPv4 address
 
-Applied in: `sprout-workflow` (CallWebhook action), `sprout-core` (shared utility).
+Applied in: `buzz-workflow` (CallWebhook action), `buzz-core` (shared utility).
 
 ### Audit Integrity
 
@@ -834,9 +834,9 @@ Docker Compose provides the full local development stack. All services include h
 
 | Pattern | Type | TTL | Purpose |
 |---------|------|-----|---------|
-| `sprout:channel:{uuid}` | Pub/Sub channel | — | Event fan-out |
-| `sprout:presence:{pubkey_hex}` | String | 90s | Online/away status |
-| `sprout:typing:{channel_uuid}` | Sorted Set | 60s | Active typers (5s window) |
+| `buzz:channel:{uuid}` | Pub/Sub channel | — | Event fan-out |
+| `buzz:presence:{pubkey_hex}` | String | 90s | Online/away status |
+| `buzz:typing:{channel_uuid}` | Sorted Set | 60s | Active typers (5s window) |
 
 ### Typesense Collection
 
@@ -851,7 +851,7 @@ These are verified gaps in the current implementation — not design aspirations
 | # | Limitation | Detail |
 |---|-----------|--------|
 | 1 | **No sqlx offline query cache** | Uses `sqlx::query()` (runtime) not `sqlx::query!()` (compile-time). No `.sqlx/` directory. Queries are not validated at compile time. |
-| 2 | **No rate limiting implementation** | `RateLimiter` trait exists in `sprout-auth`. Only implementation is `AlwaysAllowRateLimiter` (test stub, gated behind `#[cfg(any(test, feature = "test-utils"))]`). `RateLimitConfig` defines 4 tiers (human, agent-standard, agent-elevated, agent-platform) but none are enforced. |
+| 2 | **No rate limiting implementation** | `RateLimiter` trait exists in `buzz-auth`. Only implementation is `AlwaysAllowRateLimiter` (test stub, gated behind `#[cfg(any(test, feature = "test-utils"))]`). `RateLimitConfig` defines 4 tiers (human, agent-standard, agent-elevated, agent-platform) but none are enforced. |
 | 3 | **No dedicated typing REST endpoint** | Typing indicators (kind 20002) are delivered via both local fan-out and Redis pub/sub (cross-node). There is no REST endpoint to query current typers — `/api/presence` returns online/away status only, not typing state. |
 | 4 | **Huddle recording/tracks not built** | Voice, room lifecycle, and join/leave/end events are wired (see Huddle Audio above). Recording and per-track publishing have reserved kinds but no producer yet. |
 | 5 | **Approval gates not wired end-to-end** | The executor returns `StepResult::Suspended` and the relay has grant/deny API endpoints with DB CRUD, but the engine intercepts before creating `WaitingApproval` rows — runs that hit an approval gate are marked as Failed (🚧 WF-08). |

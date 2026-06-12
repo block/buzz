@@ -2,10 +2,10 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:sprout_mobile/features/channels/channel.dart';
-import 'package:sprout_mobile/features/channels/channels_provider.dart';
-import 'package:sprout_mobile/features/channels/read_state/read_state_provider.dart';
-import 'package:sprout_mobile/features/channels/unread_badge/unread_badge_provider.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
 
 /// Unit tests for [unreadBadgeProvider].
 ///

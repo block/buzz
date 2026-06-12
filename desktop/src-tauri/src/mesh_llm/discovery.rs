@@ -19,7 +19,7 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
         return MeshAvailability::unavailable("relay mesh status is not published yet");
     }
 
-    // Relay status is now per reporter (d=sprout-relay-mesh:<pubkey>), so a
+    // Relay status is now per reporter (d=buzz-relay-mesh:<pubkey>), so a
     // query returns multiple replaceable events. Aggregate them; do not pick the
     // newest single event or one member's machines hide everyone else's.
     let mut all_targets = Vec::<MeshServeTarget>::new();
@@ -102,7 +102,7 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
 pub fn mesh_status_filter() -> serde_json::Value {
     serde_json::json!({
         "kinds": [MESH_STATUS_KIND],
-        "#k": ["sprout-mesh-status"],
+        "#k": ["buzz-mesh-status"],
         "limit": 100
     })
 }
@@ -112,8 +112,7 @@ fn reporter_pubkey_from_status_event(event: &nostr::Event) -> Option<String> {
         let slice = tag.as_slice();
         let d = slice.get(1)?;
         if slice.first().is_some_and(|name| name == "d") {
-            d.strip_prefix("sprout-relay-mesh:")
-                .map(ToString::to_string)
+            d.strip_prefix("buzz-relay-mesh:").map(ToString::to_string)
         } else {
             None
         }

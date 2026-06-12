@@ -3,11 +3,11 @@ use super::*;
 #[test]
 fn canonical_dev_data_dir_replaces_last_component() {
     let current =
-        PathBuf::from("/Users/me/Library/Application Support/xyz.block.sprout.app.dev.my-branch");
+        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app.dev.my-branch");
     let canonical = canonical_dev_data_dir(&current).unwrap();
     assert_eq!(
         canonical,
-        PathBuf::from("/Users/me/Library/Application Support/xyz.block.sprout.app.dev")
+        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app.dev")
     );
 }
 
@@ -17,14 +17,58 @@ fn canonical_dev_data_dir_returns_none_for_root() {
     assert!(canonical_dev_data_dir(Path::new("/")).is_none());
 }
 
+#[test]
+fn legacy_app_data_dir_maps_release_identifier() {
+    let current = PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app");
+    let legacy = legacy_app_data_dir(&current).unwrap();
+    assert_eq!(
+        legacy,
+        PathBuf::from("/Users/me/Library/Application Support/xyz.block.sprout.app")
+    );
+}
+
+#[test]
+fn legacy_app_data_dir_maps_dev_worktree_identifier() {
+    let current =
+        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app.dev.my-branch");
+    let legacy = legacy_app_data_dir(&current).unwrap();
+    assert_eq!(
+        legacy,
+        PathBuf::from("/Users/me/Library/Application Support/xyz.block.sprout.app.dev.my-branch",)
+    );
+}
+
+#[test]
+fn copy_dir_all_preserves_nested_files_without_overwriting() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("old");
+    let dst = dir.path().join("new");
+    std::fs::create_dir_all(src.join("agents")).unwrap();
+    std::fs::write(src.join("identity.key"), "old-key").unwrap();
+    std::fs::write(src.join("agents/managed-agents.json"), "old-agents").unwrap();
+    std::fs::create_dir_all(&dst).unwrap();
+    std::fs::write(dst.join("identity.key"), "new-key").unwrap();
+
+    copy_dir_all(&src, &dst).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(dst.join("identity.key")).unwrap(),
+        "new-key"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dst.join("agents/managed-agents.json")).unwrap(),
+        "old-agents"
+    );
+}
+
 /// Helper: create a temp dir structure mimicking canonical + worktree layout.
 /// Packs live in a `.main` sibling (not canonical) to match real-world state.
 /// Returns `(parent_dir_handle, canonical_dir, worktree_dir)`.
 fn setup_sync_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let parent = tempfile::tempdir().unwrap();
     let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    let worktree = parent.path().join("xyz.block.sprout.app.dev.my-branch");
-    let main_instance = parent.path().join("xyz.block.sprout.app.dev.main");
+    let worktree = parent.path().join("xyz.block.buzz.app.dev.my-branch");
+    let main_instance = parent.path().join("xyz.block.buzz.app.dev.main");
 
     std::fs::create_dir_all(canonical.join("agents")).unwrap();
     std::fs::write(
@@ -34,7 +78,7 @@ fn setup_sync_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
     .unwrap();
     std::fs::write(
         canonical.join("agents/personas.json"),
-        r#"[{"id":"builtin:solo"}]"#,
+        r#"[{"id":"builtin:fizz"}]"#,
     )
     .unwrap();
     std::fs::write(canonical.join("agents/teams.json"), r#"[{"id":"team-1"}]"#).unwrap();
@@ -43,7 +87,7 @@ fn setup_sync_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let team_dir = main_instance.join("agents/teams/com.example.test-pack");
     std::fs::create_dir_all(&team_dir).unwrap();
     std::fs::write(team_dir.join("instructions.md"), "# Test pack").unwrap();
-    std::fs::write(team_dir.join("solo.persona.md"), "# Solo").unwrap();
+    std::fs::write(team_dir.join("fizz.persona.md"), "# Fizz").unwrap();
 
     (parent, canonical, worktree)
 }
@@ -239,7 +283,7 @@ fn writes_through_symlink_reach_canonical() {
     let canonical_path = canonical.join("agents/personas.json");
 
     // Write through the symlink using the same pattern as atomic_write_json.
-    let new_content = r#"[{"id":"builtin:solo","updated":true}]"#;
+    let new_content = r#"[{"id":"builtin:fizz","updated":true}]"#;
     let resolved = std::fs::canonicalize(&worktree_path).unwrap();
     let tmp = resolved.with_extension("json.tmp");
     std::fs::write(&tmp, new_content.as_bytes()).unwrap();
@@ -264,10 +308,10 @@ fn canonical_dev_data_dir_returns_self_for_canonical_instance() {
     // When the current app data dir IS the canonical dev identifier,
     // canonical_dev_data_dir returns the exact same path — the caller
     // (sync_shared_agent_data) uses this equality to skip the sync.
-    // The env-var guards (SPROUT_SHARE_IDENTITY, SPROUT_PRIVATE_KEY)
+    // The env-var guards (BUZZ_SHARE_IDENTITY, BUZZ_PRIVATE_KEY)
     // require a live Tauri AppHandle and are covered by integration
     // testing only.
-    let current = PathBuf::from("/Users/me/Library/Application Support/xyz.block.sprout.app.dev");
+    let current = PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app.dev");
     assert_eq!(canonical_dev_data_dir(&current).unwrap(), current);
 
     // Also verify with a temp dir on the real filesystem.
@@ -316,7 +360,7 @@ fn sync_migrates_teams_from_sibling_to_canonical() {
     let main_instance = canonical
         .parent()
         .unwrap()
-        .join("xyz.block.sprout.app.dev.main");
+        .join("xyz.block.buzz.app.dev.main");
 
     // Before sync: canonical has no teams, .main has the real team dir.
     assert!(!canonical.join("agents/teams").exists());
@@ -363,7 +407,7 @@ fn team_dir_reconcile_rewrites_worktree_path() {
         "{}/agents/packs/com.wpfleger.sietch-tabr",
         parent
             .path()
-            .join("xyz.block.sprout.app.dev.worktree-my-branch")
+            .join("xyz.block.buzz.app.dev.worktree-my-branch")
             .display()
     );
     let expected_path = format!(
@@ -397,7 +441,7 @@ fn team_dir_reconcile_rewrites_new_field_name() {
         "{}/agents/teams/com.wpfleger.sietch-tabr",
         parent
             .path()
-            .join("xyz.block.sprout.app.dev.worktree-my-branch")
+            .join("xyz.block.buzz.app.dev.worktree-my-branch")
             .display()
     );
     let expected_path = format!(
@@ -455,7 +499,7 @@ fn team_dir_reconcile_skips_records_without_team_dir() {
         &canonical,
         &serde_json::json!([{
             "name": "Test Agent",
-            "agent_command": "sprout-agent"
+            "agent_command": "buzz-agent"
         }]),
     );
 
@@ -476,7 +520,7 @@ fn team_dir_reconcile_is_idempotent() {
         "{}/agents/packs/com.wpfleger.sietch-tabr",
         parent
             .path()
-            .join("xyz.block.sprout.app.dev.worktree-my-branch")
+            .join("xyz.block.buzz.app.dev.worktree-my-branch")
             .display()
     );
 
@@ -719,14 +763,14 @@ fn rename_provider_to_runtime_preserves_existing_runtime_over_provider() {
 }
 
 #[test]
-fn reconcile_mcp_commands_clears_stale_sprout_mcp_server() {
+fn reconcile_mcp_commands_clears_stale_buzz_mcp_server() {
     let dir = tempfile::tempdir().unwrap();
     write_agents_json(
         dir.path(),
         &serde_json::json!([{
-            "name": "Solo",
+            "name": "Fizz",
             "agent_command": "goose",
-            "mcp_command": "sprout-mcp-server"
+            "mcp_command": "buzz-mcp-server"
         }]),
     );
     reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
@@ -735,26 +779,26 @@ fn reconcile_mcp_commands_clears_stale_sprout_mcp_server() {
 }
 
 #[test]
-fn reconcile_mcp_commands_sets_canonical_for_sprout_agent() {
+fn reconcile_mcp_commands_sets_canonical_for_buzz_agent() {
     let dir = tempfile::tempdir().unwrap();
     write_agents_json(
         dir.path(),
         &serde_json::json!([{
             "name": "Stilgar",
-            "agent_command": "sprout-agent",
-            "mcp_command": "sprout-mcp-server"
+            "agent_command": "buzz-agent",
+            "mcp_command": "buzz-mcp-server"
         }]),
     );
     reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
     let records = read_agents_json(dir.path());
-    assert_eq!(records[0]["mcp_command"], "sprout-dev-mcp");
+    assert_eq!(records[0]["mcp_command"], "buzz-dev-mcp");
 }
 
 #[test]
 fn reconcile_mcp_commands_leaves_custom_value_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let json = serde_json::json!([{
-        "name": "Solo",
+        "name": "Fizz",
         "agent_command": "goose",
         "mcp_command": "my-custom-mcp"
     }]);
@@ -771,7 +815,7 @@ fn reconcile_mcp_commands_leaves_unknown_runtime_untouched() {
     let json = serde_json::json!([{
         "name": "Custom",
         "agent_command": "my-custom-agent",
-        "mcp_command": "sprout-mcp-server"
+        "mcp_command": "buzz-mcp-server"
     }]);
     write_agents_json(dir.path(), &json);
     let path = dir.path().join("agents/managed-agents.json");
@@ -786,9 +830,9 @@ fn reconcile_mcp_commands_is_idempotent() {
     write_agents_json(
         dir.path(),
         &serde_json::json!([{
-            "name": "Solo",
+            "name": "Fizz",
             "agent_command": "goose",
-            "mcp_command": "sprout-mcp-server"
+            "mcp_command": "buzz-mcp-server"
         }]),
     );
     let path = dir.path().join("agents/managed-agents.json");
@@ -804,10 +848,10 @@ fn reconcile_mcp_commands_handles_mixed_agents() {
     write_agents_json(
         dir.path(),
         &serde_json::json!([
-            {"name": "Stale Goose", "agent_command": "goose", "mcp_command": "sprout-mcp-server"},
+            {"name": "Stale Goose", "agent_command": "goose", "mcp_command": "buzz-mcp-server"},
             {"name": "Clean Goose", "agent_command": "goose", "mcp_command": ""},
             {"name": "Custom Agent", "agent_command": "goose", "mcp_command": "my-custom-mcp"},
-            {"name": "Stale Sprout", "agent_command": "sprout-agent", "mcp_command": "sprout-mcp-server"}
+            {"name": "Stale Buzz", "agent_command": "buzz-agent", "mcp_command": "buzz-mcp-server"}
         ]),
     );
     reconcile_mcp_commands_in_file(&dir.path().join("agents/managed-agents.json"));
@@ -815,7 +859,7 @@ fn reconcile_mcp_commands_handles_mixed_agents() {
     assert_eq!(records[0]["mcp_command"], "");
     assert_eq!(records[1]["mcp_command"], "");
     assert_eq!(records[2]["mcp_command"], "my-custom-mcp");
-    assert_eq!(records[3]["mcp_command"], "sprout-dev-mcp");
+    assert_eq!(records[3]["mcp_command"], "buzz-dev-mcp");
 }
 
 #[test]
@@ -823,7 +867,7 @@ fn reconcile_mcp_commands_skips_record_without_agent_command() {
     let dir = tempfile::tempdir().unwrap();
     let json = serde_json::json!([{
         "name": "No Command",
-        "mcp_command": "sprout-mcp-server"
+        "mcp_command": "buzz-mcp-server"
     }]);
     write_agents_json(dir.path(), &json);
     let path = dir.path().join("agents/managed-agents.json");

@@ -212,7 +212,7 @@ List<TimelineMessage> formatTimeline(
   String? currentPubkey,
 }) {
   // 1. Collect deletion targets. Both kind:5 (NIP-09) and kind:9005
-  // (Sprout-native) are deletion markers; mirror desktop's behavior.
+  // (Buzz-native) are deletion markers; mirror desktop's behavior.
   final deletedIds = <String>{};
   for (final event in events) {
     if (event.kind != EventKind.deletion &&

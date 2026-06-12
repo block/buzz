@@ -8,6 +8,7 @@ type AppShellContextValue = {
     readAt: string | null | undefined,
   ) => void;
   markChannelUnread: (channelId: string) => void;
+  openCreateChannel: () => void;
   openChannelManagement: () => void;
   // NIP-RS read marker for a channel as a unix-seconds timestamp, or null
   // when unknown. Backed by the single AppShell-mounted ReadStateManager so
@@ -28,6 +29,7 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   markAllChannelsRead: () => {},
   markChannelRead: () => {},
   markChannelUnread: () => {},
+  openCreateChannel: () => {},
   openChannelManagement: () => {},
   getChannelReadAt: () => null,
   readStateVersion: 0,

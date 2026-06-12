@@ -1,7 +1,7 @@
-//! Sprout Nest — persistent agent workspace at `~/.sprout`.
+//! Buzz Nest — persistent agent workspace at `~/.buzz`.
 //!
 //! Creates a shared knowledge directory on first launch so every
-//! Sprout-spawned agent starts with orientation (AGENTS.md) and a
+//! Buzz-spawned agent starts with orientation (AGENTS.md) and a
 //! place to accumulate research, plans, and logs across sessions.
 //!
 //! Static template content in AGENTS.md (above the managed-section markers)
@@ -34,9 +34,9 @@ const NEST_DIRS: &[&str] = &[
 /// Fully static — no runtime interpolation, no secrets, no user paths.
 const AGENTS_MD: &str = include_str!("nest_agents.md");
 
-/// Default SKILL.md content for the sprout-cli skill.
-/// Written to ~/.sprout/.agents/skills/sprout-cli/SKILL.md on first init.
-const SPROUT_CLI_SKILL_MD: &str = include_str!("nest_skill.md");
+/// Default SKILL.md content for the buzz-cli skill.
+/// Written to ~/.buzz/.agents/skills/buzz-cli/SKILL.md on first init.
+const BUZZ_CLI_SKILL_MD: &str = include_str!("nest_skill.md");
 
 /// Template content version for AGENTS.md static content (above managed markers).
 /// Bump this when changing `nest_agents.md` to trigger refresh on existing installs.
@@ -47,18 +47,18 @@ const NEST_AGENTS_VERSION: u32 = 4;
 /// Bump this when changing `nest_skill.md` to trigger refresh on existing installs.
 const NEST_SKILL_VERSION: u32 = 3;
 
-const BEGIN_MARKER: &str = "<!-- BEGIN SPROUT MANAGED";
-const END_MARKER: &str = "<!-- END SPROUT MANAGED -->";
+const BEGIN_MARKER: &str = "<!-- BEGIN BUZZ MANAGED";
+const END_MARKER: &str = "<!-- END BUZZ MANAGED -->";
 
 /// Canonical skill directory path relative to the nest root.
-const CANONICAL_SKILL_DIR: &str = ".agents/skills/sprout-cli";
-/// Returns the nest root path (`~/.sprout`), or `None` if the home
+const CANONICAL_SKILL_DIR: &str = ".agents/skills/buzz-cli";
+/// Returns the nest root path (`~/.buzz`), or `None` if the home
 /// directory cannot be resolved.
 pub fn nest_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".sprout"))
+    dirs::home_dir().map(|h| h.join(".buzz"))
 }
 
-/// Creates the Sprout nest at `~/.sprout` if it doesn't already exist.
+/// Creates the Buzz nest at `~/.buzz` if it doesn't already exist.
 ///
 /// Delegates to [`ensure_nest_at`] with the resolved nest directory.
 /// Returns an error string if the home directory cannot be resolved.
@@ -67,13 +67,13 @@ pub fn ensure_nest() -> Result<(), String> {
     ensure_nest_at(&root)
 }
 
-/// Creates a Sprout nest at the given `root` path.
+/// Creates a Buzz nest at the given `root` path.
 ///
 /// - Creates the root directory and all subdirectories.
 /// - Writes `AGENTS.md` only if it doesn't already exist.
-/// - Writes `.agents/skills/sprout-cli/SKILL.md` only if it doesn't already exist.
+/// - Writes `.agents/skills/buzz-cli/SKILL.md` only if it doesn't already exist.
 /// - Creates harness-specific symlinks pointing to the canonical
-///   `.agents/skills/sprout-cli` directory for each known provider.
+///   `.agents/skills/buzz-cli` directory for each known provider.
 /// - Sets 700 permissions on the root, all subdirectories, and the skill
 ///   directory tree (Unix).
 ///
@@ -132,7 +132,7 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
         }
     }
 
-    // Write sprout-cli skill to the harness-agnostic .agents path.
+    // Write buzz-cli skill to the harness-agnostic .agents path.
     // The first-init write uses the new canonical path; migration from
     // the old .claude path is handled in refresh_skill_md_if_stale.
     let agents_skill_dir = root.join(CANONICAL_SKILL_DIR);
@@ -147,7 +147,7 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
     {
         Ok(mut file) => {
             use std::io::Write;
-            file.write_all(SPROUT_CLI_SKILL_MD.as_bytes())
+            file.write_all(BUZZ_CLI_SKILL_MD.as_bytes())
                 .map_err(|e| format!("write {}: {e}", skill_md.display()))?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -157,7 +157,7 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
     }
 
     // Create harness-specific symlinks for all known providers.
-    // Migration of the old .claude/skills/sprout-cli real dir is handled in
+    // Migration of the old .claude/skills/buzz-cli real dir is handled in
     // refresh_skill_md_if_stale; ensure_skill_symlinks skips paths that already exist.
     ensure_skill_symlinks(root)?;
 
@@ -225,7 +225,7 @@ fn ensure_skill_symlinks(root: &Path) -> Result<(), String> {
     for skill_dir in known_skill_dirs() {
         let parent = root.join(skill_dir);
         fs::create_dir_all(&parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-        let link = parent.join("sprout-cli");
+        let link = parent.join("buzz-cli");
         if link.symlink_metadata().is_ok() {
             continue; // symlink or real path exists — skip
         }
@@ -243,18 +243,18 @@ fn ensure_skill_symlinks(_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Ensures `~/.local/bin/sprout` is a symlink to the bundled CLI binary.
+/// Ensures `~/.local/bin/buzz` is a symlink to the bundled CLI binary.
 ///
 /// Creates the symlink if it doesn't exist, updates it if it already points
-/// to a Sprout app bundle, and leaves it alone if it points elsewhere (to
+/// to a Buzz app bundle, and leaves it alone if it points elsewhere (to
 /// avoid clobbering another tool's binary).
 ///
 /// Non-fatal: callers should ignore errors — the symlink is a convenience
 /// for human Terminal use; agents find the CLI via PATH augmentation.
 #[cfg(unix)]
 pub fn ensure_cli_symlink(exe_parent: &Path) -> Result<(), String> {
-    let sprout_bin = exe_parent.join("sprout");
-    if !sprout_bin.exists() {
+    let buzz_bin = exe_parent.join("buzz");
+    if !buzz_bin.exists() {
         return Ok(()); // CLI not bundled (e.g., dev builds without sidecars).
     }
 
@@ -264,16 +264,16 @@ pub fn ensure_cli_symlink(exe_parent: &Path) -> Result<(), String> {
         .join("bin");
     fs::create_dir_all(&local_bin).map_err(|e| format!("create {}: {e}", local_bin.display()))?;
 
-    let link = local_bin.join("sprout");
+    let link = local_bin.join("buzz");
     match link.symlink_metadata() {
         Ok(meta) if meta.file_type().is_symlink() => {
-            // Symlink exists — only update if it points to a Sprout bundle.
+            // Symlink exists — only update if it points to a Buzz bundle.
             if let Ok(target) = fs::read_link(&link) {
                 let target_str = target.display().to_string();
                 if target_str.contains(".app/Contents/MacOS") {
-                    // Sprout-owned symlink — update to current bundle path.
+                    // Buzz-owned symlink — update to current bundle path.
                     let _ = fs::remove_file(&link);
-                    std::os::unix::fs::symlink(&sprout_bin, &link)
+                    std::os::unix::fs::symlink(&buzz_bin, &link)
                         .map_err(|e| format!("symlink {}: {e}", link.display()))?;
                 }
                 // Otherwise: symlink points elsewhere — don't clobber.
@@ -284,7 +284,7 @@ pub fn ensure_cli_symlink(exe_parent: &Path) -> Result<(), String> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // No file exists — create the symlink.
-            std::os::unix::fs::symlink(&sprout_bin, &link)
+            std::os::unix::fs::symlink(&buzz_bin, &link)
                 .map_err(|e| format!("symlink {}: {e}", link.display()))?;
         }
         Err(e) => {
@@ -311,7 +311,7 @@ fn read_version_file(path: &Path) -> u32 {
 
 /// Refresh AGENTS.md static content if the template version has changed.
 ///
-/// Preserves everything from the `<!-- BEGIN SPROUT MANAGED` marker onward
+/// Preserves everything from the `<!-- BEGIN BUZZ MANAGED` marker onward
 /// (the dynamic section managed by `upsert_managed_section`). Replaces
 /// only the static template content above the marker.
 fn refresh_agents_md_if_stale(root: &Path) -> Result<(), String> {
@@ -370,16 +370,16 @@ fn refresh_agents_md_if_stale(root: &Path) -> Result<(), String> {
 ///
 /// SKILL.md has no user-editable sections — it is fully overwritten on version bump.
 fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
-    let agents_skill_dir = root.join(".agents/skills/sprout-cli");
+    let agents_skill_dir = root.join(".agents/skills/buzz-cli");
     let version_path = agents_skill_dir.join(".skill-version");
     if read_version_file(&version_path) >= NEST_SKILL_VERSION {
         return Ok(());
     }
 
-    // Migration: if .claude/skills/sprout-cli exists as a real directory
+    // Migration: if .claude/skills/buzz-cli exists as a real directory
     // (pre-migration install), copy user's SKILL.md to the new location
     // then remove the old directory so we can replace it with a symlink.
-    let old_skill_dir = root.join(".claude/skills/sprout-cli");
+    let old_skill_dir = root.join(".claude/skills/buzz-cli");
     let old_is_real_dir = old_skill_dir
         .symlink_metadata()
         .map(|m| m.file_type().is_dir())
@@ -388,9 +388,9 @@ fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
     let skill_content = if old_is_real_dir {
         // Preserve user-edited content during migration.
         fs::read_to_string(old_skill_dir.join("SKILL.md"))
-            .unwrap_or_else(|_| SPROUT_CLI_SKILL_MD.to_string())
+            .unwrap_or_else(|_| BUZZ_CLI_SKILL_MD.to_string())
     } else {
-        SPROUT_CLI_SKILL_MD.to_string()
+        BUZZ_CLI_SKILL_MD.to_string()
     };
 
     // Ensure the canonical .agents skill directory exists.
@@ -415,13 +415,13 @@ fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
             .map_err(|e| format!("remove {}: {e}", old_skill_dir.display()))?;
     }
 
-    // Create/replace the .claude/skills/sprout-cli symlink.
+    // Create/replace the .claude/skills/buzz-cli symlink.
     #[cfg(unix)]
     {
         let claude_skills_dir = root.join(".claude/skills");
         fs::create_dir_all(&claude_skills_dir)
             .map_err(|e| format!("create {}: {e}", claude_skills_dir.display()))?;
-        let symlink_path = root.join(".claude/skills/sprout-cli");
+        let symlink_path = root.join(".claude/skills/buzz-cli");
         // Remove any stale symlink before (re)creating.
         let symlink_exists = symlink_path
             .symlink_metadata()
@@ -431,7 +431,7 @@ fn refresh_skill_md_if_stale(root: &Path) -> Result<(), String> {
             fs::remove_file(&symlink_path)
                 .map_err(|e| format!("remove symlink {}: {e}", symlink_path.display()))?;
         }
-        std::os::unix::fs::symlink("../../.agents/skills/sprout-cli", &symlink_path)
+        std::os::unix::fs::symlink("../../.agents/skills/buzz-cli", &symlink_path)
             .map_err(|e| format!("symlink {}: {e}", symlink_path.display()))?;
     }
 
@@ -451,7 +451,7 @@ pub fn render_dynamic_section(
     relay_url: &str,
 ) -> String {
     let active_agents = if agents.is_empty() {
-        "## Active Agents\n\n*(No agents deployed yet. Add agents in the Sprout desktop app.)*"
+        "## Active Agents\n\n*(No agents deployed yet. Add agents in the Buzz desktop app.)*"
             .to_string()
     } else {
         let mut table =
@@ -592,7 +592,7 @@ pub fn regenerate_nest_context(app: &AppHandle) -> Result<(), String> {
 /// a stale AGENTS.md, so we warn and continue rather than propagating the error.
 pub fn try_regenerate_nest(app: &AppHandle) {
     if let Err(error) = regenerate_nest_context(app) {
-        eprintln!("sprout-desktop: nest context regeneration failed: {error}");
+        eprintln!("buzz-desktop: nest context regeneration failed: {error}");
     }
 }
 
@@ -603,14 +603,14 @@ mod tests {
     #[test]
     fn nest_dir_is_under_home() {
         if let Some(dir) = nest_dir() {
-            assert!(dir.ends_with(".sprout"));
+            assert!(dir.ends_with(".buzz"));
         }
     }
 
     #[test]
     fn ensure_nest_creates_all_dirs_and_agents_md() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
 
         ensure_nest_at(&root).unwrap();
 
@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn ensure_nest_is_idempotent_and_preserves_custom_content() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
 
         // First call creates everything.
         ensure_nest_at(&root).unwrap();
@@ -668,7 +668,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("real_dir");
         fs::create_dir(&target).unwrap();
-        let link = tmp.path().join(".sprout");
+        let link = tmp.path().join(".buzz");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
         let result = ensure_nest_at(&link);
@@ -679,27 +679,27 @@ mod tests {
     #[test]
     fn ensure_nest_creates_skill_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
         ensure_nest_at(&root).unwrap();
 
         // Canonical location under .agents.
-        let skill = root.join(".agents/skills/sprout-cli/SKILL.md");
+        let skill = root.join(".agents/skills/buzz-cli/SKILL.md");
         assert!(skill.exists(), "SKILL.md should exist at .agents path");
         let content = fs::read_to_string(&skill).unwrap();
-        assert_eq!(content, SPROUT_CLI_SKILL_MD);
+        assert_eq!(content, BUZZ_CLI_SKILL_MD);
 
         // On unix, harness-specific symlinks should resolve to the canonical dir.
         #[cfg(unix)]
         {
             for dir in [".goose/skills", ".claude/skills", ".codex/skills"] {
-                let link = root.join(dir).join("sprout-cli");
+                let link = root.join(dir).join("buzz-cli");
                 assert!(
                     link.symlink_metadata().unwrap().file_type().is_symlink(),
-                    "{dir}/sprout-cli should be a symlink"
+                    "{dir}/buzz-cli should be a symlink"
                 );
                 assert!(
                     link.join("SKILL.md").exists(),
-                    "symlink at {dir}/sprout-cli should resolve to dir with SKILL.md"
+                    "symlink at {dir}/buzz-cli should resolve to dir with SKILL.md"
                 );
             }
         }
@@ -708,10 +708,10 @@ mod tests {
     #[test]
     fn ensure_nest_does_not_overwrite_skill_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
         ensure_nest_at(&root).unwrap();
 
-        let skill = root.join(".agents/skills/sprout-cli/SKILL.md");
+        let skill = root.join(".agents/skills/buzz-cli/SKILL.md");
         fs::write(&skill, "custom skill content").unwrap();
 
         ensure_nest_at(&root).unwrap();
@@ -723,14 +723,14 @@ mod tests {
     fn ensure_nest_skill_dir_has_700_permissions() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
         ensure_nest_at(&root).unwrap();
         // Canonical path and all provider parent dirs should be locked down.
-        // Symlinks (e.g. .goose/skills/sprout-cli) are skipped by the chmod loop.
+        // Symlinks (e.g. .goose/skills/buzz-cli) are skipped by the chmod loop.
         for dir in [
             ".agents",
             ".agents/skills",
-            ".agents/skills/sprout-cli",
+            ".agents/skills/buzz-cli",
             ".goose",
             ".goose/skills",
             ".claude",
@@ -750,7 +750,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
 
         // First call creates the real nest.
         ensure_nest_at(&root).unwrap();
@@ -777,32 +777,32 @@ mod tests {
     #[test]
     fn ensure_nest_migrates_old_skill_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
 
         // Simulate a pre-migration install: real directory at old path.
         // Create the nest first to get all dirs, then simulate old layout.
         ensure_nest_at(&root).unwrap();
 
         // Remove the symlink and new skill dir, recreate old real dir.
-        let _ = fs::remove_file(root.join(".claude/skills/sprout-cli"));
-        let _ = fs::remove_dir_all(root.join(".agents/skills/sprout-cli"));
-        let old_skill_dir = root.join(".claude/skills/sprout-cli");
+        let _ = fs::remove_file(root.join(".claude/skills/buzz-cli"));
+        let _ = fs::remove_dir_all(root.join(".agents/skills/buzz-cli"));
+        let old_skill_dir = root.join(".claude/skills/buzz-cli");
         fs::create_dir_all(&old_skill_dir).unwrap();
         fs::write(old_skill_dir.join("SKILL.md"), "user edited skill").unwrap();
 
         // Delete version file to force refresh.
-        let _ = fs::remove_file(root.join(".agents/skills/sprout-cli/.skill-version"));
+        let _ = fs::remove_file(root.join(".agents/skills/buzz-cli/.skill-version"));
 
         // Re-run ensure_nest_at — should trigger migration in refresh_skill_md_if_stale.
         ensure_nest_at(&root).unwrap();
 
         // New canonical location exists with user's content preserved.
-        let new_skill = root.join(".agents/skills/sprout-cli/SKILL.md");
+        let new_skill = root.join(".agents/skills/buzz-cli/SKILL.md");
         assert!(new_skill.exists(), "SKILL.md should exist at new path");
         assert_eq!(fs::read_to_string(&new_skill).unwrap(), "user edited skill");
 
         // Old path is now a symlink, not a real directory.
-        let old_path = root.join(".claude/skills/sprout-cli");
+        let old_path = root.join(".claude/skills/buzz-cli");
         assert!(
             old_path
                 .symlink_metadata()
@@ -817,23 +817,23 @@ mod tests {
     #[test]
     fn ensure_skill_symlinks_are_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
         ensure_nest_at(&root).unwrap();
         // Second call should succeed without errors.
         ensure_nest_at(&root).unwrap();
         // All symlinks still valid and point to relative targets.
         for dir in [".goose/skills", ".claude/skills", ".codex/skills"] {
-            let link = root.join(dir).join("sprout-cli");
+            let link = root.join(dir).join("buzz-cli");
             assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
             assert!(
                 link.join("SKILL.md").exists(),
-                "symlink at {dir}/sprout-cli should resolve to dir with SKILL.md"
+                "symlink at {dir}/buzz-cli should resolve to dir with SKILL.md"
             );
             let target = fs::read_link(&link).unwrap();
             assert_eq!(
                 target.to_str().unwrap(),
                 format!("../../{CANONICAL_SKILL_DIR}"),
-                "symlink at {dir}/sprout-cli should use relative target"
+                "symlink at {dir}/buzz-cli should use relative target"
             );
         }
     }
@@ -843,13 +843,13 @@ mod tests {
     fn ensure_skill_symlinks_skips_existing_path_during_initial_pass() {
         // ensure_skill_symlinks skips any path where symlink_metadata succeeds.
         // However, refresh_skill_md_if_stale (called after ensure_skill_symlinks)
-        // migrates pre-existing real directories at .claude/skills/sprout-cli to
+        // migrates pre-existing real directories at .claude/skills/buzz-cli to
         // symlinks. This test verifies the end-to-end behavior: a pre-existing real
         // dir at the claude path is migrated to a symlink.
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
         // Pre-create a real directory where a symlink would go.
-        let real_dir = root.join(".claude/skills/sprout-cli");
+        let real_dir = root.join(".claude/skills/buzz-cli");
         fs::create_dir_all(&real_dir).unwrap();
         // Place SKILL.md so migration preserves it.
         fs::write(real_dir.join("SKILL.md"), "custom skill content").unwrap();
@@ -863,10 +863,10 @@ mod tests {
                 .unwrap()
                 .file_type()
                 .is_symlink(),
-            ".claude/skills/sprout-cli should be migrated to a symlink"
+            ".claude/skills/buzz-cli should be migrated to a symlink"
         );
         // The canonical path now holds the migrated content.
-        let canonical = root.join(".agents/skills/sprout-cli/SKILL.md");
+        let canonical = root.join(".agents/skills/buzz-cli/SKILL.md");
         assert_eq!(
             fs::read_to_string(&canonical).unwrap(),
             "custom skill content"
@@ -877,11 +877,11 @@ mod tests {
     #[test]
     fn ensure_skill_symlinks_skip_dangling_symlink() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
         // Pre-create a dangling symlink where the .codex link would go.
         let codex_skills = root.join(".codex/skills");
         fs::create_dir_all(&codex_skills).unwrap();
-        let dangling = codex_skills.join("sprout-cli");
+        let dangling = codex_skills.join("buzz-cli");
         std::os::unix::fs::symlink("/nonexistent/target", &dangling).unwrap();
 
         ensure_nest_at(&root).unwrap();
@@ -904,18 +904,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let exe_parent = tmp.path().join("MacOS");
         fs::create_dir(&exe_parent).unwrap();
-        fs::write(exe_parent.join("sprout"), "binary").unwrap();
+        fs::write(exe_parent.join("buzz"), "binary").unwrap();
 
         // Point home_dir to a temp location by using ensure_cli_symlink
         // directly with a custom link target. We'll test the logic manually.
         let local_bin = tmp.path().join("local_bin");
         fs::create_dir_all(&local_bin).unwrap();
-        let link = local_bin.join("sprout");
+        let link = local_bin.join("buzz");
 
         // Create symlink manually to test the creation path.
-        std::os::unix::fs::symlink(exe_parent.join("sprout"), &link).unwrap();
+        std::os::unix::fs::symlink(exe_parent.join("buzz"), &link).unwrap();
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
-        assert_eq!(fs::read_link(&link).unwrap(), exe_parent.join("sprout"));
+        assert_eq!(fs::read_link(&link).unwrap(), exe_parent.join("buzz"));
     }
 
     #[cfg(unix)]
@@ -924,7 +924,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let local_bin = tmp.path().join("local_bin");
         fs::create_dir_all(&local_bin).unwrap();
-        let link = local_bin.join("sprout");
+        let link = local_bin.join("buzz");
         fs::write(&link, "user-installed binary").unwrap();
 
         // Verify it's a regular file.
@@ -1025,15 +1025,15 @@ mod tests {
         let file = tmp.path().join("AGENTS.md");
         fs::write(
             &file,
-            "# Header\n\nsome content\n\n<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\nold section\n<!-- END SPROUT MANAGED -->\n\nafter\n",
+            "# Header\n\nsome content\n\n<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\nold section\n<!-- END BUZZ MANAGED -->\n\nafter\n",
         )
         .unwrap();
 
         upsert_managed_section(&file, "new section").unwrap();
 
         let result = fs::read_to_string(&file).unwrap();
-        assert!(result.contains("<!-- BEGIN SPROUT MANAGED"));
-        assert!(result.contains("<!-- END SPROUT MANAGED -->"));
+        assert!(result.contains("<!-- BEGIN BUZZ MANAGED"));
+        assert!(result.contains("<!-- END BUZZ MANAGED -->"));
         assert!(result.contains("new section"));
         assert!(!result.contains("old section"));
         assert!(result.contains("# Header"));
@@ -1052,10 +1052,10 @@ mod tests {
         let result = fs::read_to_string(&file).unwrap();
         assert!(result.contains("# Header"));
         assert!(result.contains("existing content"));
-        assert!(result.contains("<!-- BEGIN SPROUT MANAGED"));
-        assert!(result.contains("<!-- END SPROUT MANAGED -->"));
+        assert!(result.contains("<!-- BEGIN BUZZ MANAGED"));
+        assert!(result.contains("<!-- END BUZZ MANAGED -->"));
         assert!(result.contains("injected section"));
-        let begin_pos = result.find("<!-- BEGIN SPROUT MANAGED").unwrap();
+        let begin_pos = result.find("<!-- BEGIN BUZZ MANAGED").unwrap();
         let header_pos = result.find("# Header").unwrap();
         assert!(
             header_pos < begin_pos,
@@ -1095,7 +1095,7 @@ mod tests {
         let file = tmp.path().join("AGENTS.md");
         fs::write(
             &file,
-            "# Header\n\n<!-- END SPROUT MANAGED -->\nsome middle content\n<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\nold section\n",
+            "# Header\n\n<!-- END BUZZ MANAGED -->\nsome middle content\n<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\nold section\n",
         )
         .unwrap();
 
@@ -1142,7 +1142,7 @@ mod tests {
         let file = tmp.path().join("AGENTS.md");
         fs::write(
             &file,
-            "# Header\n\nsome content\n\n<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\norphaned section without end marker\n",
+            "# Header\n\nsome content\n\n<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\norphaned section without end marker\n",
         )
         .unwrap();
 
@@ -1183,7 +1183,7 @@ mod tests {
         let file = tmp.path().join("AGENTS.md");
         fs::write(
             &file,
-            "# Header\n\n<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\nfirst block\n<!-- END SPROUT MANAGED -->\n\nbetween blocks\n\n<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\nsecond block\n<!-- END SPROUT MANAGED -->\n",
+            "# Header\n\n<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\nfirst block\n<!-- END BUZZ MANAGED -->\n\nbetween blocks\n\n<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\nsecond block\n<!-- END BUZZ MANAGED -->\n",
         )
         .unwrap();
 
@@ -1216,7 +1216,7 @@ mod tests {
         // Indented by 4 spaces — not at column 0, so should NOT match as a real marker.
         fs::write(
             &file,
-            "# Header\n\n    <!-- BEGIN SPROUT MANAGED — some indented marker -->\n\nReal content here\n",
+            "# Header\n\n    <!-- BEGIN BUZZ MANAGED — some indented marker -->\n\nReal content here\n",
         )
         .unwrap();
 
@@ -1225,7 +1225,7 @@ mod tests {
         let result = fs::read_to_string(&file).unwrap();
 
         assert!(
-            result.contains("    <!-- BEGIN SPROUT MANAGED — some indented marker -->"),
+            result.contains("    <!-- BEGIN BUZZ MANAGED — some indented marker -->"),
             "indented marker inside code block must be preserved verbatim"
         );
         assert!(
@@ -1239,7 +1239,7 @@ mod tests {
 
         // The real markers appended at the end must be at line-start (column 0).
         let begin_pos = result
-            .find("<!-- BEGIN SPROUT MANAGED — regenerated")
+            .find("<!-- BEGIN BUZZ MANAGED — regenerated")
             .expect("regenerated BEGIN marker must be present");
         assert!(
             begin_pos == 0 || result.as_bytes()[begin_pos - 1] == b'\n',
@@ -1304,7 +1304,7 @@ mod tests {
         let file = tmp.path().join("AGENTS.md");
         fs::write(
             &file,
-            "# Header\n\n<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->\nexisting section\n<!-- END SPROUT MANAGED -->\n",
+            "# Header\n\n<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->\nexisting section\n<!-- END BUZZ MANAGED -->\n",
         )
         .unwrap();
 
@@ -1323,7 +1323,7 @@ mod tests {
     #[test]
     fn refresh_agents_md_writes_version_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
         ensure_nest_at(&root).unwrap();
         let version = fs::read_to_string(root.join(".nest-agents-version")).unwrap();
         assert_eq!(version.trim(), NEST_AGENTS_VERSION.to_string());
@@ -1332,17 +1332,17 @@ mod tests {
     #[test]
     fn refresh_skill_md_writes_version_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
         ensure_nest_at(&root).unwrap();
         let version =
-            fs::read_to_string(root.join(".agents/skills/sprout-cli/.skill-version")).unwrap();
+            fs::read_to_string(root.join(".agents/skills/buzz-cli/.skill-version")).unwrap();
         assert_eq!(version.trim(), NEST_SKILL_VERSION.to_string());
     }
 
     #[test]
     fn refresh_agents_md_preserves_managed_section() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
         ensure_nest_at(&root).unwrap();
 
         // Simulate a managed section update.
@@ -1362,7 +1362,7 @@ mod tests {
         let content = fs::read_to_string(&agents_md).unwrap();
         // Static content should be refreshed (from template).
         assert!(
-            content.starts_with("# Sprout Nest"),
+            content.starts_with("# Buzz Nest"),
             "template header must be present"
         );
         // Managed section should be preserved.
@@ -1377,7 +1377,7 @@ mod tests {
     #[test]
     fn refresh_skips_when_version_current() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
         ensure_nest_at(&root).unwrap();
 
         // Manually change AGENTS.md content after version file is written.
@@ -1397,20 +1397,20 @@ mod tests {
     #[test]
     fn refresh_skill_overwrites_on_version_bump() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join(".sprout");
+        let root = tmp.path().join(".buzz");
         ensure_nest_at(&root).unwrap();
 
-        let skill_md = root.join(".agents/skills/sprout-cli/SKILL.md");
+        let skill_md = root.join(".agents/skills/buzz-cli/SKILL.md");
         fs::write(&skill_md, "stale skill content").unwrap();
 
         // Remove version file to simulate upgrade.
-        let _ = fs::remove_file(root.join(".agents/skills/sprout-cli/.skill-version"));
+        let _ = fs::remove_file(root.join(".agents/skills/buzz-cli/.skill-version"));
 
         ensure_nest_at(&root).unwrap();
 
         let content = fs::read_to_string(&skill_md).unwrap();
         assert_eq!(
-            content, SPROUT_CLI_SKILL_MD,
+            content, BUZZ_CLI_SKILL_MD,
             "SKILL.md must be refreshed on version bump"
         );
     }

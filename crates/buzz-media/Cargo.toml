@@ -1,0 +1,35 @@
+[package]
+name = "buzz-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Media storage, validation, and thumbnail generation for Buzz"
+
+[dependencies]
+buzz-core = { workspace = true }
+nostr = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+axum = { workspace = true }
+s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
+infer = "0.19"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+blurhash = "0.2"
+imagesize = "0.14"
+bytes = "1"
+mp4 = "0.14"
+tempfile = "3"
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+futures-core = "0.3"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

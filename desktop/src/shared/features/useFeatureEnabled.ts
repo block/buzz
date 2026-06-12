@@ -50,6 +50,7 @@ export function emitChange(): void {
 
 let cachedRaw: string | null = null;
 let cachedParsed: Record<string, boolean> | null = null;
+const emptyOverrides = Object.freeze({}) as Record<string, boolean>;
 
 function getSnapshot(): string {
   const raw = JSON.stringify(getOverrides());
@@ -63,7 +64,7 @@ function getSnapshot(): string {
 /**
  * Server-side snapshot for useSyncExternalStore.
  *
- * Sprout is a Tauri desktop app and does not currently SSR. Returning an
+ * Buzz is a Tauri desktop app and does not currently SSR. Returning an
  * explicit empty-state snapshot is safer than omitting this argument: under
  * any future test harness or SSR experiment, the hook returns "no overrides"
  * instead of throwing.
@@ -73,7 +74,7 @@ const getServerSnapshot = (): string => "{}";
 function getParsedSnapshot(): Record<string, boolean> {
   // Ensure snapshot is fresh
   getSnapshot();
-  return cachedParsed!;
+  return cachedParsed ?? emptyOverrides;
 }
 
 // ---------------------------------------------------------------------------

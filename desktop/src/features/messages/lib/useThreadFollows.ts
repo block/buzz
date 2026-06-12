@@ -1,6 +1,6 @@
 import * as React from "react";
 
-const STORAGE_KEY_PREFIX = "sprout-thread-follows.v1";
+const STORAGE_KEY_PREFIX = "buzz-thread-follows.v1";
 const MAX_ENTRIES = 500;
 
 type ThreadFollowEntry = {

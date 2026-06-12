@@ -15,7 +15,7 @@ type ThemeContextValue = {
   setTheme: (theme: Theme) => void;
 };
 
-const STORAGE_KEY = "sprout-web-theme";
+const STORAGE_KEY = "buzz-web-theme";
 
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 

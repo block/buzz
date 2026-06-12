@@ -1,8 +1,8 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sprout_mobile/features/channels/timeline_message.dart';
-import 'package:sprout_mobile/shared/relay/relay.dart';
+import 'package:buzz/features/channels/timeline_message.dart';
+import 'package:buzz/shared/relay/relay.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -328,7 +328,7 @@ void main() {
       expect(result[0].content, 'keep');
     });
 
-    test('filters messages deleted via kind:9005 (Sprout-native)', () {
+    test('filters messages deleted via kind:9005 (Buzz-native)', () {
       // Agents emit kind:9005 deletes via the CLI. Mobile must mirror desktop
       // and treat 9005 as a deletion marker, otherwise agent-deleted messages
       // stay rendered until manual refresh.

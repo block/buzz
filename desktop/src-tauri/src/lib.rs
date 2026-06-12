@@ -233,11 +233,15 @@ fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), String> {
     // All tracked PIDs have already been killed above, so pass an empty skip list.
     managed_agents::sweep_orphaned_agent_processes(app, &[]);
 
-    // System-wide sweep: agent workers (goose, sprout-agent, etc.) are spawned
-    // in their own process groups by sprout-acp, so group-kills above only
+    // System-wide sweep: agent workers (goose, buzz-agent, etc.) are spawned
+    // in their own process groups by buzz-acp, so group-kills above only
     // reach the harness, not the workers. Scan all user processes and kill any
     // known agent binaries that are still running.
     managed_agents::sweep_system_agent_processes(&managed_agents::current_instance_id(app), &[]);
+
+    // Dead-instance reaping: find agents belonging to Buzz instances
+    // whose desktop process is no longer running and reap them.
+    managed_agents::reap_dead_instance_agents(&managed_agents::current_instance_id(app), &[]);
 
     if changed {
         save_managed_agents(app, &records)?;
@@ -246,7 +250,7 @@ fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Parse the query string of a `sprout://message?…` URL into the JSON
+/// Parse the query string of a `buzz://message?…` URL into the JSON
 /// payload emitted on `deep-link-message`. Returns `None` when a required
 /// param (`channel`, `id`) is missing or empty — mirroring the validation
 /// policy of the `connect` arm so the frontend never sees a half-formed
@@ -278,21 +282,21 @@ fn parse_message_deep_link(url: &Url) -> Option<serde_json::Value> {
     }))
 }
 
-/// Handle an incoming `sprout://` deep link URL.
+/// Handle an incoming `buzz://` deep link URL.
 ///
 /// Currently supports:
-/// - `sprout://connect?relay=<ws(s)://...>` — emits `deep-link-connect` to the frontend
+/// - `buzz://connect?relay=<ws(s)://...>` — emits `deep-link-connect` to the frontend
 fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
     let url = match Url::parse(url_str) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!("sprout-desktop: invalid deep link URL {url_str:?}: {e}");
+            eprintln!("buzz-desktop: invalid deep link URL {url_str:?}: {e}");
             return;
         }
     };
 
-    if url.scheme() != "sprout" {
-        eprintln!("sprout-desktop: ignoring non-sprout deep link: {url_str}");
+    if url.scheme() != "buzz" {
+        eprintln!("buzz-desktop: ignoring unsupported deep link scheme: {url_str}");
         return;
     }
 
@@ -303,7 +307,7 @@ fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 .find(|(k, _)| k == "relay")
                 .map(|(_, v)| v.into_owned());
             let Some(relay_url) = relay else {
-                eprintln!("sprout-desktop: connect deep link missing relay param: {url_str}");
+                eprintln!("buzz-desktop: connect deep link missing relay param: {url_str}");
                 return;
             };
             // Validate the relay URL is ws:// or wss://
@@ -311,20 +315,20 @@ fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 Ok(parsed) if parsed.scheme() == "ws" || parsed.scheme() == "wss" => {}
                 Ok(parsed) => {
                     eprintln!(
-                        "sprout-desktop: rejecting non-websocket relay URL scheme {:?}: {relay_url}",
+                        "buzz-desktop: rejecting non-websocket relay URL scheme {:?}: {relay_url}",
                         parsed.scheme()
                     );
                     return;
                 }
                 Err(e) => {
-                    eprintln!("sprout-desktop: invalid relay URL {relay_url:?}: {e}");
+                    eprintln!("buzz-desktop: invalid relay URL {relay_url:?}: {e}");
                     return;
                 }
             }
             let _ = app.emit("deep-link-connect", relay_url);
         }
         Some("message") => {
-            // `sprout://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`
+            // `buzz://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`
             //
             // Validation policy mirrors the `connect` arm: parse what we
             // need, refuse to emit anything if a required param is missing
@@ -333,16 +337,16 @@ fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             // structure on this side (serde JSON) and let the TS code own
             // any further normalisation.
             let Some(payload) = parse_message_deep_link(&url) else {
-                eprintln!("sprout-desktop: message deep link missing channel or id: {url_str}");
+                eprintln!("buzz-desktop: message deep link missing channel or id: {url_str}");
                 return;
             };
             let _ = app.emit("deep-link-message", payload);
         }
         Some(action) => {
-            eprintln!("sprout-desktop: unknown deep link action: {action}");
+            eprintln!("buzz-desktop: unknown deep link action: {action}");
         }
         None => {
-            eprintln!("sprout-desktop: deep link missing action: {url_str}");
+            eprintln!("buzz-desktop: deep link missing action: {url_str}");
         }
     }
 }
@@ -373,7 +377,7 @@ pub fn run() {
             }
             // Forward any deep link URLs from the duplicate launch.
             for arg in &argv {
-                if arg.starts_with("sprout://") {
+                if arg.starts_with("buzz://") {
                     handle_deep_link_url(app, arg);
                 }
             }
@@ -490,23 +494,23 @@ pub fn run() {
     // Only register the updater in release builds that were compiled with a
     // real updater configuration. Local unsigned builds omit that config and
     // should still launch for debugging.
-    #[cfg(sprout_updater_enabled)]
+    #[cfg(buzz_updater_enabled)]
     let builder = if cfg!(debug_assertions) {
         builder
     } else {
         builder.plugin(tauri_plugin_updater::Builder::new().build())
     };
 
-    #[cfg(not(sprout_updater_enabled))]
+    #[cfg(not(buzz_updater_enabled))]
     let builder = builder;
 
     let shutdown_started = Arc::new(AtomicBool::new(false));
     let restore_shutdown_started = Arc::clone(&shutdown_started);
     let app = builder
-        .register_asynchronous_uri_scheme_protocol("sprout-media", |ctx, request, responder| {
+        .register_asynchronous_uri_scheme_protocol("buzz-media", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             tauri::async_runtime::spawn(async move {
-                let response = media_proxy::handle_sprout_media(&app, &request).await;
+                let response = media_proxy::handle_buzz_media(&app, &request).await;
                 responder.respond(response);
             });
         })
@@ -516,17 +520,22 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let shutdown_started = Arc::clone(&restore_shutdown_started);
 
+            // Copy legacy app data into the Buzz app data directory
+            // before any state is loaded from disk.
+            migration::migrate_legacy_app_data_dir(&app_handle);
+
             // Sync shared agent data from the canonical dev data directory to
             // this worktree's data directory. Must run before
             // restore_managed_agents_on_launch (which reads managed-agents.json).
             migration::sync_shared_agent_data(&app_handle);
             migration::migrate_packs_to_teams(&app_handle);
             migration::reconcile_persona_team_dirs(&app_handle);
-            migration::reconcile_provider_mcp_commands(&app_handle);
             migration::migrate_persona_provider_to_runtime(&app_handle);
+            migration::reconcile_legacy_command_names(&app_handle);
+            migration::reconcile_provider_mcp_commands(&app_handle);
 
             if let Err(e) = managed_agents::sync_team_personas(&app_handle) {
-                eprintln!("sprout-desktop: sync-team-personas: {e}");
+                eprintln!("buzz-desktop: sync-team-personas: {e}");
             }
 
             // Resolve persisted identity key (env var → file → generate+save).
@@ -570,19 +579,19 @@ pub fn run() {
                     .store(port, std::sync::atomic::Ordering::Relaxed);
             });
 
-            // Create the Sprout nest (~/.sprout) before agents are restored,
+            // Create the Buzz nest (~/.buzz) before agents are restored,
             // so default_agent_workdir() resolves to the nest directory.
             // Non-fatal: agents fall back to $HOME if nest creation fails.
             if let Err(error) = ensure_nest() {
-                eprintln!("sprout-desktop: failed to create nest: {error}");
+                eprintln!("buzz-desktop: failed to create nest: {error}");
             }
 
-            // Create/update ~/.local/bin/sprout symlink pointing to the
+            // Create/update the local CLI symlink pointing to the
             // bundled CLI binary. Non-fatal: agents find CLI via PATH.
             if let Ok(exe) = std::env::current_exe() {
                 if let Some(parent) = exe.parent() {
                     if let Err(error) = managed_agents::ensure_cli_symlink(parent) {
-                        eprintln!("sprout-desktop: failed to create CLI symlink: {error}");
+                        eprintln!("buzz-desktop: failed to create CLI symlink: {error}");
                     }
                 }
             }
@@ -600,7 +609,7 @@ pub fn run() {
                 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
                 let shortcut = Shortcut::new(Some(Modifiers::CONTROL), Code::Space);
                 if let Err(e) = app.handle().global_shortcut().register(shortcut) {
-                    eprintln!("sprout-desktop: failed to register PTT shortcut: {e}");
+                    eprintln!("buzz-desktop: failed to register PTT shortcut: {e}");
                 }
             }
 
@@ -624,7 +633,46 @@ pub fn run() {
                 if let Err(error) =
                     restore_managed_agents_on_launch(&app_handle, shutdown_started.as_ref()).await
                 {
-                    eprintln!("sprout-desktop: failed to restore managed agents: {error}");
+                    eprintln!("buzz-desktop: failed to restore managed agents: {error}");
+                }
+            });
+
+            // Periodic sweep: reap orphaned agents from dead instances every 60s.
+            // Catches agents that escaped both the Justfile trap and boot-time
+            // reaping (e.g. a `just staging` Ctrl+C leak that only gets collected
+            // by a different instance's periodic sweep).
+            let sweep_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use std::collections::HashSet;
+                use std::time::Duration;
+                use tauri::Manager;
+                let instance_id = managed_agents::current_instance_id(&sweep_handle);
+                let state = sweep_handle.state::<AppState>();
+                // Two-tick grace: only reap same-instance orphans seen on two
+                // consecutive sweeps. Prevents killing a legitimately-starting
+                // agent that spawned between the skip-list snapshot and the scan.
+                let mut prev_orphans: HashSet<u32> = HashSet::new();
+                loop {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    // Collect PIDs of our own live agents to avoid killing them.
+                    let skip_pids: Vec<u32> = state
+                        .managed_agent_processes
+                        .lock()
+                        .map(|runtimes| runtimes.values().map(|rt| rt.child.id()).collect())
+                        .unwrap_or_default();
+                    let prev = prev_orphans.clone();
+                    let inst = instance_id.clone();
+                    // Run the blocking syscall work off the async executor.
+                    let new_orphans = tauri::async_runtime::spawn_blocking(move || {
+                        let orphans = managed_agents::sweep_system_agent_processes_with_grace(
+                            &inst, &skip_pids, &prev,
+                        );
+                        managed_agents::reap_dead_instance_agents(&inst, &skip_pids);
+                        orphans
+                    })
+                    .await
+                    .unwrap_or_default();
+                    prev_orphans = new_orphans;
                 }
             });
 
@@ -677,6 +725,7 @@ pub fn run() {
             get_feed,
             search_messages,
             send_channel_message,
+            send_managed_agent_channel_message,
             get_forum_posts,
             get_forum_thread,
             edit_message,
@@ -812,7 +861,7 @@ pub fn run() {
             }
             std::process::exit(0);
         }) {
-            eprintln!("sprout-desktop: failed to register signal handler: {e}");
+            eprintln!("buzz-desktop: failed to register signal handler: {e}");
         }
     }
 
@@ -823,7 +872,7 @@ pub fn run() {
             if !run_shutdown_done.swap(true, Ordering::SeqCst) {
                 prevent_sleep::release(&app_handle.state::<AppState>().prevent_sleep);
                 if let Err(error) = shutdown_managed_agents(app_handle) {
-                    eprintln!("sprout-desktop: failed to stop managed agents: {error}");
+                    eprintln!("buzz-desktop: failed to stop managed agents: {error}");
                 }
             }
         }
@@ -862,7 +911,7 @@ mod tests {
 
     #[test]
     fn parse_message_deep_link_extracts_required_params() {
-        let url = Url::parse("sprout://message?channel=abc&id=xyz").unwrap();
+        let url = Url::parse("buzz://message?channel=abc&id=xyz").unwrap();
         let payload = parse_message_deep_link(&url).expect("required params present");
         assert_eq!(payload["channelId"], "abc");
         assert_eq!(payload["messageId"], "xyz");
@@ -870,34 +919,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_message_deep_link_accepts_buzz_scheme() {
+        let url = Url::parse("buzz://message?channel=abc&id=xyz").unwrap();
+        let payload = parse_message_deep_link(&url).expect("required params present");
+        assert_eq!(payload["channelId"], "abc");
+        assert_eq!(payload["messageId"], "xyz");
+    }
+
+    #[test]
     fn parse_message_deep_link_includes_thread_root() {
-        let url = Url::parse("sprout://message?channel=abc&id=xyz&thread=root1").unwrap();
+        let url = Url::parse("buzz://message?channel=abc&id=xyz&thread=root1").unwrap();
         let payload = parse_message_deep_link(&url).expect("required params present");
         assert_eq!(payload["threadRootId"], "root1");
     }
 
     #[test]
     fn parse_message_deep_link_rejects_missing_id() {
-        let url = Url::parse("sprout://message?channel=abc").unwrap();
+        let url = Url::parse("buzz://message?channel=abc").unwrap();
         assert!(parse_message_deep_link(&url).is_none());
     }
 
     #[test]
     fn parse_message_deep_link_rejects_empty_channel() {
         // Regression: `channel=&id=foo` previously produced channelId: "".
-        let url = Url::parse("sprout://message?channel=&id=foo").unwrap();
+        let url = Url::parse("buzz://message?channel=&id=foo").unwrap();
         assert!(parse_message_deep_link(&url).is_none());
     }
 
     #[test]
     fn parse_message_deep_link_rejects_empty_id() {
-        let url = Url::parse("sprout://message?channel=abc&id=").unwrap();
+        let url = Url::parse("buzz://message?channel=abc&id=").unwrap();
         assert!(parse_message_deep_link(&url).is_none());
     }
 
     #[test]
     fn parse_message_deep_link_treats_empty_thread_as_absent() {
-        let url = Url::parse("sprout://message?channel=abc&id=xyz&thread=").unwrap();
+        let url = Url::parse("buzz://message?channel=abc&id=xyz&thread=").unwrap();
         let payload = parse_message_deep_link(&url).expect("required params present");
         assert!(payload["threadRootId"].is_null());
     }

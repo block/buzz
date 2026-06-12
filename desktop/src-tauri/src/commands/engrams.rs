@@ -22,8 +22,8 @@ use nostr::PublicKey;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
-use sprout_core::engram::{self, extract_refs, select_head, validate_and_decrypt, Body};
-use sprout_core::kind::KIND_AGENT_ENGRAM;
+use buzz_core_pkg::engram::{self, extract_refs, select_head, validate_and_decrypt, Body};
+use buzz_core_pkg::kind::KIND_AGENT_ENGRAM;
 
 use crate::{app_state::AppState, managed_agents::load_managed_agents, relay::query_relay};
 

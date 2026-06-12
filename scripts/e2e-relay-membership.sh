@@ -6,7 +6,7 @@
 #
 # Prerequisites:
 #   - Docker services running (postgres, redis, typesense)
-#   - Relay built: cargo build --release --bin sprout-relay
+#   - Relay built: cargo build --release --bin buzz-relay
 #   - nak available on PATH (for event signing)
 #
 # What it tests:
@@ -138,7 +138,7 @@ send_event() {
 
 # ── Helper: REST call with X-Pubkey header (dev mode) ────────────────────────
 #
-# When SPROUT_REQUIRE_AUTH_TOKEN=false the relay accepts an X-Pubkey header
+# When BUZZ_REQUIRE_AUTH_TOKEN=false the relay accepts an X-Pubkey header
 # containing the caller's hex pubkey — no token minting required.
 # This is the correct pattern for dev-mode E2E tests.
 #
@@ -218,11 +218,11 @@ if [[ -f .env ]]; then
     set +o allexport
 fi
 
-export SPROUT_BIND_ADDR="0.0.0.0:3000"
+export BUZZ_BIND_ADDR="0.0.0.0:3000"
 export RELAY_URL="ws://localhost:3000"
-export RUST_LOG="sprout_relay=warn"
-export SPROUT_REQUIRE_AUTH_TOKEN=false
-export SPROUT_REQUIRE_RELAY_MEMBERSHIP=true
+export RUST_LOG="buzz_relay=warn"
+export BUZZ_REQUIRE_AUTH_TOKEN=false
+export BUZZ_REQUIRE_RELAY_MEMBERSHIP=true
 
 # Generate owner keypair BEFORE relay start — main.rs requires RELAY_OWNER_PUBKEY
 log "Generating owner keypair..."
@@ -233,22 +233,22 @@ log "Owner pubkey: $OWNER_PUBKEY"
 
 # Generate a stable relay signing key for NIP-43 self-signed events (kind:13534, etc.)
 RELAY_SK=$(generate_keypair)
-export SPROUT_RELAY_PRIVATE_KEY="$RELAY_SK"
+export BUZZ_RELAY_PRIVATE_KEY="$RELAY_SK"
 log "Relay signing key set (NIP-43 self-signed events enabled)"
 
 # Kill any existing relay
-pkill -f "sprout-relay" 2>/dev/null || true
+pkill -f "buzz-relay" 2>/dev/null || true
 sleep 1
 
-./target/release/sprout-relay > /tmp/sprout-relay-membership-e2e.log 2>&1 &
+./target/release/buzz-relay > /tmp/buzz-relay-membership-e2e.log 2>&1 &
 RELAY_PID=$!
 
 for i in $(seq 1 15); do
-    if curl -s http://localhost:3000/ -H "Accept: application/nostr+json" | grep -q "Sprout"; then
+    if curl -s http://localhost:3000/ -H "Accept: application/nostr+json" | grep -q "Buzz"; then
         break
     fi
     if [[ $i -eq 15 ]]; then
-        fatal "Relay did not start. Check /tmp/sprout-relay-membership-e2e.log"
+        fatal "Relay did not start. Check /tmp/buzz-relay-membership-e2e.log"
     fi
     sleep 1
 done

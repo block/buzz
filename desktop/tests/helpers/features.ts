@@ -34,4 +34,4 @@ export const PREVIEW_FEATURE_IDS: string[] = manifest.features
  * Mirrors `OVERRIDES_KEY` in `src/shared/features/store.ts` so a manifest
  * version bump flows through to E2E seeding without manual updates.
  */
-export const FEATURE_OVERRIDES_STORAGE_KEY = `sprout-feature-overrides-v${manifest.version}`;
+export const FEATURE_OVERRIDES_STORAGE_KEY = `buzz-feature-overrides-v${manifest.version}`;

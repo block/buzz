@@ -4,12 +4,12 @@
  * The localStorage key is derived from `manifest.version` so a schema bump
  * naturally orphans the old key — clean reset, no migration logic.
  *
- *   sprout-feature-overrides-v${manifest.version}
+ *   buzz-feature-overrides-v${manifest.version}
  *     → JSON object of { [featureId]: boolean }
  */
 import { manifest } from "./manifest";
 
-export const OVERRIDES_KEY = `sprout-feature-overrides-v${manifest.version}`;
+export const OVERRIDES_KEY = `buzz-feature-overrides-v${manifest.version}`;
 
 export type FeatureOverrides = Record<string, boolean>;
 

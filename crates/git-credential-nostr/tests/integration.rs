@@ -50,7 +50,7 @@ fn valid_input() -> String {
      protocol=https\n\
      host=relay.example.com\n\
      path=git/owner/repo.git/info/refs\n\
-     wwwauth[]=Nostr realm=\"sprout\", method=\"GET\"\n\
+     wwwauth[]=Nostr realm=\"buzz\", method=\"GET\"\n\
      \n"
     .to_string()
 }
@@ -180,7 +180,7 @@ fn missing_method_hint() {
                  protocol=https\n\
                  host=relay.example.com\n\
                  path=git/owner/repo.git/info/refs\n\
-                 wwwauth[]=Nostr realm=\"sprout\"\n\
+                 wwwauth[]=Nostr realm=\"buzz\"\n\
                  \n";
 
     let nsec = fresh_nsec();
@@ -208,7 +208,7 @@ fn missing_path() {
                  capability[]=state\n\
                  protocol=https\n\
                  host=relay.example.com\n\
-                 wwwauth[]=Nostr realm=\"sprout\", method=\"GET\"\n\
+                 wwwauth[]=Nostr realm=\"buzz\", method=\"GET\"\n\
                  \n";
 
     let nsec = fresh_nsec();

@@ -11,15 +11,15 @@ export const READ_STATE_HORIZON_SECONDS = 7 * 24 * 60 * 60;
 const MAX_CONTEXTS = 10_000;
 
 export function localReadStateKey(pubkey: string): string {
-  return `sprout.channel-read-state.v2:${pubkey}`;
+  return `buzz.channel-read-state.v2:${pubkey}`;
 }
 
 export function localPublishableContextKey(pubkey: string): string {
-  return `sprout.channel-read-state.publishable.v1:${pubkey}`;
+  return `buzz.channel-read-state.publishable.v1:${pubkey}`;
 }
 
 export function localSourceCreatedAtKey(pubkey: string): string {
-  return `sprout.channel-read-state.source-created-at.v1:${pubkey}`;
+  return `buzz.channel-read-state.source-created-at.v1:${pubkey}`;
 }
 
 export function isPlainRecord(

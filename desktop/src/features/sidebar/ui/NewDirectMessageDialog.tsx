@@ -114,7 +114,7 @@ export function NewDirectMessageDialog({
         <DialogHeader>
           <DialogTitle>New direct message</DialogTitle>
           <DialogDescription>
-            Pick 1 to 8 people. If the conversation already exists, Sprout will
+            Pick 1 to 8 people. If the conversation already exists, Buzz will
             reopen it.
           </DialogDescription>
         </DialogHeader>

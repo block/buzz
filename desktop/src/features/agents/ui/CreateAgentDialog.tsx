@@ -56,7 +56,7 @@ export function CreateAgentDialog({
   const allProvidersQuery = useAcpRuntimesQuery();
   const backendProvidersQuery = useBackendProvidersQuery();
   const { lastRuntimeId, setLastRuntime } = useLastRuntime();
-  const [acpCommand, setAcpCommand] = React.useState("sprout-acp");
+  const [acpCommand, setAcpCommand] = React.useState("buzz-acp");
   const [agentCommand, setAgentCommand] = React.useState("goose");
   const [agentArgs, setAgentArgs] = React.useState("acp");
   const [mcpCommand, setMcpCommand] = React.useState("");
@@ -90,7 +90,7 @@ export function CreateAgentDialog({
   const [probeError, setProbeError] = React.useState<string | null>(null);
 
   // ── Relay-mesh flow state ──────────────────────────────────────────────────
-  // When `useMesh` is on, the agent runs sprout-agent against a member's
+  // When `useMesh` is on, the agent runs buzz-agent against a member's
   // shared compute. The ACP runtime + backend selectors are hidden; runtime
   // fields are driven by `mesh_agent_preset(meshModelId)` and the submit
   // input carries `model: meshModelId`.
@@ -122,7 +122,7 @@ export function CreateAgentDialog({
     () => backendProviders.find((p) => p.id === runOn) ?? null,
     [backendProviders, runOn],
   );
-  // Relay mesh always runs in local mode (sprout-agent + OpenAI-compat env);
+  // Relay mesh always runs in local mode (buzz-agent + OpenAI-compat env);
   // when on, it suppresses the backend "Run on" branch even if a stale
   // `runOn` value remains. The relay-mesh path is its own thing.
   const isProviderMode = !useMesh && runOn !== "local";
@@ -235,7 +235,7 @@ export function CreateAgentDialog({
     setRelayUrl("");
     setSpawnAfterCreate(true);
     setStartOnAppLaunch(true);
-    setAcpCommand("sprout-acp");
+    setAcpCommand("buzz-acp");
     setAgentCommand("goose");
     setAgentArgs("acp");
     setMcpCommand("");
@@ -435,7 +435,7 @@ export function CreateAgentDialog({
             <DialogTitle>Create agent</DialogTitle>
             <DialogDescription>
               This creates a local agent identity, syncs its display name when
-              possible, and can spawn `sprout-acp` immediately.
+              possible, and can spawn `buzz-acp` immediately.
             </DialogDescription>
           </DialogHeader>
 
@@ -621,7 +621,7 @@ export function CreateAgentDialog({
                     />
 
                     <p className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3 text-sm text-muted-foreground">
-                      Local Sprout binary checks and ACP runtime discovery now
+                      Local Buzz binary checks and ACP runtime discovery now
                       live in Settings &gt; Doctor.
                     </p>
 

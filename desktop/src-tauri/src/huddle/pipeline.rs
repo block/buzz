@@ -60,10 +60,10 @@ pub(crate) async fn post_connect_setup(
 
     // Start pipelines: TTS first (so STT can capture tts_cancel for barge-in).
     if let Err(e) = maybe_start_tts_pipeline(state).await {
-        eprintln!("sprout-desktop: TTS pipeline failed to start: {e}");
+        eprintln!("buzz-desktop: TTS pipeline failed to start: {e}");
     }
     if let Err(e) = maybe_start_stt_pipeline(state, ephemeral_channel_id).await {
-        eprintln!("sprout-desktop: STT pipeline failed to start: {e}");
+        eprintln!("buzz-desktop: STT pipeline failed to start: {e}");
     }
 
     Ok(())
@@ -273,14 +273,14 @@ pub(crate) fn spawn_transcription_task(
                 match events::build_message(channel_uuid, &t, None, &p_tags, &[], &[], &[]) {
                     Ok(b) => b,
                     Err(e) => {
-                        eprintln!("sprout-desktop: STT build_message: {e}");
+                        eprintln!("buzz-desktop: STT build_message: {e}");
                         continue;
                     }
                 };
             let event = match builder.sign_with_keys(&keys) {
                 Ok(e) => e,
                 Err(e) => {
-                    eprintln!("sprout-desktop: STT sign event: {e}");
+                    eprintln!("buzz-desktop: STT sign event: {e}");
                     continue;
                 }
             };
@@ -294,7 +294,7 @@ pub(crate) fn spawn_transcription_task(
             ) {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("sprout-desktop: STT NIP-98 auth: {e}");
+                    eprintln!("buzz-desktop: STT NIP-98 auth: {e}");
                     continue;
                 }
             };
@@ -311,12 +311,12 @@ pub(crate) fn spawn_transcription_task(
                 Ok(resp) if resp.status().is_success() => {}
                 Ok(resp) => {
                     eprintln!(
-                        "sprout-desktop: STT kind:9 post failed: HTTP {}",
+                        "buzz-desktop: STT kind:9 post failed: HTTP {}",
                         resp.status()
                     );
                 }
                 Err(e) => {
-                    eprintln!("sprout-desktop: STT kind:9 post failed: {e}");
+                    eprintln!("buzz-desktop: STT kind:9 post failed: {e}");
                 }
             }
         }

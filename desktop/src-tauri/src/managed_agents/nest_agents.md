@@ -1,6 +1,6 @@
-# Sprout Nest
+# Buzz Nest
 
-Your persistent workspace. Created once by the Sprout desktop app. The static content above the managed-section markers is regenerated on upgrades — add custom notes below the markers or in separate files.
+Your persistent workspace. Created once by the Buzz desktop app. The static content above the managed-section markers is regenerated on upgrades — add custom notes below the markers or in separate files.
 
 ## Directory Layout
 
@@ -16,7 +16,7 @@ Your persistent workspace. Created once by the Sprout desktop app. The static co
 
 Filenames: `ALL_CAPS_WITH_UNDERSCORES.md` (e.g., `OAUTH_FLOW_NOTES.md`).
 
-The `sprout` CLI is your primary tool interface — run `sprout --help` for commands. The CLI skill file has the full reference.
+The bundled CLI is your primary tool interface — run its `--help` command for usage. The CLI skill file has the full reference.
 
 ## Knowledge File Conventions
 
@@ -54,9 +54,9 @@ The human operator signs off for accountability.
 - **Signing:** if the agent has a registered signing key, sign commits. If not, commits will land unverified — this is acceptable until agent SSH keys are provisioned. Do NOT use the human's signing key.
 - **Verify before pushing:** `git log -1` should show the human's `Signed-off-by` trailer.
 
-<!-- BEGIN SPROUT MANAGED — regenerated automatically, do not edit below -->
+<!-- BEGIN BUZZ MANAGED — regenerated automatically, do not edit below -->
 ## Active Agents
 
-*(No agents deployed yet. Add agents in the Sprout desktop app.)*
+*(No agents deployed yet. Add agents in the Buzz desktop app.)*
 
-<!-- END SPROUT MANAGED -->
+<!-- END BUZZ MANAGED -->

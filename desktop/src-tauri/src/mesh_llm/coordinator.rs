@@ -9,7 +9,7 @@
 //!
 //! Two responsibilities:
 //!   1. `spawn_listener` — a long-lived task that holds an authenticated WS to
-//!      Sprout's relay (generalizing the proven `commands::pairing` NIP-42
+//!      Buzz's relay (generalizing the proven `commands::pairing` NIP-42
 //!      machinery), subscribes `kind:24622 #p=self`, and dials each paired
 //!      call-me-now back into the local mesh runtime. Idempotent: one listener
 //!      per process; re-entrant calls return the live handle.
@@ -31,7 +31,7 @@ use tauri::{AppHandle, Manager};
 use tokio::sync::watch;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use sprout_core::kind::{
+use buzz_core_pkg::kind::{
     KIND_MESH_CALL_ME_NOW, KIND_MESH_CONNECT_REQUEST, KIND_MESH_STATUS_REPORT,
 };
 
@@ -138,14 +138,14 @@ async fn status_publisher_loop(app: AppHandle) {
 pub(crate) async fn publish_current_status_once(app: &AppHandle, reason: &str) {
     let state = app.state::<AppState>();
     if let Err(error) = publish_current_status_for_state(&state).await {
-        eprintln!("sprout-mesh: status report after {reason} failed: {error}");
+        eprintln!("buzz-mesh: status report after {reason} failed: {error}");
     }
 }
 
 pub(crate) async fn publish_stopped_status_once(app: &AppHandle, reason: &str) {
     let state = app.state::<AppState>();
     if let Err(error) = publish_stopped_status_for_state(&state).await {
-        eprintln!("sprout-mesh: stopped status report after {reason} failed: {error}");
+        eprintln!("buzz-mesh: stopped status report after {reason} failed: {error}");
     }
 }
 
@@ -176,14 +176,14 @@ fn stopped_status_payload() -> serde_json::Value {
     })
 }
 
-/// The listener task body. Connects, authenticates as the Sprout identity,
+/// The listener task body. Connects, authenticates as the Buzz identity,
 /// subscribes `24622 #p=self`, and dials each paired call-me-now. Reconnects
 /// with backoff on connection loss; flips `active` to `false` while down so
 /// `start_client` won't publish during an outage.
 async fn listener_loop(app: AppHandle, active: watch::Sender<bool>) {
     loop {
         if let Err(error) = listener_session(&app, &active).await {
-            eprintln!("sprout-mesh: call-me-now listener session ended: {error}");
+            eprintln!("buzz-mesh: call-me-now listener session ended: {error}");
         }
         let _ = active.send(false);
         tokio::time::sleep(RETRY_BACKOFF).await;
@@ -236,7 +236,7 @@ async fn listener_session(app: &AppHandle, active: &watch::Sender<bool>) -> Resu
             if let Err(error) =
                 crate::commands::ensure_client_node_for_model_dial_only(&state, &addr).await
             {
-                eprintln!("sprout-mesh: call-me-now dial failed: {error}");
+                eprintln!("buzz-mesh: call-me-now dial failed: {error}");
             }
         }
     }
@@ -296,7 +296,7 @@ pub async fn start_client(
     ))
 }
 
-/// Build + sign + submit the kind:24621 connect-request as the Sprout identity.
+/// Build + sign + submit the kind:24621 connect-request as the Buzz identity.
 async fn publish_connect_request(
     state: &AppState,
     request: &RelayMeshConnectRequest<'_>,
@@ -351,7 +351,7 @@ pub(crate) async fn publish_status_report(
 /// dropping expired ones.
 fn call_me_now_peer_addr(event: &nostr::Event) -> Option<String> {
     let payload: serde_json::Value = serde_json::from_str(&event.content).ok()?;
-    if payload.get("type")?.as_str()? != "sprout-iroh-call-me-now" {
+    if payload.get("type")?.as_str()? != "buzz-iroh-call-me-now" {
         return None;
     }
     let now = chrono::Utc::now().timestamp().max(0) as u64;
@@ -366,7 +366,7 @@ fn call_me_now_peer_addr(event: &nostr::Event) -> Option<String> {
         .map(str::to_string)
 }
 
-/// NIP-42 AUTH as the Sprout identity. Generalized from `commands::pairing`'s
+/// NIP-42 AUTH as the Buzz identity. Generalized from `commands::pairing`'s
 /// `handle_nip42_auth` — same flow, signs with `state.keys` instead of a
 /// pairing session. Returns `Ok(())` when the relay does not challenge.
 async fn authenticate<R, W>(
@@ -512,7 +512,7 @@ mod tests {
     fn call_me_now_peer_addr_extracts_unexpired() {
         let future = chrono::Utc::now().timestamp() as u64 + 30;
         let event = test_event(&json!({
-            "type": "sprout-iroh-call-me-now",
+            "type": "buzz-iroh-call-me-now",
             "peer_endpoint_addr": "node-abc",
             "attempt_id": "a1",
             "expires_at": future,
@@ -523,7 +523,7 @@ mod tests {
     #[test]
     fn call_me_now_peer_addr_drops_expired() {
         let event = test_event(&json!({
-            "type": "sprout-iroh-call-me-now",
+            "type": "buzz-iroh-call-me-now",
             "peer_endpoint_addr": "node-abc",
             "attempt_id": "a1",
             "expires_at": 1u64,

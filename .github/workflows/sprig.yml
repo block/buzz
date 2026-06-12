@@ -1,9 +1,9 @@
 name: Sprig
 
 # Builds and publishes Sprig — one deploy-anywhere Linux multicall binary for:
-#   sprout-acp       ACP harness that bridges Sprout events to the LLM agent
-#   sprout-agent     ACP-compliant agent (spawns MCP, calls LLMs)
-#   sprout-dev-mcp   Developer MCP server (multicall: rg, tree, sprout,
+#   buzz-acp       ACP harness that bridges Buzz events to the LLM agent
+#   buzz-agent     ACP-compliant agent (spawns MCP, calls LLMs)
+#   buzz-dev-mcp   Developer MCP server (multicall: rg, tree, buzz,
 #                    git-credential-nostr, git-sign-nostr)
 #
 # Targets: x86_64-unknown-linux-musl and aarch64-unknown-linux-musl (static
@@ -137,7 +137,7 @@ jobs:
           set -euo pipefail
           TAG="sprig-latest"
           TITLE="Sprig (rolling)"
-          NOTES="Rolling Linux build of Sprig (all-in-one sprout-acp + sprout-agent + sprout-dev-mcp), tracking \`main\` (\`${SHA}\`)."
+          NOTES="Rolling Linux build of Sprig (all-in-one buzz-acp + buzz-agent + buzz-dev-mcp), tracking \`main\` (\`${SHA}\`)."
 
           if gh api "repos/${REPO}/git/refs/tags/${TAG}" >/dev/null 2>&1; then
             gh api -X PATCH "repos/${REPO}/git/refs/tags/${TAG}" \
@@ -197,5 +197,5 @@ jobs:
           set -euo pipefail
           gh release create "$TAG" \
             --title "Sprig v${VERSION}" \
-            --notes "Sprig v${VERSION} — Linux all-in-one builds of sprout-acp + sprout-agent + sprout-dev-mcp." \
+            --notes "Sprig v${VERSION} — Linux all-in-one builds of buzz-acp + buzz-agent + buzz-dev-mcp." \
             dist/*

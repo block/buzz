@@ -68,7 +68,7 @@ expression = "MIT OR Apache-2.0"
 license-files = []
 
 [[licenses.clarify]]
-crate = "sprout-desktop"
+crate = "buzz-desktop"
 expression = "Apache-2.0"
 license-files = []
 

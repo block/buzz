@@ -1,6 +1,6 @@
 import { QueryClient } from "@tanstack/react-query";
 
-export function createSproutQueryClient() {
+export function createBuzzQueryClient() {
   return new QueryClient({
     defaultOptions: {
       queries: {

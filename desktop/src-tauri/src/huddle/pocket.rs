@@ -23,7 +23,7 @@
 //!   in <https://huggingface.co/kyutai/tts-voices>. CC-BY-4.0, base recording
 //!   from the VCTK corpus, enhanced by ai-coustics.
 //!
-//! Sprout ships these files unmodified; see the on-disk `MODEL_LICENSE.txt`
+//! Buzz ships these files unmodified; see the on-disk `MODEL_LICENSE.txt`
 //! sidecar written by `huddle::models` during install for the canonical
 //! CC-BY-4.0 §3(a)(1) attribution block.
 //!
@@ -539,7 +539,7 @@ impl PocketTts {
         let sample_rate = audio.sample_rate();
         if sample_rate != SAMPLE_RATE as i32 {
             eprintln!(
-                "sprout-desktop: Pocket TTS returned unexpected sample rate {sample_rate}Hz \
+                "buzz-desktop: Pocket TTS returned unexpected sample rate {sample_rate}Hz \
                  (expected {SAMPLE_RATE}Hz); playback speed may be wrong"
             );
         }

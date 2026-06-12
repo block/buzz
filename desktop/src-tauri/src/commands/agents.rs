@@ -20,7 +20,7 @@ use crate::{
 };
 
 /// Read the workspace owner's pubkey hex from app state without holding the
-/// lock for longer than necessary. Used to populate `SPROUT_ACP_AGENT_OWNER`
+/// lock for longer than necessary. Used to populate `BUZZ_ACP_AGENT_OWNER`
 /// as a fallback for legacy agent records that have no NIP-OA `auth_tag`.
 fn workspace_owner_hex(state: &AppState) -> Result<String, String> {
     let keys = state.keys.lock().map_err(|e| e.to_string())?;
@@ -46,6 +46,30 @@ fn normalize_relay_mesh(
     Ok(Some(RelayMeshConfig {
         model_ref: model_ref.to_string(),
     }))
+}
+
+fn trim_to_optional_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn resolve_created_avatar_url(
+    requested_avatar_url: Option<&str>,
+    persona_avatar_url: Option<String>,
+    agent_command: &str,
+) -> Option<String> {
+    requested_avatar_url
+        .and_then(trim_to_optional_string)
+        .or_else(|| {
+            persona_avatar_url
+                .as_deref()
+                .and_then(trim_to_optional_string)
+        })
+        .or_else(|| managed_agent_avatar_url(agent_command))
 }
 
 #[cfg(feature = "mesh-llm")]
@@ -111,7 +135,8 @@ async fn start_local_agent_with_preflight(
         .iter()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    build_managed_agent_summary(app, record, &runtimes)
+    let personas = load_personas(app).unwrap_or_default();
+    build_managed_agent_summary(app, record, &runtimes, &personas)
 }
 
 /// Build the standard agent JSON payload for provider deploy calls.
@@ -283,9 +308,10 @@ pub fn list_managed_agents(
         save_managed_agents(&app, &records)?;
     }
 
+    let personas = load_personas(&app).unwrap_or_default();
     records
         .iter()
-        .map(|record| build_managed_agent_summary(&app, record, &runtimes))
+        .map(|record| build_managed_agent_summary(&app, record, &runtimes, &personas))
         .collect()
 }
 
@@ -313,7 +339,7 @@ pub async fn create_managed_agent(
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
 
     // Validate & normalize the respond-to allowlist BEFORE any side effects.
-    // The harness has its own validator (sprout-acp/src/config.rs) but we want
+    // The harness has its own validator (buzz-acp/src/config.rs) but we want
     // to catch malformed input at the boundary so the agent never tries to
     // start with a list that will crash it on launch.
     let respond_to_allowlist =
@@ -384,12 +410,12 @@ pub async fn create_managed_agent(
     // No tokens are minted. Fail closed: bad auth tag → don't create agent.
     let auth_tag = {
         let owner_keys = state.keys.lock().map_err(|e| e.to_string())?;
-        // Bridge nostr 0.37 → 0.36 (sprout-sdk) via hex round-trip.
+        // Bridge nostr 0.37 → 0.36 (buzz-sdk) via hex round-trip.
         let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
             .map_err(|e| format!("failed to bridge owner keys: {e}"))?;
         let compat_agent = nostr::PublicKey::from_hex(&agent_keys.public_key().to_hex())
             .map_err(|e| format!("failed to bridge agent pubkey: {e}"))?;
-        let tag = sprout_sdk::nip_oa::compute_auth_tag(&compat_owner, &compat_agent, "")
+        let tag = buzz_sdk_pkg::nip_oa::compute_auth_tag(&compat_owner, &compat_agent, "")
             .map_err(|e| format!("failed to compute NIP-OA auth tag: {e}"))?;
         Some(tag)
     };
@@ -472,16 +498,21 @@ pub async fn create_managed_agent(
             });
 
         // Resolve the avatar URL once at creation and persist it on the record.
-        // This is the same logic the original publish used (user input, else
-        // command-based fallback) — storing it lets reconciliation compare
-        // against what was actually published instead of re-deriving it.
-        let resolved_avatar_url = input
-            .avatar_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .or_else(|| managed_agent_avatar_url(&agent_command));
+        // Explicit input wins, then the persona's own avatar, then the runtime
+        // fallback. Storing it lets reconciliation compare against what was
+        // actually published instead of re-deriving it.
+        let persona_avatar_url = requested_persona_id.as_ref().and_then(|persona_id| {
+            load_personas(&app)
+                .ok()?
+                .into_iter()
+                .find(|persona| persona.id == *persona_id)?
+                .avatar_url
+        });
+        let resolved_avatar_url = resolve_created_avatar_url(
+            input.avatar_url.as_deref(),
+            persona_avatar_url,
+            &agent_command,
+        );
 
         let record = crate::managed_agents::ManagedAgentRecord {
             pubkey: pubkey.clone(),
@@ -565,8 +596,9 @@ pub async fn create_managed_agent(
             .iter()
             .find(|record| record.pubkey == pubkey)
             .ok_or_else(|| "created agent disappeared unexpectedly".to_string())?;
+        let personas = load_personas(&app).unwrap_or_default();
         (
-            build_managed_agent_summary(&app, record, &runtimes)?,
+            build_managed_agent_summary(&app, record, &runtimes, &personas)?,
             resolved_avatar_url,
         )
     };
@@ -595,7 +627,8 @@ pub async fn create_managed_agent(
                     .iter()
                     .find(|record| record.pubkey == pubkey)
                     .ok_or_else(|| "created agent disappeared unexpectedly".to_string())?;
-                build_managed_agent_summary(&app, record, &runtimes)?
+                let personas = load_personas(&app).unwrap_or_default();
+                build_managed_agent_summary(&app, record, &runtimes, &personas)?
             }
         }
     } else {
@@ -647,7 +680,7 @@ pub async fn create_managed_agent(
                     if let Err(persist_err) = persist_create_deploy_error(&app, &state, &pubkey, &e)
                     {
                         eprintln!(
-                            "sprout-desktop: failed to persist deploy-prep error for {pubkey}: {persist_err}"
+                            "buzz-desktop: failed to persist deploy-prep error for {pubkey}: {persist_err}"
                         );
                     }
                     Some(e)
@@ -681,7 +714,8 @@ pub async fn create_managed_agent(
             .iter()
             .find(|r| r.pubkey == pubkey)
             .ok_or_else(|| "agent disappeared".to_string())?;
-        build_managed_agent_summary(&app, record, &runtimes)?
+        let personas = load_personas(&app).unwrap_or_default();
+        build_managed_agent_summary(&app, record, &runtimes, &personas)?
     } else {
         agent
     };
@@ -811,7 +845,8 @@ pub async fn start_managed_agent(
                 .iter()
                 .find(|r| r.pubkey == pubkey)
                 .ok_or_else(|| format!("agent {pubkey} not found"))?;
-            build_managed_agent_summary(&app, record, &runtimes)
+            let personas = load_personas(&app).unwrap_or_default();
+            build_managed_agent_summary(&app, record, &runtimes, &personas)
         }
         StartTarget::Provider { backend, .. } => Err(format!(
             "agent {pubkey} has unsupported backend kind: {backend:?}"
@@ -834,7 +869,7 @@ pub async fn start_managed_agent(
                     .await
             {
                 eprintln!(
-                    "sprout-desktop: profile reconciliation failed for agent {reconcile_pubkey}: {e}"
+                    "buzz-desktop: profile reconciliation failed for agent {reconcile_pubkey}: {e}"
                 );
             }
         });
@@ -1003,7 +1038,8 @@ pub fn stop_managed_agent(
         .iter()
         .find(|record| record.pubkey == pubkey)
         .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    build_managed_agent_summary(&app, record, &runtimes)
+    let personas = load_personas(&app).unwrap_or_default();
+    build_managed_agent_summary(&app, record, &runtimes, &personas)
 }
 
 #[tauri::command]
@@ -1103,7 +1139,7 @@ pub fn discover_backend_providers() -> Vec<BackendProviderInfo> {
 
 #[tauri::command]
 pub async fn probe_backend_provider(binary_path: String) -> Result<serde_json::Value, String> {
-    // Validate that the requested path is actually a discovered sprout-backend-* binary.
+    // Validate that the requested path is actually a discovered buzz-backend-* binary.
     // This prevents arbitrary binary execution via a compromised frontend or IPC.
     let candidates = discover_provider_candidates();
     let path = std::path::PathBuf::from(&binary_path);
@@ -1115,7 +1151,7 @@ pub async fn probe_backend_provider(binary_path: String) -> Result<serde_json::V
         .any(|(_, p)| p.canonicalize().ok().as_ref() == Some(&canonical));
     if !is_known {
         return Err(format!(
-            "binary '{binary_path}' is not a discovered sprout-backend-* provider"
+            "binary '{binary_path}' is not a discovered buzz-backend-* provider"
         ));
     }
     // request_id is for provider-side logging — not validated in the response
@@ -1138,149 +1174,5 @@ pub async fn probe_backend_provider(binary_path: String) -> Result<serde_json::V
 // No backend Tauri command needed. Presence IS the status.
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_relay_mesh_rejects_empty_model_ref() {
-        let config = RelayMeshConfig {
-            model_ref: "  \t ".to_string(),
-        };
-
-        assert_eq!(
-            normalize_relay_mesh(Some(&config), &BackendKind::Local).unwrap_err(),
-            "relay mesh modelRef is required"
-        );
-    }
-
-    #[test]
-    fn normalize_relay_mesh_rejects_non_local_backend() {
-        let config = RelayMeshConfig {
-            model_ref: "Qwen3".to_string(),
-        };
-        let backend = BackendKind::Provider {
-            id: "blox".to_string(),
-            config: serde_json::json!({}),
-        };
-
-        assert_eq!(
-            normalize_relay_mesh(Some(&config), &backend).unwrap_err(),
-            "relay mesh agents must use the local backend"
-        );
-    }
-
-    #[test]
-    fn normalize_relay_mesh_trims_and_preserves_valid_config() {
-        let config = RelayMeshConfig {
-            model_ref: "  Qwen3  ".to_string(),
-        };
-
-        assert_eq!(
-            normalize_relay_mesh(Some(&config), &BackendKind::Local).unwrap(),
-            Some(RelayMeshConfig {
-                model_ref: "Qwen3".to_string(),
-            })
-        );
-    }
-
-    fn profile(name: Option<&str>, picture: Option<&str>) -> crate::relay::AgentProfileInfo {
-        crate::relay::AgentProfileInfo {
-            display_name: name.map(str::to_string),
-            picture: picture.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn profile_needs_sync_when_missing() {
-        assert!(profile_needs_sync(None, "Duncan", Some("https://x/a.png")));
-    }
-
-    #[test]
-    fn profile_needs_sync_when_name_diverges() {
-        let existing = profile(Some("Stilgar"), Some("https://x/a.png"));
-        assert!(profile_needs_sync(
-            Some(&existing),
-            "Duncan",
-            Some("https://x/a.png")
-        ));
-    }
-
-    #[test]
-    fn profile_needs_sync_when_picture_diverges() {
-        let existing = profile(Some("Duncan"), Some("https://x/old.png"));
-        assert!(profile_needs_sync(
-            Some(&existing),
-            "Duncan",
-            Some("https://x/new.png")
-        ));
-    }
-
-    #[test]
-    fn profile_in_sync_when_name_and_picture_match() {
-        let existing = profile(Some("Duncan"), Some("https://x/a.png"));
-        assert!(!profile_needs_sync(
-            Some(&existing),
-            "Duncan",
-            Some("https://x/a.png")
-        ));
-    }
-
-    #[test]
-    fn profile_in_sync_when_both_avatars_absent() {
-        let existing = profile(Some("Duncan"), None);
-        assert!(!profile_needs_sync(Some(&existing), "Duncan", None));
-    }
-
-    #[test]
-    fn profile_needs_sync_when_existing_name_is_none() {
-        let existing = profile(None, Some("https://x/a.png"));
-        assert!(profile_needs_sync(
-            Some(&existing),
-            "Duncan",
-            Some("https://x/a.png"),
-        ));
-    }
-
-    #[test]
-    fn profile_needs_sync_when_expected_avatar_absent_but_published() {
-        let existing = profile(Some("Duncan"), Some("https://x/a.png"));
-        assert!(profile_needs_sync(Some(&existing), "Duncan", None));
-    }
-
-    #[test]
-    fn legacy_avatar_prefers_persona_over_corrupted_relay_picture() {
-        // The regression: the relay picture was overwritten with the command
-        // default. The persona avatar must win so the correct avatar is restored.
-        let resolved = resolve_legacy_avatar(
-            Some("https://x/persona.png".to_string()),
-            Some("https://x/default-icon.png".to_string()),
-            "goose",
-        );
-
-        assert_eq!(resolved, "https://x/persona.png");
-    }
-
-    #[test]
-    fn legacy_avatar_falls_back_to_relay_picture_without_persona() {
-        let resolved =
-            resolve_legacy_avatar(None, Some("https://x/relay.png".to_string()), "goose");
-
-        assert_eq!(resolved, "https://x/relay.png");
-    }
-
-    #[test]
-    fn legacy_avatar_falls_back_to_command_icon_when_no_persona_or_relay() {
-        use crate::managed_agents::managed_agent_avatar_url;
-
-        let resolved = resolve_legacy_avatar(None, None, "goose");
-
-        assert_eq!(resolved, managed_agent_avatar_url("goose").unwrap());
-    }
-
-    #[test]
-    fn legacy_avatar_empty_when_nothing_resolves() {
-        let resolved = resolve_legacy_avatar(None, None, "totally-unknown-command");
-
-        assert!(resolved.is_empty());
-    }
-}
+#[path = "agents_tests.rs"]
+mod tests;

@@ -35,7 +35,7 @@ pub struct AppState {
     pub media_proxy_port: AtomicU16,
     /// IOKit power assertion state — prevents idle sleep while agents run.
     pub prevent_sleep: Arc<Mutex<crate::prevent_sleep::PreventSleepState>>,
-    /// In-process mesh-llm node started by Sprout Desktop.
+    /// In-process mesh-llm node started by Buzz Desktop.
     #[cfg(feature = "mesh-llm")]
     pub mesh_llm_runtime: AsyncMutex<Option<crate::mesh_llm::DesktopMeshRuntime>>,
     /// Runtime-owned relay-mesh control plane (call-me-now listener + connect
@@ -48,16 +48,16 @@ pub struct AppState {
 pub fn build_app_state() -> AppState {
     // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
     // in setup() will replace the ephemeral placeholder with a persisted key.
-    let (keys, source) = match std::env::var("SPROUT_PRIVATE_KEY") {
+    let (keys, source) = match std::env::var("BUZZ_PRIVATE_KEY") {
         Ok(nsec) => match Keys::parse(nsec.trim()) {
             Ok(keys) => (keys, "configured"),
             Err(error) => {
-                eprintln!("sprout-desktop: invalid SPROUT_PRIVATE_KEY: {error}");
+                eprintln!("buzz-desktop: invalid BUZZ_PRIVATE_KEY: {error}");
                 (Keys::generate(), "ephemeral")
             }
         },
         Err(std::env::VarError::NotUnicode(_)) => {
-            eprintln!("sprout-desktop: SPROUT_PRIVATE_KEY contains invalid UTF-8");
+            eprintln!("buzz-desktop: BUZZ_PRIVATE_KEY contains invalid UTF-8");
             (Keys::generate(), "ephemeral")
         }
         Err(std::env::VarError::NotPresent) => (Keys::generate(), "ephemeral"),
@@ -65,7 +65,7 @@ pub fn build_app_state() -> AppState {
 
     if source == "configured" {
         eprintln!(
-            "sprout-desktop: configured identity pubkey {}",
+            "buzz-desktop: configured identity pubkey {}",
             keys.public_key().to_hex()
         );
     }
@@ -126,7 +126,7 @@ impl AppState {
 
 /// Resolve the user's identity key from the app data directory.
 ///
-/// Priority: `SPROUT_PRIVATE_KEY` env var (already handled in `build_app_state`)
+/// Priority: `BUZZ_PRIVATE_KEY` env var (already handled in `build_app_state`)
 /// → `{app_data_dir}/identity.key` file → generate + save.
 ///
 /// Writes use `atomic-write-file` which handles temp file creation, fsync,
@@ -135,7 +135,7 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
     // Only skip file-based resolution if the env var was present AND parsed
     // successfully. A malformed env var should fall through to the persisted
     // key rather than leaving the app on an ephemeral identity.
-    if let Ok(nsec) = std::env::var("SPROUT_PRIVATE_KEY") {
+    if let Ok(nsec) = std::env::var("BUZZ_PRIVATE_KEY") {
         if Keys::parse(nsec.trim()).is_ok() {
             return Ok(());
         }
@@ -153,7 +153,7 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
         match load_key_file(&key_path) {
             Ok(keys) => {
                 eprintln!(
-                    "sprout-desktop: persisted identity pubkey {}",
+                    "buzz-desktop: persisted identity pubkey {}",
                     keys.public_key().to_hex()
                 );
                 *state.keys.lock().map_err(|e| e.to_string())? = keys;
@@ -168,7 +168,7 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
                     .unwrap_or(0);
                 let bad_name = format!("identity.key.bad.{ts}");
                 eprintln!(
-                    "sprout-desktop: corrupt identity.key ({error}), quarantining to {bad_name}"
+                    "buzz-desktop: corrupt identity.key ({error}), quarantining to {bad_name}"
                 );
                 let bad_path = data_dir.join(bad_name);
                 if std::fs::rename(&key_path, &bad_path).is_err() {
@@ -183,7 +183,7 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
     save_key_file(&key_path, &keys)?;
 
     eprintln!(
-        "sprout-desktop: generated and saved identity pubkey {}",
+        "buzz-desktop: generated and saved identity pubkey {}",
         keys.public_key().to_hex()
     );
     *state.keys.lock().map_err(|e| e.to_string())? = keys;

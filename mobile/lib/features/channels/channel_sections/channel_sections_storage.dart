@@ -2,8 +2,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-String channelSectionsKey(String pubkey) =>
-    'sprout.channel-sections.v1:$pubkey';
+String channelSectionsKey(String pubkey) => 'buzz.channel-sections.v1:$pubkey';
 
 class ChannelSection {
   final String id;

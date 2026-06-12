@@ -1,0 +1,56 @@
+export const TOP_CHROME_HEIGHT_DEFAULT = "2.5rem";
+export const CHANNEL_CONTENT_TOP_PADDING_DEFAULT = "5.75rem";
+
+export const chromeCssVars = {
+  topChromeHeight: "--buzz-top-chrome-height",
+  channelContentTopPadding: "--buzz-channel-content-top-padding",
+} as const;
+
+export const chromeCssVarDefaults = {
+  [chromeCssVars.topChromeHeight]: TOP_CHROME_HEIGHT_DEFAULT,
+  [chromeCssVars.channelContentTopPadding]: CHANNEL_CONTENT_TOP_PADDING_DEFAULT,
+} as const;
+
+export const channelContentTopPaddingMeasurement = {
+  cssVariable: chromeCssVars.channelContentTopPadding,
+  resetValue: chromeCssVarDefaults[chromeCssVars.channelContentTopPadding],
+} as const;
+
+/** Tailwind class fragments for layout under the global top chrome. */
+export const topChromeInset = {
+  /** Absolute/fixed top offset below the search bar. */
+  top: "top-(--buzz-top-chrome-height,2.5rem)",
+  /** Padding-top clearing the global top chrome. */
+  padding: "pt-(--buzz-top-chrome-height,2.5rem)",
+  /** `after:` pseudo-element top offset. */
+  afterTop: "after:top-(--buzz-top-chrome-height,2.5rem)",
+  /** Horizontal divider at the bottom edge of the global top chrome inset. */
+  divider:
+    "before:pointer-events-none before:absolute before:inset-x-0 before:top-(--buzz-top-chrome-height,2.5rem) before:h-px before:bg-border/35 before:content-['']",
+  /** Shared header backdrop and bottom border below the inset row. */
+  headerBase:
+    "relative z-40 shrink-0 border-b border-border/35 bg-background/75 backdrop-blur-md supports-backdrop-filter:bg-background/65 dark:bg-background/45 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/35",
+  /** Vertical pane divider starting below the global top chrome. */
+  verticalDivider:
+    "after:pointer-events-none after:absolute after:bottom-0 after:right-0 after:top-(--buzz-top-chrome-height,2.5rem) after:z-40 after:w-px after:bg-border/35 after:content-['']",
+} as const;
+
+/** Tailwind class fragments for the global top chrome backdrop strip. */
+export const topChromeBackdrop = {
+  /** Height matching the global top chrome search/drag strip. */
+  height: "h-(--buzz-top-chrome-height,2.5rem)",
+  /** `after:` pseudo-element offset aligned to the bottom of top chrome. */
+  dividerTop: "after:top-(--buzz-top-chrome-height,2.5rem)",
+} as const;
+
+/** Tailwind class fragments for measured channel header chrome. */
+export const channelChrome = {
+  /** Padding-top that clears the measured channel header chrome. */
+  contentPadding: "pt-(--buzz-channel-content-top-padding,5.75rem)",
+  /** Absolute/fixed top offset below the measured channel header chrome. */
+  top: "top-(--buzz-channel-content-top-padding,5.75rem)",
+  /** Height matching the measured channel header chrome. */
+  headerHeight: "h-(--buzz-channel-content-top-padding,5.75rem)",
+  /** Negative margin for overlaid channel chrome that should not affect flow. */
+  negativeMargin: "-mb-(--buzz-channel-content-top-padding,5.75rem)",
+} as const;

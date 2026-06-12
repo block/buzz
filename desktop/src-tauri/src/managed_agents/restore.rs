@@ -61,6 +61,10 @@ pub async fn restore_managed_agents_on_launch(
         // process group whose parent harness exited).
         super::sweep_system_agent_processes(&super::current_instance_id(app), &tracked_pids);
 
+        // Dead-instance reaping: find agents belonging to Buzz instances
+        // whose desktop process is no longer running and reap them.
+        super::reap_dead_instance_agents(&super::current_instance_id(app), &tracked_pids);
+
         let candidates: Vec<String> = records
             .iter()
             .filter(|record| record.start_on_app_launch && record.backend == BackendKind::Local)
@@ -228,7 +232,7 @@ pub async fn restore_managed_agents_on_launch(
                 crate::commands::reconcile_agent_profile(&state, &reconcile_app, &pubkey, &data)
                     .await
             {
-                eprintln!("sprout-desktop: profile reconciliation failed for agent {pubkey}: {e}");
+                eprintln!("buzz-desktop: profile reconciliation failed for agent {pubkey}: {e}");
             }
         });
     }

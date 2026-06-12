@@ -1,10 +1,10 @@
-# Local dev Prometheus config — scrapes sprout-relay metrics.
+# Local dev Prometheus config — scrapes buzz-relay metrics.
 # The relay runs on the host (not in Docker), so we use host.docker.internal.
-# Default metrics port is 9102; override with SPROUT_METRICS_PORT.
+# Default metrics port is 9102; override with BUZZ_METRICS_PORT.
 global:
   scrape_interval: 5s
 
 scrape_configs:
-  - job_name: sprout-relay
+  - job_name: buzz-relay
     static_configs:
       - targets: ["host.docker.internal:9102"]

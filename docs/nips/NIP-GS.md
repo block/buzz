@@ -338,7 +338,7 @@ The signing program MUST load the signer's secret key from one of the following
 sources, checked in order:
 
 1. `NOSTR_PRIVATE_KEY` environment variable.
-2. `SPROUT_PRIVATE_KEY` environment variable.
+2. `BUZZ_PRIVATE_KEY` environment variable.
 3. A keyfile at the path specified by `nostr.keyfile` git config key.
 
 Each source accepts the key in either `nsec1...` (NIP-19 bech32) or 64-character
@@ -468,7 +468,7 @@ include `oa`. The `oa` field cannot be added after the fact.
 The signing program SHOULD load the NIP-OA auth tag from one of the following
 sources, checked in order:
 
-1. `SPROUT_AUTH_TAG` environment variable — a JSON-encoded array of 4 strings
+1. `BUZZ_AUTH_TAG` environment variable — a JSON-encoded array of 4 strings
    (`["auth", "<owner>", "<conditions>", "<sig>"]`). The program extracts
    elements 1–3 for the `oa` field.
 2. `nostr.authtag` git config key — same JSON format.
@@ -760,7 +760,7 @@ signer's secret key is compromised:
 ### Key Exposure via Environment Variables
 
 The signing program reads secret keys from environment variables
-(`NOSTR_PRIVATE_KEY`, `SPROUT_PRIVATE_KEY`). Environment variables are visible
+(`NOSTR_PRIVATE_KEY`, `BUZZ_PRIVATE_KEY`). Environment variables are visible
 to:
 
 - The process itself and its children.

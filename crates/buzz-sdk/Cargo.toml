@@ -1,0 +1,16 @@
+[package]
+name = "buzz-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed Nostr event builders for Buzz operations"
+
+[dependencies]
+buzz-core = { workspace = true }
+nostr = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

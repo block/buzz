@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sprout_mobile/features/channels/channel_management_provider.dart';
-import 'package:sprout_mobile/shared/relay/relay.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
 
 /// Tests for [channelDetailsFromEvent].
 ///

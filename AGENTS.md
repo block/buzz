@@ -1,6 +1,6 @@
 # AGENTS.md — AI Agent Contributor Guide
 
-This guide is for AI agents contributing to the Sprout codebase. It covers
+This guide is for AI agents contributing to the Buzz codebase. It covers
 agent-specific context and conventions. For general contributor info (setup,
 code style, PR process, architecture), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -8,7 +8,7 @@ code style, PR process, architecture), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Ecosystem
 
-Sprout spans five repos. This one (`block/sprout`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
+Buzz spans five repos. This one (`block/sprout`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
 
 | Repo | Purpose |
 |------|---------|
@@ -37,32 +37,32 @@ access information.
 ```
 crates/
   # Relay + core
-  sprout-relay        # WebSocket relay server — main entry point; also hosts git + huddle audio
-  sprout-core         # Core types, event verification, filter matching, kind registry
-  sprout-db           # Postgres event store and data access layer
-  sprout-auth         # Authentication and authorization
-  sprout-pubsub       # Redis pub/sub fan-out, presence, typing indicators
-  sprout-search       # Typesense-backed full-text search
-  sprout-audit        # Hash-chain audit log
-  sprout-media        # Blossom/S3 media storage
+  buzz-relay          # WebSocket relay server — main entry point; also hosts git + huddle audio
+  buzz-core           # Core types, event verification, filter matching, kind registry
+  buzz-db             # Postgres event store and data access layer
+  buzz-auth           # Authentication and authorization
+  buzz-pubsub         # Redis pub/sub fan-out, presence, typing indicators
+  buzz-search         # Typesense-backed full-text search
+  buzz-audit          # Hash-chain audit log
+  buzz-media          # Blossom/S3 media storage
   # Agent surface
-  sprout-acp          # ACP harness bridging Sprout events to AI agents
-  sprout-agent        # Minimal ACP-compliant agent (non-streaming, tool-calls-as-output)
-  sprout-dev-mcp      # Developer MCP server — shell + file-edit tools
-  sprout-persona      # Agent persona packs
-  sprout-workflow     # YAML-as-code workflow engine (evalexpr conditions)
+  buzz-acp            # ACP harness bridging Buzz events to AI agents
+  buzz-agent          # Minimal ACP-compliant agent (non-streaming, tool-calls-as-output)
+  buzz-dev-mcp        # Developer MCP server — shell + file-edit tools
+  buzz-persona        # Agent persona packs
+  buzz-workflow       # YAML-as-code workflow engine (evalexpr conditions)
   # Clients + interop
-  sprout-proxy        # Nostr client compatibility proxy (NIP-28)
-  sprout-pair-relay   # Ephemeral sidecar relay for NIP-AB device pairing
-  sprout-pairing-cli  # CLI for NIP-AB device pairing interop testing
+  buzz-proxy          # Nostr client compatibility proxy (NIP-28)
+  buzz-pair-relay     # Ephemeral sidecar relay for NIP-AB device pairing
+  buzz-pairing-cli    # CLI for NIP-AB device pairing interop testing
   git-sign-nostr      # Sign git objects with a Nostr key
   git-credential-nostr # Git credential helper for Nostr-authed push/fetch
   # Tooling + shared
-  sprout-cli          # Agent-first CLI
-  sprout-sdk          # Typed Nostr event builders
-  sprout-admin        # Operator CLI for relay administration
-  sprout-ws-client    # Shared NIP-42 WebSocket client (connect, auth, publish)
-  sprout-test-client  # Integration test client and E2E test suite
+  buzz-cli            # Agent-first CLI
+  buzz-sdk            # Typed Nostr event builders
+  buzz-admin          # Operator CLI for relay administration
+  buzz-ws-client      # Shared NIP-42 WebSocket client (connect, auth, publish)
+  buzz-test-client    # Integration test client and E2E test suite
   sprig               # All-in-one harness bundling ACP, agent, and dev MCP
 
 desktop/              # Tauri 2 + React 19 desktop app
@@ -94,8 +94,8 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 Run `just ci` before every PR — it runs `fmt` + `clippy` + desktop lint +
 unit tests + builds. Clippy passing does not mean fmt passes; run both.
 
-Run `just test` for integration tests if you touched `sprout-relay`,
-`sprout-db`, or `sprout-auth` — these require a running Postgres and Redis.
+Run `just test` for integration tests if you touched `buzz-relay`,
+`buzz-db`, or `buzz-auth` — these require a running Postgres and Redis.
 
 **Pre-commit hooks** are installed automatically by `just setup` and auto-fix
 formatting via `stage_fixed`. Pre-commit runs fix variants in parallel (Rust
@@ -116,13 +116,13 @@ Additional rules:
 
 ## Key Patterns
 
-**Dual API surface**: Sprout exposes both a REST API and a NIP-29 WebSocket
-relay. Both paths converge on shared DB functions in `sprout-db`. When adding
+**Dual API surface**: Buzz exposes both a REST API and a NIP-29 WebSocket
+relay. Both paths converge on shared DB functions in `buzz-db`. When adding
 a feature, implement the shared DB logic first, then wire up both surfaces.
 
 **Prefer Nostr events over new REST endpoints**: For new feature work, model
-the operation as a Nostr event (new kind in `sprout-core/src/kind.rs`, handler
-in `sprout-relay`) rather than adding a new REST endpoint. REST is reserved
+the operation as a Nostr event (new kind in `buzz-core/src/kind.rs`, handler
+in `buzz-relay`) rather than adding a new REST endpoint. REST is reserved
 for things that genuinely need an HTTP-only surface: media upload/download
 (Blossom), OAuth callbacks, health checks, and the existing read endpoints
 that proxy DB queries. Two helpful endpoints already exist and rarely need
@@ -130,7 +130,7 @@ to be duplicated:
 
 - `POST /events` — submit any signed event (same path the WebSocket uses).
 - `POST /query` — Nostr REQ filters over HTTP. NIP-50 `search` filters
-  are routed to `sprout-search` (Typesense-backed) automatically.
+  are routed to `buzz-search` (Typesense-backed) automatically.
 - `POST /count` — Nostr COUNT filters over HTTP.
 
 If you find yourself reaching for a new REST endpoint, first check whether
@@ -140,15 +140,15 @@ fan-out, NIP-29 scoping, and the existing auth pipeline for free.
 Reference https://github.com/nostr-protocol/nips
 
 **Event kinds**: All event kind integers are defined in
-`sprout-core/src/kind.rs`. New features get new kind integers — add them here
+`buzz-core/src/kind.rs`. New features get new kind integers — add them here
 first, then implement handling in the relay.
 
 **Channel scoping**: Channels use `h` tags (NIP-29 group tag), not `e` tags.
 Filters and queries must scope to `h` tags when operating within a channel.
 
-**Agent-facing operations go in `sprout-cli`**: New agent-facing features belong in `sprout-cli` — add a subcommand there first, then wire the REST/WebSocket call in `client.rs`. `sprout-dev-mcp` (shell + file tools for `sprout-agent`) is separate.
+**Agent-facing operations go in `buzz-cli`**: New agent-facing features belong in `buzz-cli` — add a subcommand there first, then wire the REST/WebSocket call in `client.rs`. `buzz-dev-mcp` (shell + file tools for `buzz-agent`) is separate.
 
-**Workflow conditions**: `sprout-workflow` uses
+**Workflow conditions**: `buzz-workflow` uses
 [evalexpr](https://docs.rs/evalexpr) for condition evaluation. Keep expressions
 simple and testable.
 
@@ -158,29 +158,29 @@ check existing reply handlers for the pattern.
 
 ---
 
-## Agent CLI (`sprout-cli`)
+## Agent CLI (`buzz-cli`)
 
-`sprout` is the agent-first CLI. Auth env vars
-(`SPROUT_RELAY_URL`, `SPROUT_PRIVATE_KEY`, `SPROUT_AUTH_TAG`) are auto-injected
+`buzz` is the agent-first CLI. Auth env vars
+(`BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY`, `BUZZ_AUTH_TAG`) are auto-injected
 by the ACP harness into managed agent subprocesses. In development, set
-`SPROUT_PRIVATE_KEY` and `SPROUT_RELAY_URL` in your environment manually.
+`BUZZ_PRIVATE_KEY` and `BUZZ_RELAY_URL` in your environment manually.
 
 ### Building the CLI
 
 ```bash
-cargo build --release -p sprout-cli
+cargo build --release -p buzz-cli
 ```
 
-Binary location: `./target/release/sprout`. Add `./target/release` to `PATH`
+Binary location: `./target/release/buzz`. Add `./target/release` to `PATH`
 or invoke with the full path.
 
 ### Deep Links
 
-`sprout://message?channel=<uuid>&id=<hex>` links reference a specific message
+`buzz://message?channel=<uuid>&id=<hex>` links reference a specific message
 thread. To read the linked thread:
 
 ```bash
-sprout messages thread --channel <uuid> --event <hex> --format compact
+buzz messages thread --channel <uuid> --event <hex> --format compact
 ```
 
 Extract `channel` and `id` from the URL query parameters. The optional
@@ -192,9 +192,9 @@ All reads return sig-stripped JSON arrays; all writes return
 0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
 
 `--format compact` is a **global** flag — it goes before the subcommand:
-`sprout --format compact channels list`, NOT `sprout channels list --format compact`.
+`buzz --format compact channels list`, NOT `buzz channels list --format compact`.
 
-See `crates/sprout-cli/TESTING.md` for the full live-testing runbook.
+See `crates/buzz-cli/TESTING.md` for the full live-testing runbook.
 
 ---
 
@@ -205,7 +205,7 @@ just test-unit    # unit tests, no infrastructure needed
 just test         # full integration suite (requires Postgres + Redis)
 ```
 
-E2E tests live in `crates/sprout-test-client/tests/`:
+E2E tests live in `crates/buzz-test-client/tests/`:
 - `e2e_relay.rs` — WebSocket relay protocol
 - `e2e_rest_api.rs` — REST endpoint coverage
 - `e2e_tokens.rs` — auth token flows
@@ -220,7 +220,7 @@ See [TESTING.md](TESTING.md) for the full multi-agent E2E guide.
 
 ### Desktop Screenshots (Playwright)
 
-> **Do NOT use `sprout upload`, the relay media endpoint, or any third-party
+> **Do NOT use `buzz upload`, the relay media endpoint, or any third-party
 > image host for PR screenshots.** Relay media URLs fail through GitHub's camo
 > proxy. Always use `scripts/post-screenshots.sh` — see the `desktop-screenshot`
 > skill for the full workflow.
@@ -246,7 +246,7 @@ Output is a PNG path on stdout.
 
 Use `--messages` to inject content into a channel before capture. The JSON file
 is an array of objects — `channelName` and `content` are required, all other
-fields are optional and passed through to `__SPROUT_E2E_EMIT_MOCK_MESSAGE__`:
+fields are optional and passed through to `__BUZZ_E2E_EMIT_MOCK_MESSAGE__`:
 
 ```json
 [
@@ -350,7 +350,7 @@ must run BEFORE `installMockBridge(page)` — React reads state on mount, the
 bridge triggers mount.
 
 **Live messages:** Call `waitForMockLiveSubscription(page, channelName)` before
-`__SPROUT_E2E_EMIT_MOCK_MESSAGE__` — messages are silently dropped without a
+`__BUZZ_E2E_EMIT_MOCK_MESSAGE__` — messages are silently dropped without a
 subscription. Navigate to the channel first (triggers subscription), then away
 (so unread indicators appear), then inject.
 
@@ -393,7 +393,7 @@ description. See [PR #803](https://github.com/block/sprout/pull/803).
 
 ## Common Gotchas
 
-1. **Kind `39000` for channel metadata, not `41`** — kind 41 is NIP-01 (unused). All kinds defined in `sprout-core/src/kind.rs`.
+1. **Kind `39000` for channel metadata, not `41`** — kind 41 is NIP-01 (unused). All kinds defined in `buzz-core/src/kind.rs`.
 2. **Relay queries must specify `kinds`** — omitting `kinds` triggers the p-gate (403). Always include explicit kind filters.
 3. **`messages search` must include `--kinds`** — an open-ended search (no kinds) hits the relay p-gate and returns 403. Pass at least `--kinds 9,45001,45003` to scope the query.
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.

@@ -1,6 +1,6 @@
-# Contributing to Sprout
+# Contributing to Buzz
 
-Welcome, and thank you for your interest in contributing! Sprout is an
+Welcome, and thank you for your interest in contributing! Buzz is an
 open-source project and we're glad you're here. This guide will help you
 get from zero to a merged pull request.
 
@@ -29,7 +29,7 @@ reach out in the community channels.
 
 This project follows the [Contributor Covenant v2.1](CODE_OF_CONDUCT.md).
 By participating you agree to uphold these standards. Please report
-unacceptable behavior to **conduct@sprout-relay.org**.
+unacceptable behavior to **conduct@buzz-relay.org**.
 
 ---
 
@@ -87,7 +87,7 @@ OAuth/OIDC testing, MinIO on `:9000` for media storage, and Prometheus on
 
 ```bash
 just relay
-# or: cargo run -p sprout-relay
+# or: cargo run -p buzz-relay
 ```
 
 The relay listens on `ws://localhost:3000` by default. You should see log
@@ -126,7 +126,7 @@ already running.
 
 ### End-to-End Tests
 
-End-to-end tests live in `crates/sprout-test-client/tests/`:
+End-to-end tests live in `crates/buzz-test-client/tests/`:
 
 - `e2e_rest_api.rs` — REST API tests
 - `e2e_relay.rs` — WebSocket relay tests
@@ -140,7 +140,7 @@ End-to-end tests live in `crates/sprout-test-client/tests/`:
 Run them with (requires running infrastructure):
 
 ```bash
-cargo test -p sprout-test-client -- --ignored
+cargo test -p buzz-test-client -- --ignored
 ```
 
 See `TESTING.md` for the full multi-agent E2E testing guide.
@@ -287,7 +287,7 @@ design principles:
 **The relay is the single source of truth.** All state flows through the
 event store. Crates communicate through the database and Redis pub/sub — not
 through direct function calls across crate boundaries (with the exception
-of `sprout-core` types, which are shared everywhere).
+of `buzz-core` types, which are shared everywhere).
 
 **Event kinds are the only switch.** Every action in the system — a message,
 a reaction, a workflow step, a canvas update — is a Nostr event with a kind
@@ -298,7 +298,7 @@ to existing clients.
 
 ## Ecosystem
 
-Sprout is developed across multiple repositories. This repo (`block/sprout`)
+Buzz is developed across multiple repositories. This repo (`block/sprout`)
 is the open-source home for all application code — the relay, desktop app,
 mobile app, CLI, and agent harness. Internal repositories handle
 enterprise-signed builds and infrastructure deployment.
@@ -318,7 +318,7 @@ for team access setup, onboarding, and the full repo inventory. See
 
 ## How to Add a New Event Kind
 
-1. **Define the kind constant** in `sprout-core/src/kind.rs`:
+1. **Define the kind constant** in `buzz-core/src/kind.rs`:
 
    ```rust
    /// My new event kind — description of what it represents.
@@ -329,7 +329,7 @@ for team access setup, onboarding, and the full repo inventory. See
    Check the `ALL_KINDS` array for collisions. Each sub-range is documented
    with comments in the file.
 
-2. **Define the payload type** in the appropriate module in `sprout-core/src/`
+2. **Define the payload type** in the appropriate module in `buzz-core/src/`
    (e.g., alongside `event.rs`) if the content field is structured JSON:
 
    ```rust
@@ -341,7 +341,7 @@ for team access setup, onboarding, and the full repo inventory. See
    ```
 
 3. **Register the kind's required scope** in
-   `crates/sprout-relay/src/handlers/ingest.rs` inside
+   `crates/buzz-relay/src/handlers/ingest.rs` inside
    `required_scope_for_kind()`. This controls which auth scope a caller
    needs to submit the event:
 
@@ -350,7 +350,7 @@ for team access setup, onboarding, and the full repo inventory. See
    ```
 
 4. **Handle post-storage side effects** by adding a match arm in
-   `crates/sprout-relay/src/handlers/side_effects.rs` inside
+   `crates/buzz-relay/src/handlers/side_effects.rs` inside
    `handle_side_effects()`:
 
    ```rust
@@ -360,21 +360,21 @@ for team access setup, onboarding, and the full repo inventory. See
    `handle_side_effects()` runs after the event is stored — use it for
    notifications, cache invalidation, or derived data. If the new kind
    also needs a REST surface (e.g., a query endpoint for clients), add a
-   handler in `crates/sprout-relay/src/api/` and register it in
-   `crates/sprout-relay/src/router.rs`.
+   handler in `crates/buzz-relay/src/api/` and register it in
+   `crates/buzz-relay/src/router.rs`.
 
 5. **Persist to the database** — if the event needs to be queryable, add a
-   handler in `sprout-db/src/` (e.g., `sprout-db/src/my_feature.rs`) with
+   handler in `buzz-db/src/` (e.g., `buzz-db/src/my_feature.rs`) with
    the appropriate `INSERT` and `SELECT` queries.
 
 6. **Index for search** (if applicable) — add the kind to the Typesense
-   indexing logic in `sprout-search/src/index.rs`.
+   indexing logic in `buzz-search/src/index.rs`.
 
 7. **Audit** — the audit log captures all events automatically; no changes
    needed unless you need custom audit metadata.
 
 8. **Write tests** — add a unit test for payload serialization in
-   `sprout-core` and an integration test in `sprout-test-client` that sends
+   `buzz-core` and an integration test in `buzz-test-client` that sends
    the new event kind and verifies the expected behavior.
 
 9. **Document** — `kind.rs` is the authoritative registry of all kind numbers.
@@ -384,9 +384,9 @@ for team access setup, onboarding, and the full repo inventory. See
 
 ## How to Add a New API Endpoint
 
-REST endpoints live in `crates/sprout-relay/src/api/` — each resource has
+REST endpoints live in `crates/buzz-relay/src/api/` — each resource has
 its own submodule (e.g., `channels.rs`, `messages.rs`, `tokens.rs`). Routes
-are registered in `crates/sprout-relay/src/router.rs`.
+are registered in `crates/buzz-relay/src/router.rs`.
 
 1. **Define the handler function:**
 
@@ -399,7 +399,7 @@ are registered in `crates/sprout-relay/src/router.rs`.
        let channel_id = uuid::Uuid::parse_str(&channel_id_str)
            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid channel_id"))?;
        let ctx = extract_auth_context(&headers, &state).await?;
-       sprout_auth::require_scope(&ctx.scopes, sprout_auth::Scope::ChannelsRead)
+       buzz_auth::require_scope(&ctx.scopes, buzz_auth::Scope::ChannelsRead)
            .map_err(scope_error)?;
        let pubkey_bytes = ctx.pubkey_bytes.clone();
        check_token_channel_access(&ctx, &channel_id)?;
@@ -411,20 +411,20 @@ are registered in `crates/sprout-relay/src/router.rs`.
    }
    ```
 
-2. **Register the route** in `crates/sprout-relay/src/router.rs`:
+2. **Register the route** in `crates/buzz-relay/src/router.rs`:
 
    ```rust
    .route("/api/channels/{channel_id}/my-resource", get(get_my_resource))
    ```
 
-3. **Add the database query** in `sprout-db/src/` — follow the existing
+3. **Add the database query** in `buzz-db/src/` — follow the existing
    patterns in `channel.rs`, `event.rs`, etc.
 
 4. **Handle errors** — use the `api_error()` and `internal_error()` helpers in
-   `sprout-relay/src/api/mod.rs`. Return `(StatusCode, Json<Value>)` tuples.
+   `buzz-relay/src/api/mod.rs`. Return `(StatusCode, Json<Value>)` tuples.
 
-5. **Write tests** — add an integration test using the `sprout-test-client`
-   harness in `crates/sprout-test-client/tests/e2e_rest_api.rs`.
+5. **Write tests** — add an integration test using the `buzz-test-client`
+   harness in `crates/buzz-test-client/tests/e2e_rest_api.rs`.
 
 6. **Document** — if the endpoint is part of the public API surface, add it
    to the API reference section of `README.md` or a dedicated `API.md`.
@@ -433,7 +433,7 @@ are registered in `crates/sprout-relay/src/router.rs`.
 
 ## License and CLA
 
-Sprout is licensed under the **Apache License, Version 2.0**. See
+Buzz is licensed under the **Apache License, Version 2.0**. See
 [LICENSE](LICENSE) for the full text.
 
 By submitting a pull request, you agree that your contribution is licensed
@@ -444,5 +444,5 @@ their sign-off. When in doubt, check with your legal team.
 
 ---
 
-*Thank you for contributing to Sprout. Every bug report, documentation fix,
-and code contribution makes the project better for everyone. 🌱*
+*Thank you for contributing to Buzz. Every bug report, documentation fix,
+and code contribution makes the project better for everyone. 🐝*

@@ -148,7 +148,7 @@ export function EditWorkspaceDialog({
             <Input
               id="edit-ws-token"
               onChange={(e) => setToken(e.target.value)}
-              placeholder="sprout_..."
+              placeholder="buzz_..."
               type="password"
               value={token}
             />

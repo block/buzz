@@ -15,9 +15,9 @@ import {
   loadThemeData,
 } from "./theme-loader";
 
-export const THEME_STORAGE_KEY = "sprout-theme";
-const CACHE_KEY = "sprout-theme-cache";
-export const ACCENT_STORAGE_KEY = "sprout-accent-color";
+export const THEME_STORAGE_KEY = "buzz-theme";
+const CACHE_KEY = "buzz-theme-cache";
+export const ACCENT_STORAGE_KEY = "buzz-accent-color";
 export const NEUTRAL_ACCENT = "neutral";
 
 export const ACCENT_COLORS = [

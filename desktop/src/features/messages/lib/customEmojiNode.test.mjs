@@ -102,37 +102,37 @@ function runRule(rule, src, pos) {
 }
 
 test("rule fires for a boundary :shortcode: (start of string)", () => {
-  const rule = captureRule(["sprout"]);
-  const { matched, advanced } = runRule(rule, ":sprout:", 0);
+  const rule = captureRule(["buzz"]);
+  const { matched, advanced } = runRule(rule, ":buzz:", 0);
   assert.equal(matched, true);
-  assert.equal(advanced, ":sprout:".length);
+  assert.equal(advanced, ":buzz:".length);
 });
 
 test("rule fires for a :shortcode: preceded by whitespace", () => {
-  const rule = captureRule(["sprout"]);
+  const rule = captureRule(["buzz"]);
   // pos points at the `:` after the space.
-  const { matched } = runRule(rule, "hi :sprout:", 3);
+  const { matched } = runRule(rule, "hi :buzz:", 3);
   assert.equal(matched, true);
 });
 
-test("rule does NOT fire when the colon is glued to a word char (not:sprout:)", () => {
-  const rule = captureRule(["sprout"]);
+test("rule does NOT fire when the colon is glued to a word char (not:buzz:)", () => {
+  const rule = captureRule(["buzz"]);
   // pos points at the `:` immediately after `not`.
-  const { matched } = runRule(rule, "not:sprout:", 3);
+  const { matched } = runRule(rule, "not:buzz:", 3);
   assert.equal(matched, false);
 });
 
-test("rule does NOT fire inside a URL-like sequence (http://x:y:sprout:)", () => {
-  const rule = captureRule(["sprout"]);
-  const src = "http://x:y:sprout:";
+test("rule does NOT fire inside a URL-like sequence (http://x:y:buzz:)", () => {
+  const rule = captureRule(["buzz"]);
+  const src = "http://x:y:buzz:";
   // pos points at the `:` immediately after `y` (a word char).
-  const { matched } = runRule(rule, src, src.indexOf(":sprout:"));
+  const { matched } = runRule(rule, src, src.indexOf(":buzz:"));
   assert.equal(matched, false);
 });
 
 test("rule fires after punctuation boundary (e.g. parenthesis)", () => {
-  const rule = captureRule(["sprout"]);
+  const rule = captureRule(["buzz"]);
   // `(` is not a word char, so a `:shortcode:` after it still materializes.
-  const { matched } = runRule(rule, "(:sprout:)", 1);
+  const { matched } = runRule(rule, "(:buzz:)", 1);
   assert.equal(matched, true);
 });

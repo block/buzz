@@ -156,6 +156,51 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
         }
     }
 
+    // Populate last_message_at by fetching the most recent human message per
+    // channel. Uses per-channel filters (single #h value each) so the relay can
+    // push the query to its indexed channel_id column. Multi-value #h is NOT
+    // SQL-pushed and would silently drop quieter channels under the global limit.
+    let channel_ids: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
+    if !channel_ids.is_empty() {
+        let filters: Vec<serde_json::Value> = channel_ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "kinds": [9, 40002],
+                    "#h": [id],
+                    "limit": 1
+                })
+            })
+            .collect();
+
+        let message_events = query_relay(&state, &filters).await.unwrap_or_default();
+
+        let mut last_message_by_channel: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        for ev in &message_events {
+            if let Some(ch_id) = ev.tags.iter().find_map(|t| {
+                let s = t.as_slice();
+                (s.len() >= 2 && s[0] == "h").then(|| s[1].clone())
+            }) {
+                let ts = ev.created_at.as_secs();
+                last_message_by_channel
+                    .entry(ch_id)
+                    .and_modify(|existing| {
+                        if ts > *existing {
+                            *existing = ts;
+                        }
+                    })
+                    .or_insert(ts);
+            }
+        }
+
+        for channel in &mut channels {
+            if let Some(&ts) = last_message_by_channel.get(&channel.id) {
+                channel.last_message_at = Some(nostr_convert::timestamp_to_iso(ts));
+            }
+        }
+    }
+
     // NIP-DV: drop DMs the viewer has hidden. The relay maintains a per-viewer
     // parameterized-replaceable snapshot (kind:30622, d=my pubkey) whose `h`
     // tags list currently-hidden DM channel ids. The snapshot also carries
@@ -166,7 +211,7 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
         let events = query_relay(
             &state,
             &[serde_json::json!({
-                "kinds": [sprout_core::kind::KIND_DM_VISIBILITY],
+                "kinds": [buzz_core_pkg::kind::KIND_DM_VISIBILITY],
                 "#p": [&my_pubkey],
                 "limit": 1,
             })],

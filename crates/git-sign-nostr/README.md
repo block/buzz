@@ -17,7 +17,7 @@ git config user.signingkey <hex-pubkey>
 export NOSTR_PRIVATE_KEY=<hex-or-nsec>
 
 # Optional: NIP-OA owner attestation
-export SPROUT_AUTH_TAG='["auth","<owner-pk>","<conditions>","<owner-sig>"]'
+export BUZZ_AUTH_TAG='["auth","<owner-pk>","<conditions>","<owner-sig>"]'
 
 # Commits are now automatically signed
 git commit -m "signed with nostr"
@@ -29,7 +29,7 @@ git verify-commit HEAD
 ## Key Loading Priority
 
 1. `NOSTR_PRIVATE_KEY` environment variable
-2. `SPROUT_PRIVATE_KEY` environment variable
+2. `BUZZ_PRIVATE_KEY` environment variable
 3. Keyfile at path from `git config nostr.keyfile`
 
 Keys may be hex (64 chars) or NIP-19 bech32 (`nsec1...`).

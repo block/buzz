@@ -159,7 +159,7 @@ const emojiCategories = <({String label, IconData icon, List<String> emoji})>[
   ),
   (
     label: 'Nature',
-    icon: LucideIcons.sprout,
+    icon: LucideIcons.leaf,
     emoji: [
       '\u{1F331}',
       '\u{1F332}',

@@ -208,7 +208,7 @@ impl TtsPipeline {
     /// `TEXT_QUEUE_DEPTH`) — caller may log and discard.
     pub fn speak(&self, text: String) -> Result<(), String> {
         self.text_tx.try_send(text).map_err(|e| {
-            eprintln!("sprout-desktop: TTS queue saturated, dropping message: {e}");
+            eprintln!("buzz-desktop: TTS queue saturated, dropping message: {e}");
             format!("TTS queue full, dropping: {e}")
         })
     }
@@ -254,7 +254,7 @@ fn tts_worker(
         Ok(e) => e,
         Err(e) => {
             eprintln!(
-                "sprout-desktop: TTS engine init failed (model_dir={}): {e}. TTS disabled.",
+                "buzz-desktop: TTS engine init failed (model_dir={}): {e}. TTS disabled.",
                 model_dir.display()
             );
             drain_until_shutdown(text_rx, &shutdown);
@@ -268,7 +268,7 @@ fn tts_worker(
         Ok(s) => s,
         Err(e) => {
             eprintln!(
-                "sprout-desktop: TTS voice style load failed ({voice_name}): {e}. TTS disabled."
+                "buzz-desktop: TTS voice style load failed ({voice_name}): {e}. TTS disabled."
             );
             drain_until_shutdown(text_rx, &shutdown);
             return;
@@ -284,11 +284,11 @@ fn tts_worker(
         let t = std::time::Instant::now();
         match engine.synth_chunk("warmup", "en", &style, SYNTH_STEPS, SYNTH_SPEED) {
             Ok(_) => eprintln!(
-                "sprout-desktop: TTS warmup completed in {:.0}ms",
+                "buzz-desktop: TTS warmup completed in {:.0}ms",
                 t.elapsed().as_millis()
             ),
             Err(e) => eprintln!(
-                "sprout-desktop: TTS warmup failed after {:.0}ms: {e} — first utterance may be slow",
+                "buzz-desktop: TTS warmup failed after {:.0}ms: {e} — first utterance may be slow",
                 t.elapsed().as_millis()
             ),
         }
@@ -301,7 +301,7 @@ fn tts_worker(
     {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("sprout-desktop: TTS audio output failed: {e}. TTS disabled.");
+            eprintln!("buzz-desktop: TTS audio output failed: {e}. TTS disabled.");
             drain_until_shutdown(text_rx, &shutdown);
             return;
         }
@@ -373,14 +373,14 @@ fn tts_worker(
         let channels = match NonZero::new(1u16) {
             Some(c) => c,
             None => {
-                eprintln!("sprout-desktop: TTS channel count invariant violated");
+                eprintln!("buzz-desktop: TTS channel count invariant violated");
                 break;
             }
         };
         let rate = match NonZero::new(SAMPLE_RATE) {
             Some(r) => r,
             None => {
-                eprintln!("sprout-desktop: TTS sample rate invariant violated");
+                eprintln!("buzz-desktop: TTS sample rate invariant violated");
                 break;
             }
         };
@@ -432,7 +432,7 @@ fn tts_worker(
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    eprintln!("sprout-desktop: TTS synth failed: {e}");
+                    eprintln!("buzz-desktop: TTS synth failed: {e}");
                 }
             }
         }

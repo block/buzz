@@ -9,16 +9,16 @@ import { openSettings } from "../helpers/settings";
 // invariant and the membership-denial copy.
 
 type E2eWindow = Window & {
-  __SPROUT_E2E__?: { mock?: { meshReporterPubkey?: string } };
-  __SPROUT_E2E_INVOKE_MOCK_COMMAND__?: unknown;
+  __BUZZ_E2E__?: { mock?: { meshReporterPubkey?: string } };
+  __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
   __TAURI_INTERNALS__?: { invoke?: unknown };
-  __SPROUT_E2E_COMMANDS__?: string[];
-  __SPROUT_E2E_SIGNED_EVENTS__?: Array<{
+  __BUZZ_E2E_COMMANDS__?: string[];
+  __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
     content: string;
     kind: number;
     tags: string[][];
   }>;
-  __SPROUT_E2E_SET_MESH__?: (mesh: {
+  __BUZZ_E2E_SET_MESH__?: (mesh: {
     admitted?: boolean;
     models?: Array<{ id: string; name: string | null }>;
     denyReason?: string;
@@ -29,7 +29,7 @@ async function waitForInvokeBridge(page: import("@playwright/test").Page) {
   await page.waitForFunction(() => {
     const w = window as E2eWindow;
     return (
-      typeof w.__SPROUT_E2E_INVOKE_MOCK_COMMAND__ === "function" ||
+      typeof w.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function" ||
       typeof w.__TAURI_INTERNALS__?.invoke === "function"
     );
   }, null);
@@ -45,15 +45,13 @@ async function gotoApp(page: import("@playwright/test").Page) {
 
 /** Ordered command names the bridge recorded so far. */
 async function commands(page: import("@playwright/test").Page) {
-  return page.evaluate(
-    () => (window as E2eWindow).__SPROUT_E2E_COMMANDS__ ?? [],
-  );
+  return page.evaluate(() => (window as E2eWindow).__BUZZ_E2E_COMMANDS__ ?? []);
 }
 
 /** Signed event templates the bridge recorded so far. */
 async function signedEvents(page: import("@playwright/test").Page) {
   return page.evaluate(
-    () => (window as E2eWindow).__SPROUT_E2E_SIGNED_EVENTS__ ?? [],
+    () => (window as E2eWindow).__BUZZ_E2E_SIGNED_EVENTS__ ?? [],
   );
 }
 
@@ -62,7 +60,7 @@ async function setMesh(
   mesh: { admitted?: boolean; denyReason?: string },
 ) {
   await page.evaluate((m) => {
-    (window as E2eWindow).__SPROUT_E2E_SET_MESH__?.(m);
+    (window as E2eWindow).__BUZZ_E2E_SET_MESH__?.(m);
   }, mesh);
 }
 
@@ -215,10 +213,10 @@ test("Run-on-relay-mesh canonicalizes the mesh connect #p target", async ({
 }) => {
   await page.addInitScript(() => {
     const w = window as E2eWindow;
-    w.__SPROUT_E2E__ = {
-      ...(w.__SPROUT_E2E__ ?? {}),
+    w.__BUZZ_E2E__ = {
+      ...(w.__BUZZ_E2E__ ?? {}),
       mock: {
-        ...(w.__SPROUT_E2E__?.mock ?? {}),
+        ...(w.__BUZZ_E2E__?.mock ?? {}),
         meshReporterPubkey:
           "  CAFEBABECAFEBABECAFEBABECAFEBABECAFEBABECAFEBABECAFEBABECAFEBABE  ",
       },
@@ -278,7 +276,7 @@ test("a non-member cannot enable relay-mesh — membership is the gate", async (
   expect(seq).not.toContain("create_managed_agent");
 });
 
-test("saved relay-mesh agents require a fresh serve target before manual start", async ({
+test("saved relay-mesh agents restart via the backend serve-target preflight", async ({
   page,
 }) => {
   await gotoApp(page);
@@ -301,12 +299,12 @@ test("saved relay-mesh agents require a fresh serve target before manual start",
 
   const agents = await page.evaluate(async () => {
     const w = window as E2eWindow & {
-      __SPROUT_E2E_INVOKE_MOCK_COMMAND__?: (
+      __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
         command: string,
         payload?: Record<string, unknown>,
       ) => Promise<Array<{ name: string; pubkey: string }>>;
     };
-    const invoke = w.__SPROUT_E2E_INVOKE_MOCK_COMMAND__;
+    const invoke = w.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
     if (!invoke) throw new Error("Mock invoke bridge is unavailable.");
     return invoke("list_managed_agents");
   });
@@ -330,23 +328,35 @@ test("saved relay-mesh agents require a fresh serve target before manual start",
     .toContain("stop_managed_agent");
   await expect(row).toContainText("stopped");
 
-  const before = (await commands(page)).length;
+  // With a live serve target for the model, manual restart goes through:
+  // the backend preflight re-resolves the target and the agent starts.
+  await openManagedAgentActions(page, pubkey);
+  await page.getByRole("menuitem", { name: "Spawn" }).click();
+  await expect
+    .poll(async () => await commands(page))
+    .toContain("start_managed_agent");
+  await expect(row).toContainText("running");
+
+  await openManagedAgentActions(page, pubkey);
+  await page.getByRole("menuitem", { name: "Stop" }).click();
+  await expect(row).toContainText("stopped");
+
+  // Without a live serve target, the backend preflight rejects the start
+  // with an actionable error, surfaced as a toast; the agent stays stopped.
+  await setMesh(page, { models: [] });
   await openManagedAgentActions(page, pubkey);
   await page.getByRole("menuitem", { name: "Spawn" }).click();
 
   await expect(
     page
       .locator("[data-sonner-toast]")
-      .filter({ hasText: "Relay-mesh agents need a fresh serve target" }),
+      .filter({ hasText: "no live serve target is available" }),
   ).toBeVisible();
-  expect((await commands(page)).slice(before)).not.toContain(
-    "start_managed_agent",
-  );
   await expect(row).toContainText("stopped");
 
   await expect(
     page.evaluate(async (agentPubkey) => {
-      const invoke = (window as E2eWindow).__SPROUT_E2E_INVOKE_MOCK_COMMAND__ as
+      const invoke = (window as E2eWindow).__BUZZ_E2E_INVOKE_MOCK_COMMAND__ as
         | ((
             command: string,
             payload?: Record<string, unknown>,
@@ -360,6 +370,6 @@ test("saved relay-mesh agents require a fresh serve target before manual start",
         return err instanceof Error ? err.message : String(err);
       }
     }, pubkey),
-  ).resolves.toContain("selected serve target is not persisted");
+  ).resolves.toContain("no live serve target is available");
   await expect(row).toContainText("stopped");
 });

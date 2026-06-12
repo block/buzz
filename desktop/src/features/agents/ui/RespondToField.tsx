@@ -17,7 +17,7 @@ import { UserAvatar } from "@/shared/ui/UserAvatar";
  * Inbound author gate UI for create/edit agent dialogs.
  *
  * Dropdown:
- *   - Owner only  (default; matches `sprout-acp --respond-to=owner-only`)
+ *   - Owner only  (default; matches `buzz-acp --respond-to=owner-only`)
  *   - Anyone      (`--respond-to=anyone` — fully open bot)
  *   - Allowlist   (`--respond-to=allowlist`, plus the chip list as
  *                  `--respond-to-allowlist`)

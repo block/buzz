@@ -9,9 +9,9 @@ async function setMockWebsocketSendsStalled(
   await page.evaluate((shouldStall) => {
     const setter = (
       window as Window & {
-        __SPROUT_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
+        __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
       }
-    ).__SPROUT_E2E_SET_STALL_WEBSOCKET_SENDS__;
+    ).__BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__;
     if (!setter) {
       throw new Error("E2E websocket stall setter is not installed.");
     }

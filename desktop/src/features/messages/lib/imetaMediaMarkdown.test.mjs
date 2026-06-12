@@ -81,7 +81,9 @@ test("formatImetaMediaLine: image mime → ![image] line", () => {
   );
 });
 
-test("buildImetaTags omits image filenames from imeta", () => {
+test("buildImetaTags keeps media filenames in imeta", () => {
+  // Filenames are included for every MIME type — the video review dialog
+  // and file cards use them as display titles.
   assert.deepEqual(
     buildImetaTags([
       {
@@ -93,7 +95,16 @@ test("buildImetaTags omits image filenames from imeta", () => {
         filename: "Party Parrot.png",
       },
     ]),
-    [["imeta", "url https://b/a.png", "m image/png", "x abc", "size 10"]],
+    [
+      [
+        "imeta",
+        "url https://b/a.png",
+        "m image/png",
+        "x abc",
+        "size 10",
+        "filename Party Parrot.png",
+      ],
+    ],
   );
 });
 

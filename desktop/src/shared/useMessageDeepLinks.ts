@@ -4,7 +4,7 @@ import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { listenForMessageDeepLinks } from "@/shared/deep-link";
 
 /**
- * Subscribe to `sprout://message` deep links emitted by the Tauri backend
+ * Subscribe to `buzz://message` deep links emitted by the Tauri backend
  * and route them through the app's navigation helpers.
  *
  * Lives in a hook (not inline in `AppShell`) so it can be unit-tested
@@ -12,7 +12,7 @@ import { listenForMessageDeepLinks } from "@/shared/deep-link";
  *
  * Mirrors the cold-start race handling of the `connect` listener in
  * `App.tsx`: late-arriving payloads from a fresh launch are picked up the
- * first time the listener mounts. Routing matches the in-app sprout://
+ * first time the listener mounts. Routing matches the in-app buzz://
  * handler in `markdown.tsx`: always `goChannel` with `messageId` and let
  * the channel route's existing scroll-into-view + getEventById backfill
  * resolve the target (works for both stream replies and forum threads).

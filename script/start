@@ -2,9 +2,9 @@
 # CAKE entrypoint — bridge Istio abstract socket to file socket, then exec relay.
 #
 # Traffic flow:
-#   Client → Envoy → @istio-proxy.sock (abstract) → socat → /tmp/local.sock → Sprout
-#   K8s probes → 0.0.0.0:8080 → Sprout (direct, no Istio)
-#   Prometheus → 0.0.0.0:9102/metrics → Sprout
+#   Client → Envoy → @istio-proxy.sock (abstract) → socat → /tmp/local.sock → Buzz
+#   K8s probes → 0.0.0.0:8080 → Buzz (direct, no Istio)
+#   Prometheus → 0.0.0.0:9102/metrics → Buzz
 set -eu
 
 SIDECAR_SOCKET="${SIDECAR_LISTENER_BIND:-@istio-proxy.sock}"
@@ -17,10 +17,10 @@ rm -f "${LOCAL_SOCKET}"
 # Only start if SIDECAR_LISTENER_BIND is set (i.e., running in CAKE).
 if [ -n "${SIDECAR_LISTENER_BIND:-}" ]; then
     socat "ABSTRACT-LISTEN:${SIDECAR_SOCKET#@},fork" "UNIX-CONNECT:${LOCAL_SOCKET}" &
-    export SPROUT_UDS_PATH="${LOCAL_SOCKET}"
+    export BUZZ_UDS_PATH="${LOCAL_SOCKET}"
 fi
 
-export SPROUT_HEALTH_PORT="${SPROUT_HEALTH_PORT:-8080}"
-export SPROUT_METRICS_PORT="${SPROUT_METRICS_PORT:-9102}"
+export BUZZ_HEALTH_PORT="${BUZZ_HEALTH_PORT:-8080}"
+export BUZZ_METRICS_PORT="${BUZZ_METRICS_PORT:-9102}"
 
-exec /code/sprout-relay
+exec /code/buzz-relay

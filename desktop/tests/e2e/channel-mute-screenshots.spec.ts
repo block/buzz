@@ -4,7 +4,7 @@ import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const ENGINEERING_CHANNEL_ID = "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9";
-const MUTE_STORAGE_KEY = `sprout-channel-mutes.v1:${MOCK_PUBKEY}`;
+const MUTE_STORAGE_KEY = `buzz-channel-mutes.v1:${MOCK_PUBKEY}`;
 const SHOTS = "test-results/channel-mute";
 
 function seedMuteState(
@@ -37,11 +37,11 @@ async function waitForMockLiveSubscription(
         ({ ch }) =>
           (
             window as Window & {
-              __SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+              __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
                 channelName: string;
               }) => boolean;
             }
-          ).__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({ channelName: ch }) ??
+          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({ channelName: ch }) ??
           false,
         { ch: channelName },
       );
@@ -114,14 +114,14 @@ test.describe("channel muting screenshots", () => {
       ({ pubkey, mockPubkey }) => {
         (
           window as Window & {
-            __SPROUT_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+            __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
               channelName: string;
               content: string;
               pubkey: string;
               mentionPubkeys: string[];
             }) => unknown;
           }
-        ).__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+        ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
           channelName: "engineering",
           content: "Hey check this out",
           pubkey,

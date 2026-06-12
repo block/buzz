@@ -7,9 +7,7 @@ use crate::{
     util::now_iso,
 };
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+use super::team_repair::team_persona_key;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TeamPersonaPreview {
@@ -52,10 +50,10 @@ struct BuiltInTeam {
 }
 
 const BUILT_IN_TEAMS: &[BuiltInTeam] = &[BuiltInTeam {
-    id: "builtin-team:kit-scout",
-    name: "Kit & Scout",
-    description: Some("Kit orchestrates and builds; Scout researches, plans, and reviews."),
-    persona_ids: &["builtin:kit", "builtin:scout"],
+    id: "builtin-team:fizz",
+    name: "Fizz",
+    description: Some("Fizz works carefully and collaboratively."),
+    persona_ids: &["builtin:fizz"],
 }];
 
 fn built_in_team_records(now: &str) -> Vec<TeamRecord> {
@@ -163,9 +161,8 @@ pub fn save_teams(app: &AppHandle, records: &[TeamRecord]) -> Result<(), String>
 // ---------------------------------------------------------------------------
 // Directory-backed team operations
 // ---------------------------------------------------------------------------
-
 /// Teams directory: `<AppDataDir>/agents/teams/`
-fn teams_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(super) fn teams_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = managed_agents_base_dir(app)?.join("teams");
     fs::create_dir_all(&dir).map_err(|e| format!("failed to create teams dir: {e}"))?;
     Ok(dir)
@@ -233,7 +230,7 @@ pub fn import_team_from_directory(
     use uuid::Uuid;
 
     // 1. Validate + resolve at source
-    let resolved = sprout_persona::resolve::resolve_pack(source_dir)
+    let resolved = buzz_persona_pkg::resolve::resolve_pack(source_dir)
         .map_err(|e| format!("team directory validation failed: {e}"))?;
 
     // 2. Sanitize team ID
@@ -274,7 +271,7 @@ pub fn import_team_from_directory(
     }
 
     // 5. Re-validate the copy/symlink target (defense-in-depth)
-    let re_resolved = sprout_persona::resolve::resolve_pack(&dest).map_err(|e| {
+    let re_resolved = buzz_persona_pkg::resolve::resolve_pack(&dest).map_err(|e| {
         // Clean up on failure
         if use_symlink {
             let _ = fs::remove_file(&dest);
@@ -365,6 +362,10 @@ pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<(), St
 
     if team.source_dir.is_some() {
         // Directory-backed team: full cascade
+        // Match on the shared key (directory name) so legacy UUID-id teams
+        // still cascade correctly.
+        let persona_key = team_persona_key(team).to_string();
+
         // 1. Check no managed agents reference these personas
         let agents = crate::managed_agents::load_managed_agents(app)?;
         let referencing: Vec<&str> = agents
@@ -374,7 +375,7 @@ pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<(), St
                     .as_ref()
                     .and_then(|p| p.file_name())
                     .and_then(|n| n.to_str())
-                    == Some(team_id)
+                    == Some(persona_key.as_str())
             })
             .map(|a| a.name.as_str())
             .collect();
@@ -387,9 +388,9 @@ pub fn delete_team_with_cascade(app: &AppHandle, team_id: &str) -> Result<(), St
             ));
         }
 
-        // 2. Remove all PersonaRecords where source_team == team_id
+        // 2. Remove all PersonaRecords sourced from this team
         let mut personas = super::load_personas(app)?;
-        personas.retain(|p| p.source_team.as_deref() != Some(team_id));
+        personas.retain(|p| p.source_team.as_deref() != Some(persona_key.as_str()));
         super::save_personas(app, &personas)?;
 
         // 3. Remove directory
@@ -432,6 +433,10 @@ pub fn sync_team_from_dir(
         .as_ref()
         .ok_or_else(|| format!("team {team_id} is not directory-backed"))?;
 
+    // Personas reference the team's directory name (pack manifest ID) in
+    // source_team, which may differ from team_id for pre-backfill teams.
+    let persona_key = team_persona_key(team).to_string();
+
     if !source_dir.exists() {
         return Err(format!(
             "team directory does not exist: {}",
@@ -440,7 +445,7 @@ pub fn sync_team_from_dir(
     }
 
     // Resolve current state of the directory
-    let resolved = sprout_persona::resolve::resolve_pack(source_dir)
+    let resolved = buzz_persona_pkg::resolve::resolve_pack(source_dir)
         .map_err(|e| format!("failed to resolve team directory: {e}"))?;
 
     let mut personas = super::load_personas(app)?;
@@ -453,7 +458,7 @@ pub fn sync_team_from_dir(
     // Find existing personas for this team
     let existing_slugs: Vec<(String, String)> = personas
         .iter()
-        .filter(|p| p.source_team.as_deref() == Some(team_id))
+        .filter(|p| p.source_team.as_deref() == Some(persona_key.as_str()))
         .map(|p| {
             (
                 p.source_team_persona_slug.clone().unwrap_or_default(),
@@ -513,7 +518,7 @@ pub fn sync_team_from_dir(
                 name_pool: Vec::new(),
                 is_builtin: false,
                 is_active: true,
-                source_team: Some(team_id.to_string()),
+                source_team: Some(persona_key.clone()),
                 source_team_persona_slug: Some(dir_persona.name.clone()),
                 env_vars: crate::managed_agents::env_vars::filter_derived_provider_model_env_vars(
                     dir_persona.runtime_env_vars.iter().cloned(),
@@ -571,7 +576,7 @@ pub fn sync_team_from_dir(
         // Update persona_ids to reflect current state
         let current_ids: Vec<String> = personas
             .iter()
-            .filter(|p| p.source_team.as_deref() == Some(team_id))
+            .filter(|p| p.source_team.as_deref() == Some(persona_key.as_str()))
             .map(|p| p.id.clone())
             .collect();
         if team_record.persona_ids != current_ids {
@@ -710,21 +715,6 @@ pub fn parse_team_json(json_bytes: &[u8]) -> Result<ParsedTeamPreview, String> {
         description,
         personas,
     })
-}
-
-/// Sync all directory-backed teams on launch — the team equivalent of the
-/// former `sync_pack_personas`. Silently skips teams whose source directory
-/// is missing (e.g., external drive unmounted).
-pub fn sync_team_personas(app: &AppHandle) -> Result<(), String> {
-    let teams = load_teams(app)?;
-    for team in &teams {
-        if team.source_dir.as_ref().is_some_and(|d| d.exists()) {
-            if let Err(e) = sync_team_from_dir(app, &team.id) {
-                eprintln!("sprout-desktop: sync team {}: {e}", team.id);
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -900,12 +890,12 @@ mod tests {
         let json = serde_json::json!({
             "version": 1,
             "type": "team",
-            "name": "Solo",
+            "name": "Fizz",
         });
         let bytes = serde_json::to_vec(&json).unwrap();
         let parsed = parse_team_json(&bytes).unwrap();
         assert!(parsed.personas.is_empty());
-        assert_eq!(parsed.name, "Solo");
+        assert_eq!(parsed.name, "Fizz");
     }
 
     // -----------------------------------------------------------------------
@@ -920,24 +910,24 @@ mod tests {
         assert_eq!(records.len(), BUILT_IN_TEAMS.len());
         assert!(records.iter().all(|record| record.is_builtin));
         let names: Vec<&str> = records.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["Kit & Scout"]);
+        assert_eq!(names, vec!["Fizz"]);
     }
 
     #[test]
     fn merge_teams_preserves_user_customizations_to_builtin() {
-        let mut customized = team("builtin-team:kit-scout", "Kit & Scout (mine)");
+        let mut customized = team("builtin-team:fizz", "Fizz (mine)");
         customized.is_builtin = true;
-        customized.persona_ids = vec!["builtin:kit".to_string()];
+        customized.persona_ids = vec!["builtin:fizz".to_string()];
 
         let (records, _changed) = merge_teams(vec![customized], "2026-05-07T00:00:00Z");
 
-        let kit_scout = records
+        let fizz = records
             .iter()
-            .find(|t| t.id == "builtin-team:kit-scout")
-            .expect("Kit & Scout built-in should exist");
-        assert_eq!(kit_scout.name, "Kit & Scout (mine)");
-        assert_eq!(kit_scout.persona_ids, vec!["builtin:kit".to_string()]);
-        assert!(kit_scout.is_builtin);
+            .find(|t| t.id == "builtin-team:fizz")
+            .expect("Fizz built-in should exist");
+        assert_eq!(fizz.name, "Fizz (mine)");
+        assert_eq!(fizz.persona_ids, vec!["builtin:fizz".to_string()]);
+        assert!(fizz.is_builtin);
     }
 
     #[test]
@@ -946,7 +936,7 @@ mod tests {
         let (records, _changed) = merge_teams(vec![user_team], "2026-05-07T00:00:00Z");
 
         assert!(records.iter().any(|t| t.id == "user-uuid"));
-        assert!(records.iter().any(|t| t.id == "builtin-team:kit-scout"));
+        assert!(records.iter().any(|t| t.id == "builtin-team:fizz"));
     }
 
     #[test]
@@ -969,31 +959,25 @@ mod tests {
     fn merge_teams_repromotes_existing_builtin_marked_as_custom() {
         // If someone hand-edits the store and flips is_builtin to false on a
         // canonical built-in id, merge_teams should restore the flag.
-        let mut downgraded = team("builtin-team:kit-scout", "Kit & Scout");
+        let mut downgraded = team("builtin-team:fizz", "Fizz");
         downgraded.is_builtin = false;
 
         let (records, changed) = merge_teams(vec![downgraded], "2026-05-07T00:00:00Z");
 
         assert!(changed);
-        let kit_scout = records
+        let fizz = records
             .iter()
-            .find(|t| t.id == "builtin-team:kit-scout")
-            .expect("Kit & Scout should exist");
-        assert!(kit_scout.is_builtin);
+            .find(|t| t.id == "builtin-team:fizz")
+            .expect("Fizz should exist");
+        assert!(fizz.is_builtin);
     }
 
     #[test]
     fn validate_team_deletion_rejects_built_ins() {
-        let mut built_in = team("builtin-team:kit-scout", "Kit & Scout");
+        let mut built_in = team("builtin-team:fizz", "Fizz");
         built_in.is_builtin = true;
 
         let err = validate_team_deletion(&built_in).unwrap_err();
         assert_eq!(err, "Built-in teams cannot be deleted.");
-    }
-
-    #[test]
-    fn validate_team_deletion_allows_custom_teams() {
-        let custom = team("user-uuid", "My Team");
-        assert!(validate_team_deletion(&custom).is_ok());
     }
 }

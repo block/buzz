@@ -20,12 +20,12 @@ pub struct PersonaRecord {
     pub avatar_url: Option<String>,
     pub system_prompt: String,
     /// Preferred ACP runtime ID (e.g., 'goose', 'claude', 'codex'). Determines which agent binary
-    /// Sprout spawns. When deploying from this persona, this runtime is pre-selected in the UI.
+    /// Buzz spawns. When deploying from this persona, this runtime is pre-selected in the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     /// Opaque, harness-specific model identifier string. Format depends on the runtime and its LLM
     /// provider (e.g., 'goose-claude-4-6-opus' for Databricks, 'claude-opus-4-7' for Anthropic
-    /// direct). Sprout stores and passes through without interpretation.
+    /// direct). Buzz stores and passes through without interpretation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// LLM inference provider (e.g., 'databricks', 'anthropic', 'openai'). Optional — when set,
@@ -59,7 +59,7 @@ pub struct PersonaRecord {
     )]
     pub source_team_persona_slug: Option<String>,
     /// Harness-level configuration passed to the agent subprocess as environment variables.
-    /// Opaque to Sprout — keys and values are runtime-specific.
+    /// Opaque to Buzz — keys and values are runtime-specific.
     ///
     /// Stored as a BTreeMap for deterministic on-disk ordering.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -123,7 +123,7 @@ pub struct ManagedAgentRecord {
     /// creation by matching this ID against the fresh session/new response.
     #[serde(default)]
     pub model: Option<String>,
-    /// Comma-separated toolset string forwarded as SPROUT_TOOLSETS to the MCP subprocess.
+    /// Comma-separated toolset string forwarded as BUZZ_TOOLSETS to the MCP subprocess.
     /// When None, the MCP server uses its own default ("default" toolset).
     #[serde(default)]
     pub mcp_toolsets: Option<String>,
@@ -163,7 +163,7 @@ pub struct ManagedAgentRecord {
     pub last_stopped_at: Option<String>,
     pub last_exit_code: Option<i32>,
     pub last_error: Option<String>,
-    /// Inbound author gate mode. Translates to `SPROUT_ACP_RESPOND_TO`.
+    /// Inbound author gate mode. Translates to `BUZZ_ACP_RESPOND_TO`.
     #[serde(default)]
     pub respond_to: RespondTo,
     /// Allowlist used when `respond_to == Allowlist`. Stored normalized
@@ -172,7 +172,7 @@ pub struct ManagedAgentRecord {
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
     /// Typed marker for relay-mesh agents. `Some(_)` means this agent runs its
-    /// inference through Sprout's relay-mesh local endpoint; the `model_ref` is
+    /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.
     ///
     /// This is the source of truth for "is this a mesh agent + which model" —
@@ -544,9 +544,9 @@ pub struct MigrationReport {
     pub errors: Vec<String>,
 }
 
-pub const DEFAULT_ACP_COMMAND: &str = "sprout-acp";
+pub const DEFAULT_ACP_COMMAND: &str = "buzz-acp";
 pub const DEFAULT_AGENT_COMMAND: &str = "goose";
-/// ~5 min (320s) — matches the CLI harness default (SPROUT_ACP_IDLE_TIMEOUT).
+/// ~5 min (320s) — matches the CLI harness default (BUZZ_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
 /// 1 hour — absolute wall-clock safety cap per turn.
 pub const DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS: u64 = 3600;
@@ -566,10 +566,10 @@ fn default_record_active() -> bool {
 
 // ── Inbound author gate ──────────────────────────────────────────────────────
 //
-// Mirrors `sprout-acp`'s `--respond-to` CLI flag and the related
+// Mirrors `buzz-acp`'s `--respond-to` CLI flag and the related
 // `--respond-to-allowlist` option. Persisted per agent so the desktop can
-// translate the user's choice into `SPROUT_ACP_RESPOND_TO` /
-// `SPROUT_ACP_RESPOND_TO_ALLOWLIST` env vars at spawn time.
+// translate the user's choice into `BUZZ_ACP_RESPOND_TO` /
+// `BUZZ_ACP_RESPOND_TO_ALLOWLIST` env vars at spawn time.
 //
 // Wire format is kebab-case (`owner-only`, `allowlist`, `anyone`) to match
 // the harness CLI vocabulary and the strings the GUI emits.
@@ -589,7 +589,7 @@ pub enum RespondTo {
 }
 
 impl RespondTo {
-    /// CLI/env wire string (matches `sprout-acp`'s `--respond-to`).
+    /// CLI/env wire string (matches `buzz-acp`'s `--respond-to`).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OwnerOnly => "owner-only",
@@ -601,7 +601,7 @@ impl RespondTo {
 
 /// Validate and normalize a respond-to allowlist.
 ///
-/// Rules mirror `sprout-acp/src/config.rs::validate_allowlist`:
+/// Rules mirror `buzz-acp/src/config.rs::validate_allowlist`:
 /// - Each entry is exactly 64 hex chars (any case in, lowercase out).
 /// - Duplicates removed, insertion order preserved.
 ///
@@ -635,8 +635,8 @@ mod tests {
     fn persona_record_defaults_active_when_field_is_missing() {
         let record: PersonaRecord = serde_json::from_str(
             r#"{
-                "id": "builtin:solo",
-                "display_name": "Solo",
+                "id": "builtin:fizz",
+                "display_name": "Fizz",
                 "avatar_url": null,
                 "system_prompt": "Prompt",
                 "created_at": "2026-03-19T00:00:00Z",
@@ -662,7 +662,7 @@ mod tests {
                 "name": "test-agent",
                 "private_key_nsec": "nsec1fake",
                 "relay_url": "wss://localhost:3000",
-                "acp_command": "sprout-acp",
+                "acp_command": "buzz-acp",
                 "agent_command": "goose",
                 "agent_args": [],
                 "mcp_command": "",
@@ -692,7 +692,7 @@ mod tests {
             "private_key_nsec": "nsec1fake",
             "auth_tag": "[\"auth\",\"deadbeef\",\"\",\"cafebabe\"]",
             "relay_url": "wss://localhost:3000",
-            "acp_command": "sprout-acp",
+            "acp_command": "buzz-acp",
             "agent_command": "goose",
             "agent_args": [],
             "mcp_command": "",
@@ -770,7 +770,7 @@ mod tests {
                 "name": "legacy-agent",
                 "private_key_nsec": "nsec1fake",
                 "relay_url": "wss://localhost:3000",
-                "acp_command": "sprout-acp",
+                "acp_command": "buzz-acp",
                 "agent_command": "goose",
                 "agent_args": [],
                 "mcp_command": "",
@@ -932,7 +932,7 @@ mod tests {
                 "name": "test-agent",
                 "private_key_nsec": "nsec1fake",
                 "relay_url": "wss://localhost:3000",
-                "acp_command": "sprout-acp",
+                "acp_command": "buzz-acp",
                 "agent_command": "goose",
                 "agent_args": [],
                 "mcp_command": "",

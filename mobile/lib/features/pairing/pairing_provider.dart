@@ -75,7 +75,7 @@ class PairingNotifier extends Notifier<PairingState> {
     if (trimmed.startsWith('nostrpair://')) {
       return _pairNipAb(trimmed);
     }
-    // Legacy sprout:// flow.
+    // Legacy buzz:// flow.
     return _pairLegacy(trimmed);
   }
 
@@ -526,7 +526,7 @@ class PairingNotifier extends Notifier<PairingState> {
     );
   }
 
-  // ── Legacy sprout:// flow ───────────────────────────────────────────────
+  // ── Legacy buzz:// flow ───────────────────────────────────────────────
 
   Future<void> _pairLegacy(String rawInput) async {
     state = const PairingState(status: PairingStatus.connecting);
@@ -593,8 +593,8 @@ class PairingNotifier extends Notifier<PairingState> {
   Workspace _parseLegacyInput(String raw) {
     var payload = raw.trim();
 
-    if (payload.startsWith('sprout://')) {
-      payload = payload.substring('sprout://'.length);
+    if (payload.startsWith('buzz://')) {
+      payload = payload.substring('buzz://'.length);
     }
 
     final normalized = base64Url.normalize(payload);

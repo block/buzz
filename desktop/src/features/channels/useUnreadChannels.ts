@@ -30,7 +30,7 @@ type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
 // per-channel limit elsewhere in the app.
 const CATCH_UP_LIMIT = 1000;
 
-const PARTICIPATION_STORAGE_PREFIX = "sprout-thread-participation.v1";
+const PARTICIPATION_STORAGE_PREFIX = "buzz-thread-participation.v1";
 const MAX_PARTICIPATION_ENTRIES = 1000;
 
 function participationStorageKey(pubkey: string): string {
@@ -72,7 +72,7 @@ function writeParticipationToStorage(
   }
 }
 
-const AUTHORED_STORAGE_PREFIX = "sprout-thread-authored.v1";
+const AUTHORED_STORAGE_PREFIX = "buzz-thread-authored.v1";
 const MAX_AUTHORED_ENTRIES = 1000;
 
 function authoredStorageKey(pubkey: string): string {
@@ -111,7 +111,7 @@ function writeAuthoredToStorage(pubkey: string, rootIds: Set<string>): void {
   }
 }
 
-const MUTED_STORAGE_PREFIX = "sprout-thread-muted.v1";
+const MUTED_STORAGE_PREFIX = "buzz-thread-muted.v1";
 const MAX_MUTED_ENTRIES = 1000;
 
 function mutedStorageKey(pubkey: string): string {
@@ -157,7 +157,7 @@ export type ThreadActivityItem = {
   tags: string[][];
 };
 
-const ACTIVITY_STORAGE_PREFIX = "sprout-thread-activity.v1";
+const ACTIVITY_STORAGE_PREFIX = "buzz-thread-activity.v1";
 const MAX_ACTIVITY_ITEMS = 100;
 
 function activityStorageKey(pubkey: string): string {

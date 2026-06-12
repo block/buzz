@@ -8,6 +8,7 @@ import {
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type { ForumThreadResponse, ThreadReply } from "@/shared/api/types";
+import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
@@ -158,7 +159,7 @@ export function ForumThreadPanel({
 
   if (isLoading || !thread) {
     return (
-      <div className="flex h-full flex-col">
+      <div className={cn("flex h-full flex-col", channelChrome.contentPadding)}>
         <div className="border-b border-border/60 px-4 py-3">
           <Button
             className="gap-1.5 text-muted-foreground"
@@ -191,7 +192,7 @@ export function ForumThreadPanel({
     profiles?.[post.pubkey.toLowerCase()]?.avatarUrl ?? null;
 
   return (
-    <div className="flex h-full flex-col">
+    <div className={cn("flex h-full flex-col", channelChrome.contentPadding)}>
       <div className="border-b border-border/60 px-4 py-3">
         <Button
           className="gap-1.5 text-muted-foreground"

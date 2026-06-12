@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run-tests.sh — Run Sprout test suite
+# run-tests.sh — Run Buzz test suite
 # =============================================================================
 # Usage:
 #   ./scripts/run-tests.sh              # run all tests (default)
@@ -40,14 +40,14 @@ if [[ -f ".env" ]]; then
   set +o allexport
 else
   # Use defaults matching docker-compose.yml
-  export DATABASE_URL="postgres://sprout:sprout_dev@localhost:5432/sprout"
+  export DATABASE_URL="postgres://buzz:buzz_dev@localhost:5432/buzz"
   export PGHOST=localhost
   export PGPORT=5432
-  export PGUSER=sprout
-  export PGPASSWORD=sprout_dev
-  export PGDATABASE=sprout
+  export PGUSER=buzz
+  export PGPASSWORD=buzz_dev
+  export PGDATABASE=buzz
   export REDIS_URL="redis://localhost:6379"
-  export TYPESENSE_API_KEY="sprout_dev_key"
+  export TYPESENSE_API_KEY="buzz_dev_key"
   export TYPESENSE_URL="http://localhost:8108"
 fi
 
@@ -80,11 +80,11 @@ ensure_infra() {
 run_unit_tests() {
   section "Unit Tests (no infra required)"
 
-  run_test_step "sprout-core tests" \
-    cargo test -p sprout-core --lib -- --nocapture
+  run_test_step "buzz-core tests" \
+    cargo test -p buzz-core --lib -- --nocapture
 
-  run_test_step "sprout-auth unit tests" \
-    cargo test -p sprout-auth --lib -- --nocapture
+  run_test_step "buzz-auth unit tests" \
+    cargo test -p buzz-auth --lib -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------
@@ -94,12 +94,12 @@ run_integration_tests() {
 
   ensure_infra
 
-  run_test_step "sprout-db tests" \
-    cargo test -p sprout-db -- --nocapture
+  run_test_step "buzz-db tests" \
+    cargo test -p buzz-db -- --nocapture
 
-  run_test_step "sprout-auth integration tests" \
-    cargo test -p sprout-auth --test '*' -- --nocapture 2>/dev/null || \
-    run_test_step "sprout-auth (no integration tests found)" true
+  run_test_step "buzz-auth integration tests" \
+    cargo test -p buzz-auth --test '*' -- --nocapture 2>/dev/null || \
+    run_test_step "buzz-auth (no integration tests found)" true
 
   run_test_step "workspace integration tests" \
     cargo test --test '*' -- --nocapture 2>/dev/null || \

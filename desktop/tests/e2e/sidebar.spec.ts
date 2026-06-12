@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-const SIDEBAR_WIDTH_STORAGE_KEY = "sprout-sidebar-width";
+const SIDEBAR_WIDTH_STORAGE_KEY = "buzz-sidebar-width";
 const DEFAULT_SIDEBAR_WIDTH = 300;
 
 test.beforeEach(async ({ page }) => {

@@ -219,7 +219,7 @@ export function CustomEmojiSettingsCard() {
                   </p>
                 ) : pendingUpload === null ? (
                   <p className="text-sm font-normal text-muted-foreground">
-                    Choose an image first; Sprout will suggest a name from the
+                    Choose an image first; Buzz will suggest a name from the
                     filename.
                   </p>
                 ) : ownDuplicate ? (

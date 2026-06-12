@@ -2,6 +2,8 @@ import { Card } from "@/shared/ui/card";
 import { useSidebar } from "@/shared/ui/sidebar";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { cn } from "@/shared/lib/cn";
+import { channelChrome } from "@/shared/layout/chromeLayout";
+import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 
 type ViewLoadingFallbackKind =
   | "agents"
@@ -20,25 +22,26 @@ function LoadingHeaderSkeleton() {
   const { state: sidebarState } = useSidebar();
 
   return (
-    <header
-      className={cn(
-        "flex min-h-[44px] min-w-0 cursor-default select-none items-center gap-[10px] bg-background/70 py-[6px] pl-[16px] pr-[8px] shadow-[0_4px_24px_rgba(0,0,0,0.06)] backdrop-blur-xl transition-[padding] duration-200 ease-linear supports-[backdrop-filter]:bg-background/55 dark:shadow-[0_4px_24px_rgba(0,0,0,0.25)] sm:pl-[24px] sm:pr-[12px]",
-        sidebarState === "collapsed" && "md:pl-[160px]",
-      )}
-      data-tauri-drag-region
-    >
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-[6px]">
-          <Skeleton className="h-3.5 w-3.5 rounded-xs" />
-          <Skeleton className="h-4 w-28 max-w-[50vw]" />
+    <TopChromeInsetHeader data-tauri-drag-region>
+      <header
+        className={cn(
+          "flex min-h-[44px] min-w-0 cursor-default select-none items-center gap-[10px] py-[6px] pl-[16px] pr-[8px] transition-[padding] duration-200 ease-linear sm:pl-[24px] sm:pr-[12px]",
+          sidebarState === "collapsed" && "md:pl-[160px]",
+        )}
+      >
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-[6px]">
+            <Skeleton className="h-3.5 w-3.5 rounded-xs" />
+            <Skeleton className="h-4 w-28 max-w-[50vw]" />
+          </div>
+          <Skeleton className="mt-2 h-4 w-full max-w-2xl" />
         </div>
-        <Skeleton className="mt-2 h-4 w-full max-w-2xl" />
-      </div>
-      <div className="hidden shrink-0 items-center gap-2 sm:flex">
-        <Skeleton className="h-6 w-6 rounded-lg" />
-        <Skeleton className="h-6 w-6 rounded-lg" />
-      </div>
-    </header>
+        <div className="hidden shrink-0 items-center gap-2 sm:flex">
+          <Skeleton className="h-6 w-6 rounded-lg" />
+          <Skeleton className="h-6 w-6 rounded-lg" />
+        </div>
+      </header>
+    </TopChromeInsetHeader>
   );
 }
 
@@ -47,7 +50,7 @@ function MessageRowsSkeleton() {
     <>
       {["first", "second", "third", "fourth", "fifth"].map((row, index) => (
         <div className="flex gap-3" key={row}>
-          <Skeleton className="h-9 w-9 shrink-0 rounded-xl" />
+          <Skeleton className="h-9 w-9 shrink-0 rounded-full" />
           <div className="min-w-0 flex-1 space-y-1 pt-0.5">
             <div className="flex items-baseline gap-2">
               <Skeleton className="h-3.5 w-28" />
@@ -64,7 +67,7 @@ function MessageRowsSkeleton() {
 
 function AgentsLoadingBody() {
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-14 sm:px-6">
       <div className="space-y-6">
         <section className="space-y-4">
           <div className="flex items-center justify-between gap-3">
@@ -139,7 +142,7 @@ function AgentsLoadingBody() {
 
 function CardListLoadingBody() {
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-14 sm:px-6">
       <div className="mb-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Skeleton className="h-6 w-28" />
@@ -176,11 +179,18 @@ function CardListLoadingBody() {
   );
 }
 
-function ChannelLoadingBody() {
+function ChannelLoadingBody({ hasHeader = false }: { hasHeader?: boolean }) {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <div className="flex-1 overflow-y-auto px-4 py-3 sm:px-6">
-        <div className="flex w-full flex-col gap-4">
+      <div className="flex-1 overflow-y-auto px-4 pt-1 sm:px-6">
+        <div
+          className={cn(
+            "flex w-full flex-col gap-4",
+            // The real channel header overlays content, so reserve its
+            // measured height — unless an in-flow header skeleton is above.
+            hasHeader ? "pt-3" : channelChrome.contentPadding,
+          )}
+        >
           <MessageRowsSkeleton />
         </div>
       </div>
@@ -199,9 +209,14 @@ function ChannelLoadingBody() {
   );
 }
 
-function ForumLoadingBody() {
+function ForumLoadingBody({ hasHeader = false }: { hasHeader?: boolean }) {
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+    <div
+      className={cn(
+        "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
+        !hasHeader && channelChrome.contentPadding,
+      )}
+    >
       <div className="border-b border-border/60 p-4">
         <Skeleton className="h-10 w-full rounded-xl" />
       </div>
@@ -241,9 +256,13 @@ export function ViewLoadingFallback({
       {kind === "agents" ? <AgentsLoadingBody /> : null}
       {kind === "workflows" ? <CardListLoadingBody /> : null}
       {kind === "projects" ? <CardListLoadingBody /> : null}
-      {kind === "channel" ? <ChannelLoadingBody /> : null}
-      {kind === "forum" ? <ForumLoadingBody /> : null}
-      {kind === "pulse" ? <ChannelLoadingBody /> : null}
+      {kind === "channel" ? (
+        <ChannelLoadingBody hasHeader={includeHeader} />
+      ) : null}
+      {kind === "forum" ? <ForumLoadingBody hasHeader={includeHeader} /> : null}
+      {kind === "pulse" ? (
+        <ChannelLoadingBody hasHeader={includeHeader} />
+      ) : null}
     </div>
   );
 }

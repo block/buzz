@@ -4,7 +4,7 @@
 // Defaults for the iOS Release build. Internal/custom builds (e.g. an
 // enterprise-signed distribution) override these without patching tracked
 // files by writing `mobile/ios/Flutter/AppOverrides.xcconfig` (gitignored).
-BUNDLE_IDENTIFIER = com.sprout.sproutMobile
+BUNDLE_IDENTIFIER = com.buzz.buzzMobile
 CODE_SIGN_STYLE = Automatic
 CODE_SIGN_IDENTITY = iPhone Developer
 #include? "AppOverrides.xcconfig"

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'accent_colors.dart';
 
-// Catppuccin Latte (mauve accent) — matches Sprout desktop light theme
+// Catppuccin Latte (mauve accent) — matches Buzz desktop light theme
 const lightColorScheme = ColorScheme(
   brightness: Brightness.light,
   primary: Color(0xFF8839EF), // Latte Mauve
@@ -35,7 +35,7 @@ const lightColorScheme = ColorScheme(
   surfaceContainerHighest: Color(0xFFFFFFFF),
 );
 
-// Catppuccin Macchiato (mauve accent) — matches Sprout desktop dark theme
+// Catppuccin Macchiato (mauve accent) — matches Buzz desktop dark theme
 const darkColorScheme = ColorScheme(
   brightness: Brightness.dark,
   primary: Color(0xFFA875F5), // Macchiato Mauve (saturated)

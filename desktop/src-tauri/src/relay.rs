@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-// nostr 0.36 alias — required for cross-version bridging with sprout-sdk.
+// nostr 0.36 alias — required for cross-version bridging with buzz-sdk.
 
 use crate::app_state::AppState;
 
@@ -19,8 +19,8 @@ fn configured_env_var(name: &str) -> Option<String> {
 }
 
 pub fn relay_ws_url() -> String {
-    configured_env_var("SPROUT_RELAY_URL")
-        .or_else(|| option_env!("SPROUT_DESKTOP_BUILD_RELAY_URL").map(str::to_string))
+    configured_env_var("BUZZ_RELAY_URL")
+        .or_else(|| option_env!("BUZZ_DESKTOP_BUILD_RELAY_URL").map(str::to_string))
         .unwrap_or_else(|| DEFAULT_RELAY_WS_URL.to_string())
 }
 
@@ -64,11 +64,11 @@ pub fn relay_http_base_url(relay_url: &str) -> String {
 }
 
 pub fn relay_api_base_url() -> String {
-    if let Some(base) = configured_env_var("SPROUT_RELAY_HTTP") {
+    if let Some(base) = configured_env_var("BUZZ_RELAY_HTTP") {
         return base.trim_end_matches('/').to_string();
     }
 
-    if let Some(base) = option_env!("SPROUT_DESKTOP_BUILD_RELAY_HTTP") {
+    if let Some(base) = option_env!("BUZZ_DESKTOP_BUILD_RELAY_HTTP") {
         return base.trim().trim_end_matches('/').to_string();
     }
 
@@ -191,7 +191,7 @@ pub async fn query_relay_at(
 
 /// Parse a command-event OK message of the form `"response:<json>"`.
 ///
-/// Sprout's command kinds (e.g. 41010, 30620, 46020) acknowledge writes via
+/// Buzz's command kinds (e.g. 41010, 30620, 46020) acknowledge writes via
 /// relay OK messages whose payload is a `response:`-prefixed JSON document.
 /// This helper strips the prefix and deserializes the remainder as `T`.
 pub fn parse_command_response<T: DeserializeOwned>(message: &str) -> Result<T, String> {
@@ -211,7 +211,7 @@ pub fn parse_command_response<T: DeserializeOwned>(message: &str) -> Result<T, S
 /// This is a pure function (no I/O) extracted from `sync_managed_agent_profile` so that
 /// the event-building and auth-tag-injection logic can be unit tested without HTTP calls.
 ///
-/// `sprout-sdk` uses `nostr 0.36` while the desktop crate uses `nostr 0.37`. Cross-version
+/// `buzz-sdk` uses `nostr 0.36` while the desktop crate uses `nostr 0.37`. Cross-version
 /// bridging is done via hex-encoded public keys and raw tag slices — both versions share the
 /// same wire format.
 fn build_profile_event(
@@ -229,11 +229,11 @@ fn build_profile_event(
             .map_err(|e| format!("failed to convert agent pubkey for auth verification: {e}"))?;
 
         // Verify Schnorr signature before injecting into profile event.
-        sprout_sdk::nip_oa::verify_auth_tag(tag_json, &compat_pubkey)
+        buzz_sdk_pkg::nip_oa::verify_auth_tag(tag_json, &compat_pubkey)
             .map_err(|e| format!("auth tag verification failed for profile event: {e}"))?;
 
         // parse_auth_tag returns a nostr 0.36 Tag; bridge to nostr 0.37 via raw slice.
-        let compat_tag = sprout_sdk::nip_oa::parse_auth_tag(tag_json)
+        let compat_tag = buzz_sdk_pkg::nip_oa::parse_auth_tag(tag_json)
             .map_err(|e| format!("failed to parse verified auth tag: {e}"))?;
         let tag = nostr::Tag::parse(compat_tag.as_slice())
             .map_err(|e| format!("failed to convert auth tag to nostr 0.37: {e}"))?;
@@ -398,6 +398,55 @@ pub async fn submit_event(
     Ok(result)
 }
 
+/// Sign an event with explicit keys and POST it to `/events` with NIP-98 auth.
+///
+/// Managed-agent flows use this to publish as the agent itself while still
+/// including the stored NIP-OA auth tag when the relay requires owner-backed
+/// membership.
+pub async fn submit_event_with_keys(
+    builder: nostr::EventBuilder,
+    state: &AppState,
+    keys: &Keys,
+    auth_tag: Option<&str>,
+) -> Result<SubmitEventResponse, String> {
+    let url = format!("{}/events", relay_api_base_url_with_override(state));
+    let event = builder
+        .sign_with_keys(keys)
+        .map_err(|e| format!("failed to sign event: {e}"))?;
+    let body_bytes = event.as_json().into_bytes();
+    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+
+    let mut request = state
+        .http_client
+        .post(&url)
+        .header("Authorization", auth_header)
+        .header("Content-Type", "application/json");
+    if let Some(tag) = auth_tag {
+        request = request.header("x-auth-tag", tag);
+    }
+
+    let response = request
+        .body(body_bytes)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(relay_error_message(response).await);
+    }
+
+    let result: SubmitEventResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("failed to parse response: {e}"))?;
+
+    if !result.accepted {
+        return Err(format!("relay rejected event: {}", result.message));
+    }
+
+    Ok(result)
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -458,14 +507,14 @@ mod tests {
     /// and addressed to `agent_keys`.
     ///
     /// Uses `nostr_compat` (nostr 0.36) for the owner keys because
-    /// `sprout_sdk::nip_oa::compute_auth_tag` expects nostr 0.36 types.
+    /// `buzz_sdk_pkg::nip_oa::compute_auth_tag` expects nostr 0.36 types.
     /// The agent pubkey is bridged via hex encoding.
     fn make_valid_auth_tag(agent_keys: &nostr::Keys) -> String {
         let owner_keys = nostr::Keys::generate();
         let agent_pubkey_hex = agent_keys.public_key().to_hex();
         let agent_compat_pubkey =
             nostr::PublicKey::from_hex(&agent_pubkey_hex).expect("valid hex pubkey should parse");
-        sprout_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_compat_pubkey, "")
+        buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_keys, &agent_compat_pubkey, "")
             .expect("compute_auth_tag should not fail with distinct keys")
     }
 

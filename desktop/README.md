@@ -1,4 +1,4 @@
-# Sprout
+# Buzz
 
 Desktop chat shell with:
 

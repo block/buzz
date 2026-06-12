@@ -30,8 +30,8 @@ function autocomplete(page: import("@playwright/test").Page) {
 async function readCommandLog(page: import("@playwright/test").Page) {
   return page.evaluate(() => {
     return (
-      (window as Window & { __SPROUT_E2E_COMMANDS__?: string[] })
-        .__SPROUT_E2E_COMMANDS__ ?? []
+      (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+        .__BUZZ_E2E_COMMANDS__ ?? []
     );
   });
 }
@@ -41,12 +41,12 @@ async function readCommandPayloads(page: import("@playwright/test").Page) {
     return (
       (
         window as Window & {
-          __SPROUT_E2E_COMMAND_PAYLOADS__?: Array<{
+          __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
             command: string;
             payload: unknown;
           }>;
         }
-      ).__SPROUT_E2E_COMMAND_PAYLOADS__ ?? []
+      ).__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []
     );
   });
 }
@@ -67,12 +67,12 @@ async function waitForMockLiveSubscription(
           return (
             (
               window as Window & {
-                __SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
                   channelName: string;
                   kind?: number;
                 }) => boolean;
               }
-            ).__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
               channelName: currentChannelName,
               kind: expectedKind,
             }) ?? false
@@ -88,7 +88,7 @@ test("@ trigger shows unified autocomplete with agents first", async ({
   page,
 }) => {
   await installMockBridge(page, {
-    activePersonaIds: ["builtin:kit", "builtin:scout"],
+    activePersonaIds: ["builtin:fizz"],
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -101,8 +101,7 @@ test("@ trigger shows unified autocomplete with agents first", async ({
   await expect(dropdown).toBeVisible();
   await expect(dropdown.getByText("alice")).toBeVisible();
   await expect(dropdown.getByText("bob")).toBeVisible();
-  await expect(dropdown.getByText("Kit")).toBeVisible();
-  await expect(dropdown.getByText("Scout")).toBeVisible();
+  await expect(dropdown.getByText("Fizz")).toBeVisible();
   await expect(dropdown.getByText("charlie")).toBeVisible();
   await expect(dropdown.getByText("outsider")).toBeVisible();
   const charlieRow = dropdown.locator("button", { hasText: "charlie" });
@@ -118,8 +117,7 @@ test("@ trigger shows unified autocomplete with agents first", async ({
 
   const suggestions = dropdown.locator("button");
   const suggestionText = await suggestions.allInnerTexts();
-  const kitIndex = suggestionText.findIndex((text) => text.includes("Kit"));
-  const scoutIndex = suggestionText.findIndex((text) => text.includes("Scout"));
+  const fizzIndex = suggestionText.findIndex((text) => text.includes("Fizz"));
   const aliceIndex = suggestionText.findIndex((text) => text.includes("alice"));
   const bobIndex = suggestionText.findIndex((text) => text.includes("bob"));
   const charlieIndex = suggestionText.findIndex((text) =>
@@ -128,16 +126,13 @@ test("@ trigger shows unified autocomplete with agents first", async ({
   const outsiderIndex = suggestionText.findIndex((text) =>
     text.includes("outsider"),
   );
-  expect(kitIndex).toBeGreaterThanOrEqual(0);
-  expect(scoutIndex).toBeGreaterThanOrEqual(0);
+  expect(fizzIndex).toBeGreaterThanOrEqual(0);
   expect(aliceIndex).toBeGreaterThanOrEqual(0);
   expect(bobIndex).toBeGreaterThanOrEqual(0);
   expect(charlieIndex).toBeGreaterThanOrEqual(0);
   expect(outsiderIndex).toBeGreaterThanOrEqual(0);
-  expect(kitIndex).toBeLessThan(aliceIndex);
-  expect(scoutIndex).toBeLessThan(aliceIndex);
-  expect(kitIndex).toBeLessThan(bobIndex);
-  expect(scoutIndex).toBeLessThan(bobIndex);
+  expect(fizzIndex).toBeLessThan(aliceIndex);
+  expect(fizzIndex).toBeLessThan(bobIndex);
   expect(aliceIndex).toBeLessThan(charlieIndex);
   expect(bobIndex).toBeLessThan(charlieIndex);
   expect(aliceIndex).toBeLessThan(outsiderIndex);
@@ -227,29 +222,29 @@ test("selecting a persona mention creates a channel agent before sending", async
   page,
 }) => {
   await installMockBridge(page, {
-    activePersonaIds: ["builtin:kit"],
+    activePersonaIds: ["builtin:fizz"],
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
-  await input.fill("Ask @ki");
+  await input.fill("Ask @fi");
 
   const dropdown = autocomplete(page);
-  const kitRow = dropdown.locator("button", { hasText: "Kit" });
-  await expect(kitRow).toBeVisible();
-  await expect(kitRow.getByTestId("mention-agent-icon")).toBeVisible();
-  await expect(kitRow.getByText("agent")).toBeVisible();
-  await expect(kitRow.getByText("not in channel")).toBeVisible();
+  const fizzRow = dropdown.locator("button", { hasText: "Fizz" });
+  await expect(fizzRow).toBeVisible();
+  await expect(fizzRow.getByTestId("mention-agent-icon")).toBeVisible();
+  await expect(fizzRow.getByText("agent")).toBeVisible();
+  await expect(fizzRow.getByText("not in channel")).toBeVisible();
   await input.press("Enter");
   await page.keyboard.type(" for a hand");
 
   const composerChip = input.locator(".agent-mention-highlight", {
-    hasText: "Kit",
+    hasText: "Fizz",
   });
   await expect(composerChip).toBeVisible();
-  await expect(composerChip).toHaveText("Kit");
+  await expect(composerChip).toHaveText("Fizz");
 
   const baselineCommands = await readCommandLog(page);
   const baselineCreateCount = commandCount(
@@ -299,21 +294,21 @@ test("selecting a persona mention creates a channel agent before sending", async
   const mentionChip = page
     .getByTestId("message-row")
     .last()
-    .locator("[data-mention].agent-mention-highlight", { hasText: "Kit" });
+    .locator("[data-mention].agent-mention-highlight", { hasText: "Fizz" });
   await expect(mentionChip).toBeVisible();
-  await expect(mentionChip).toHaveText("Kit");
+  await expect(mentionChip).toHaveText("Fizz");
 });
 
 test("selecting a persona mention reuses an existing persona agent", async ({
   page,
 }) => {
   await installMockBridge(page, {
-    activePersonaIds: ["builtin:kit"],
+    activePersonaIds: ["builtin:fizz"],
     managedAgents: [
       {
         pubkey: REUSABLE_PERSONA_AGENT_PUBKEY,
-        name: "Kit",
-        personaId: "builtin:kit",
+        name: "Fizz",
+        personaId: "builtin:fizz",
         status: "stopped",
       },
     ],
@@ -323,11 +318,11 @@ test("selecting a persona mention reuses an existing persona agent", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
-  await input.fill("Ask @ki");
+  await input.fill("Ask @fi");
 
   const dropdown = autocomplete(page);
-  const kitRow = dropdown.locator("button", { hasText: "Kit" });
-  await expect(kitRow).toBeVisible();
+  const fizzRow = dropdown.locator("button", { hasText: "Fizz" });
+  await expect(fizzRow).toBeVisible();
   await input.press("Enter");
   await page.keyboard.type(" for a hand");
 
@@ -365,9 +360,9 @@ test("selecting a persona mention reuses an existing persona agent", async ({
   const mentionChip = page
     .getByTestId("message-row")
     .last()
-    .locator("[data-mention].agent-mention-highlight", { hasText: "Kit" });
+    .locator("[data-mention].agent-mention-highlight", { hasText: "Fizz" });
   await expect(mentionChip).toBeVisible();
-  await expect(mentionChip).toHaveText("Kit");
+  await expect(mentionChip).toHaveText("Fizz");
 });
 
 test("relay-profile agents with member roles use the agent composer style", async ({
@@ -421,7 +416,7 @@ test("mentioning an in-channel stopped managed agent starts it before sending", 
     managedAgents: [
       {
         pubkey: IN_CHANNEL_MANAGED_AGENT_PUBKEY,
-        name: "kit",
+        name: "fizz",
         status: "stopped",
         channelNames: ["general"],
       },
@@ -432,10 +427,10 @@ test("mentioning an in-channel stopped managed agent starts it before sending", 
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
-  await input.fill("Hey @kit");
+  await input.fill("Hey @fizz");
 
   const dropdown = autocomplete(page);
-  await expect(dropdown.getByText("kit")).toBeVisible();
+  await expect(dropdown.getByText("fizz")).toBeVisible();
   await expect(dropdown.getByText("agent")).toBeVisible();
   await input.press("Enter");
   await page.keyboard.type(" can you help?");
@@ -455,7 +450,7 @@ test("mentioning an in-channel stopped managed agent starts it before sending", 
   const mentionChip = page
     .getByTestId("message-row")
     .last()
-    .locator("[data-mention].agent-mention-highlight", { hasText: "kit" });
+    .locator("[data-mention].agent-mention-highlight", { hasText: "fizz" });
   await expect(mentionChip).toBeVisible();
 });
 
@@ -516,7 +511,7 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
     managedAgents: [
       {
         pubkey: OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY,
-        name: "scout",
+        name: "fizz",
         status: "stopped",
       },
     ],
@@ -526,12 +521,12 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
-  await input.fill("Loop in @scout");
+  await input.fill("Loop in @fizz");
 
   const dropdown = autocomplete(page);
-  const scoutRow = dropdown.locator("button", { hasText: "scout" });
-  await expect(scoutRow).toBeVisible();
-  await expect(scoutRow.getByText("not in channel")).toBeVisible();
+  const fizzRow = dropdown.locator("button", { hasText: "fizz" });
+  await expect(fizzRow).toBeVisible();
+  await expect(fizzRow.getByText("not in channel")).toBeVisible();
   await input.press("Enter");
 
   const baselineCommands = await readCommandLog(page);
@@ -561,7 +556,7 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
   const mentionChip = page
     .getByTestId("message-row")
     .last()
-    .locator("[data-mention].agent-mention-highlight", { hasText: "scout" });
+    .locator("[data-mention].agent-mention-highlight", { hasText: "fizz" });
   await expect(mentionChip).toBeVisible();
 });
 
@@ -650,7 +645,7 @@ test("system add and remove rows use agent mention styling for managed agents", 
 
   await page.evaluate(
     ({ actorPubkey, kind, targetPubkey }) => {
-      window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content: JSON.stringify({
           type: "member_joined",
@@ -659,7 +654,7 @@ test("system add and remove rows use agent mention styling for managed agents", 
         }),
         kind,
       });
-      window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content: JSON.stringify({
           type: "member_removed",

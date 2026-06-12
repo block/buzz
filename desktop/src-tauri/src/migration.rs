@@ -1,11 +1,14 @@
-//! Worktree data sync and on-launch reconciliation for the Sprout desktop app.
+//! Worktree data sync and on-launch reconciliation for the Buzz desktop app.
 //!
 //! **Worktree sync** (`sync_shared_agent_data`): Per-launch symlink creation
 //! from the current worktree data directory to the canonical dev data
-//! directory (`xyz.block.sprout.app.dev`). Only runs when
-//! `SPROUT_SHARE_IDENTITY=1` and `SPROUT_PRIVATE_KEY` is set. All dev
+//! directory (`xyz.block.buzz.app.dev`). Only runs when
+//! `BUZZ_SHARE_IDENTITY=1` and `BUZZ_PRIVATE_KEY` is set. All dev
 //! instances share the same physical files — edits in any worktree are
 //! immediately visible to all others.
+//!
+//! **Command reconciliation** (`reconcile_legacy_command_names`): Per-launch
+//! fix-up of persisted built-in command names from the Sprout→Buzz rename.
 //!
 //! **Provider reconciliation** (`reconcile_provider_mcp_commands`): Per-launch
 //! fix-up of `mcp_command` values in `managed-agents.json` against the
@@ -15,12 +18,14 @@
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
-const CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.sprout.app.dev";
+const CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.buzz.app.dev";
+const LEGACY_CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.sprout.app.dev";
+const LEGACY_RELEASE_IDENTIFIER: &str = "xyz.block.sprout.app";
 
 /// JSON files symlinked from worktree data directories to the canonical
 /// dev data directory. Only data files — never `agent-pids/` or `logs/`.
 /// `identity.key` is deliberately excluded because worktree instances
-/// receive their identity via the `SPROUT_PRIVATE_KEY` env var.
+/// receive their identity via the `BUZZ_PRIVATE_KEY` env var.
 const SHARED_AGENT_FILES: &[&str] = &[
     "agents/managed-agents.json",
     "agents/personas.json",
@@ -35,6 +40,84 @@ fn canonical_dev_data_dir(current: &Path) -> Option<PathBuf> {
     current.parent().map(|p| p.join(CANONICAL_DEV_IDENTIFIER))
 }
 
+fn legacy_app_data_dir(current: &Path) -> Option<PathBuf> {
+    let name = current.file_name()?.to_str()?;
+    let legacy_name = if name.starts_with(CANONICAL_DEV_IDENTIFIER) {
+        name.replacen(CANONICAL_DEV_IDENTIFIER, LEGACY_CANONICAL_DEV_IDENTIFIER, 1)
+    } else if name.starts_with("xyz.block.buzz.app") {
+        name.replacen("xyz.block.buzz.app", LEGACY_RELEASE_IDENTIFIER, 1)
+    } else {
+        return None;
+    };
+    current.parent().map(|parent| parent.join(legacy_name))
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        let metadata = std::fs::symlink_metadata(&src_path)?;
+        if metadata.file_type().is_symlink() {
+            #[cfg(unix)]
+            {
+                let target = std::fs::read_link(&src_path)?;
+                if dst_path.exists() || dst_path.is_symlink() {
+                    let _ = std::fs::remove_file(&dst_path);
+                }
+                std::os::unix::fs::symlink(target, &dst_path)?;
+            }
+            #[cfg(not(unix))]
+            {
+                continue;
+            }
+        } else if metadata.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else if metadata.is_file() {
+            if let Some(parent) = dst_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if !dst_path.exists() {
+                std::fs::copy(&src_path, &dst_path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Copy one-time app state from the legacy app identifier directory to
+/// the current Buzz identifier directory. The Tauri identifier controls the app
+/// data path, so without this copy a product rename would look like a fresh
+/// install and users would lose their persisted identity and agent settings.
+pub fn migrate_legacy_app_data_dir(app: &tauri::AppHandle) {
+    let current_dir = match app.path().app_data_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("buzz-desktop: app-data-migration: cannot resolve app data dir: {e}");
+            return;
+        }
+    };
+    let Some(legacy_dir) = legacy_app_data_dir(&current_dir) else {
+        return;
+    };
+    if !legacy_dir.exists() {
+        return;
+    }
+    match copy_dir_all(&legacy_dir, &current_dir) {
+        Ok(()) => eprintln!(
+            "buzz-desktop: app-data-migration: copied legacy data from {} to {}",
+            legacy_dir.display(),
+            current_dir.display()
+        ),
+        Err(error) => eprintln!(
+            "buzz-desktop: app-data-migration: failed to copy {} to {}: {error}",
+            legacy_dir.display(),
+            current_dir.display()
+        ),
+    }
+}
+
 /// Read a JSON array of objects from `path`, apply `f` to each object,
 /// and write back if any mutation returned `true`.
 fn patch_json_records(
@@ -46,7 +129,7 @@ fn patch_json_records(
     };
     let Ok(mut records) = serde_json::from_str::<Vec<serde_json::Value>>(&content) else {
         eprintln!(
-            "sprout-desktop: patch-json-records: failed to parse {}",
+            "buzz-desktop: patch-json-records: failed to parse {}",
             path.display()
         );
         return;
@@ -68,35 +151,33 @@ fn patch_json_records(
 /// data directory to the canonical dev data directory.
 ///
 /// Guards:
-/// - `SPROUT_SHARE_IDENTITY` must be `"1"`
-/// - `SPROUT_PRIVATE_KEY` must parse as valid `nostr::Keys`
+/// - `BUZZ_SHARE_IDENTITY` must be `"1"`
+/// - `BUZZ_PRIVATE_KEY` must parse as valid `nostr::Keys`
 /// - The canonical dir must differ from the current dir (skip if we ARE canonical)
 /// - The canonical dir must exist
 pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
     // Guard: only runs when sharing identity with a worktree.
-    let is_shared = std::env::var("SPROUT_SHARE_IDENTITY")
+    let is_shared = std::env::var("BUZZ_SHARE_IDENTITY")
         .map(|v| v == "1")
         .unwrap_or(false);
     if !is_shared {
         return;
     }
 
-    // Guard: SPROUT_PRIVATE_KEY must be a valid nostr key.
-    let has_valid_key = std::env::var("SPROUT_PRIVATE_KEY")
+    // Guard: BUZZ_PRIVATE_KEY must be a valid nostr key.
+    let has_valid_key = std::env::var("BUZZ_PRIVATE_KEY")
         .ok()
         .and_then(|k| k.parse::<nostr::Keys>().ok())
         .is_some();
     if !has_valid_key {
-        eprintln!(
-            "sprout-desktop: shared-agent-sync: SPROUT_PRIVATE_KEY missing or invalid, skipping"
-        );
+        eprintln!("buzz-desktop: shared-agent-sync: BUZZ_PRIVATE_KEY missing or invalid, skipping");
         return;
     }
 
     let current_dir = match app.path().app_data_dir() {
         Ok(dir) => dir,
         Err(e) => {
-            eprintln!("sprout-desktop: shared-agent-sync: cannot resolve app data dir: {e}");
+            eprintln!("buzz-desktop: shared-agent-sync: cannot resolve app data dir: {e}");
             return;
         }
     };
@@ -104,9 +185,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
     let canonical_dir = match canonical_dev_data_dir(&current_dir) {
         Some(dir) => dir,
         None => {
-            eprintln!(
-                "sprout-desktop: shared-agent-sync: cannot compute canonical dir (no parent)"
-            );
+            eprintln!("buzz-desktop: shared-agent-sync: cannot compute canonical dir (no parent)");
             return;
         }
     };
@@ -124,7 +203,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
     // Guard: skip if canonical dir doesn't exist.
     if !canonical_dir.exists() {
         eprintln!(
-            "sprout-desktop: shared-agent-sync: canonical dir does not exist: {}",
+            "buzz-desktop: shared-agent-sync: canonical dir does not exist: {}",
             canonical_dir.display()
         );
         return;
@@ -142,7 +221,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
         if let Some(parent) = dst.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 eprintln!(
-                    "sprout-desktop: shared-agent-sync: failed to create {}: {e}",
+                    "buzz-desktop: shared-agent-sync: failed to create {}: {e}",
                     parent.display()
                 );
                 continue;
@@ -166,7 +245,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
         match std::os::unix::fs::symlink(&src, &dst) {
             Ok(_) => synced += 1,
             Err(e) => {
-                eprintln!("sprout-desktop: shared-agent-sync: failed to symlink {rel}: {e}");
+                eprintln!("buzz-desktop: shared-agent-sync: failed to symlink {rel}: {e}");
             }
         }
     }
@@ -179,7 +258,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
         if !canonical_target.exists() {
             if let Err(e) = std::fs::create_dir_all(&canonical_target) {
                 eprintln!(
-                    "sprout-desktop: shared-agent-sync: failed to create {}: {e}",
+                    "buzz-desktop: shared-agent-sync: failed to create {}: {e}",
                     canonical_target.display()
                 );
             }
@@ -205,7 +284,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
                             let _ = std::fs::remove_dir_all(&sibling_dir);
                             let _ = std::os::unix::fs::symlink(&canonical_target, &sibling_dir);
                             eprintln!(
-                                "sprout-desktop: shared-agent-sync: migrated {rel} from {}",
+                                "buzz-desktop: shared-agent-sync: migrated {rel} from {}",
                                 sibling.display()
                             );
                             break;
@@ -227,7 +306,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
         if let Some(parent) = dst.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
                 eprintln!(
-                    "sprout-desktop: shared-agent-sync: failed to create {}: {e}",
+                    "buzz-desktop: shared-agent-sync: failed to create {}: {e}",
                     parent.display()
                 );
                 continue;
@@ -251,14 +330,14 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
         match std::os::unix::fs::symlink(&src, &dst) {
             Ok(_) => synced += 1,
             Err(e) => {
-                eprintln!("sprout-desktop: shared-agent-sync: failed to symlink {rel}: {e}");
+                eprintln!("buzz-desktop: shared-agent-sync: failed to symlink {rel}: {e}");
             }
         }
     }
 
     if synced > 0 {
         eprintln!(
-            "sprout-desktop: shared-agent-sync: {synced} item(s) linked to {}",
+            "buzz-desktop: shared-agent-sync: {synced} item(s) linked to {}",
             canonical_dir.display()
         );
     }
@@ -300,7 +379,7 @@ fn reconcile_team_dirs_in_file(path: &Path, canonical_dir: &Path) {
             return false;
         }
         eprintln!(
-            "sprout-desktop: team-dir-reconcile: {:?}: {:?} → {:?}",
+            "buzz-desktop: team-dir-reconcile: {:?}: {:?} → {:?}",
             obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
             team_path,
             expected,
@@ -417,9 +496,7 @@ pub fn migrate_packs_to_teams(app: &tauri::AppHandle) {
                     report
                         .errors
                         .push(format!("failed to rename packs → teams: {e}"));
-                    eprintln!(
-                        "sprout-desktop: packs→teams migration: directory rename failed: {e}"
-                    );
+                    eprintln!("buzz-desktop: packs→teams migration: directory rename failed: {e}");
                     return;
                 }
             }
@@ -472,7 +549,7 @@ pub fn migrate_packs_to_teams(app: &tauri::AppHandle) {
 
     if report.packs_migrated > 0 || report.personas_updated > 0 || report.agents_updated > 0 {
         eprintln!(
-            "sprout-desktop: packs→teams migration complete: {} dirs, {} personas, {} agents{}",
+            "buzz-desktop: packs→teams migration complete: {} dirs, {} personas, {} agents{}",
             report.packs_migrated,
             report.personas_updated,
             report.agents_updated,
@@ -504,11 +581,11 @@ fn reconcile_mcp_commands_in_file(path: &Path) {
         }
         // Only fix values that are clearly stale (empty or a removed binary).
         // Leave user-customized values untouched.
-        if !current.is_empty() && current != "sprout-mcp-server" {
+        if !current.is_empty() && current != "buzz-mcp-server" {
             return false;
         }
         eprintln!(
-            "sprout-desktop: runtime-reconcile: {:?} ({:?}): mcp_command {:?} → {:?}",
+            "buzz-desktop: runtime-reconcile: {:?} ({:?}): mcp_command {:?} → {:?}",
             obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
             agent_command,
             current,
@@ -520,6 +597,191 @@ fn reconcile_mcp_commands_in_file(path: &Path) {
         );
         true
     });
+}
+
+fn replace_command_field(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    replacement: String,
+) -> bool {
+    let Some(current) = obj.get(field).and_then(|v| v.as_str()) else {
+        return false;
+    };
+    if current == replacement {
+        return false;
+    }
+    eprintln!(
+        "buzz-desktop: command-rename-reconcile: {:?}: {field} {:?} → {:?}",
+        obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+        current,
+        replacement,
+    );
+    obj.insert(field.to_string(), serde_json::Value::String(replacement));
+    true
+}
+
+fn reconcile_legacy_command_names_in_file(path: &Path) {
+    patch_json_records(path, |obj| {
+        let mut changed = false;
+
+        if let Some(acp_command) = obj
+            .get("acp_command")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            if acp_command == "sprout-acp" {
+                changed |= replace_command_field(obj, "acp_command", "buzz-acp".to_string());
+            }
+        }
+
+        let mut agent_command = obj
+            .get("agent_command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if agent_command == "sprout-agent" {
+            agent_command = "buzz-agent".to_string();
+            changed |= replace_command_field(obj, "agent_command", agent_command.clone());
+        }
+
+        if let Some(mcp_command) = obj
+            .get("mcp_command")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            match mcp_command.as_str() {
+                "sprout-dev-mcp" => {
+                    changed |=
+                        replace_command_field(obj, "mcp_command", "buzz-dev-mcp".to_string());
+                }
+                "sprout-mcp" | "sprout-mcp-server" | "buzz-mcp-server" => {
+                    let replacement = if agent_command == "buzz-agent" {
+                        "buzz-dev-mcp"
+                    } else {
+                        ""
+                    };
+                    changed |= replace_command_field(obj, "mcp_command", replacement.to_string());
+                }
+                _ => {}
+            }
+        }
+
+        changed
+    });
+}
+
+fn reconcile_legacy_persona_runtimes_in_file(path: &Path) {
+    patch_json_records(path, |obj| {
+        let Some(runtime) = obj.get("runtime").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        if runtime != "sprout-agent" {
+            return false;
+        }
+        eprintln!(
+            "buzz-desktop: command-rename-reconcile: persona {:?}: runtime {:?} → {:?}",
+            obj.get("display_name")
+                .or_else(|| obj.get("displayName"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("?"),
+            runtime,
+            "buzz-agent",
+        );
+        obj.insert(
+            "runtime".to_string(),
+            serde_json::Value::String("buzz-agent".to_string()),
+        );
+        true
+    });
+}
+
+fn rewrite_legacy_persona_md_runtime(content: &str) -> Option<String> {
+    let (frontmatter, body) = buzz_persona_pkg::persona::split_frontmatter(content).ok()?;
+    let mut value = serde_yaml::from_str::<serde_yaml::Value>(frontmatter).ok()?;
+    let mapping = value.as_mapping_mut()?;
+    let runtime = mapping.get_mut(serde_yaml::Value::String("runtime".to_string()))?;
+    if runtime.as_str()? != "sprout-agent" {
+        return None;
+    }
+    *runtime = serde_yaml::Value::String("buzz-agent".to_string());
+    let frontmatter = serde_yaml::to_string(&value).ok()?;
+    Some(format!("---\n{frontmatter}---\n{body}"))
+}
+
+fn reconcile_legacy_team_persona_runtime_files(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            reconcile_legacy_team_persona_runtime_files(&path);
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(".persona.md") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(updated) = rewrite_legacy_persona_md_runtime(&content) else {
+            continue;
+        };
+        if updated == content {
+            continue;
+        }
+        match std::fs::write(&path, updated) {
+            Ok(()) => {
+                eprintln!(
+                    "buzz-desktop: command-rename-reconcile: updated {}",
+                    path.display()
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "buzz-desktop: command-rename-reconcile: failed to update {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Reconcile exact built-in command values persisted before the Sprout→Buzz
+/// rename. Custom commands and explicit paths are left untouched.
+pub fn reconcile_legacy_command_names(app: &tauri::AppHandle) {
+    let Ok(current_dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let mut dirs = vec![current_dir.clone()];
+    if let Some(canonical) = canonical_dev_data_dir(&current_dir) {
+        if canonical.exists() && canonical != current_dir {
+            dirs.push(canonical);
+        }
+    }
+    for dir in dirs {
+        let path = dir.join("agents/managed-agents.json");
+        if path.exists() {
+            reconcile_legacy_command_names_in_file(&path);
+        }
+        let personas_path = dir.join("agents/personas.json");
+        if personas_path.exists() {
+            reconcile_legacy_persona_runtimes_in_file(&personas_path);
+        }
+        let teams_dir = dir.join("agents/teams");
+        if teams_dir.exists() && !teams_dir.is_symlink() {
+            reconcile_legacy_team_persona_runtime_files(&teams_dir);
+        }
+    }
 }
 
 /// Reconcile `mcp_command` values in managed-agents.json against the
@@ -572,3 +834,7 @@ pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
 #[cfg(test)]
 #[path = "migration_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "migration_command_tests.rs"]
+mod command_tests;

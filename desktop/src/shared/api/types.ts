@@ -298,7 +298,7 @@ export type ManagedAgent = {
   startOnAppLaunch: boolean;
   backend: ManagedAgentBackend;
   backendAgentId: string | null;
-  /** Who the agent should respond to. Maps to `sprout-acp --respond-to`. */
+  /** Who the agent should respond to. Maps to `buzz-acp --respond-to`. */
   respondTo: RespondToMode;
   /**
    * Normalized 64-char lowercase hex pubkeys. Used only when `respondTo` is
@@ -308,7 +308,7 @@ export type ManagedAgent = {
 };
 
 /**
- * Inbound author gate mode. Mirrors `sprout-acp`'s `--respond-to` CLI flag.
+ * Inbound author gate mode. Mirrors `buzz-acp`'s `--respond-to` CLI flag.
  * `"nobody"` is supported by the harness but not surfaced through this API —
  * it's a heartbeat-only mode without a meaningful GUI use case.
  */
@@ -473,7 +473,7 @@ export type AgentPersona = {
   systemPrompt: string;
   /** Preferred ACP runtime ID (e.g. "goose", "claude"). */
   runtime: string | null;
-  /** Opaque, harness-specific model identifier string. Sprout stores and passes through without interpretation. */
+  /** Opaque, harness-specific model identifier string. Buzz stores and passes through without interpretation. */
   model: string | null;
   /** LLM inference provider (e.g. "databricks", "anthropic"). Injected as the runtime's provider env var at spawn time. */
   provider: string | null;

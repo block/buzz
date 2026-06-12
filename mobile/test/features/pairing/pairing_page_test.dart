@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:sprout_mobile/features/pairing/pairing_page.dart';
-import 'package:sprout_mobile/features/pairing/pairing_provider.dart';
+import 'package:buzz/features/pairing/pairing_page.dart';
+import 'package:buzz/features/pairing/pairing_provider.dart';
 
 import '../../helpers/widget_helpers.dart';
 
@@ -15,7 +15,7 @@ void main() {
         WidgetHelpers.testable(child: const PairingPage()),
       );
 
-      expect(find.text('Welcome to Sprout'), findsOneWidget);
+      expect(find.text('Welcome to Buzz'), findsOneWidget);
       expect(find.text('Scan QR Code'), findsOneWidget);
       expect(find.text('or paste pairing code'), findsOneWidget);
       expect(find.text('Connect'), findsOneWidget);

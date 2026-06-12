@@ -361,7 +361,7 @@ export function ProfileSettingsCard({
         <div className="mb-12 space-y-1">
           <h2 className="text-2xl font-semibold tracking-tight">Profile</h2>
           <p className="text-base font-normal text-muted-foreground">
-            Update how your name, avatar, and bio appear across Sprout.
+            Update how your name, avatar, and bio appear across Buzz.
           </p>
         </div>
 
@@ -429,8 +429,8 @@ export function ProfileSettingsCard({
                       >
                         <span
                           className={cn(
-                            "sprout-avatar-emoji-glyph flex h-full w-full items-center justify-center text-[6rem] leading-[100px]",
-                            avatarSquishKey > 0 && "sprout-avatar-squish",
+                            "buzz-avatar-emoji-glyph flex h-full w-full items-center justify-center text-[6rem] leading-[100px]",
+                            avatarSquishKey > 0 && "buzz-avatar-squish",
                           )}
                           data-testid="profile-avatar-preview-emoji"
                           key={avatarSquishKey}

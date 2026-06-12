@@ -19,15 +19,15 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_MESH_API_PORT: u16 = 9337;
 const DEFAULT_MESH_CONSOLE_PORT: u16 = 3131;
 const MESH_STATUS_KIND: u64 = 30_621;
-const MESH_API_PORT_ENV: &str = "SPROUT_MESH_API_PORT";
-const MESH_CONSOLE_PORT_ENV: &str = "SPROUT_MESH_CONSOLE_PORT";
-const RELAY_MESH_API_KEY_PLACEHOLDER: &str = "sprout-mesh-local";
+const MESH_API_PORT_ENV: &str = "BUZZ_MESH_API_PORT";
+const MESH_CONSOLE_PORT_ENV: &str = "BUZZ_MESH_CONSOLE_PORT";
+const RELAY_MESH_API_KEY_PLACEHOLDER: &str = "buzz-mesh-local";
 /// ACP provider relay-mesh agents run on. Sources of truth for its command +
 /// MCP live in the runtime catalog (`known_acp_runtime_exact`); these are
-/// only the fallbacks. `sprout-agent` reads the `SPROUT_AGENT_PROVIDER` /
+/// only the fallbacks. `buzz-agent` reads the `BUZZ_AGENT_PROVIDER` /
 /// `OPENAI_COMPAT_*` env vars below — goose (the global default) does not.
-const MESH_AGENT_PROVIDER_ID: &str = "sprout-agent";
-const MESH_AGENT_MCP_COMMAND: &str = "sprout-dev-mcp";
+const MESH_AGENT_PROVIDER_ID: &str = "buzz-agent";
+const MESH_AGENT_MCP_COMMAND: &str = "buzz-dev-mcp";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

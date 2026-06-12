@@ -181,7 +181,7 @@ export function CreateAgentRuntimeFields({
             className="text-xs text-muted-foreground"
             id="help-agent-acp-command"
           >
-            The sprout-acp binary path or alias used to launch the ACP harness
+            The buzz-acp binary path or alias used to launch the ACP harness
             process.
           </p>
         </div>
@@ -229,7 +229,7 @@ export function CreateAgentRuntimeFields({
             className="text-xs text-muted-foreground"
             id="help-agent-runtime-args"
           >
-            sprout-acp splits args on commas, matching the testing guide.
+            buzz-acp splits args on commas, matching the testing guide.
           </p>
         </div>
 
@@ -249,7 +249,7 @@ export function CreateAgentRuntimeFields({
             id="help-agent-mcp-command"
           >
             Optional. Only needed for agents that use a custom MCP server (e.g.
-            sprout-agent with sprout-dev-mcp). Leave blank for most agents.
+            buzz-agent with buzz-dev-mcp). Leave blank for most agents.
           </p>
         </div>
 
@@ -292,7 +292,7 @@ export function CreateAgentRuntimeFields({
             className="text-xs text-muted-foreground"
             id="help-agent-parallelism"
           >
-            Number of ACP worker subprocesses. sprout-acp allows 1-32.
+            Number of ACP worker subprocesses. buzz-acp allows 1-32.
           </p>
         </div>
       </div>
@@ -309,7 +309,7 @@ export function CreateAgentRuntimeFields({
           value={mcpToolsets}
         />
         <p className="text-xs text-muted-foreground">
-          Comma-separated list of toolsets to expose via SPROUT_TOOLSETS.
+          Comma-separated list of toolsets to expose via BUZZ_TOOLSETS.
           Available: default, channel_admin, dms, canvas, workflow_admin,
           identity, forums, social, media. Leave blank for default toolsets
           (default, canvas, forums, dms, media).
@@ -332,7 +332,7 @@ export function CreateAgentRuntimeFields({
           className="text-xs text-muted-foreground"
           id="help-agent-system-prompt"
         >
-          Blank means no override. sprout-acp will not add a [System] prompt.
+          Blank means no override. buzz-acp will not add a [System] prompt.
         </p>
       </div>
     </>

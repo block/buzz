@@ -396,7 +396,7 @@ macro_rules! status_or_fail {
 
 /// Load the private key from env vars or git config keyfile.
 ///
-/// Priority: NOSTR_PRIVATE_KEY > SPROUT_PRIVATE_KEY > git config nostr.keyfile
+/// Priority: NOSTR_PRIVATE_KEY > BUZZ_PRIVATE_KEY > git config nostr.keyfile
 ///
 /// Returns a zeroize-on-drop string containing the raw key material.
 fn load_key() -> Result<zeroize::Zeroizing<String>, Error> {
@@ -420,21 +420,21 @@ fn load_key() -> Result<zeroize::Zeroizing<String>, Error> {
         }
     }
 
-    // 2. SPROUT_PRIVATE_KEY
-    if let Ok(mut val) = std::env::var("SPROUT_PRIVATE_KEY") {
+    // 2. BUZZ_PRIVATE_KEY
+    if let Ok(mut val) = std::env::var("BUZZ_PRIVATE_KEY") {
         // Cap at 128 bytes: nsec1 bech32 is ~63 chars, hex is 64 chars.
         // 128 bytes is generous headroom; anything larger is malformed input.
         if val.len() > 128 {
             val.zeroize();
-            std::env::remove_var("SPROUT_PRIVATE_KEY");
+            std::env::remove_var("BUZZ_PRIVATE_KEY");
             return Err(Error::Fatal(
-                "SPROUT_PRIVATE_KEY exceeds 128-byte size limit".to_string(),
+                "BUZZ_PRIVATE_KEY exceeds 128-byte size limit".to_string(),
             ));
         }
         let trimmed = val.trim().to_string();
         val.zeroize();
         // Remove from process environment to minimize exposure window
-        std::env::remove_var("SPROUT_PRIVATE_KEY");
+        std::env::remove_var("BUZZ_PRIVATE_KEY");
         if !trimmed.is_empty() {
             return Ok(zeroize::Zeroizing::new(trimmed));
         }
@@ -443,7 +443,7 @@ fn load_key() -> Result<zeroize::Zeroizing<String>, Error> {
     // 3. nostr.keyfile git config
     let path = git_config("nostr.keyfile").ok_or_else(|| {
         Error::Fatal(
-            "no key available: set NOSTR_PRIVATE_KEY, SPROUT_PRIVATE_KEY, \
+            "no key available: set NOSTR_PRIVATE_KEY, BUZZ_PRIVATE_KEY, \
              or git config nostr.keyfile"
                 .to_string(),
         )
@@ -456,7 +456,7 @@ fn load_key() -> Result<zeroize::Zeroizing<String>, Error> {
 
 /// Load the NIP-OA auth tag from env or git config.
 ///
-/// Priority per NIP-GS spec: `SPROUT_AUTH_TAG` env var > `nostr.authtag` git config.
+/// Priority per NIP-GS spec: `BUZZ_AUTH_TAG` env var > `nostr.authtag` git config.
 /// The env var takes precedence so that CI/CD pipelines and agent harnesses can
 /// inject auth tags without modifying repo config.
 ///
@@ -469,7 +469,7 @@ fn load_auth_tag() -> Result<Option<(String, String, String)>, Error> {
     // NIP-GS spec: check env var first, then git config.
     // Use git_config_strict for auth tag to fail closed on read errors —
     // a configured-but-unreadable auth tag must not be silently omitted.
-    let json_str = match std::env::var("SPROUT_AUTH_TAG")
+    let json_str = match std::env::var("BUZZ_AUTH_TAG")
         .ok()
         .filter(|s| !s.is_empty())
     {
@@ -494,39 +494,39 @@ fn load_auth_tag() -> Result<Option<(String, String, String)>, Error> {
 
     // Parse: ["auth", "<owner>", "<conditions>", "<sig>"]
     let arr: serde_json::Value = serde_json::from_str(&json_str)
-        .map_err(|e| Error::Fatal(format!("SPROUT_AUTH_TAG is not valid JSON: {e}")))?;
+        .map_err(|e| Error::Fatal(format!("BUZZ_AUTH_TAG is not valid JSON: {e}")))?;
     let arr = arr
         .as_array()
-        .ok_or_else(|| Error::Fatal("SPROUT_AUTH_TAG must be a JSON array".to_string()))?;
+        .ok_or_else(|| Error::Fatal("BUZZ_AUTH_TAG must be a JSON array".to_string()))?;
     if arr.len() != 4 {
         return Err(Error::Fatal(
-            "SPROUT_AUTH_TAG must have exactly 4 elements".to_string(),
+            "BUZZ_AUTH_TAG must have exactly 4 elements".to_string(),
         ));
     }
     if arr[0].as_str() != Some("auth") {
         return Err(Error::Fatal(
-            "SPROUT_AUTH_TAG[0] must be \"auth\"".to_string(),
+            "BUZZ_AUTH_TAG[0] must be \"auth\"".to_string(),
         ));
     }
 
     let owner = arr[1]
         .as_str()
-        .ok_or_else(|| Error::Fatal("SPROUT_AUTH_TAG[1] must be a string".to_string()))?
+        .ok_or_else(|| Error::Fatal("BUZZ_AUTH_TAG[1] must be a string".to_string()))?
         .to_string();
     let conditions = arr[2]
         .as_str()
-        .ok_or_else(|| Error::Fatal("SPROUT_AUTH_TAG[2] must be a string".to_string()))?
+        .ok_or_else(|| Error::Fatal("BUZZ_AUTH_TAG[2] must be a string".to_string()))?
         .to_string();
     let sig = arr[3]
         .as_str()
-        .ok_or_else(|| Error::Fatal("SPROUT_AUTH_TAG[3] must be a string".to_string()))?
+        .ok_or_else(|| Error::Fatal("BUZZ_AUTH_TAG[3] must be a string".to_string()))?
         .to_string();
 
     // Validate conditions character class per NIP-OA: empty string is valid,
     // otherwise only ASCII alphanumeric + '_' + '=' + '<' + '>' + '&' allowed.
     if !validate_conditions(&conditions) {
         return Err(Error::Fatal(
-            "SPROUT_AUTH_TAG conditions contain invalid characters".to_string(),
+            "BUZZ_AUTH_TAG conditions contain invalid characters".to_string(),
         ));
     }
 
@@ -537,7 +537,7 @@ fn load_auth_tag() -> Result<Option<(String, String, String)>, Error> {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     {
         return Err(Error::Fatal(
-            "SPROUT_AUTH_TAG owner must be 64 lowercase hex chars".to_string(),
+            "BUZZ_AUTH_TAG owner must be 64 lowercase hex chars".to_string(),
         ));
     }
     if sig.len() != 128
@@ -546,7 +546,7 @@ fn load_auth_tag() -> Result<Option<(String, String, String)>, Error> {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
     {
         return Err(Error::Fatal(
-            "SPROUT_AUTH_TAG signature must be 128 lowercase hex chars".to_string(),
+            "BUZZ_AUTH_TAG signature must be 128 lowercase hex chars".to_string(),
         ));
     }
 
@@ -669,7 +669,7 @@ fn git_config(key: &str) -> Option<String> {
     let mut child = process::Command::new("git")
         .args(["config", "--get", key])
         .env_remove("NOSTR_PRIVATE_KEY")
-        .env_remove("SPROUT_PRIVATE_KEY")
+        .env_remove("BUZZ_PRIVATE_KEY")
         .stdout(process::Stdio::piped())
         .stderr(process::Stdio::null())
         .spawn()
@@ -723,7 +723,7 @@ fn git_config_strict(key: &str) -> Result<Option<String>, String> {
     let mut child = process::Command::new("git")
         .args(["config", "--get", key])
         .env_remove("NOSTR_PRIVATE_KEY")
-        .env_remove("SPROUT_PRIVATE_KEY")
+        .env_remove("BUZZ_PRIVATE_KEY")
         .stdout(process::Stdio::piped())
         .stderr(process::Stdio::null())
         .spawn()
@@ -1043,7 +1043,7 @@ fn do_sign(key_id: &str, status: &mut StatusWriter) -> Result<(), Error> {
         if !verify_oa(&pk_hex, oa_val) {
             return Err(Error::Fatal(
                 "auth tag owner signature (oa[2]) verification failed — \
-                 the configured SPROUT_AUTH_TAG is invalid or stale"
+                 the configured BUZZ_AUTH_TAG is invalid or stale"
                     .to_string(),
             ));
         }
@@ -1971,7 +1971,7 @@ Initial commit"
     fn test_load_auth_tag_rejects_bad_conditions() {
         // Valid conditions → Ok(Some(...))
         std::env::set_var(
-            "SPROUT_AUTH_TAG",
+            "BUZZ_AUTH_TAG",
             format!(
                 r#"["auth","{}","kind=9&created_at<1700000000","{}"]"#,
                 "a".repeat(64),
@@ -1986,7 +1986,7 @@ Initial commit"
 
         // Empty conditions (valid) → Ok(Some(...))
         std::env::set_var(
-            "SPROUT_AUTH_TAG",
+            "BUZZ_AUTH_TAG",
             format!(r#"["auth","{}","","{}"]"#, "a".repeat(64), "b".repeat(128)),
         );
         let result = load_auth_tag();
@@ -1997,7 +1997,7 @@ Initial commit"
 
         // Conditions with spaces → Err (fail closed)
         std::env::set_var(
-            "SPROUT_AUTH_TAG",
+            "BUZZ_AUTH_TAG",
             format!(
                 r#"["auth","{}","kind = 9","{}"]"#,
                 "a".repeat(64),
@@ -2012,7 +2012,7 @@ Initial commit"
 
         // Conditions with special chars → Err (fail closed)
         std::env::set_var(
-            "SPROUT_AUTH_TAG",
+            "BUZZ_AUTH_TAG",
             format!(
                 r#"["auth","{}","kind=9;rm -rf /","{}"]"#,
                 "a".repeat(64),
@@ -2026,7 +2026,7 @@ Initial commit"
         );
 
         // No auth tag set → Ok(None)
-        std::env::remove_var("SPROUT_AUTH_TAG");
+        std::env::remove_var("BUZZ_AUTH_TAG");
         let result = load_auth_tag();
         assert!(
             matches!(result, Ok(None)),

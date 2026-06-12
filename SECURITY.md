@@ -4,8 +4,8 @@
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-If you discover a security vulnerability in Sprout, please report it by emailing
-**security@sprout-relay.org**. Include as much detail as possible:
+If you discover a security vulnerability in Buzz, please report it by emailing
+**security@buzz-relay.org**. Include as much detail as possible:
 
 - A description of the vulnerability and its potential impact
 - Steps to reproduce or a proof-of-concept (if available)
@@ -33,7 +33,7 @@ We will credit reporters in release notes unless you prefer to remain anonymous.
 | `main` (latest) | ✅ Active |
 | Previous releases | ⚠️ Best-effort; upgrade recommended |
 
-Sprout is pre-1.0. We do not maintain long-term support branches at this stage.
+Buzz is pre-1.0. We do not maintain long-term support branches at this stage.
 All security fixes land on `main` first.
 
 ---
@@ -66,7 +66,7 @@ unless the subscriber is a member.
 
 ### Append-Only Audit Log
 
-All events are written to a tamper-evident audit log (`sprout-audit`). Each
+All events are written to a tamper-evident audit log (`buzz-audit`). Each
 log entry is chained to the previous one via an HMAC, making retroactive
 modification detectable. The audit log is designed for SOX-grade compliance
 and eDiscovery.

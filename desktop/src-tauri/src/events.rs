@@ -1,6 +1,6 @@
 //! Signed-event builders for desktop write operations.
 //!
-//! Mirrors the sprout-sdk builder patterns but uses nostr 0.37 API
+//! Mirrors the buzz-sdk builder patterns but uses nostr 0.37 API
 //! (the desktop is excluded from the workspace which pins nostr 0.36).
 //!
 //! Mental model:
@@ -9,19 +9,19 @@
 //! Each function validates inputs and returns a nostr::EventBuilder.
 //! Signing and submission happen in relay::submit_event.
 
+use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
-use sprout_core::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use uuid::Uuid;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-/// Maximum content size — matches sprout-sdk (64 KiB).
+/// Maximum content size — matches buzz-sdk (64 KiB).
 const MAX_CONTENT_BYTES: usize = 64 * 1024;
 
-/// Maximum mention count — matches sprout-sdk.
+/// Maximum mention count — matches buzz-sdk.
 const MAX_MENTIONS: usize = 50;
 
-/// Maximum emoji length in characters — matches sprout-sdk.
+/// Maximum emoji length in characters — matches buzz-sdk.
 const MAX_EMOJI_CHARS: usize = 64;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -296,6 +296,34 @@ pub fn build_message(
     custom_emoji_tags: &[Vec<String>],
     mention_ref_tags: &[Vec<String>],
 ) -> Result<EventBuilder, String> {
+    build_message_with_client_tags(
+        channel_id,
+        content,
+        thread_ref,
+        mentions,
+        media_tags,
+        custom_emoji_tags,
+        mention_ref_tags,
+        &[],
+    )
+}
+
+/// Kind 9 — stream message with internal client marker tags.
+///
+/// This is intentionally narrower than arbitrary extra tags: callers can add
+/// only `["client", ...]` tags, which are useful for idempotency markers but
+/// cannot forge channel/thread/mention metadata.
+#[allow(clippy::too_many_arguments)]
+pub fn build_message_with_client_tags(
+    channel_id: Uuid,
+    content: &str,
+    thread_ref: Option<&ThreadRef>,
+    mentions: &[&str],
+    media_tags: &[Vec<String>],
+    custom_emoji_tags: &[Vec<String>],
+    mention_ref_tags: &[Vec<String>],
+    client_tags: &[Vec<String>],
+) -> Result<EventBuilder, String> {
     check_content(content)?;
     let mut tags = vec![tag(vec!["h", &channel_id.to_string()])?];
     if let Some(tr) = thread_ref {
@@ -305,7 +333,25 @@ pub fn build_message(
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
+    append_client_tags(client_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
+}
+
+fn append_client_tags(client_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
+    for client_tag in client_tags {
+        if client_tag.first().map(String::as_str) != Some("client") {
+            return Err(format!(
+                "client tags must use 'client' prefix (got {:?})",
+                client_tag.first()
+            ));
+        }
+        if client_tag.len() < 2 {
+            return Err("client tag missing marker".into());
+        }
+        let parts: Vec<&str> = client_tag.iter().map(String::as_str).collect();
+        tags.push(Tag::parse(parts).map_err(|e| format!("invalid client tag: {e}"))?);
+    }
+    Ok(())
 }
 
 /// Kind 45001 — forum post.

@@ -4,7 +4,7 @@ import { installMockBridge } from "../helpers/bridge";
 
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 const ENGINEERING_CHANNEL_ID = "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9";
-const STAR_STORAGE_KEY = `sprout-channel-stars.v1:${MOCK_PUBKEY}`;
+const STAR_STORAGE_KEY = `buzz-channel-stars.v1:${MOCK_PUBKEY}`;
 const SHOTS = "test-results/channel-star";
 
 function seedStarState(

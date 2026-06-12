@@ -250,18 +250,15 @@ export function HuddleIndicator({
       <>
         <Button
           aria-label="Start huddle"
-          className={cn(
-            "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5",
-            className,
-          )}
+          className={className}
           data-testid="channel-start-huddle-trigger"
           disabled={startDisabled || isStarting}
           onClick={() => headphonesGate.gate(() => onStart())}
           size="icon"
           type="button"
-          variant="ghost"
+          variant="outline"
         >
-          <Headphones className="size-5" />
+          <Headphones />
         </Button>
         {gateDialog}
       </>
@@ -313,17 +310,14 @@ export function HuddleIndicator({
         <TooltipTrigger asChild>
           <Button
             aria-label={`Join active huddle (${participantCount} participant${participantCount !== 1 ? "s" : ""})`}
-            className={cn(
-              "relative h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5",
-              className,
-            )}
+            className={cn("relative", className)}
             disabled={isJoining || isStarting}
             onClick={() => headphonesGate.gate(() => void doJoin())}
             size="icon"
             type="button"
-            variant="ghost"
+            variant="outline"
           >
-            <Headphones className="size-5 text-muted-foreground" />
+            <Headphones />
             <span className="absolute inset-0 animate-pulse rounded-lg ring-2 ring-border/70" />
             {/* Participant count badge */}
             {participantCount > 0 && (

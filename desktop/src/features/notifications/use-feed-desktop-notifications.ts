@@ -18,10 +18,14 @@ import {
   requestDesktopNotificationAccess,
   sendDesktopNotification,
 } from "./lib/desktop";
-import { playNotificationSound } from "./lib/sound";
+import {
+  playNotificationSound,
+  resolveSlotSound,
+  slotForFeedKind,
+} from "./lib/sound";
 import type { NotificationSettings } from "./hooks";
 
-const HOME_FEED_SEEN_STORAGE_KEY = "sprout-home-feed-seen.v1";
+const HOME_FEED_SEEN_STORAGE_KEY = "buzz-home-feed-seen.v1";
 const HOME_FEED_SEEN_MAX_ITEMS = 500;
 
 function homeFeedSeenStorageKey(pubkey: string) {
@@ -117,8 +121,9 @@ export function useFeedDesktopNotifications(
         title: notificationTitle(item, senderName),
       });
 
-      if (didSend && settings.soundEnabled) {
-        playNotificationSound();
+      if (didSend) {
+        const slot = slotForFeedKind(item.kind, item.category);
+        playNotificationSound(resolveSlotSound(settings, slot));
       }
     },
   );
@@ -149,8 +154,8 @@ export function useFeedDesktopNotifications(
     const nextSeenItemIds = new Set(seenItemIdsRef.current);
     const newItems = settings.desktopEnabled
       ? eligibleFeedNotificationItems(feed, {
-          mentions: settings.mentions,
-          needsAction: settings.needsAction,
+          mentions: settings.slotAlertsEnabled.mention,
+          needsAction: settings.slotAlertsEnabled.needs_action,
         })
           .filter((item) => !nextSeenItemIds.has(item.id))
           .filter(
@@ -204,7 +209,7 @@ export function useFeedDesktopNotifications(
     normalizedPubkey,
     profiles,
     settings.desktopEnabled,
-    settings.mentions,
-    settings.needsAction,
+    settings.slotAlertsEnabled.mention,
+    settings.slotAlertsEnabled.needs_action,
   ]);
 }

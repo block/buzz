@@ -1,29 +1,29 @@
 [workspace]
 members = [
-    "crates/sprout-relay",
-    "crates/sprout-core",
-    "crates/sprout-db",
-    "crates/sprout-pubsub",
-    "crates/sprout-auth",
-    "crates/sprout-search",
-    "crates/sprout-audit",
-    "crates/sprout-acp",
-    "crates/sprout-agent",
+    "crates/buzz-relay",
+    "crates/buzz-core",
+    "crates/buzz-db",
+    "crates/buzz-pubsub",
+    "crates/buzz-auth",
+    "crates/buzz-search",
+    "crates/buzz-audit",
+    "crates/buzz-acp",
+    "crates/buzz-agent",
     "crates/sprig",
-    "crates/sprout-proxy",
-    "crates/sprout-test-client",
-    "crates/sprout-ws-client",
-    "crates/sprout-admin",
-    "crates/sprout-workflow",
-    "crates/sprout-media",
-    "crates/sprout-cli",
-    "crates/sprout-pairing-cli",
-    "crates/sprout-sdk",
-    "crates/sprout-persona",
+    "crates/buzz-proxy",
+    "crates/buzz-test-client",
+    "crates/buzz-ws-client",
+    "crates/buzz-admin",
+    "crates/buzz-workflow",
+    "crates/buzz-media",
+    "crates/buzz-cli",
+    "crates/buzz-pairing-cli",
+    "crates/buzz-sdk",
+    "crates/buzz-persona",
     "crates/git-credential-nostr",
     "crates/git-sign-nostr",
-    "crates/sprout-pair-relay",
-    "crates/sprout-dev-mcp",
+    "crates/buzz-pair-relay",
+    "crates/buzz-dev-mcp",
     "examples/countdown-bot",
 ]
 exclude = ["desktop/src-tauri"]
@@ -102,22 +102,22 @@ futures-util = "0.3"
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 
-# MCP SDK (used by sprout-dev-mcp and sprout-agent)
+# MCP SDK (used by buzz-dev-mcp and buzz-agent)
 rmcp = { version = "1.1.0", features = ["server", "transport-io", "macros"] }
 schemars = { version = "1", default-features = false }
 
 # Internal crates
-sprout-core = { path = "crates/sprout-core" }
-sprout-db = { path = "crates/sprout-db" }
-sprout-auth = { path = "crates/sprout-auth" }
-sprout-pubsub = { path = "crates/sprout-pubsub" }
-sprout-search = { path = "crates/sprout-search" }
-sprout-audit = { path = "crates/sprout-audit" }
-sprout-proxy = { path = "crates/sprout-proxy" }
-sprout-workflow = { path = "crates/sprout-workflow" }
-sprout-media = { path = "crates/sprout-media" }
-sprout-sdk = { path = "crates/sprout-sdk" }
-sprout-ws-client = { path = "crates/sprout-ws-client" }
+buzz-core = { path = "crates/buzz-core" }
+buzz-db = { path = "crates/buzz-db" }
+buzz-auth = { path = "crates/buzz-auth" }
+buzz-pubsub = { path = "crates/buzz-pubsub" }
+buzz-search = { path = "crates/buzz-search" }
+buzz-audit = { path = "crates/buzz-audit" }
+buzz-proxy = { path = "crates/buzz-proxy" }
+buzz-workflow = { path = "crates/buzz-workflow" }
+buzz-media = { path = "crates/buzz-media" }
+buzz-sdk = { path = "crates/buzz-sdk" }
+buzz-ws-client = { path = "crates/buzz-ws-client" }
 
 # CI profile — release-grade codegen for the relay so e2e tests hit a
 # realistic binary, not an unoptimised debug build.  Inherits `release`

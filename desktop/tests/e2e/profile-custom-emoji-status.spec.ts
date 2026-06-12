@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
-const SHORTCODE = "sprout";
+const SHORTCODE = "buzz";
 const STATUS_TEXT = "testing custom status";
 
 async function openProfilePopover(page: import("@playwright/test").Page) {

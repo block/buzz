@@ -113,7 +113,7 @@ Two operations act on `R`:
 - **Push(R, Δ)** — receive-pack. Δ is a set of requested ref updates
   `refname ↦ (old_id, new_id)`.
 
-**The manifest pointer is the sole source of truth.** In Sprout, a successful
+**The manifest pointer is the sole source of truth.** In Buzz, a successful
 push may also publish a relay event (kind:30618) so subscribers learn refs moved.
 That event is a *derived notification*, never the commit point: a push has
 happened iff `M_R` was CAS-swapped (A3), regardless of whether — or when — any
@@ -447,7 +447,7 @@ transfer:
   `manifest_event::build_ref_state_event` from `CasSuccess.manifest` — the
   values that *physically landed* via CAS, by `Inv_RefEffectApplied`. The event
   is relay-signed (the relay is authoritative for ref state of repos it hosts);
-  the pusher's pubkey rides in a `p` tag (sprout extension; NIP-34 does not
+  the pusher's pubkey rides in a `p` tag (buzz extension; NIP-34 does not
   define one). 30618 emission happens after `cas_publish` returns `Ok` and
   before the success `Response` is constructed — so 30618 is a strict
   consequence of a committed CAS, never the commit itself. A failed 30618
@@ -461,7 +461,7 @@ transfer:
   accepted v1 tradeoff named in §Scope).
 
 **Current code status (verified provenance).** The full S3-CAS implementation
-exists in code at PR #726's tip (`crates/sprout-relay/src/api/git/`), with the
+exists in code at PR #726's tip (`crates/buzz-relay/src/api/git/`), with the
 relay lib green, clippy `--tests -D warnings` clean, fmt clean, and the live
 MinIO e2e — clone/push/fetch/force-push roundtrip + N-way concurrent-push
 no-fork — green on the assembled tip. (Line numbers below are pinned at

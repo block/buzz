@@ -54,14 +54,16 @@ import {
   shallowArrayEqual,
 } from "./markdownUtils";
 import { resolveFileCard } from "./markdownFileCard";
-import { VideoPlayer } from "./VideoPlayer";
+import { VideoPlayer, type VideoReviewContext } from "./VideoPlayer";
 
 type ImetaEntry = {
+  dim?: string;
   image?: string;
   thumb?: string;
   m?: string;
   size?: number;
   filename?: string;
+  duration?: number;
 };
 
 type ImetaLookup = Map<string, ImetaEntry>;
@@ -119,8 +121,72 @@ function useStableArray<T>(arr: T[]): T[] {
   return ref.current;
 }
 
+function aspectRatioFromDim(dim?: string): number | undefined {
+  if (!dim) return undefined;
+  const match = dim.match(/^(\d+)x(\d+)$/i);
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || height <= 0) {
+    return undefined;
+  }
+  return width / height;
+}
+
 /**
- * `urlTransform` for `<ReactMarkdown>` that preserves `sprout://message?…`
+ * Video review context flows through React context instead of
+ * `createMarkdownComponents` arguments. The component map must keep a stable
+ * identity across re-renders: a new map means new element types, which makes
+ * React unmount and remount every rendered node — including `<video>`
+ * elements, killing playback (and any in-progress review comment draft)
+ * whenever the timeline re-renders.
+ */
+const VideoReviewMarkdownContext = React.createContext<
+  VideoReviewContext | undefined
+>(undefined);
+
+function MarkdownVideoPlayer({
+  alt,
+  entry,
+  resolvedSrc,
+  src,
+}: {
+  alt?: string;
+  entry?: ImetaEntry;
+  resolvedSrc: string;
+  src?: string;
+}) {
+  const videoReviewContext = React.useContext(VideoReviewMarkdownContext);
+  // Look up poster frame from imeta tags (NIP-71 `image` field).
+  // Fall back to `thumb` for compatibility with older events.
+  const posterUrl = entry?.image ?? entry?.thumb;
+  const resolvedPoster = posterUrl ? rewriteRelayUrl(posterUrl) : undefined;
+  const resolvedReviewContext = React.useMemo(
+    () =>
+      videoReviewContext
+        ? {
+            ...videoReviewContext,
+            title:
+              videoReviewContext.title ?? entry?.filename ?? alt ?? "Video",
+          }
+        : undefined,
+    [alt, entry?.filename, videoReviewContext],
+  );
+
+  return (
+    <VideoPlayer
+      src={resolvedSrc}
+      aspectRatio={aspectRatioFromDim(entry?.dim)}
+      poster={resolvedPoster}
+      durationSeconds={entry?.duration}
+      reviewKey={src ?? resolvedSrc}
+      reviewContext={resolvedReviewContext}
+    />
+  );
+}
+
+/**
+ * `urlTransform` for `<ReactMarkdown>` that preserves `buzz://message?…`
  * links. The default transform strips unknown schemes (returns `""`) before
  * the `a` component override can see them, which would break copy → paste →
  * click end-to-end. Everything else delegates to `defaultUrlTransform`.
@@ -145,6 +211,7 @@ type MarkdownProps = {
   mentionPubkeysByName?: Record<string, string>;
   searchQuery?: string;
   tight?: boolean;
+  videoReviewContext?: VideoReviewContext;
 };
 
 type MarkdownVariant = "default" | "compact" | "tight";
@@ -709,7 +776,7 @@ function createMarkdownComponents(
         );
       }
 
-      // Intercept `sprout://message?channel=…&id=…` links so a click navigates
+      // Intercept `buzz://message?channel=…&id=…` links so a click navigates
       // in-app instead of opening the URL in the OS browser. http(s) links
       // continue to use the existing target="_blank" behavior.
       if (isMessageLink(href)) {
@@ -730,7 +797,7 @@ function createMarkdownComponents(
             </a>
           );
         }
-        // Malformed sprout://message link — fall through to the default
+        // Malformed message deep link — fall through to the default
         // anchor (renders as a normal external link).
       }
       return (
@@ -817,19 +884,15 @@ function createMarkdownComponents(
       }
 
       if (resolvedSrc?.endsWith(".mp4")) {
-        // Look up poster frame from imeta tags (NIP-71 `image` field).
-        // Fall back to `thumb` for compatibility with older events.
         const entry = src ? imetaByUrl?.get(src) : undefined;
-        const posterUrl = entry?.image ?? entry?.thumb;
-        const resolvedPoster = posterUrl
-          ? rewriteRelayUrl(posterUrl)
-          : undefined;
         return (
           <span data-block-media="">
-            <VideoPlayer
-              key={resolvedSrc}
-              src={resolvedSrc}
-              poster={resolvedPoster}
+            <MarkdownVideoPlayer
+              key={src ?? resolvedSrc}
+              alt={alt}
+              entry={entry}
+              resolvedSrc={resolvedSrc}
+              src={src}
             />
           </span>
         );
@@ -991,7 +1054,7 @@ function createMarkdownComponents(
       const href = String(children ?? "");
       const parsed = parseMessageLink(href);
       if (!parsed.ok) {
-        // Malformed `sprout://message?…` — render the raw URL as plain text
+        // Malformed `buzz://message?…` — render the raw URL as plain text
         // rather than a misleading clickable pill.
         return <span data-message-link="">{href}</span>;
       }
@@ -1040,6 +1103,7 @@ function MarkdownInner({
   mentionPubkeysByName,
   searchQuery,
   tight = false,
+  videoReviewContext,
 }: MarkdownProps) {
   const variant: MarkdownVariant = tight
     ? "tight"
@@ -1183,7 +1247,9 @@ function MarkdownInner({
         className,
       )}
     >
-      {markdownNode}
+      <VideoReviewMarkdownContext.Provider value={videoReviewContext}>
+        {markdownNode}
+      </VideoReviewMarkdownContext.Provider>
     </div>
   );
 }
@@ -1202,7 +1268,8 @@ export const Markdown = React.memo(
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&
     shallowArrayEqual(prev.channelNames, next.channelNames) &&
     prev.imetaByUrl === next.imetaByUrl &&
-    prev.searchQuery === next.searchQuery,
+    prev.searchQuery === next.searchQuery &&
+    prev.videoReviewContext === next.videoReviewContext,
 );
 
 Markdown.displayName = "Markdown";

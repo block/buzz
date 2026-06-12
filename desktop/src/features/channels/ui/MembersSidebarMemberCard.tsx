@@ -46,6 +46,7 @@ type MembersSidebarMemberCardProps = {
   onChangeRole: (member: ChannelMember, role: string) => void;
   onEditRespondTo?: (agent: ManagedAgent) => void;
   onManagedAgentAction: (agent: ManagedAgent) => void;
+  onOpenProfile?: (pubkey: string) => void;
   onRemoveMember: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
   presenceStatus?: PresenceStatus | null;
@@ -97,6 +98,7 @@ export function MembersSidebarMemberCard({
   onChangeRole,
   onEditRespondTo,
   onManagedAgentAction,
+  onOpenProfile,
   onRemoveMember,
   onViewActivity,
   presenceStatus,
@@ -112,60 +114,76 @@ export function MembersSidebarMemberCard({
     ? Boolean(managedAgent) || canRemoveMember || canViewActivity
     : canRemoveMember || canChangeRole;
 
+  const memberIdentity = (
+    <>
+      <div className="relative shrink-0">
+        <ProfileAvatar
+          avatarUrl={profileAvatarUrl ?? null}
+          className="h-9 w-9 text-[11px] shadow-none"
+          iconClassName="h-4 w-4"
+          label={memberAvatarLabel}
+        />
+        {presenceStatus ? (
+          <span
+            className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-background"
+            data-testid={`sidebar-member-presence-${member.pubkey}`}
+          >
+            <PresenceDot className="h-2 w-2" status={presenceStatus} />
+          </span>
+        ) : null}
+      </div>
+      <div className="min-w-0">
+        <div className="flex items-center gap-1.5">
+          <p className="truncate text-sm font-medium leading-5">
+            {memberLabel}
+          </p>
+          <Badge className="shrink-0" variant="secondary">
+            {roleLabel}
+          </Badge>
+          {managedAgent ? (
+            <>
+              <Badge
+                className="shrink-0"
+                data-testid={`sidebar-managed-agent-status-${member.pubkey}`}
+                variant="secondary"
+              >
+                {formatManagedAgentStatus(managedAgent)}
+              </Badge>
+              <Badge
+                className="shrink-0"
+                data-testid={`sidebar-managed-agent-respond-to-${member.pubkey}`}
+                variant="outline"
+              >
+                {formatRespondToLabel(managedAgent)}
+              </Badge>
+            </>
+          ) : null}
+        </div>
+        <p className="truncate font-mono text-[10px] text-muted-foreground/50">
+          {truncatePubkey(member.pubkey)}
+        </p>
+      </div>
+    </>
+  );
+
   return (
     <div
       className="group flex items-center justify-between gap-3 rounded-lg px-3 py-2 transition-colors hover:bg-muted/40"
       data-testid={`sidebar-member-${member.pubkey}`}
     >
-      <div className="flex min-w-0 items-center gap-3">
-        <div className="relative shrink-0">
-          <ProfileAvatar
-            avatarUrl={profileAvatarUrl ?? null}
-            className="h-9 w-9 text-[11px] shadow-none"
-            iconClassName="h-4 w-4"
-            label={memberAvatarLabel}
-          />
-          {presenceStatus ? (
-            <span
-              className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-background"
-              data-testid={`sidebar-member-presence-${member.pubkey}`}
-            >
-              <PresenceDot className="h-2 w-2" status={presenceStatus} />
-            </span>
-          ) : null}
-        </div>
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
-            <p className="truncate text-sm font-medium leading-5">
-              {memberLabel}
-            </p>
-            <Badge className="shrink-0" variant="secondary">
-              {roleLabel}
-            </Badge>
-            {managedAgent ? (
-              <>
-                <Badge
-                  className="shrink-0"
-                  data-testid={`sidebar-managed-agent-status-${member.pubkey}`}
-                  variant="secondary"
-                >
-                  {formatManagedAgentStatus(managedAgent)}
-                </Badge>
-                <Badge
-                  className="shrink-0"
-                  data-testid={`sidebar-managed-agent-respond-to-${member.pubkey}`}
-                  variant="outline"
-                >
-                  {formatRespondToLabel(managedAgent)}
-                </Badge>
-              </>
-            ) : null}
-          </div>
-          <p className="truncate font-mono text-[10px] text-muted-foreground/50">
-            {truncatePubkey(member.pubkey)}
-          </p>
-        </div>
-      </div>
+      {onOpenProfile ? (
+        <button
+          aria-label={`Open profile for ${memberLabel}`}
+          className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background rounded-md"
+          data-testid={`sidebar-member-open-profile-${member.pubkey}`}
+          onClick={() => onOpenProfile(member.pubkey)}
+          type="button"
+        >
+          {memberIdentity}
+        </button>
+      ) : (
+        <div className="flex min-w-0 items-center gap-3">{memberIdentity}</div>
+      )}
       {hasActions ? (
         <MemberActionsMenu
           canChangeRole={canChangeRole}

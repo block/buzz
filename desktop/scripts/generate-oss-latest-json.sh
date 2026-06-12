@@ -14,7 +14,7 @@ ARCHIVE_URL="$3"
 # only. Supporting Intel Macs (darwin-x86_64) would require a matrix build.
 jq -n \
   --arg version "$VERSION" \
-  --arg notes "Sprout v$VERSION" \
+  --arg notes "Buzz v$VERSION" \
   --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg signature "$(cat "$SIG_FILE")" \
   --arg url "$ARCHIVE_URL" \

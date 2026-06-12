@@ -1,12 +1,12 @@
-# Using Third-Party Nostr Clients with Sprout
+# Using Third-Party Nostr Clients with Buzz
 
-Sprout is a Nostr relay that speaks NIP-29 (relay-based groups) natively. There are two ways for
+Buzz is a Nostr relay that speaks NIP-29 (relay-based groups) natively. There are two ways for
 third-party Nostr clients to connect:
 
 | Path | Protocol | Connects to | Expected clients (not all verified in-repo) |
 |------|----------|-------------|----------------------------------------------|
-| **Direct** | NIP-29 | `sprout-relay :3000` | NIP-29 clients (e.g. Chachi, 0xchat), nak |
-| **Via proxy** | NIP-28 | `sprout-proxy :4869` | NIP-28 clients (e.g. Coracle, Amethyst), nostr-tools apps |
+| **Direct** | NIP-29 | `buzz-relay :3000` | NIP-29 clients (e.g. Chachi, 0xchat), nak |
+| **Via proxy** | NIP-28 | `buzz-proxy :4869` | NIP-28 clients (e.g. Coracle, Amethyst), nostr-tools apps |
 
 **Direct** is simpler — no extra process, no translation layer. Use it when your client speaks
 NIP-29. **Proxy** is for external guests (investors, press, partners, etc.) who use standard NIP-28
@@ -24,14 +24,14 @@ Connect any NIP-29 client straight to the relay.
 
 ```bash
 # 1. (Optional) Enable pubkey allowlist — must be set BEFORE relay startup
-export SPROUT_PUBKEY_ALLOWLIST=true
+export BUZZ_PUBKEY_ALLOWLIST=true
 
 # 2. Start the relay (auto-starts Docker services and runs migrations)
 just relay &                         # relay on :3000
 
 # 3. Add a pubkey to the allowlist (if enabled)
 #    Insert directly — there is no CLI command for this yet.
-PGPASSWORD=sprout_dev psql -h localhost -U sprout -d sprout -c \
+PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
   "INSERT INTO pubkey_allowlist (pubkey) VALUES (decode('<64-char-hex-pubkey>', 'hex'))"
 
 # 5. Connect any NIP-29 + NIP-42 client to ws://localhost:3000
@@ -66,8 +66,8 @@ PGPASSWORD=sprout_dev psql -h localhost -U sprout -d sprout -c \
 | **NIP-17 DMs (gift wrap)** | ✅ | kind:1059 accepted with ephemeral signing keys. Stored globally (channel_id=None). Delivered via `#p`-filtered subscriptions. Not indexed in search. |
 | **DM discovery** | ✅ | DM creation emits kind:39000 (with `hidden` tag) + kind:44100 membership notifications. NIP-29 clients discover DMs via standard group discovery flow. |
 | **Join request (kind:9021)** | ✅ | Open channels only. Adds member, emits system message + group discovery events + kind:44100 membership notification. Private channels rejected at ingest. |
-| **Edits (kind:40003)** | ⚠️ | Works on the wire but Sprout-only — no standard NIP-29 client renders these |
-| **Rich content (kind:40002)** | ⚠️ | Works on the wire but Sprout-only — no standard NIP-29 client renders these |
+| **Edits (kind:40003)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
+| **Rich content (kind:40002)** | ⚠️ | Works on the wire but Buzz-only — no standard NIP-29 client renders these |
 
 ### What Doesn't Work
 
@@ -79,7 +79,7 @@ PGPASSWORD=sprout_dev psql -h localhost -U sprout -d sprout -c \
 
 ### Pubkey Allowlist
 
-When `SPROUT_PUBKEY_ALLOWLIST=true`, NIP-42 connections that authenticate with only a pubkey
+When `BUZZ_PUBKEY_ALLOWLIST=true`, NIP-42 connections that authenticate with only a pubkey
 (no API token) are checked against the `pubkey_allowlist` table. This lets you open the
 relay to specific external Nostr identities without granting full access.
 
@@ -101,7 +101,7 @@ All discovery events include a `d` tag set to the channel UUID (NIP-29 addressab
 
 | Kind | Tags | Content |
 |------|------|---------|
-| **39000** | `d=<uuid>`, `name`, `closed` (always); `about` (if description non-empty); `private` (if applicable); `hidden` (DM channels only) | Group metadata. **Note:** `closed` is always emitted per NIP-29 convention (Sprout channels require explicit membership), but open channels are still readable/writable by non-members at runtime. The tag reflects the membership model, not access enforcement. |
+| **39000** | `d=<uuid>`, `name`, `closed` (always); `about` (if description non-empty); `private` (if applicable); `hidden` (DM channels only) | Group metadata. **Note:** `closed` is always emitted per NIP-29 convention (Buzz channels require explicit membership), but open channels are still readable/writable by non-members at runtime. The tag reflects the membership model, not access enforcement. |
 | **39001** | `d=<uuid>`, `p` tags with role label (`owner`, `admin`) | Admin list |
 | **39002** | `d=<uuid>`, `p` tags for all members | Member list |
 
@@ -184,7 +184,7 @@ nak req -k 1059 --tag "p=<your-hex-pubkey>" \
 
 | Client | Platform | Evidence | Notes |
 |--------|----------|:--------:|-------|
-| **SproutTestClient** | Rust (repo) | Automated E2E | Full NIP-29 flow: discovery (39000/39001/39002), kind:9 send/receive, reactions, deletions, h-tag enforcement |
+| **BuzzTestClient** | Rust (repo) | Automated E2E | Full NIP-29 flow: discovery (39000/39001/39002), kind:9 send/receive, reactions, deletions, h-tag enforcement |
 | **E2E nostr interop** | Rust (repo) | Automated E2E | NIP-50 search (3 tests), NIP-10 threads (3 tests), NIP-17 gift wraps (3 tests), DM discovery (1 test) |
 | **nak** | CLI | Manual (verified) | kind:9 send/recv, NIP-50 search, NIP-10 thread replies, group discovery |
 
@@ -194,9 +194,9 @@ nak req -k 1059 --tag "p=<your-hex-pubkey>" \
 
 ---
 
-## Path 2: NIP-28 via sprout-proxy
+## Path 2: NIP-28 via buzz-proxy
 
-For clients that speak NIP-28 (kind:40/41/42) but not NIP-29, **sprout-proxy** translates between
+For clients that speak NIP-28 (kind:40/41/42) but not NIP-29, **buzz-proxy** translates between
 the two protocols in real time. Events are re-signed with deterministic shadow keys so each
 external user maps to a consistent identity on the relay.
 
@@ -206,31 +206,31 @@ external user maps to a consistent identity on the relay.
 # 1. Start infrastructure + relay (see Path 1)
 
 # 2. Generate proxy server key and derive its pubkey
-export SPROUT_PROXY_SERVER_KEY=$(openssl rand -hex 32)
-PROXY_PUBKEY=$(echo $SPROUT_PROXY_SERVER_KEY | nak key public)
+export BUZZ_PROXY_SERVER_KEY=$(openssl rand -hex 32)
+PROXY_PUBKEY=$(echo $BUZZ_PROXY_SERVER_KEY | nak key public)
 
 # 3. Mint a proxy API token (required until proxy is migrated to NIP-98 auth)
-export SPROUT_PROXY_API_TOKEN=$(curl -s -X POST http://localhost:3000/api/tokens \
+export BUZZ_PROXY_API_TOKEN=$(curl -s -X POST http://localhost:3000/api/tokens \
   -H "Authorization: Nostr <base64-nip98-event>" \
   -H "Content-Type: application/json" \
   -d '{"name":"proxy"}' | jq -r .token)
 
 # 4. Get the relay's public key (needed for attribution trust)
-#    This is the pubkey of the relay's signing keypair. If SPROUT_RELAY_PRIVATE_KEY
-#    is set, derive it: echo $SPROUT_RELAY_PRIVATE_KEY | nak key public
+#    This is the pubkey of the relay's signing keypair. If BUZZ_RELAY_PRIVATE_KEY
+#    is set, derive it: echo $BUZZ_RELAY_PRIVATE_KEY | nak key public
 #    If not set, the relay generates a random keypair at startup — check relay logs.
-export SPROUT_RELAY_PUBKEY=<relay-hex-pubkey>
+export BUZZ_RELAY_PUBKEY=<relay-hex-pubkey>
 
 # 5. Start the proxy
-export SPROUT_UPSTREAM_URL=ws://localhost:3000
-export SPROUT_PROXY_SALT=$(openssl rand -hex 32)
-export SPROUT_PROXY_ADMIN_SECRET=$(openssl rand -hex 16)
-cargo run -p sprout-proxy             # proxy on :4869
+export BUZZ_UPSTREAM_URL=ws://localhost:3000
+export BUZZ_PROXY_SALT=$(openssl rand -hex 32)
+export BUZZ_PROXY_ADMIN_SECRET=$(openssl rand -hex 16)
+cargo run -p buzz-proxy             # proxy on :4869
 
 # 6. Register a guest
 curl -X POST http://localhost:4869/admin/guests \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $SPROUT_PROXY_ADMIN_SECRET" \
+  -H "Authorization: Bearer $BUZZ_PROXY_ADMIN_SECRET" \
   -d '{"pubkey": "<guest-hex-pubkey>", "channels": "<channel-uuid>"}'
 
 # 7. Connect any NIP-28 + NIP-42 client to ws://localhost:4869
@@ -242,9 +242,9 @@ curl -X POST http://localhost:4869/admin/guests \
 |---------|:------:|-------|
 | **NIP-11 relay info** | ✅ | Standard relay info document at `GET /` |
 | **NIP-42 authentication** | ✅ | Proactive challenge + reactive-auth compatible |
-| **Channel discovery (kind:40)** | ✅ | Synthesized from Sprout REST API at startup; served locally. Content uses channel UUID as `name` for ID stability; human-readable name is in kind:41. **Snapshot — new channels created after proxy start require restart. Renames do NOT affect kind:40 (UUID-anchored).** |
+| **Channel discovery (kind:40)** | ✅ | Synthesized from Buzz REST API at startup; served locally. Content uses channel UUID as `name` for ID stability; human-readable name is in kind:41. **Snapshot — new channels created after proxy start require restart. Renames do NOT affect kind:40 (UUID-anchored).** |
 | **Channel metadata (kind:41)** | ✅ | Name, description (picture always empty — no channel-picture source in proxy path); synthesized at startup, served locally. **Snapshot — new channels AND renames require restart to update local kind:41.** |
-| **Channel messages (kind:42)** | ✅ | Translated to/from Sprout kind:9 |
+| **Channel messages (kind:42)** | ✅ | Translated to/from Buzz kind:9 |
 | **Inbound kind:1** | ✅ | Text notes (kind:1) accepted and translated to kind:9, same as kind:42 |
 | **Message editing (kind:41)** | ✅ | Bidirectional: inbound kind:41 → kind:40003; outbound kind:40003 → kind:41. **Note:** inbound kind:41 is always treated as a message edit, never as a channel metadata update. Standard NIP-28 channel-metadata writes are not supported. |
 | **Reactions (kind:7)** | ✅ | Bidirectional; inbound channel scope verified against allowed channels. **Constraint:** target must already be known to the proxy's ID mapping cache (populated by prior fetch, outbound delivery, or inbound publish). Error if unknown: `reaction target is unknown to the proxy; fetch the message first`. |
@@ -273,7 +273,7 @@ curl -X POST http://localhost:4869/admin/guests \
 
 ### Channel UUIDs vs Event IDs
 
-Sprout identifies channels by UUID. NIP-28 clients identify channels by the event ID of the
+Buzz identifies channels by UUID. NIP-28 clients identify channels by the event ID of the
 kind:40 creation event. The proxy translates automatically, but you need the event ID to subscribe.
 
 The synthesized kind:40 uses the channel UUID as the `name` field in content (for deterministic
@@ -293,17 +293,17 @@ Two methods, both using NIP-42:
 ```bash
 # Register
 curl -X POST http://localhost:4869/admin/guests \
-  -H "Authorization: Bearer $SPROUT_PROXY_ADMIN_SECRET" \
+  -H "Authorization: Bearer $BUZZ_PROXY_ADMIN_SECRET" \
   -H "Content-Type: application/json" \
   -d '{"pubkey": "<hex>", "channels": "<uuid1>,<uuid2>"}'
 
 # List
 curl http://localhost:4869/admin/guests \
-  -H "Authorization: Bearer $SPROUT_PROXY_ADMIN_SECRET"
+  -H "Authorization: Bearer $BUZZ_PROXY_ADMIN_SECRET"
 
 # Revoke
 curl -X DELETE http://localhost:4869/admin/guests \
-  -H "Authorization: Bearer $SPROUT_PROXY_ADMIN_SECRET" \
+  -H "Authorization: Bearer $BUZZ_PROXY_ADMIN_SECRET" \
   -H "Content-Type: application/json" \
   -d '{"pubkey": "<hex>"}'
 ```
@@ -318,7 +318,7 @@ curl -X DELETE http://localhost:4869/admin/guests \
 ```bash
 # Create
 curl -X POST http://localhost:4869/admin/invite \
-  -H "Authorization: Bearer $SPROUT_PROXY_ADMIN_SECRET" \
+  -H "Authorization: Bearer $BUZZ_PROXY_ADMIN_SECRET" \
   -H "Content-Type: application/json" \
   -d '{"channels": "<uuid1>,<uuid2>", "max_uses": 5, "hours": 48}'
 
@@ -421,14 +421,14 @@ Test script: `scripts/test-proxy-nostr-sdk-python.py`.
 ```
                           NIP-29 (direct)
 ┌──────────────────┐ ◄──────────────────────────► ┌──────────────────┐
-│  NIP-29 Client   │   kind:9, kind:7, kind:5     │  Sprout Relay    │
+│  NIP-29 Client   │   kind:9, kind:7, kind:5     │  Buzz Relay    │
 │  (Chachi, 0xchat,│   kind:9000/01/02/05/07/08   │  :3000           │
 │   nak)           │   #h(uuid), NIP-42            │                  │
 └──────────────────┘                               │  kind:39000/1/2  │
                                                    │  kind:44100/44101│
                                                    │  Blossom media   │
 ┌──────────────────┐        ┌────────────────┐     │  /media/upload   │
-│  NIP-28 Client   │◄──────►│  sprout-proxy  │◄───►│                  │
+│  NIP-28 Client   │◄──────►│  buzz-proxy    │◄───►│                  │
 │  (Coracle, nak,  │ NIP-28 │  :4869         │ WS  └──────────────────┘
 │   nostr-tools)   │        │                │ +REST
 └──────────────────┘        │ kind:42↔kind:9 │ (/api/channels,
@@ -450,7 +450,7 @@ notifications (kind:44100/44101), NIP-29 admin commands (kind:9000, 9001, 9002, 
 (edits), kind:7 (reactions, bidirectional), and kind:5 (deletions, outbound only — standard kind:5
 events only; admin/REST deletions do not surface as NIP-28 delete events). Re-signs events with
 deterministic shadow keys (HMAC-SHA256 of salt + pubkey). Channel discovery (kind:40) is synthesized
-locally from Sprout's REST API at startup and never forwarded upstream. Channel metadata (kind:41)
+locally from Buzz's REST API at startup and never forwarded upstream. Channel metadata (kind:41)
 is dual-sourced: local snapshot metadata plus upstream edit events (kind:40003 → kind:41).
 
 ---
@@ -459,15 +459,15 @@ is dual-sourced: local snapshot metadata plus upstream edit events (kind:40003 �
 
 | Variable | Required | Default | Description |
 |----------|:--------:|---------|-------------|
-| `SPROUT_UPSTREAM_URL` | ✅ | — | WebSocket URL of the relay |
-| `SPROUT_PROXY_API_TOKEN` | ✅ | — | Relay API token for REST calls (required until proxy is migrated to NIP-98 auth) |
-| `SPROUT_PROXY_SERVER_KEY` | ✅ | — | Hex-encoded 32-byte secret key (raw hex, not bech32 `nsec`) |
-| `SPROUT_PROXY_SALT` | ✅ | — | Hex 32-byte salt for shadow keys (keep stable and secret) |
-| `SPROUT_RELAY_PUBKEY` | ✅ | — | Hex-encoded 64-char relay public key (for attribution trust) |
-| `SPROUT_PROXY_BIND_ADDR` | ❌ | `0.0.0.0:4869` | Listen address |
-| `SPROUT_PROXY_RELAY_URL` | ❌ | derived from bind addr | Public WebSocket URL for NIP-42 relay-tag validation. Set if behind a reverse proxy. |
-| `SPROUT_PROXY_ADMIN_SECRET` | ❌ | — | Bearer secret for `/admin/*` (unset = no auth, dev mode) |
-| `RUST_LOG` | ❌ | `sprout_proxy=info,tower_http=info` | Log level |
+| `BUZZ_UPSTREAM_URL` | ✅ | — | WebSocket URL of the relay |
+| `BUZZ_PROXY_API_TOKEN` | ✅ | — | Relay API token for REST calls (required until proxy is migrated to NIP-98 auth) |
+| `BUZZ_PROXY_SERVER_KEY` | ✅ | — | Hex-encoded 32-byte secret key (raw hex, not bech32 `nsec`) |
+| `BUZZ_PROXY_SALT` | ✅ | — | Hex 32-byte salt for shadow keys (keep stable and secret) |
+| `BUZZ_RELAY_PUBKEY` | ✅ | — | Hex-encoded 64-char relay public key (for attribution trust) |
+| `BUZZ_PROXY_BIND_ADDR` | ❌ | `0.0.0.0:4869` | Listen address |
+| `BUZZ_PROXY_RELAY_URL` | ❌ | derived from bind addr | Public WebSocket URL for NIP-42 relay-tag validation. Set if behind a reverse proxy. |
+| `BUZZ_PROXY_ADMIN_SECRET` | ❌ | — | Bearer secret for `/admin/*` (unset = no auth, dev mode) |
+| `RUST_LOG` | ❌ | `buzz_proxy=info,tower_http=info` | Log level |
 
 ---
 
@@ -475,9 +475,9 @@ is dual-sourced: local snapshot metadata plus upstream edit events (kind:40003 �
 
 | Variable | Required | Default | Description |
 |----------|:--------:|---------|-------------|
-| `SPROUT_PUBKEY_ALLOWLIST` | ❌ | `false` | Enable pubkey allowlist for NIP-42 pubkey-only auth |
-| `SPROUT_RELAY_PRIVATE_KEY` | ❌ | random | Hex secret key for relay signing (discovery events, system messages) |
-| `SPROUT_REQUIRE_AUTH_TOKEN` | ❌ | `false` | Require authenticated NIP-42 for all connections |
+| `BUZZ_PUBKEY_ALLOWLIST` | ❌ | `false` | Enable pubkey allowlist for NIP-42 pubkey-only auth |
+| `BUZZ_RELAY_PRIVATE_KEY` | ❌ | random | Hex secret key for relay signing (discovery events, system messages) |
+| `BUZZ_REQUIRE_AUTH_TOKEN` | ❌ | `false` | Require authenticated NIP-42 for all connections |
 
 ---
 
@@ -524,10 +524,10 @@ is dual-sourced: local snapshot metadata plus upstream edit events (kind:40003 �
 | `auth-required: authentication timeout` | Client didn't respond to NIP-42 within 30s | Use a NIP-42-capable client |
 | No messages after auth | Unresolved `#e` filter silently returns zero events | Re-query `nak req -k 40` for correct kind:40 event ID |
 | Guest still has access after revoke | Active sessions not terminated | Restart proxy to cut all sessions |
-| Proxy startup fails | Can't reach relay REST API or missing env vars | Check relay is running; verify all required env vars (especially `SPROUT_RELAY_PUBKEY`) |
+| Proxy startup fails | Can't reach relay REST API or missing env vars | Check relay is running; verify all required env vars (especially `BUZZ_RELAY_PUBKEY`) |
 
 ---
 
 ## Further Reading
 
-- [`crates/sprout-proxy/README.md`](crates/sprout-proxy/README.md) — proxy crate internals, shadow key derivation, subscription namespacing. **Note:** some auth/buffering details in that README may be stale; this document is the authoritative reference for proxy behavior.
+- [`crates/buzz-proxy/README.md`](crates/buzz-proxy/README.md) — proxy crate internals, shadow key derivation, subscription namespacing. **Note:** some auth/buffering details in that README may be stale; this document is the authoritative reference for proxy behavior.

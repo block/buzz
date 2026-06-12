@@ -260,7 +260,7 @@ fn parse_team_from_pack_zip(zip_bytes: &[u8]) -> Result<ParsedTeamPreview, Strin
 
     let pack_root = crate::managed_agents::find_plugin_json(tmp.path())
         .ok_or_else(|| "No .plugin/plugin.json found in ZIP".to_string())?;
-    let resolved = sprout_persona::resolve::resolve_pack(&pack_root)
+    let resolved = buzz_persona_pkg::resolve::resolve_pack(&pack_root)
         .map_err(|e| format!("Pack validation failed: {e}"))?;
 
     if resolved.personas.is_empty() {

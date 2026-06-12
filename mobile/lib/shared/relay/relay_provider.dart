@@ -28,12 +28,12 @@ class RelayConfig {
 /// Compile-time environment config via --dart-define.
 ///
 /// Run with:
-///   flutter run --dart-define=SPROUT_RELAY_URL=http://localhost:3000
+///   flutter run --dart-define=BUZZ_RELAY_URL=http://localhost:3000
 ///
 /// Or create a `.env.json` and use --dart-define-from-file=.env.json
 class Env {
   static const relayUrl = String.fromEnvironment(
-    'SPROUT_RELAY_URL',
+    'BUZZ_RELAY_URL',
     defaultValue: 'http://localhost:3000',
   );
 }

@@ -4,14 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
-import 'package:sprout_mobile/features/activity/activity_page.dart';
-import 'package:sprout_mobile/features/activity/activity_provider.dart';
-import 'package:sprout_mobile/features/activity/feed_item.dart';
-import 'package:sprout_mobile/features/channels/channel.dart';
-import 'package:sprout_mobile/features/channels/channels_provider.dart';
-import 'package:sprout_mobile/features/profile/user_cache_provider.dart';
-import 'package:sprout_mobile/features/profile/user_profile.dart';
-import 'package:sprout_mobile/shared/theme/theme.dart';
+import 'package:buzz/features/activity/activity_page.dart';
+import 'package:buzz/features/activity/activity_provider.dart';
+import 'package:buzz/features/activity/feed_item.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/profile/user_cache_provider.dart';
+import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/theme/theme.dart';
 
 void main() {
   Widget buildTestable({required List<Override> overrides}) {

@@ -428,12 +428,12 @@ test("rehypeImageGallery: mixed content paragraph is not image-only", () => {
   assert.equal(tree.children.length, 3);
 });
 
-// ── messageLinkUrlTransform: sprout:// link preservation ──────────────
+// ── messageLinkUrlTransform: buzz:// link preservation ──────────────
 // Regression test: react-markdown's `defaultUrlTransform` strips unknown
 // schemes (returns `""`) before our `a` component override can see them,
-// which would break copy → paste → click for `sprout://message?…` links
+// which would break copy → paste → click for `buzz://message?…` links
 // end-to-end. We pass a custom `urlTransform` that delegates to the
-// default for everything except `sprout://message` hrefs.
+// default for `buzz://message` and legacy `buzz://message` hrefs.
 //
 // This test renders real `<ReactMarkdown>` with the production transform
 // and asserts the link href survives to the rendered DOM. Mirrors the
@@ -462,19 +462,19 @@ function renderMarkdown(content) {
   );
 }
 
-test("messageLinkUrlTransform: preserves sprout://message href", () => {
+test("messageLinkUrlTransform: preserves buzz://message href", () => {
   const html = renderMarkdown(
-    "Click [here](sprout://message?channel=abc&id=xyz)",
+    "Click [here](buzz://message?channel=abc&id=xyz)",
   );
   // HTML-encoded `&` in attributes is fine — the browser decodes back to `&`.
-  assert.match(html, /href="sprout:\/\/message\?channel=abc&(?:amp;)?id=xyz"/);
+  assert.match(html, /href="buzz:\/\/message\?channel=abc&(?:amp;)?id=xyz"/);
 });
 
-test("messageLinkUrlTransform: preserves sprout://message href with thread", () => {
+test("messageLinkUrlTransform: preserves buzz://message href with thread", () => {
   const html = renderMarkdown(
-    "[link](sprout://message?channel=c1&id=m1&thread=t1)",
+    "[link](buzz://message?channel=c1&id=m1&thread=t1)",
   );
-  assert.match(html, /href="sprout:\/\/message\?[^"]*thread=t1"/);
+  assert.match(html, /href="buzz:\/\/message\?[^"]*thread=t1"/);
 });
 
 test("messageLinkUrlTransform: still strips javascript: scheme", () => {
@@ -489,18 +489,25 @@ test("messageLinkUrlTransform: passes http(s) through unchanged", () => {
   assert.match(html, /href="https:\/\/example\.com\/path"/);
 });
 
-test("messageLinkUrlTransform: leaves non-message sprout:// schemes to default", () => {
-  // `sprout://connect?relay=…` is handled by a different code path (Tauri
+test("messageLinkUrlTransform: preserves legacy buzz://message href", () => {
+  const html = renderMarkdown(
+    "Click [here](buzz://message?channel=abc&id=xyz)",
+  );
+  assert.match(html, /href="buzz:\/\/message\?channel=abc&(?:amp;)?id=xyz"/);
+});
+
+test("messageLinkUrlTransform: leaves non-message buzz:// schemes to default", () => {
+  // `buzz://connect?relay=…` is handled by a different code path (Tauri
   // single-instance). The markdown renderer should let it pass through
   // defaultUrlTransform (which strips it) since it's not clickable in-app.
   const html = renderMarkdown(
-    "[connect](sprout://connect?relay=wss://relay.example)",
+    "[connect](buzz://connect?relay=wss://relay.example)",
   );
   assert.match(html, /href=""/);
 });
 
 // ── remarkMessageLinks: bare-URL → message-link node ──────────────────
-// `remark-gfm`'s autolinker only covers http(s)://, so bare `sprout://message`
+// `remark-gfm`'s autolinker only covers http(s)://, so bare `buzz://message`
 // URLs in plain text never reach any rendering path without this plugin.
 // The plugin emits a custom `message-link` HAST element which markdown.tsx
 // renders as an inline pill. Tests operate on the mdast tree directly —
@@ -521,18 +528,26 @@ function text(value) {
   return { type: "text", value };
 }
 
-test("remarkMessageLinks: bare sprout://message URL is replaced", () => {
-  const tree = runPlugin(paragraph(text("sprout://message?channel=c&id=m")));
+test("remarkMessageLinks: bare buzz://message URL is replaced", () => {
+  const tree = runPlugin(paragraph(text("buzz://message?channel=c&id=m")));
   const para = tree.children[0];
   assert.equal(para.children.length, 1);
   assert.equal(para.children[0].type, "message-link");
-  assert.equal(para.children[0].value, "sprout://message?channel=c&id=m");
+  assert.equal(para.children[0].value, "buzz://message?channel=c&id=m");
   assert.equal(para.children[0].data.hName, "message-link");
+});
+
+test("remarkMessageLinks: legacy bare buzz://message URL is replaced", () => {
+  const tree = runPlugin(paragraph(text("buzz://message?channel=c&id=m")));
+  const para = tree.children[0];
+  assert.equal(para.children.length, 1);
+  assert.equal(para.children[0].type, "message-link");
+  assert.equal(para.children[0].value, "buzz://message?channel=c&id=m");
 });
 
 test("remarkMessageLinks: mid-sentence URL splits surrounding text", () => {
   const tree = runPlugin(
-    paragraph(text("see sprout://message?channel=c&id=m here")),
+    paragraph(text("see buzz://message?channel=c&id=m here")),
   );
   const kids = tree.children[0].children;
   assert.equal(kids.length, 3);
@@ -547,28 +562,28 @@ test("remarkMessageLinks: two URLs in one text node both replaced", () => {
   const tree = runPlugin(
     paragraph(
       text(
-        "first sprout://message?channel=a&id=1 then sprout://message?channel=b&id=2 done",
+        "first buzz://message?channel=a&id=1 then buzz://message?channel=b&id=2 done",
       ),
     ),
   );
   const kids = tree.children[0].children;
   const links = kids.filter((c) => c.type === "message-link");
   assert.equal(links.length, 2);
-  assert.equal(links[0].value, "sprout://message?channel=a&id=1");
-  assert.equal(links[1].value, "sprout://message?channel=b&id=2");
+  assert.equal(links[0].value, "buzz://message?channel=a&id=1");
+  assert.equal(links[1].value, "buzz://message?channel=b&id=2");
 });
 
 test("remarkMessageLinks: trailing sentence punctuation stays outside URL", () => {
   for (const punctuation of [".", ",", ";", ":", "!", "?"]) {
     const tree = runPlugin(
-      paragraph(text(`see sprout://message?channel=c&id=m${punctuation}`)),
+      paragraph(text(`see buzz://message?channel=c&id=m${punctuation}`)),
     );
     const kids = tree.children[0].children;
 
     assert.equal(kids.length, 3, punctuation);
     assert.equal(kids[0].value, "see ", punctuation);
     assert.equal(kids[1].type, "message-link", punctuation);
-    assert.equal(kids[1].value, "sprout://message?channel=c&id=m", punctuation);
+    assert.equal(kids[1].value, "buzz://message?channel=c&id=m", punctuation);
     assert.equal(kids[2].type, "text", punctuation);
     assert.equal(kids[2].value, punctuation, punctuation);
   }
@@ -576,20 +591,20 @@ test("remarkMessageLinks: trailing sentence punctuation stays outside URL", () =
 
 test("remarkMessageLinks: URL inside parens keeps closing paren outside", () => {
   const tree = runPlugin(
-    paragraph(text("see (sprout://message?channel=c&id=m) for details")),
+    paragraph(text("see (buzz://message?channel=c&id=m) for details")),
   );
   const kids = tree.children[0].children;
 
   assert.equal(kids.length, 3);
   assert.equal(kids[0].value, "see (");
   assert.equal(kids[1].type, "message-link");
-  assert.equal(kids[1].value, "sprout://message?channel=c&id=m");
+  assert.equal(kids[1].value, "buzz://message?channel=c&id=m");
   assert.equal(kids[2].type, "text");
   assert.equal(kids[2].value, ") for details");
 });
 
 test("remarkMessageLinks: URL without trailing punctuation matches end-to-end", () => {
-  const value = "sprout://message?channel=c&id=m";
+  const value = "buzz://message?channel=c&id=m";
   const tree = runPlugin(paragraph(text(value)));
   const kids = tree.children[0].children;
 
@@ -598,8 +613,8 @@ test("remarkMessageLinks: URL without trailing punctuation matches end-to-end", 
   assert.equal(kids[0].value, value);
 });
 
-test("remarkMessageLinks: non-message sprout:// URLs are not matched", () => {
-  const original = "sprout://connect?relay=wss://x.example";
+test("remarkMessageLinks: non-message buzz:// URLs are not matched", () => {
+  const original = "buzz://connect?relay=wss://x.example";
   const tree = runPlugin(paragraph(text(original)));
   const kids = tree.children[0].children;
   assert.equal(kids.length, 1);
@@ -618,7 +633,7 @@ test("remarkMessageLinks: text inside inlineCode is left alone", () => {
       {
         type: "paragraph",
         children: [
-          { type: "inlineCode", value: "sprout://message?channel=c&id=m" },
+          { type: "inlineCode", value: "buzz://message?channel=c&id=m" },
         ],
       },
     ],
@@ -627,5 +642,5 @@ test("remarkMessageLinks: text inside inlineCode is left alone", () => {
   const kids = tree.children[0].children;
   assert.equal(kids.length, 1);
   assert.equal(kids[0].type, "inlineCode");
-  assert.equal(kids[0].value, "sprout://message?channel=c&id=m");
+  assert.equal(kids[0].value, "buzz://message?channel=c&id=m");
 });

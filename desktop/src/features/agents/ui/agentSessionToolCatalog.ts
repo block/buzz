@@ -11,7 +11,7 @@ import {
   XCircle,
 } from "lucide-react";
 
-import type { SproutToolInfo, ToolStatus } from "./agentSessionTypes";
+import type { BuzzToolInfo, ToolStatus } from "./agentSessionTypes";
 
 export function normalizeToolStatus(status: string): ToolStatus {
   const normalized = status.toLowerCase();
@@ -64,7 +64,7 @@ export function getToolStatusDisplay(status: ToolStatus, isError: boolean) {
   };
 }
 
-const SPROUT_READ_TOOLS = new Set([
+const BUZZ_READ_TOOLS = new Set([
   "get_messages",
   "get_channel_history",
   "get_thread",
@@ -85,7 +85,7 @@ const SPROUT_READ_TOOLS = new Set([
   "get_contact_list",
 ]);
 
-const SPROUT_WRITE_TOOLS = new Set([
+const BUZZ_WRITE_TOOLS = new Set([
   "send_message",
   "send_diff_message",
   "edit_message",
@@ -119,16 +119,13 @@ const SPROUT_WRITE_TOOLS = new Set([
   "set_contact_list",
 ]);
 
-const SPROUT_TOOL_NAMES = new Set([
-  ...SPROUT_READ_TOOLS,
-  ...SPROUT_WRITE_TOOLS,
-]);
+const BUZZ_TOOL_NAMES = new Set([...BUZZ_READ_TOOLS, ...BUZZ_WRITE_TOOLS]);
 
-const SPROUT_TOOL_NAMES_BY_LENGTH = [...SPROUT_TOOL_NAMES].sort(
+const BUZZ_TOOL_NAMES_BY_LENGTH = [...BUZZ_TOOL_NAMES].sort(
   (left, right) => right.length - left.length,
 );
 
-const SPROUT_TOOL_TITLE_ALIASES: Array<[RegExp, string]> = [
+const BUZZ_TOOL_TITLE_ALIASES: Array<[RegExp, string]> = [
   [/\bsending message to channel\b/, "send_message"],
   [/\bretrieving recent messages from channel\b/, "get_messages"],
   [/\bgetting channel details\b/, "get_channel"],
@@ -139,10 +136,10 @@ const SPROUT_TOOL_TITLE_ALIASES: Array<[RegExp, string]> = [
   [/\bremoving reaction\b/, "remove_reaction"],
 ];
 
-export function getSproutToolInfo(title: string): SproutToolInfo | null {
+export function getBuzzToolInfo(title: string): BuzzToolInfo | null {
   const name = normalizeToolName(title);
-  const isRead = SPROUT_READ_TOOLS.has(name);
-  const isWrite = SPROUT_WRITE_TOOLS.has(name);
+  const isRead = BUZZ_READ_TOOLS.has(name);
+  const isWrite = BUZZ_WRITE_TOOLS.has(name);
   if (!isRead && !isWrite) {
     return null;
   }
@@ -151,8 +148,8 @@ export function getSproutToolInfo(title: string): SproutToolInfo | null {
     return {
       icon: Workflow,
       label: isRead
-        ? "Reads workflow state from Sprout."
-        : "Updates workflow state in Sprout.",
+        ? "Reads workflow state from Buzz."
+        : "Updates workflow state in Buzz.",
       tone: isWrite ? "write" : "read",
     };
   }
@@ -164,8 +161,8 @@ export function getSproutToolInfo(title: string): SproutToolInfo | null {
     return {
       icon: Hash,
       label: isRead
-        ? "Reads channel context from the Sprout relay."
-        : "Changes channel state in the Sprout relay.",
+        ? "Reads channel context from the Buzz relay."
+        : "Changes channel state in the Buzz relay.",
       tone: isWrite ? "write" : "read",
     };
   }
@@ -177,15 +174,15 @@ export function getSproutToolInfo(title: string): SproutToolInfo | null {
     return {
       icon: Users,
       label: isRead
-        ? "Reads Sprout identity or presence data."
-        : "Updates Sprout identity or membership data.",
+        ? "Reads Buzz identity or presence data."
+        : "Updates Buzz identity or membership data.",
       tone: isWrite ? "write" : "admin",
     };
   }
   if (name.includes("search") || name === "get_feed") {
     return {
       icon: Search,
-      label: "Searches relay-visible Sprout history.",
+      label: "Searches relay-visible Buzz history.",
       tone: "read",
     };
   }
@@ -196,23 +193,23 @@ export function getSproutToolInfo(title: string): SproutToolInfo | null {
   ) {
     return {
       icon: Send,
-      label: "Publishes relay-visible Sprout activity.",
+      label: "Publishes relay-visible Buzz activity.",
       tone: "write",
     };
   }
 
   return {
     icon: MessageSquare,
-    label: isRead ? "Reads from Sprout." : "Writes to Sprout.",
+    label: isRead ? "Reads from Buzz." : "Writes to Buzz.",
     tone: isWrite ? "write" : "read",
   };
 }
 
 export function normalizeToolName(title: string): string {
-  const knownName = findSproutToolName(title, true);
+  const knownName = findBuzzToolName(title, true);
   if (knownName) return knownName;
 
-  const normalized = normalizeToolNameText(title).replace(/^sprout_/, "");
+  const normalized = normalizeToolNameText(title).replace(/^buzz_/, "");
   return normalized.match(/[a-z][a-z0-9_]+/)?.[0] ?? normalized;
 }
 
@@ -225,27 +222,27 @@ export function normalizeToolNameText(value: string): string {
     .replace(/^_+|_+$/g, "");
 }
 
-export function findSproutToolName(value: string, includeShortNames: boolean) {
-  const alias = findSproutToolAlias(value);
+export function findBuzzToolName(value: string, includeShortNames: boolean) {
+  const alias = findBuzzToolAlias(value);
   if (alias) return alias;
 
   const normalized = normalizeToolNameText(value);
   return (
-    SPROUT_TOOL_NAMES_BY_LENGTH.find(
+    BUZZ_TOOL_NAMES_BY_LENGTH.find(
       (name) =>
         (includeShortNames || name.length >= 8) && normalized.includes(name),
     ) ?? null
   );
 }
 
-function findSproutToolAlias(value: string) {
+function findBuzzToolAlias(value: string) {
   const normalizedPhrase = value
     .trim()
     .toLowerCase()
     .replace(/[_-]+/g, " ")
     .replace(/\s+/g, " ");
   return (
-    SPROUT_TOOL_TITLE_ALIASES.find(([pattern]) =>
+    BUZZ_TOOL_TITLE_ALIASES.find(([pattern]) =>
       pattern.test(normalizedPhrase),
     )?.[1] ?? null
   );
@@ -271,7 +268,7 @@ export function formatToolTitle(
   fallbackTitle?: string,
 ): string {
   const name = normalizeToolName(toolName);
-  if (SPROUT_READ_TOOLS.has(name) || SPROUT_WRITE_TOOLS.has(name)) {
+  if (BUZZ_READ_TOOLS.has(name) || BUZZ_WRITE_TOOLS.has(name)) {
     return name
       .split("_")
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))

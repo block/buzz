@@ -1,13 +1,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use buzz_core_pkg::kind::KIND_PAIRING;
+use buzz_core_pkg::pairing::qr::encode_qr;
+use buzz_core_pkg::pairing::session::PairingSession;
+use buzz_core_pkg::pairing::types::{AbortReason, PayloadType};
 use futures_util::{SinkExt, StreamExt};
 use nostr::ToBech32;
 use serde::Serialize;
-use sprout_core::kind::KIND_PAIRING;
-use sprout_core::pairing::qr::encode_qr;
-use sprout_core::pairing::session::PairingSession;
-use sprout_core::pairing::types::{AbortReason, PayloadType};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -400,7 +400,7 @@ fn event_to_relay_json(event: &nostr::Event) -> String {
     format!("[\"EVENT\",{}]", nostr::JsonUtil::as_json(event))
 }
 
-/// Parse a relay EVENT message into a nostr 0.36 Event (sprout-core compatible).
+/// Parse a relay EVENT message into a nostr 0.36 Event (buzz-core compatible).
 fn parse_relay_event(text: &str, sub_id: &str) -> Option<nostr::Event> {
     let arr: serde_json::Value = serde_json::from_str(text).ok()?;
     let arr = arr.as_array()?;

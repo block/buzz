@@ -1,0 +1,72 @@
+[package]
+name = "buzz-relay"
+default-run = "buzz-relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebSocket relay server for the Buzz communications platform"
+
+[[bin]]
+name = "buzz-relay"
+path = "src/main.rs"
+
+[[bin]]
+name = "buzz-reindex-kind0"
+path = "src/bin/reindex_kind0.rs"
+
+[dependencies]
+buzz-core = { workspace = true }
+buzz-db = { workspace = true }
+buzz-auth = { workspace = true }
+buzz-pubsub = { workspace = true }
+buzz-audit = { workspace = true }
+buzz-search = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+nostr = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+dashmap = { workspace = true }
+futures-util = { workspace = true }
+deadpool-redis = { workspace = true }
+redis = { workspace = true }
+sqlx = { workspace = true }
+base64 = "0.22"
+buzz-sdk = { workspace = true }
+buzz-workflow = { workspace = true, features = ["reqwest"] }
+buzz-media = { workspace = true }
+s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
+tempfile = "3"
+bytes = "1"
+infer = "0.19"
+serde_yaml      = { workspace = true }
+sha2            = { workspace = true }
+hmac            = { workspace = true }
+subtle          = { workspace = true }
+rand            = { workspace = true }
+hex             = { workspace = true }
+url             = { workspace = true }
+moka            = { workspace = true }
+metrics         = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+
+[features]
+dev = ["buzz-auth/dev"]
+
+[dev-dependencies]
+mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ebc3ab4c4b5f4a45d5bc942c66c18583800c3f82", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"] }
+mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ebc3ab4c4b5f4a45d5bc942c66c18583800c3f82", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"] }
+buzz-core = { workspace = true, features = ["test-utils"] }
+buzz-auth = { workspace = true, features = ["dev"] }
+reqwest = { workspace = true }

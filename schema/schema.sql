@@ -1,4 +1,4 @@
--- Sprout — Declarative Postgres schema (managed by pgschema)
+-- Buzz — Declarative Postgres schema (managed by pgschema)
 --
 -- This file represents the desired state of the database schema.
 -- Use `pgschema apply --file schema/schema.sql` to bring the database up to date.

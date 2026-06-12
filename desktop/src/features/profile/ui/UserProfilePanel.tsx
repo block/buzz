@@ -31,6 +31,12 @@ import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
+import {
+  AuxiliaryPanelHeader,
+  AuxiliaryPanelHeaderGroup,
+  AuxiliaryPanelTitle,
+  auxiliaryPanelContentPaddingClass,
+} from "@/shared/layout/AuxiliaryPanelHeader";
 import { cn } from "@/shared/lib/cn";
 import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
@@ -42,14 +48,22 @@ import {
 } from "@/shared/ui/OverlayPanelBackdrop";
 
 type UserProfilePanelProps = {
-  canResetWidth: boolean;
+  canResetWidth?: boolean;
   currentPubkey?: string;
   isSinglePanelView?: boolean;
+  layout?: "standalone" | "split";
   onClose: () => void;
   onOpenDm?: (pubkeys: string[]) => void;
-  onResetWidth: () => void;
-  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onResetWidth?: () => void;
+  onResizeStart?: (event: React.PointerEvent<HTMLButtonElement>) => void;
   pubkey: string;
+  /**
+   * When true, the panel sits beside a sibling pane managed by a single-panel
+   * width controller (ChannelScreen). The width is clamped so the sibling keeps
+   * at least THREAD_PANEL_MIN_WIDTH_PX. Standalone/floating mounts (e.g. Pulse)
+   * have no such sibling, so they omit this and use the configured width
+   * directly — otherwise `calc(100% - 300px)` would wrongly shrink the panel.
+   */
   splitPaneClamp?: boolean;
   widthPx: number;
 };
@@ -112,6 +126,7 @@ export function UserProfilePanel({
   canResetWidth,
   currentPubkey,
   isSinglePanelView = false,
+  layout = "standalone",
   onClose,
   onOpenDm,
   onResetWidth,
@@ -122,8 +137,7 @@ export function UserProfilePanel({
 }: UserProfilePanelProps) {
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
-  const usesChannelSplitChrome =
-    splitPaneClamp && !isOverlay && !isSinglePanelView;
+  const isSplitLayout = layout === "split";
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
   const [view, setView] = React.useState<ProfilePanelView>("summary");
@@ -233,6 +247,122 @@ export function UserProfilePanel({
     ? (memoryQuery.data.core ? 1 : 0) + memoryQuery.data.memories.length
     : undefined;
 
+  const headerLeftContent = (
+    <AuxiliaryPanelHeaderGroup>
+      {view !== "summary" ? (
+        <Button
+          aria-label="Back to profile"
+          className="shrink-0"
+          data-testid="user-profile-panel-back"
+          onClick={() => setView("summary")}
+          size="icon"
+          type="button"
+          variant="outline"
+        >
+          <ArrowLeft />
+        </Button>
+      ) : null}
+      <AuxiliaryPanelTitle>{panelTitle}</AuxiliaryPanelTitle>
+    </AuxiliaryPanelHeaderGroup>
+  );
+
+  const headerActions = (
+    <div className="ml-auto flex shrink-0 items-center gap-2">
+      {view === "memories" && isOwner === true ? (
+        <MemoryRefreshButton agentPubkey={pubkey} variant="outline" />
+      ) : null}
+      <Button
+        aria-label="Close profile"
+        data-testid="user-profile-panel-close"
+        onClick={onClose}
+        size="icon"
+        type="button"
+        variant="ghost"
+      >
+        <X />
+      </Button>
+    </div>
+  );
+
+  const profileBody = (
+    <div
+      className={cn(
+        "min-h-0 flex-1 overflow-y-auto px-4 pb-6",
+        isSplitLayout && auxiliaryPanelContentPaddingClass,
+        !isSplitLayout && !isFloatingOverlay && "pt-[4.75rem]",
+      )}
+    >
+      {view === "summary" ? (
+        <ProfileSummaryView
+          canEditAgent={canEditAgent}
+          canViewActivity={canViewActivity}
+          channelCount={profileChannels.length}
+          channelsLoading={channelsQuery.isLoading}
+          displayName={displayName}
+          followMutation={followMutation}
+          handleEditAgent={handleEditAgent}
+          handleMessage={handleMessage}
+          handleOpenActivity={handleOpenActivity}
+          isBot={isBot}
+          isFollowing={isFollowing}
+          isOwner={isOwner}
+          isSelf={isSelf}
+          managedAgent={managedAgent}
+          memoriesLoading={memoryQuery.isLoading}
+          memoryCount={memoryCount}
+          ownerDisplayName={ownerDisplayName}
+          ownerHandle={ownerHandle}
+          onOpenChannels={() => setView("channels")}
+          onOpenMemories={() => setView("memories")}
+          onOpenDm={onOpenDm}
+          presenceLoaded={presenceQuery.isSuccess}
+          presenceStatus={presenceStatus}
+          profile={profile}
+          pubkey={pubkey}
+          relayAgent={relayAgent}
+          unfollowMutation={unfollowMutation}
+          userStatus={userStatus}
+        />
+      ) : null}
+
+      {view === "memories" ? (
+        <MemoryFocusedView agentPubkey={pubkey} isOwner={isOwner} />
+      ) : null}
+
+      {view === "channels" ? (
+        <ChannelsFocusedView
+          channels={profileChannels}
+          isLoading={channelsQuery.isLoading}
+          onOpenChannel={handleOpenChannel}
+        />
+      ) : null}
+    </div>
+  );
+
+  const editAgentDialog =
+    canEditAgent && managedAgent ? (
+      <EditAgentDialog
+        agent={managedAgent}
+        onOpenChange={setEditAgentOpen}
+        open={editAgentOpen}
+      />
+    ) : null;
+
+  if (isSplitLayout) {
+    return (
+      <>
+        <div className="flex min-h-0 flex-1 flex-col">
+          <AuxiliaryPanelHeader>
+            {headerLeftContent}
+            {headerActions}
+          </AuxiliaryPanelHeader>
+          {profileBody}
+        </div>
+        {editAgentDialog}
+      </>
+    );
+  }
+
   return (
     <>
       {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
@@ -251,7 +381,7 @@ export function UserProfilePanel({
               : `${widthPx}px`,
         }}
       >
-        {!isOverlay && !isSinglePanelView && (
+        {!isOverlay && !isSinglePanelView && onResizeStart && (
           <button
             aria-label="Resize profile panel"
             className="peer/profile-resize group/profile-resize absolute inset-y-0 left-0 z-40 w-3 -translate-x-1/2 cursor-col-resize"
@@ -272,10 +402,7 @@ export function UserProfilePanel({
         {!isOverlay ? (
           <div
             aria-hidden="true"
-            className={cn(
-              "pointer-events-none absolute inset-x-0 top-0 z-40 bg-background/80 backdrop-blur-md after:absolute after:left-0 after:right-0 after:top-10 after:h-px after:bg-border/35 supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55",
-              usesChannelSplitChrome ? "h-[92px]" : "h-[76px]",
-            )}
+            className="pointer-events-none absolute inset-x-0 top-0 z-40 h-[4.75rem] bg-background/80 backdrop-blur-md after:absolute after:left-0 after:right-0 after:top-10 after:h-px after:bg-border/35 supports-[backdrop-filter]:bg-background/70 peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
           />
         ) : null}
 
@@ -283,146 +410,20 @@ export function UserProfilePanel({
           className={cn(
             "flex cursor-default select-none items-center",
             isSinglePanelView
-              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[76px] min-h-[76px] shrink-0 gap-[10px] bg-transparent pb-[4px] pl-[16px] pr-[8px] pt-[42px] sm:pl-[24px] sm:pr-[12px]`
+              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[4.75rem] min-h-[4.75rem] shrink-0 gap-2.5 bg-transparent pb-1 pl-4 pr-2 pt-[2.625rem] sm:pl-6 sm:pr-3`
               : isOverlay
-                ? "relative z-50 min-h-[44px] shrink-0 gap-3 bg-background/80 px-3 py-[6px] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
-                : cn(
-                    "absolute inset-x-0 z-50 bg-transparent after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80",
-                    usesChannelSplitChrome
-                      ? "top-[48px] h-[32px] gap-[10px] py-0 pl-[16px] pr-[8px] sm:pr-[12px]"
-                      : "top-[42px] min-h-[32px] gap-3 px-3 py-[4px]",
-                  ),
+                ? "relative z-50 min-h-11 shrink-0 gap-3 bg-background/80 px-3 py-1.5 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55"
+                : "absolute inset-x-0 top-[2.625rem] z-50 min-h-8 gap-3 bg-transparent px-3 py-1 after:absolute after:bottom-0 after:-left-px after:top-0 after:w-px after:bg-border/45 after:transition-colors peer-hover/profile-resize:after:bg-border/80 peer-focus-visible/profile-resize:after:bg-border/80",
           )}
           data-tauri-drag-region
         >
-          <div className="flex min-w-0 items-center gap-1.5">
-            {view !== "summary" ? (
-              <Button
-                aria-label="Back to profile"
-                className={cn(
-                  "shrink-0",
-                  usesChannelSplitChrome
-                    ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
-                    : "h-7 w-7 rounded-full text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-                )}
-                data-testid="user-profile-panel-back"
-                onClick={() => setView("summary")}
-                size="icon"
-                type="button"
-                variant="ghost"
-              >
-                <ArrowLeft
-                  className={cn(usesChannelSplitChrome ? "size-4" : "size-3.5")}
-                />
-              </Button>
-            ) : null}
-            <h2
-              className={cn(
-                "translate-y-px font-semibold tracking-tight",
-                usesChannelSplitChrome
-                  ? "text-base leading-6"
-                  : "text-sm leading-5",
-              )}
-            >
-              {panelTitle}
-            </h2>
-          </div>
-          <div className="ml-auto flex shrink-0 items-center gap-2">
-            {view === "memories" && isOwner === true ? (
-              <MemoryRefreshButton
-                agentPubkey={pubkey}
-                className={cn(
-                  usesChannelSplitChrome
-                    ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
-                    : "h-4 w-4 rounded-full text-foreground hover:bg-muted/60 hover:text-foreground",
-                )}
-                iconClassName={cn(
-                  usesChannelSplitChrome ? "size-4" : "h-2.5 w-2.5",
-                )}
-              />
-            ) : null}
-            <Button
-              aria-label="Close profile"
-              className={cn(
-                usesChannelSplitChrome
-                  ? "h-8 w-8 rounded-lg border border-border/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground [&_svg]:size-5"
-                  : "h-4 w-4 rounded-full text-foreground hover:bg-muted/60 hover:text-foreground",
-              )}
-              data-testid="user-profile-panel-close"
-              onClick={onClose}
-              size="icon"
-              type="button"
-              variant="ghost"
-            >
-              <X
-                className={cn(
-                  usesChannelSplitChrome ? "size-5" : "h-2.5 w-2.5",
-                )}
-              />
-            </Button>
-          </div>
+          {headerLeftContent}
+          {headerActions}
         </div>
 
-        <div
-          className={cn(
-            "min-h-0 flex-1 overflow-y-auto px-4 pb-6",
-            !isFloatingOverlay &&
-              (usesChannelSplitChrome ? "pt-[92px]" : "pt-[76px]"),
-          )}
-        >
-          {view === "summary" ? (
-            <ProfileSummaryView
-              canEditAgent={canEditAgent}
-              canViewActivity={canViewActivity}
-              channelCount={profileChannels.length}
-              channelsLoading={channelsQuery.isLoading}
-              displayName={displayName}
-              followMutation={followMutation}
-              handleEditAgent={handleEditAgent}
-              handleMessage={handleMessage}
-              handleOpenActivity={handleOpenActivity}
-              isBot={isBot}
-              isFollowing={isFollowing}
-              isOwner={isOwner}
-              isSelf={isSelf}
-              managedAgent={managedAgent}
-              memoriesLoading={memoryQuery.isLoading}
-              memoryCount={memoryCount}
-              ownerDisplayName={ownerDisplayName}
-              ownerHandle={ownerHandle}
-              onOpenChannels={() => setView("channels")}
-              onOpenMemories={() => setView("memories")}
-              onOpenDm={onOpenDm}
-              presenceLoaded={presenceQuery.isSuccess}
-              presenceStatus={presenceStatus}
-              profile={profile}
-              pubkey={pubkey}
-              relayAgent={relayAgent}
-              unfollowMutation={unfollowMutation}
-              userStatus={userStatus}
-            />
-          ) : null}
-
-          {view === "memories" ? (
-            <MemoryFocusedView agentPubkey={pubkey} isOwner={isOwner} />
-          ) : null}
-
-          {view === "channels" ? (
-            <ChannelsFocusedView
-              channels={profileChannels}
-              isLoading={channelsQuery.isLoading}
-              onOpenChannel={handleOpenChannel}
-            />
-          ) : null}
-        </div>
+        {profileBody}
       </aside>
-      {canEditAgent && managedAgent ? (
-        <EditAgentDialog
-          agent={managedAgent}
-          onOpenChange={setEditAgentOpen}
-          open={editAgentOpen}
-        />
-      ) : null}
+      {editAgentDialog}
     </>
   );
 }

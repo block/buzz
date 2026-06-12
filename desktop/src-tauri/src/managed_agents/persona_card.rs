@@ -51,19 +51,19 @@ pub fn parse_png_persona(png_bytes: &[u8]) -> Result<ParsedPersonaPreview, Strin
         .map_err(|e| format!("Invalid PNG: {e}"))?;
     let info = reader.info();
 
-    let mut sprout_text: Option<&str> = None;
+    let mut buzz_text: Option<&str> = None;
     let mut chara_text: Option<&str> = None;
 
     for chunk in &info.uncompressed_latin1_text {
         match chunk.keyword.as_str() {
-            "sprout_persona" if sprout_text.is_none() => sprout_text = Some(&chunk.text),
+            "buzz_persona_pkg" if buzz_text.is_none() => buzz_text = Some(&chunk.text),
             "chara" | "ccv3" if chara_text.is_none() => chara_text = Some(&chunk.text),
             _ => {}
         }
     }
 
-    let fields = if let Some(text) = sprout_text {
-        parse_sprout_payload(text)?
+    let fields = if let Some(text) = buzz_text {
+        parse_buzz_payload(text)?
     } else if let Some(text) = chara_text {
         parse_chara_payload(text)?
     } else {
@@ -96,8 +96,8 @@ fn decode_b64_json(b64: &str) -> Result<Value, String> {
     serde_json::from_slice(&bytes).map_err(|e| format!("Invalid JSON: {e}"))
 }
 
-/// Extracted fields from a Sprout persona JSON payload.
-struct SproutPersonaFields {
+/// Extracted fields from a Buzz persona JSON payload.
+struct BuzzPersonaFields {
     display_name: String,
     system_prompt: String,
     avatar_url: Option<String>,
@@ -107,9 +107,9 @@ struct SproutPersonaFields {
     name_pool: Vec<String>,
 }
 
-/// Extract and validate fields from a Sprout persona JSON value
+/// Extract and validate fields from a Buzz persona JSON value
 /// (shared by both the PNG tEXt-chunk path and the standalone JSON path).
-fn extract_sprout_fields(v: &Value) -> Result<SproutPersonaFields, String> {
+fn extract_buzz_fields(v: &Value) -> Result<BuzzPersonaFields, String> {
     let version = v.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
     if version != 1 {
         return Err(format!("Unsupported persona version: {version}"));
@@ -172,7 +172,7 @@ fn extract_sprout_fields(v: &Value) -> Result<SproutPersonaFields, String> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(SproutPersonaFields {
+    Ok(BuzzPersonaFields {
         display_name: name,
         system_prompt: prompt,
         avatar_url,
@@ -183,12 +183,12 @@ fn extract_sprout_fields(v: &Value) -> Result<SproutPersonaFields, String> {
     })
 }
 
-fn parse_sprout_payload(b64: &str) -> Result<SproutPersonaFields, String> {
+fn parse_buzz_payload(b64: &str) -> Result<BuzzPersonaFields, String> {
     let v = decode_b64_json(b64)?;
-    extract_sprout_fields(&v)
+    extract_buzz_fields(&v)
 }
 
-fn parse_chara_payload(b64: &str) -> Result<SproutPersonaFields, String> {
+fn parse_chara_payload(b64: &str) -> Result<BuzzPersonaFields, String> {
     let v = decode_b64_json(b64)?;
     let data = v.get("data").ok_or("Missing 'data' in chara payload")?;
     let name = data
@@ -217,7 +217,7 @@ fn parse_chara_payload(b64: &str) -> Result<SproutPersonaFields, String> {
     if prompt.is_empty() {
         return Err("Chara card has no system_prompt or description".to_string());
     }
-    Ok(SproutPersonaFields {
+    Ok(BuzzPersonaFields {
         display_name: name,
         system_prompt: prompt,
         avatar_url: None,
@@ -234,7 +234,7 @@ fn parse_chara_payload(b64: &str) -> Result<SproutPersonaFields, String> {
 
 pub fn parse_json_persona(json_bytes: &[u8]) -> Result<ParsedPersonaPreview, String> {
     let v: Value = serde_json::from_slice(json_bytes).map_err(|e| format!("Invalid JSON: {e}"))?;
-    let fields = extract_sprout_fields(&v)?;
+    let fields = extract_buzz_fields(&v)?;
 
     Ok(ParsedPersonaPreview {
         display_name: fields.display_name,
@@ -288,13 +288,13 @@ pub fn encode_persona_json(
 pub fn parse_md_persona(md_bytes: &[u8]) -> Result<ParsedPersonaPreview, String> {
     let content =
         std::str::from_utf8(md_bytes).map_err(|e| format!("Invalid UTF-8 in .persona.md: {e}"))?;
-    let config = sprout_persona::persona::parse_persona_md(content)
+    let config = buzz_persona_pkg::persona::parse_persona_md(content)
         .map_err(|e| format!("Failed to parse .persona.md: {e}"))?;
 
     // Split "provider:model" into separate fields for the preview.
     let model = match config.model.as_deref() {
         Some(s) if !s.is_empty() => {
-            let (_prov, id) = sprout_persona::persona::split_model(s);
+            let (_prov, id) = buzz_persona_pkg::persona::split_model(s);
             Some(id.to_owned())
         }
         _ => None,
@@ -395,7 +395,7 @@ pub fn parse_zip_pack(zip_bytes: &[u8]) -> Result<ParsePersonaFilesResult, Strin
     })?;
 
     // Resolve the pack from the extracted directory.
-    let resolved = sprout_persona::resolve::resolve_pack(&pack_root)
+    let resolved = buzz_persona_pkg::resolve::resolve_pack(&pack_root)
         .map_err(|e| format!("Pack validation failed: {e}"))?;
 
     let personas: Vec<ParsedPersonaPreview> = resolved
@@ -572,7 +572,7 @@ mod tests {
         buf
     }
 
-    /// Helper: build a PNG with a sprout_persona tEXt chunk for the given name/prompt.
+    /// Helper: build a PNG with a buzz_persona_pkg tEXt chunk for the given name/prompt.
     fn make_test_persona_png(name: &str, prompt: &str) -> Vec<u8> {
         let payload = serde_json::json!({
             "version": 1,
@@ -580,7 +580,7 @@ mod tests {
             "systemPrompt": prompt,
         });
         let b64 = STANDARD.encode(payload.to_string().as_bytes());
-        make_png_with_text("sprout_persona", &b64)
+        make_png_with_text("buzz_persona_pkg", &b64)
     }
 
     /// Helper: build a plain PNG with no metadata.
@@ -632,14 +632,14 @@ mod tests {
     fn parse_png_unknown_version() {
         let payload = serde_json::json!({"version": 99, "displayName": "X", "systemPrompt": "Y"});
         let b64 = STANDARD.encode(payload.to_string().as_bytes());
-        let png = make_png_with_text("sprout_persona", &b64);
+        let png = make_png_with_text("buzz_persona_pkg", &b64);
         let err = parse_png_persona(&png).unwrap_err();
         assert!(err.contains("Unsupported persona version"));
     }
 
     #[test]
     fn parse_png_malformed_base64() {
-        let png = make_png_with_text("sprout_persona", "!!!not-base64!!!");
+        let png = make_png_with_text("buzz_persona_pkg", "!!!not-base64!!!");
         let err = parse_png_persona(&png).unwrap_err();
         assert!(err.contains("Invalid base64"));
     }
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn parse_png_malformed_json() {
         let b64 = STANDARD.encode(b"not json at all");
-        let png = make_png_with_text("sprout_persona", &b64);
+        let png = make_png_with_text("buzz_persona_pkg", &b64);
         let err = parse_png_persona(&png).unwrap_err();
         assert!(err.contains("Invalid JSON"));
     }
@@ -656,7 +656,7 @@ mod tests {
     fn parse_png_empty_fields() {
         let payload = serde_json::json!({"version": 1, "displayName": "", "systemPrompt": "Y"});
         let b64 = STANDARD.encode(payload.to_string().as_bytes());
-        let png = make_png_with_text("sprout_persona", &b64);
+        let png = make_png_with_text("buzz_persona_pkg", &b64);
         let err = parse_png_persona(&png).unwrap_err();
         assert!(err.contains("displayName is empty"));
     }
@@ -680,14 +680,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_png_chara_ignored_when_sprout_present() {
-        // Build a PNG with both sprout_persona and chara chunks.
-        let sprout = serde_json::json!({"version": 1, "displayName": "Sprout Name", "systemPrompt": "Sprout prompt"});
+    fn parse_png_chara_ignored_when_buzz_present() {
+        // Build a PNG with both buzz_persona_pkg and chara chunks.
+        let buzz = serde_json::json!({"version": 1, "displayName": "Buzz Name", "systemPrompt": "Buzz prompt"});
         let chara = serde_json::json!({
             "spec": "chara_card_v2", "spec_version": "2.0",
             "data": {"name": "Chara Name", "system_prompt": "Chara prompt", "description": ""}
         });
-        let sprout_b64 = STANDARD.encode(sprout.to_string().as_bytes());
+        let buzz_b64 = STANDARD.encode(buzz.to_string().as_bytes());
         let chara_b64 = STANDARD.encode(chara.to_string().as_bytes());
 
         let mut buf = Vec::new();
@@ -695,7 +695,7 @@ mod tests {
             let mut enc = Encoder::new(Cursor::new(&mut buf), 1, 1);
             enc.set_color(ColorType::Rgba);
             enc.set_depth(BitDepth::Eight);
-            enc.add_text_chunk("sprout_persona".to_string(), sprout_b64)
+            enc.add_text_chunk("buzz_persona_pkg".to_string(), buzz_b64)
                 .unwrap();
             enc.add_text_chunk("chara".to_string(), chara_b64).unwrap();
             let mut w = enc.write_header().unwrap();
@@ -703,8 +703,8 @@ mod tests {
         }
 
         let result = parse_png_persona(&buf).unwrap();
-        assert_eq!(result.display_name, "Sprout Name");
-        assert_eq!(result.system_prompt, "Sprout prompt");
+        assert_eq!(result.display_name, "Buzz Name");
+        assert_eq!(result.system_prompt, "Buzz prompt");
     }
 
     #[test]
@@ -767,7 +767,7 @@ mod tests {
 
     #[test]
     fn parse_png_duplicate_chunks() {
-        // Two sprout_persona chunks — should use the first and ignore the second.
+        // Two buzz_persona_pkg chunks — should use the first and ignore the second.
         let payload1 =
             serde_json::json!({"version": 1, "displayName": "First", "systemPrompt": "Prompt 1"});
         let payload2 =
@@ -780,9 +780,9 @@ mod tests {
             let mut enc = Encoder::new(Cursor::new(&mut buf), 1, 1);
             enc.set_color(ColorType::Rgba);
             enc.set_depth(BitDepth::Eight);
-            enc.add_text_chunk("sprout_persona".to_string(), b64_1)
+            enc.add_text_chunk("buzz_persona_pkg".to_string(), b64_1)
                 .unwrap();
-            enc.add_text_chunk("sprout_persona".to_string(), b64_2)
+            enc.add_text_chunk("buzz_persona_pkg".to_string(), b64_2)
                 .unwrap();
             let mut w = enc.write_header().unwrap();
             w.write_image_data(&[0, 0, 0, 255]).unwrap();

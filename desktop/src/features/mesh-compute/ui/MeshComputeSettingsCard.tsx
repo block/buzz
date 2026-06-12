@@ -18,8 +18,8 @@ import {
 import { classifyModelRef, modelRefHintLabel } from "../classifyModelRef";
 import { useMeshNodeStatus } from "../hooks/useMeshNodeStatus";
 
-const MODEL_DRAFT_STORAGE_KEY = "sprout.mesh-compute.share.model.v1";
-const MAX_VRAM_DRAFT_STORAGE_KEY = "sprout.mesh-compute.share.max-vram-gb.v1";
+const MODEL_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.model.v1";
+const MAX_VRAM_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.max-vram-gb.v1";
 
 function readDraft(key: string): string {
   try {
@@ -284,9 +284,9 @@ export function MeshComputeSettingsCard() {
       </SettingsOptionGroup>
 
       <p className="mt-3 rounded-lg bg-muted/30 px-3 py-2 text-sm font-normal text-muted-foreground">
-        Sprout will not publish your machine to public Nostr relays,
-        auto-discover other networks, or share your endpoint outside this
-        relay's members. Only members of this relay can dial in.
+        Buzz will not publish your machine to public Nostr relays, auto-discover
+        other networks, or share your endpoint outside this relay's members.
+        Only members of this relay can dial in.
       </p>
     </section>
   );

@@ -347,7 +347,7 @@ pub(crate) async fn ensure_relay_mesh_for_record(
             {
                 // Non-fatal: the one-sided dial may still punch on a favorable NAT.
                 // Surface the reason without blocking the agent's spawn.
-                eprintln!("sprout-mesh: saved-start connect-request failed: {error}");
+                eprintln!("buzz-mesh: saved-start connect-request failed: {error}");
             }
         }
     }
@@ -503,7 +503,7 @@ mod tests {
     /// frontend selected earlier.
     ///
     /// Hardware-gated (`#[ignore]`): loads a real model. Run with:
-    ///   cargo test -p sprout-desktop --features mesh-llm \
+    ///   cargo test -p buzz-desktop --features mesh-llm \
     ///     ensure_serve_runtime_serves_other_model -- --ignored --nocapture
     #[tokio::test]
     #[ignore = "loads a real model; run manually with --ignored"]

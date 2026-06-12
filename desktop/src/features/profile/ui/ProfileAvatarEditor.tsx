@@ -654,7 +654,7 @@ export function ProfileAvatarEditor({
               ) : (
                 <div className="relative grid content-start gap-3">
                   <div
-                    className="sprout-emoji-mart relative z-0 h-[316px] overflow-hidden rounded-xl bg-muted transition-colors duration-[250ms] ease-out"
+                    className="buzz-emoji-mart relative z-0 h-[316px] overflow-hidden rounded-xl bg-muted transition-colors duration-[250ms] ease-out"
                     ref={emojiPickerContainerRef}
                     style={emojiMartThemeVars}
                   >
@@ -883,7 +883,7 @@ export function ProfileAvatarEditor({
                       aria-valuemax={360}
                       aria-valuemin={0}
                       aria-valuenow={customHue}
-                      className="sprout-avatar-hue-scrubber relative mt-3 h-10 w-full cursor-pointer select-none rounded-full touch-none"
+                      className="buzz-avatar-hue-scrubber relative mt-3 h-10 w-full cursor-pointer select-none rounded-full touch-none"
                       data-testid={`${testIdPrefix}-custom-color-hue`}
                       onKeyDown={(event) => {
                         if (

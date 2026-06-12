@@ -15,7 +15,7 @@ export function UpdateChecker() {
           Software Updates
         </h2>
         <p className="text-base font-normal text-muted-foreground">
-          Keep Sprout up to date with the latest features and fixes.
+          Keep Buzz up to date with the latest features and fixes.
         </p>
       </div>
 

@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sprout_mobile/features/custom_emoji/custom_emoji.dart';
-import 'package:sprout_mobile/shared/relay/nostr_models.dart';
+import 'package:buzz/features/custom_emoji/custom_emoji.dart';
+import 'package:buzz/shared/relay/nostr_models.dart';
 
 NostrEvent _event(String pubkey, List<List<String>> emojiTags) {
   return NostrEvent(

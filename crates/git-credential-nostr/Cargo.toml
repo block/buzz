@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Git credential helper that produces NIP-98 auth headers for Sprout's git server"
+description = "Git credential helper that produces NIP-98 auth headers for Buzz's git server"
 
 [lib]
 name = "git_credential_nostr"

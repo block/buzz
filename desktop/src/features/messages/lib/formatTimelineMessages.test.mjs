@@ -52,7 +52,7 @@ test("kind:5 (NIP-09) deletion hides the target message", () => {
   );
 });
 
-test("kind:9005 (NIP-29 / Sprout-native) deletion hides the target message", () => {
+test("kind:9005 (NIP-29 / Buzz-native) deletion hides the target message", () => {
   // This is the actual reported bug: agents emit kind:9005 deletes via the
   // CLI. Without recognizing 9005 as a deletion marker the message stayed
   // rendered until manual refresh.

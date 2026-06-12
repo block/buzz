@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sprout_mobile/features/channels/agent_activity/observer_models.dart';
-import 'package:sprout_mobile/features/channels/agent_activity/transcript_builder.dart';
+import 'package:buzz/features/channels/agent_activity/observer_models.dart';
+import 'package:buzz/features/channels/agent_activity/transcript_builder.dart';
 
 void main() {
   test('aggregates assistant chunks until another item seals the message', () {
@@ -54,7 +54,7 @@ void main() {
     expect((items[2] as MessageItem).text, 'Done');
   });
 
-  test('normalizes sprout tool calls and applies result updates', () {
+  test('normalizes buzz tool calls and applies result updates', () {
     final items = buildTranscript([
       _updateFrame(
         seq: 1,
@@ -82,14 +82,14 @@ void main() {
     expect(items, hasLength(1));
     expect(items.single, isA<ToolItem>());
     final tool = items.single as ToolItem;
-    expect(tool.sproutToolName, 'send_message');
+    expect(tool.buzzToolName, 'send_message');
     expect(tool.toolName, 'send_message');
     expect(tool.status, ToolStatus.completed);
     expect(tool.args, {'content': 'hi'});
     expect(tool.result, 'posted #activity-test-channel');
   });
 
-  test('parses sprout prompt text into user message and metadata', () {
+  test('parses buzz prompt text into user message and metadata', () {
     final items = buildTranscript([
       ObserverFrame(
         seq: 1,
@@ -102,7 +102,7 @@ void main() {
             'prompt': [
               {
                 'content':
-                    '[Sprout event: stream message]\n'
+                    '[Buzz event: stream message]\n'
                     'Content: @claude can you do that again?\n\n'
                     '[Channel]\n'
                     '#activity-test-channel',

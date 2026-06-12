@@ -4,6 +4,8 @@ import * as React from "react";
 import { useProfileQuery, useUsersBatchQuery } from "@/features/profile/hooks";
 import { mergeCurrentProfileIntoLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
+import { channelChrome } from "@/shared/layout/chromeLayout";
+import { cn } from "@/shared/lib/cn";
 import { Skeleton } from "@/shared/ui/skeleton";
 
 import {
@@ -143,7 +145,7 @@ export function ForumView({
   }
 
   return (
-    <div className="flex h-full flex-col pt-11">
+    <div className={cn("flex h-full flex-col", channelChrome.contentPadding)}>
       {/* New post area */}
       <div className="border-b border-border/60 p-4">
         {isComposerOpen ? (

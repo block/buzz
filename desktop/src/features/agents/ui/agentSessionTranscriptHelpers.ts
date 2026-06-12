@@ -1,6 +1,6 @@
 import type { ObserverEvent, PromptSection } from "./agentSessionTypes";
 import {
-  findSproutToolName,
+  findBuzzToolName,
   isGenericToolTitle,
   normalizeToolName,
 } from "./agentSessionToolCatalog";
@@ -29,9 +29,10 @@ export function parsePromptText(text: string): {
     };
   }
 
-  const eventSection = sections.find((section) =>
-    section.title.toLowerCase().startsWith("sprout event"),
-  );
+  const eventSection = sections.find((section) => {
+    const title = section.title.toLowerCase();
+    return title.startsWith("buzz event") || title.startsWith("buzz event");
+  });
   const eventContent = eventSection
     ? extractEventContent(eventSection.body)
     : "";
@@ -43,7 +44,7 @@ export function parsePromptText(text: string): {
   return {
     sections,
     userText: eventContent,
-    userTitle: eventKind ? titleCase(eventKind) : "Sprout event",
+    userTitle: eventKind ? titleCase(eventKind) : "Buzz event",
     userPubkey: eventAuthorPubkey,
   };
 }
@@ -144,14 +145,14 @@ export function extractToolArgs(
 export function extractToolIdentity(update: Record<string, unknown>): {
   title: string;
   toolName: string;
-  sproutToolName: string | null;
+  buzzToolName: string | null;
 } {
   const candidates = collectToolNameCandidates(update);
   const knownName =
     candidates
-      .map((candidate) => findSproutToolName(candidate, true))
+      .map((candidate) => findBuzzToolName(candidate, true))
       .find((candidate): candidate is string => Boolean(candidate)) ??
-    findSproutToolName(JSON.stringify(update), false);
+    findBuzzToolName(JSON.stringify(update), false);
   const firstSpecific = candidates.find(
     (candidate) => !isGenericToolTitle(candidate),
   );
@@ -160,7 +161,7 @@ export function extractToolIdentity(update: Record<string, unknown>): {
   return {
     title,
     toolName: knownName ?? normalizeToolName(firstSpecific ?? title),
-    sproutToolName: knownName,
+    buzzToolName: knownName,
   };
 }
 

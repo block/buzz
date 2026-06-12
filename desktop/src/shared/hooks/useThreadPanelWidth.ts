@@ -5,7 +5,7 @@ export const THREAD_PANEL_MIN_WIDTH_PX = 300;
 export const THREAD_PANEL_SINGLE_COLUMN_BREAKPOINT_PX =
   THREAD_PANEL_MIN_WIDTH_PX * 2;
 const THREAD_PANEL_MAX_WIDTH_PX = 720;
-const THREAD_PANEL_WIDTH_SESSION_KEY = "sprout.desktop.thread-panel-width";
+const THREAD_PANEL_WIDTH_SESSION_KEY = "buzz.desktop.thread-panel-width";
 
 function clampThreadPanelWidth(width: number): number {
   return Math.max(

@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sprout_mobile/features/activity/feed_item.dart';
+import 'package:buzz/features/activity/feed_item.dart';
 
 void main() {
   group('FeedItem.fromJson', () {

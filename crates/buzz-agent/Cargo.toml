@@ -1,0 +1,57 @@
+[package]
+name = "buzz-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minimal, unbreakable ACP-compliant agent. Non-streaming. Tool-calls-as-output."
+readme = "README.md"
+keywords = ["acp", "agent", "llm", "mcp", "minimal"]
+categories = ["command-line-utilities", "web-programming"]
+
+[lib]
+name = "buzz_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "buzz-agent"
+path = "src/main.rs"
+
+# Test-only fake MCP server. Built unconditionally because cargo can't gate
+# bins on `cfg(test)`, but it's tiny and only used by integration tests.
+[[bin]]
+name = "fake-mcp"
+path = "tests/bin/fake_mcp.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls", "form"] }
+rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process"] }
+arc-swap = "1"
+getrandom = "0.4"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# OAuth 2.0 PKCE for Databricks (and future browser-auth providers).
+async-trait = "0.1"
+axum = { workspace = true }
+base64 = "0.22"
+hex = { workspace = true }
+sha2 = { workspace = true }
+urlencoding = "2"
+webbrowser = "1"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+axum = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+tempfile = "3"

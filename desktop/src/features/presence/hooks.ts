@@ -4,13 +4,18 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { relayClient } from "@/shared/api/relayClient";
 import { getPresence } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import {
+  mergePresenceUpdate,
+  parseLivePresenceEvent,
+  presenceQueryWantsPubkey,
+} from "@/features/presence/lib/presence";
 import type { PresenceLookup, PresenceStatus } from "@/shared/api/types";
 
 const PRESENCE_HEARTBEAT_INTERVAL_MS = 30_000;
 const PRESENCE_IDLE_TIMEOUT_MS = 5 * 60_000;
 const PRESENCE_STATUS_TICK_INTERVAL_MS = 30_000;
 const PRESENCE_TTL_SECONDS = 90;
-const PRESENCE_PREFERENCE_STORAGE_KEY = "sprout-presence-preference";
+const PRESENCE_PREFERENCE_STORAGE_KEY = "buzz-presence-preference";
 
 type PresencePreference = "auto" | "away" | "offline" | null;
 
@@ -103,25 +108,18 @@ export function usePresenceSubscription() {
     let isCancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    function handlePresenceEvent(event: {
-      pubkey: string;
-      content: string;
-      tags?: string[][];
-    }) {
+    function handlePresenceEvent(event: { pubkey: string; content: string }) {
       if (isCancelled) return;
-      const status = event.content;
-      if (status !== "online" && status !== "away" && status !== "offline")
-        return;
-      const pubkey = (
-        event.tags?.find((t) => t[0] === "p")?.[1] ?? event.pubkey
-      ).toLowerCase();
+      const parsed = parseLivePresenceEvent(event);
+      if (!parsed) return;
+      const { pubkey, status } = parsed;
       queryClient.setQueriesData<PresenceLookup>(
-        { queryKey: ["presence"] },
-        (old) => {
-          if (!old || !(pubkey in old)) return old;
-          if (old[pubkey] === status) return old;
-          return { ...old, [pubkey]: status };
+        {
+          queryKey: ["presence"],
+          predicate: (query) =>
+            presenceQueryWantsPubkey(query.queryKey, pubkey),
         },
+        (old) => mergePresenceUpdate(old, pubkey, status),
       );
     }
 
@@ -176,14 +174,13 @@ export function useSetPresenceMutation(pubkey?: string) {
     },
     onSuccess: ({ status }) => {
       if (normalizedPubkey.length === 0) return;
-      // Update all cached presence queries containing this pubkey.
       queryClient.setQueriesData<PresenceLookup>(
-        { queryKey: ["presence"] },
-        (old) => {
-          if (!old || !(normalizedPubkey in old)) return old;
-          if (old[normalizedPubkey] === status) return old;
-          return { ...old, [normalizedPubkey]: status };
+        {
+          queryKey: ["presence"],
+          predicate: (query) =>
+            presenceQueryWantsPubkey(query.queryKey, normalizedPubkey),
         },
+        (old) => mergePresenceUpdate(old, normalizedPubkey, status),
       );
     },
   });

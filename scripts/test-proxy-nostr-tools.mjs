@@ -1,10 +1,10 @@
 /**
- * sprout-proxy E2E test using nostr-tools v2.23.3
+ * buzz-proxy E2E test using nostr-tools v2.23.3
  *
  * nostr-tools is the most widely-used Nostr library in the ecosystem,
  * powering Coracle, Snort, Damus Web, and hundreds of other clients.
  *
- * Tests the full NIP-28 channel flow through sprout-proxy:
+ * Tests the full NIP-28 channel flow through buzz-proxy:
  *   1. NIP-42 authentication (automatic via onauth callback)
  *   2. Channel discovery (kind:40)
  *   3. Channel metadata (kind:41)
@@ -26,7 +26,7 @@ const GUEST_PRIVKEY_HEX = process.env.GUEST_PRIVKEY
 const CHANNEL_EVENT_ID = process.env.CHANNEL_EVENT_ID
 
 if (!GUEST_PRIVKEY_HEX || !CHANNEL_EVENT_ID) {
-  console.error('Usage: GUEST_PRIVKEY=<hex> CHANNEL_EVENT_ID=<hex> node test-sprout-proxy.mjs')
+  console.error('Usage: GUEST_PRIVKEY=<hex> CHANNEL_EVENT_ID=<hex> node test-buzz-proxy.mjs')
   process.exit(1)
 }
 
@@ -69,7 +69,7 @@ function list(relay, filters, timeoutMs = 8000) {
 
 async function main() {
   console.log('═'.repeat(64))
-  console.log('  nostr-tools v2.23 E2E TEST against sprout-proxy')
+  console.log('  nostr-tools v2.23 E2E TEST against buzz-proxy')
   console.log('═'.repeat(64))
   console.log(`  Relay:  ${RELAY_URL}`)
   console.log(`  Pubkey: ${pubkey.slice(0, 24)}...`)
@@ -251,7 +251,7 @@ async function main() {
   }
   console.log('═'.repeat(64))
   console.log(allPass
-    ? '  🎉 ALL TESTS PASSED — nostr-tools works with sprout-proxy!'
+    ? '  🎉 ALL TESTS PASSED — nostr-tools works with buzz-proxy!'
     : '  ⚠️  Some tests failed')
   console.log('═'.repeat(64))
   process.exit(allPass ? 0 : 1)

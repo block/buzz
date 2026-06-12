@@ -8,7 +8,7 @@ import {
 import type { MemoryTreeNode } from "@/features/agent-memory/lib/buildMemoryGraph";
 import type { EngramEntry } from "@/shared/api/tauriEngrams";
 import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
+import { Button, type ButtonProps } from "@/shared/ui/button";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -58,10 +58,12 @@ export function MemoryRefreshButton({
   agentPubkey,
   className,
   iconClassName,
+  variant = "ghost",
 }: {
   agentPubkey: string;
   className?: string;
   iconClassName?: string;
+  variant?: ButtonProps["variant"];
 }): React.ReactElement | null {
   const isOwner = useIsManagedAgent(agentPubkey);
   const { query } = useAgentMemoryGraph(agentPubkey, {
@@ -79,7 +81,7 @@ export function MemoryRefreshButton({
       onClick={() => query.refetch()}
       size="icon"
       type="button"
-      variant="ghost"
+      variant={variant}
     >
       <RefreshCw
         className={cn(

@@ -597,7 +597,7 @@ test("opens a single-level thread panel with inline expansion", async ({
 
   await page.evaluate(
     ({ content, parentEventId, pubkey }) => {
-      window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content,
         parentEventId,
@@ -663,7 +663,7 @@ test("thread panel width uses session storage and reset handle", async ({
 
   await page.addInitScript((width) => {
     window.sessionStorage.setItem(
-      "sprout.desktop.thread-panel-width",
+      "buzz.desktop.thread-panel-width",
       String(width),
     );
   }, customWidthPx);
@@ -675,7 +675,9 @@ test("thread panel width uses session storage and reset handle", async ({
   const timeline = page.getByTestId("message-timeline");
   const rootMessage = timeline.getByTestId("message-row").first();
   const threadPanel = page.getByTestId("message-thread-panel");
-  const resizeHandle = threadPanel.getByTestId("message-thread-resize-handle");
+  const resizeHandle = threadPanel.getByTestId(
+    "right-auxiliary-pane-resize-handle",
+  );
 
   await rootMessage.hover();
   await rootMessage.getByRole("button", { name: "Reply" }).click();

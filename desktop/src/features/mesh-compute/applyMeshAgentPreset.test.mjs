@@ -9,16 +9,16 @@ import {
 const PRESET = {
   providerId: "relay-mesh",
   label: "Relay mesh",
-  acpCommand: "sprout-acp",
-  agentCommand: "sprout-agent",
+  acpCommand: "buzz-acp",
+  agentCommand: "buzz-agent",
   agentArgs: [],
-  mcpCommand: "sprout-dev-mcp",
+  mcpCommand: "buzz-dev-mcp",
   model: "Qwen3-8B-Q4_K_M",
   envVars: {
-    SPROUT_AGENT_PROVIDER: "openai",
+    BUZZ_AGENT_PROVIDER: "openai",
     OPENAI_COMPAT_BASE_URL: "http://127.0.0.1:9337/v1",
     OPENAI_COMPAT_MODEL: "Qwen3-8B-Q4_K_M",
-    OPENAI_COMPAT_API_KEY: "sprout-mesh-local",
+    OPENAI_COMPAT_API_KEY: "buzz-mesh-local",
     OPENAI_COMPAT_API: "chat",
   },
 };
@@ -27,10 +27,10 @@ const PRESET = {
 
 test("patch carries the fields a managed-agent draft needs", () => {
   const patch = meshAgentPresetPatch(PRESET);
-  assert.equal(patch.acpCommand, "sprout-acp");
-  assert.equal(patch.agentCommand, "sprout-agent");
+  assert.equal(patch.acpCommand, "buzz-acp");
+  assert.equal(patch.agentCommand, "buzz-agent");
   assert.deepEqual(patch.agentArgs, []);
-  assert.equal(patch.mcpCommand, "sprout-dev-mcp");
+  assert.equal(patch.mcpCommand, "buzz-dev-mcp");
   assert.equal(patch.model, "Qwen3-8B-Q4_K_M");
   assert.equal(patch.envVars.OPENAI_COMPAT_MODEL, "Qwen3-8B-Q4_K_M");
 });
@@ -63,13 +63,13 @@ test("empty draft has no overrides", () => {
 test("matching draft has no overrides", () => {
   const overrides = detectMeshPresetOverrides(
     {
-      acpCommand: "sprout-acp",
-      agentCommand: "sprout-agent",
+      acpCommand: "buzz-acp",
+      agentCommand: "buzz-agent",
       agentArgs: [],
-      mcpCommand: "sprout-dev-mcp",
+      mcpCommand: "buzz-dev-mcp",
       model: "Qwen3-8B-Q4_K_M",
       envVars: {
-        SPROUT_AGENT_PROVIDER: "openai",
+        BUZZ_AGENT_PROVIDER: "openai",
         OPENAI_COMPAT_BASE_URL: "http://127.0.0.1:9337/v1",
       },
     },
@@ -81,10 +81,10 @@ test("matching draft has no overrides", () => {
 test("differing model is reported as override", () => {
   const overrides = detectMeshPresetOverrides(
     {
-      acpCommand: "sprout-acp",
-      agentCommand: "sprout-agent",
+      acpCommand: "buzz-acp",
+      agentCommand: "buzz-agent",
       agentArgs: [],
-      mcpCommand: "sprout-dev-mcp",
+      mcpCommand: "buzz-dev-mcp",
       model: "llama-3.2-3b-instruct",
       envVars: {},
     },
@@ -93,13 +93,13 @@ test("differing model is reported as override", () => {
   assert.deepEqual(overrides, ["model"]);
 });
 
-test("non-sprout-agent runtime + non-mesh model both reported", () => {
+test("non-buzz-agent runtime + non-mesh model both reported", () => {
   const overrides = detectMeshPresetOverrides(
     {
-      acpCommand: "sprout-acp",
+      acpCommand: "buzz-acp",
       agentCommand: "goose",
       agentArgs: ["acp"],
-      mcpCommand: "sprout-dev-mcp",
+      mcpCommand: "buzz-dev-mcp",
       model: "gpt-4o",
       envVars: {},
     },
@@ -111,13 +111,13 @@ test("non-sprout-agent runtime + non-mesh model both reported", () => {
 test("overlapping env-var with differing value is reported", () => {
   const overrides = detectMeshPresetOverrides(
     {
-      acpCommand: "sprout-acp",
-      agentCommand: "sprout-agent",
+      acpCommand: "buzz-acp",
+      agentCommand: "buzz-agent",
       agentArgs: [],
-      mcpCommand: "sprout-dev-mcp",
+      mcpCommand: "buzz-dev-mcp",
       model: "Qwen3-8B-Q4_K_M",
       envVars: {
-        SPROUT_AGENT_PROVIDER: "anthropic",
+        BUZZ_AGENT_PROVIDER: "anthropic",
       },
     },
     PRESET,
@@ -128,13 +128,13 @@ test("overlapping env-var with differing value is reported", () => {
 test("overlapping env-var with same value is NOT reported", () => {
   const overrides = detectMeshPresetOverrides(
     {
-      acpCommand: "sprout-acp",
-      agentCommand: "sprout-agent",
+      acpCommand: "buzz-acp",
+      agentCommand: "buzz-agent",
       agentArgs: [],
-      mcpCommand: "sprout-dev-mcp",
+      mcpCommand: "buzz-dev-mcp",
       model: "Qwen3-8B-Q4_K_M",
       envVars: {
-        SPROUT_AGENT_PROVIDER: "openai",
+        BUZZ_AGENT_PROVIDER: "openai",
       },
     },
     PRESET,
@@ -145,10 +145,10 @@ test("overlapping env-var with same value is NOT reported", () => {
 test("additive env-var (new key) is not an override", () => {
   const overrides = detectMeshPresetOverrides(
     {
-      acpCommand: "sprout-acp",
-      agentCommand: "sprout-agent",
+      acpCommand: "buzz-acp",
+      agentCommand: "buzz-agent",
       agentArgs: [],
-      mcpCommand: "sprout-dev-mcp",
+      mcpCommand: "buzz-dev-mcp",
       model: "Qwen3-8B-Q4_K_M",
       envVars: {
         SOME_USER_VAR: "kept",
@@ -164,10 +164,10 @@ test("empty model string treated like null (no override)", () => {
   // "" instead of null. Either should be treated as "user hasn't picked yet."
   const overrides = detectMeshPresetOverrides(
     {
-      acpCommand: "sprout-acp",
-      agentCommand: "sprout-agent",
+      acpCommand: "buzz-acp",
+      agentCommand: "buzz-agent",
       agentArgs: [],
-      mcpCommand: "sprout-dev-mcp",
+      mcpCommand: "buzz-dev-mcp",
       model: "",
       envVars: {},
     },

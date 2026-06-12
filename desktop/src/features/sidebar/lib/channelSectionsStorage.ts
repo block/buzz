@@ -1,4 +1,4 @@
-const STORAGE_KEY_PREFIX = "sprout-channel-sections.v1";
+const STORAGE_KEY_PREFIX = "buzz-channel-sections.v1";
 
 export type ChannelSection = {
   id: string;

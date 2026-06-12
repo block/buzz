@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
+use buzz_core_pkg::PresenceStatus;
 use serde_json::Value;
-use sprout_core::PresenceStatus;
 use tauri::State;
 
 use crate::{
@@ -196,7 +196,7 @@ pub async fn search_users(
 
     // NIP-50 full-text search on kind:0 profiles. The relay's HTTP bridge
     // intercepts the `search` field on POST /query and routes to Typesense
-    // (see `crates/sprout-relay/src/api/bridge.rs::handle_bridge_search`),
+    // (see `crates/buzz-relay/src/api/bridge.rs::handle_bridge_search`),
     // so we get indexed, server-side search instead of fetching every kind:0
     // and scanning client-side. The old path was capped at 2000 kind:0 events
     // by the relay's HTTP bridge limit, which silently hid users on busy relays.

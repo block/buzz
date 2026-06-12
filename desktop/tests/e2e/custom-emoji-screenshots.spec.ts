@@ -6,7 +6,7 @@ import { installMockBridge } from "../helpers/bridge";
 // hard assertion suite — it documents the two user-visible surfaces Tyler asked
 // to verify: the composer rendering and the settings card's own-vs-workspace
 // split. Artifacts land in test-results/.
-const SHORTCODE = "sprout";
+const SHORTCODE = "buzz";
 const SHOTS = "test-results/custom-emoji";
 
 test.beforeEach(async ({ page }) => {
@@ -48,13 +48,13 @@ test("settings card splits My emoji from read-only Workspace emoji", async ({
   await expect(page.getByTestId("settings-view")).toBeVisible();
   await page.getByTestId("settings-nav-custom-emoji").click();
 
-  // The mock identity owns :sprout: (removable); :narf: belongs to another
+  // The mock identity owns :buzz: (removable); :narf: belongs to another
   // member (read-only, no trash button).
   const card = page.getByTestId("settings-custom-emoji");
-  await expect(card.getByTestId("custom-emoji-mine")).toContainText(":sprout:");
+  await expect(card.getByTestId("custom-emoji-mine")).toContainText(":buzz:");
   const mine = card.getByTestId("custom-emoji-mine");
   await expect(
-    mine.getByRole("button", { name: "Remove :sprout:" }),
+    mine.getByRole("button", { name: "Remove :buzz:" }),
   ).toBeVisible();
 
   const workspace = card.getByTestId("custom-emoji-workspace");

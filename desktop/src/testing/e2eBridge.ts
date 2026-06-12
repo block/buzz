@@ -63,6 +63,7 @@ type E2eConfig = {
     };
     managedAgents?: MockManagedAgentSeed[];
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
+    createManagedAgentDelayMs?: number;
     profileReadDelayMs?: number;
     profileReadError?: string;
     profileUpdateError?: string;
@@ -97,6 +98,11 @@ type RawBlobDescriptor = {
   size: number;
   type: string;
   uploaded: number;
+  dim?: string;
+  blurhash?: string;
+  thumb?: string;
+  duration?: number;
+  image?: string;
   filename?: string;
 };
 
@@ -153,6 +159,7 @@ type RawChannel = {
   topic: string | null;
   purpose: string | null;
   member_count: number;
+  member_pubkeys: string[];
   last_message_at: string | null;
   archived_at: string | null;
   participants: string[];
@@ -199,7 +206,7 @@ type RawAddChannelMembersResponse = {
   }>;
 };
 
-type MockChannel = RawChannelDetail & {
+type MockChannel = Omit<RawChannelDetail, "member_pubkeys"> & {
   members: RawChannelMember[];
 };
 
@@ -464,9 +471,9 @@ function createMockRelayMembershipEvent(): RelayEvent {
 /**
  * Per-user custom emoji sets (kind:30030) the mock WS serves for
  * `listCustomEmoji` REQs. The workspace palette is the client-side UNION of
- * every member's own set (d=`sprout:custom-emoji`). We serve TWO member-authored
+ * every member's own set (d=`buzz:custom-emoji`). We serve TWO member-authored
  * sets from distinct pubkeys so the e2e exercises the union/collapse path, not
- * a single relay-owned set. `:sprout:` is the stable shortcode exercised by
+ * a single relay-owned set. `:buzz:` is the stable shortcode exercised by
  * custom-emoji.spec.ts (claimed by BOTH members with different URLs, so the
  * palette must collapse it to one deterministic winner); `:narf:` proves a
  * second member's distinct emoji unions in.
@@ -478,7 +485,7 @@ function createMockCustomEmojiSetEvents(): RelayEvent[] {
       "",
       [
         ["d", CUSTOM_EMOJI_SET_D_TAG],
-        ["emoji", "sprout", "https://example.com/e2e/sprout.png"],
+        ["emoji", "buzz", "https://example.com/e2e/buzz.png"],
         // A relay-hosted emoji whose URL matches rewriteRelayUrl()'s pattern,
         // used by the reaction guard to assert the proxy rewrite fires.
         ["emoji", REACTION_EMOJI_SHORTCODE, REACTION_EMOJI_URL],
@@ -493,9 +500,9 @@ function createMockCustomEmojiSetEvents(): RelayEvent[] {
       [
         ["d", CUSTOM_EMOJI_SET_D_TAG],
         ["emoji", "narf", "https://example.com/e2e/narf.png"],
-        // member B claims :sprout: with a DIFFERENT url — unionCustomEmoji must
+        // member B claims :buzz: with a DIFFERENT url — unionCustomEmoji must
         // collapse it to one deterministic winner, never expose two URLs.
-        ["emoji", "sprout", "https://example.com/e2e/sprout-b.png"],
+        ["emoji", "buzz", "https://example.com/e2e/buzz-b.png"],
       ],
       "b".repeat(64),
     ),
@@ -544,22 +551,22 @@ function updateMockRelayMembershipFromAdminEvent(event: RelayEvent): boolean {
 
 declare global {
   interface Window {
-    __SPROUT_E2E__?: E2eConfig;
-    __SPROUT_E2E_COMMANDS__?: string[];
-    __SPROUT_E2E_COMMAND_PAYLOADS__?: Array<{
+    __BUZZ_E2E__?: E2eConfig;
+    __BUZZ_E2E_COMMANDS__?: string[];
+    __BUZZ_E2E_COMMAND_PAYLOADS__?: Array<{
       command: string;
       payload: unknown;
     }>;
-    __SPROUT_E2E_COMMAND_LOG__?: Array<{
+    __BUZZ_E2E_COMMAND_LOG__?: Array<{
       command: string;
       payload: unknown;
     }>;
-    __SPROUT_E2E_WEBVIEW_ZOOM__?: number;
-    __SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+    __BUZZ_E2E_WEBVIEW_ZOOM__?: number;
+    __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
       channelName: string;
       kind?: number;
     }) => boolean;
-    __SPROUT_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+    __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
       channelName: string;
       content: string;
       parentEventId?: string | null;
@@ -568,27 +575,27 @@ declare global {
       mentionPubkeys?: string[];
       extraTags?: string[][];
     }) => RelayEvent;
-    __SPROUT_E2E_EMIT_MOCK_TYPING__?: (input: {
+    __BUZZ_E2E_EMIT_MOCK_TYPING__?: (input: {
       channelName: string;
       pubkey?: string;
     }) => RelayEvent;
-    __SPROUT_E2E_INVOKE_MOCK_COMMAND__?: (
+    __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
       command: string,
       payload?: Record<string, unknown>,
     ) => Promise<unknown>;
-    __SPROUT_E2E_PUSH_MOCK_FEED_ITEM__?: (item: RawFeedItem) => RawFeedItem;
-    __SPROUT_E2E_SIGNED_EVENTS__?: Array<{
+    __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: RawFeedItem) => RawFeedItem;
+    __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
       content: string;
       kind: number;
       tags: string[][];
     }>;
-    __SPROUT_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
-    __SPROUT_E2E_SET_MESH__?: (mesh: {
+    __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
+    __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
       denyReason?: string;
     }) => void;
-    __SPROUT_E2E_EMIT_MOCK_READ_STATE__?: (input: {
+    __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
       clientId: string;
       contexts: Record<string, number>;
       createdAt: number;
@@ -606,13 +613,13 @@ const KIND_DELETION = 5; // NIP-09 deletion
 
 // Fake media-proxy port the mock answers for `get_media_proxy_port`, so
 // `rewriteRelayUrl()` produces a real `http://localhost:<port>/media/...` src
-// in e2e (instead of the `sprout-media://` fallback). The reaction guard
+// in e2e (instead of the `buzz-media://` fallback). The reaction guard
 // asserts against this exact port.
 const MOCK_MEDIA_PROXY_PORT = 54321;
 
 // A relay-hosted custom emoji used by the reaction guard. Its URL matches
 // `rewriteRelayUrl()`'s `/media/{64-hex}.{ext}` pattern on the relay origin, so
-// reacting with it exercises the proxy rewrite (unlike the `:sprout:` fixture,
+// reacting with it exercises the proxy rewrite (unlike the `:buzz:` fixture,
 // whose external example.com URL passes through unchanged).
 const REACTION_EMOJI_SHORTCODE = "react";
 const REACTION_EMOJI_SHA = "c".repeat(64);
@@ -629,7 +636,7 @@ const REACTION_TARGET_CONTENT = "React to me with a custom emoji";
 // id so it is a valid reaction target and never collides with the regular
 // REACTION_TARGET_EVENT_ID.
 const SYSTEM_REACTION_TARGET_EVENT_ID = "e".repeat(64);
-const E2E_IDENTITY_OVERRIDE_STORAGE_KEY = "sprout:e2e-identity-override.v1";
+const E2E_IDENTITY_OVERRIDE_STORAGE_KEY = "buzz:e2e-identity-override.v1";
 const DEFAULT_MOCK_IDENTITY = {
   pubkey: "deadbeef".repeat(8),
   display_name: "npub1mock...",
@@ -691,6 +698,7 @@ function toRawChannel(
     topic: channel.topic,
     purpose: channel.purpose,
     member_count: channel.member_count,
+    member_pubkeys: channel.members.map((member) => member.pubkey),
     last_message_at: channel.last_message_at,
     archived_at: channel.archived_at,
     participants: [...channel.participants],
@@ -931,7 +939,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     name: seed.name,
     persona_id: seed.personaId ?? null,
     relay_url: DEFAULT_RELAY_WS_URL,
-    acp_command: "sprout-acp",
+    acp_command: "buzz-acp",
     agent_command: "goose",
     agent_args: ["acp"],
     mcp_command: "",
@@ -958,7 +966,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     respond_to_allowlist: [],
     private_key_nsec: `nsec1mock${seed.pubkey.slice(0, 20)}`,
     log_lines: [
-      `sprout-acp starting: relay=${DEFAULT_RELAY_WS_URL} agent_pubkey=${seed.pubkey} parallelism=1`,
+      `buzz-acp starting: relay=${DEFAULT_RELAY_WS_URL} agent_pubkey=${seed.pubkey} parallelism=1`,
       "profile created; harness not started",
     ],
   };
@@ -1000,32 +1008,12 @@ function resetMockPersonas(config?: E2eConfig) {
   const activePersonaIds = new Set(config?.mock?.activePersonaIds ?? []);
   mockPersonas = [
     {
-      id: "builtin:solo",
-      display_name: "Solo",
+      id: "builtin:fizz",
+      display_name: "Fizz",
       avatar_url: null,
-      system_prompt: "You are Solo.",
+      system_prompt: "You are Fizz.",
       is_builtin: true,
-      is_active: activePersonaIds.has("builtin:solo"),
-      created_at: now,
-      updated_at: now,
-    },
-    {
-      id: "builtin:kit",
-      display_name: "Kit",
-      avatar_url: null,
-      system_prompt: "You are Kit.",
-      is_builtin: true,
-      is_active: activePersonaIds.has("builtin:kit"),
-      created_at: now,
-      updated_at: now,
-    },
-    {
-      id: "builtin:scout",
-      display_name: "Scout",
-      avatar_url: null,
-      system_prompt: "You are Scout.",
-      is_builtin: true,
-      is_active: activePersonaIds.has("builtin:scout"),
+      is_active: activePersonaIds.has("builtin:fizz"),
       created_at: now,
       updated_at: now,
     },
@@ -1039,9 +1027,7 @@ function resetMockTeams() {
       id: "team-engineering-001",
       name: "Engineering",
       description: "Core engineering personas",
-      // Scout is intentionally excluded so the clean deselect flow has a
-      // built-in persona that is not pre-referenced by any default team.
-      persona_ids: ["builtin:solo", "builtin:kit"],
+      persona_ids: [],
       is_builtin: false,
       source_dir: null,
       is_symlink: false,
@@ -1054,7 +1040,7 @@ function resetMockTeams() {
       id: "team-research-002",
       name: "Research Agents",
       description: "Directory-backed research team",
-      persona_ids: ["builtin:solo", "builtin:kit"],
+      persona_ids: [],
       is_builtin: false,
       source_dir: "/Users/dev/agents/research",
       is_symlink: false,
@@ -1067,7 +1053,7 @@ function resetMockTeams() {
       id: "team-platform-003",
       name: "Platform Tools",
       description: "Symlinked platform team",
-      persona_ids: ["builtin:kit"],
+      persona_ids: [],
       is_builtin: false,
       source_dir: "/Users/dev/agents/platform",
       is_symlink: true,
@@ -1460,7 +1446,7 @@ let mockManagedAgents: MockManagedAgent[] = [];
 
 // Mesh-compute mock state — TEST-ONLY.
 //
-// This entire module (e2eBridge.ts) is loaded only when `window.__SPROUT_E2E__`
+// This entire module (e2eBridge.ts) is loaded only when `window.__BUZZ_E2E__`
 // is set by the Playwright harness; it never runs in a shipped build. These
 // handlers stub the `mesh_*` Tauri commands with the SHAPES the UI expects
 // (availability, node status, preset) so the desktop UI flow can be exercised
@@ -1822,7 +1808,7 @@ function getManagedAgentRelayMembership(pubkey: string) {
 }
 
 function getConfig(): E2eConfig | undefined {
-  return window.__SPROUT_E2E__;
+  return window.__BUZZ_E2E__;
 }
 
 function readStoredIdentityOverride(): TestIdentity | undefined {
@@ -3033,6 +3019,25 @@ async function handleGetUsersBatch(
         : false,
     };
   }
+  for (const pubkey of args.pubkeys) {
+    const normalizedPubkey = pubkey.toLowerCase();
+    if (found.has(normalizedPubkey)) {
+      continue;
+    }
+
+    const profile = getMockProfileByPubkey(normalizedPubkey);
+    if (!profile) {
+      continue;
+    }
+
+    found.add(normalizedPubkey);
+    profiles[normalizedPubkey] = {
+      display_name: profile.display_name,
+      avatar_url: profile.avatar_url,
+      nip05_handle: profile.nip05_handle,
+      is_agent: profile.is_agent ?? false,
+    };
+  }
   const missing = args.pubkeys.filter((p) => !found.has(p.toLowerCase()));
   return { profiles, missing };
 }
@@ -4195,16 +4200,16 @@ async function handleDiscoverAcpRuntimes(
       underlying_cli_path: null,
     },
     {
-      id: "sprout-agent",
-      label: "Sprout Agent",
+      id: "buzz-agent",
+      label: "Buzz Agent",
       avatar_url: "",
       availability: "available",
-      command: "sprout-agent",
-      binary_path: "/usr/local/bin/sprout-agent",
+      command: "buzz-agent",
+      binary_path: "/usr/local/bin/buzz-agent",
       default_args: [],
-      mcp_command: "sprout-dev-mcp",
-      install_hint: "Ships with the Sprout desktop app.",
-      install_instructions_url: "https://github.com/block/sprout",
+      mcp_command: "buzz-dev-mcp",
+      install_hint: "Ships with the Buzz desktop app.",
+      install_instructions_url: "https://github.com/block/buzz",
       can_auto_install: false,
       underlying_cli_path: null,
     },
@@ -4250,12 +4255,10 @@ async function handleDiscoverManagedAgentPrereqs(
   return {
     acp: {
       command:
-        configuredPrereqs?.acp?.command ??
-        args.input?.acpCommand ??
-        "sprout-acp",
+        configuredPrereqs?.acp?.command ?? args.input?.acpCommand ?? "buzz-acp",
       resolved_path:
         configuredPrereqs?.acp?.resolvedPath ??
-        "/Users/wesb/dev/sprout/target/debug/sprout-acp",
+        "/Users/wesb/dev/buzz/target/debug/buzz-acp",
       available: configuredPrereqs?.acp?.available ?? true,
     },
     mcp: {
@@ -4636,35 +4639,49 @@ async function handleExportPersonaToJson(args: {
   return true; // Simulate successful save
 }
 
-async function handleCreateManagedAgent(args: {
-  input: {
-    name: string;
-    personaId?: string;
-    relayUrl?: string;
-    acpCommand?: string;
-    agentCommand?: string;
-    agentArgs?: string[];
-    mcpCommand?: string;
-    turnTimeoutSeconds?: number;
-    idleTimeoutSeconds?: number;
-    maxTurnDurationSeconds?: number;
-    parallelism?: number;
-    systemPrompt?: string;
-    avatarUrl?: string;
-    model?: string;
-    envVars?: Record<string, string>;
-    spawnAfterCreate?: boolean;
-    startOnAppLaunch?: boolean;
-    backend?:
-      | { type: "local" }
-      | { type: "provider"; id: string; config: Record<string, unknown> };
-    respondTo?: "owner-only" | "allowlist" | "anyone";
-    respondToAllowlist?: string[];
-  };
-}): Promise<RawCreateManagedAgentResponse> {
+async function handleCreateManagedAgent(
+  args: {
+    input: {
+      name: string;
+      personaId?: string;
+      relayUrl?: string;
+      acpCommand?: string;
+      agentCommand?: string;
+      agentArgs?: string[];
+      mcpCommand?: string;
+      turnTimeoutSeconds?: number;
+      idleTimeoutSeconds?: number;
+      maxTurnDurationSeconds?: number;
+      parallelism?: number;
+      systemPrompt?: string;
+      avatarUrl?: string;
+      model?: string;
+      envVars?: Record<string, string>;
+      spawnAfterCreate?: boolean;
+      startOnAppLaunch?: boolean;
+      backend?:
+        | { type: "local" }
+        | { type: "provider"; id: string; config: Record<string, unknown> };
+      respondTo?: "owner-only" | "allowlist" | "anyone";
+      respondToAllowlist?: string[];
+    };
+  },
+  config: E2eConfig | undefined,
+): Promise<RawCreateManagedAgentResponse> {
+  const delayMs = config?.mock?.createManagedAgentDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
   if (args.input.personaId) {
     ensureMockPersonaIsActive(args.input.personaId);
   }
+  const personaAvatarUrl =
+    args.input.personaId === undefined
+      ? null
+      : (mockPersonas.find((persona) => persona.id === args.input.personaId)
+          ?.avatar_url ?? null);
+  const avatarUrl = args.input.avatarUrl?.trim() || personaAvatarUrl;
   const name = args.input.name.trim();
   const now = new Date().toISOString();
   const pubkey = crypto
@@ -4677,7 +4694,7 @@ async function handleCreateManagedAgent(args: {
     name,
     persona_id: args.input.personaId ?? null,
     relay_url: args.input.relayUrl ?? DEFAULT_RELAY_WS_URL,
-    acp_command: args.input.acpCommand ?? "sprout-acp",
+    acp_command: args.input.acpCommand ?? "buzz-acp",
     agent_command: args.input.agentCommand ?? "goose",
     agent_args:
       args.input.agentArgs && args.input.agentArgs.length > 0
@@ -4707,7 +4724,7 @@ async function handleCreateManagedAgent(args: {
     respond_to_allowlist: args.input.respondToAllowlist ?? [],
     private_key_nsec: `nsec1mock${pubkey.slice(0, 20)}`,
     log_lines: [
-      `sprout-acp starting: relay=${args.input.relayUrl ?? DEFAULT_RELAY_WS_URL} agent_pubkey=${pubkey} parallelism=${args.input.parallelism ?? 1}`,
+      `buzz-acp starting: relay=${args.input.relayUrl ?? DEFAULT_RELAY_WS_URL} agent_pubkey=${pubkey} parallelism=${args.input.parallelism ?? 1}`,
       args.input.systemPrompt?.trim()
         ? `system prompt override configured (${args.input.systemPrompt.trim().length} chars)`
         : "system prompt override not set",
@@ -4723,7 +4740,7 @@ async function handleCreateManagedAgent(args: {
   mockProfiles.set(pubkey, {
     pubkey,
     display_name: name,
-    avatar_url: args.input.avatarUrl?.trim() || null,
+    avatar_url: avatarUrl,
     about: args.input.systemPrompt?.trim() || null,
     nip05_handle: null,
     is_agent: true,
@@ -4753,10 +4770,10 @@ function isRelayMeshManagedAgent(agent: MockManagedAgent): boolean {
   const env = agent.env_vars ?? {};
   return (
     agent.backend.type === "local" &&
-    env.SPROUT_AGENT_PROVIDER === "openai" &&
+    env.BUZZ_AGENT_PROVIDER === "openai" &&
     env.OPENAI_COMPAT_BASE_URL?.replace(/\/+$/, "") ===
       "http://127.0.0.1:9337/v1" &&
-    env.OPENAI_COMPAT_API_KEY === "sprout-mesh-local"
+    env.OPENAI_COMPAT_API_KEY === "buzz-mesh-local"
   );
 }
 
@@ -4765,9 +4782,18 @@ async function handleStartManagedAgent(args: {
 }): Promise<RawManagedAgent> {
   const agent = getMockManagedAgent(args.pubkey);
   if (isRelayMeshManagedAgent(agent)) {
-    throw new Error(
-      "relay mesh agents cannot be started from saved state because the selected serve target is not persisted. Create a new agent with Run on relay mesh selected to refresh the target for http://127.0.0.1:9337/v1.",
-    );
+    // Model the backend start preflight (ensure_relay_mesh_for_record): a
+    // saved relay-mesh agent re-resolves a live serve target for its model
+    // and only fails when no peer currently serves it.
+    const modelId = agent.env_vars?.OPENAI_COMPAT_MODEL;
+    const hasLiveTarget =
+      mockMeshState.admitted &&
+      mockMeshState.models.some((model) => model.id === modelId);
+    if (!hasLiveTarget) {
+      throw new Error(
+        "relay mesh agents cannot be started from saved state because no live serve target is available for this model. Start serving on a mesh peer, or create a new agent with Run on relay mesh selected to refresh the target for http://127.0.0.1:9337/v1.",
+      );
+    }
   }
 
   const now = new Date().toISOString();
@@ -4953,6 +4979,23 @@ async function handleSearchMessages(
         score: 5.2,
       },
     ];
+    for (const [channelId, events] of mockMessages) {
+      const channel = mockChannels.find(
+        (candidate) => candidate.id === channelId,
+      );
+      for (const event of events) {
+        mockHits.push({
+          event_id: event.id,
+          content: event.content,
+          kind: event.kind,
+          pubkey: event.pubkey,
+          channel_id: channelId,
+          channel_name: channel?.name ?? null,
+          created_at: event.created_at,
+          score: 1,
+        });
+      }
+    }
 
     const hits = mockHits
       .filter((hit) => {
@@ -5159,6 +5202,54 @@ async function handleSendChannelMessage(
     root_event_id: args.parentEventId ?? null,
     depth: args.parentEventId ? 1 : 0,
     created_at: Math.floor(Date.now() / 1000),
+  };
+}
+
+async function handleSendManagedAgentChannelMessage(
+  args: {
+    agentPubkey: string;
+    channelId: string;
+    content: string;
+    marker?: string | null;
+  },
+  _config: E2eConfig | undefined,
+): Promise<RawSendChannelMessageResponse> {
+  const agent = getMockManagedAgent(args.agentPubkey);
+  const marker = args.marker?.trim();
+  if (marker) {
+    const existing = getMockMessageStore(args.channelId).find(
+      (event) =>
+        event.pubkey === agent.pubkey &&
+        event.tags.some((tag) => tag[0] === "client" && tag[1] === marker),
+    );
+    if (existing) {
+      return {
+        event_id: existing.id,
+        parent_event_id: null,
+        root_event_id: null,
+        depth: 0,
+        created_at: existing.created_at,
+      };
+    }
+  }
+
+  const createdAt = Math.floor(Date.now() / 1000);
+  const event = createMockEvent(
+    9,
+    args.content.trim(),
+    [["h", args.channelId], ...(marker ? [["client", marker]] : [])],
+    agent.pubkey,
+    createdAt,
+  );
+  recordMockMessage(args.channelId, event);
+  emitMockLiveEvent(args.channelId, event);
+
+  return {
+    event_id: event.id,
+    parent_event_id: null,
+    root_event_id: null,
+    depth: 0,
+    created_at: createdAt,
   };
 }
 
@@ -5681,12 +5772,12 @@ export function maybeInstallE2eTauriMocks() {
   resetMockUserStatuses();
   mockWebsocketSendMutexWedged = false;
   mockWindows("main");
-  window.__SPROUT_E2E_COMMANDS__ = [];
-  window.__SPROUT_E2E_COMMAND_PAYLOADS__ = [];
-  window.__SPROUT_E2E_COMMAND_LOG__ = [];
-  window.__SPROUT_E2E_SIGNED_EVENTS__ = [];
-  window.__SPROUT_E2E_WEBVIEW_ZOOM__ = 1;
-  window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__ = ({
+  window.__BUZZ_E2E_COMMANDS__ = [];
+  window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
+  window.__BUZZ_E2E_COMMAND_LOG__ = [];
+  window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
+  window.__BUZZ_E2E_WEBVIEW_ZOOM__ = 1;
+  window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ = ({
     channelName,
     content,
     parentEventId,
@@ -5712,7 +5803,7 @@ export function maybeInstallE2eTauriMocks() {
       extraTags,
     );
   };
-  window.__SPROUT_E2E_EMIT_MOCK_TYPING__ = ({ channelName, pubkey }) => {
+  window.__BUZZ_E2E_EMIT_MOCK_TYPING__ = ({ channelName, pubkey }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
     );
@@ -5722,10 +5813,7 @@ export function maybeInstallE2eTauriMocks() {
 
     return emitMockTypingIndicator(channel.id, pubkey ?? CHARLIE_PUBKEY);
   };
-  window.__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__ = ({
-    channelName,
-    kind,
-  }) => {
+  window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__ = ({ channelName, kind }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
     );
@@ -5735,13 +5823,13 @@ export function maybeInstallE2eTauriMocks() {
 
     return hasMockLiveSubscription(channel.id, kind);
   };
-  window.__SPROUT_E2E_PUSH_MOCK_FEED_ITEM__ = (item) => {
+  window.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ = (item) => {
     const category = item.category === "mention" ? "mentions" : item.category;
     mockFeedOverrides[category].unshift(item);
-    window.dispatchEvent(new CustomEvent("sprout:e2e-home-feed-updated"));
+    window.dispatchEvent(new CustomEvent("buzz:e2e-home-feed-updated"));
     return item;
   };
-  window.__SPROUT_E2E_EMIT_MOCK_READ_STATE__ = ({
+  window.__BUZZ_E2E_EMIT_MOCK_READ_STATE__ = ({
     clientId,
     contexts,
     createdAt,
@@ -5765,7 +5853,7 @@ export function maybeInstallE2eTauriMocks() {
     emitMockLiveEvent(GLOBAL_MOCK_SUBSCRIPTION, event);
     return event;
   };
-  window.__SPROUT_E2E_SET_STALL_WEBSOCKET_SENDS__ = (stall) => {
+  window.__BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__ = (stall) => {
     const config = getConfig();
     if (!config?.mock) return;
     config.mock.stallWebsocketSends = stall;
@@ -5774,7 +5862,7 @@ export function maybeInstallE2eTauriMocks() {
   // Tests flip `admitted` to exercise the denial path: mesh_ensure_client_node
   // rejects when not admitted, which proves relay membership is the gate and
   // that the create flow surfaces denial copy without spawning the agent.
-  window.__SPROUT_E2E_SET_MESH__ = (mesh) => {
+  window.__BUZZ_E2E_SET_MESH__ = (mesh) => {
     if (mesh.admitted !== undefined) mockMeshState.admitted = mesh.admitted;
     if (mesh.models !== undefined) mockMeshState.models = mesh.models;
     if (mesh.denyReason !== undefined)
@@ -5799,7 +5887,7 @@ export function maybeInstallE2eTauriMocks() {
   const handleMockCommand = async (command: string, payload: unknown) => {
     const activeConfig = getConfig();
     const identity = getActiveIdentity(activeConfig);
-    window.__SPROUT_E2E_COMMANDS__?.push(command);
+    window.__BUZZ_E2E_COMMANDS__?.push(command);
     const loggedPayload = (() => {
       try {
         return JSON.parse(JSON.stringify(payload ?? null));
@@ -5807,11 +5895,11 @@ export function maybeInstallE2eTauriMocks() {
         return null;
       }
     })();
-    window.__SPROUT_E2E_COMMAND_PAYLOADS__?.push({
+    window.__BUZZ_E2E_COMMAND_PAYLOADS__?.push({
       command,
       payload: loggedPayload,
     });
-    window.__SPROUT_E2E_COMMAND_LOG__?.push({ command, payload });
+    window.__BUZZ_E2E_COMMAND_LOG__?.push({ command, payload });
 
     switch (command) {
       case "mesh_availability":
@@ -5888,7 +5976,7 @@ export function maybeInstallE2eTauriMocks() {
           identity?.pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey
         ).toLowerCase();
         if (reporterPubkey && reporterPubkey !== selfPubkey) {
-          window.__SPROUT_E2E_SIGNED_EVENTS__?.push({
+          window.__BUZZ_E2E_SIGNED_EVENTS__?.push({
             kind: 24621,
             tags: [["p", reporterPubkey]],
             content: JSON.stringify({
@@ -5923,15 +6011,15 @@ export function maybeInstallE2eTauriMocks() {
           providerId: "relay-mesh" as const,
           label: "Run on relay mesh",
           acpCommand: "",
-          agentCommand: "sprout-agent",
+          agentCommand: "buzz-agent",
           agentArgs: [],
           mcpCommand: "",
           model,
           envVars: {
-            SPROUT_AGENT_PROVIDER: "openai",
+            BUZZ_AGENT_PROVIDER: "openai",
             OPENAI_COMPAT_BASE_URL: "http://127.0.0.1:9337/v1",
             OPENAI_COMPAT_MODEL: model,
-            OPENAI_COMPAT_API_KEY: "sprout-mesh-local",
+            OPENAI_COMPAT_API_KEY: "buzz-mesh-local",
             OPENAI_COMPAT_API: "chat",
           },
         };
@@ -6095,6 +6183,7 @@ export function maybeInstallE2eTauriMocks() {
       case "create_managed_agent":
         return handleCreateManagedAgent(
           payload as Parameters<typeof handleCreateManagedAgent>[0],
+          activeConfig,
         );
       case "start_managed_agent":
         return handleStartManagedAgent(
@@ -6225,6 +6314,11 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleSendChannelMessage>[0],
           activeConfig,
         );
+      case "send_managed_agent_channel_message":
+        return handleSendManagedAgentChannelMessage(
+          payload as Parameters<typeof handleSendManagedAgentChannelMessage>[0],
+          activeConfig,
+        );
       case "edit_message":
         return handleEditMessage(
           payload as Parameters<typeof handleEditMessage>[0],
@@ -6250,7 +6344,7 @@ export function maybeInstallE2eTauriMocks() {
       case "download_file":
         // The save dialog can't run headlessly; report a successful save so the
         // FileCard / image-menu click handlers resolve. Specs assert the
-        // command was invoked via `__SPROUT_E2E_COMMANDS__`, not the dialog.
+        // command was invoked via `__BUZZ_E2E_COMMANDS__`, not the dialog.
         return true;
       case "get_event":
         return handleGetEvent(
@@ -6258,7 +6352,7 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig,
         );
       case "sign_event":
-        window.__SPROUT_E2E_SIGNED_EVENTS__?.push({
+        window.__BUZZ_E2E_SIGNED_EVENTS__?.push({
           content: (payload as { content: string }).content,
           kind: (payload as { kind: number }).kind,
           tags: (payload as { tags: string[][] }).tags,
@@ -6374,9 +6468,7 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleGetRunApprovals>[0],
         );
       case "plugin:webview|set_webview_zoom":
-        window.__SPROUT_E2E_WEBVIEW_ZOOM__ = (
-          payload as { value: number }
-        ).value;
+        window.__BUZZ_E2E_WEBVIEW_ZOOM__ = (payload as { value: number }).value;
         return;
       case "plugin:event|listen":
         // Tauri event system (pairing, huddle) — no-op in e2e, return unlisten fn ID
@@ -6405,7 +6497,7 @@ export function maybeInstallE2eTauriMocks() {
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }
   };
-  window.__SPROUT_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>
+  window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ = (command, payload) =>
     handleMockCommand(command, payload ?? null);
   mockIPC(handleMockCommand);
 

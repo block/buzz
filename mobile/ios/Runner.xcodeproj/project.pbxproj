@@ -483,7 +483,7 @@
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER)";
-				PRODUCT_NAME = Sprout;
+				PRODUCT_NAME = Buzz;
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
@@ -504,7 +504,7 @@
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sprout.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Sprout";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Buzz.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Buzz";
 			};
 			name = Debug;
 		};
@@ -520,7 +520,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).RunnerTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sprout.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Sprout";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Buzz.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Buzz";
 			};
 			name = Release;
 		};
@@ -536,7 +536,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).RunnerTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Sprout.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Sprout";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Buzz.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Buzz";
 			};
 			name = Profile;
 		};
@@ -665,7 +665,7 @@
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER)";
-				PRODUCT_NAME = Sprout;
+				PRODUCT_NAME = Buzz;
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
@@ -688,7 +688,7 @@
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER)";
-				PRODUCT_NAME = Sprout;
+				PRODUCT_NAME = Buzz;
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";

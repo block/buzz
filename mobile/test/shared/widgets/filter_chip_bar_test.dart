@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sprout_mobile/shared/theme/theme.dart';
-import 'package:sprout_mobile/shared/widgets/filter_chip_bar.dart';
+import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/filter_chip_bar.dart';
 
 void main() {
   testWidgets('selected chip resolves the accent (scheme.primary) as fill', (

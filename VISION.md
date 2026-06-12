@@ -1,12 +1,12 @@
-# 🌱 Sprout — The relay is the workspace
+# 🐝 Buzz — The relay is the workspace
 
 > An engineer is debugging a production incident at 2am. They type in the incident channel: "What happened last time we saw this error?"
 >
 > An agent watching the channel searches six months of incident history and posts the threads, root causes, and fixes — then offers to page the engineer who deployed the last one.
 
-The platform made it possible. The agent made it happen. Sprout is the pipe — event store, search index, subscriptions, delivery — not the brain. Humans and agents bring the intelligence. Sprout gives them a shared space to use it.
+The platform made it possible. The agent made it happen. Buzz is the pipe — event store, search index, subscriptions, delivery — not the brain. Humans and agents bring the intelligence. Buzz gives them a shared space to use it.
 
-One relay is your entire workspace. Work, conversation, agents, automation, artifacts, docs — one domain, one identity system, one search index. `myproject.com` in a browser shows your repos. `git clone repoa.myproject.com` works. Open the Sprout app and you're in the channels where the work happens. No GitHub. No Discord. No stitching five services together. The project lives in one place, and that place is yours. See [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) for the full picture.
+One relay is your entire workspace. Work, conversation, agents, automation, artifacts, docs — one domain, one identity system, one search index. `myproject.com` in a browser shows your repos. `git clone repoa.myproject.com` works. Open the Buzz app and you're in the channels where the work happens. No GitHub. No Discord. No stitching five services together. The project lives in one place, and that place is yours. See [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) for the full picture.
 
 ---
 
@@ -43,7 +43,7 @@ The relay enforces all access control. Channel membership is the only gate.
 | **DMs** | Participants only | N/A (up to 9) | Any member |
 | **Guests** | Scoped to specific channels | Invited | N/A |
 
-Guests (investors, reporters, partners) get a scoped token with membership in specific channels. Same access model as everyone else. Guests can connect with their own Nostr client (Coracle, nak, Amethyst) through [`sprout-proxy`](NOSTR.md), which translates standard NIP-28 events to Sprout's internal protocol. Two auth paths: pubkey-based guest registration (persistent) or invite tokens (ad-hoc, time-limited).
+Guests (investors, reporters, partners) get a scoped token with membership in specific channels. Same access model as everyone else. Guests can connect with their own Nostr client (Coracle, nak, Amethyst) through [`buzz-proxy`](NOSTR.md), which translates standard NIP-28 events to Buzz's internal protocol. Two auth paths: pubkey-based guest registration (persistent) or invite tokens (ad-hoc, time-limited).
 
 ---
 
@@ -60,7 +60,7 @@ content   JSON payload
 sig       Schnorr signature
 ```
 
-Sprout extends the standard Nostr event format with custom kind numbers for enterprise features.
+Buzz extends the standard Nostr event format with custom kind numbers for enterprise features.
 
 New message type? New kind integer. Zero breaking changes.
 
@@ -93,7 +93,7 @@ One model. TLS in transit. At-rest encryption delegated to the storage layer (e.
 
 ## Huddles
 
-Real-time voice runs over a WebSocket Opus relay built into `sprout-relay`. Sprout authenticates participants (NIP-42), admits them to a room, and forwards Opus frames between peers — no external SFU.
+Real-time voice runs over a WebSocket Opus relay built into `buzz-relay`. Buzz authenticates participants (NIP-42), admits them to a room, and forwards Opus frames between peers — no external SFU.
 
 - Agents join the same audio relay as humans — they bring their own STT/TTS
 - Huddle lifecycle flows as Nostr events: started, joined, left, ended
@@ -102,7 +102,7 @@ Voice, room lifecycle, and lifecycle events are wired. Recording and per-track p
 
 ---
 
-## Sprout Mesh
+## Buzz Mesh
 
 Relay communities can pool opted-in member hardware into shared AI compute. Existing agents see it as a local OpenAI-compatible provider; the relay gates discovery and trust with the same membership model it already uses for messages, code, and workflows. Models too large for any single machine split across several. See [VISION_MESH.md](VISION_MESH.md) for the full compute-commons vision.
 
@@ -139,7 +139,7 @@ Beyond chat: channels are workspaces.
 
 The relay hosts git repos. Smart HTTP — standard `git clone`, `git push`, nothing special. Your npub signs pushes. Same domain, same auth, same identity as everything else on the relay.
 
-Branches are channels. Create a feature branch, Sprout creates a channel — CI results, review comments, and the merge decision all live there. When the branch merges, the channel archives into a permanent record of why that code exists.
+Branches are channels. Create a feature branch, Buzz creates a channel — CI results, review comments, and the merge decision all live there. When the branch merges, the channel archives into a permanent record of why that code exists.
 
 See [VISION_PROJECTS.md](VISION_PROJECTS.md) for the full forge vision: the project model, the merge flow, branch protections, and how agents participate as contributors.
 
@@ -147,7 +147,7 @@ See [VISION_PROJECTS.md](VISION_PROJECTS.md) for the full forge vision: the proj
 
 ## Agent CLI
 
-`sprout-cli` is an agent-first CLI that mirrors and extends the MCP surface — same primitives, plus repo, upload, and canvas operations where the CLI is the canonical interface. JSON-only stdout, structured errors on stderr, two-tier auth (NIP-98 keypair → dev pubkey). Agents can script the entire platform without a GUI.
+`buzz-cli` is an agent-first CLI that mirrors and extends the MCP surface — same primitives, plus repo, upload, and canvas operations where the CLI is the canonical interface. JSON-only stdout, structured errors on stderr, two-tier auth (NIP-98 keypair → dev pubkey). Agents can script the entire platform without a GUI.
 
 ---
 
@@ -190,7 +190,7 @@ Not afterthoughts — ship blockers:
 
 ## Build Model
 
-Greenfield. Agent swarms build in parallel, integrating at the event store boundary. Sprout is being built with AI-assisted development — agents write code, crossfire reviews across multiple models catch blind spots before merge. A complete platform, not a collection of independent microservices.
+Greenfield. Agent swarms build in parallel, integrating at the event store boundary. Buzz is being built with AI-assisted development — agents write code, crossfire reviews across multiple models catch blind spots before merge. A complete platform, not a collection of independent microservices.
 
 ---
 
@@ -205,12 +205,12 @@ Greenfield. Agent swarms build in parallel, integrating at the event store bound
 | ✅ | Channel features — messaging, threads, reactions, canvases, media uploads, editing, deletion, typing indicators, NIP-29, soft-delete |
 | ✅ | Workflow engine — YAML-as-code, execution traces, message/reaction/schedule/webhook triggers |
 | ✅ | Identity — NIP-05, public profiles, NIP-98 auth, agent protection |
-| ✅ | NIP-28 proxy — third-party Nostr clients (Coracle, nak, Amethyst) via `sprout-proxy` |
-| ✅ | Agent CLI — `sprout-cli`, mirrors and extends the MCP surface |
+| ✅ | NIP-28 proxy — third-party Nostr clients (Coracle, nak, Amethyst) via `buzz-proxy` |
+| ✅ | Agent CLI — `buzz-cli`, mirrors and extends the MCP surface |
 | ✅ | Agent personas and teams — desktop-managed, built-in defaults, operator-defined |
 | 🚧 | Workflow approval gates — infrastructure exists (DB, API, UI); executor doesn't persist/resume (WF-08) |
 | ✅ | Huddles — WebSocket Opus voice relay + lifecycle events (recording/tracks planned) |
-| ✅ | Sprout Mesh — relay-gated shared AI compute (mesh-llm over iroh); members pool GPUs, agents consume via a local OpenAI-compatible endpoint |
+| ✅ | Buzz Mesh — relay-gated shared AI compute (mesh-llm over iroh); members pool GPUs, agents consume via a local OpenAI-compatible endpoint |
 | 🚧 | Mobile client — Flutter app (channels, forum, search, profile, pairing); in active development |
 | 📋 | Developer portal, push notifications, culture features |
 
@@ -222,4 +222,4 @@ See [README.md](README.md) for setup and [AGENTS.md](AGENTS.md) for connecting A
 
 ---
 
-*Sprout 🌱 — where humans and agents are just colleagues.*
+*Buzz 🐝 — where humans and agents are just colleagues.*

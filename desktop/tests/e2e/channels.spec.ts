@@ -64,12 +64,12 @@ async function waitForMockLiveSubscription(
           return (
             (
               window as Window & {
-                __SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
                   channelName: string;
                   kind?: number;
                 }) => boolean;
               }
-            ).__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
               channelName: currentChannelName,
               kind,
             }) ?? false
@@ -139,8 +139,8 @@ async function getManagedAgentPubkey(
 async function readCommandLog(page: import("@playwright/test").Page) {
   return page.evaluate(() => {
     return (
-      (window as Window & { __SPROUT_E2E_COMMANDS__?: string[] })
-        .__SPROUT_E2E_COMMANDS__ ?? []
+      (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+        .__BUZZ_E2E_COMMANDS__ ?? []
     );
   });
 }
@@ -150,12 +150,12 @@ async function readCommandPayloadLog(page: import("@playwright/test").Page) {
     return (
       (
         window as Window & {
-          __SPROUT_E2E_COMMAND_LOG__?: Array<{
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{
             command: string;
             payload: unknown;
           }>;
         }
-      ).__SPROUT_E2E_COMMAND_LOG__ ?? []
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? []
     );
   });
 }
@@ -169,9 +169,9 @@ async function invokeMockCommand<T>(
     return Boolean(
       (
         window as Window & {
-          __SPROUT_E2E_INVOKE_MOCK_COMMAND__?: unknown;
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
         }
-      ).__SPROUT_E2E_INVOKE_MOCK_COMMAND__,
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__,
     );
   });
 
@@ -185,12 +185,12 @@ async function invokeMockCommand<T>(
     }) => {
       const invoke = (
         window as Window & {
-          __SPROUT_E2E_INVOKE_MOCK_COMMAND__?: (
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
             command: string,
             payload?: Record<string, unknown>,
           ) => Promise<unknown>;
         }
-      ).__SPROUT_E2E_INVOKE_MOCK_COMMAND__;
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
 
       if (!invoke) {
         throw new Error("Mock bridge is not installed.");
@@ -200,6 +200,97 @@ async function invokeMockCommand<T>(
     },
     { command, payload },
   ) as Promise<T>;
+}
+
+async function expectSameLeftInset(
+  page: import("@playwright/test").Page,
+  firstTestId: string,
+  secondTestId: string,
+) {
+  const firstBox = await page.getByTestId(firstTestId).boundingBox();
+  const secondBox = await page.getByTestId(secondTestId).first().boundingBox();
+
+  if (!firstBox || !secondBox) {
+    throw new Error(`Could not measure ${firstTestId} against ${secondTestId}`);
+  }
+
+  expect(Math.abs(firstBox.x - secondBox.x)).toBeLessThanOrEqual(1);
+}
+
+async function expectIntroBalancedAroundDayDivider(
+  page: import("@playwright/test").Page,
+  introTestId: string,
+) {
+  const introBox = await page.getByTestId(introTestId).boundingBox();
+  const dividerBox = await page
+    .getByTestId("message-timeline-day-divider")
+    .first()
+    .boundingBox();
+  const messageBox = await page
+    .getByTestId("message-row")
+    .first()
+    .boundingBox();
+
+  if (!introBox || !dividerBox || !messageBox) {
+    throw new Error(`Could not measure timeline spacing for ${introTestId}`);
+  }
+
+  const gapAboveDivider = dividerBox.y - (introBox.y + introBox.height);
+  const gapBelowDivider = messageBox.y - (dividerBox.y + dividerBox.height);
+
+  expect(Math.abs(gapAboveDivider - gapBelowDivider)).toBeLessThanOrEqual(1);
+}
+
+async function expectIntroActionCardLayout(
+  page: import("@playwright/test").Page,
+  actionTestId: string,
+) {
+  const actionBox = await page.getByTestId(actionTestId).boundingBox();
+  const iconBox = await page.getByTestId(`${actionTestId}-icon`).boundingBox();
+
+  if (!actionBox || !iconBox) {
+    throw new Error(`Could not measure intro action card: ${actionTestId}`);
+  }
+
+  expect(actionBox.height).toBeGreaterThan(actionBox.width);
+  expect(Math.round(actionBox.width)).toBe(220);
+  expect(Math.round(iconBox.width)).toBe(48);
+  expect(Math.round(iconBox.height)).toBe(48);
+  const introIconRadius = await page
+    .getByTestId("message-channel-intro-icon")
+    .evaluate((element) => window.getComputedStyle(element).borderRadius);
+  const actionRadius = await page
+    .getByTestId(actionTestId)
+    .evaluate((element) => window.getComputedStyle(element).borderRadius);
+  expect(actionRadius).toBe(introIconRadius);
+  await expect(page.getByTestId(`${actionTestId}-title`)).toHaveCSS(
+    "white-space",
+    "normal",
+  );
+  await expect(page.getByTestId(`${actionTestId}-description`)).toHaveCSS(
+    "white-space",
+    "normal",
+  );
+}
+
+async function expectIntroActionsShareRow(
+  page: import("@playwright/test").Page,
+  actionTestIds: string[],
+) {
+  const boxes = await Promise.all(
+    actionTestIds.map((testId) => page.getByTestId(testId).boundingBox()),
+  );
+  const measuredBoxes = boxes.filter(
+    (box): box is NonNullable<typeof box> => box !== null,
+  );
+  const [firstBox] = measuredBoxes;
+  if (!firstBox || measuredBoxes.length !== actionTestIds.length) {
+    throw new Error("Could not measure intro action row");
+  }
+
+  for (const box of measuredBoxes.slice(1)) {
+    expect(Math.abs(firstBox.y - box.y)).toBeLessThanOrEqual(1);
+  }
 }
 
 test.beforeEach(async ({ page }) => {
@@ -309,13 +400,13 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   await page.getByTestId("create-channel-submit").click();
 
   await expect(page.getByTestId("stream-list")).toContainText(channelName);
-  await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+  await expect(page.getByTestId("chat-title")).toContainText(channelName);
   await expect(
     page.getByTestId(`channel-ephemeral-${channelName}`),
   ).toBeVisible();
   await expect(page.getByTestId("chat-ephemeral-badge")).toBeVisible();
   await expect(page.getByTestId("chat-ephemeral-badge")).toHaveAttribute(
-    "title",
+    "aria-label",
     /Ephemeral channel\. Cleans up (tomorrow|in \d+ hours?)\./,
   );
 
@@ -348,7 +439,7 @@ test("ephemeral countdown refreshes when switching channels after a clock jump",
       .getByLabel("Ephemeral — auto-archives after 1 day of inactivity")
       .click();
     await page.getByTestId("create-channel-submit").click();
-    await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+    await expect(page.getByTestId("chat-title")).toContainText(channelName);
   }
 
   await page.clock.setFixedTime(shiftedTime);
@@ -357,9 +448,9 @@ test("ephemeral countdown refreshes when switching channels after a clock jump",
     .toBe(shiftedTime.getTime());
 
   await page.getByTestId(`channel-${firstChannelName}`).click();
-  await expect(page.getByTestId("chat-title")).toHaveText(firstChannelName);
+  await expect(page.getByTestId("chat-title")).toContainText(firstChannelName);
   await expect(page.getByTestId("chat-ephemeral-badge")).toHaveAttribute(
-    "title",
+    "aria-label",
     /Ephemeral channel\. Cleans up in 22 hours\./,
   );
 });
@@ -373,9 +464,9 @@ test("archived channels stay out of all sidebar sections", async ({ page }) => {
     return Boolean(
       (
         window as Window & {
-          __SPROUT_E2E_INVOKE_MOCK_COMMAND__?: unknown;
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
         }
-      ).__SPROUT_E2E_INVOKE_MOCK_COMMAND__,
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__,
     );
   });
   await page.evaluate(
@@ -390,12 +481,12 @@ test("archived channels stay out of all sidebar sections", async ({ page }) => {
     }) => {
       const invoke = (
         window as Window & {
-          __SPROUT_E2E_INVOKE_MOCK_COMMAND__?: (
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
             command: string,
             payload?: Record<string, unknown>,
           ) => Promise<{ id: string }>;
         }
-      ).__SPROUT_E2E_INVOKE_MOCK_COMMAND__;
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
 
       if (!invoke) {
         throw new Error("Mock bridge is not installed.");
@@ -482,12 +573,46 @@ test("switch between channel types", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
 });
 
-test("empty channel shows empty state", async ({ page }) => {
+test("empty channel shows intro actions", async ({ page }) => {
   await page.goto("/");
 
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
-  await expect(page.getByTestId("message-empty")).toBeVisible();
+  await expect(page.getByTestId("message-channel-intro")).toBeVisible();
+  await expect(page.getByTestId("message-channel-intro")).toContainText(
+    "This is the beginning of the regular channel.",
+  );
+  await expect(
+    page.getByTestId("channel-intro-action-create-channel"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-intro-action-create-agent"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("channel-intro-action-add-people"),
+  ).toBeVisible();
+  await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
+    0,
+  );
+  await expectIntroActionCardLayout(page, "channel-intro-action-create-agent");
+  await expectIntroActionsShareRow(page, [
+    "channel-intro-action-create-agent",
+    "channel-intro-action-add-people",
+  ]);
+
+  await page.getByTestId("channel-intro-action-add-people").click();
+  await expect(page.getByTestId("members-sidebar")).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
+
+  await page.getByTestId("channel-intro-action-create-agent").click();
+  await expect(page.getByRole("heading", { name: "Add agents" })).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "Add agents" })).toHaveCount(
+    0,
+  );
 });
 
 test("channel with messages shows content", async ({ page }) => {
@@ -495,9 +620,25 @@ test("channel with messages shows content", async ({ page }) => {
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("message-channel-intro")).toBeVisible();
+  await expect(page.getByTestId("message-channel-intro")).toContainText(
+    "This is the beginning of the regular channel.",
+  );
+  await expect(
+    page.getByTestId("channel-intro-action-create-channel"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-intro-action-create-agent"),
+  ).toBeVisible();
+  await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Welcome to #general",
   );
+  await expectSameLeftInset(page, "message-channel-intro", "message-row");
+  await expectIntroBalancedAroundDayDivider(page, "message-channel-intro");
 });
 
 test("shows and clears activity indicators for active channel agents", async ({
@@ -510,7 +651,7 @@ test("shows and clears activity indicators for active channel agents", async ({
   await waitForMockLiveSubscription(page, "agents", KIND_TYPING_INDICATOR);
 
   await page.evaluate((pubkey) => {
-    window.__SPROUT_E2E_EMIT_MOCK_TYPING__?.({
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
       channelName: "agents",
       pubkey,
     });
@@ -533,7 +674,7 @@ test("shows and clears activity indicators for active channel agents", async ({
   await expect(page.getByTestId("message-typing-indicator")).toHaveCount(0);
 
   await page.evaluate((pubkey) => {
-    window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
       channelName: "agents",
       content: "Done.",
       pubkey,
@@ -547,7 +688,7 @@ test("shows and clears activity indicators for active channel agents", async ({
 
   await page.waitForTimeout(1_200);
   await page.evaluate((pubkey) => {
-    window.__SPROUT_E2E_EMIT_MOCK_TYPING__?.({
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
       channelName: "agents",
       pubkey,
     });
@@ -569,7 +710,7 @@ test("typing indicator shows avatars and maintains stable name order", async ({
 
   // Alice starts typing first
   await page.evaluate((pubkey) => {
-    window.__SPROUT_E2E_EMIT_MOCK_TYPING__?.({
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
       channelName: "random",
       pubkey,
     });
@@ -588,7 +729,7 @@ test("typing indicator shows avatars and maintains stable name order", async ({
 
   // Bob starts typing second
   await page.evaluate((pubkey) => {
-    window.__SPROUT_E2E_EMIT_MOCK_TYPING__?.({
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
       channelName: "random",
       pubkey,
     });
@@ -601,7 +742,7 @@ test("typing indicator shows avatars and maintains stable name order", async ({
 
   // Alice re-broadcasts — order should stay "alice and bob", not flip
   await page.evaluate((pubkey) => {
-    window.__SPROUT_E2E_EMIT_MOCK_TYPING__?.({
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
       channelName: "random",
       pubkey,
     });
@@ -613,7 +754,7 @@ test("typing indicator shows avatars and maintains stable name order", async ({
 
   // Bob re-broadcasts — order should still stay "alice and bob"
   await page.evaluate((pubkey) => {
-    window.__SPROUT_E2E_EMIT_MOCK_TYPING__?.({
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
       channelName: "random",
       pubkey,
     });
@@ -636,7 +777,7 @@ test("sidebar shows unread indicator for newly active channels", async ({
   // alice — simulating a real "another user posted while I was elsewhere".
   await page.evaluate(
     ({ pubkey }) => {
-      window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "random",
         content: "Unread update for #random",
         kind: 40002,
@@ -665,7 +806,7 @@ test("sidebar shows unread indicator for new forum posts", async ({ page }) => {
   // Emit as alice — the unread tracker ignores self-authored messages.
   await page.evaluate(
     ({ pubkey }) => {
-      window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "watercooler",
         content: "Unread update for the forum",
         kind: 45001,
@@ -689,7 +830,7 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
   await waitForMockLiveSubscription(page, "alice-tyler");
 
   await page.evaluate((pubkey) => {
-    window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
       channelName: "alice-tyler",
       content: "Unread update for the DM",
       pubkey,
@@ -700,9 +841,16 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
 
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await expect(page.getByTestId("message-dm-intro")).toBeVisible();
+  await expect(page.getByTestId("message-dm-intro")).toContainText(
+    "This is the beginning of your direct message with",
+  );
+  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Unread update for the DM",
   );
+  await expectSameLeftInset(page, "message-dm-intro", "message-row");
+  await expectIntroBalancedAroundDayDivider(page, "message-dm-intro");
   await expect(page.getByTestId("channel-unread-alice-tyler")).toHaveCount(0);
 });
 

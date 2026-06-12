@@ -32,6 +32,7 @@ export default defineConfig({
         "**/channel-controls-screenshots.spec.ts",
         "**/team-management-screenshots.spec.ts",
         "**/file-attachment.spec.ts",
+        "**/video-attachment.spec.ts",
         "**/mentions.spec.ts",
         "**/relay-reconnect.spec.ts",
         "**/workflows.spec.ts",

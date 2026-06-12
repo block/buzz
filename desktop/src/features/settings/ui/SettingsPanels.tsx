@@ -23,6 +23,7 @@ import type {
   DesktopNotificationPermissionState,
   NotificationSettings,
 } from "@/features/notifications/hooks";
+import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
 import { RelayMembersSettingsCard } from "@/features/relay-members/ui/RelayMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
 import { cn } from "@/shared/lib/cn";
@@ -77,9 +78,10 @@ export type SettingsPanelProps = {
   notificationSettings: NotificationSettings;
   onSetDesktopNotificationsEnabled: (enabled: boolean) => Promise<boolean>;
   onSetHomeBadgeEnabled: (enabled: boolean) => void;
-  onSetMentionNotificationsEnabled: (enabled: boolean) => void;
-  onSetNeedsActionNotificationsEnabled: (enabled: boolean) => void;
-  onSetSoundEnabled: (enabled: boolean) => void;
+  onSetSlotAlertsEnabled: (slot: SoundSlot, enabled: boolean) => void;
+  onSetNotifyWhileViewing: (enabled: boolean) => void;
+  onSetAllSlotAlertsEnabled: (enabled: boolean) => void;
+  onSetSoundForSlot: (slot: SoundSlot, name: SoundName) => void;
 };
 
 export const settingsSections: SettingsSectionDescriptor[] = [
@@ -184,7 +186,7 @@ function ThemeSettingsCard() {
       <div className="mb-12 min-w-0">
         <h2 className="text-2xl font-semibold tracking-tight">Appearance</h2>
         <p className="text-base font-normal text-muted-foreground">
-          Choose a theme for Sprout. Light and dark mode is auto-detected.
+          Choose a theme for Buzz. Light and dark mode is auto-detected.
         </p>
       </div>
 
@@ -301,13 +303,10 @@ export function renderSettingsSection(
             props.onSetDesktopNotificationsEnabled
           }
           onSetHomeBadgeEnabled={props.onSetHomeBadgeEnabled}
-          onSetMentionNotificationsEnabled={
-            props.onSetMentionNotificationsEnabled
-          }
-          onSetNeedsActionNotificationsEnabled={
-            props.onSetNeedsActionNotificationsEnabled
-          }
-          onSetSoundEnabled={props.onSetSoundEnabled}
+          onSetSlotAlertsEnabled={props.onSetSlotAlertsEnabled}
+          onSetNotifyWhileViewing={props.onSetNotifyWhileViewing}
+          onSetAllSlotAlertsEnabled={props.onSetAllSlotAlertsEnabled}
+          onSetSoundForSlot={props.onSetSoundForSlot}
         />
       );
     case "experimental":

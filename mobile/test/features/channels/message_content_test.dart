@@ -3,9 +3,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:sprout_mobile/features/channels/message_content.dart';
-import 'package:sprout_mobile/features/channels/media_viewer_page.dart';
-import 'package:sprout_mobile/shared/theme/theme.dart';
+import 'package:buzz/features/channels/message_content.dart';
+import 'package:buzz/features/channels/media_viewer_page.dart';
+import 'package:buzz/shared/theme/theme.dart';
 
 Widget _testable(Widget child, {List<Override> overrides = const []}) {
   return ProviderScope(
@@ -245,16 +245,14 @@ void main() {
       testWidgets('renders markdown link', (tester) async {
         await tester.pumpWidget(
           _testable(
-            const MessageContent(
-              content: 'Check [Sprout](https://example.com)',
-            ),
+            const MessageContent(content: 'Check [Buzz](https://example.com)'),
           ),
         );
 
         final allText = _allRichText(tester);
-        expect(allText, contains('Sprout'));
+        expect(allText, contains('Buzz'));
         // Should not show raw markdown syntax.
-        expect(allText, isNot(contains('[Sprout]')));
+        expect(allText, isNot(contains('[Buzz]')));
         expect(allText, isNot(contains('(https://example.com)')));
       });
 

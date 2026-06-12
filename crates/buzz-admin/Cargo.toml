@@ -1,0 +1,23 @@
+[package]
+name = "buzz-admin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Operator CLI for Buzz relay administration"
+
+[[bin]]
+name = "buzz-admin"
+path = "src/main.rs"
+
+[dependencies]
+buzz-db = { workspace = true }
+buzz-core = { workspace = true }
+buzz-auth = { workspace = true }
+nostr = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true }
+clap = { version = "4", features = ["derive"] }

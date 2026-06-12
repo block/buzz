@@ -1,12 +1,12 @@
 # Mesh LLM local build prerequisites
 
-Sprout embeds mesh-llm through the Rust SDK pinned in Cargo. mesh-llm's native
+Buzz embeds mesh-llm through the Rust SDK pinned in Cargo. mesh-llm's native
 skippy/llama layer is linked into the relay and desktop binaries.
 
 ## Local Mac demo path
 
 For the first local milestone, use mesh-llm's default native build path. On macOS
-this compiles patched llama.cpp/ggml with Metal support the first time a Sprout
+this compiles patched llama.cpp/ggml with Metal support the first time a Buzz
 binary that depends on mesh is built. The result is cached under Cargo's git
 checkout of mesh-llm, so subsequent builds are much faster.
 
@@ -20,7 +20,7 @@ brew install cmake       # if cmake is not already available
 Then build normally:
 
 ```bash
-cargo build -p sprout-relay --bin sprout-relay
+cargo build -p buzz-relay --bin buzz-relay
 cargo check --manifest-path desktop/src-tauri/Cargo.toml
 ```
 
@@ -52,7 +52,7 @@ supported local path for M1.
 
 ## Connectivity model: public iroh relays off, raw STUN on (WAN)
 
-Sprout Desktop starts the embedded mesh node with `disable_iroh_relays(true)`
+Buzz Desktop starts the embedded mesh node with `disable_iroh_relays(true)`
 (mesh-llm fork rev `bc2f1106`, `RelayPolicy::ExplicitlyDisabled`): **no public
 iroh relays** (no `*.iroh.link` traffic, no relay transport), so there is no
 empty-relay fallback to public infrastructure.
@@ -62,7 +62,7 @@ Raw STUN **remains on** under this policy: the node discovers its public address
 token / `EndpointAddr`. That address rides the relay-signed `24621`/`24622`
 call-me-now exchange, and peers hole-punch directly over UDP — so this works over
 **WAN**, not just LAN. STUN is a "what's my public IP" lookup, not a relay or a
-data path; the Sprout relay performs the address-exchange coordination.
+data path; the Buzz relay performs the address-exchange coordination.
 
 Residual limit (intentional v1): with iroh relays off there is **no relay
 transport fallback**, so two peers both behind **symmetric NATs** may fail to
@@ -80,13 +80,13 @@ coverage into three layers and are explicit about what is real vs mocked.
 
 | # | What it proves | Where | Real / Mocked | Runs in CI? | How to run |
 |---|----------------|-------|---------------|-------------|------------|
-| 1 | serve node + client node + mesh routing + **real inference** | `crates/sprout-relay/examples/mesh_serve_client_smoke.rs` | **REAL** (loads a model, runs inference, joins a real mesh) | No — hardware-gated | `just mesh-e2e-hardware` (or `cargo run -p sprout-relay --example mesh_serve_client_smoke`) |
-| 2 | admission **invariant**: relay membership is the only factor | `crates/sprout-relay/src/handlers/mesh_signaling.rs` (`*_admitted` / `denied_is_not_admitted` tests) | REAL policy logic, no I/O | **Yes** | `cargo test -p sprout-relay mesh_signaling` |
-| 2b | live db-membership admission + member/non-member status reads | `crates/sprout-test-client/tests/e2e_mesh_llm.rs` (`trust_*`) | REAL relay over ws | No — env-gated (`MEMBER_NSEC`/`STRANGER_NSEC`, live relay) | see that file's module docs |
+| 1 | serve node + client node + mesh routing + **real inference** | `crates/buzz-relay/examples/mesh_serve_client_smoke.rs` | **REAL** (loads a model, runs inference, joins a real mesh) | No — hardware-gated | `just mesh-e2e-hardware` (or `cargo run -p buzz-relay --example mesh_serve_client_smoke`) |
+| 2 | admission **invariant**: relay membership is the only factor | `crates/buzz-relay/src/handlers/mesh_signaling.rs` (`*_admitted` / `denied_is_not_admitted` tests) | REAL policy logic, no I/O | **Yes** | `cargo test -p buzz-relay mesh_signaling` |
+| 2b | live db-membership admission + member/non-member status reads | `crates/buzz-test-client/tests/e2e_mesh_llm.rs` (`trust_*`) | REAL relay over ws | No — env-gated (`MEMBER_NSEC`/`STRANGER_NSEC`, live relay) | see that file's module docs |
 | 3 | desktop UI contract: Share-compute start/stop, Run-on-relay-mesh preset, **ensure-before-spawn** order, membership-gated toggle | `desktop/tests/e2e/mesh-compute.spec.ts` | UI REAL, Tauri mesh commands MOCKED via the e2e bridge | **Yes** | `cd desktop && pnpm test:e2e:integration -- mesh-compute.spec.ts` |
 
 `just mesh-e2e` runs the two CI-safe layers (2 + 3). Layer 1 is run on hardware.
-`just mesh-e2e-hardware` prepares a matching MeshLLM native runtime in a Sprout-controlled local cache before starting the real serve/client smoke, so it does not depend on a manually preseeded `MESH_LLM_NATIVE_RUNTIME_CACHE_DIR`.
+`just mesh-e2e-hardware` prepares a matching MeshLLM native runtime in a Buzz-controlled local cache before starting the real serve/client smoke, so it does not depend on a manually preseeded `MESH_LLM_NATIVE_RUNTIME_CACHE_DIR`.
 
 ### What "real" means per layer
 

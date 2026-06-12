@@ -200,7 +200,7 @@ mod tests {
         let agent_keys = nostr::Keys::generate();
         let owner_keys = nostr::Keys::generate();
         let agent_pubkey = agent_keys.public_key();
-        let tag_json = sprout_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_pubkey, "")
+        let tag_json = buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_keys, &agent_pubkey, "")
             .expect("compute auth tag");
         let tag_values: Vec<String> = serde_json::from_str(&tag_json).expect("parse auth tag json");
         let auth_tag = Tag::parse(tag_values).expect("parse auth tag");

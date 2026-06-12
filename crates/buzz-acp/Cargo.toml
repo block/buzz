@@ -1,0 +1,78 @@
+[package]
+name = "buzz-acp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ACP harness that bridges Buzz events to AI agents"
+
+[lib]
+name = "buzz_acp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "buzz-acp"
+path = "src/main.rs"
+
+[dependencies]
+# Internal
+buzz-core = { workspace = true }
+buzz-sdk = { workspace = true }
+buzz-persona = { path = "../buzz-persona" }
+
+# Nostr
+nostr = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# WebSocket
+tokio-tungstenite = { workspace = true }
+
+# Codec (bounded line reads)
+tokio-util = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+futures-util = { workspace = true }
+
+# HTTP (channel discovery REST API)
+reqwest = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# IDs
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# URL parsing
+url = { workspace = true }
+
+# NIP-98 HTTP auth signing
+sha2 = { workspace = true }
+base64 = "0.22"
+hex = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Process-group kill (safe wrapper around killpg)
+nix = { version = "0.31", default-features = false, features = ["signal"] }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Config file
+toml = "1.0"
+
+# Filter expressions
+evalexpr = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

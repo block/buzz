@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build Sprig — one deploy-anywhere multicall binary for the Sprout ACP
+# Build Sprig — one deploy-anywhere multicall binary for the Buzz ACP
 # harness, agent, and developer MCP. The archive exposes these command names:
 #
 #   sprig            implementation binary
-#   sprout-acp       link to sprig (ACP harness)
-#   sprout-agent     link to sprig (ACP-compliant agent)
-#   sprout-dev-mcp   link to sprig (developer MCP server; also dispatches
-#                    rg/tree/sprout/git-credential-nostr/git-sign-nostr)
+#   buzz-acp       link to sprig (ACP harness)
+#   buzz-agent     link to sprig (ACP-compliant agent)
+#   buzz-dev-mcp   link to sprig (developer MCP server; also dispatches
+#                    rg/tree/buzz/git-credential-nostr/git-sign-nostr)
 #
 # Usage:
 #   ./scripts/build-sprig.sh [version] [target]
@@ -32,9 +32,9 @@
 #
 # The tarball contains:
 #   sprig
-#   sprout-acp
-#   sprout-agent
-#   sprout-dev-mcp
+#   buzz-acp
+#   buzz-agent
+#   buzz-dev-mcp
 #   README.md
 #   sprig.json        { version, git_sha, target, binaries: [{name, sha256, size}] }
 
@@ -59,7 +59,7 @@ else
 fi
 
 BUNDLE_BIN="sprig"
-COMMANDS=(sprout-acp sprout-agent sprout-dev-mcp)
+COMMANDS=(buzz-acp buzz-agent buzz-dev-mcp)
 
 echo "==> Building Sprig v${VERSION} for ${TARGET}"
 echo "    git_sha=${GIT_SHA}"
@@ -133,18 +133,18 @@ JSON
 cat > "${STAGING}/README.md" <<'README'
 # Sprig
 
-Sprig is the all-in-one Sprout agent binary for deploy-anywhere environments.
+Sprig is the all-in-one Buzz agent binary for deploy-anywhere environments.
 It exposes the ACP harness, ACP agent, and developer MCP command names as symlinks
 to one multicall binary so shared Rust runtime/TLS code is stored only once.
 
 Commands:
 
 - `sprig` — prints usage/version. Invoke a personality by one of the links below.
-- `sprout-acp` — ACP harness that bridges Sprout channel events to an
+- `buzz-acp` — ACP harness that bridges Buzz channel events to an
   ACP-compliant agent over stdio.
-- `sprout-agent` — ACP-compliant agent (spawns MCP servers, calls LLMs).
-- `sprout-dev-mcp` — Developer MCP server (shell, str_replace, todo) and
-  multicall entrypoint for `rg`, `tree`, `sprout`, `git-credential-nostr`,
+- `buzz-agent` — ACP-compliant agent (spawns MCP servers, calls LLMs).
+- `buzz-dev-mcp` — Developer MCP server (shell, str_replace, todo) and
+  multicall entrypoint for `rg`, `tree`, `buzz`, `git-credential-nostr`,
   `git-sign-nostr`.
 
 See `sprig.json` for SHA-256s, sizes, target, and source git SHA.
@@ -160,14 +160,14 @@ export PATH="/opt/sprig:$PATH"
 
 ```bash
 # Agent provider
-export SPROUT_AGENT_PROVIDER=anthropic            # or openai
+export BUZZ_AGENT_PROVIDER=anthropic            # or openai
 export ANTHROPIC_API_KEY=sk-...
 export ANTHROPIC_MODEL=claude-sonnet-4-20250514
 
-# Nostr identity (shared by sprout-acp, git auth, signing, and sprout CLI)
+# Nostr identity (shared by buzz-acp, git auth, signing, and buzz CLI)
 export NOSTR_PRIVATE_KEY=nsec1...
-export SPROUT_PRIVATE_KEY="$NOSTR_PRIVATE_KEY"
-export SPROUT_RELAY_URL=https://your-relay.example.com
+export BUZZ_PRIVATE_KEY="$NOSTR_PRIVATE_KEY"
+export BUZZ_RELAY_URL=https://your-relay.example.com
 ```
 README
 

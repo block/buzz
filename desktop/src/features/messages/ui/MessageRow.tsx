@@ -18,6 +18,7 @@ import {
   resolveMentionPubkeysByName,
 } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
+import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -46,6 +47,7 @@ export const MessageRow = React.memo(
     profiles,
     searchQuery,
     agentPubkeys,
+    videoReviewContext,
   }: {
     agentPubkeys?: ReadonlySet<string>;
     channelId?: string | null;
@@ -67,6 +69,7 @@ export const MessageRow = React.memo(
     onUnfollowThread?: (message: TimelineMessage) => void;
     profiles?: UserProfileLookup;
     searchQuery?: string;
+    videoReviewContext?: VideoReviewContext;
   }) {
     const [expandedDiffId, setExpandedDiffId] = React.useState<string | null>(
       null,
@@ -197,6 +200,7 @@ export const MessageRow = React.memo(
               mentionPubkeysByName={mentionPubkeysByName}
               searchQuery={searchQuery}
               tight
+              videoReviewContext={videoReviewContext}
             />
           );
       }
@@ -205,7 +209,7 @@ export const MessageRow = React.memo(
     const isThreadReplyLayout = layoutVariant === "thread-reply";
     const guideBleedPx = isThreadReplyLayout ? 4 : 0;
     const avatarSizeClass = "!h-9 !w-9";
-    const avatarButtonRadiusClass = "rounded-xl";
+    const avatarButtonRadiusClass = "rounded-full";
 
     const respondToDotColor =
       message.respondTo === "anyone"
@@ -504,7 +508,8 @@ export const MessageRow = React.memo(
     prev.isFollowingThread === next.isFollowingThread &&
     prev.layoutVariant === next.layoutVariant &&
     prev.profiles === next.profiles &&
-    prev.searchQuery === next.searchQuery,
+    prev.searchQuery === next.searchQuery &&
+    prev.videoReviewContext === next.videoReviewContext,
 );
 
 MessageRow.displayName = "MessageRow";

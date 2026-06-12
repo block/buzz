@@ -50,8 +50,8 @@ function AnimatedCountSlot({
     return (
       <span
         className={cn(
-          "sprout-animated-count__slot",
-          isDigit && "sprout-animated-count__slot--digit",
+          "buzz-animated-count__slot",
+          isDigit && "buzz-animated-count__slot--digit",
         )}
       >
         {renderSlotText(current)}
@@ -62,7 +62,7 @@ function AnimatedCountSlot({
   if (!isDigit) {
     return (
       <span
-        className="sprout-animated-count__symbol"
+        className="buzz-animated-count__symbol"
         data-direction={direction > 0 ? "up" : "down"}
         key={`${version}-${previous}-${current}`}
       >
@@ -73,11 +73,11 @@ function AnimatedCountSlot({
 
   return (
     <span
-      className="sprout-animated-count__slot sprout-animated-count__slot--digit"
+      className="buzz-animated-count__slot buzz-animated-count__slot--digit"
       data-direction={direction > 0 ? "up" : "down"}
     >
       <span
-        className="sprout-animated-count__reel"
+        className="buzz-animated-count__reel"
         key={`${version}-${previous}-${current}`}
       >
         {direction > 0 ? (
@@ -161,9 +161,9 @@ export function AnimatedCount({ className, value }: AnimatedCountProps) {
   const slots = getAnimatedCountSlots(transition.previous, transition.current);
 
   return (
-    <span className={cn("sprout-animated-count", className)}>
+    <span className={cn("buzz-animated-count", className)}>
       <span className="sr-only">{transition.current}</span>
-      <span aria-hidden className="sprout-animated-count__motion">
+      <span aria-hidden className="buzz-animated-count__motion">
         {slots.map((slot) => (
           <AnimatedCountSlot
             current={slot.current}
@@ -175,7 +175,7 @@ export function AnimatedCount({ className, value }: AnimatedCountProps) {
           />
         ))}
       </span>
-      <span aria-hidden className="sprout-animated-count__static">
+      <span aria-hidden className="buzz-animated-count__static">
         {transition.current}
       </span>
     </span>
