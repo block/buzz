@@ -8,12 +8,11 @@ use crate::{
         ensure_persona_is_active, find_managed_agent_mut, invoke_provider, load_managed_agents,
         load_personas, managed_agent_avatar_url, managed_agent_log_path, managed_agents_base_dir,
         normalize_agent_args, provider_deploy, read_log_tail, resolve_provider_binary,
-        save_managed_agents, spawn_key_refusal, start_managed_agent_process,
-        stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
-        validate_provider_config, BackendKind, BackendProviderInfo, CreateManagedAgentRequest,
-        CreateManagedAgentResponse, ManagedAgentLogResponse, ManagedAgentRecord,
-        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
+        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
+        BackendProviderInfo, CreateManagedAgentRequest, CreateManagedAgentResponse,
+        ManagedAgentLogResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -303,21 +302,43 @@ async fn start_local_agent_with_preflight(
 /// `"private_key_nsec": ""` and launch the agent with no identity — the same
 /// hazard the local spawn path refuses via `spawn_key_refusal`.
 fn build_deploy_payload(
+    app: &AppHandle,
     state: &AppState,
     record: &ManagedAgentRecord,
 ) -> Result<serde_json::Value, String> {
-    if let Some(error) = spawn_key_refusal(record) {
-        return Err(error);
-    }
-    // The record's env_vars is the complete pinned env map (persona env merged
-    // under agent overrides at create). `merged_user_env` with an empty persona
-    // map applies the reserved-key / malformed-key / NUL filtering. Re-reading
-    // persona env live here would leak post-create credential edits into a
-    // pinned agent — the bug the create-time snapshot exists to prevent.
-    let merged_env = crate::managed_agents::merged_user_env(
-        &std::collections::BTreeMap::new(),
-        &record.env_vars,
-    );
+    // Merge persona env_vars + agent env_vars for provider deploy. Same
+    // precedence as local spawn: persona first, agent overrides last. Without
+    // this, provider-backed agents wouldn't receive credentials saved on the
+    // persona or the agent itself.
+    let persona_env =
+        crate::managed_agents::resolve_persona_env(app, record.persona_id.as_deref())?;
+    let merged_env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
+
+    // Resolve the persona's structured provider/model so the remote provider
+    // receives the same authoritative values that local spawn derives from
+    // `runtime_metadata_env_vars`. Without this, remote deploy would rely on
+    // stale derived env copies in `env_vars` (or have no provider at all for
+    // imported personas whose derived keys were filtered at import time).
+    //
+    // Precedence mirrors local spawn: persona structured model is authoritative
+    // when present; the agent record's `model` is a fallback for personas that
+    // don't specify one (or when no persona is linked).
+    let (effective_model, effective_provider) = if let Some(pid) = record.persona_id.as_deref() {
+        let personas = load_personas(app).map_err(|e| {
+            format!(
+                "failed to load personas while building deploy payload for persona `{pid}`: {e}"
+            )
+        })?;
+        let persona = personas
+            .into_iter()
+            .find(|p| p.id == pid)
+            .ok_or_else(|| format!("persona `{pid}` not found while building deploy payload"))?;
+        let model = persona.model.clone().or(record.model.clone());
+        let provider = persona.provider;
+        (model, provider)
+    } else {
+        (record.model.clone(), None)
+    };
 
     Ok(serde_json::json!({
         "name": &record.name,
@@ -335,8 +356,11 @@ fn build_deploy_payload(
         "agent_command": &record.agent_command,
         "agent_args": &record.agent_args,
         "system_prompt": &record.system_prompt,
-        "model": &record.model,
-        "provider": &record.provider,
+        "model": effective_model,
+        // Structured provider from the persona record. Providers that don't
+        // yet read this field will fall back to env_vars or their own default
+        // — no protocol break.
+        "provider": effective_provider,
         "turn_timeout_seconds": record.turn_timeout_seconds,
         "idle_timeout_seconds": record.idle_timeout_seconds,
         "max_turn_duration_seconds": record.max_turn_duration_seconds,
@@ -854,7 +878,7 @@ pub async fn create_managed_agent(
                     .iter()
                     .find(|r| r.pubkey == pubkey)
                     .ok_or_else(|| "agent disappeared".to_string())?;
-                build_deploy_payload(&state, rec)?
+                build_deploy_payload(&app, &state, rec)?
             };
             match deploy_to_provider(&app, &state, &pubkey, id, config, agent_json, None).await {
                 Ok(()) => spawn_error,
@@ -982,7 +1006,7 @@ pub async fn start_managed_agent(
             StartTarget::Provider {
                 backend: record.backend.clone(),
                 cached_binary_path: record.provider_binary_path.clone(),
-                agent_json: build_deploy_payload(&state, record)?,
+                agent_json: build_deploy_payload(&app, &state, record)?,
             }
         };
 
@@ -1220,6 +1244,7 @@ pub fn stop_managed_agent(
         }
         stop_managed_agent_process(&app, record, &mut runtimes)?;
     }
+    state.clear_session_cache(&pubkey);
     save_managed_agents(&app, &records)?;
     let record = records
         .iter()
@@ -1269,10 +1294,9 @@ pub fn delete_managed_agent(
         }
 
         if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
-            // For local agents: kills the process. For remote agents: no-op (the frontend
-            // sends !shutdown via WebSocket before calling delete). Either way, safe.
             stop_managed_agent_process(&app, record, &mut runtimes)?;
         }
+        state.clear_session_cache(&pubkey);
         let initial_len = records.len();
         records.retain(|record| record.pubkey != pubkey);
         if records.len() == initial_len {

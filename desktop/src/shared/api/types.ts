@@ -476,6 +476,101 @@ export type AgentModelInfo = {
   name: string | null;
   description: string | null;
 };
+
+// ── Config bridge types ──────────────────────────────────────────────────────
+
+export type ConfigOrigin =
+  | "buzzExplicit"
+  | "acpNativeRead"
+  | "acpConfigOption"
+  | "envVar"
+  | "configFile"
+  | "personaDefault";
+
+export type ConfigWriteMechanism =
+  | { type: "respawnWithEnvVar"; envKey: string }
+  | { type: "acpSetConfigOption"; configId: string }
+  | { type: "acpSetSessionModel" }
+  | { type: "gooseNativeConfigWrite"; configKey: string }
+  | { type: "readOnly" };
+
+export type NormalizedField = {
+  value: string | null;
+  origin: ConfigOrigin;
+  isWritable: boolean;
+  writeVia: ConfigWriteMechanism;
+  overriddenValue: string | null;
+  overriddenOrigin: ConfigOrigin | null;
+};
+
+export type ConfigFieldType =
+  | { type: "string" }
+  | { type: "number" }
+  | { type: "boolean" }
+  | { type: "enum"; options: string[] };
+
+export type ConfigField = {
+  key: string;
+  label: string;
+  value: string | null;
+  origin: ConfigOrigin;
+  schemaType: ConfigFieldType;
+  isWritable: boolean;
+  writeVia: ConfigWriteMechanism;
+};
+
+export type ConfigTierStatus = "available" | "pending" | "notApplicable";
+
+export type ConfigSourceReport = {
+  acpNative: ConfigTierStatus;
+  acpConfigOptions: ConfigTierStatus;
+  envVars: ConfigTierStatus;
+  configFile: ConfigTierStatus;
+  configFilePath: string | null;
+};
+
+export type NormalizedConfig = {
+  model: NormalizedField | null;
+  provider: NormalizedField | null;
+  mode: NormalizedField | null;
+  thinkingEffort: NormalizedField | null;
+  maxOutputTokens: NormalizedField | null;
+  contextLimit: NormalizedField | null;
+  systemPrompt: NormalizedField | null;
+};
+
+export type RuntimeConfigSurface = {
+  runtimeId: string | null;
+  runtimeLabel: string | null;
+  isPreSpawn: boolean;
+  normalized: NormalizedConfig;
+  advanced: ConfigField[];
+  sources: ConfigSourceReport;
+};
+
+export type WriteConfigTarget =
+  | { type: "model" }
+  | { type: "provider" }
+  | { type: "mode" }
+  | { type: "thinkingEffort" }
+  | { type: "maxOutputTokens" }
+  | { type: "contextLimit" }
+  | { type: "systemPrompt" }
+  | { type: "advanced"; key: string };
+
+export type WriteConfigFieldRequest = {
+  pubkey: string;
+  field: WriteConfigTarget;
+  value: string | null;
+};
+
+export type WriteConfigResult = {
+  success: boolean;
+  mechanismUsed: ConfigWriteMechanism;
+  requiresRestart: boolean;
+  error: string | null;
+};
+
 export type UpdateManagedAgentInput = {
   pubkey: string;
   name?: string;

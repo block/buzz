@@ -42,6 +42,11 @@ pub(crate) struct KnownAcpRuntime {
     pub provider_env_var: Option<&'static str>,
     pub provider_locked: bool,
     pub default_env: &'static [(&'static str, &'static str)],
+    pub config_file_path: Option<&'static str>,
+    #[allow(dead_code)] // reserved for format-based dispatch when readers are unified
+    pub config_file_format: Option<&'static str>,
+    pub supports_acp_native_config: bool, // tier 1a: config/read+write
+    pub thinking_env_var: Option<&'static str>,
 }
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
@@ -93,6 +98,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         provider_env_var: Some("GOOSE_PROVIDER"),
         provider_locked: false,
         default_env: &[("GOOSE_MODE", "auto")],
+        config_file_path: Some("~/.config/goose/config.yaml"),
+        config_file_format: Some("yaml"),
+        supports_acp_native_config: true,
+        thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
     },
     KnownAcpRuntime {
         id: "claude",
@@ -114,6 +123,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         provider_env_var: None,
         provider_locked: true,
         default_env: &[],
+        config_file_path: Some("~/.claude/settings.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
     },
     KnownAcpRuntime {
         id: "codex",
@@ -133,8 +146,12 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         supports_acp_model_switching: false,
         model_env_var: None,
         provider_env_var: None,
-        provider_locked: true,
+        provider_locked: false,
         default_env: &[],
+        config_file_path: Some("~/.codex/config.toml"),
+        config_file_format: Some("toml"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -156,6 +173,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
         provider_locked: false,
         default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: None,
     },
 ];
 

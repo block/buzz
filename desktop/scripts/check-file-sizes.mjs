@@ -81,7 +81,7 @@ const overrides = new Map([
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
   // parameter plumbing, not generic debt growth. Approved override; still
   // queued to split.
-  ["src/shared/api/tauri.ts", 1209],
+  ["src/shared/api/tauri.ts", 1235],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
@@ -102,11 +102,15 @@ const overrides = new Map([
   // overage from load-bearing per-message plumbing, not generic debt growth.
   // Approved override; still queued to split with the rest of this list.
   ["src/features/messages/ui/MessageThreadPanel.tsx", 1006],
+  // AgentConfigPanel footer fold into ProfileFieldGroup for the config-bridge
+  // panel — a small overage from load-bearing UI plumbing, not generic debt
+  // growth. Approved override; still queued to split with the rest of this list.
+  ["src/features/profile/ui/UserProfilePanelSections.tsx", 1002],
   // PersistBackend enum + marker-on-keyring-success plumbing and its three
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at
   // 893 lines, not generic debt growth. Approved override; still queued to split.
-  ["src-tauri/src/app_state.rs", 1012],
+  ["src-tauri/src/app_state.rs", 1033],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
   // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,

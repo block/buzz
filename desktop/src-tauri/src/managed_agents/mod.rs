@@ -1,5 +1,6 @@
 pub(crate) mod agent_events;
 mod backend;
+pub(crate) mod config_bridge;
 mod discovery;
 mod env_vars;
 mod nest;

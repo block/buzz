@@ -616,6 +616,16 @@ async fn create_session_and_apply_model(
         });
     }
 
+    // Emit session config for desktop consumption (config bridge tier 1b).
+    agent.acp.observe(
+        "session_config_captured",
+        serde_json::json!({
+            "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
+            "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
+            "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
+        }),
+    );
+
     // Apply desired_model if set, matching against the fresh session/new response.
     if let Some(ref desired) = agent.desired_model {
         match resolve_model_switch_method(&resp.raw, desired) {

@@ -2,7 +2,7 @@ import * as React from "react";
 
 import { subscribeToAgentObserverFrames } from "@/shared/api/observerRelay";
 import type { RelayEvent, ManagedAgent } from "@/shared/api/types";
-import { getIdentity } from "@/shared/api/tauri";
+import { getIdentity, putAgentSessionConfig } from "@/shared/api/tauri";
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type {
@@ -190,6 +190,9 @@ async function handleRelayObserverEvent(
       return;
     }
     appendAgentEvent(agentPubkey, parsed);
+    if (parsed.kind === "session_config_captured") {
+      void putAgentSessionConfig(agentPubkey, parsed.payload);
+    }
   } catch (error) {
     if (activeGeneration !== generation) {
       return;
