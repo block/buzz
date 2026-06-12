@@ -44,6 +44,9 @@ import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
 import { SECTION_ACTION_VISIBILITY_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
+import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
+import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
+import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCardVisibility";
 import type {
   Channel,
   ChannelVisibility,
@@ -222,6 +225,12 @@ export function AppSidebar({
   onStarChannel,
   onUnstarChannel,
 }: AppSidebarProps) {
+  const { status: updateStatus } = useUpdaterContext();
+  const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
+  const [isSidebarUpdateCardDismissed, setIsSidebarUpdateCardDismissed] =
+    React.useState(false);
+  const showSidebarUpdateCard =
+    canShowSidebarUpdateCard && !isSidebarUpdateCardDismissed;
   const skeletonRows = ["first", "second", "third", "fourth", "fifth", "sixth"];
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
@@ -230,6 +239,12 @@ export function AppSidebar({
   useSidebarScrollLock(scrollRef);
   const [createDialogKind, setCreateDialogKind] =
     React.useState<CreateChannelKind | null>(null);
+
+  React.useEffect(() => {
+    if (!canShowSidebarUpdateCard) {
+      setIsSidebarUpdateCardDismissed(false);
+    }
+  }, [canShowSidebarUpdateCard]);
 
   // Allow the create-channel dialog to be opened from outside (e.g. the
   // ⌘⇧N global shortcut in AppShell), mirroring the controlled new-DM lift.
@@ -526,7 +541,10 @@ export function AppSidebar({
             testId="sidebar-more-unread-above"
           />
         ) : null}
-        <SidebarContent className="pb-32" ref={scrollRef}>
+        <SidebarContent
+          className={cn(showSidebarUpdateCard ? "pb-72" : "pb-32")}
+          ref={scrollRef}
+        >
           {isLoading ? (
             <SidebarGroup>
               <SidebarGroupLabel>Channels</SidebarGroupLabel>
@@ -755,7 +773,7 @@ export function AppSidebar({
 
         {unreadBelowCount > 0 ? (
           <MoreUnreadButton
-            bottomClassName="bottom-28"
+            bottomClassName={showSidebarUpdateCard ? "bottom-64" : "bottom-28"}
             count={unreadBelowCount}
             icon={<ArrowDown />}
             onClick={scrollToNextBelow}
@@ -765,6 +783,13 @@ export function AppSidebar({
         ) : null}
 
         <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
+          {showSidebarUpdateCard ? (
+            <div className="mb-2 group-data-[collapsible=icon]:hidden">
+              <SidebarUpdateCard
+                onDismiss={() => setIsSidebarUpdateCardDismissed(true)}
+              />
+            </div>
+          ) : null}
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarProfileCard

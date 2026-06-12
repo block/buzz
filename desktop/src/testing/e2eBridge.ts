@@ -74,7 +74,10 @@ type E2eConfig = {
     profileReadError?: string;
     profileUpdateError?: string;
     searchProfiles?: MockSearchProfileSeed[];
+    updateAvailable?: boolean;
     updateChannelDelayMs?: number;
+    updateDownloadDelayMs?: number;
+    updateVersion?: string;
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -3610,6 +3613,46 @@ async function handleSetChannelPurpose(
   });
 }
 
+type MockUpdaterChannel = {
+  onmessage?: (event: { event: "Finished" }) => void;
+};
+
+function notifyUpdaterFinished(payload: unknown) {
+  const channel = (payload as { onEvent?: MockUpdaterChannel } | null)?.onEvent;
+  channel?.onmessage?.({ event: "Finished" });
+}
+
+function handleUpdaterCheck(config: E2eConfig | undefined) {
+  if (!config?.mock?.updateAvailable) {
+    return null;
+  }
+
+  const version = config.mock.updateVersion ?? "0.3.18";
+
+  return {
+    rid: 42,
+    currentVersion: "0.3.17",
+    version,
+    date: "2026-06-12T00:00:00Z",
+    body: `Mock update ${version}`,
+    rawJson: null,
+  };
+}
+
+async function handleUpdaterDownloadAndInstall(
+  payload: unknown,
+  config: E2eConfig | undefined,
+) {
+  const delayMs = config?.mock?.updateDownloadDelayMs ?? 0;
+
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
+  notifyUpdaterFinished(payload);
+  return null;
+}
+
 async function handleArchiveChannel(
   args: { channelId: string },
   config: E2eConfig | undefined,
@@ -6489,6 +6532,13 @@ export function maybeInstallE2eTauriMocks() {
       case "plugin:window|set_focus":
       case "plugin:window|set_badge_count":
       case "plugin:window|set_badge_label":
+        return null;
+      case "plugin:updater|check":
+        return handleUpdaterCheck(activeConfig);
+      case "plugin:updater|download_and_install":
+        return handleUpdaterDownloadAndInstall(payload, activeConfig);
+      case "plugin:resources|close":
+      case "plugin:process|restart":
         return null;
       case "get_channel_workflows":
         return handleGetChannelWorkflows(

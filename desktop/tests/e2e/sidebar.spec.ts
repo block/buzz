@@ -66,3 +66,59 @@ test("resizes, persists, and snaps to the default sidebar width", async ({
     .poll(() => storedSidebarWidth(page))
     .toBe(String(DEFAULT_SIDEBAR_WIDTH));
 });
+
+test("shows a sidebar update card when an update is ready", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
+
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E__?: { mock?: { updateAvailable?: boolean } };
+    };
+
+    testWindow.__BUZZ_E2E__ = {
+      ...(testWindow.__BUZZ_E2E__ ?? {}),
+      mock: {
+        ...(testWindow.__BUZZ_E2E__?.mock ?? {}),
+        updateAvailable: true,
+      },
+    };
+  });
+
+  await page.getByTestId("sidebar-profile-card").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await page.getByTestId("settings-nav-updates").click();
+  await page.getByRole("button", { name: "Check for Updates" }).click();
+  await expect(page.getByTestId("settings-panel-updates")).toContainText(
+    "Update installed. Restart to apply.",
+  );
+
+  await page.getByTestId("settings-back-to-app").click();
+
+  const updateCard = page.getByTestId("sidebar-update-card");
+  await expect(updateCard).toBeVisible();
+  await expect(updateCard).toContainText("Update ready");
+  await expect(updateCard).toContainText("Restart to apply the update.");
+  await expect(page.getByTestId("sidebar-update-restart")).toBeVisible();
+
+  await page.getByTestId("sidebar-update-restart").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMANDS__?: string[];
+            }
+          ).__BUZZ_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toContain("plugin:process|restart");
+
+  await updateCard.hover();
+  await page.getByTestId("sidebar-update-dismiss").click();
+  await expect(updateCard).toBeHidden();
+});

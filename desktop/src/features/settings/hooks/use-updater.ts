@@ -1,7 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { toast } from "sonner";
 
 export type UpdateStatus =
   | { state: "idle" }
@@ -87,10 +86,6 @@ export function useUpdater() {
 
       updateRef.current = null;
       setStatus({ state: "ready" });
-      toast("Update ready", {
-        description: "Restart when you're ready to apply the update.",
-        duration: 8000,
-      });
     } catch (err) {
       setStatus({ state: "error", message: toErrorMessage(err) });
     } finally {
