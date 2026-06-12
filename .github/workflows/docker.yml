@@ -132,7 +132,7 @@ jobs:
           cache-from: |
             type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }}
           cache-to: |
-            type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }},mode=max,compression=zstd
+            ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref={0}-buildcache:{1},mode=max,compression=zstd', env.IMAGE_NAME, matrix.arch) || '' }}
 
       - name: Export digest
         if: github.event_name != 'pull_request'
