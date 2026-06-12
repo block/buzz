@@ -4,6 +4,8 @@ import { decode } from "nostr-tools/nip19";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { parse as yamlParse } from "yaml";
 
+import { relayClient } from "@/shared/api/relayClient";
+import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import {
@@ -65,6 +67,9 @@ type E2eConfig = {
     managedAgents?: MockManagedAgentSeed[];
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
     createManagedAgentDelayMs?: number;
+    channelsReadError?: string;
+    feedReadError?: string;
+    canvasReadError?: string;
     profileReadDelayMs?: number;
     profileReadError?: string;
     profileUpdateError?: string;
@@ -590,6 +595,7 @@ declare global {
       kind: number;
       tags: string[][];
     }>;
+    __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: ConnectionState) => void;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
@@ -2719,6 +2725,11 @@ async function submitSignedEvent(
 }
 
 async function handleGetChannels(config: E2eConfig | undefined) {
+  const channelsReadError = config?.mock?.channelsReadError;
+  if (channelsReadError) {
+    throw new Error(channelsReadError);
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     return listMockChannels(config);
@@ -3824,6 +3835,11 @@ async function handleGetFeed(
   },
   config: E2eConfig | undefined,
 ): Promise<RawHomeFeedResponse> {
+  const feedReadError = config?.mock?.feedReadError;
+  if (feedReadError) {
+    throw new Error(feedReadError);
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     const now = Math.floor(Date.now() / 1000);
@@ -5859,6 +5875,19 @@ export function maybeInstallE2eTauriMocks() {
     emitMockLiveEvent(GLOBAL_MOCK_SUBSCRIPTION, event);
     return event;
   };
+  window.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ = (state) => {
+    // Directly emit a connection state change on the relay client singleton,
+    // for tests that need to drive ConnectionBanner without waiting for the
+    // real auth-timeout + reconnect-debounce cycle (~10 s). Reaches the
+    // TS-private emitter via a cast so the production class carries no
+    // test-only seam.
+    (
+      relayClient as unknown as {
+        connectionStateEmitter: { set: (s: ConnectionState) => void };
+      }
+    ).connectionStateEmitter.set(state);
+  };
+
   window.__BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__ = (stall) => {
     const config = getConfig();
     if (!config?.mock) return;
@@ -6519,6 +6548,14 @@ export function maybeInstallE2eTauriMocks() {
         // The spec only verifies UI state, not the submitted request shape;
         // returning null mirrors the Rust submit_event success path.
         return null;
+      case "get_canvas": {
+        const canvasReadError = activeConfig?.mock?.canvasReadError;
+        if (canvasReadError) {
+          throw new Error(canvasReadError);
+        }
+        // Return the no-canvas success shape — content null means no canvas set.
+        return { content: null, updated_at: null, author: null };
+      }
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }
