@@ -270,6 +270,8 @@ impl AcpClient {
     /// Must be called exactly once, before any other ACP method.
     /// The caller may inspect `agentCapabilities` in the returned value.
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
+        // Requesting version 2 is an intentional temporary pin — we are squatting
+        // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
         let params = serde_json::json!({
             "protocolVersion": 2,
             "clientCapabilities": {},

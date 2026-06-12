@@ -217,6 +217,10 @@ async fn initialize(id: Value, params: Value, wire_tx: &WireSender) {
     };
     // Honest negotiation: respond with the minimum of what the client
     // requested and what we support.
+    // NOTE: gating `[Base]` injection on `protocol_version < 2` is a deliberate
+    // temporary measure — we are squatting on ACP v2 ahead of the upstream ACP
+    // RFD. Revisit when that RFD merges; otherwise a genuine upstream-v2 agent
+    // would silently lose `[Base]`.
     let negotiated_version = p.protocol_version.min(PROTOCOL_VERSION);
     wire::send(
         wire_tx,
