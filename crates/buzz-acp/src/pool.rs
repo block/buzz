@@ -1100,7 +1100,11 @@ pub async fn run_prompt_task(
     let liveness = run_turn_liveness(
         agent.acp.observer_handle(),
         agent.acp.observer_agent_index(),
-        observer::context_for(observer_channel_id, Some(session_id.clone()), Some(turn_id.clone())),
+        observer::context_for(
+            observer_channel_id,
+            Some(session_id.clone()),
+            Some(turn_id.clone()),
+        ),
         ctx.turn_liveness_interval,
     );
     tokio::pin!(liveness);
@@ -2070,7 +2074,12 @@ async fn run_turn_liveness(
     ticker.tick().await;
     loop {
         ticker.tick().await;
-        observer.emit("turn_liveness", agent_index, &context, serde_json::json!({}));
+        observer.emit(
+            "turn_liveness",
+            agent_index,
+            &context,
+            serde_json::json!({}),
+        );
     }
 }
 
@@ -2901,8 +2910,7 @@ mod tests {
     async fn test_liveness_disabled_when_interval_zero_emits_nothing() {
         let observer = observer::ObserverHandle::in_process();
         let context = observer::context_for(None, None, Some("t-1".into()));
-        let liveness =
-            run_turn_liveness(Some(observer.clone()), Some(0), context, Duration::ZERO);
+        let liveness = run_turn_liveness(Some(observer.clone()), Some(0), context, Duration::ZERO);
         tokio::pin!(liveness);
 
         tokio::select! {
