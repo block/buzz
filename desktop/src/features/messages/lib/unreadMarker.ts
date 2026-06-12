@@ -62,3 +62,52 @@ export function computeChannelUnreadMarker(
     ? EMPTY_MARKER
     : { firstUnreadMessageId, unreadCount };
 }
+
+/**
+ * Thread-scoped unread marker. Counts replies newer than the thread read
+ * frontier and identifies the first unread reply.
+ *
+ * Unlike the channel marker, every entry is a reply (no parentId filter) and
+ * there is no suppression mechanism.
+ */
+export type ThreadUnreadMarker = {
+  /** Event id of the oldest unread reply, or null if none. */
+  firstUnreadReplyId: string | null;
+  /** Count of unread replies at or after the first unread one. */
+  unreadCount: number;
+};
+
+const EMPTY_THREAD_MARKER: ThreadUnreadMarker = {
+  firstUnreadReplyId: null,
+  unreadCount: 0,
+};
+
+/**
+ * @param replies Thread replies in chronological order.
+ * @param frontierSeconds Read frontier in unix seconds captured at thread
+ *   open. `null` means the thread was never read, so every reply counts as
+ *   unread.
+ */
+export function computeThreadUnreadMarker(
+  replies: Pick<TimelineMessage, "id" | "createdAt">[],
+  frontierSeconds: number | null,
+): ThreadUnreadMarker {
+  let firstUnreadReplyId: string | null = null;
+  let unreadCount = 0;
+
+  for (const reply of replies) {
+    const isUnread =
+      frontierSeconds === null || reply.createdAt > frontierSeconds;
+    if (!isUnread) {
+      continue;
+    }
+    if (firstUnreadReplyId === null) {
+      firstUnreadReplyId = reply.id;
+    }
+    unreadCount += 1;
+  }
+
+  return firstUnreadReplyId === null
+    ? EMPTY_THREAD_MARKER
+    : { firstUnreadReplyId, unreadCount };
+}

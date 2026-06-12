@@ -37,7 +37,7 @@ import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
 } from "@/features/messages/lib/threadPanel";
-import { computeChannelUnreadMarker } from "@/features/messages/lib/unreadMarker";
+import { computeChannelUnreadMarker, computeThreadUnreadMarker } from "@/features/messages/lib/unreadMarker";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
@@ -84,6 +84,9 @@ export function ChannelScreen({
     markChannelRead,
     markChannelUnread,
     getChannelReadAt,
+    getThreadReadAt,
+    markThreadRead,
+    readStateVersion,
     openCreateChannel,
     openChannelManagement,
     followThread,
@@ -405,6 +408,64 @@ export function ChannelScreen({
   const openThreadHeadMessage = threadPanelData.threadHead;
   const threadMessages = threadPanelData.visibleReplies;
   const threadReplyTargetMessage = threadPanelData.replyTargetMessage;
+
+  // --- Thread unread state ---
+  // Capture the thread read frontier on open (same pattern as channel frontier).
+  // Keyed per thread root so switching threads captures a fresh frontier.
+  const threadOpenFrontierRef = React.useRef(new Map<string, number | null>());
+  if (openThreadHeadId && !threadOpenFrontierRef.current.has(openThreadHeadId)) {
+    threadOpenFrontierRef.current.set(
+      openThreadHeadId,
+      getThreadReadAt(openThreadHeadId),
+    );
+  }
+  const threadOpenFrontierSeconds = openThreadHeadId
+    ? (threadOpenFrontierRef.current.get(openThreadHeadId) ?? null)
+    : null;
+  // Clear the thread frontier when the thread closes so re-opening captures fresh.
+  React.useEffect(() => {
+    const rootId = openThreadHeadId;
+    if (!rootId) return;
+    return () => {
+      threadOpenFrontierRef.current.delete(rootId);
+    };
+  }, [openThreadHeadId]);
+  // Mark thread read when the panel opens (advance frontier to latest reply).
+  React.useEffect(() => {
+    if (!openThreadHeadId || threadMessages.length === 0) return;
+    const latestReply = threadMessages[threadMessages.length - 1].message;
+    markThreadRead(openThreadHeadId, latestReply.createdAt);
+  }, [openThreadHeadId, threadMessages, markThreadRead]);
+  // Compute the in-thread "New" divider position from the open-time frontier.
+  const { firstUnreadReplyId: threadFirstUnreadReplyId } = React.useMemo(
+    () => {
+      if (!openThreadHeadId || threadMessages.length === 0) {
+        return { firstUnreadReplyId: null, unreadCount: 0 };
+      }
+      const replies = threadMessages.map((entry) => entry.message);
+      return computeThreadUnreadMarker(replies, threadOpenFrontierSeconds);
+    },
+    [openThreadHeadId, threadMessages, threadOpenFrontierSeconds],
+  );
+  // Compute per-thread unread counts for summary rows in the main timeline.
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- readStateVersion is the invalidation signal
+  const threadUnreadCounts = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const message of timelineMessages) {
+      if (message.parentId) continue;
+      // Only compute for messages that have thread replies
+      const directReplies = timelineMessages.filter(
+        (m) => m.parentId === message.id,
+      );
+      if (directReplies.length === 0) continue;
+      const frontier = getThreadReadAt(message.id);
+      const { unreadCount } = computeThreadUnreadMarker(directReplies, frontier);
+      if (unreadCount > 0) {
+        counts.set(message.id, unreadCount);
+      }
+    }
+    return counts;
+  }, [timelineMessages, getThreadReadAt, readStateVersion]);
   const editTargetMessage = React.useMemo(
     () =>
       timelineMessages.find((message) => message.id === editTargetId) ?? null,
@@ -733,6 +794,8 @@ export function ChannelScreen({
                   threadTypingPubkeys={threadTypingPubkeys}
                   threadReplyTargetMessage={threadReplyTargetMessage}
                   threadScrollTargetId={threadScrollTargetId}
+                  threadUnreadCounts={threadUnreadCounts}
+                  threadFirstUnreadReplyId={threadFirstUnreadReplyId}
                   isJoining={joinChannelMutation.isPending}
                   onJoinChannel={joinChannelMutation.mutateAsync}
                   typingPubkeys={humanTypingPubkeys}

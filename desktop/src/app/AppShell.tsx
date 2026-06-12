@@ -392,6 +392,18 @@ export function AppShell() {
     followedRootIds,
   });
 
+  const getThreadReadAt = React.useCallback(
+    (rootId: string) => getChannelReadAt(`thread:${rootId}`),
+    [getChannelReadAt],
+  );
+
+  const markThreadRead = React.useCallback(
+    (rootId: string, timestamp: number) => {
+      markChannelRead(`thread:${rootId}`, new Date(timestamp * 1_000).toISOString());
+    },
+    [markChannelRead],
+  );
+
   // Badge count is computed here (rather than inside useHomeFeedNotifications)
   // so it can consume the NIP-RS read-state lifted from the single
   // ReadStateManager mounted via useUnreadChannels above. Channel-backed
@@ -736,6 +748,8 @@ export function AppShell() {
               setIsChannelManagementOpen(true);
             },
             getChannelReadAt,
+            getThreadReadAt,
+            markThreadRead,
             readStateVersion,
             followThread: handleFollowThread,
             unfollowThread: handleUnfollowThread,

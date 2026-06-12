@@ -14,6 +14,11 @@ type AppShellContextValue = {
   // when unknown. Backed by the single AppShell-mounted ReadStateManager so
   // every surface (sidebar, home, badges) projects from the same source.
   getChannelReadAt: (channelId: string) => number | null;
+  // Thread read frontier as unix-seconds timestamp, or null when never read.
+  // Uses `thread:<rootId>` context keys in the same ReadStateManager.
+  getThreadReadAt: (rootId: string) => number | null;
+  // Advance the thread read frontier to the given unix-seconds timestamp.
+  markThreadRead: (rootId: string, timestamp: number) => void;
   // Bump-counter that invalidates whenever the read marker changes. Include
   // in memo deps that consume getChannelReadAt.
   readStateVersion: number;
@@ -33,6 +38,8 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   openCreateChannel: () => {},
   openChannelManagement: () => {},
   getChannelReadAt: () => null,
+  getThreadReadAt: () => null,
+  markThreadRead: () => {},
   readStateVersion: 0,
   followThread: () => {},
   unfollowThread: () => {},
