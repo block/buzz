@@ -379,25 +379,18 @@ export function AppShell() {
     mutedRootIds,
     muteThread,
     unmuteThread,
-  } = useUnreadChannels(
-    sidebarChannels,
-    activeChannel,
-    // Wait for ChannelScreen to report the latest loaded message before
-    // advancing unread state for the active channel.
-    null,
-    {
-      pubkey: identityQuery.data?.pubkey,
-      relayClient,
-      currentPubkey: identityQuery.data?.pubkey,
-      mutedChannelIds,
-      notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
-      onChannelMessage: handleChannelNotification,
-      onDmMessage: handleDmNotification,
-      onLiveMention: refetchHomeFeedOnLiveMention,
-      onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
-      followedRootIds,
-    },
-  );
+  } = useUnreadChannels(sidebarChannels, activeChannel, {
+    pubkey: identityQuery.data?.pubkey,
+    relayClient,
+    currentPubkey: identityQuery.data?.pubkey,
+    mutedChannelIds,
+    notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
+    onChannelMessage: handleChannelNotification,
+    onDmMessage: handleDmNotification,
+    onLiveMention: refetchHomeFeedOnLiveMention,
+    onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
+    followedRootIds,
+  });
 
   // Badge count is computed here (rather than inside useHomeFeedNotifications)
   // so it can consume the NIP-RS read-state lifted from the single

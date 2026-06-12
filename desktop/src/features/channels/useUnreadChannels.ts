@@ -224,7 +224,6 @@ function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
 export function useUnreadChannels(
   channels: Channel[],
   activeChannel: Channel | null,
-  activeReadAt?: string | null,
   options: UseUnreadChannelsOptions = {},
 ) {
   const {
@@ -234,13 +233,7 @@ export function useUnreadChannels(
     ...liveUpdateOptions
   } = options;
   const activeChannelId = activeChannel?.id ?? null;
-  const activeChannelLastMessageAt = activeChannel?.lastMessageAt ?? null;
   const normalizedPubkey = pubkey?.toLowerCase() ?? null;
-
-  // Let callers pass `null` to intentionally suppress the optimistic
-  // channel-metadata fallback until a real timeline position is known.
-  const effectiveActiveReadAt =
-    activeReadAt === undefined ? activeChannelLastMessageAt : activeReadAt;
 
   const {
     getEffectiveTimestamp,
@@ -370,21 +363,6 @@ export function useUnreadChannels(
       bumpLatestVersion();
     }
   }, []);
-
-  // Mark the active channel as read when it changes or new messages arrive.
-  // Honours the caller's contract that a null activeReadAt suppresses
-  // read-marking until the timeline reports a real position. Manual
-  // mark-unread state is cleared inside markChannelRead, not here.
-  React.useEffect(() => {
-    if (!isReadStateReady) return;
-    if (!activeChannelId) return;
-    markChannelRead(activeChannelId, effectiveActiveReadAt);
-  }, [
-    activeChannelId,
-    effectiveActiveReadAt,
-    isReadStateReady,
-    markChannelRead,
-  ]);
 
   // Feed the in-session "latest external trigger" map from live channel
   // events. Composes with any caller-supplied onChannelMessage handler.

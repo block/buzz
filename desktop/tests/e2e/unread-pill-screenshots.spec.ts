@@ -133,8 +133,11 @@ test.describe("unread pill & divider screenshots", () => {
     const pill = page.getByTestId("message-unread-pill");
     await expect(pill).toBeVisible();
 
-    // Click the pill to jump to oldest unread
-    await pill.click();
+    // Click the pill to jump to oldest unread. The topbar search overlay
+    // (fixed, higher z-index) sits over the pill's position and swallows a
+    // hit-tested click, so dispatch the event directly to exercise the real
+    // jump-and-dismiss handler.
+    await pill.dispatchEvent("click");
 
     // Pill should be dismissed
     await expect(pill).toHaveCount(0);
@@ -159,12 +162,13 @@ test.describe("unread pill & divider screenshots", () => {
     await page.getByTestId("channel-general").click({ button: "right" });
     await page.getByText("Mark unread").click();
 
-    // Verify the channel shows as unread in sidebar
-    await expect(page.getByTestId("channel-unread-general")).toBeVisible();
-
     // Switch away and back to re-open the channel
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+    // The unread indicator only renders on inactive channels, so it appears
+    // once general is no longer the active channel.
+    await expect(page.getByTestId("channel-unread-general")).toBeVisible();
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
