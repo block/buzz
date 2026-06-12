@@ -61,7 +61,6 @@ export function ChannelBrowserDialog({
   const [joiningChannelId, setJoiningChannelId] = React.useState<string | null>(
     null,
   );
-  const contentRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
   const tabListRef = React.useRef<HTMLDivElement>(null);
   const tabTriggerRefs = React.useRef<
@@ -260,9 +259,8 @@ export function ChannelBrowserDialog({
         }
         onOpenAutoFocus={(event) => {
           event.preventDefault();
-          contentRef.current?.focus();
+          inputRef.current?.focus({ preventScroll: true });
         }}
-        ref={contentRef}
         showCloseButton={false}
       >
         <DialogHeader className="space-y-0 pb-5">
