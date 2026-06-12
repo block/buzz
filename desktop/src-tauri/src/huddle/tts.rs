@@ -59,30 +59,21 @@ const SYNTH_STEPS: usize = 1;
 /// Synthesis speed multiplier. Slightly faster than natural speech.
 const SYNTH_SPEED: f32 = 1.05;
 
-/// Upper bound on per-sentence loudness normalization, in linear scale.
-/// −3 dBFS = 10^(−3/20) ≈ 0.708. This is a *ceiling*, not a floor: any
-/// sentence whose computed gain would push its peak above this is held at
-/// the ceiling, and quieter utterances under the [`MAX_GAIN`] cap may land
-/// below it. The ceiling leaves 3 dB of headroom above the loudest sample
-/// so the subsequent fade-out and any system mixer gain don't soft-clip.
-///
-/// Tyler bumped this from the previous −6 dBFS (0.501) to give Pocket TTS
-/// output some perceived loudness — the model's reference voice is quieter
-/// than Kokoro's was, and the prior target landed normal utterances around
-/// −9 dBFS once interior dynamics are accounted for.
-const TARGET_PEAK: f32 = 0.707_945_8; // 10f32.powf(-3.0 / 20.0)
-
-/// Maximum gain applied by `normalize_for_playback`. Caps amplification on
-/// near-silent buffers so a mid-utterance pause or a malformed synth doesn't
-/// get amplified to full scale (which would surface any quantization noise).
+/// Fixed playback gain applied to every synthesized sentence, in linear scale.
 ///
 /// Pocket TTS reference-voice output measured ~7.6% peak on a 75-character
-/// utterance (`examples/pocket_bench`); a gain of 1/0.076 ≈ 6.6 lands that
-/// sample at −6 dBFS and ≈9.3 at −3 dBFS. `8.0` covers normal utterances at
-/// the new ceiling while still catching pathological near-silent buffers
-/// (which will land at peak ≤ 0.076 × 8 = 0.61 — below the ceiling, which
-/// is the intended behaviour).
-const MAX_GAIN: f32 = 8.0;
+/// utterance (`examples/pocket_bench`); 9.3 × 0.076 ≈ 0.71 lands a typical
+/// peak at the Tyler-approved −3 dBFS loudness. The `clamp(±1.0)` in
+/// [`apply_playback_gain`] is the safety net for outlier transients.
+///
+/// Why a *fixed* gain rather than per-sentence peak normalization (which this
+/// replaced): normalizing each sentence to its own peak makes loudness a
+/// function of that sentence's loudest transient — a sentence with one sharp
+/// consonant gets less gain than its neighbors, producing audible level
+/// pumping between consecutive sentences. The kyutai reference pipeline
+/// applies no normalization at all; a fixed gain is the minimal deviation
+/// that keeps the desired output level while making loudness text-invariant.
+const PLAYBACK_GAIN: f32 = 9.3;
 
 /// Fade-out length in samples (8 ms at 24 kHz ≈ 192 samples).
 ///
@@ -426,7 +417,7 @@ fn tts_worker(
 
             match engine.synth_chunk(text, "en", &style, SYNTH_STEPS, SYNTH_SPEED) {
                 Ok(samples) if !samples.is_empty() => {
-                    let mut boosted = normalize_for_playback(samples);
+                    let mut boosted = apply_playback_gain(samples);
                     // Fade-out only — fading-in would attenuate the consonant
                     // onset (see `apply_fade_out` docstring + the
                     // 2026-05-18 "first little sound is missing" regression).
@@ -498,25 +489,17 @@ fn handle_cancel_or_shutdown(
     false
 }
 
-/// Per-sentence peak normalization. Scales the buffer so its loudest sample
-/// lands at `TARGET_PEAK` (−6 dBFS), capped at `MAX_GAIN` to avoid amplifying
-/// near-silent buffers into quantization noise. Returns the input unchanged on
-/// empty input or pure-silence input.
+/// Apply the fixed playback gain ([`PLAYBACK_GAIN`]), hard-clamped to ±1.0.
 ///
-/// Why normalize per-sentence rather than apply a fixed boost: Pocket TTS
-/// reference-voice output measured ~7.6% peak on one utterance, but per-
-/// sentence peak distribution isn't known in advance and may vary with text
-/// and any future voice swap. A fixed multiplier either clips loud sentences
-/// or under-amplifies quiet ones; normalization adapts.
-fn normalize_for_playback(samples: Vec<f32>) -> Vec<f32> {
-    let peak = samples.iter().fold(0.0_f32, |acc, &s| acc.max(s.abs()));
-    if peak == 0.0 {
-        return samples;
-    }
-    let gain = (TARGET_PEAK / peak).min(MAX_GAIN);
+/// Replaces the earlier per-sentence peak normalization — see the
+/// [`PLAYBACK_GAIN`] doc-comment for why fixed gain wins (level pumping
+/// between consecutive sentences). The clamp is the only nonlinearity and is
+/// expected to be inert for typical Pocket output (peak ≈ 0.076 × 9.3 ≈
+/// 0.71); it exists to catch outlier transients before they wrap.
+fn apply_playback_gain(samples: Vec<f32>) -> Vec<f32> {
     samples
         .into_iter()
-        .map(|s| (s * gain).clamp(-1.0, 1.0))
+        .map(|s| (s * PLAYBACK_GAIN).clamp(-1.0, 1.0))
         .collect()
 }
 
@@ -1349,89 +1332,59 @@ mod tests {
         );
     }
 
-    // ── normalize_for_playback tests ──────────────────────────────────────────
+    // ── apply_playback_gain tests ─────────────────────────────────────────────
 
-    /// A moderately quiet buffer (peak comfortably under MAX_GAIN reach of
-    /// TARGET_PEAK) is scaled up to exactly TARGET_PEAK. With TARGET_PEAK at
-    /// −3 dBFS (0.708) and MAX_GAIN at 8.0, the gain saturation point is
-    /// peak = 0.708 / 8.0 ≈ 0.0885 — so a 0.1-peak buffer is in the linear
-    /// region and gets normalized cleanly.
+    /// Typical Pocket output (peak ≈ 0.076) lands at ≈ −3 dBFS after the
+    /// fixed gain — the level the per-sentence normalization used to target.
     #[test]
-    fn normalize_for_playback_hits_target_on_quiet_buffer() {
-        // peak 0.1 ⇒ ideal gain 7.08, under MAX_GAIN (8.0), so target hit.
-        let mut input: Vec<f32> = (0..100).map(|i| 0.1 * (i as f32 / 100.0)).collect();
-        input.push(0.1); // ensure exact peak
-        let out = normalize_for_playback(input);
+    fn apply_playback_gain_lands_typical_peak_near_minus_3_dbfs() {
+        let input = vec![0.076_f32, -0.076, 0.02];
+        let out = apply_playback_gain(input);
         let peak = out.iter().fold(0.0_f32, |a, &s| a.max(s.abs()));
+        let expected = 0.076 * PLAYBACK_GAIN; // ≈ 0.707
         assert!(
-            (peak - TARGET_PEAK).abs() < 1e-3,
-            "expected peak ~{TARGET_PEAK}, got {peak}"
-        );
-    }
-
-    /// A buffer whose ideal gain exceeds MAX_GAIN gets clamped — the peak
-    /// lands at input_peak × MAX_GAIN, below TARGET_PEAK. With the new
-    /// −3 dBFS target this captures the Pocket-bench-typical case
-    /// (input peak 0.076 → ideal gain ≈ 9.3 > MAX_GAIN, so we clamp).
-    #[test]
-    fn normalize_for_playback_clamps_at_max_gain_below_target() {
-        let mut input: Vec<f32> = (0..100).map(|i| 0.076 * (i as f32 / 100.0)).collect();
-        input.push(0.076);
-        let out = normalize_for_playback(input);
-        let peak = out.iter().fold(0.0_f32, |a, &s| a.max(s.abs()));
-        let expected = 0.076 * MAX_GAIN;
-        assert!(
-            (peak - expected).abs() < 1e-3,
+            (peak - expected).abs() < 1e-4,
             "expected peak ~{expected}, got {peak}"
         );
+    }
+
+    /// Gain is text-invariant: two buffers with different peaks get the SAME
+    /// gain, so their relative loudness is preserved. (This is the property
+    /// per-sentence peak normalization violated — level pumping.)
+    #[test]
+    fn apply_playback_gain_preserves_relative_loudness() {
+        let quiet = apply_playback_gain(vec![0.02_f32]);
+        let loud = apply_playback_gain(vec![0.08_f32]);
+        let ratio = loud[0] / quiet[0];
         assert!(
-            peak < TARGET_PEAK,
-            "clamped peak {peak} should be below TARGET_PEAK {TARGET_PEAK}"
+            (ratio - 4.0).abs() < 1e-4,
+            "expected 4x ratio preserved, got {ratio}"
         );
     }
 
-    /// A near-silent buffer would need a huge gain to reach TARGET_PEAK;
-    /// `MAX_GAIN` caps the amplification so we don't bring quantization noise
-    /// up to full scale.
+    /// Pure silence stays pure silence — gain has no floor effect.
     #[test]
-    fn normalize_for_playback_caps_gain_on_near_silent_buffer() {
-        // peak 0.001 ⇒ ideal gain 501; MAX_GAIN caps it at 8.0, so the
-        // resulting peak is 0.001 × 8.0 = 0.008, NOT TARGET_PEAK.
-        let input = vec![0.001_f32, -0.001, 0.001];
-        let out = normalize_for_playback(input);
-        let peak = out.iter().fold(0.0_f32, |a, &s| a.max(s.abs()));
-        assert!(
-            (peak - 0.008).abs() < 1e-6,
-            "expected peak 0.008 (gain-capped), got {peak}"
-        );
-        assert!(peak < TARGET_PEAK);
-    }
-
-    /// A pure-silence buffer is returned unchanged — no division by zero, no
-    /// amplification of nothing.
-    #[test]
-    fn normalize_for_playback_silence_is_unchanged() {
-        let input = vec![0.0_f32; 16];
-        let out = normalize_for_playback(input);
+    fn apply_playback_gain_silence_is_unchanged() {
+        let out = apply_playback_gain(vec![0.0_f32; 16]);
         assert!(out.iter().all(|&s| s == 0.0));
         assert_eq!(out.len(), 16);
     }
 
-    /// Empty input round-trips to empty output. No panic on `peak == 0` path.
+    /// Empty input round-trips to empty output.
     #[test]
-    fn normalize_for_playback_empty_buffer() {
-        let out = normalize_for_playback(Vec::new());
+    fn apply_playback_gain_empty_buffer() {
+        let out = apply_playback_gain(Vec::new());
         assert!(out.is_empty());
     }
 
-    /// A buffer that would otherwise clip after gain is hard-clamped to ±1.0.
-    /// Belt-and-suspenders: `gain * peak` shouldn't exceed TARGET_PEAK by
-    /// construction, but the `.clamp(-1.0, 1.0)` is still asserted here in case
-    /// future changes loosen TARGET_PEAK or MAX_GAIN past full scale.
+    /// Outlier transients that would exceed full scale after gain are
+    /// hard-clamped to ±1.0 rather than wrapping.
     #[test]
-    fn normalize_for_playback_clamps_to_full_scale() {
-        let input = vec![10.0_f32, -10.0]; // already past full scale before gain
-        let out = normalize_for_playback(input);
+    fn apply_playback_gain_clamps_to_full_scale() {
+        let input = vec![0.5_f32, -0.5]; // 0.5 × 9.3 = 4.65 → clamps
+        let out = apply_playback_gain(input);
         assert!(out.iter().all(|&s| s.abs() <= 1.0));
+        assert_eq!(out[0], 1.0);
+        assert_eq!(out[1], -1.0);
     }
 }
