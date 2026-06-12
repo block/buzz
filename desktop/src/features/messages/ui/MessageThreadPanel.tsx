@@ -436,8 +436,7 @@ export function MessageThreadPanel({
             >
               {deferredThreadReplies.map((entry, index) => {
                 const showUnreadDivider =
-                  index > 0 &&
-                  entry.message.id === firstUnreadReplyId;
+                  index > 0 && entry.message.id === firstUnreadReplyId;
                 return (
                   <div
                     className={cn(

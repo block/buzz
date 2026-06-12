@@ -399,7 +399,10 @@ export function AppShell() {
 
   const markThreadRead = React.useCallback(
     (rootId: string, timestamp: number) => {
-      markChannelRead(`thread:${rootId}`, new Date(timestamp * 1_000).toISOString());
+      markChannelRead(
+        `thread:${rootId}`,
+        new Date(timestamp * 1_000).toISOString(),
+      );
     },
     [markChannelRead],
   );

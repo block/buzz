@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { computeChannelUnreadMarker, computeThreadUnreadMarker } from "./unreadMarker.ts";
+import {
+  computeChannelUnreadMarker,
+  computeThreadUnreadMarker,
+} from "./unreadMarker.ts";
 
 function topLevel(id, createdAt) {
   return { id, createdAt, author: "a", time: "", body: "", depth: 0 };

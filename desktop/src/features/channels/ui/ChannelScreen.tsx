@@ -37,7 +37,10 @@ import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
 } from "@/features/messages/lib/threadPanel";
-import { computeChannelUnreadMarker, computeThreadUnreadMarker } from "@/features/messages/lib/unreadMarker";
+import {
+  computeChannelUnreadMarker,
+  computeThreadUnreadMarker,
+} from "@/features/messages/lib/unreadMarker";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
@@ -191,7 +194,6 @@ export function ChannelScreen({
   const {
     activeChannelTitle,
     activeDmAvatarUrl,
-    activeDmHeaderParticipants,
     activeDmPresenceStatus,
     activeChannelEphemeralDisplay,
   } = useActiveChannelHeader(activeChannel, currentPubkey);
@@ -413,7 +415,10 @@ export function ChannelScreen({
   // Capture the thread read frontier on open (same pattern as channel frontier).
   // Keyed per thread root so switching threads captures a fresh frontier.
   const threadOpenFrontierRef = React.useRef(new Map<string, number | null>());
-  if (openThreadHeadId && !threadOpenFrontierRef.current.has(openThreadHeadId)) {
+  if (
+    openThreadHeadId &&
+    !threadOpenFrontierRef.current.has(openThreadHeadId)
+  ) {
     threadOpenFrontierRef.current.set(
       openThreadHeadId,
       getThreadReadAt(openThreadHeadId),
@@ -438,22 +443,24 @@ export function ChannelScreen({
     if (!isNotifiedForCurrentThread) return;
     const latestReply = threadMessages[threadMessages.length - 1].message;
     markThreadRead(openThreadHeadId, latestReply.createdAt);
-  }, [openThreadHeadId, threadMessages, markThreadRead, isNotifiedForCurrentThread]);
+  }, [
+    openThreadHeadId,
+    threadMessages,
+    markThreadRead,
+    isNotifiedForCurrentThread,
+  ]);
   // Compute the in-thread "New" divider position from the open-time frontier.
-  const { firstUnreadReplyId: threadFirstUnreadReplyId } = React.useMemo(
-    () => {
-      if (!openThreadHeadId || threadMessages.length === 0) {
-        return { firstUnreadReplyId: null, unreadCount: 0 };
-      }
-      const replies = threadMessages.map((entry) => entry.message);
-      return computeThreadUnreadMarker(replies, threadOpenFrontierSeconds);
-    },
-    [openThreadHeadId, threadMessages, threadOpenFrontierSeconds],
-  );
+  const { firstUnreadReplyId: threadFirstUnreadReplyId } = React.useMemo(() => {
+    if (!openThreadHeadId || threadMessages.length === 0) {
+      return { firstUnreadReplyId: null, unreadCount: 0 };
+    }
+    const replies = threadMessages.map((entry) => entry.message);
+    return computeThreadUnreadMarker(replies, threadOpenFrontierSeconds);
+  }, [openThreadHeadId, threadMessages, threadOpenFrontierSeconds]);
   // Compute per-thread unread counts for summary rows in the main timeline.
   // Only compute for threads the user has notification interest in — this
   // aligns the badge display with the read-state write path.
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- readStateVersion is the invalidation signal
+  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates getThreadReadAt and isNotifiedForThread without changing their identity
   const threadUnreadCounts = React.useMemo(() => {
     const counts = new Map<string, number>();
     for (const message of timelineMessages) {
@@ -465,13 +472,21 @@ export function ChannelScreen({
       );
       if (directReplies.length === 0) continue;
       const frontier = getThreadReadAt(message.id);
-      const { unreadCount } = computeThreadUnreadMarker(directReplies, frontier);
+      const { unreadCount } = computeThreadUnreadMarker(
+        directReplies,
+        frontier,
+      );
       if (unreadCount > 0) {
         counts.set(message.id, unreadCount);
       }
     }
     return counts;
-  }, [timelineMessages, getThreadReadAt, isNotifiedForThread, readStateVersion]);
+  }, [
+    timelineMessages,
+    getThreadReadAt,
+    isNotifiedForThread,
+    readStateVersion,
+  ]);
   const editTargetMessage = React.useMemo(
     () =>
       timelineMessages.find((message) => message.id === editTargetId) ?? null,
@@ -570,13 +585,11 @@ export function ChannelScreen({
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     });
-  const hasTimelineData = messagesQuery.data !== undefined;
   const isTimelineLoading =
     activeChannel !== null &&
     activeChannel.channelType !== "forum" &&
-    !hasTimelineData &&
-    messagesQuery.isPending;
-  const shouldShowInitialChannelLoading = isTimelineLoading;
+    (messagesQuery.isPending ||
+      (messagesQuery.isFetching && resolvedMessages.length === 0));
   const resetComposerTargets = React.useCallback(
     (_channelId: string | null) => {
       setOpenThreadHeadId(null);
@@ -671,7 +684,6 @@ export function ChannelScreen({
       activeChannelTitle={activeChannelTitle}
       actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
       activeDmAvatarUrl={activeDmAvatarUrl}
-      activeDmHeaderParticipants={activeDmHeaderParticipants}
       activeDmPresenceStatus={activeDmPresenceStatus}
       chromeWrapperRef={channelHeaderChromeRef}
       currentPubkey={currentPubkey}
@@ -693,9 +705,7 @@ export function ChannelScreen({
           ref={channelContentRef}
         >
           {activeChannel ? (
-            shouldShowInitialChannelLoading ? (
-              <ViewLoadingFallback includeHeader kind="channel" />
-            ) : activeChannel.channelType === "forum" ? (
+            activeChannel.channelType === "forum" ? (
               <>
                 {channelHeader}
                 <React.Suspense fallback={<ViewLoadingFallback kind="forum" />}>
@@ -710,9 +720,7 @@ export function ChannelScreen({
                 </React.Suspense>
               </>
             ) : (
-              <React.Suspense
-                fallback={<ViewLoadingFallback includeHeader kind="channel" />}
-              >
+              <React.Suspense fallback={<ViewLoadingFallback kind="channel" />}>
                 <ChannelPane
                   activeChannel={activeChannel}
                   agentPubkeys={agentPubkeys}
