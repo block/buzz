@@ -166,6 +166,20 @@ pub enum PromptSource {
     Heartbeat,
 }
 
+/// Apply state effects for Race 1, where a control signal arrives just after the
+/// prompt completed naturally. The prompt result has already been consumed by
+/// `select!`, so the harness must synthesize a successful result while still
+/// honoring any load-bearing control signal semantics.
+fn apply_completed_before_control_signal(
+    state: &mut SessionState,
+    source: &PromptSource,
+    control_signal: ControlSignal,
+) {
+    if control_signal == ControlSignal::Rotate {
+        state.invalidate(source);
+    }
+}
+
 /// Control signal for an in-flight channel turn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlSignal {
@@ -1132,9 +1146,21 @@ pub async fn run_prompt_task(
                         // and last_prompt_id was cleared by the success path.
                         //
                         // MUST send a PromptResult or the main loop deadlocks.
-                        tracing::debug!(
-                            target: "pool::prompt",
-                            "cancel signal arrived but turn already completed — treating as success"
+                        if control_signal == ControlSignal::Rotate {
+                            tracing::debug!(
+                                target: "pool::prompt",
+                                "rotate signal arrived but turn already completed — invalidating session"
+                            );
+                        } else {
+                            tracing::debug!(
+                                target: "pool::prompt",
+                                "control signal arrived but turn already completed — treating as success"
+                            );
+                        }
+                        apply_completed_before_control_signal(
+                            &mut agent.state,
+                            &source,
+                            control_signal,
                         );
                         let _ = result_tx.send(PromptResult {
                             agent,
@@ -2488,6 +2514,43 @@ mod tests {
         s.heartbeat_session = Some("sess-hb".into());
         s.heartbeat_turn_count = 7;
         (s, ch_a, ch_b)
+    }
+
+    #[test]
+    fn test_rotate_after_natural_completion_invalidates_channel_state() {
+        let (mut s, ch_a, ch_b) = make_state();
+
+        apply_completed_before_control_signal(
+            &mut s,
+            &PromptSource::Channel(ch_a),
+            ControlSignal::Rotate,
+        );
+
+        assert!(!s.sessions.contains_key(&ch_a));
+        assert!(!s.turn_counts.contains_key(&ch_a));
+        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.has_channel_state(&ch_a));
+        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
+        assert_eq!(s.heartbeat_turn_count, 7);
+    }
+
+    #[test]
+    fn test_cancel_after_natural_completion_preserves_channel_state() {
+        let (mut s, ch_a, ch_b) = make_state();
+
+        apply_completed_before_control_signal(
+            &mut s,
+            &PromptSource::Channel(ch_a),
+            ControlSignal::Cancel,
+        );
+
+        assert_eq!(s.sessions.get(&ch_a).unwrap(), "sess-a");
+        assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
+        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
+        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
     }
 
     #[test]
