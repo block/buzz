@@ -34,6 +34,7 @@ export const MessageRow = React.memo(
     channelId = null,
     highlighted = false,
     hoverBackground = true,
+    actionBarPlacement = "floating",
     isFollowingThread,
     layoutVariant = "default",
     message,
@@ -53,6 +54,7 @@ export const MessageRow = React.memo(
     channelId?: string | null;
     highlighted?: boolean;
     hoverBackground?: boolean;
+    actionBarPlacement?: "floating" | "inside";
     isFollowingThread?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
@@ -255,7 +257,14 @@ export const MessageRow = React.memo(
     );
 
     const actionBarNode = (
-      <div className="absolute right-2 top-1 z-10">
+      <div
+        className={cn(
+          "absolute right-2 top-1 z-10",
+          actionBarPlacement === "floating"
+            ? "sm:top-0 sm:-translate-y-1/2"
+            : "sm:top-1 sm:translate-y-0",
+        )}
+      >
         <MessageActionBar
           channelId={channelId}
           isFollowingThread={isFollowingThread}
