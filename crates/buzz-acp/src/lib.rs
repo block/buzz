@@ -2079,15 +2079,6 @@ fn handle_prompt_result(
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
 
-    // Extract thread root from the batch before it's consumed by requeue.
-    // Used by death notices to thread the message into the original conversation.
-    let thread_root: Option<String> = result
-        .batch
-        .as_ref()
-        .and_then(|b| b.events.first())
-        .map(|e| queue::parse_thread_tags(&e.event))
-        .and_then(|tags| tags.root_event_id);
-
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
     // retry_counts. If mark_complete runs first, retry_counts is cleared and
@@ -2176,11 +2167,6 @@ fn handle_prompt_result(
             };
             emit_turn_error(death_message);
 
-            // Post a visible death notice to the channel so humans know why
-            // the agent went silent.
-            if let Some(ch) = channel_id {
-                relay.publish_death_notice(ch, death_message, thread_root.as_deref());
-            }
             let index = result.agent.index;
             let slot_history = &mut crash_history[index];
             if !spawn_respawn_task(
@@ -2238,15 +2224,6 @@ fn handle_prompt_result(
                 );
                 emit_turn_error(&e.to_string());
 
-                // Post a visible death notice for transport errors too.
-                if let Some(ch) = channel_id {
-                    relay.publish_death_notice(
-                        ch,
-                        "Agent connection lost (transport error)",
-                        thread_root.as_deref(),
-                    );
-                }
-
                 let index = result.agent.index;
                 let slot_history = &mut crash_history[index];
                 if !spawn_respawn_task(
@@ -2270,6 +2247,7 @@ fn handle_prompt_result(
                     "agent_returned (application error — pipe intact)"
                 );
                 emit_turn_error(&e.to_string());
+
                 pool.return_agent(result.agent);
             }
         }
