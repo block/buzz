@@ -564,15 +564,21 @@ jobs:
           ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
           persist-credentials: false
 
-      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.14.0
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11.4.0
 
       - name: Install desktop dependencies
         shell: bash
-        run: just desktop-install-ci
-
-      - name: Add Rust target
-        shell: bash
-        run: rustup target add "$TARGET"
+        run: pnpm install --frozen-lockfile
 
       - name: Patch version
         shell: bash
