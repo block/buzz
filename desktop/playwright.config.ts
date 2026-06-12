@@ -56,6 +56,7 @@ export default defineConfig({
         "**/sidebar.spec.ts",
         "**/tokens.spec.ts",
         "**/persona-env-vars.spec.ts",
+        "**/persona-instantiation.spec.ts",
         "**/mesh-compute.spec.ts",
       ],
       use: {

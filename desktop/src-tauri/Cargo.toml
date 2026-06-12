@@ -17,8 +17,9 @@ name = "buzz_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = []
+default = ["legacy_team_sync"]
 mesh-llm = ["dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime"]
+legacy_team_sync = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

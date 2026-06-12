@@ -552,9 +552,20 @@ pub fn run() {
                 .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
             migration::migrate_personas_to_events(&app_handle, &owner_keys);
 
-            if let Err(e) = managed_agents::sync_team_personas(&app_handle) {
-                eprintln!("buzz-desktop: sync-team-personas: {e}");
-            }
+            // Fleet update: reconcile every agent's `mem/persona` engram against
+            // its persona's current content. Replaces the old directory-based
+            // `sync_team_personas`. Best-effort and relay-dependent, so it runs
+            // off-thread — engram drift is non-fatal and resolves next launch.
+            let fleet_app = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                match managed_agents::fleet_update::check_fleet_updates(&fleet_app).await {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        eprintln!("buzz-desktop: fleet-update: rewrote {n} persona engram(s)")
+                    }
+                    Err(e) => eprintln!("buzz-desktop: fleet-update: {e}"),
+                }
+            });
 
             // Store the AppHandle so huddle commands can emit `huddle-state-changed`
             // events via `huddle::emit_huddle_state` without threading the handle
@@ -793,7 +804,9 @@ pub fn run() {
             create_team,
             update_team,
             delete_team,
+            #[cfg(feature = "legacy_team_sync")]
             install_team_from_directory,
+            #[cfg(feature = "legacy_team_sync")]
             sync_team_directory,
             pick_team_directory,
             export_team_to_json,

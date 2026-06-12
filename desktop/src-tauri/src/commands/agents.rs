@@ -651,6 +651,27 @@ pub async fn create_managed_agent(
     .await)
         .err();
 
+    // ── Phase 4b: write persona engram (async, best-effort) ─────────────────
+    // If the agent was created from a persona, snapshot it into a `mem/persona`
+    // engram. This is provenance-only for now (the live resolve path still reads
+    // the persona catalog at spawn); fleet update keeps it current.
+    if requested_persona_id.is_some() {
+        if let Err(e) = crate::managed_agents::fleet_update::write_persona_engram_at_creation(
+            &state,
+            &agent_keys,
+            &resolved_relay_url,
+            requested_persona_id.as_deref().unwrap(),
+            &app,
+        )
+        .await
+        {
+            eprintln!(
+                "buzz-desktop: create-agent: persona engram write failed for {}: {e}",
+                &pubkey[..pubkey.len().min(8)]
+            );
+        }
+    }
+
     // ── Phase 5: provider deploy (async, outside lock) ───────────────────────
     let spawn_error = if input.spawn_after_create && input.backend != BackendKind::Local {
         if let BackendKind::Provider { ref id, ref config } = input.backend {

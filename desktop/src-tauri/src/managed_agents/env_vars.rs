@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 ///
 /// Non-structured knobs (`GOOSE_TEMPERATURE`, `GOOSE_CONTEXT_LIMIT`) are NOT
 /// in this list — they have no structured counterpart and must be preserved.
+#[cfg_attr(not(feature = "legacy_team_sync"), allow(dead_code))]
 pub(crate) const DERIVED_PROVIDER_MODEL_ENV_KEYS: &[&str] = &[
     "GOOSE_MODEL",
     "GOOSE_PROVIDER",
@@ -34,6 +35,7 @@ pub(crate) const DERIVED_PROVIDER_MODEL_ENV_KEYS: &[&str] = &[
 
 /// Returns `true` if `key` is a derived provider/model env key that should be
 /// filtered out of persisted `PersonaRecord.env_vars` at pack import time.
+#[cfg(feature = "legacy_team_sync")]
 pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
     DERIVED_PROVIDER_MODEL_ENV_KEYS
         .iter()
@@ -46,6 +48,7 @@ pub(crate) fn is_derived_provider_model_key(key: &str) -> bool {
 /// The structured `PersonaRecord.provider` / `PersonaRecord.model` fields are
 /// the authoritative source of truth. Keeping the derived copies would cause
 /// stale env values to override updated structured fields at spawn/deploy time.
+#[cfg(feature = "legacy_team_sync")]
 pub(crate) fn filter_derived_provider_model_env_vars(
     env_vars: impl IntoIterator<Item = (String, String)>,
 ) -> BTreeMap<String, String> {
