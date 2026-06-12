@@ -378,6 +378,18 @@ fn reconcile_team_dirs_in_file(path: &Path, canonical_dir: &Path) {
         if team_path == expected {
             return false;
         }
+        // Rewriting to a path that does not exist on disk makes things worse
+        // than leaving a stale-but-working path in place. Path::exists follows
+        // symlinks, so a valid symlinked install passes; a dangling symlink fails.
+        if !expected.exists() {
+            eprintln!(
+                "buzz-desktop: team-dir-reconcile: {:?}: {:?} expected at {:?} — not found, leaving as-is",
+                obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+                team_path,
+                expected,
+            );
+            return false;
+        }
         eprintln!(
             "buzz-desktop: team-dir-reconcile: {:?}: {:?} → {:?}",
             obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
@@ -394,23 +406,56 @@ fn reconcile_team_dirs_in_file(path: &Path, canonical_dir: &Path) {
     });
 }
 
+/// Select the data directory to reconcile against.
+///
+/// Dev instances — identified by the data-dir name starting with
+/// `CANONICAL_DEV_IDENTIFIER` (covers the canonical dir itself and any
+/// worktree variant like `xyz.block.buzz.app.dev.mybranch`) — share
+/// `agents/managed-agents.json` and `agents/teams` via symlinks to the
+/// canonical dev dir, so they should normalize against that canonical dir.
+///
+/// Release builds must reconcile their own data dir — keying off the canonical
+/// dev dir's mere existence would leave release records permanently stale on
+/// developer machines, where that dir is always present.
+fn reconcile_target_dir(current_dir: PathBuf) -> PathBuf {
+    let is_dev_instance = current_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(CANONICAL_DEV_IDENTIFIER));
+    if is_dev_instance {
+        match canonical_dev_data_dir(&current_dir) {
+            Some(dir) if dir.exists() => dir,
+            _ => current_dir,
+        }
+    } else {
+        current_dir
+    }
+}
+
 /// Reconcile `persona_team_dir` (and legacy `persona_pack_path`) values in
-/// managed-agents.json to point to the canonical dev data directory's
-/// `agents/teams/` prefix. Fixes stale paths left when agents were created
-/// from worktree instances whose data directories don't have local team copies.
+/// managed-agents.json to point to the correct `agents/teams/` prefix.
+///
+/// Fixes two classes of stale paths:
+/// - Worktree dev instances whose records point at a sibling data dir rather
+///   than the canonical dev dir (dev instances share managed-agents.json and
+///   agents/teams via symlinks, so they all reconcile against the canonical dir).
+/// - Legacy paths left by historical renames: `agents/packs/` → `agents/teams/`
+///   (v0.3.16) and bundle-id `xyz.block.sprout.app` → `xyz.block.buzz.app`
+///   (v0.3.17, which changed the app data dir location).
+///
+/// Release builds reconcile their own data dir — choosing the canonical dev dir
+/// whenever it exists would leave release files permanently stale on developer
+/// machines.
 pub fn reconcile_persona_team_dirs(app: &tauri::AppHandle) {
     let Ok(current_dir) = app.path().app_data_dir() else {
         return;
     };
-    let canonical_dir = match canonical_dev_data_dir(&current_dir) {
-        Some(dir) if dir.exists() => dir,
-        _ => current_dir,
-    };
-    let path = canonical_dir.join("agents/managed-agents.json");
+    let target_dir = reconcile_target_dir(current_dir);
+    let path = target_dir.join("agents/managed-agents.json");
     if !path.exists() {
         return;
     }
-    reconcile_team_dirs_in_file(&path, &canonical_dir);
+    reconcile_team_dirs_in_file(&path, &target_dir);
 }
 
 /// One-time migration from packs to teams.
@@ -838,3 +883,7 @@ mod tests;
 #[cfg(test)]
 #[path = "migration_command_tests.rs"]
 mod command_tests;
+
+#[cfg(test)]
+#[path = "migration_team_dir_tests.rs"]
+mod team_dir_tests;
