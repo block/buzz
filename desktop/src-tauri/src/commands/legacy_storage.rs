@@ -80,7 +80,7 @@ fn decode_webkit_local_storage_value(bytes: &[u8]) -> Option<String> {
         return Some(String::new());
     }
 
-    if bytes.len() % 2 == 0 {
+    if bytes.len().is_multiple_of(2) {
         let has_utf16_ascii_shape = bytes.chunks_exact(2).any(|chunk| chunk[1] == 0);
         if has_utf16_ascii_shape {
             let utf16: Vec<u16> = bytes

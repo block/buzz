@@ -3159,6 +3159,7 @@ mod error_outcome_emission_tests {
             max_turn_duration_secs: 3600,
             agents: 1,
             heartbeat_interval_secs: 0,
+            turn_liveness_secs: 10,
             heartbeat_prompt: None,
             system_prompt: None,
             initial_message: None,
