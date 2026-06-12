@@ -18,7 +18,10 @@
 //!   → cancel flag: a 10 ms barge-in monitor thread silences the player and
 //!     releases tts_active on the flag's rising edge (~15 ms flag-to-silence,
 //!     even mid-sentence while the worker is blocked in synth_chunk); the
-//!     worker then consumes the flag — drain queue + clear + play (un-pause)
+//!     worker then consumes the flag — drain queue + clear + play (un-pause).
+//!     Monitor clears and worker player mutations are serialized through the
+//!     `player_ops` mutex, with the flag re-checked under the lock — see the
+//!     monitor block in `tts_worker` for the race this closes.
 //! ```
 //!
 //! Lookahead pipelining spans *items*, not just sentences within one item:
@@ -37,7 +40,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, SyncSender},
-        Arc,
+        Arc, Mutex, MutexGuard, PoisonError,
     },
     thread,
     time::Duration,
@@ -364,23 +367,42 @@ fn tts_worker(
     // monitor keeps re-clearing until the worker catches up, which also
     // covers a sentence appended in the race window after the worker's own
     // post-synthesis cancel check.
+    //
+    // `player_ops` closes the converse race (found in review): the monitor
+    // loads `cancel == true`, is preempted, the worker consumes the cancel
+    // and appends a fresh post-cancel utterance, then the monitor resumes
+    // from its stale branch and deletes audio that was meant to play. All
+    // worker player mutations (appends and cancel/shutdown clears) hold this
+    // lock, and the monitor re-checks `cancel` *while holding it* — so its
+    // clear either runs before fresh audio can be appended, or observes
+    // `cancel == false` and no-ops. The lock is uncontended except during an
+    // actual barge-in, so the hot path is unaffected.
+    let player_ops = Arc::new(Mutex::new(()));
     let monitor_stop = Arc::new(AtomicBool::new(false));
     let monitor = {
         let player = Arc::clone(&player);
         let cancel = Arc::clone(&cancel);
         let tts_active = Arc::clone(&tts_active);
         let stop = Arc::clone(&monitor_stop);
+        let player_ops = Arc::clone(&player_ops);
         thread::Builder::new()
             .name("tts-barge-in-monitor".into())
             .spawn(move || {
                 while !stop.load(Ordering::Acquire) {
                     if cancel.load(Ordering::Acquire) {
-                        // clear() pauses the persistent player; play() un-pauses
-                        // (see handle_cancel_or_shutdown). Idempotent — safe to
-                        // repeat every tick until the worker consumes the flag.
-                        player.clear();
-                        player.play();
-                        tts_active.store(false, Ordering::Release);
+                        let _ops = lock_player_ops(&player_ops);
+                        // Re-check under the lock: the worker may have
+                        // consumed this cancel (and appended fresh audio)
+                        // between the load above and the lock acquisition.
+                        if cancel.load(Ordering::Acquire) {
+                            // clear() pauses the persistent player; play()
+                            // un-pauses (see handle_cancel_or_shutdown).
+                            // Idempotent — safe to repeat every tick until
+                            // the worker consumes the flag.
+                            player.clear();
+                            player.play();
+                            tts_active.store(false, Ordering::Release);
+                        }
                     }
                     thread::sleep(MONITOR_TICK);
                 }
@@ -408,7 +430,13 @@ fn tts_worker(
     let mut first_append = true;
 
     loop {
-        if handle_cancel_or_shutdown(&cancel, &shutdown, &tts_active, &text_rx, Some(&player)) {
+        if handle_cancel_or_shutdown(
+            &cancel,
+            &shutdown,
+            &tts_active,
+            &text_rx,
+            Some((&player, &player_ops)),
+        ) {
             if shutdown.load(Ordering::Acquire) {
                 break;
             }
@@ -435,7 +463,13 @@ fn tts_worker(
 
         // Check cancel again after unblocking — a cancel may have arrived
         // while we were waiting.
-        if handle_cancel_or_shutdown(&cancel, &shutdown, &tts_active, &text_rx, Some(&player)) {
+        if handle_cancel_or_shutdown(
+            &cancel,
+            &shutdown,
+            &tts_active,
+            &text_rx,
+            Some((&player, &player_ops)),
+        ) {
             if shutdown.load(Ordering::Acquire) {
                 break;
             }
@@ -471,7 +505,13 @@ fn tts_worker(
             .collect();
 
         for sentence in &sentences {
-            if handle_cancel_or_shutdown(&cancel, &shutdown, &tts_active, &text_rx, Some(&player)) {
+            if handle_cancel_or_shutdown(
+                &cancel,
+                &shutdown,
+                &tts_active,
+                &text_rx,
+                Some((&player, &player_ops)),
+            ) {
                 first_append = true;
                 break;
             }
@@ -483,16 +523,6 @@ fn tts_worker(
 
             match engine.synth_chunk(text, "en", &style, SYNTH_STEPS, SYNTH_SPEED) {
                 Ok(samples) if !samples.is_empty() => {
-                    // A barge-in may have arrived during synthesis (the
-                    // blocking window the monitor thread exists for). Don't
-                    // append the now-stale sentence — the human interrupted;
-                    // speaking it anyway would talk over them. The flag is
-                    // deliberately NOT consumed here: the loop-top
-                    // handle_cancel_or_shutdown does the full consume
-                    // (drain queue, reset lead-in) on the next iteration.
-                    if cancel.load(Ordering::Acquire) {
-                        break;
-                    }
                     let mut boosted = apply_playback_gain(samples);
                     // Fade-out only — fading-in would attenuate the consonant
                     // onset (see `apply_fade_out` docstring + the
@@ -506,6 +536,25 @@ fn tts_worker(
                     // every chunk a quiet device warm-up window.
                     let buf =
                         build_sentence_append_buffer(&mut first_append, boosted, silence_buf_len);
+
+                    // Check-and-append under `player_ops`, serialized with
+                    // the monitor: a barge-in may have arrived during
+                    // synthesis (the blocking window the monitor thread
+                    // exists for). Don't append the now-stale sentence — the
+                    // human interrupted; speaking it anyway would talk over
+                    // them. Holding the lock for the check + append means the
+                    // monitor can never clear between our check passing and
+                    // the buffer landing. The flag is deliberately NOT
+                    // consumed here: the loop-top handle_cancel_or_shutdown
+                    // does the full consume (drain queue, reset lead-in) on
+                    // the next iteration.
+                    let _ops = lock_player_ops(&player_ops);
+                    if cancel.load(Ordering::Acquire) {
+                        // Nothing appended; the loop-top consume re-arms
+                        // `first_append` (the flag is still set — the worker
+                        // is its only consumer).
+                        break;
+                    }
                     player.append(SamplesBuffer::new(channels, rate, buf));
                     // NOTE: tts_active is set AFTER player.append(), not
                     // before. Setting it before synthesis would cause STT to
@@ -540,22 +589,29 @@ fn tts_worker(
 
 /// Check for cancel or shutdown. Returns `true` if the caller should break/continue.
 /// On cancel: drains the text queue and clears the cancel flag.
+///
+/// `player` pairs the Player with the `player_ops` mutex shared with the
+/// barge-in monitor thread; the cancel/shutdown clear runs under that lock so
+/// it is serialized with the monitor's stale-branch re-check (see the monitor
+/// block in `tts_worker`).
 fn handle_cancel_or_shutdown(
     cancel: &AtomicBool,
     shutdown: &AtomicBool,
     tts_active: &AtomicBool,
     text_rx: &mpsc::Receiver<String>,
-    player: Option<&rodio::Player>,
+    player: Option<(&rodio::Player, &Mutex<()>)>,
 ) -> bool {
     if shutdown.load(Ordering::Acquire) {
-        if let Some(p) = player {
+        if let Some((p, ops)) = player {
+            let _ops = lock_player_ops(ops);
             p.clear();
         }
         tts_active.store(false, Ordering::Release);
         return true;
     }
     if cancel.load(Ordering::Acquire) {
-        if let Some(p) = player {
+        if let Some((p, ops)) = player {
+            let _ops = lock_player_ops(ops);
             // `Player::clear()` removes queued sources AND pauses the player
             // (rodio 0.22 `clear()` ends with `self.pause()`). With one
             // persistent Player for the worker's lifetime, the un-pause is
@@ -563,13 +619,29 @@ fn handle_cancel_or_shutdown(
             // would queue silently forever.
             p.clear();
             p.play();
+            // Consume the flag under the lock: once released with
+            // `cancel == false`, the monitor's stale branch no-ops instead
+            // of clearing the fresh post-cancel utterance.
+            while text_rx.try_recv().is_ok() {}
+            cancel.store(false, Ordering::Release);
+        } else {
+            while text_rx.try_recv().is_ok() {}
+            cancel.store(false, Ordering::Release);
         }
-        while text_rx.try_recv().is_ok() {}
-        cancel.store(false, Ordering::Release);
         tts_active.store(false, Ordering::Release);
         return true;
     }
     false
+}
+
+/// Acquire the `player_ops` lock, recovering from poison.
+///
+/// The data under the mutex is `()` — it only serializes Player mutations —
+/// so a panicked holder leaves nothing inconsistent to observe and recovery
+/// is always safe. Without this, a worker panic would wedge the monitor (or
+/// vice versa) on `unwrap()`.
+fn lock_player_ops(ops: &Mutex<()>) -> MutexGuard<'_, ()> {
+    ops.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Apply the fixed playback gain ([`PLAYBACK_GAIN`]), hard-clamped to ±1.0.

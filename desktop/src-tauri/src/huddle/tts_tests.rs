@@ -7,7 +7,7 @@ use super::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // ── Remote interrupt tracker ──────────────────────────────────────────────
 //
@@ -468,19 +468,33 @@ fn on_receipt_check_releases_mic_gate_before_synthesis() {
 //
 // Models one tick of the tts-barge-in-monitor thread in `tts_worker`. The
 // contract (must match production):
-//   - cancel set   → silence player + release tts_active, flag NOT consumed
+//   - cancel set   → take `player_ops`, RE-CHECK cancel under the lock; if
+//     still set: silence player + release tts_active, flag NOT consumed
 //     (the worker owns consumption: queue drain + lead-in reset)
+//   - cancel cleared by the time the lock is held → no-op (stale branch)
 //   - cancel clear → no-op
 // Not consuming the flag is what makes the monitor idempotent across ticks
 // and closes the race where the worker appends a sentence after the
-// monitor's clear but before consuming the flag.
+// monitor's clear but before consuming the flag. The under-lock re-check
+// closes the converse race (PR #997 review blocker): worker consumes the
+// cancel and appends a fresh post-cancel utterance between the monitor's
+// initial load and its clear — the stale branch must not delete that audio.
 
 /// Test-side model of one monitor tick. `player_cleared` stands in for the
-/// `clear()+play()` pair on the real Player.
-fn simulate_monitor_tick(cancel: &AtomicBool, tts_active: &AtomicBool, player_cleared: &mut bool) {
+/// `clear()+play()` pair on the real Player; `player_ops` is the mutex
+/// serializing monitor clears with worker player mutations.
+fn simulate_monitor_tick(
+    cancel: &AtomicBool,
+    tts_active: &AtomicBool,
+    player_ops: &Mutex<()>,
+    player_cleared: &mut bool,
+) {
     if cancel.load(Ordering::Acquire) {
-        *player_cleared = true;
-        tts_active.store(false, Ordering::Release);
+        let _ops = player_ops.lock().unwrap();
+        if cancel.load(Ordering::Acquire) {
+            *player_cleared = true;
+            tts_active.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -490,9 +504,10 @@ fn simulate_monitor_tick(cancel: &AtomicBool, tts_active: &AtomicBool, player_cl
 fn monitor_tick_silences_and_releases_without_consuming_cancel() {
     let cancel = AtomicBool::new(true);
     let tts_active = AtomicBool::new(true);
+    let player_ops = Mutex::new(());
     let mut player_cleared = false;
 
-    simulate_monitor_tick(&cancel, &tts_active, &mut player_cleared);
+    simulate_monitor_tick(&cancel, &tts_active, &player_ops, &mut player_cleared);
 
     assert!(player_cleared, "monitor must silence in-flight audio");
     assert!(
@@ -511,14 +526,62 @@ fn monitor_tick_silences_and_releases_without_consuming_cancel() {
 fn monitor_tick_noop_without_cancel() {
     let cancel = AtomicBool::new(false);
     let tts_active = AtomicBool::new(true);
+    let player_ops = Mutex::new(());
     let mut player_cleared = false;
 
-    simulate_monitor_tick(&cancel, &tts_active, &mut player_cleared);
+    simulate_monitor_tick(&cancel, &tts_active, &player_ops, &mut player_cleared);
 
     assert!(!player_cleared);
     assert!(
         tts_active.load(Ordering::Acquire),
         "monitor must not touch the mic gate while no barge-in is pending",
+    );
+}
+
+/// Stale-branch race (PR #997 review blocker): monitor observes
+/// `cancel == true`, then the worker — under `player_ops` — consumes the
+/// cancel and appends a fresh post-cancel utterance before the monitor
+/// reaches its clear. The monitor's under-lock re-check must see
+/// `cancel == false` and no-op, leaving the fresh audio and its mic gate
+/// intact.
+#[test]
+fn monitor_stale_cancel_branch_must_not_clear_fresh_audio() {
+    let cancel = AtomicBool::new(true);
+    let tts_active = AtomicBool::new(true);
+    let player_ops = Mutex::new(());
+    let mut player_cleared = false;
+
+    // Monitor's initial (pre-lock) load observes the cancel…
+    let stale_observation = cancel.load(Ordering::Acquire);
+    assert!(stale_observation);
+
+    // …then the worker wins the lock: consumes the cancel, appends a fresh
+    // utterance, sets tts_active (mirrors handle_cancel_or_shutdown +
+    // the locked append in the sentence loop).
+    {
+        let _ops = player_ops.lock().unwrap();
+        cancel.store(false, Ordering::Release);
+        tts_active.store(true, Ordering::Release);
+    }
+
+    // Monitor resumes from its stale branch — the re-check under the lock
+    // must turn it into a no-op.
+    if stale_observation {
+        let _ops = player_ops.lock().unwrap();
+        if cancel.load(Ordering::Acquire) {
+            player_cleared = true;
+            tts_active.store(false, Ordering::Release);
+        }
+    }
+
+    assert!(
+        !player_cleared,
+        "stale monitor branch must not clear a fresh post-cancel utterance",
+    );
+    assert!(
+        tts_active.load(Ordering::Acquire),
+        "stale monitor branch must not release the mic gate while fresh \
+         audio is playing",
     );
 }
 
