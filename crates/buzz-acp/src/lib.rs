@@ -1078,6 +1078,7 @@ async fn tokio_main() -> Result<()> {
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
+        turn_liveness_interval: Duration::from_secs(config.turn_liveness_secs),
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
         base_prompt: if config.no_base_prompt {
@@ -3025,6 +3026,7 @@ mod build_mcp_servers_tests {
             max_turn_duration_secs: 3600,
             agents: 1,
             heartbeat_interval_secs: 0,
+            turn_liveness_secs: 10,
             heartbeat_prompt: None,
             system_prompt: None,
             initial_message: None,
