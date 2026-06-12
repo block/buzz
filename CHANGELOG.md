@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.3.19
+
+faf00724f fix(release): ignore prerelease tags in changelog generation (#1021)
+b8c0556e7 fix: repair main build after cross-PR merge skew (#1020)
+87e45c65b feat(agents): show per-turn duration and prune dead turns within ~25s of host crash (#1017)
+2fef8d664 fix(release): replace hermit with native tool setup on Windows job (#1018)
+6db90514b feat(acp): surface error-class outcomes to the activity feed only, never the channel (#1010)
+563f68434 fix(desktop): migrate Sprout workspace storage (#1016)
+5a8cc79c6 feat(auth): force token refresh on rejected token (401/403), never the browser (#1015)
+59a7e5da8 fix(release): mark prerelease versions so they do not become latest (#1013)
+f08588245 feat(acp): implement systemPrompt with protocol version gating (#981)
+d07c8216c fix(release): update repository name check from block/sprout to block/buzz (#1012)
+de641fce5 feat(release): all-OS desktop builds + universal auto-update manifest (#1011)
+8c9211ffc Add relay disconnect UX: friendly errors, reconnect, cached identity (#1004)
+7983bf675 feat(agents): add active turn indicators to Agents Menu (#1005)
+39d9aa826 ci: add fork guards to docker, release, and auto-tag workflows (#1007)
+43d1ce353 docs(nip-rs): add optional thread read context scheme (#1006)
+12433077a fix(huddle): Pocket TTS quality overhaul — reference parity + cross-message pipelining (#997)
+00dc4915d Add manual ACP session rotation command (#932)
+df8896f13 fix(desktop): heal stale persona_team_dir paths in release builds (#1003)
+1fa63bada ci(docker): publish public ghcr.io/block/buzz image (native multi-arch) (#986)
+84f499cb6 fix(buzz-agent): cap tool-result text at 50 KiB with middle elision (#952)
+2846a96ed feat(huddle): sentence-at-a-time voice-mode guidelines for lower TTS latency (#996)
+a1c28f487 Shard desktop Playwright CI jobs (#992)
+
+
 ## v0.3.18
 
 05fc69b8408 Video Player Improvements  (#993)
