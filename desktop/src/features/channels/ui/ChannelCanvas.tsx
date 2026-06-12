@@ -9,6 +9,10 @@ import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext"
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
 import { Textarea } from "@/shared/ui/textarea";
+import {
+  isRelayUnreachableError,
+  RELAY_UNREACHABLE_SHORT,
+} from "@/shared/lib/relayError";
 
 type ChannelCanvasProps = {
   channelId: string | null;
@@ -55,7 +59,9 @@ export function ChannelCanvas({
   if (canvasQuery.error instanceof Error) {
     return (
       <p className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-        {canvasQuery.error.message}
+        {isRelayUnreachableError(canvasQuery.error)
+          ? RELAY_UNREACHABLE_SHORT
+          : canvasQuery.error.message}
       </p>
     );
   }

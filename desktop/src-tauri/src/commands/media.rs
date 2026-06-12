@@ -5,7 +5,10 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 use crate::app_state::AppState;
-use crate::relay::relay_api_base_url_with_override;
+use crate::relay::{
+    classify_request_error, parse_json_response, relay_api_base_url_with_override,
+    relay_error_message,
+};
 
 use super::media_transcode::{is_video_file, transcode_and_extract_poster};
 
@@ -246,17 +249,13 @@ async fn do_upload(
     } else {
         req.body(body).send().await
     }
-    .map_err(|e| format!("upload failed: {e}"))?;
+    .map_err(|e| classify_request_error(&e))?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("upload failed ({status}): {text}"));
+        return Err(relay_error_message(resp).await);
     }
 
-    resp.json::<BlobDescriptor>()
-        .await
-        .map_err(|e| format!("parse failed: {e}"))
+    parse_json_response::<BlobDescriptor>(resp).await
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────

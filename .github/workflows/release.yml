@@ -17,6 +17,7 @@ on:
 jobs:
   release:
     name: Release
+    if: github.repository == 'block/sprout'
     runs-on: macos-latest
     timeout-minutes: 60
     permissions:
@@ -261,6 +262,7 @@ jobs:
 
   release-macos-x64:
     name: Release macOS (Intel)
+    if: github.repository == 'block/sprout'
     runs-on: macos-latest
     needs: release
     timeout-minutes: 60
@@ -366,6 +368,7 @@ jobs:
 
   release-linux:
     name: Release Linux
+    if: github.repository == 'block/sprout'
     runs-on: ubuntu-latest
     needs: release
     timeout-minutes: 60

@@ -66,6 +66,7 @@ import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
 import { joinChannel } from "@/shared/api/tauri";
 import type { Channel, RelayEvent, SearchHit } from "@/shared/api/types";
@@ -74,6 +75,7 @@ import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
+import { ConnectionBanner } from "@/shared/ui/ConnectionBanner";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 
 type AppView =
@@ -218,6 +220,7 @@ export function AppShell() {
   );
   const profileQuery = useProfileQuery();
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
+  useRelayAutoHeal();
   usePresenceSubscription();
   useUserStatusSubscription();
   useWorkspaceEmojiLiveUpdates();
@@ -938,6 +941,7 @@ export function AppShell() {
                         className="min-h-0 min-w-0 overflow-hidden"
                         style={chromeCssVarDefaults}
                       >
+                        <ConnectionBanner />
                         <Outlet />
                       </SidebarInset>
                     </MainInsetProvider>

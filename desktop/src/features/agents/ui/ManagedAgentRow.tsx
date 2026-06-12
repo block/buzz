@@ -15,9 +15,11 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { Badge } from "@/shared/ui/badge";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
+import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import type {
   ManagedAgent,
   PresenceLookup,
@@ -39,6 +41,7 @@ import { truncatePubkey } from "./agentUi";
 
 export function ManagedAgentRow({
   agent,
+  channelIdToName,
   channelNames,
   isActionPending,
   isLogSelected,
@@ -56,7 +59,8 @@ export function ManagedAgentRow({
   onToggleStartOnAppLaunch,
 }: {
   agent: ManagedAgent;
-  channelNames: string[];
+  channelIdToName: Record<string, string>;
+  channelNames: { id: string; name: string }[];
   isActionPending: boolean;
   isLogSelected: boolean;
   logContent: string | null;
@@ -80,6 +84,15 @@ export function ManagedAgentRow({
     ? (personaLabelsById[agent.personaId] ?? null)
     : null;
   const presenceStatus = presenceLookup[agent.pubkey.trim().toLowerCase()];
+  const activeChannelIds = useActiveAgentTurns(agent.pubkey);
+  const activeWorkingChannels = React.useMemo(
+    () =>
+      [...activeChannelIds]
+        .map((id) => ({ id, name: channelIdToName[id] ?? id }))
+        .slice(0, 3),
+    [activeChannelIds, channelIdToName],
+  );
+  const isWorking = activeWorkingChannels.length > 0;
   const processDetail =
     agent.pid !== null
       ? `PID ${agent.pid}`
@@ -116,6 +129,7 @@ export function ManagedAgentRow({
           >
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1.8fr)_minmax(120px,0.8fr)_minmax(0,1.1fr)] lg:gap-4">
               <AgentSummary
+                activeWorkingChannels={activeWorkingChannels}
                 agent={agent}
                 channelNames={channelNames}
                 isExpandable
@@ -125,6 +139,7 @@ export function ManagedAgentRow({
               />
               <StatusBlock
                 friendlyError={friendlyError}
+                isWorking={isWorking}
                 presenceLoaded={presenceLoaded}
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
@@ -137,6 +152,7 @@ export function ManagedAgentRow({
           <div className="min-w-0 flex-1">
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1.8fr)_minmax(120px,0.8fr)_minmax(0,1.1fr)] lg:gap-4">
               <AgentSummary
+                activeWorkingChannels={activeWorkingChannels}
                 agent={agent}
                 channelNames={channelNames}
                 isExpandable={false}
@@ -146,6 +162,7 @@ export function ManagedAgentRow({
               />
               <StatusBlock
                 friendlyError={friendlyError}
+                isWorking={isWorking}
                 presenceLoaded={presenceLoaded}
                 presenceStatus={presenceStatus}
                 processDetail={processDetail}
@@ -191,6 +208,7 @@ export function ManagedAgentRow({
 }
 
 function AgentSummary({
+  activeWorkingChannels,
   agent,
   channelNames,
   isExpandable,
@@ -198,13 +216,16 @@ function AgentSummary({
   personaLabel,
   presenceStatus,
 }: {
+  activeWorkingChannels: { id: string; name: string }[];
   agent: ManagedAgent;
-  channelNames: string[];
+  channelNames: { id: string; name: string }[];
   isExpandable: boolean;
   isLogSelected: boolean;
   personaLabel: string | null;
   presenceStatus: PresenceStatus | undefined;
 }) {
+  const { goChannel } = useAppNavigation();
+
   return (
     <div className="min-w-0">
       <div className="flex items-start gap-3">
@@ -242,13 +263,34 @@ function AgentSummary({
           </div>
           {channelNames.length > 0 ? (
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-              {channelNames.map((name) => (
+              {channelNames.map((channel) => (
                 <Badge
-                  className="normal-case tracking-normal"
-                  key={name}
+                  className="cursor-pointer normal-case tracking-normal hover:opacity-80"
+                  key={channel.id}
                   variant="outline"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void goChannel(channel.id);
+                  }}
                 >
-                  # {name}
+                  # {channel.name}
+                </Badge>
+              ))}
+            </div>
+          ) : null}
+          {activeWorkingChannels.length > 0 ? (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              {activeWorkingChannels.map((channel) => (
+                <Badge
+                  className="cursor-pointer motion-safe:animate-pulse normal-case tracking-normal hover:opacity-80"
+                  key={`working-${channel.id}`}
+                  variant="default"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void goChannel(channel.id);
+                  }}
+                >
+                  Working in #{channel.name}
                 </Badge>
               ))}
             </div>
@@ -261,12 +303,14 @@ function AgentSummary({
 
 function StatusBlock({
   friendlyError,
+  isWorking,
   presenceLoaded,
   presenceStatus,
   processDetail,
   status,
 }: {
   friendlyError: ReturnType<typeof friendlyAgentLastError>;
+  isWorking: boolean;
   presenceLoaded: boolean;
   presenceStatus: PresenceStatus | undefined;
   processDetail: string;
@@ -278,6 +322,7 @@ function StatusBlock({
         Status
       </p>
       <AgentStatusBadge
+        isWorking={isWorking}
         presenceLoaded={presenceLoaded}
         presenceStatus={presenceStatus}
         status={status}

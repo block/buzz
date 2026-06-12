@@ -92,6 +92,9 @@ type MockBridgeOptions = {
   };
   managedAgents?: MockManagedAgentSeed[];
   createManagedAgentDelayMs?: number;
+  channelsReadError?: string;
+  feedReadError?: string;
+  canvasReadError?: string;
   profileReadDelayMs?: number;
   profileReadError?: string;
   profileUpdateError?: string;

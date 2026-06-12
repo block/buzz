@@ -16,6 +16,7 @@ import {
   saveActiveWorkspaceId,
   saveWorkspaces,
 } from "./workspaceStorage";
+import { removeSelfProfileCachesForRelay } from "@/features/profile/lib/selfProfileStorage";
 
 export type UseWorkspacesReturn = {
   workspaces: Workspace[];
@@ -105,6 +106,17 @@ function useWorkspacesInternal(): UseWorkspacesReturn {
 
   const removeWorkspace = useCallback(
     (id: string) => {
+      // GC self-profile caches for the removed workspace's relay. Mirror the
+      // updater guard (length > 1) so we only GC when removal will actually
+      // proceed. Runs outside the updater — updaters can execute twice under
+      // React StrictMode.
+      if (workspaces.length > 1) {
+        const removed = workspaces.find((w) => w.id === id);
+        if (removed) {
+          removeSelfProfileCachesForRelay(removed.relayUrl);
+        }
+      }
+
       setWorkspacesState((prev) => {
         // Never allow removing the last workspace
         if (prev.length <= 1) {
@@ -122,7 +134,7 @@ function useWorkspacesInternal(): UseWorkspacesReturn {
         return next;
       });
     },
-    [activeId],
+    [activeId, workspaces],
   );
 
   const switchWorkspace = useCallback(

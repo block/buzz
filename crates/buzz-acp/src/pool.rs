@@ -718,6 +718,16 @@ pub async fn run_prompt_task(
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
+    // ── Turn completion guard ─────────────────────────────────────────────
+    // Emits `turn_completed` on any exit path. Captures observer handle and
+    // metadata now, before the agent is moved into PromptResult.
+    let _turn_guard = TurnCompletionGuard::new(
+        agent.acp.observer_handle(),
+        agent.acp.observer_agent_index(),
+        observer_channel_id,
+        turn_id.clone(),
+    );
+
     let (session_id, is_new_session) = match &source {
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
@@ -2003,6 +2013,49 @@ impl Drop for ReactionGuard {
             }
             // If no runtime is available, reactions are left as-is — they are
             // cosmetic indicators and the stale state is harmless.
+        }
+    }
+}
+
+// ── Turn completion scope guard ──────────────────────────────────────────────
+// Emits a `turn_completed` observer event on drop, covering ALL exit paths
+// (success, error, timeout, cancel, panic) from `run_prompt_task`. Captures
+// observer handle and metadata at creation time so it remains valid even after
+// the agent is moved into `PromptResult`.
+
+struct TurnCompletionGuard {
+    observer: Option<observer::ObserverHandle>,
+    agent_index: Option<usize>,
+    channel_id: Option<uuid::Uuid>,
+    turn_id: String,
+}
+
+impl TurnCompletionGuard {
+    fn new(
+        observer: Option<observer::ObserverHandle>,
+        agent_index: Option<usize>,
+        channel_id: Option<uuid::Uuid>,
+        turn_id: String,
+    ) -> Self {
+        Self {
+            observer,
+            agent_index,
+            channel_id,
+            turn_id,
+        }
+    }
+}
+
+impl Drop for TurnCompletionGuard {
+    fn drop(&mut self) {
+        if let Some(observer) = self.observer.take() {
+            let context = observer::context_for(self.channel_id, None, Some(self.turn_id.clone()));
+            observer.emit(
+                "turn_completed",
+                self.agent_index,
+                &context,
+                serde_json::json!({}),
+            );
         }
     }
 }

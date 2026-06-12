@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronRight, Smile } from "lucide-react";
+import { ChevronRight, RefreshCw, Smile } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -19,6 +19,7 @@ interface ProfilePopoverProps {
   onOpenChange: (open: boolean) => void;
   displayName: string;
   avatarUrl: string | null;
+  avatarDataUrl?: string | null;
   currentStatus: PresenceStatus;
   isStatusPending?: boolean;
   userStatusText?: string;
@@ -27,6 +28,8 @@ interface ProfilePopoverProps {
   onSetUserStatus: (text: string, emoji: string) => void;
   onClearUserStatus: () => void;
   onOpenSettings: (section?: "profile" | "appearance") => void;
+  onReconnect?: () => void;
+  isReconnectPending?: boolean;
   children: React.ReactNode;
   // Optional outer container whose clicks should NOT close the popover.
   // Used when auxiliary triggers (avatar, status text) live alongside the
@@ -56,6 +59,7 @@ export function ProfilePopover({
   onOpenChange,
   displayName,
   avatarUrl,
+  avatarDataUrl,
   currentStatus,
   isStatusPending,
   userStatusText,
@@ -64,6 +68,8 @@ export function ProfilePopover({
   onSetUserStatus,
   onClearUserStatus,
   onOpenSettings,
+  onReconnect,
+  isReconnectPending,
   children,
   triggerContainerRef,
   workspaceSwitcherSlot,
@@ -142,6 +148,7 @@ export function ProfilePopover({
             <div className="flex items-center gap-2 px-4 pt-3 pb-2">
               <div className="relative shrink-0">
                 <ProfileAvatar
+                  avatarDataUrl={avatarDataUrl}
                   avatarUrl={avatarUrl}
                   className="h-8 w-8 text-xs"
                   iconClassName="h-4 w-4"
@@ -267,6 +274,27 @@ export function ProfilePopover({
                 {settingsShortcutLabel}
               </kbd>
             </button>
+
+            {onReconnect ? (
+              <button
+                className={MENU_ITEM_CLASS}
+                data-testid="profile-popover-reconnect"
+                disabled={isReconnectPending}
+                onClick={() => {
+                  closePopover();
+                  onReconnect();
+                }}
+                role="menuitem"
+                type="button"
+              >
+                <RefreshCw
+                  className={`h-4 w-4 shrink-0 text-muted-foreground${isReconnectPending ? " animate-spin" : ""}`}
+                />
+                <span className="flex-1">
+                  {isReconnectPending ? "Reconnecting…" : "Reconnect to relay"}
+                </span>
+              </button>
+            ) : null}
 
             {workspaceSwitcherSlot ? (
               <>
