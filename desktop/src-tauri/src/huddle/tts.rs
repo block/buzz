@@ -545,8 +545,8 @@ fn apply_fade_out(samples: &mut [f32]) {
 ///
 /// Every sentence chunk gets a short lead-in pad immediately before its audio.
 /// This matters for chunks that start with soft first phonemes (`I'm`, `I've`):
-/// the sacrificial-prefix trim intentionally returns audio whose first sample is
-/// already speech, so the playback layer must provide the device/mixer cushion.
+/// the synthesized buffer can begin with speech within the first millisecond,
+/// so the playback layer must provide the device/mixer cushion.
 /// To keep the audible gap unchanged, the trailing silence after this chunk is
 /// shortened by the same amount (`silence_buf_len - SENTENCE_LEAD_IN_SAMPLES`):
 /// sentence N contributes 80 ms of post-speech silence and sentence N+1
@@ -1184,8 +1184,8 @@ mod tests {
 
     // ── build_sentence_append_buffer tests ───────────────────────────────────
 
-    /// REGRESSION: every chunk needs an onset cushion; trimmed short chunks
-    /// can start with speech at sample 0.
+    /// REGRESSION: every chunk needs an onset cushion; synthesized chunks
+    /// can start with speech energy within the first millisecond.
     #[test]
     fn lead_in_pad_is_present_for_every_sentence_chunk() {
         const SENTENCE_AUDIO_LEN: usize = 1000;
