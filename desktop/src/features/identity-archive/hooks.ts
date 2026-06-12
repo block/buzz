@@ -1,6 +1,8 @@
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 
+import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import {
   archiveIdentity,
@@ -104,4 +106,102 @@ export function useUnarchiveIdentityMutation() {
       });
     },
   });
+}
+
+/** Everything the profile panel needs to gate + drive NIP-IA archival. */
+export type IdentityArchiveActions = {
+  /**
+   * UX gate. `true` when ANY auth path will be accepted by the relay: self
+   * (acting on own pubkey), relay admin/owner, or verified NIP-OA owner of the
+   * viewee. The relay re-verifies on submit — this is purely a render guard.
+   */
+  canArchive: boolean;
+  /**
+   * `true` iff the target is in the relay's latest `kind:13535` snapshot.
+   * `undefined` while the snapshot loads so callers can defer the flair /
+   * Manage section until authority + state are both known.
+   */
+  isArchived: boolean | undefined;
+  /** Either mutation in flight — drives the disabled + "Archiving…" states. */
+  isPending: boolean;
+  /** Submit a `kind:9035` archive request for `pubkey` (toasts on result). */
+  archive: () => void;
+  /** Submit a `kind:9036` unarchive request for `pubkey` (toasts on result). */
+  unarchive: () => void;
+};
+
+/**
+ * Self-contained NIP-IA archive controller for a single `pubkey`. Composes the
+ * three gate queries, owns both mutations, and exposes the archive/unarchive
+ * callbacks with toasts — collapsing what used to be six props drilled through
+ * the profile panel into one hook call.
+ *
+ * Safe to call from multiple components on the same `pubkey`: React Query
+ * dedupes the underlying subscriptions by queryKey, so the only cost is a
+ * second hook invocation, not a second network round-trip.
+ *
+ * Gate composition is verbatim from the old `UserProfilePanel`:
+ * `canArchive = isSelf || isRelayAdminOrOwner || isOaOwnerOfViewee`.
+ */
+export function useIdentityArchive(pubkey: string): IdentityArchiveActions {
+  const identityQuery = useIdentityQuery();
+  const currentPubkey = identityQuery.data?.pubkey;
+
+  const pubkeyLower = pubkey.toLowerCase();
+  const isSelf =
+    currentPubkey !== undefined &&
+    pubkeyLower === currentPubkey.toLowerCase();
+
+  const myMembershipQuery = useMyRelayMembershipQuery();
+  // Skip the kind:0 lookup when viewing yourself — the OA gate is for
+  // archiving *other* identities you own. Also defer until our own identity
+  // resolves so we never fire the lookup against an unknown viewer.
+  const oaOwnerQuery = useOaOwnerQuery(
+    pubkey,
+    currentPubkey !== undefined && !isSelf,
+  );
+
+  const isArchived = useIsIdentityArchived(pubkey);
+
+  const archiveMutation = useArchiveIdentityMutation();
+  const unarchiveMutation = useUnarchiveIdentityMutation();
+
+  const myRole = myMembershipQuery.data?.role;
+  const isRelayAdminOrOwner = myRole === "owner" || myRole === "admin";
+  const isOaOwnerOfViewee = oaOwnerQuery.data?.isMe === true;
+  const canArchive = isSelf || isRelayAdminOrOwner || isOaOwnerOfViewee;
+
+  const archive = React.useCallback(() => {
+    archiveMutation.mutate(
+      { targetPubkey: pubkey },
+      {
+        onSuccess: () => toast.success("Archived on this relay"),
+        onError: (error) =>
+          toast.error(
+            `Archive failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+      },
+    );
+  }, [archiveMutation, pubkey]);
+
+  const unarchive = React.useCallback(() => {
+    unarchiveMutation.mutate(
+      { targetPubkey: pubkey },
+      {
+        onSuccess: () => toast.success("Unarchived on this relay"),
+        onError: (error) =>
+          toast.error(
+            `Unarchive failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+      },
+    );
+  }, [pubkey, unarchiveMutation]);
+
+  return {
+    canArchive,
+    isArchived,
+    isPending: archiveMutation.isPending || unarchiveMutation.isPending,
+    archive,
+    unarchive,
+  };
 }

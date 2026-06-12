@@ -28,10 +28,7 @@ import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import type {
-  useArchiveIdentityMutation,
-  useUnarchiveIdentityMutation,
-} from "@/features/identity-archive/hooks";
+import { useIdentityArchive } from "@/features/identity-archive/hooks";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import type {
@@ -68,8 +65,6 @@ async function copyToClipboard(value: string, label?: string) {
 // ── Summary view ─────────────────────────────────────────────────────────────
 
 export type ProfileSummaryViewProps = {
-  archiveMutation: ReturnType<typeof useArchiveIdentityMutation>;
-  canArchive: boolean;
   canEditAgent: boolean;
   canViewActivity: boolean;
   channelCount: number;
@@ -77,12 +72,9 @@ export type ProfileSummaryViewProps = {
   channelsLoading: boolean;
   displayName: string;
   followMutation: ReturnType<typeof useFollowMutation>;
-  handleArchive: () => void;
   handleEditAgent: () => void;
   handleMessage: () => void;
   handleOpenActivity: () => void;
-  handleUnarchive: () => void;
-  isArchived: boolean | undefined;
   isBot: boolean;
   isFollowing: boolean;
   isOwner: boolean | undefined;
@@ -100,14 +92,11 @@ export type ProfileSummaryViewProps = {
   profile: ReturnType<typeof useUserProfileQuery>["data"];
   pubkey: string;
   relayAgent: RelayAgent | undefined;
-  unarchiveMutation: ReturnType<typeof useUnarchiveIdentityMutation>;
   unfollowMutation: ReturnType<typeof useUnfollowMutation>;
   userStatus: { text: string; emoji: string } | null | undefined;
 };
 
 export function ProfileSummaryView({
-  archiveMutation,
-  canArchive,
   canEditAgent,
   canViewActivity,
   channelCount,
@@ -115,12 +104,9 @@ export function ProfileSummaryView({
   channelsLoading,
   displayName,
   followMutation,
-  handleArchive,
   handleEditAgent,
   handleMessage,
   handleOpenActivity,
-  handleUnarchive,
-  isArchived,
   isBot,
   isFollowing,
   isOwner,
@@ -138,12 +124,14 @@ export function ProfileSummaryView({
   profile,
   pubkey,
   relayAgent,
-  unarchiveMutation,
   unfollowMutation,
   userStatus,
 }: ProfileSummaryViewProps) {
   const { goChannel } = useAppNavigation();
   const activeTurns = useActiveAgentTurns(isBot ? pubkey : null);
+
+  const { canArchive, isArchived } = useIdentityArchive(pubkey);
+
 
   const metadataFields = [
     ...buildPublicFields({
@@ -208,14 +196,7 @@ export function ProfileSummaryView({
       ) : null}
 
       {showManageSection ? (
-        <ProfileManageSection
-          archiveMutation={archiveMutation}
-          isArchived={isArchived === true}
-          isBot={isBot}
-          onArchive={handleArchive}
-          onUnarchive={handleUnarchive}
-          unarchiveMutation={unarchiveMutation}
-        />
+        <ProfileManageSection isBot={isBot} pubkey={pubkey} />
       ) : null}
 
 
@@ -581,20 +562,15 @@ function ProfileQuickAction({
 // `canArchive` gate upstream is a UX guard so the button only renders when at
 // least one path will be accepted.
 function ProfileManageSection({
-  archiveMutation,
-  isArchived,
   isBot,
-  onArchive,
-  onUnarchive,
-  unarchiveMutation,
+  pubkey,
 }: {
-  archiveMutation: ReturnType<typeof useArchiveIdentityMutation>;
-  isArchived: boolean;
   isBot: boolean;
-  onArchive: () => void;
-  onUnarchive: () => void;
-  unarchiveMutation: ReturnType<typeof useUnarchiveIdentityMutation>;
+  pubkey: string;
 }) {
+  const { isArchived, isPending, archive, unarchive } =
+    useIdentityArchive(pubkey);
+
   const archiveLabel = isBot ? "Archive agent" : "Archive identity";
   const unarchiveLabel = isBot ? "Unarchive agent" : "Unarchive identity";
 
@@ -607,25 +583,25 @@ function ProfileManageSection({
         <Button
           className="w-full"
           data-testid="user-profile-unarchive-identity"
-          disabled={unarchiveMutation.isPending}
-          onClick={onUnarchive}
+          disabled={isPending}
+          onClick={unarchive}
           type="button"
           variant="secondary"
         >
           <ArchiveRestore className="h-4 w-4" />
-          {unarchiveMutation.isPending ? "Unarchiving…" : unarchiveLabel}
+          {isPending ? "Unarchiving…" : unarchiveLabel}
         </Button>
       ) : (
         <Button
           className="w-full"
           data-testid="user-profile-archive-identity"
-          disabled={archiveMutation.isPending}
-          onClick={onArchive}
+          disabled={isPending}
+          onClick={archive}
           type="button"
           variant="secondary"
         >
           <Archive className="h-4 w-4" />
-          {archiveMutation.isPending ? "Archiving…" : archiveLabel}
+          {isPending ? "Archiving…" : archiveLabel}
         </Button>
       )}
     </section>

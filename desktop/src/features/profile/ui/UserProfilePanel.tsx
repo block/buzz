@@ -1,6 +1,5 @@
 import * as React from "react";
 import { ArrowLeft, X } from "lucide-react";
-import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
@@ -16,12 +15,6 @@ import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsSto
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import { EditAgentDialog } from "@/features/agents/ui/EditAgentDialog";
 import { useChannelsQuery } from "@/features/channels/hooks";
-import {
-  useArchiveIdentityMutation,
-  useIsIdentityArchived,
-  useOaOwnerQuery,
-  useUnarchiveIdentityMutation,
-} from "@/features/identity-archive/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import {
   useContactListQuery,
@@ -35,7 +28,6 @@ import {
   MemoryFocusedView,
   ProfileSummaryView,
 } from "@/features/profile/ui/UserProfilePanelSections";
-import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
@@ -170,17 +162,6 @@ export function UserProfilePanel({
   const contactListQuery = useContactListQuery(currentPubkey);
   const followMutation = useFollowMutation(currentPubkey);
   const unfollowMutation = useUnfollowMutation(currentPubkey);
-  const myMembershipQuery = useMyRelayMembershipQuery();
-  // Skip the kind:0 lookup when viewing yourself — the OA gate is for
-  // archiving *other* identities you own.
-  const oaOwnerQuery = useOaOwnerQuery(
-    pubkey,
-    currentPubkey !== undefined &&
-      pubkey.toLowerCase() !== currentPubkey.toLowerCase(),
-  );
-  const isArchived = useIsIdentityArchived(pubkey);
-  const archiveMutation = useArchiveIdentityMutation();
-  const unarchiveMutation = useUnarchiveIdentityMutation();
   const { onOpenAgentSession } = useAgentSession();
   const { goChannel } = useAppNavigation();
 
@@ -216,15 +197,6 @@ export function UserProfilePanel({
   const isSelf =
     currentPubkey !== undefined && pubkeyLower === currentPubkey.toLowerCase();
   const canViewActivity = isOwner === true && Boolean(onOpenAgentSession);
-  // NIP-IA gate composition. The button shows when ANY of: self path (acting
-  // on own pubkey), admin path (current user is owner/admin in relay_members),
-  // or OA-owner path (current user is the verified NIP-OA owner of the viewee
-  // per its live kind:0). The relay re-verifies authority on submit; this gate
-  // is purely a UX guard.
-  const myRole = myMembershipQuery.data?.role;
-  const isRelayAdminOrOwner = myRole === "owner" || myRole === "admin";
-  const isOaOwnerOfViewee = oaOwnerQuery.data?.isMe === true;
-  const canArchive = isSelf || isRelayAdminOrOwner || isOaOwnerOfViewee;
   const isFollowing =
     !isSelf &&
     (contactListQuery.data?.contacts.some(
@@ -277,32 +249,6 @@ export function UserProfilePanel({
     },
     [goChannel],
   );
-
-  const handleArchive = React.useCallback(() => {
-    archiveMutation.mutate(
-      { targetPubkey: pubkey },
-      {
-        onSuccess: () => toast.success("Archived on this relay"),
-        onError: (error) =>
-          toast.error(
-            `Archive failed: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-      },
-    );
-  }, [archiveMutation, pubkey]);
-
-  const handleUnarchive = React.useCallback(() => {
-    unarchiveMutation.mutate(
-      { targetPubkey: pubkey },
-      {
-        onSuccess: () => toast.success("Unarchived on this relay"),
-        onError: (error) =>
-          toast.error(
-            `Unarchive failed: ${error instanceof Error ? error.message : String(error)}`,
-          ),
-      },
-    );
-  }, [pubkey, unarchiveMutation]);
 
   const displayName = profile?.displayName ?? truncatePubkey(pubkey);
   const ownerHandle = React.useMemo(() => {
@@ -370,8 +316,6 @@ export function UserProfilePanel({
     >
       {view === "summary" ? (
         <ProfileSummaryView
-          archiveMutation={archiveMutation}
-          canArchive={canArchive}
           canEditAgent={canEditAgent}
           canViewActivity={canViewActivity}
           channelCount={profileChannels.length}
@@ -379,12 +323,9 @@ export function UserProfilePanel({
           channelsLoading={channelsQuery.isLoading}
           displayName={displayName}
           followMutation={followMutation}
-          handleArchive={handleArchive}
           handleEditAgent={handleEditAgent}
           handleMessage={handleMessage}
           handleOpenActivity={handleOpenActivity}
-          handleUnarchive={handleUnarchive}
-          isArchived={isArchived}
           isBot={isBot}
           isFollowing={isFollowing}
           isOwner={isOwner}
@@ -402,7 +343,6 @@ export function UserProfilePanel({
           profile={profile}
           pubkey={pubkey}
           relayAgent={relayAgent}
-          unarchiveMutation={unarchiveMutation}
           unfollowMutation={unfollowMutation}
           userStatus={userStatus}
         />
