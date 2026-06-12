@@ -9,6 +9,8 @@ import {
   PenSquare,
   Zap,
 } from "lucide-react";
+import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
+import { isRelayUnreachableError } from "@/shared/lib/relayError";
 import * as React from "react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
@@ -277,6 +279,8 @@ export function AppSidebar({
     assignChannel,
     unassignChannel,
   } = useChannelSections(currentPubkey);
+
+  const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
 
   const [createSectionState, setCreateSectionState] = React.useState<{
     open: boolean;
@@ -720,9 +724,29 @@ export function AppSidebar({
           ) : null}
 
           {errorMessage ? (
-            <div className="px-3 py-2 text-sm text-destructive">
-              {errorMessage}
-            </div>
+            isRelayUnreachableError(errorMessage) ? (
+              <div
+                className="px-3 py-2 text-sm"
+                data-testid="sidebar-relay-unreachable"
+              >
+                <span className="text-muted-foreground">
+                  Can't reach the relay.{" "}
+                </span>
+                <button
+                  className="text-primary hover:underline disabled:opacity-50"
+                  data-testid="sidebar-reconnect"
+                  disabled={isReconnectPending}
+                  onClick={() => void reconnect()}
+                  type="button"
+                >
+                  {isReconnectPending ? "Reconnecting…" : "Reconnect"}
+                </button>
+              </div>
+            ) : (
+              <div className="px-3 py-2 text-sm text-destructive">
+                {errorMessage}
+              </div>
+            )
           ) : null}
         </SidebarContent>
 

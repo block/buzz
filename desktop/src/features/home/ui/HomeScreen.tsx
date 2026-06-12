@@ -5,6 +5,7 @@ import { useHomeFeedQuery } from "@/features/home/hooks";
 import { HomeView } from "@/features/home/ui/HomeView";
 import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
 import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
+import { isRelayUnreachableError } from "@/shared/lib/relayError";
 
 type HomeScreenProps = {
   availableChannelIds: ReadonlySet<string>;
@@ -58,8 +59,12 @@ export function HomeScreen({
         availableChannelIds={availableChannelIds}
         currentPubkey={currentPubkey}
         errorMessage={
-          homeFeedQuery.error instanceof Error
-            ? homeFeedQuery.error.message
+          homeFeedQuery.error !== null && homeFeedQuery.error !== undefined
+            ? isRelayUnreachableError(homeFeedQuery.error)
+              ? "Can't reach the relay — check your VPN or network connection."
+              : homeFeedQuery.error instanceof Error
+                ? homeFeedQuery.error.message
+                : undefined
             : undefined
         }
         feed={augmentedFeed}
