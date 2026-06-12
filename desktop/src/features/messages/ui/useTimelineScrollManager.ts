@@ -347,6 +347,55 @@ export function useTimelineScrollManager({
   ]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: timelineRef is a stable React ref — its identity never changes
+  const scrollToMessage = React.useCallback(
+    (messageId: string) => {
+      const timeline = timelineRef.current;
+      if (!timeline) {
+        return false;
+      }
+
+      const targetElement = timeline.querySelector<HTMLElement>(
+        `[data-message-id="${messageId}"]`,
+      );
+      if (!targetElement) {
+        return false;
+      }
+
+      unpinFromBottom(timeline.scrollTop);
+      setHighlightedMessageId(messageId);
+      setNewMessageCount(0);
+
+      const alignToTarget = (remainingFrames: number) => {
+        targetElement.scrollIntoView({
+          block: "center",
+          behavior: "auto",
+        });
+        previousScrollTopRef.current = timeline.scrollTop;
+
+        if (remainingFrames > 0) {
+          requestAnimationFrame(() => {
+            alignToTarget(remainingFrames - 1);
+          });
+          return;
+        }
+
+        onTargetReached?.(messageId);
+      };
+
+      alignToTarget(2);
+
+      window.setTimeout(() => {
+        setHighlightedMessageId((current) =>
+          current === messageId ? null : current,
+        );
+      }, 2_000);
+
+      return true;
+    },
+    [onTargetReached, unpinFromBottom],
+  );
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: timelineRef is a stable React ref — its identity never changes
   React.useEffect(() => {
     if (!targetMessageId) {
       handledTargetMessageIdRef.current = null;
@@ -367,52 +416,12 @@ export function useTimelineScrollManager({
       return;
     }
 
-    const timeline = timelineRef.current;
-    if (!timeline) {
-      return;
-    }
-
-    const targetElement = timeline.querySelector<HTMLElement>(
-      `[data-message-id="${targetMessageId}"]`,
-    );
-    if (!targetElement) {
+    if (!scrollToMessage(targetMessageId)) {
       return;
     }
 
     handledTargetMessageIdRef.current = targetMessageId;
-    unpinFromBottom(timeline.scrollTop);
-    setHighlightedMessageId(targetMessageId);
-    setNewMessageCount(0);
-
-    const alignToTarget = (remainingFrames: number) => {
-      targetElement.scrollIntoView({
-        block: "center",
-        behavior: "auto",
-      });
-      previousScrollTopRef.current = timeline.scrollTop;
-
-      if (remainingFrames > 0) {
-        requestAnimationFrame(() => {
-          alignToTarget(remainingFrames - 1);
-        });
-        return;
-      }
-
-      onTargetReached?.(targetMessageId);
-    };
-
-    alignToTarget(2);
-
-    const timeout = window.setTimeout(() => {
-      setHighlightedMessageId((current) =>
-        current === targetMessageId ? null : current,
-      );
-    }, 2_000);
-
-    return () => {
-      window.clearTimeout(timeout);
-    };
-  }, [isLoading, messages, onTargetReached, targetMessageId, unpinFromBottom]);
+  }, [isLoading, messages, scrollToMessage, targetMessageId]);
 
   return {
     bottomAnchorRef,
@@ -422,6 +431,7 @@ export function useTimelineScrollManager({
     newMessageCount,
     restoreScrollPosition,
     scrollToBottom,
+    scrollToMessage,
     syncScrollState,
   };
 }

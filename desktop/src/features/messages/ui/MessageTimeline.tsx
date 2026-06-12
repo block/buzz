@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ArrowDown, Hash } from "lucide-react";
+import { ArrowDown, ArrowUp, Hash } from "lucide-react";
 
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -72,6 +72,10 @@ type MessageTimelineProps = {
   searchQuery?: string;
   targetMessageId?: string | null;
   onTargetReached?: (messageId: string) => void;
+  /** Event id of the oldest unread top-level message at channel open, or null. */
+  firstUnreadMessageId?: string | null;
+  /** Count of unread top-level messages at channel open. */
+  unreadCount?: number;
 };
 
 type ChannelIntroAction = {
@@ -136,6 +140,8 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   searchQuery,
   targetMessageId = null,
   onTargetReached,
+  firstUnreadMessageId = null,
+  unreadCount = 0,
 }: MessageTimelineProps) {
   const internalScrollRef = React.useRef<HTMLDivElement>(null);
   const scrollContainerRef = externalScrollRef ?? internalScrollRef;
@@ -166,6 +172,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     newMessageCount,
     restoreScrollPosition,
     scrollToBottom,
+    scrollToMessage,
     syncScrollState,
   } = useTimelineScrollManager({
     channelId,
@@ -175,6 +182,33 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     scrollContainerRef,
     targetMessageId,
   });
+
+  // The unread pill is a transient, per-open affordance: dismiss it once the
+  // user acts on it (jumps to the oldest unread) or catches up by reaching the
+  // bottom of the timeline. Reset when the channel changes so a freshly opened
+  // channel shows its own pill.
+  const [isUnreadPillDismissed, setIsUnreadPillDismissed] =
+    React.useState(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset on channel switch only
+  React.useEffect(() => {
+    setIsUnreadPillDismissed(false);
+  }, [channelId]);
+  React.useEffect(() => {
+    if (isAtBottom) {
+      setIsUnreadPillDismissed(true);
+    }
+  }, [isAtBottom]);
+  const showUnreadPill =
+    !isUnreadPillDismissed &&
+    unreadCount > 0 &&
+    firstUnreadMessageId !== null &&
+    !isLoading;
+  const handleJumpToOldestUnread = React.useCallback(() => {
+    setIsUnreadPillDismissed(true);
+    if (firstUnreadMessageId) {
+      scrollToMessage(firstUnreadMessageId);
+    }
+  }, [firstUnreadMessageId, scrollToMessage]);
 
   // Scroll to the active search match when it changes.
   const prevSearchActiveRef = React.useRef<string | null>(null);
@@ -228,6 +262,21 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   return (
     <TooltipProvider delayDuration={200}>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        {showUnreadPill ? (
+          <div className="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center px-4">
+            <Button
+              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-primary/40 bg-primary/10 px-2.5 text-[11px] font-medium text-primary shadow-xs backdrop-blur-sm hover:bg-primary/20 [&_svg]:size-3.5"
+              data-testid="message-unread-pill"
+              onClick={handleJumpToOldestUnread}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              <ArrowUp aria-hidden />
+              {`${unreadCount} new message${unreadCount === 1 ? "" : "s"}`}
+            </Button>
+          </div>
+        ) : null}
         <div
           className={cn(
             "absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pt-1 [overflow-anchor:none] sm:px-6",
@@ -413,6 +462,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                     channelName={channelName}
                     channelType={channelType}
                     currentPubkey={currentPubkey}
+                    firstUnreadMessageId={firstUnreadMessageId}
                     followThreadById={followThreadById}
                     highlightedMessageId={highlightedMessageId}
                     isFollowingThreadById={isFollowingThreadById}

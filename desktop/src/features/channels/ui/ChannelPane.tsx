@@ -72,6 +72,10 @@ type ChannelPaneProps = {
   isSending: boolean;
   isTimelineLoading: boolean;
   messages: TimelineMessage[];
+  /** Event id of the oldest unread top-level message at channel open, or null. */
+  firstUnreadMessageId?: string | null;
+  /** Count of unread top-level messages at channel open. */
+  unreadCount?: number;
   canResetThreadPanelWidth: boolean;
   onCancelEdit?: () => void;
   onCancelThreadReply: () => void;
@@ -212,6 +216,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   isSending,
   isTimelineLoading,
   messages,
+  firstUnreadMessageId = null,
+  unreadCount = 0,
   canResetThreadPanelWidth,
   onCancelEdit,
   onCancelThreadReply,
@@ -684,6 +690,8 @@ export const ChannelPane = React.memo(function ChannelPane({
             }
             isLoading={isTimelineLoading}
             messages={visibleMessages}
+            firstUnreadMessageId={firstUnreadMessageId}
+            unreadCount={unreadCount}
             onDelete={onDelete}
             onEdit={onEdit}
             onMarkUnread={onMarkUnread}

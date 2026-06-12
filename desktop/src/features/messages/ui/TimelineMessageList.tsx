@@ -16,6 +16,7 @@ import { DayDivider } from "./DayDivider";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { SystemMessageRow } from "./SystemMessageRow";
+import { UnreadDivider } from "./UnreadDivider";
 
 type TimelineMessageListProps = {
   agentPubkeys?: ReadonlySet<string>;
@@ -23,6 +24,8 @@ type TimelineMessageListProps = {
   channelName?: string;
   channelType?: ChannelType | null;
   currentPubkey?: string;
+  /** Event id of the oldest unread top-level message; renders a "New" divider above it. */
+  firstUnreadMessageId?: string | null;
   followThreadById?: (rootId: string) => void;
   highlightedMessageId?: string | null;
   isFollowingThreadById?: (rootId: string) => boolean;
@@ -63,6 +66,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   channelName,
   channelType,
   currentPubkey,
+  firstUnreadMessageId = null,
   followThreadById,
   highlightedMessageId = null,
   isFollowingThreadById,
@@ -156,6 +160,12 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         elements: [],
       };
       dayGroups.push(currentDayGroup);
+    }
+
+    if (firstUnreadMessageId && message.id === firstUnreadMessageId) {
+      currentDayGroup?.elements.push(
+        <UnreadDivider key={`unread-${messageRenderKey}`} />,
+      );
     }
 
     if (message.kind === KIND_SYSTEM_MESSAGE) {
