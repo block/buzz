@@ -239,6 +239,21 @@ export function buildMainTimelineEntries(
     });
 }
 
+/**
+ * Whether the unread "New" divider should render above the entry at `index`.
+ * The divider marks a read/unread boundary, so it only makes sense when there
+ * is a rendered message above the first unread. When the first unread is the
+ * first rendered top-level entry (index 0) — the fresh/never-read channel case
+ * — there is nothing above it to separate from, so the divider is suppressed.
+ */
+export function shouldRenderUnreadDivider(
+  index: number,
+  messageId: string,
+  firstUnreadMessageId: string | null,
+): boolean {
+  return index > 0 && messageId === firstUnreadMessageId;
+}
+
 export function buildThreadPanelData(
   messages: TimelineMessage[],
   openThreadHeadId: string | null,

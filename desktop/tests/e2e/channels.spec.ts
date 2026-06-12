@@ -226,26 +226,17 @@ async function expectIntroBalancedAroundDayDivider(
     .getByTestId("message-timeline-day-divider")
     .first()
     .boundingBox();
-  // The day divider is centered between the intro and the first element of the
-  // day's content. That element is normally the first message, but an unread
-  // "New" divider can sit between the day divider and the first message — in
-  // which case it, not the message row, is the content the day divider hugs.
-  const unreadDividerBox = await page
-    .getByTestId("message-unread-divider")
+  const messageBox = await page
+    .getByTestId("message-row")
     .first()
-    .boundingBox()
-    .catch(() => null);
-  const firstContentBox =
-    unreadDividerBox ??
-    (await page.getByTestId("message-row").first().boundingBox());
+    .boundingBox();
 
-  if (!introBox || !dividerBox || !firstContentBox) {
+  if (!introBox || !dividerBox || !messageBox) {
     throw new Error(`Could not measure timeline spacing for ${introTestId}`);
   }
 
   const gapAboveDivider = dividerBox.y - (introBox.y + introBox.height);
-  const gapBelowDivider =
-    firstContentBox.y - (dividerBox.y + dividerBox.height);
+  const gapBelowDivider = messageBox.y - (dividerBox.y + dividerBox.height);
 
   expect(Math.abs(gapAboveDivider - gapBelowDivider)).toBeLessThanOrEqual(1);
 }
