@@ -346,7 +346,8 @@ fn tts_worker(
     // most RECV_TIMEOUT and never waits for playback to drain before taking
     // the next item — synthesis of item N+1 overlaps playback of item N.
     // `tts_active` lifecycle: set on the first append while idle, cleared
-    // only when the channel is quiet AND the player has fully drained.
+    // whenever the player has fully drained — either in the idle timeout
+    // arm or on item receipt before synthesis begins.
     let silence_buf_len = (INTER_SENTENCE_SILENCE * SAMPLE_RATE as f32) as usize;
     // `first_append` = "no audio queued since the player last went idle".
     // Flipped by `build_sentence_append_buffer` on the first real append; the
@@ -388,6 +389,19 @@ fn tts_worker(
             }
             first_append = true;
             continue;
+        }
+
+        // If playback already drained while we were waiting for this item,
+        // the agent is silent — release the mic gate BEFORE preprocessing/
+        // synthesis. Without this, an item arriving inside the recv timeout
+        // window would run the whole synthesis pass with `tts_active` stuck
+        // true and nothing playing, making STT discard human speech as
+        // "echo" during a silent window. (Pipelining is unaffected: when
+        // audio is still draining, `player.empty()` is false and the flag
+        // stays set across items.)
+        if player.empty() && !first_append {
+            tts_active.store(false, Ordering::Release);
+            first_append = true;
         }
 
         // Preprocess text.

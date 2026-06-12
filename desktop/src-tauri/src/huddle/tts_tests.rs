@@ -111,11 +111,12 @@ fn simulate_cancel_consumption(
     false
 }
 
-/// Simulate the idle branch of the TTS worker's main loop (the
-/// recv-timeout arm): with nothing queued, `tts_active` is released and
-/// the lead-in re-armed only when the player has fully drained AND audio
-/// was actually queued since the last idle period. Must match the
-/// production logic in `tts_worker`.
+/// Simulate the drained-player check in the TTS worker's main loop. It
+/// runs in TWO places — the recv-timeout (idle) arm, and on item receipt
+/// before synthesis begins: `tts_active` is released and the lead-in
+/// re-armed only when the player has fully drained AND audio was actually
+/// queued since the last idle period. Must match the production logic in
+/// `tts_worker`.
 fn simulate_idle_check(player_empty: bool, first_append: &mut bool, tts_active: &AtomicBool) {
     if player_empty && !*first_append {
         tts_active.store(false, Ordering::Release);
@@ -437,6 +438,30 @@ fn idle_check_noop_when_nothing_was_queued() {
 
     assert!(!tts_active.load(Ordering::Acquire));
     assert!(first_append, "lead-in should remain armed");
+}
+
+/// On-receipt check (PR #997 review blocker): item N's audio drains, then
+/// item N+1 arrives BEFORE the recv timeout fires. The same drained-player
+/// check must run on receipt so `tts_active` is released before the
+/// synthesis pass — otherwise STT discards human speech as "echo" for the
+/// whole synthesis window while the agent is actually silent.
+#[test]
+fn on_receipt_check_releases_mic_gate_before_synthesis() {
+    let tts_active = AtomicBool::new(true);
+    let mut first_append = false; // item N appended audio, now fully drained
+
+    // Item N+1 received with the player already empty: release + re-arm.
+    simulate_idle_check(true, &mut first_append, &tts_active);
+
+    assert!(
+        !tts_active.load(Ordering::Acquire),
+        "tts_active must be released before synthesizing the next item \
+         when playback has already drained",
+    );
+    assert!(
+        first_append,
+        "lead-in must re-arm so the next utterance gets a fresh cushion"
+    );
 }
 
 /// Full cycle: remote speech → cancel → TTS consumption → new TTS → cancel again.
