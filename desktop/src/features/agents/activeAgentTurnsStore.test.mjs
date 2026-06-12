@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach, afterEach, mock } from "node:test";
 
 import {
   syncAgentTurnsFromEvents,
@@ -539,6 +539,77 @@ describe("activeAgentTurnsStore", () => {
       ]);
       const ids = getActiveTurnsForAgent(AGENT).map((s) => s.channelId);
       assert.deepEqual(ids, ["c-alpha", "c-zebra"]);
+    });
+  });
+
+  describe("turn_liveness prune backstop", () => {
+    // The prune sweep runs on an internal setInterval keyed off Date.now();
+    // faking both lets us drive the 25s bound deterministically. The fixed
+    // epoch is the clock floor — event timestamps below anchor lastActivityAt
+    // to it, so elapsed time is exactly what mock.timers.tick advances.
+    const EPOCH = Date.parse("2024-01-01T00:00:00Z");
+    const at = (ms) => new Date(EPOCH + ms).toISOString();
+    // Mirrors the store's REMOVE_AFTER_MS (LIVENESS_INTERVAL_MS * 2.5) and
+    // PRUNE_INTERVAL_MS. Not exported — kept in lockstep here so the prune
+    // bound stays asserted from the consumer's perspective.
+    const REMOVE_AFTER_MS = 25_000;
+    const PRUNE_INTERVAL_MS = 5_000;
+
+    let unsubscribe;
+
+    beforeEach(() => {
+      mock.timers.enable({ apis: ["setInterval", "Date"], now: EPOCH });
+      // Subscribing starts the prune interval under the faked clock.
+      unsubscribe = subscribeActiveAgentTurns(() => {});
+    });
+
+    afterEach(() => {
+      unsubscribe();
+      mock.timers.reset();
+    });
+
+    it("keeps a turn alive when turn_liveness refreshes before the bound", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      ]);
+
+      // Refresh activity at 20s — under the 25s bound — then advance to 40s.
+      // Without the refresh the turn would have been pruned by 25s; the
+      // liveness ping resets lastActivityAt so it survives.
+      mock.timers.tick(20_000);
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 2,
+          kind: "turn_liveness",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(20_000),
+        }),
+      ]);
+      mock.timers.tick(20_000);
+
+      const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
+      assert.ok(
+        channels.has("c1"),
+        "liveness within the bound must defer the prune",
+      );
+    });
+
+    it("prunes a turn that receives no activity past the bound", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      ]);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 1);
+
+      // No liveness pings — the host died without unwinding. Advance past the
+      // 25s bound; the next prune sweep evicts the silent turn.
+      mock.timers.tick(REMOVE_AFTER_MS + PRUNE_INTERVAL_MS);
+
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        0,
+        "a turn with no activity past the bound must be pruned",
+      );
     });
   });
 });

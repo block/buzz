@@ -8,8 +8,14 @@ import {
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { ObserverEvent } from "./ui/agentSessionTypes";
 
-/** Remove a turn entirely after 90s of no activity. */
-const REMOVE_AFTER_MS = 90_000;
+/** Harness emits turn_liveness every ~10s (BUZZ_ACP_TURN_LIVENESS_SECS). */
+const LIVENESS_INTERVAL_MS = 10_000;
+/** Remove a turn after this long with no activity. Tolerates one fully dropped
+ * liveness ping plus slack before pruning a turn whose host died without
+ * unwinding (kill -9 / crash) — the only case that reaches this bound, since
+ * graceful exits clear via turn_completed and working turns refresh on every
+ * stream event. Derived from the interval so it tracks if the interval changes. */
+const REMOVE_AFTER_MS = LIVENESS_INTERVAL_MS * 2.5;
 /** Maximum concurrent active turns tracked per agent (matches pool size). */
 const MAX_TURNS_PER_AGENT = 4;
 /** Interval for pruning stale/expired turns. */
@@ -193,6 +199,10 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
       break;
     case "acp_read":
     case "acp_write":
+    // turn_liveness keeps a quiet-but-alive turn from being pruned; same
+    // refresh-only path as stream activity — no surfaced summary change, so
+    // no notifyListeners().
+    case "turn_liveness":
       recordActivity(agentPubkey, event.turnId ?? null);
       break;
   }
