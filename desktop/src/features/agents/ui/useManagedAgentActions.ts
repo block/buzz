@@ -84,10 +84,14 @@ export function useManagedAgentActions() {
     // Seed from relay agent profiles (kind:10100 events).
     for (const ra of relayAgentsQuery.data ?? []) {
       if (ra.channels.length > 0) {
-        map[normalizePubkey(ra.pubkey)] = ra.channels.map((name, i) => ({
-          id: ra.channelIds[i] ?? name,
-          name,
-        }));
+        // Skip entries missing a channel id rather than falling back to the
+        // name as id — a misaligned channels/channelIds pairing would otherwise
+        // produce a pill that silently navigates to a channel name as if it
+        // were an id.
+        map[normalizePubkey(ra.pubkey)] = ra.channels.flatMap((name, i) => {
+          const id = ra.channelIds[i];
+          return id ? [{ id, name }] : [];
+        });
       }
     }
     // Fill in from channel member lists (kind:39002) for any managed agents
