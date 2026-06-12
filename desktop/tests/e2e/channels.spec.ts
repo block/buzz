@@ -202,6 +202,97 @@ async function invokeMockCommand<T>(
   ) as Promise<T>;
 }
 
+async function expectSameLeftInset(
+  page: import("@playwright/test").Page,
+  firstTestId: string,
+  secondTestId: string,
+) {
+  const firstBox = await page.getByTestId(firstTestId).boundingBox();
+  const secondBox = await page.getByTestId(secondTestId).first().boundingBox();
+
+  if (!firstBox || !secondBox) {
+    throw new Error(`Could not measure ${firstTestId} against ${secondTestId}`);
+  }
+
+  expect(Math.abs(firstBox.x - secondBox.x)).toBeLessThanOrEqual(1);
+}
+
+async function expectIntroBalancedAroundDayDivider(
+  page: import("@playwright/test").Page,
+  introTestId: string,
+) {
+  const introBox = await page.getByTestId(introTestId).boundingBox();
+  const dividerBox = await page
+    .getByTestId("message-timeline-day-divider")
+    .first()
+    .boundingBox();
+  const messageBox = await page
+    .getByTestId("message-row")
+    .first()
+    .boundingBox();
+
+  if (!introBox || !dividerBox || !messageBox) {
+    throw new Error(`Could not measure timeline spacing for ${introTestId}`);
+  }
+
+  const gapAboveDivider = dividerBox.y - (introBox.y + introBox.height);
+  const gapBelowDivider = messageBox.y - (dividerBox.y + dividerBox.height);
+
+  expect(Math.abs(gapAboveDivider - gapBelowDivider)).toBeLessThanOrEqual(1);
+}
+
+async function expectIntroActionCardLayout(
+  page: import("@playwright/test").Page,
+  actionTestId: string,
+) {
+  const actionBox = await page.getByTestId(actionTestId).boundingBox();
+  const iconBox = await page.getByTestId(`${actionTestId}-icon`).boundingBox();
+
+  if (!actionBox || !iconBox) {
+    throw new Error(`Could not measure intro action card: ${actionTestId}`);
+  }
+
+  expect(actionBox.height).toBeGreaterThan(actionBox.width);
+  expect(Math.round(actionBox.width)).toBe(220);
+  expect(Math.round(iconBox.width)).toBe(48);
+  expect(Math.round(iconBox.height)).toBe(48);
+  const introIconRadius = await page
+    .getByTestId("message-channel-intro-icon")
+    .evaluate((element) => window.getComputedStyle(element).borderRadius);
+  const actionRadius = await page
+    .getByTestId(actionTestId)
+    .evaluate((element) => window.getComputedStyle(element).borderRadius);
+  expect(actionRadius).toBe(introIconRadius);
+  await expect(page.getByTestId(`${actionTestId}-title`)).toHaveCSS(
+    "white-space",
+    "normal",
+  );
+  await expect(page.getByTestId(`${actionTestId}-description`)).toHaveCSS(
+    "white-space",
+    "normal",
+  );
+}
+
+async function expectIntroActionsShareRow(
+  page: import("@playwright/test").Page,
+  actionTestIds: string[],
+) {
+  const boxes = await Promise.all(
+    actionTestIds.map((testId) => page.getByTestId(testId).boundingBox()),
+  );
+  const measuredBoxes = boxes.filter(
+    (box): box is NonNullable<typeof box> => box !== null,
+  );
+  const [firstBox] = measuredBoxes;
+  if (!firstBox || measuredBoxes.length !== actionTestIds.length) {
+    throw new Error("Could not measure intro action row");
+  }
+
+  for (const box of measuredBoxes.slice(1)) {
+    expect(Math.abs(firstBox.y - box.y)).toBeLessThanOrEqual(1);
+  }
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
@@ -309,13 +400,13 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   await page.getByTestId("create-channel-submit").click();
 
   await expect(page.getByTestId("stream-list")).toContainText(channelName);
-  await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+  await expect(page.getByTestId("chat-title")).toContainText(channelName);
   await expect(
     page.getByTestId(`channel-ephemeral-${channelName}`),
   ).toBeVisible();
   await expect(page.getByTestId("chat-ephemeral-badge")).toBeVisible();
   await expect(page.getByTestId("chat-ephemeral-badge")).toHaveAttribute(
-    "title",
+    "aria-label",
     /Ephemeral channel\. Cleans up (tomorrow|in \d+ hours?)\./,
   );
 
@@ -348,7 +439,7 @@ test("ephemeral countdown refreshes when switching channels after a clock jump",
       .getByLabel("Ephemeral — auto-archives after 1 day of inactivity")
       .click();
     await page.getByTestId("create-channel-submit").click();
-    await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+    await expect(page.getByTestId("chat-title")).toContainText(channelName);
   }
 
   await page.clock.setFixedTime(shiftedTime);
@@ -357,9 +448,9 @@ test("ephemeral countdown refreshes when switching channels after a clock jump",
     .toBe(shiftedTime.getTime());
 
   await page.getByTestId(`channel-${firstChannelName}`).click();
-  await expect(page.getByTestId("chat-title")).toHaveText(firstChannelName);
+  await expect(page.getByTestId("chat-title")).toContainText(firstChannelName);
   await expect(page.getByTestId("chat-ephemeral-badge")).toHaveAttribute(
-    "title",
+    "aria-label",
     /Ephemeral channel\. Cleans up in 22 hours\./,
   );
 });
@@ -482,12 +573,46 @@ test("switch between channel types", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
 });
 
-test("empty channel shows empty state", async ({ page }) => {
+test("empty channel shows intro actions", async ({ page }) => {
   await page.goto("/");
 
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
-  await expect(page.getByTestId("message-empty")).toBeVisible();
+  await expect(page.getByTestId("message-channel-intro")).toBeVisible();
+  await expect(page.getByTestId("message-channel-intro")).toContainText(
+    "This is the beginning of the regular channel.",
+  );
+  await expect(
+    page.getByTestId("channel-intro-action-create-channel"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-intro-action-create-agent"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("channel-intro-action-add-people"),
+  ).toBeVisible();
+  await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
+    0,
+  );
+  await expectIntroActionCardLayout(page, "channel-intro-action-create-agent");
+  await expectIntroActionsShareRow(page, [
+    "channel-intro-action-create-agent",
+    "channel-intro-action-add-people",
+  ]);
+
+  await page.getByTestId("channel-intro-action-add-people").click();
+  await expect(page.getByTestId("members-sidebar")).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
+
+  await page.getByTestId("channel-intro-action-create-agent").click();
+  await expect(page.getByRole("heading", { name: "Add agents" })).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "Add agents" })).toHaveCount(
+    0,
+  );
 });
 
 test("channel with messages shows content", async ({ page }) => {
@@ -495,9 +620,25 @@ test("channel with messages shows content", async ({ page }) => {
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("message-channel-intro")).toBeVisible();
+  await expect(page.getByTestId("message-channel-intro")).toContainText(
+    "This is the beginning of the regular channel.",
+  );
+  await expect(
+    page.getByTestId("channel-intro-action-create-channel"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-intro-action-create-agent"),
+  ).toBeVisible();
+  await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Welcome to #general",
   );
+  await expectSameLeftInset(page, "message-channel-intro", "message-row");
+  await expectIntroBalancedAroundDayDivider(page, "message-channel-intro");
 });
 
 test("shows and clears activity indicators for active channel agents", async ({
@@ -700,9 +841,16 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
 
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await expect(page.getByTestId("message-dm-intro")).toBeVisible();
+  await expect(page.getByTestId("message-dm-intro")).toContainText(
+    "This is the beginning of your direct message with",
+  );
+  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Unread update for the DM",
   );
+  await expectSameLeftInset(page, "message-dm-intro", "message-row");
+  await expectIntroBalancedAroundDayDivider(page, "message-dm-intro");
   await expect(page.getByTestId("channel-unread-alice-tyler")).toHaveCount(0);
 });
 

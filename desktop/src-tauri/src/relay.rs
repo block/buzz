@@ -398,6 +398,55 @@ pub async fn submit_event(
     Ok(result)
 }
 
+/// Sign an event with explicit keys and POST it to `/events` with NIP-98 auth.
+///
+/// Managed-agent flows use this to publish as the agent itself while still
+/// including the stored NIP-OA auth tag when the relay requires owner-backed
+/// membership.
+pub async fn submit_event_with_keys(
+    builder: nostr::EventBuilder,
+    state: &AppState,
+    keys: &Keys,
+    auth_tag: Option<&str>,
+) -> Result<SubmitEventResponse, String> {
+    let url = format!("{}/events", relay_api_base_url_with_override(state));
+    let event = builder
+        .sign_with_keys(keys)
+        .map_err(|e| format!("failed to sign event: {e}"))?;
+    let body_bytes = event.as_json().into_bytes();
+    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+
+    let mut request = state
+        .http_client
+        .post(&url)
+        .header("Authorization", auth_header)
+        .header("Content-Type", "application/json");
+    if let Some(tag) = auth_tag {
+        request = request.header("x-auth-tag", tag);
+    }
+
+    let response = request
+        .body(body_bytes)
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(relay_error_message(response).await);
+    }
+
+    let result: SubmitEventResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("failed to parse response: {e}"))?;
+
+    if !result.accepted {
+        return Err(format!("relay rejected event: {}", result.message));
+    }
+
+    Ok(result)
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

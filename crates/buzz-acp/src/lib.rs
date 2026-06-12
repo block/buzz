@@ -28,7 +28,7 @@ use filter::SubscriptionRule;
 use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
 use pool::{
-    AgentPool, CancelMode, OwnedAgent, PromptContext, PromptOutcome, PromptResult, PromptSource,
+    AgentPool, ControlSignal, OwnedAgent, PromptContext, PromptOutcome, PromptResult, PromptSource,
     SessionState,
 };
 use queue::{EventQueue, QueuedEvent, ThreadTags};
@@ -540,7 +540,7 @@ fn handle_relay_observer_control_event(
         return;
     };
 
-    let fired = cancel_in_flight_task(pool, channel_id, CancelMode::Stop);
+    let fired = signal_in_flight_task(pool, channel_id, ControlSignal::Cancel);
     let status = if fired { "sent" } else { "no_active_turn" };
     if let Some(observer) = observer {
         observer.emit(
@@ -1475,12 +1475,12 @@ async fn tokio_main() -> Result<()> {
 
                             // ── Shutdown command handling ─────────────────────
                             // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
-                            let is_shutdown = kind_u32 == KIND_STREAM_MESSAGE
-                                && buzz_event.event.content.trim() == "!shutdown"
-                                && buzz_event.event.tags.iter().any(|t| {
-                                    t.as_slice().first().map(|s| s.as_str()) == Some("p")
-                                        && t.as_slice().get(1).map(|s| s.as_str()) == Some(pubkey_hex.as_str())
-                                });
+                            let is_shutdown = is_owner_control_command(
+                                &buzz_event.event,
+                                kind_u32,
+                                "!shutdown",
+                                &pubkey_hex,
+                            );
                             if is_shutdown {
                                 let owner = owner_cache.get();
                                 if let Some(owner) = owner {
@@ -1508,16 +1508,20 @@ async fn tokio_main() -> Result<()> {
                             // Mode-independent: !cancel fires regardless of
                             // --multiple-event-handling. It is explicit user
                             // intent, not an automatic policy decision.
-                            let is_cancel = kind_u32 == KIND_STREAM_MESSAGE
-                                && buzz_event.event.content.trim() == "!cancel"
-                                && buzz_event.event.tags.iter().any(|t| {
-                                    t.as_slice().first().map(|s| s.as_str()) == Some("p")
-                                        && t.as_slice().get(1).map(|s| s.as_str()) == Some(pubkey_hex.as_str())
-                                });
+                            let is_cancel = is_owner_control_command(
+                                &buzz_event.event,
+                                kind_u32,
+                                "!cancel",
+                                &pubkey_hex,
+                            );
                             if is_cancel {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
-                                        let fired = cancel_in_flight_task(&mut pool, buzz_event.channel_id, CancelMode::Stop);
+                                        let fired = signal_in_flight_task(
+                                            &mut pool,
+                                            buzz_event.channel_id,
+                                            ControlSignal::Cancel,
+                                        );
                                         if !fired {
                                             tracing::warn!(
                                                 channel_id = %buzz_event.channel_id,
@@ -1530,6 +1534,53 @@ async fn tokio_main() -> Result<()> {
                                 // Not from owner — fall through to normal prompt handling.
                             }
                             // ── End cancel command handling ───────────────────
+
+                            // ── Rotate command handling ─────────────────────
+                            // Mirrors !shutdown / !cancel: kind:9, content
+                            // "!rotate", from owner, mentions THIS agent.
+                            //
+                            // Rotation is explicit owner intent to start the
+                            // next turn in this channel with a fresh ACP
+                            // session. It is consumed by the harness and never
+                            // forwarded to the agent. If a turn is in-flight,
+                            // cancel it, drop its triggering batch, and
+                            // invalidate the channel session when the task
+                            // returns. If idle, invalidate the cached channel
+                            // session immediately. Queued future events remain
+                            // queued and will create a fresh session on dispatch.
+                            let is_rotate = is_owner_control_command(
+                                &buzz_event.event,
+                                kind_u32,
+                                "!rotate",
+                                &pubkey_hex,
+                            );
+                            if is_rotate {
+                                if let Some(owner) = owner_cache.get() {
+                                    if buzz_event.event.pubkey.to_hex() == *owner {
+                                        let fired = signal_in_flight_task(
+                                            &mut pool,
+                                            buzz_event.channel_id,
+                                            ControlSignal::Rotate,
+                                        );
+                                        if fired {
+                                            tracing::info!(
+                                                channel_id = %buzz_event.channel_id,
+                                                "!rotate received — cancelling in-flight turn and rotating session"
+                                            );
+                                        } else {
+                                            let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
+                                            tracing::info!(
+                                                channel_id = %buzz_event.channel_id,
+                                                invalidated,
+                                                "!rotate received — invalidated idle channel session(s)"
+                                            );
+                                        }
+                                        continue; // consume event — do NOT push to queue
+                                    }
+                                }
+                                // Not from owner — fall through to normal prompt handling.
+                            }
+                            // ── End rotate command handling ──────────────────
 
                             // ── Inbound author gate ──────────────────────────
                             // Coarse security policy: drop events from disallowed
@@ -1612,7 +1663,11 @@ async fn tokio_main() -> Result<()> {
                                     }
                                 };
                                 if should_cancel {
-                                    cancel_in_flight_task(&mut pool, buzz_event.channel_id, CancelMode::Interrupt);
+                                    signal_in_flight_task(
+                                        &mut pool,
+                                        buzz_event.channel_id,
+                                        ControlSignal::Interrupt,
+                                    );
                                 }
                             }
                             // ── End mode gate ────────────────────────────────
@@ -1881,20 +1936,44 @@ enum LoopAction {
     Exit,
 }
 
-// ── cancel_in_flight_task ─────────────────────────────────────────────────────
+// ── Owner control commands ───────────────────────────────────────────────────
 
-/// Send a cancel signal to the in-flight task for `channel_id`.
+fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
+    event.tags.iter().any(|t| {
+        t.as_slice().first().map(|s| s.as_str()) == Some("p")
+            && t.as_slice().get(1).map(|s| s.as_str()) == Some(agent_pubkey_hex)
+    })
+}
+
+fn is_owner_control_command(
+    event: &nostr::Event,
+    kind_u32: u32,
+    command: &str,
+    agent_pubkey_hex: &str,
+) -> bool {
+    kind_u32 == KIND_STREAM_MESSAGE
+        && event.content.trim() == command
+        && event_mentions_agent(event, agent_pubkey_hex)
+}
+
+// ── signal_in_flight_task ─────────────────────────────────────────────────────
+
+/// Send a control signal to the in-flight task for `channel_id`.
 /// Returns `true` if a signal was sent, `false` if no in-flight task was found.
-fn cancel_in_flight_task(pool: &mut AgentPool, channel_id: uuid::Uuid, mode: CancelMode) -> bool {
+fn signal_in_flight_task(
+    pool: &mut AgentPool,
+    channel_id: uuid::Uuid,
+    mode: ControlSignal,
+) -> bool {
     let entry = pool
         .task_map_mut()
         .values_mut()
         .find(|m| m.channel_id == Some(channel_id));
 
     if let Some(meta) = entry {
-        if let Some(tx) = meta.cancel_tx.take() {
+        if let Some(tx) = meta.control_tx.take() {
             let _ = tx.send(mode);
-            tracing::info!(channel = %channel_id, "cancel signal sent to in-flight task");
+            tracing::info!(channel = %channel_id, ?mode, "control signal sent to in-flight task");
             return true;
         }
     }
@@ -1945,7 +2024,7 @@ fn dispatch_pending(
 
         // Prompt text is now built inside run_prompt_task (needs async for
         // context fetching). Pass None for prompt_text; batch carries the data.
-        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<CancelMode>();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
 
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
@@ -1954,7 +2033,7 @@ fn dispatch_pending(
                 None,
                 ctx_clone,
                 result_tx,
-                Some(cancel_rx),
+                Some(control_rx),
             )
             .await;
         });
@@ -1965,7 +2044,7 @@ fn dispatch_pending(
                 agent_index,
                 channel_id: Some(channel_id),
                 recoverable_batch,
-                cancel_tx: Some(cancel_tx),
+                control_tx: Some(control_tx),
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
@@ -2372,7 +2451,7 @@ fn dispatch_heartbeat(
             agent_index,
             channel_id: None,
             recoverable_batch: None,
-            cancel_tx: None,
+            control_tx: None,
         },
     );
     *heartbeat_in_flight = true;
@@ -2719,6 +2798,92 @@ mod heartbeat_base_prompt_tests {
         let prompt = "[System: Heartbeat]\nrun feed get";
         let composed = pool::prepend_base_for_legacy(2, Some("you are a helpful agent"), prompt);
         assert_eq!(composed, prompt);
+    }
+}
+
+#[cfg(test)]
+mod owner_control_command_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn make_event(kind: u32, content: &str, p_hex: Option<&str>) -> nostr::Event {
+        let keys = Keys::generate();
+        let tags = match p_hex {
+            Some(hex) => vec![Tag::parse(["p", hex]).expect("p tag")],
+            None => vec![],
+        };
+        EventBuilder::new(Kind::Custom(kind as u16), content)
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn owner_control_command_requires_kind_content_and_agent_mention() {
+        let agent = "ab".repeat(32);
+
+        let event = make_event(KIND_STREAM_MESSAGE, " !rotate ", Some(&agent));
+        assert!(is_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            "!rotate",
+            &agent
+        ));
+
+        let wrong_kind = make_event(1, "!rotate", Some(&agent));
+        assert!(!is_owner_control_command(&wrong_kind, 1, "!rotate", &agent));
+
+        let wrong_content = make_event(KIND_STREAM_MESSAGE, "!cancel", Some(&agent));
+        assert!(!is_owner_control_command(
+            &wrong_content,
+            KIND_STREAM_MESSAGE,
+            "!rotate",
+            &agent
+        ));
+
+        let no_mention = make_event(KIND_STREAM_MESSAGE, "!rotate", None);
+        assert!(!is_owner_control_command(
+            &no_mention,
+            KIND_STREAM_MESSAGE,
+            "!rotate",
+            &agent
+        ));
+    }
+
+    #[tokio::test]
+    async fn signal_in_flight_task_sends_rotate_once() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let other_channel_id = Uuid::new_v4();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+
+        let abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+            },
+        );
+
+        assert!(!signal_in_flight_task(
+            &mut pool,
+            other_channel_id,
+            ControlSignal::Rotate
+        ));
+        assert!(signal_in_flight_task(
+            &mut pool,
+            channel_id,
+            ControlSignal::Rotate
+        ));
+        assert_eq!(control_rx.await.unwrap(), ControlSignal::Rotate);
+        assert!(!signal_in_flight_task(
+            &mut pool,
+            channel_id,
+            ControlSignal::Rotate
+        ));
     }
 }
 

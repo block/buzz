@@ -1,5 +1,5 @@
 import { hexToBytes } from "@noble/hashes/utils.js";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { nsecEncode } from "nostr-tools/nip19";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
@@ -90,25 +90,6 @@ async function selectFirstEmojiFromPicker(page: Page) {
   });
 }
 
-async function expectHomeSeenCount(page: Page, expectedCount: number) {
-  await expect
-    .poll(async () => {
-      return page.evaluate((prefix) => {
-        const seenEntries = Object.entries(window.localStorage).filter(
-          ([key]) => key.startsWith(prefix),
-        );
-        if (seenEntries.length === 0) {
-          return 0;
-        }
-
-        const [, rawValue] = seenEntries[0];
-        const parsed = JSON.parse(rawValue ?? "[]");
-        return Array.isArray(parsed) ? parsed.length : 0;
-      }, HOME_SEEN_STORAGE_KEY_PREFIX);
-    })
-    .toBe(expectedCount);
-}
-
 async function expectShellHidden(page: Page) {
   await expect(page.getByTestId("app-sidebar")).toHaveCount(0);
   await expect(page.getByTestId("chat-title")).toHaveCount(0);
@@ -116,6 +97,420 @@ async function expectShellHidden(page: Page) {
 
 async function expectHomeView(page: Page) {
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+}
+
+async function expectWiderThanTall(locator: Locator) {
+  const box = await locator.boundingBox();
+  if (!box) {
+    throw new Error("Could not measure welcome intro action card");
+  }
+
+  expect(box.width).toBeGreaterThan(box.height);
+}
+
+async function expectIntroActionIconStackedAboveTitle(
+  action: Locator,
+  testId: string,
+) {
+  const iconBox = await action.getByTestId(`${testId}-icon`).boundingBox();
+  const titleBox = await action.getByTestId(`${testId}-title`).boundingBox();
+  if (!iconBox || !titleBox) {
+    throw new Error("Could not measure welcome intro action content");
+  }
+
+  expect(titleBox.y).toBeGreaterThan(iconBox.y + iconBox.height);
+}
+
+async function expectWelcomeComposerBannerLayout(page: Page) {
+  const banner = page.getByTestId("welcome-composer-guide-banner");
+  const personaMention = page.getByTestId("welcome-composer-persona-mention");
+  const composer = page.getByTestId("message-composer");
+  const bannerBox = await banner.boundingBox();
+  const personaMentionBox = await personaMention.boundingBox();
+  const composerBox = await composer.boundingBox();
+
+  if (!bannerBox || !personaMentionBox || !composerBox) {
+    throw new Error("Could not measure welcome composer banner layout");
+  }
+
+  expect(
+    await composer.getByTestId("welcome-composer-guide-banner").count(),
+  ).toBe(0);
+  expect(bannerBox.y).toBeLessThan(composerBox.y);
+  expect(bannerBox.y + bannerBox.height).toBeGreaterThan(composerBox.y);
+
+  const radii = await banner.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    return {
+      bottomLeft: styles.borderBottomLeftRadius,
+      bottomRight: styles.borderBottomRightRadius,
+      topLeft: styles.borderTopLeftRadius,
+      topRight: styles.borderTopRightRadius,
+    };
+  });
+
+  expect(radii.topLeft).toBe(radii.topRight);
+  expect(radii.bottomLeft).toBe("0px");
+  expect(radii.bottomRight).toBe("0px");
+  expect(personaMentionBox.width).toBeGreaterThan(0);
+}
+
+async function expectWelcomePersonaMention(page: Page) {
+  const banner = page.getByTestId("welcome-composer-guide-banner");
+  const personaMention = page.getByTestId("welcome-composer-persona-mention");
+  await expect(personaMention).toBeVisible();
+  await expect(personaMention).toHaveAttribute("data-persona-options", "Fizz");
+  await expect(personaMention).toHaveAttribute("data-active-persona", "Fizz");
+  await expect(personaMention).toHaveAttribute(
+    "data-animation-target",
+    "per-character",
+  );
+
+  const activePersona = await personaMention.getAttribute(
+    "data-active-persona",
+  );
+  expect(activePersona).not.toBeNull();
+  await expect(personaMention).toContainText(`@${activePersona}`);
+  expect(
+    await personaMention
+      .getByTestId("welcome-composer-persona-character")
+      .count(),
+  ).toBeGreaterThanOrEqual(4);
+
+  const transition = await personaMention.evaluate((element) => {
+    const styles = window.getComputedStyle(element);
+    const durationMs = Number(
+      element.getAttribute("data-width-animation-duration-ms"),
+    );
+    return {
+      duration: styles.transitionDuration,
+      durationMs,
+      property: styles.transitionProperty,
+    };
+  });
+  expect(transition.durationMs).toBeGreaterThanOrEqual(700);
+  expect(transition.durationMs).toBeLessThanOrEqual(740);
+  expect(Math.round(Number.parseFloat(transition.duration) * 1000)).toBe(
+    transition.durationMs,
+  );
+  expect(transition.property).toContain("width");
+
+  const alignment = await personaMention.evaluate((element) => {
+    const mentionStyles = window.getComputedStyle(element);
+    const bannerStyles = window.getComputedStyle(
+      element.closest('[data-testid="welcome-composer-guide-banner"]') ??
+        element,
+    );
+    return {
+      display: mentionStyles.display,
+      lineHeightMatchesBanner:
+        mentionStyles.lineHeight === bannerStyles.lineHeight,
+      verticalAlign: mentionStyles.verticalAlign,
+    };
+  });
+  expect(alignment.display).toBe("inline-block");
+  expect(alignment.verticalAlign).toBe("baseline");
+  expect(alignment.lineHeightMatchesBanner).toBe(true);
+  await expect(banner).toContainText("Try mentioning");
+}
+
+async function expectWelcomeView(page: Page) {
+  await expect(page).toHaveURL(/#\/channels\/[^/?#]+$/);
+  await expect(page.getByTestId("channel-Welcome")).toBeVisible();
+  await expect(page.getByTestId("chat-title")).toContainText("Welcome");
+  await expect(page.getByTestId("channel-ephemeral-Welcome")).toHaveCount(0);
+  await expect(page.getByTestId("chat-ephemeral-badge")).toHaveCount(0);
+  await expect(page.getByTestId("message-channel-intro")).toBeVisible();
+  await expect(page.getByTestId("message-channel-intro")).toContainText(
+    "This is the beginning of the private welcome channel.",
+  );
+  await expect(page.getByTestId("message-channel-intro")).not.toContainText(
+    "A few good first steps",
+  );
+  await expect(
+    page.getByTestId("welcome-intro-action-create-channel"),
+  ).toBeVisible();
+  await expectWiderThanTall(
+    page.getByTestId("welcome-intro-action-create-channel"),
+  );
+  await expectIntroActionIconStackedAboveTitle(
+    page.getByTestId("welcome-intro-action-create-channel"),
+    "welcome-intro-action-create-channel",
+  );
+  await expect(
+    page.getByTestId("welcome-intro-action-create-channel-title"),
+  ).toHaveText("Create a channel");
+  await expect(
+    page.getByTestId("welcome-intro-action-create-channel-title"),
+  ).toHaveCSS("white-space", "normal");
+  await expect(
+    page.getByTestId("welcome-intro-action-create-channel-description"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("welcome-intro-action-create-agent"),
+  ).toBeVisible();
+  await expectWiderThanTall(
+    page.getByTestId("welcome-intro-action-create-agent"),
+  );
+  await expectIntroActionIconStackedAboveTitle(
+    page.getByTestId("welcome-intro-action-create-agent"),
+    "welcome-intro-action-create-agent",
+  );
+  await expect(
+    page.getByTestId("welcome-intro-action-create-agent-title"),
+  ).toHaveText("Create a custom agent");
+  await expect(
+    page.getByTestId("welcome-intro-action-create-agent-description"),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("message-composer")).toBeVisible();
+  await expect(page.getByTestId("welcome-composer-guide-banner")).toBeVisible();
+  await expect(page.getByTestId("welcome-composer-guide-banner")).toContainText(
+    "Try mentioning",
+  );
+  await expect(page.getByTestId("welcome-composer-guide-banner")).toContainText(
+    "to chat with an agent in this channel.",
+  );
+  await expectWelcomePersonaMention(page);
+  await expectWelcomeComposerBannerLayout(page);
+}
+
+async function expectWelcomeComposerBannerCompletesAfterPersonaMention(
+  page: Page,
+) {
+  const banner = page.getByTestId("welcome-composer-guide-banner");
+  const channelIntro = page.getByTestId("message-channel-intro");
+
+  await page.getByTestId("message-input").fill("Thanks @Fizz");
+  await page.getByTestId("send-message").click();
+
+  await expect(banner).toHaveAttribute("data-state", "complete");
+  await expect(banner).toHaveAttribute("data-tone", "success");
+  await expect(
+    banner.getByTestId("welcome-composer-complete-icon"),
+  ).toBeVisible();
+  await expect(
+    banner.locator('[data-animation-target="success-icon"]'),
+  ).toBeVisible();
+  await expect(
+    banner.locator('[data-animation-target="success-copy"]'),
+  ).toBeVisible();
+  await expect(banner).toContainText("Nice work.");
+  await expect(banner).not.toContainText("Try mentioning");
+  const introBoxBeforeDismiss = await channelIntro.boundingBox();
+  if (!introBoxBeforeDismiss) {
+    throw new Error("Could not measure welcome intro before banner dismiss");
+  }
+
+  await page.waitForFunction(
+    ({ beforeY }) => {
+      const bannerElement = document.querySelector(
+        '[data-testid="welcome-composer-guide-banner"]',
+      );
+      const introElement = document.querySelector(
+        '[data-testid="message-channel-intro"]',
+      );
+
+      if (
+        !(bannerElement instanceof HTMLElement) ||
+        !(introElement instanceof HTMLElement) ||
+        bannerElement.dataset.state !== "dismissing"
+      ) {
+        return false;
+      }
+
+      return introElement.getBoundingClientRect().y > beforeY + 4;
+    },
+    { beforeY: introBoxBeforeDismiss.y },
+    { polling: "raf", timeout: 5_000 },
+  );
+  await expect(banner).toHaveCount(0, { timeout: 7_000 });
+}
+
+async function getMockChannels(page: Page) {
+  return page.evaluate(async () => {
+    const bridgeWindow = window as Window & {
+      __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+        command: string,
+        payload?: Record<string, unknown>,
+      ) => Promise<unknown>;
+      __TAURI_INTERNALS__?: {
+        invoke?: (
+          command: string,
+          payload?: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+    };
+    const invoke =
+      bridgeWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ ??
+      bridgeWindow.__TAURI_INTERNALS__?.invoke;
+
+    if (!invoke) {
+      throw new Error("Mock invoke bridge is unavailable.");
+    }
+
+    return (await invoke("get_channels")) as Array<{
+      id: string;
+      name: string;
+      channel_type: string;
+      visibility: "open" | "private";
+      member_count: number;
+      is_member: boolean;
+      ttl_seconds: number | null;
+    }>;
+  });
+}
+
+async function invokeMockCommand<T>(
+  page: Page,
+  command: string,
+  payload?: Record<string, unknown>,
+) {
+  return page.evaluate(
+    async ({ command, payload }) => {
+      const bridgeWindow = window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload?: Record<string, unknown>,
+        ) => Promise<unknown>;
+        __TAURI_INTERNALS__?: {
+          invoke?: (
+            command: string,
+            payload?: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      };
+      const invoke =
+        bridgeWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ ??
+        bridgeWindow.__TAURI_INTERNALS__?.invoke;
+
+      if (!invoke) {
+        throw new Error("Mock invoke bridge is unavailable.");
+      }
+
+      return (await invoke(command, payload)) as T;
+    },
+    { command, payload },
+  );
+}
+
+async function getWelcomeChannelId(page: Page) {
+  const channels = await getMockChannels(page);
+  return (
+    channels.find(
+      (channel) =>
+        channel.name === "Welcome" && channel.visibility === "private",
+    )?.id ?? null
+  );
+}
+
+async function expectPrivateWelcomeChannel(page: Page) {
+  await expect
+    .poll(async () => {
+      const channels = await getMockChannels(page);
+      const welcomeChannel = channels.find(
+        (channel) =>
+          channel.name === "Welcome" && channel.visibility === "private",
+      );
+
+      if (!welcomeChannel) {
+        return null;
+      }
+
+      return {
+        channelType: welcomeChannel.channel_type,
+        isMember: welcomeChannel.is_member,
+        memberCount: welcomeChannel.member_count,
+        ttlSeconds: welcomeChannel.ttl_seconds,
+        visibility: welcomeChannel.visibility,
+      };
+    })
+    .toEqual({
+      channelType: "stream",
+      isMember: true,
+      memberCount: 2,
+      ttlSeconds: null,
+      visibility: "private",
+    });
+}
+
+async function expectWelcomeGuideIntro(
+  page: Page,
+  { expectVisible = true }: { expectVisible?: boolean } = {},
+) {
+  await expect
+    .poll(async () => {
+      const channelId = await getWelcomeChannelId(page);
+      if (!channelId) {
+        return null;
+      }
+
+      const [members, agents, introSearch] = await Promise.all([
+        invokeMockCommand<{
+          members: Array<{ pubkey: string; role: string; is_agent: boolean }>;
+        }>(page, "get_channel_members", { channelId }),
+        invokeMockCommand<
+          Array<{ pubkey: string; name: string; persona_id: string | null }>
+        >(page, "list_managed_agents"),
+        invokeMockCommand<{
+          hits: Array<{ pubkey: string; content: string }>;
+        }>(page, "search_messages", {
+          q: "Hi, I'm Fizz",
+          limit: 10,
+        }),
+      ]);
+      const fizz = agents.find(
+        (agent) => agent.name === "Fizz" && agent.persona_id === "builtin:fizz",
+      );
+      const fizzMember = fizz
+        ? members.members.find((member) => member.pubkey === fizz.pubkey)
+        : null;
+      const intro = fizz
+        ? introSearch.hits.find((hit) => hit.pubkey === fizz.pubkey)
+        : null;
+      const fizzWelcomeHits = fizz
+        ? introSearch.hits.filter((hit) => hit.pubkey === fizz.pubkey)
+        : [];
+      const profileAvatarUrl = fizz
+        ? (
+            await invokeMockCommand<{
+              profiles: Record<string, { avatar_url: string | null }>;
+            }>(page, "get_users_batch", {
+              pubkeys: [fizz.pubkey],
+            })
+          ).profiles[fizz.pubkey]?.avatar_url
+        : null;
+
+      return {
+        fizzIsBot: fizzMember?.role === "bot" && fizzMember.is_agent,
+        fizzPersonaId: fizz?.persona_id ?? null,
+        introContent: intro?.content ?? null,
+        introMatchesFizz: Boolean(fizz && intro?.pubkey === fizz.pubkey),
+        fizzWelcomeHitCount: fizzWelcomeHits.length,
+        profileAvatarUrl,
+      };
+    })
+    .toEqual({
+      fizzIsBot: true,
+      fizzPersonaId: "builtin:fizz",
+      introContent:
+        "Hi, I'm Fizz. Welcome to Buzz.\n\nI can help you get oriented, answer questions, and make the first few steps feel less mysterious.\n\nFeel free to ask me what else you can do in Buzz, or just talk through what you want to build.",
+      introMatchesFizz: true,
+      fizzWelcomeHitCount: 1,
+      profileAvatarUrl: null,
+    });
+
+  if (expectVisible) {
+    await expect(page.getByTestId("message-timeline")).toContainText(
+      "Hi, I'm Fizz. Welcome to Buzz.",
+    );
+    await expect(page.getByTestId("message-timeline")).toContainText(
+      "Feel free to ask me what else you can do in Buzz",
+    );
+    await expect(
+      page.getByTestId("message-timeline-day-divider"),
+    ).toBeVisible();
+    await expect(page.getByTestId("system-message-row")).toHaveCount(0);
+  }
 }
 
 async function getMockProfile(page: Page) {
@@ -532,7 +927,7 @@ test("avatar upload accepts a file whose server-detected MIME is an image", asyn
   await expect(page.getByTestId("onboarding-avatar-error")).toHaveCount(0);
 });
 
-test("first-run onboarding keeps the shell hidden through setup and only marks Home seen after finish", async ({
+test("first-run onboarding keeps the shell hidden through setup and lands on Welcome after finish", async ({
   page,
 }) => {
   await seedActiveIdentity(page, FIRST_RUN_ALICE);
@@ -552,8 +947,75 @@ test("first-run onboarding keeps the shell hidden through setup and only marks H
 
   await page.getByTestId("onboarding-finish").click();
   await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
-  await expectHomeView(page);
-  await expectHomeSeenCount(page, 2);
+  await expectWelcomeView(page);
+  await expectPrivateWelcomeChannel(page);
+  await expectWelcomeGuideIntro(page);
+});
+
+test("first-run onboarding shows setup loading until Welcome bootstrap completes", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    { createManagedAgentDelayMs: 5_000 },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await continueToSetupPage(page);
+  await page.getByTestId("onboarding-finish").click();
+
+  const loadingGate = page.getByTestId("app-loading-gate");
+  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
+  await expect(loadingGate).toBeVisible();
+  await expect(loadingGate).toContainText("Setting up your workspace...");
+  await expect(
+    loadingGate.getByTestId("setup-grainient-background"),
+  ).toBeVisible();
+  await expect(
+    loadingGate.getByTestId("setup-grainient-background").locator("canvas"),
+  ).toHaveCount(0);
+  await expect
+    .poll(async () =>
+      loadingGate.evaluate((element) => {
+        const wash = element.querySelector(".buzz-setup-grainient__wash");
+        if (!(wash instanceof HTMLElement)) {
+          return null;
+        }
+
+        const shellStyles = window.getComputedStyle(element);
+        const washStyles = window.getComputedStyle(wash);
+        const loadingText = element.querySelector(".buzz-setup-loading-text");
+        const textStyles =
+          loadingText instanceof HTMLElement
+            ? window.getComputedStyle(loadingText)
+            : null;
+        return {
+          animationName: washStyles.animationName,
+          backgroundMatchesTheme:
+            shellStyles.backgroundColor === washStyles.backgroundColor,
+          textAvoidsHardcodedWhite: textStyles?.color !== "rgb(255, 255, 255)",
+          usesRadialGradients:
+            washStyles.backgroundImage.includes("radial-gradient"),
+        };
+      }),
+    )
+    .toEqual({
+      animationName: "buzz-grainient-orbit",
+      backgroundMatchesTheme: true,
+      textAvoidsHardcodedWhite: true,
+      usesRadialGradients: true,
+    });
+  await expect(loadingGate).not.toHaveClass(/buzz-onboarding-neutral-theme/);
+  await expectShellHidden(page);
+  await page.waitForTimeout(250);
+  await expect(loadingGate).toBeVisible();
+
+  await expectWelcomeView(page);
+  await expectPrivateWelcomeChannel(page);
+  await expectWelcomeGuideIntro(page);
 });
 
 test("existing relay profile with display name auto-skips onboarding without localStorage", async ({
@@ -596,7 +1058,22 @@ test("onboarding can import an existing key when the workspace is already set up
   await expectHomeView(page);
 });
 
-test("finishing onboarding auto-joins the #general channel for a new member", async ({
+test("completed onboarding backfills a missing private Welcome channel", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await seedOnboardingCompletion(page, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(page, undefined, { skipOnboardingSeed: true });
+  await page.goto("/");
+
+  await expect(page.getByTestId("onboarding-gate")).toHaveCount(0);
+  await expectHomeView(page);
+  await expect(page.getByTestId("channel-Welcome")).toBeVisible();
+  await expectPrivateWelcomeChannel(page);
+  await expectWelcomeGuideIntro(page, { expectVisible: false });
+});
+
+test("finishing onboarding creates and focuses a private Welcome channel for a new member", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -607,8 +1084,11 @@ test("finishing onboarding auto-joins the #general channel for a new member", as
   await continueToSetupPage(page);
   await page.getByTestId("onboarding-finish").click();
 
-  await expectHomeView(page);
+  await expectWelcomeView(page);
   await expect(page.getByTestId("channel-general")).toBeVisible();
+  await expectPrivateWelcomeChannel(page);
+  await expectWelcomeGuideIntro(page);
+  await expectWelcomeComposerBannerCompletesAfterPersonaMention(page);
 });
 
 test("page 2 falls back to Doctor guidance when ACP tools are not installed", async ({

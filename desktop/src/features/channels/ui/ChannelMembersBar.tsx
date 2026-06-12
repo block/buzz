@@ -24,6 +24,8 @@ import { AddChannelBotDialog } from "./AddChannelBotDialog";
 type ChannelMembersBarProps = {
   channel: Channel;
   currentPubkey?: string;
+  isAddBotOpen?: boolean;
+  onAddBotOpenChange?: (open: boolean) => void;
   onManageChannel: () => void;
   onToggleMembers: () => void;
   variant?: "inline" | "compact";
@@ -32,11 +34,24 @@ type ChannelMembersBarProps = {
 export function ChannelMembersBar({
   channel,
   currentPubkey,
+  isAddBotOpen: isAddBotOpenProp,
+  onAddBotOpenChange,
   onManageChannel,
   onToggleMembers,
   variant = "inline",
 }: ChannelMembersBarProps) {
-  const [isAddBotOpen, setIsAddBotOpen] = React.useState(false);
+  const [uncontrolledAddBotOpen, setUncontrolledAddBotOpen] =
+    React.useState(false);
+  const isAddBotOpen = isAddBotOpenProp ?? uncontrolledAddBotOpen;
+  const setIsAddBotOpen = React.useCallback(
+    (open: boolean) => {
+      onAddBotOpenChange?.(open);
+      if (isAddBotOpenProp === undefined) {
+        setUncontrolledAddBotOpen(open);
+      }
+    },
+    [isAddBotOpenProp, onAddBotOpenChange],
+  );
   const { startHuddle, isStarting: isStartingHuddle } = useHuddle();
   const queryClient = useQueryClient();
   const membersQuery = useChannelMembersQuery(channel.id);
@@ -79,7 +94,7 @@ export function ChannelMembersBar({
 
     previousChannelIdRef.current = channel.id;
     setIsAddBotOpen(false);
-  }, [channel.id]);
+  }, [channel.id, setIsAddBotOpen]);
 
   const dialogErrorMessage =
     providersQuery.error instanceof Error

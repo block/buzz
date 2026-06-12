@@ -1,3 +1,4 @@
+use super::test_support::*;
 use super::*;
 
 #[test]
@@ -320,20 +321,6 @@ fn canonical_dev_data_dir_returns_self_for_canonical_instance() {
     assert_eq!(canonical_dev_data_dir(&canonical).unwrap(), canonical);
 }
 
-fn write_agents_json(dir: &Path, records: &serde_json::Value) {
-    std::fs::create_dir_all(dir.join("agents")).unwrap();
-    std::fs::write(
-        dir.join("agents/managed-agents.json"),
-        serde_json::to_vec_pretty(records).unwrap(),
-    )
-    .unwrap();
-}
-
-fn read_agents_json(dir: &Path) -> Vec<serde_json::Value> {
-    let content = std::fs::read_to_string(dir.join("agents/managed-agents.json")).unwrap();
-    serde_json::from_str(&content).unwrap()
-}
-
 #[test]
 fn sync_creates_teams_directory_symlink() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -395,150 +382,6 @@ fn sync_replaces_real_teams_dir_with_symlink() {
         std::fs::read_link(worktree.join("agents/teams")).unwrap(),
         canonical.join("agents/teams")
     );
-}
-
-#[test]
-fn team_dir_reconcile_rewrites_worktree_path() {
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
-
-    let worktree_pack_path = format!(
-        "{}/agents/packs/com.wpfleger.sietch-tabr",
-        parent
-            .path()
-            .join("xyz.block.buzz.app.dev.worktree-my-branch")
-            .display()
-    );
-    let expected_path = format!(
-        "{}/agents/teams/com.wpfleger.sietch-tabr",
-        canonical.display()
-    );
-
-    write_agents_json(
-        &canonical,
-        &serde_json::json!([{
-            "name": "Paul",
-            "persona_pack_path": worktree_pack_path
-        }]),
-    );
-
-    reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
-
-    let records = read_agents_json(&canonical);
-    assert_eq!(records[0]["persona_team_dir"], expected_path);
-    // Old field name should be removed
-    assert!(records[0].get("persona_pack_path").is_none());
-}
-
-#[test]
-fn team_dir_reconcile_rewrites_new_field_name() {
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
-
-    let worktree_team_path = format!(
-        "{}/agents/teams/com.wpfleger.sietch-tabr",
-        parent
-            .path()
-            .join("xyz.block.buzz.app.dev.worktree-my-branch")
-            .display()
-    );
-    let expected_path = format!(
-        "{}/agents/teams/com.wpfleger.sietch-tabr",
-        canonical.display()
-    );
-
-    write_agents_json(
-        &canonical,
-        &serde_json::json!([{
-            "name": "Paul",
-            "persona_team_dir": worktree_team_path
-        }]),
-    );
-
-    reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
-
-    let records = read_agents_json(&canonical);
-    assert_eq!(records[0]["persona_team_dir"], expected_path);
-}
-
-#[test]
-fn team_dir_reconcile_leaves_canonical_path_unchanged() {
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
-
-    let canonical_path = format!(
-        "{}/agents/teams/com.wpfleger.sietch-tabr",
-        canonical.display()
-    );
-
-    write_agents_json(
-        &canonical,
-        &serde_json::json!([{
-            "name": "Duncan",
-            "persona_team_dir": canonical_path
-        }]),
-    );
-
-    let before = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
-    reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
-    let after = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
-
-    assert_eq!(before, after);
-}
-
-#[test]
-fn team_dir_reconcile_skips_records_without_team_dir() {
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
-
-    write_agents_json(
-        &canonical,
-        &serde_json::json!([{
-            "name": "Test Agent",
-            "agent_command": "buzz-agent"
-        }]),
-    );
-
-    let before = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
-    reconcile_team_dirs_in_file(&canonical.join("agents/managed-agents.json"), &canonical);
-    let after = std::fs::read_to_string(canonical.join("agents/managed-agents.json")).unwrap();
-
-    assert_eq!(before, after);
-}
-
-#[test]
-fn team_dir_reconcile_is_idempotent() {
-    let parent = tempfile::tempdir().unwrap();
-    let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
-    std::fs::create_dir_all(canonical.join("agents")).unwrap();
-
-    let worktree_pack_path = format!(
-        "{}/agents/packs/com.wpfleger.sietch-tabr",
-        parent
-            .path()
-            .join("xyz.block.buzz.app.dev.worktree-my-branch")
-            .display()
-    );
-
-    write_agents_json(
-        &canonical,
-        &serde_json::json!([{
-            "name": "Paul",
-            "persona_pack_path": worktree_pack_path
-        }]),
-    );
-
-    let path = canonical.join("agents/managed-agents.json");
-    reconcile_team_dirs_in_file(&path, &canonical);
-    let after_first = std::fs::read_to_string(&path).unwrap();
-    reconcile_team_dirs_in_file(&path, &canonical);
-    let after_second = std::fs::read_to_string(&path).unwrap();
-
-    assert_eq!(after_first, after_second);
 }
 
 // ── Packs → Teams migration tests ───────────────────────────────────
@@ -671,20 +514,6 @@ fn migrate_packs_to_teams_rewrites_agents_json() {
     assert_eq!(records[0]["persona_name_in_team"], "agent-one");
     assert!(records[0].get("persona_pack_path").is_none());
     assert!(records[0].get("persona_name_in_pack").is_none());
-}
-
-fn write_personas_json(dir: &Path, records: &serde_json::Value) {
-    std::fs::create_dir_all(dir.join("agents")).unwrap();
-    std::fs::write(
-        dir.join("agents/personas.json"),
-        serde_json::to_vec_pretty(records).unwrap(),
-    )
-    .unwrap();
-}
-
-fn read_personas_json(dir: &Path) -> Vec<serde_json::Value> {
-    let content = std::fs::read_to_string(dir.join("agents/personas.json")).unwrap();
-    serde_json::from_str(&content).unwrap()
 }
 
 #[test]

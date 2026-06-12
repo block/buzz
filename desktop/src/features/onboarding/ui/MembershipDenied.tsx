@@ -6,6 +6,7 @@ import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
+import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 
 type MembershipDeniedProps = {
   onChangeKey?: () => void;
@@ -82,6 +83,7 @@ export function MembershipDenied({
       className="flex min-h-dvh items-center justify-center bg-[radial-gradient(circle_at_top,hsl(var(--primary)/0.14),transparent_48%),linear-gradient(180deg,hsl(var(--background)),hsl(var(--muted)/0.55))] px-4 py-8"
       data-testid="membership-denied"
     >
+      <StartupWindowDragRegion />
       <div className="w-full max-w-md rounded-[28px] border border-border/70 bg-background/92 p-8 shadow-2xl backdrop-blur-sm">
         <div className="space-y-3">
           <Badge variant="warning">Membership required</Badge>

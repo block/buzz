@@ -48,6 +48,30 @@ fn normalize_relay_mesh(
     }))
 }
 
+fn trim_to_optional_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn resolve_created_avatar_url(
+    requested_avatar_url: Option<&str>,
+    persona_avatar_url: Option<String>,
+    agent_command: &str,
+) -> Option<String> {
+    requested_avatar_url
+        .and_then(trim_to_optional_string)
+        .or_else(|| {
+            persona_avatar_url
+                .as_deref()
+                .and_then(trim_to_optional_string)
+        })
+        .or_else(|| managed_agent_avatar_url(agent_command))
+}
+
 #[cfg(feature = "mesh-llm")]
 async fn ensure_relay_mesh_for_record(
     app: &AppHandle,
@@ -474,16 +498,21 @@ pub async fn create_managed_agent(
             });
 
         // Resolve the avatar URL once at creation and persist it on the record.
-        // This is the same logic the original publish used (user input, else
-        // command-based fallback) — storing it lets reconciliation compare
-        // against what was actually published instead of re-deriving it.
-        let resolved_avatar_url = input
-            .avatar_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .or_else(|| managed_agent_avatar_url(&agent_command));
+        // Explicit input wins, then the persona's own avatar, then the runtime
+        // fallback. Storing it lets reconciliation compare against what was
+        // actually published instead of re-deriving it.
+        let persona_avatar_url = requested_persona_id.as_ref().and_then(|persona_id| {
+            load_personas(&app)
+                .ok()?
+                .into_iter()
+                .find(|persona| persona.id == *persona_id)?
+                .avatar_url
+        });
+        let resolved_avatar_url = resolve_created_avatar_url(
+            input.avatar_url.as_deref(),
+            persona_avatar_url,
+            &agent_command,
+        );
 
         let record = crate::managed_agents::ManagedAgentRecord {
             pubkey: pubkey.clone(),
@@ -1145,149 +1174,5 @@ pub async fn probe_backend_provider(binary_path: String) -> Result<serde_json::V
 // No backend Tauri command needed. Presence IS the status.
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_relay_mesh_rejects_empty_model_ref() {
-        let config = RelayMeshConfig {
-            model_ref: "  \t ".to_string(),
-        };
-
-        assert_eq!(
-            normalize_relay_mesh(Some(&config), &BackendKind::Local).unwrap_err(),
-            "relay mesh modelRef is required"
-        );
-    }
-
-    #[test]
-    fn normalize_relay_mesh_rejects_non_local_backend() {
-        let config = RelayMeshConfig {
-            model_ref: "Qwen3".to_string(),
-        };
-        let backend = BackendKind::Provider {
-            id: "blox".to_string(),
-            config: serde_json::json!({}),
-        };
-
-        assert_eq!(
-            normalize_relay_mesh(Some(&config), &backend).unwrap_err(),
-            "relay mesh agents must use the local backend"
-        );
-    }
-
-    #[test]
-    fn normalize_relay_mesh_trims_and_preserves_valid_config() {
-        let config = RelayMeshConfig {
-            model_ref: "  Qwen3  ".to_string(),
-        };
-
-        assert_eq!(
-            normalize_relay_mesh(Some(&config), &BackendKind::Local).unwrap(),
-            Some(RelayMeshConfig {
-                model_ref: "Qwen3".to_string(),
-            })
-        );
-    }
-
-    fn profile(name: Option<&str>, picture: Option<&str>) -> crate::relay::AgentProfileInfo {
-        crate::relay::AgentProfileInfo {
-            display_name: name.map(str::to_string),
-            picture: picture.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn profile_needs_sync_when_missing() {
-        assert!(profile_needs_sync(None, "Duncan", Some("https://x/a.png")));
-    }
-
-    #[test]
-    fn profile_needs_sync_when_name_diverges() {
-        let existing = profile(Some("Stilgar"), Some("https://x/a.png"));
-        assert!(profile_needs_sync(
-            Some(&existing),
-            "Duncan",
-            Some("https://x/a.png")
-        ));
-    }
-
-    #[test]
-    fn profile_needs_sync_when_picture_diverges() {
-        let existing = profile(Some("Duncan"), Some("https://x/old.png"));
-        assert!(profile_needs_sync(
-            Some(&existing),
-            "Duncan",
-            Some("https://x/new.png")
-        ));
-    }
-
-    #[test]
-    fn profile_in_sync_when_name_and_picture_match() {
-        let existing = profile(Some("Duncan"), Some("https://x/a.png"));
-        assert!(!profile_needs_sync(
-            Some(&existing),
-            "Duncan",
-            Some("https://x/a.png")
-        ));
-    }
-
-    #[test]
-    fn profile_in_sync_when_both_avatars_absent() {
-        let existing = profile(Some("Duncan"), None);
-        assert!(!profile_needs_sync(Some(&existing), "Duncan", None));
-    }
-
-    #[test]
-    fn profile_needs_sync_when_existing_name_is_none() {
-        let existing = profile(None, Some("https://x/a.png"));
-        assert!(profile_needs_sync(
-            Some(&existing),
-            "Duncan",
-            Some("https://x/a.png"),
-        ));
-    }
-
-    #[test]
-    fn profile_needs_sync_when_expected_avatar_absent_but_published() {
-        let existing = profile(Some("Duncan"), Some("https://x/a.png"));
-        assert!(profile_needs_sync(Some(&existing), "Duncan", None));
-    }
-
-    #[test]
-    fn legacy_avatar_prefers_persona_over_corrupted_relay_picture() {
-        // The regression: the relay picture was overwritten with the command
-        // default. The persona avatar must win so the correct avatar is restored.
-        let resolved = resolve_legacy_avatar(
-            Some("https://x/persona.png".to_string()),
-            Some("https://x/default-icon.png".to_string()),
-            "goose",
-        );
-
-        assert_eq!(resolved, "https://x/persona.png");
-    }
-
-    #[test]
-    fn legacy_avatar_falls_back_to_relay_picture_without_persona() {
-        let resolved =
-            resolve_legacy_avatar(None, Some("https://x/relay.png".to_string()), "goose");
-
-        assert_eq!(resolved, "https://x/relay.png");
-    }
-
-    #[test]
-    fn legacy_avatar_falls_back_to_command_icon_when_no_persona_or_relay() {
-        use crate::managed_agents::managed_agent_avatar_url;
-
-        let resolved = resolve_legacy_avatar(None, None, "goose");
-
-        assert_eq!(resolved, managed_agent_avatar_url("goose").unwrap());
-    }
-
-    #[test]
-    fn legacy_avatar_empty_when_nothing_resolves() {
-        let resolved = resolve_legacy_avatar(None, None, "totally-unknown-command");
-
-        assert!(resolved.is_empty());
-    }
-}
+#[path = "agents_tests.rs"]
+mod tests;

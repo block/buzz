@@ -15,6 +15,7 @@ import {
 import { describeResolvedCommand } from "@/features/agents/ui/agentUi";
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { useTheme } from "@/shared/theme/ThemeProvider";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
@@ -58,6 +59,7 @@ function useSetupStepState(): SetupStepState {
 
 function RuntimeIcon({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   const [imageFailed, setImageFailed] = React.useState(false);
+  const { isDark } = useTheme();
   const shouldForceForegroundColor = runtime.id === "goose";
 
   if (runtime.avatarUrl && !imageFailed) {
@@ -67,7 +69,8 @@ function RuntimeIcon({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
           alt=""
           className={cn(
             "h-7 w-7 rounded-sm object-contain",
-            shouldForceForegroundColor && "brightness-0 dark:invert",
+            shouldForceForegroundColor &&
+              (isDark ? "brightness-0 invert" : "brightness-0"),
           )}
           onError={() => setImageFailed(true)}
           src={runtime.avatarUrl}
@@ -232,7 +235,7 @@ function RuntimeCard({
   return (
     <div
       className={cn(
-        "flex min-h-44 flex-col justify-between rounded-lg border bg-background p-4 text-left transition-colors",
+        "grid min-h-28 grid-cols-[auto_1fr_auto] items-start gap-3 rounded-lg border bg-background p-3 text-left transition-colors sm:p-4",
         isAvailable
           ? "border-primary/25 bg-primary/[0.055] shadow-[0_12px_30px_hsl(var(--primary)/0.08)] dark:bg-primary/[0.08]"
           : installError
@@ -241,47 +244,45 @@ function RuntimeCard({
       )}
       data-testid={`onboarding-runtime-${runtime.id}`}
     >
-      <div>
-        <div className="flex items-start justify-between gap-3">
-          <RuntimeIcon runtime={runtime} />
-          <RuntimeStatus
-            installError={installError}
-            installSuccess={installSuccess}
-            isInstalling={isInstalling}
-            onInstall={onInstall}
-            runtime={runtime}
-          />
+      <RuntimeIcon runtime={runtime} />
+
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-base font-medium leading-6 text-foreground">
+            {runtime.label}
+          </h2>
+          {isAvailable ? (
+            <Badge
+              className="border border-primary/20 bg-primary/10 text-primary"
+              variant="outline"
+            >
+              Installed
+            </Badge>
+          ) : null}
         </div>
 
-        <div className="mt-4">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-lg font-medium leading-6 text-foreground">
-              {runtime.label}
-            </h2>
-            {isAvailable ? (
-              <Badge
-                className="border border-primary/20 bg-primary/10 text-primary"
-                variant="outline"
-              >
-                Installed
-              </Badge>
-            ) : null}
-          </div>
-          <RuntimeDetails runtime={runtime} />
-        </div>
+        <RuntimeDetails runtime={runtime} />
+
+        {installError ? (
+          <p className="mt-3 rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
+            {installError}
+          </p>
+        ) : null}
+
+        {installSuccess && runtime.availability !== "available" ? (
+          <p className="mt-3 rounded-md border border-primary/25 bg-primary/10 px-3 py-2 text-xs leading-5 text-primary">
+            Installed successfully. You can finish onboarding now.
+          </p>
+        ) : null}
       </div>
 
-      {installError ? (
-        <p className="mt-4 rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
-          {installError}
-        </p>
-      ) : null}
-
-      {installSuccess && runtime.availability !== "available" ? (
-        <p className="mt-4 rounded-md border border-primary/25 bg-primary/10 px-3 py-2 text-xs leading-5 text-primary">
-          Installed successfully. You can finish onboarding now.
-        </p>
-      ) : null}
+      <RuntimeStatus
+        installError={installError}
+        installSuccess={installSuccess}
+        isInstalling={isInstalling}
+        onInstall={onInstall}
+        runtime={runtime}
+      />
     </div>
   );
 }
@@ -352,7 +353,7 @@ function RuntimeProvidersSection({
       </div>
 
       {items.length > 0 ? (
-        <div className="grid gap-3 sm:grid-cols-2">
+        <div className="grid gap-3 lg:grid-cols-2">
           {items.map((runtime) => (
             <RuntimeCard
               installError={installResults[runtime.id]?.error ?? null}

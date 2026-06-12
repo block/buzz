@@ -2,7 +2,7 @@
 
 [package]
 name = "buzz-desktop"
-version = "0.3.17"
+version = "0.3.18"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -51,6 +51,7 @@ hex = "0.4"
 tokio = { version = "1", features = ["fs", "sync", "rt", "macros", "time"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+bytes = "1"
 futures-util = "0.3"
 opus = "0.3"
 neteq = { version = "0.8", default-features = false }

@@ -63,6 +63,7 @@ type E2eConfig = {
     };
     managedAgents?: MockManagedAgentSeed[];
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
+    createManagedAgentDelayMs?: number;
     profileReadDelayMs?: number;
     profileReadError?: string;
     profileUpdateError?: string;
@@ -97,6 +98,11 @@ type RawBlobDescriptor = {
   size: number;
   type: string;
   uploaded: number;
+  dim?: string;
+  blurhash?: string;
+  thumb?: string;
+  duration?: number;
+  image?: string;
   filename?: string;
 };
 
@@ -153,6 +159,7 @@ type RawChannel = {
   topic: string | null;
   purpose: string | null;
   member_count: number;
+  member_pubkeys: string[];
   last_message_at: string | null;
   archived_at: string | null;
   participants: string[];
@@ -199,7 +206,7 @@ type RawAddChannelMembersResponse = {
   }>;
 };
 
-type MockChannel = RawChannelDetail & {
+type MockChannel = Omit<RawChannelDetail, "member_pubkeys"> & {
   members: RawChannelMember[];
 };
 
@@ -691,6 +698,7 @@ function toRawChannel(
     topic: channel.topic,
     purpose: channel.purpose,
     member_count: channel.member_count,
+    member_pubkeys: channel.members.map((member) => member.pubkey),
     last_message_at: channel.last_message_at,
     archived_at: channel.archived_at,
     participants: [...channel.participants],
@@ -3011,6 +3019,25 @@ async function handleGetUsersBatch(
         : false,
     };
   }
+  for (const pubkey of args.pubkeys) {
+    const normalizedPubkey = pubkey.toLowerCase();
+    if (found.has(normalizedPubkey)) {
+      continue;
+    }
+
+    const profile = getMockProfileByPubkey(normalizedPubkey);
+    if (!profile) {
+      continue;
+    }
+
+    found.add(normalizedPubkey);
+    profiles[normalizedPubkey] = {
+      display_name: profile.display_name,
+      avatar_url: profile.avatar_url,
+      nip05_handle: profile.nip05_handle,
+      is_agent: profile.is_agent ?? false,
+    };
+  }
   const missing = args.pubkeys.filter((p) => !found.has(p.toLowerCase()));
   return { profiles, missing };
 }
@@ -4612,35 +4639,49 @@ async function handleExportPersonaToJson(args: {
   return true; // Simulate successful save
 }
 
-async function handleCreateManagedAgent(args: {
-  input: {
-    name: string;
-    personaId?: string;
-    relayUrl?: string;
-    acpCommand?: string;
-    agentCommand?: string;
-    agentArgs?: string[];
-    mcpCommand?: string;
-    turnTimeoutSeconds?: number;
-    idleTimeoutSeconds?: number;
-    maxTurnDurationSeconds?: number;
-    parallelism?: number;
-    systemPrompt?: string;
-    avatarUrl?: string;
-    model?: string;
-    envVars?: Record<string, string>;
-    spawnAfterCreate?: boolean;
-    startOnAppLaunch?: boolean;
-    backend?:
-      | { type: "local" }
-      | { type: "provider"; id: string; config: Record<string, unknown> };
-    respondTo?: "owner-only" | "allowlist" | "anyone";
-    respondToAllowlist?: string[];
-  };
-}): Promise<RawCreateManagedAgentResponse> {
+async function handleCreateManagedAgent(
+  args: {
+    input: {
+      name: string;
+      personaId?: string;
+      relayUrl?: string;
+      acpCommand?: string;
+      agentCommand?: string;
+      agentArgs?: string[];
+      mcpCommand?: string;
+      turnTimeoutSeconds?: number;
+      idleTimeoutSeconds?: number;
+      maxTurnDurationSeconds?: number;
+      parallelism?: number;
+      systemPrompt?: string;
+      avatarUrl?: string;
+      model?: string;
+      envVars?: Record<string, string>;
+      spawnAfterCreate?: boolean;
+      startOnAppLaunch?: boolean;
+      backend?:
+        | { type: "local" }
+        | { type: "provider"; id: string; config: Record<string, unknown> };
+      respondTo?: "owner-only" | "allowlist" | "anyone";
+      respondToAllowlist?: string[];
+    };
+  },
+  config: E2eConfig | undefined,
+): Promise<RawCreateManagedAgentResponse> {
+  const delayMs = config?.mock?.createManagedAgentDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
   if (args.input.personaId) {
     ensureMockPersonaIsActive(args.input.personaId);
   }
+  const personaAvatarUrl =
+    args.input.personaId === undefined
+      ? null
+      : (mockPersonas.find((persona) => persona.id === args.input.personaId)
+          ?.avatar_url ?? null);
+  const avatarUrl = args.input.avatarUrl?.trim() || personaAvatarUrl;
   const name = args.input.name.trim();
   const now = new Date().toISOString();
   const pubkey = crypto
@@ -4699,7 +4740,7 @@ async function handleCreateManagedAgent(args: {
   mockProfiles.set(pubkey, {
     pubkey,
     display_name: name,
-    avatar_url: args.input.avatarUrl?.trim() || null,
+    avatar_url: avatarUrl,
     about: args.input.systemPrompt?.trim() || null,
     nip05_handle: null,
     is_agent: true,
@@ -4938,6 +4979,23 @@ async function handleSearchMessages(
         score: 5.2,
       },
     ];
+    for (const [channelId, events] of mockMessages) {
+      const channel = mockChannels.find(
+        (candidate) => candidate.id === channelId,
+      );
+      for (const event of events) {
+        mockHits.push({
+          event_id: event.id,
+          content: event.content,
+          kind: event.kind,
+          pubkey: event.pubkey,
+          channel_id: channelId,
+          channel_name: channel?.name ?? null,
+          created_at: event.created_at,
+          score: 1,
+        });
+      }
+    }
 
     const hits = mockHits
       .filter((hit) => {
@@ -5144,6 +5202,54 @@ async function handleSendChannelMessage(
     root_event_id: args.parentEventId ?? null,
     depth: args.parentEventId ? 1 : 0,
     created_at: Math.floor(Date.now() / 1000),
+  };
+}
+
+async function handleSendManagedAgentChannelMessage(
+  args: {
+    agentPubkey: string;
+    channelId: string;
+    content: string;
+    marker?: string | null;
+  },
+  _config: E2eConfig | undefined,
+): Promise<RawSendChannelMessageResponse> {
+  const agent = getMockManagedAgent(args.agentPubkey);
+  const marker = args.marker?.trim();
+  if (marker) {
+    const existing = getMockMessageStore(args.channelId).find(
+      (event) =>
+        event.pubkey === agent.pubkey &&
+        event.tags.some((tag) => tag[0] === "client" && tag[1] === marker),
+    );
+    if (existing) {
+      return {
+        event_id: existing.id,
+        parent_event_id: null,
+        root_event_id: null,
+        depth: 0,
+        created_at: existing.created_at,
+      };
+    }
+  }
+
+  const createdAt = Math.floor(Date.now() / 1000);
+  const event = createMockEvent(
+    9,
+    args.content.trim(),
+    [["h", args.channelId], ...(marker ? [["client", marker]] : [])],
+    agent.pubkey,
+    createdAt,
+  );
+  recordMockMessage(args.channelId, event);
+  emitMockLiveEvent(args.channelId, event);
+
+  return {
+    event_id: event.id,
+    parent_event_id: null,
+    root_event_id: null,
+    depth: 0,
+    created_at: createdAt,
   };
 }
 
@@ -6077,6 +6183,7 @@ export function maybeInstallE2eTauriMocks() {
       case "create_managed_agent":
         return handleCreateManagedAgent(
           payload as Parameters<typeof handleCreateManagedAgent>[0],
+          activeConfig,
         );
       case "start_managed_agent":
         return handleStartManagedAgent(
@@ -6205,6 +6312,11 @@ export function maybeInstallE2eTauriMocks() {
       case "send_channel_message":
         return handleSendChannelMessage(
           payload as Parameters<typeof handleSendChannelMessage>[0],
+          activeConfig,
+        );
+      case "send_managed_agent_channel_message":
+        return handleSendManagedAgentChannelMessage(
+          payload as Parameters<typeof handleSendManagedAgentChannelMessage>[0],
           activeConfig,
         );
       case "edit_message":

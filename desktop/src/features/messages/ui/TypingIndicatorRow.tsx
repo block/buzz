@@ -7,6 +7,7 @@ import {
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { Shimmer } from "@/shared/ui/Shimmer";
 
 type TypingIndicatorRowProps = {
   channel: Channel | null;
@@ -127,12 +128,12 @@ export function TypingIndicatorRow({
             className={cn(
               "truncate text-muted-foreground",
               isActivityVariant
-                ? "agent-activity-shimmer text-xs font-semibold leading-none"
+                ? "text-xs font-semibold leading-none"
                 : "text-sm",
             )}
             data-testid="message-typing-indicator-label"
           >
-            {formatTypingLabel(labels)}
+            <Shimmer>{formatTypingLabel(labels)}</Shimmer>
           </p>
         </div>
       )}

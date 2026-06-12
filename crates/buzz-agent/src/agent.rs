@@ -8,6 +8,7 @@ use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_
 use crate::handoff::HandoffOutcome;
 use crate::llm::Llm;
 use crate::mcp::McpRegistry;
+use crate::mcp::ResultBudget;
 
 use crate::types::{
     AgentError, ContentBlock, HistoryItem, ProviderStop, StopReason, ToolCall, ToolResult,
@@ -304,6 +305,10 @@ impl RunCtx<'_> {
             let wire = self.wire.clone();
             let session_id = self.session_id.to_owned();
             let timeout = self.cfg.tool_timeout;
+            let budget = ResultBudget {
+                total: MAX_TOOL_RESULT_BYTES,
+                text: self.cfg.max_tool_result_text_bytes,
+            };
             let cancel = self.cancel.clone();
             let sem = Arc::clone(&sem);
             set.spawn(async move {
@@ -317,7 +322,7 @@ impl RunCtx<'_> {
                     }
                 };
                 emit_in_progress(&wire, &session_id, &call).await;
-                let outcome = invoke_tool_inner(&mcp, &call, timeout, cancel).await;
+                let outcome = invoke_tool_inner(&mcp, &call, timeout, budget, cancel).await;
                 match &outcome {
                     InvokeOutcome::Done(result) => {
                         emit_completed(&wire, &session_id, &call, result).await;
@@ -419,6 +424,7 @@ async fn invoke_tool_inner(
     mcp: &Arc<McpRegistry>,
     call: &ToolCall,
     tool_timeout: std::time::Duration,
+    budget: ResultBudget,
     mut cancel: watch::Receiver<bool>,
 ) -> InvokeOutcome {
     if *cancel.borrow() {
@@ -430,7 +436,7 @@ async fn invoke_tool_inner(
             &call.name,
             &call.provider_id,
             &call.arguments,
-            MAX_TOOL_RESULT_BYTES,
+            budget,
             &mut cancel,
         ),
     )

@@ -4,11 +4,13 @@ import { ComposerAttachments } from "@/features/messages/ui/ComposerAttachments"
 type ComposerMedia = Pick<
   ReturnType<typeof useMediaUpload>,
   | "isUploading"
+  | "cancelUpload"
   | "pendingImeta"
   | "removeAttachment"
   | "setUploadState"
   | "uploadState"
   | "uploadingCount"
+  | "uploadingPreviews"
 >;
 
 type ForumComposerMediaStatusProps = {
@@ -38,8 +40,10 @@ export function ForumComposerMediaStatus({
           <ComposerAttachments
             attachments={media.pendingImeta}
             isUploading={media.isUploading}
+            onCancelUpload={media.cancelUpload}
             onRemove={media.removeAttachment}
             uploadingCount={media.uploadingCount}
+            uploadingPreviews={media.uploadingPreviews}
           />
         </div>
       )}

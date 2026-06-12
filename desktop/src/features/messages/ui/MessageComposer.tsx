@@ -17,7 +17,10 @@ import {
   stripImetaMediaLines,
 } from "@/features/messages/lib/imetaMediaMarkdown";
 
-import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
+import {
+  type MediaUploadController,
+  useMediaUpload,
+} from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import {
@@ -66,6 +69,7 @@ type MessageComposerProps = {
     imetaMedia?: ImetaMedia[];
   } | null;
   isSending?: boolean;
+  mediaController?: MediaUploadController;
   onCancelEdit?: () => void;
   onCancelReply?: () => void;
   /**
@@ -113,6 +117,7 @@ export function MessageComposer({
   placeholder,
   profiles,
   replyTarget = null,
+  mediaController,
   showTopBorder = false,
   toolbarExtraActions,
   typingParentEventId = null,
@@ -157,7 +162,9 @@ export function MessageComposer({
 
   // We pass a custom setter that both updates React state AND inserts
   // markdown into the Tiptap editor when media upload completes.
-  const media = useMediaUpload();
+  const internalMedia = useMediaUpload();
+  const media = mediaController ?? internalMedia;
+  const ownsDropZone = mediaController === undefined;
 
   const disabledRef = React.useRef(disabled);
   const isSendingRef = React.useRef(isSending);
@@ -722,17 +729,21 @@ export function MessageComposer({
           <form
             className="relative isolate rounded-2xl border border-border/50 bg-background/80 px-3 pb-2 pt-3 shadow-none backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55 sm:px-4"
             data-testid="message-composer"
-            onDragEnter={media.handleDragEnter}
-            onDragLeave={media.handleDragLeave}
-            onDragOver={media.handleDragOver}
-            onDrop={(e) => {
-              void media.handleDrop(e);
-            }}
+            onDragEnter={ownsDropZone ? media.handleDragEnter : undefined}
+            onDragLeave={ownsDropZone ? media.handleDragLeave : undefined}
+            onDragOver={ownsDropZone ? media.handleDragOver : undefined}
+            onDrop={
+              ownsDropZone
+                ? (e) => {
+                    void media.handleDrop(e);
+                  }
+                : undefined
+            }
             onSubmit={(event) => {
               handleSubmit(event);
             }}
           >
-            {media.isDragOver && <DropZoneOverlay />}
+            {ownsDropZone && media.isDragOver && <DropZoneOverlay />}
             <EmojiAutocomplete
               onSelect={applyEmojiInsert}
               selectedIndex={emojiAutocomplete.emojiSelectedIndex}
@@ -825,7 +836,9 @@ export function MessageComposer({
                 <ComposerAttachments
                   attachments={media.pendingImeta}
                   isUploading={media.isUploading}
+                  onCancelUpload={media.cancelUpload}
                   uploadingCount={media.uploadingCount}
+                  uploadingPreviews={media.uploadingPreviews}
                   onRemove={media.removeAttachment}
                 />
               </div>

@@ -13,6 +13,38 @@ type E2eWindow = Window & {
   __BUZZ_E2E__?: unknown;
 };
 
+const E2E_DEFAULT_PUBKEY = "deadbeef".repeat(8);
+const E2E_WORKSPACE_ID = "e2e-default-workspace";
+const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX =
+  "sprout-onboarding-complete.v1:";
+
+function configureDevE2eBridgeFromUrl() {
+  if (!import.meta.env.DEV) {
+    return;
+  }
+
+  const url = new URL(window.location.href);
+  if (url.searchParams.get("e2e") !== "mock") {
+    return;
+  }
+
+  const e2eWindow = window as E2eWindow;
+  e2eWindow.__BUZZ_E2E__ ??= { mode: "mock" };
+
+  const workspace = {
+    addedAt: new Date().toISOString(),
+    id: E2E_WORKSPACE_ID,
+    name: "E2E Test",
+    relayUrl: "ws://localhost:3000",
+  };
+  window.localStorage.setItem("sprout-workspaces", JSON.stringify([workspace]));
+  window.localStorage.setItem("sprout-active-workspace-id", E2E_WORKSPACE_ID);
+  window.localStorage.setItem(
+    `${ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX}${E2E_DEFAULT_PUBKEY}`,
+    "true",
+  );
+}
+
 function renderApp() {
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
@@ -44,6 +76,7 @@ async function installE2eBridgeIfConfigured() {
 }
 
 async function bootstrap() {
+  configureDevE2eBridgeFromUrl();
   await installE2eBridgeIfConfigured();
   renderApp();
 }

@@ -1,0 +1,254 @@
+name: Docker image
+
+# Builds and publishes the public Buzz relay image as ghcr.io/block/buzz.
+#
+# Strategy: each architecture builds on its native runner (ubuntu-24.04 for
+# amd64, ubuntu-24.04-arm for arm64), pushes to GHCR by digest, then a final
+# job stitches the per-arch digests into a single multi-arch manifest.
+# This avoids QEMU emulation (~10× slower for Rust) at zero cost on free
+# GitHub-hosted runners.
+#
+# Triggers:
+#   - push to main         → :main + :sha-<7>
+#   - push tags v*.*.*     → :latest + :{version} + :{major}.{minor} + :{major}
+#   - pull_request         → build only (no push), cache stays warm
+#   - workflow_dispatch    → manual canary
+
+on:
+  push:
+    branches: [main]
+    tags: ["v[0-9]*"]
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/docker.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
+      - "web/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "patches/**"
+  workflow_dispatch:
+
+# One image build per ref; cancel superseded PR builds, but never cancel
+# tag/main builds (publishing must not be aborted mid-flight).
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' && github.event_name == 'pull_request' }}
+
+permissions: {}
+
+env:
+  # Single source of truth for the image name. Set GHCR_IMAGE as a repo
+  # variable to override (e.g., for forks that want to push to their own
+  # namespace without forking this file).
+  IMAGE_NAME: ${{ vars.GHCR_IMAGE != '' && vars.GHCR_IMAGE || 'ghcr.io/block/buzz' }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write    # push to GHCR
+      id-token: write    # OIDC for build provenance attestation
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+
+    outputs:
+      # Used downstream by `merge` to stitch the manifest.
+      version: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+        with:
+          # Default parallelism of 4 OOMs the 7GB GitHub runner during Rust
+          # compiles (see moby/buildkit#3969). Vaultwarden hit this; we will
+          # too without the cap.
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+
+      - name: Log in to GHCR
+        # Skip on pull_request from forks — no GHCR creds, build-only.
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          # Tag matrix — every main commit gets sha-<7>, releases get full
+          # semver family. Pull requests get nothing (push: false below).
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=Buzz
+            org.opencontainers.image.description=WebSocket relay server for the Buzz communications platform
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Push by digest, not by tag — the merge job assembles the tags
+          # into one multi-arch manifest. This is what makes the native-arm
+          # matrix possible.
+          outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          cache-from: |
+            type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }}
+          cache-to: |
+            type=registry,ref=${{ env.IMAGE_NAME }}-buildcache:${{ matrix.arch }},mode=max,compression=zstd
+
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge multi-arch manifest
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write    # push the merged manifest
+      id-token: write    # OIDC for provenance attestation on the manifest
+      attestations: write
+
+    steps:
+      - name: Download all per-arch digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Create and push manifest list
+        id: manifest
+        working-directory: /tmp/digests
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          # Build -t flags from the metadata-action output.
+          tags=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] && tags+=("-t" "$tag")
+          done <<< "$META_TAGS"
+
+          # Build the digest refs from the per-arch artifacts.
+          digests=()
+          for digest in *; do
+            digests+=("${IMAGE_NAME}@sha256:${digest}")
+          done
+
+          docker buildx imagetools create "${tags[@]}" "${digests[@]}"
+
+          # Capture the merged manifest digest for the attestation step.
+          first_tag=$(echo "$META_TAGS" | head -n1)
+          merged_digest=$(docker buildx imagetools inspect "$first_tag" \
+            --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "digest=${merged_digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest provenance for the merged image
+        # Sigstore-signed in-toto attestation, verifiable with:
+        #   gh attestation verify oci://ghcr.io/block/buzz:<tag> --owner block
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          MERGED_DIGEST: ${{ steps.manifest.outputs.digest }}
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "### Published \`${IMAGE_NAME}\`"
+            echo
+            echo "**Digest:** \`${MERGED_DIGEST}\`"
+            echo
+            echo "**Tags:**"
+            echo '```'
+            echo "${META_TAGS}"
+            echo '```'
+            echo
+            echo "Verify provenance:"
+            echo '```'
+            echo "gh attestation verify oci://${IMAGE_NAME}@${MERGED_DIGEST} --owner block"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

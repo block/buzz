@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.3.18
+
+05fc69b8408 Video Player Improvements  (#993)
+d9ce0943edb Improve first-run welcome setup (#970)
+50986406ffa fix(release): use legacy updater key secret (#991)
+ea5a0a9b405 Replace built-in personas with Fizz (#987)
+6541765416b docs(buzz-acp): rewrite Communication Patterns for mention accuracy and threading clarity (#982)
+a101fd6ad38 chore(justfile): build git-credential-nostr in dev and staging recipes (#980)
+824c55114ef Fix Buzz command migration for saved agents (#979)
+63738139bac fix(desktop): resolve effective model and prompt from persona in display path (#972)
+1bb8b8d547a docs: clean up remaining Buzz references (#977)
+
+
 ## v0.3.17
 
 79bcee55cb7 docs: finish Buzz rename cleanup (#974)

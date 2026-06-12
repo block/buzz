@@ -142,7 +142,9 @@ fn patch_json_records(
     }
     if changed {
         if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
-            let _ = std::fs::write(path, bytes);
+            if let Err(e) = crate::managed_agents::atomic_write_json(path, &bytes) {
+                eprintln!("buzz-desktop: patch-json-records: {e}");
+            }
         }
     }
 }
@@ -343,8 +345,8 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
     }
 }
 
-fn reconcile_team_dirs_in_file(path: &Path, canonical_dir: &Path) {
-    let canonical_teams = canonical_dir.join("agents/teams");
+fn reconcile_team_dirs_in_file(path: &Path, target_dir: &Path) {
+    let target_teams = target_dir.join("agents/teams");
     patch_json_records(path, |obj| {
         // Handle both old field name and new field name
         let field_name = if obj.contains_key("persona_team_dir") {
@@ -374,43 +376,111 @@ fn reconcile_team_dirs_in_file(path: &Path, canonical_dir: &Path) {
         let Some(id) = team_id else {
             return false;
         };
-        let expected = canonical_teams.join(id);
+        let expected = target_teams.join(id);
         if team_path == expected {
+            // Value already correct — still normalize the legacy field name so
+            // stores converge on `persona_team_dir` (runtime reads either via
+            // serde alias).
+            if field_name == "persona_pack_path" {
+                if let Some(val) = obj.remove("persona_pack_path") {
+                    obj.insert("persona_team_dir".to_string(), val);
+                    return true;
+                }
+            }
             return false;
         }
+        // Rewriting to a path that does not exist on disk makes things worse
+        // than leaving a stale-but-working path in place. fs::metadata follows
+        // symlinks, so a valid symlinked install passes; a dangling symlink
+        // fails with NotFound.
+        if let Err(e) = std::fs::metadata(&expected) {
+            eprintln!(
+                "buzz-desktop: team-dir-reconcile: {:?}: {:?} expected at {:?} — {e}, leaving as-is",
+                obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+                team_path,
+                expected,
+            );
+            return false;
+        }
+        let Some(expected_str) = expected.to_str() else {
+            eprintln!(
+                "buzz-desktop: team-dir-reconcile: {:?}: expected path {:?} is not valid UTF-8, leaving as-is",
+                obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+                expected,
+            );
+            return false;
+        };
         eprintln!(
             "buzz-desktop: team-dir-reconcile: {:?}: {:?} → {:?}",
             obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
             team_path,
             expected,
         );
-        // Always write the canonical new field name
+        // Always write the new field name
         obj.remove("persona_pack_path");
         obj.insert(
             "persona_team_dir".to_string(),
-            serde_json::Value::String(expected.to_string_lossy().into_owned()),
+            serde_json::Value::String(expected_str.to_owned()),
         );
         true
     });
 }
 
+/// Select the data directory to reconcile against.
+///
+/// Dev instances — identified by the data-dir name starting with
+/// `CANONICAL_DEV_IDENTIFIER` (covers the canonical dir itself and any
+/// worktree variant like `xyz.block.buzz.app.dev.mybranch`) — share
+/// `agents/managed-agents.json` and `agents/teams` via symlinks to the
+/// canonical dev dir, so they should normalize against that canonical dir.
+///
+/// Release builds must reconcile their own data dir — keying off the canonical
+/// dev dir's mere existence would leave release records permanently stale on
+/// developer machines, where that dir is always present.
+fn reconcile_target_dir(current_dir: &Path) -> PathBuf {
+    let is_dev_instance = current_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(CANONICAL_DEV_IDENTIFIER));
+    if is_dev_instance {
+        match canonical_dev_data_dir(current_dir) {
+            Some(dir) if dir.exists() => dir,
+            _ => current_dir.to_path_buf(),
+        }
+    } else {
+        current_dir.to_path_buf()
+    }
+}
+
 /// Reconcile `persona_team_dir` (and legacy `persona_pack_path`) values in
-/// managed-agents.json to point to the canonical dev data directory's
-/// `agents/teams/` prefix. Fixes stale paths left when agents were created
-/// from worktree instances whose data directories don't have local team copies.
+/// managed-agents.json to point to the correct `agents/teams/` prefix.
+///
+/// Fixes two classes of stale paths:
+/// - Worktree dev instances whose records point at a sibling data dir rather
+///   than the canonical dev dir (dev instances share managed-agents.json and
+///   agents/teams via symlinks, so they all reconcile against the canonical dir).
+/// - Legacy paths left by historical renames: `agents/packs/` → `agents/teams/`
+///   (the packs→teams consolidation) and bundle-id `xyz.block.sprout.app` →
+///   `xyz.block.buzz.app` (the sprout→buzz rename, which moved the app data dir).
+///
+/// Release builds reconcile their own data dir — choosing the canonical dev dir
+/// whenever it exists would leave release files permanently stale on developer
+/// machines.
 pub fn reconcile_persona_team_dirs(app: &tauri::AppHandle) {
     let Ok(current_dir) = app.path().app_data_dir() else {
         return;
     };
-    let canonical_dir = match canonical_dev_data_dir(&current_dir) {
-        Some(dir) if dir.exists() => dir,
-        _ => current_dir,
-    };
-    let path = canonical_dir.join("agents/managed-agents.json");
+    // Single-dir on purpose: unlike reconcile_legacy_command_names and
+    // reconcile_provider_mcp_commands, which patch both [current, canonical],
+    // path rewrites are target-dependent — a dual pass through a dev
+    // instance's symlinked store would write worktree-local paths into the
+    // shared canonical file.
+    let target_dir = reconcile_target_dir(&current_dir);
+    let path = target_dir.join("agents/managed-agents.json");
     if !path.exists() {
         return;
     }
-    reconcile_team_dirs_in_file(&path, &canonical_dir);
+    reconcile_team_dirs_in_file(&path, &target_dir);
 }
 
 /// One-time migration from packs to teams.
@@ -428,15 +498,12 @@ pub fn migrate_packs_to_teams(app: &tauri::AppHandle) {
     let Ok(current_dir) = app.path().app_data_dir() else {
         return;
     };
-    let canonical_dir = match canonical_dev_data_dir(&current_dir) {
-        Some(dir) if dir.exists() => dir,
-        _ => current_dir,
-    };
+    let target_dir = reconcile_target_dir(&current_dir);
 
-    let packs_dir = canonical_dir.join("agents/packs");
-    let teams_dir = canonical_dir.join("agents/teams");
-    let personas_path = canonical_dir.join("agents/personas.json");
-    let agents_path = canonical_dir.join("agents/managed-agents.json");
+    let packs_dir = target_dir.join("agents/packs");
+    let teams_dir = target_dir.join("agents/teams");
+    let personas_path = target_dir.join("agents/personas.json");
+    let agents_path = target_dir.join("agents/managed-agents.json");
 
     // Check if migration is needed: packs dir exists OR agents JSON has old field names
     let packs_dir_exists = packs_dir.exists() && !packs_dir.is_symlink();
@@ -832,9 +899,17 @@ pub fn migrate_persona_provider_to_runtime(app: &tauri::AppHandle) {
 }
 
 #[cfg(test)]
+#[path = "migration_test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
 #[path = "migration_tests.rs"]
 mod tests;
 
 #[cfg(test)]
 #[path = "migration_command_tests.rs"]
 mod command_tests;
+
+#[cfg(test)]
+#[path = "migration_team_dir_tests.rs"]
+mod team_dir_tests;

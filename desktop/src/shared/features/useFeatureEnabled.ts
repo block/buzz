@@ -50,6 +50,7 @@ export function emitChange(): void {
 
 let cachedRaw: string | null = null;
 let cachedParsed: Record<string, boolean> | null = null;
+const emptyOverrides = Object.freeze({}) as Record<string, boolean>;
 
 function getSnapshot(): string {
   const raw = JSON.stringify(getOverrides());
@@ -73,7 +74,7 @@ const getServerSnapshot = (): string => "{}";
 function getParsedSnapshot(): Record<string, boolean> {
   // Ensure snapshot is fresh
   getSnapshot();
-  return cachedParsed ?? {};
+  return cachedParsed ?? emptyOverrides;
 }
 
 // ---------------------------------------------------------------------------

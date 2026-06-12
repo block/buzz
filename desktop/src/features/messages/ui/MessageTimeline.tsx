@@ -1,10 +1,10 @@
 import * as React from "react";
-import { ArrowDown } from "lucide-react";
+import { ArrowDown, Hash } from "lucide-react";
 
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import type { ChannelType } from "@/shared/api/types";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
-import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Button } from "@/shared/ui/button";
@@ -18,6 +18,9 @@ import { useTimelineScrollManager } from "./useTimelineScrollManager";
 type MessageTimelineProps = {
   agentPubkeys?: ReadonlySet<string>;
   channelId?: string | null;
+  channelIntro?: ChannelIntro | null;
+  channelName?: string;
+  channelType?: ChannelType | null;
   messages: TimelineMessage[];
   directMessageIntro?: {
     avatarUrl: string | null;
@@ -45,6 +48,14 @@ type MessageTimelineProps = {
   onEdit?: (message: TimelineMessage) => void;
   onMarkUnread?: (message: TimelineMessage) => void;
   onReply?: (message: TimelineMessage) => void;
+  isSendingVideoReviewComment?: boolean;
+  onSendVideoReviewComment?: (
+    message: TimelineMessage,
+    content: string,
+    mentionPubkeys: string[],
+    mediaTags?: string[][],
+    parentEventId?: string,
+  ) => Promise<void>;
   unfollowThreadById?: (rootId: string) => void;
   onToggleReaction?: (
     message: TimelineMessage,
@@ -61,9 +72,26 @@ type MessageTimelineProps = {
   onTargetReached?: (messageId: string) => void;
 };
 
+type ChannelIntroAction = {
+  description?: string;
+  icon: React.ReactNode;
+  label: string;
+  onClick: () => void;
+  testId?: string;
+};
+
+type ChannelIntro = {
+  actions?: ChannelIntroAction[];
+  channelKindLabel: string;
+  channelName: string;
+  description?: string | null;
+  icon?: React.ReactNode;
+};
+
 export const MessageTimeline = React.memo(function MessageTimeline({
   agentPubkeys,
   channelId,
+  channelIntro = null,
   directMessageIntro = null,
   messages,
   isLoading = false,
@@ -83,6 +111,10 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   onEdit,
   onMarkUnread,
   onReply,
+  channelName,
+  channelType,
+  isSendingVideoReviewComment = false,
+  onSendVideoReviewComment,
   onToggleReaction,
   unfollowThreadById,
   scrollContainerRef: externalScrollRef,
@@ -150,15 +182,16 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     sentinelRef: topSentinelRef,
   });
 
-  const hasConversationMessage = messages.some(
-    (message) => message.kind !== KIND_SYSTEM_MESSAGE,
-  );
-  const showDirectMessageIntro =
-    !isLoading && directMessageIntro !== null && !hasConversationMessage;
+  const showDirectMessageIntro = !isLoading && directMessageIntro !== null;
+  const showChannelIntro =
+    !isLoading && channelIntro !== null && directMessageIntro === null;
+  const showIntro = showDirectMessageIntro || showChannelIntro;
   const showGenericEmpty =
-    !isLoading && messages.length === 0 && directMessageIntro === null;
-  const showMessageList =
-    !isLoading && messages.length > 0 && !showDirectMessageIntro;
+    !isLoading &&
+    messages.length === 0 &&
+    directMessageIntro === null &&
+    channelIntro === null;
+  const showMessageList = !isLoading && messages.length > 0;
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -177,7 +210,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
             className={cn(
               "flex w-full flex-col gap-2",
               channelChrome.contentPadding,
-              (showDirectMessageIntro || showGenericEmpty) && "min-h-full",
+              (showIntro || showGenericEmpty) && "min-h-full",
             )}
             ref={contentRef}
           >
@@ -193,7 +226,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
 
             {showDirectMessageIntro ? (
               <div
-                className="mb-10 mt-auto flex w-full flex-col items-start text-left sm:-ml-2"
+                className="mb-0.5 mt-auto flex w-full flex-col items-start px-3 py-2 text-left"
                 data-testid="message-dm-intro"
               >
                 <ProfileAvatar
@@ -216,9 +249,102 @@ export const MessageTimeline = React.memo(function MessageTimeline({
               </div>
             ) : null}
 
+            {showChannelIntro ? (
+              <div
+                className="mb-0.5 mt-auto flex w-full max-w-2xl flex-col items-start px-3 py-2 text-left"
+                data-testid="message-channel-intro"
+              >
+                <div
+                  className="flex h-[60px] w-[60px] items-center justify-center rounded-2xl border border-border/70 bg-muted/40 text-muted-foreground"
+                  data-testid="message-channel-intro-icon"
+                >
+                  {channelIntro.icon ?? (
+                    <Hash aria-hidden className="h-7 w-7" />
+                  )}
+                </div>
+                <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
+                  #{channelIntro.channelName}
+                </p>
+                <p className="mt-1 max-w-full text-sm leading-5 text-muted-foreground">
+                  This is the beginning of the{" "}
+                  <span className="font-medium text-foreground">
+                    {channelIntro.channelKindLabel}
+                  </span>
+                  .
+                </p>
+                {channelIntro.description ? (
+                  <p className="mt-2 max-w-xl text-sm leading-5 text-muted-foreground">
+                    {channelIntro.description}
+                  </p>
+                ) : null}
+                {channelIntro.actions?.length ? (
+                  <div className="mt-4 flex max-w-full flex-nowrap gap-3 overflow-x-auto pb-1">
+                    {channelIntro.actions.map((action) => {
+                      const hasDescription = Boolean(action.description);
+
+                      return (
+                        <button
+                          className={cn(
+                            "flex shrink-0 border border-border/70 bg-background/70 text-left transition-colors hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                            hasDescription
+                              ? "h-56 w-[13.75rem] flex-col rounded-2xl p-4"
+                              : "h-28 w-64 flex-col rounded-xl p-4",
+                          )}
+                          data-testid={action.testId}
+                          key={action.label}
+                          onClick={action.onClick}
+                          type="button"
+                        >
+                          <span
+                            className={cn(
+                              "flex shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground",
+                              hasDescription
+                                ? "h-12 w-12 [&_svg]:h-6 [&_svg]:w-6"
+                                : "h-10 w-10 [&_svg]:h-5 [&_svg]:w-5",
+                            )}
+                            data-testid={
+                              action.testId
+                                ? `${action.testId}-icon`
+                                : undefined
+                            }
+                          >
+                            {action.icon}
+                          </span>
+                          <span className="mt-auto min-w-0">
+                            <span
+                              className="block whitespace-normal break-words text-base font-medium leading-6 text-foreground"
+                              data-testid={
+                                action.testId
+                                  ? `${action.testId}-title`
+                                  : undefined
+                              }
+                            >
+                              {action.label}
+                            </span>
+                            {action.description ? (
+                              <span
+                                className="mt-1 block whitespace-normal break-words text-sm leading-5 text-muted-foreground"
+                                data-testid={
+                                  action.testId
+                                    ? `${action.testId}-description`
+                                    : undefined
+                                }
+                              >
+                                {action.description}
+                              </span>
+                            ) : null}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
             {showGenericEmpty ? (
               <div
-                className="rounded-3xl border border-dashed border-border/80 bg-card/70 px-6 py-10 text-center shadow-xs"
+                className="mt-auto rounded-3xl border border-dashed border-border/80 bg-card/70 px-6 py-10 text-center shadow-xs"
                 data-testid="message-empty"
               >
                 <p className="text-base font-semibold tracking-tight">
@@ -231,27 +357,35 @@ export const MessageTimeline = React.memo(function MessageTimeline({
             ) : null}
 
             {showMessageList ? (
-              <TimelineMessageList
-                agentPubkeys={agentPubkeys}
-                channelId={channelId}
-                currentPubkey={currentPubkey}
-                followThreadById={followThreadById}
-                highlightedMessageId={highlightedMessageId}
-                isFollowingThreadById={isFollowingThreadById}
-                messageFooters={messageFooters}
-                messages={messages}
-                onDelete={onDelete}
-                onEdit={onEdit}
-                onMarkUnread={onMarkUnread}
-                onReply={onReply}
-                onToggleReaction={onToggleReaction}
-                personaLookup={personaLookup}
-                profiles={profiles}
-                searchActiveMessageId={searchActiveMessageId}
-                searchMatchingMessageIds={searchMatchingMessageIds}
-                searchQuery={searchQuery}
-                unfollowThreadById={unfollowThreadById}
-              />
+              <div
+                className={cn("flex flex-col gap-2", !showIntro && "mt-auto")}
+              >
+                <TimelineMessageList
+                  agentPubkeys={agentPubkeys}
+                  channelId={channelId}
+                  channelName={channelName}
+                  channelType={channelType}
+                  currentPubkey={currentPubkey}
+                  followThreadById={followThreadById}
+                  highlightedMessageId={highlightedMessageId}
+                  isFollowingThreadById={isFollowingThreadById}
+                  messageFooters={messageFooters}
+                  messages={messages}
+                  onDelete={onDelete}
+                  onEdit={onEdit}
+                  onMarkUnread={onMarkUnread}
+                  onReply={onReply}
+                  isSendingVideoReviewComment={isSendingVideoReviewComment}
+                  onSendVideoReviewComment={onSendVideoReviewComment}
+                  onToggleReaction={onToggleReaction}
+                  personaLookup={personaLookup}
+                  profiles={profiles}
+                  searchActiveMessageId={searchActiveMessageId}
+                  searchMatchingMessageIds={searchMatchingMessageIds}
+                  searchQuery={searchQuery}
+                  unfollowThreadById={unfollowThreadById}
+                />
+              </div>
             ) : null}
 
             <div aria-hidden className="h-px" ref={bottomAnchorRef} />

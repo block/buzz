@@ -17,21 +17,36 @@ use crate::{app_state::AppState, events, relay::submit_event};
 
 /// Voice-mode guidelines posted as kind:48106 (huddle guidelines) to the
 /// ephemeral channel at huddle start. Agents see them via EOSE replay.
-/// Instructs agents on voice-mode etiquette: TTS constraints, brevity, self-selection.
+/// Instructs agents on voice-mode etiquette: TTS constraints, brevity,
+/// self-selection, and sentence-at-a-time delivery.
+///
+/// Why sentence-at-a-time: the desktop speaks each agent message as it
+/// arrives (queued, in order), so an agent that sends its first sentence
+/// immediately — then the rest as separate messages — cuts time-to-first-
+/// audio from "full reply generated" to "first sentence generated". This is
+/// the prompt-level equivalent of token streaming, with no harness changes.
+///
 /// Build voice-mode guidelines with the parent channel ID so agents know
 /// where "the main channel" is.
 pub fn voice_mode_guidelines(parent_channel_id: &str) -> String {
     format!(
         "\
 You are in a live voice huddle attached to channel {parent_channel_id}.
-Your text is read aloud via TTS. You will be interrupted when humans speak — this is normal.
+Your text is read aloud via TTS, message by message, in the order sent.
+
+Latency matters most: reply IMMEDIATELY — do not compose your full reply
+before sending anything. The moment your first sentence is formed, send it
+as its own `buzz messages send` tool call: it is what breaks the silence.
+Then send each following sentence the same way — one sentence per separate
+`buzz messages send` call. Never hold a finished sentence back to bundle it
+with the next one.
 
 - If not addressed or relevant: do nothing. Do not respond.
-- One or two short sentences max. Start with the answer, no preamble.
+- Keep the whole reply short — a few sentences at most. Start with the answer, no preamble.
 - No markdown, code blocks, lists, or structured data — say it naturally.
 - To share code or detailed data: say \"I'll post that in the main channel\" and do so.
-- When tool results are long, summarize the key finding verbally.
-- If interrupted, continue naturally. No apologies.
+- When you need a tool, say one short sentence first (e.g. \"Let me check.\"), then run it, then summarize the key finding verbally.
+- If a new human message arrives mid-reply, you were interrupted: drop your unsent sentences and respond to the new message instead.
 - In multi-agent huddles, identify yourself only when needed.
 - Use your Buzz tools proactively when asked."
     )

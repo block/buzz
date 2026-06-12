@@ -1,10 +1,32 @@
 import * as React from "react";
 import { useQueryClient, type QueryStatus } from "@tanstack/react-query";
 
+import {
+  managedAgentsQueryKey,
+  relayAgentsQueryKey,
+} from "@/features/agents/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
+import {
+  ensureWelcomeChannel,
+  hasEnsuredWelcomeChannel,
+  markWelcomeChannelEnsured,
+  notifyWelcomeChannelReady,
+  rememberPendingWelcomeChannel,
+} from "@/features/onboarding/welcome";
+import {
+  ensureWelcomeGuideIntro,
+  getWelcomeGuideAgentPubkeys,
+} from "@/features/onboarding/welcomeGuide";
 import { useProfileQuery } from "@/features/profile/hooks";
+import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { useIdentityQuery } from "@/shared/api/hooks";
-import { getChannels, joinChannel } from "@/shared/api/tauri";
+import {
+  createChannel,
+  getChannelMembers,
+  getChannels,
+  joinChannel,
+  updateChannel,
+} from "@/shared/api/tauri";
 
 const DEFAULT_AUTO_JOIN_CHANNEL_NAME = "general";
 
@@ -23,9 +45,75 @@ async function autoJoinDefaultChannel(
     await joinChannel(target.id);
     await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
   } catch {
-    // Silent — auto-join is best-effort; the user can still find and join
-    // the channel manually from the channel browser.
+    // Silent: auto-join is best-effort. The Welcome channel is created
+    // separately, and users can still join channels manually from the browser.
   }
+}
+
+async function initializeWelcomeChannel(
+  queryClient: ReturnType<typeof useQueryClient>,
+  {
+    focus,
+    pubkey,
+    workspaceScope,
+  }: {
+    focus: boolean;
+    pubkey: string | null;
+    workspaceScope: string | null;
+  },
+) {
+  try {
+    const allowedMemberPubkeys = await getWelcomeGuideAgentPubkeys(
+      workspaceScope,
+    ).catch(() => []);
+    const welcomeChannel = await ensureWelcomeChannel(
+      {
+        createChannel,
+        getChannelMembers,
+        getChannels,
+        updateChannel,
+      },
+      {
+        allowedMemberPubkeys,
+      },
+    );
+    let didInitializeWelcomeGuide = false;
+    try {
+      await ensureWelcomeGuideIntro(welcomeChannel.id, workspaceScope);
+      didInitializeWelcomeGuide = true;
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey }),
+      ]);
+    } catch (error) {
+      console.warn("Failed to initialize Welcome guide.", error);
+    }
+    if (didInitializeWelcomeGuide) {
+      markWelcomeChannelEnsured(pubkey, workspaceScope);
+    }
+    if (focus) {
+      rememberPendingWelcomeChannel(welcomeChannel.id);
+    }
+    await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
+    if (focus) {
+      notifyWelcomeChannelReady(welcomeChannel.id);
+    }
+  } catch (error) {
+    console.warn("Failed to initialize Welcome channel.", error);
+  }
+}
+
+async function refreshChannelsCache(
+  queryClient: ReturnType<typeof useQueryClient>,
+) {
+  try {
+    queryClient.setQueryData(channelsQueryKey, await getChannels());
+  } catch {
+    // The next mounted channels query can still retry; this cache refresh is
+    // only here to avoid a blank Home flash after first-run setup.
+  }
+
+  await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
 }
 
 const ONBOARDING_COMPLETION_STORAGE_KEY = "buzz-onboarding-complete.v1";
@@ -278,9 +366,16 @@ export function useFirstRunOnboardingGate({
 
 export function useAppOnboardingState(isSharedIdentity: boolean) {
   const queryClient = useQueryClient();
+  const { activeWorkspace } = useWorkspaces();
   const identityQuery = useIdentityQuery();
   const identity = identityQuery.data;
   const currentPubkey = identity?.pubkey ?? null;
+  const welcomeChannelWorkspaceScope = activeWorkspace?.relayUrl ?? null;
+  const welcomeChannelInitPromisesRef = React.useRef(
+    new Map<string, Promise<void>>(),
+  );
+  const [isCompletingWelcomeSetup, setIsCompletingWelcomeSetup] =
+    React.useState(false);
   const profileQuery = useProfileQuery();
   const onboardingGate = useFirstRunOnboardingGate({
     currentPubkey,
@@ -292,13 +387,68 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     profileStatus: profileQuery.status,
   });
   const gateComplete = onboardingGate.complete;
-  const completeAndAutoJoin = React.useCallback(() => {
+  const requestWelcomeChannel = React.useCallback(
+    (focus: boolean) => {
+      if (!currentPubkey || !welcomeChannelWorkspaceScope) {
+        return Promise.resolve();
+      }
+
+      const welcomeChannelInitKey = `${welcomeChannelWorkspaceScope}:${currentPubkey}`;
+      const currentPromise = welcomeChannelInitPromisesRef.current.get(
+        welcomeChannelInitKey,
+      );
+      if (currentPromise) {
+        return currentPromise;
+      }
+
+      const promise = initializeWelcomeChannel(queryClient, {
+        focus,
+        pubkey: currentPubkey,
+        workspaceScope: welcomeChannelWorkspaceScope,
+      });
+      welcomeChannelInitPromisesRef.current.set(welcomeChannelInitKey, promise);
+      void promise.finally(() => {
+        welcomeChannelInitPromisesRef.current.delete(welcomeChannelInitKey);
+      });
+      return promise;
+    },
+    [currentPubkey, queryClient, welcomeChannelWorkspaceScope],
+  );
+
+  React.useEffect(() => {
+    if (
+      onboardingGate.stage !== "ready" ||
+      !currentPubkey ||
+      !welcomeChannelWorkspaceScope ||
+      !readOnboardingCompletion(currentPubkey) ||
+      hasEnsuredWelcomeChannel(currentPubkey, welcomeChannelWorkspaceScope)
+    ) {
+      return;
+    }
+
+    void requestWelcomeChannel(false);
+  }, [
+    currentPubkey,
+    onboardingGate.stage,
+    requestWelcomeChannel,
+    welcomeChannelWorkspaceScope,
+  ]);
+
+  const completeAndShowWelcome = React.useCallback(() => {
+    setIsCompletingWelcomeSetup(true);
     gateComplete();
-    void autoJoinDefaultChannel(queryClient);
-  }, [gateComplete, queryClient]);
+    void Promise.all([
+      requestWelcomeChannel(true),
+      autoJoinDefaultChannel(queryClient),
+    ])
+      .then(() => refreshChannelsCache(queryClient))
+      .finally(() => {
+        setIsCompletingWelcomeSetup(false);
+      });
+  }, [gateComplete, queryClient, requestWelcomeChannel]);
   const flow = {
     actions: {
-      complete: completeAndAutoJoin,
+      complete: completeAndShowWelcome,
       skipForNow: onboardingGate.skipForNow,
     },
     initialProfile: {
@@ -309,6 +459,6 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   return {
     currentPubkey,
     flow,
-    stage: onboardingGate.stage,
+    stage: isCompletingWelcomeSetup ? "blocking" : onboardingGate.stage,
   };
 }

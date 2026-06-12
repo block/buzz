@@ -91,8 +91,8 @@ jobs:
       - name: Unit tests
         run: just test-unit
 
-  desktop:
-    name: Desktop
+  desktop-core:
+    name: Desktop Core
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [changes]
@@ -142,34 +142,12 @@ jobs:
           restore-keys: pnpm-${{ runner.os }}-
       - name: Install desktop dependencies
         run: just desktop-install-ci
-      - name: Get Playwright version
-        id: pw-version
-        run: echo "version=$(cd desktop && node -e "console.log(require('@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
-      - name: Restore Playwright browser cache
-        id: playwright-cache
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
-        with:
-          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
-          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: cd desktop && pnpm exec playwright install chromium
-      - name: Install Playwright system dependencies
-        run: cd desktop && pnpm exec playwright install-deps chromium
-      - name: Save Playwright browser cache
-        if: steps.playwright-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
-        with:
-          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
-          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
       - name: Desktop lint and format
         run: just desktop-check
       - name: Desktop unit tests
         run: just desktop-test
       - name: Desktop build
         run: just desktop-build
-      - name: Desktop smoke e2e
-        run: cd desktop && pnpm exec playwright test --project=smoke
       - name: Desktop Tauri check
         run: just desktop-tauri-check
         env:
@@ -194,10 +172,91 @@ jobs:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
 
-  desktop-e2e-integration:
-    name: Desktop E2E Integration
+  desktop-smoke-e2e:
+    name: Desktop Smoke E2E (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+      - name: Restore pnpm store cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+      - name: Get Playwright version
+        id: pw-version
+        run: echo "version=$(cd desktop && node -e "console.log(require('@playwright/test/package.json').version)")" >> "$GITHUB_OUTPUT"
+      - name: Restore Playwright browser cache
+        id: playwright-cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
+      - name: Install Playwright Chromium
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: cd desktop && pnpm exec playwright install chromium
+      - name: Install Playwright system dependencies
+        run: cd desktop && pnpm exec playwright install-deps chromium
+      - name: Save Playwright browser cache
+        if: steps.playwright-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && matrix.shard == 1
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
+      - name: Desktop build
+        run: just desktop-build
+      - name: Desktop smoke e2e
+        run: cd desktop && pnpm exec playwright test --project=smoke --shard=${{ matrix.shard }}/4
+      - name: Upload desktop smoke e2e artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-smoke-e2e-artifacts-${{ matrix.shard }}
+          path: |
+            desktop/playwright-report
+            desktop/test-results
+          if-no-files-found: ignore
+
+  desktop:
+    name: Desktop
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [changes, desktop-core, desktop-smoke-e2e]
+    if: always() && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    permissions:
+      contents: read
+    steps:
+      - name: Check desktop jobs
+        run: |
+          if [ "${{ needs.desktop-core.result }}" != "success" ]; then
+            echo "Desktop Core finished with: ${{ needs.desktop-core.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.desktop-smoke-e2e.result }}" != "success" ]; then
+            echo "Desktop Smoke E2E shards finished with: ${{ needs.desktop-smoke-e2e.result }}"
+            exit 1
+          fi
+          echo "Desktop jobs passed"
+
+  desktop-e2e-relay:
+    name: Desktop E2E Relay
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [changes]
     if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
     permissions:
@@ -211,6 +270,31 @@ jobs:
             .
             desktop/src-tauri
           save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Build relay
+        run: cargo build --profile ci -p buzz-relay
+      - name: Upload relay binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-e2e-relay
+          path: target/ci/buzz-relay
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop-e2e-integration-shard:
+    name: Desktop E2E Integration (${{ matrix.shard }}/2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [changes, desktop-e2e-relay]
+    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
       - name: Start integration services
         run: docker compose up -d postgres redis typesense minio minio-init
       - name: Get pnpm store directory
@@ -239,7 +323,7 @@ jobs:
       - name: Install Playwright system dependencies
         run: cd desktop && pnpm exec playwright install-deps chromium
       - name: Save Playwright browser cache
-        if: steps.playwright-cache.outputs.cache-hit != 'true' && github.event_name == 'push'
+        if: steps.playwright-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && matrix.shard == 1
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
@@ -274,10 +358,14 @@ jobs:
           PGUSER: buzz
           PGPASSWORD: buzz_dev
           PGDATABASE: buzz
-      - name: Build relay
-        run: cargo build --profile ci -p buzz-relay
+      - name: Download relay binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: desktop-e2e-relay
+          path: target/ci
       - name: Start relay
         run: |
+          chmod +x ./target/ci/buzz-relay
           nohup env \
             DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz \
             REDIS_URL=redis://localhost:6379 \
@@ -306,12 +394,12 @@ jobs:
       - name: Seed desktop e2e data
         run: bash scripts/setup-desktop-test-data.sh
       - name: Desktop relay-backed e2e
-        run: cd desktop && pnpm exec playwright test --project=integration
+        run: cd desktop && pnpm exec playwright test --project=integration --shard=${{ matrix.shard }}/2
       - name: Upload desktop integration artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: desktop-e2e-integration-artifacts
+          name: desktop-e2e-integration-artifacts-${{ matrix.shard }}
           path: |
             desktop/playwright-report
             desktop/test-results
@@ -323,6 +411,23 @@ jobs:
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
           key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+
+  desktop-e2e-integration:
+    name: Desktop E2E Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [changes, desktop-e2e-integration-shard]
+    if: always() && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
+    permissions:
+      contents: read
+    steps:
+      - name: Check integration shards
+        run: |
+          if [ "${{ needs.desktop-e2e-integration-shard.result }}" != "success" ]; then
+            echo "Desktop E2E Integration shards finished with: ${{ needs.desktop-e2e-integration-shard.result }}"
+            exit 1
+          fi
+          echo "Desktop E2E Integration shards passed"
 
   web:
     name: Web

@@ -26,6 +26,16 @@ const MARKER_FIELD_MAX: usize = 256;
 pub const MAX_MCP_SERVERS: usize = 16;
 const MAX_HOOK_RESULT_BYTES: usize = 16 * 1024;
 
+/// Byte budgets for a single tool result. `total` bounds everything the
+/// result may occupy in history (text + images); `text` bounds the text
+/// portion alone, since text is where runaway outputs (build logs, file
+/// dumps) live while images are legitimately large and self-limiting.
+#[derive(Clone, Copy)]
+pub struct ResultBudget {
+    pub total: usize,
+    pub text: usize,
+}
+
 const PASSTHROUGH_ENV: &[&str] = &[
     // Core
     "PATH",
@@ -322,7 +332,10 @@ impl McpRegistry {
                         &qname,
                         "hook",
                         &args,
-                        MAX_HOOK_RESULT_BYTES,
+                        ResultBudget {
+                            total: MAX_HOOK_RESULT_BYTES,
+                            text: MAX_HOOK_RESULT_BYTES,
+                        },
                         &mut dummy_cancel,
                     ),
                 )
@@ -454,7 +467,7 @@ impl McpRegistry {
         qname: &str,
         provider_id: &str,
         arguments: &Value,
-        max_bytes: usize,
+        budget: ResultBudget,
         cancel: &mut watch::Receiver<bool>,
     ) -> Result<ToolResult, AgentError> {
         let entry = self
@@ -480,7 +493,7 @@ impl McpRegistry {
                     qname,
                     provider_id,
                     arguments,
-                    max_bytes,
+                    budget,
                     cancel,
                 )
                 .await;
@@ -513,7 +526,7 @@ impl McpRegistry {
             qname,
             provider_id,
             arguments,
-            max_bytes,
+            budget,
             cancel,
         )
         .await
@@ -528,7 +541,7 @@ impl McpRegistry {
         qname: &str,
         provider_id: &str,
         arguments: &Value,
-        max_bytes: usize,
+        budget: ResultBudget,
         cancel: &mut watch::Receiver<bool>,
     ) -> Result<ToolResult, AgentError> {
         let arg_obj = match arguments {
@@ -596,13 +609,13 @@ impl McpRegistry {
                     provider_id: provider_id.to_owned(),
                     content: vec![ToolResultContent::Text(clamp(
                         format!("Tool call rejected: {e}"),
-                        max_bytes,
+                        budget.text,
                     ))],
                     is_error: true,
                 });
             }
         };
-        let content = tool_result_content(&res.content, max_bytes);
+        let content = tool_result_content(&res.content, budget.total, budget.text);
         Ok(ToolResult {
             provider_id: provider_id.to_owned(),
             content,
@@ -833,54 +846,85 @@ pub(crate) fn truncate_at_boundary(s: &str, max: usize) -> &str {
     &s[..cut]
 }
 
-fn push_bounded(out: &mut String, s: &str, max: usize) {
-    let remaining = max.saturating_sub(out.len());
-    if remaining > 0 {
-        out.push_str(truncate_at_boundary(s, remaining));
+/// Byte allowance reserved for the elision marker inside [`truncate_middle`].
+/// The marker is ~80 bytes; the slack keeps the arithmetic safely one-sided.
+const ELISION_MARKER_ALLOWANCE: usize = 128;
+
+/// Truncate `s` to at most `max` bytes by eliding the *middle*, keeping the
+/// head and tail. Tool output puts its conclusion at the end (test summaries,
+/// error trailers) and its identity at the start; head-only truncation loses
+/// the part the model needs most. The marker reports how much was elided so
+/// the model knows to re-run a narrower command rather than trust the gap.
+pub(crate) fn truncate_middle(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
     }
+    let keep = max.saturating_sub(ELISION_MARKER_ALLOWANCE);
+    if keep == 0 {
+        // Budget too small for head + marker + tail; degrade to a head cut.
+        return truncate_at_boundary(s, max).to_owned();
+    }
+    let head = truncate_at_boundary(s, keep.div_ceil(2));
+    let mut tail_start = s.len() - keep / 2;
+    while tail_start < s.len() && !s.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let tail = &s[tail_start..];
+    let elided = s.len() - head.len() - tail.len();
+    format!(
+        "{head}\n[... {elided} of {} bytes elided from tool result ...]\n{tail}",
+        s.len()
+    )
 }
 
+/// Assemble tool-result content under two budgets: `max_bytes` bounds the
+/// whole result (text + images), `max_text_bytes` bounds the text portion
+/// alone. Images are large by nature and pass through whole or get elided
+/// with a marker; text is middle-elided so the head (what ran) and tail
+/// (how it ended) both survive. Every elision leaves an inline marker.
 fn tool_result_content(
     blocks: &[rmcp::model::Content],
     max_bytes: usize,
+    max_text_bytes: usize,
 ) -> Vec<ToolResultContent> {
     use rmcp::model::RawContent;
     let mut out = Vec::new();
     let mut text = String::new();
-    let mut used = 0usize;
-    let mut truncated = false;
+    let mut used = 0usize; // total bytes emitted (text + images)
+    let mut text_used = 0usize; // text bytes emitted
     let short = |s: &str| truncate_at_boundary(s, MARKER_FIELD_MAX).to_owned();
 
-    let flush_text = |out: &mut Vec<ToolResultContent>, text: &mut String, used: &mut usize| {
-        if !text.is_empty() {
-            *used = used.saturating_add(text.len());
-            out.push(ToolResultContent::Text(std::mem::take(text)));
+    // Flush accumulated text, middle-eliding to whatever budget remains.
+    let flush_text = |out: &mut Vec<ToolResultContent>,
+                      text: &mut String,
+                      used: &mut usize,
+                      text_used: &mut usize| {
+        if text.is_empty() {
+            return;
+        }
+        let budget = max_text_bytes
+            .saturating_sub(*text_used)
+            .min(max_bytes.saturating_sub(*used));
+        let kept = truncate_middle(&std::mem::take(text), budget);
+        *used = used.saturating_add(kept.len());
+        *text_used = text_used.saturating_add(kept.len());
+        if !kept.is_empty() {
+            out.push(ToolResultContent::Text(kept));
         }
     };
 
-    let text_budget =
-        |used: usize, text: &str| max_bytes.saturating_sub(used).saturating_sub(text.len());
+    let append = |text: &mut String, s: &str| {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(s);
+    };
 
     for c in blocks {
-        if used + text.len() >= max_bytes {
-            truncated = true;
-            break;
-        }
         match &c.raw {
-            RawContent::Text(t) => {
-                if !text.is_empty() {
-                    let max = text_budget(used, &text);
-                    push_bounded(&mut text, "\n", max);
-                }
-                let before = text.len();
-                let max = text_budget(used, &text);
-                push_bounded(&mut text, &t.text, max);
-                if text.len() - before < t.text.len() {
-                    truncated = true;
-                }
-            }
+            RawContent::Text(t) => append(&mut text, &t.text),
             RawContent::Image(i) => {
-                flush_text(&mut out, &mut text, &mut used);
+                flush_text(&mut out, &mut text, &mut used, &mut text_used);
                 let image_bytes = i.data.len().saturating_add(i.mime_type.len());
                 if used.saturating_add(image_bytes) <= max_bytes {
                     used = used.saturating_add(image_bytes);
@@ -889,53 +933,31 @@ fn tool_result_content(
                         mime_type: i.mime_type.clone(),
                     });
                 } else {
-                    truncated = true;
-                    let marker = format!(
-                        "[image elided: {}, {} base64 bytes exceeds remaining tool-result budget]",
-                        short(&i.mime_type),
-                        i.data.len()
+                    append(
+                        &mut text,
+                        &format!(
+                            "[image elided: {}, {} base64 bytes exceeds remaining tool-result budget]",
+                            short(&i.mime_type),
+                            i.data.len()
+                        ),
                     );
-                    let max = max_bytes.saturating_sub(used);
-                    push_bounded(&mut text, &marker, max);
                 }
             }
-            RawContent::Audio(a) => {
-                if !text.is_empty() {
-                    let max = text_budget(used, &text);
-                    push_bounded(&mut text, "\n", max);
-                }
-                let chunk = format!(
+            RawContent::Audio(a) => append(
+                &mut text,
+                &format!(
                     "[audio elided: {}, {} bytes]",
                     short(&a.mime_type),
                     a.data.len()
-                );
-                let max = text_budget(used, &text);
-                push_bounded(&mut text, &chunk, max);
-            }
+                ),
+            ),
             RawContent::ResourceLink(r) => {
-                if !text.is_empty() {
-                    let max = text_budget(used, &text);
-                    push_bounded(&mut text, "\n", max);
-                }
-                let chunk = format!("[resource: {}]", short(&r.uri));
-                let max = text_budget(used, &text);
-                push_bounded(&mut text, &chunk, max);
+                append(&mut text, &format!("[resource: {}]", short(&r.uri)));
             }
-            RawContent::Resource(_) => {
-                if !text.is_empty() {
-                    let max = text_budget(used, &text);
-                    push_bounded(&mut text, "\n", max);
-                }
-                let max = text_budget(used, &text);
-                push_bounded(&mut text, "[resource elided]", max);
-            }
+            RawContent::Resource(_) => append(&mut text, "[resource elided]"),
         }
     }
-    if truncated {
-        let max = text_budget(used, &text);
-        push_bounded(&mut text, "\n[content truncated]", max);
-    }
-    flush_text(&mut out, &mut text, &mut used);
+    flush_text(&mut out, &mut text, &mut used, &mut text_used);
     out
 }
 
@@ -951,7 +973,7 @@ mod content_tests {
             Content::image("aW1n", "image/png"),
             Content::text("tail"),
         ];
-        let out = tool_result_content(&blocks, 1024);
+        let out = tool_result_content(&blocks, 1024, 1024);
         assert_eq!(out.len(), 3);
         assert!(matches!(&out[0], ToolResultContent::Text(t) if t == "header"));
         assert!(matches!(
@@ -965,8 +987,65 @@ mod content_tests {
     #[test]
     fn tool_result_content_elides_images_over_budget() {
         let blocks = vec![Content::image("a".repeat(300), "image/png")];
-        let out = tool_result_content(&blocks, 256);
+        let out = tool_result_content(&blocks, 256, 256);
         assert_eq!(out.len(), 1);
         assert!(matches!(&out[0], ToolResultContent::Text(t) if t.contains("image elided")));
+    }
+
+    #[test]
+    fn oversized_text_is_middle_elided() {
+        let mut body = String::new();
+        for i in 0..5000 {
+            body.push_str(&format!("line {i}\n"));
+        }
+        let blocks = vec![Content::text(body.clone())];
+        let out = tool_result_content(&blocks, 1024 * 1024, 4096);
+        assert_eq!(out.len(), 1);
+        let ToolResultContent::Text(t) = &out[0] else {
+            panic!("expected text");
+        };
+        assert!(t.len() <= 4096, "text exceeds budget: {}", t.len());
+        assert!(t.starts_with("line 0\n"), "head lost");
+        assert!(t.ends_with("line 4999\n"), "tail lost");
+        assert!(
+            t.contains("bytes elided from tool result"),
+            "missing elision marker"
+        );
+    }
+
+    #[test]
+    fn text_within_budget_is_untouched() {
+        let blocks = vec![Content::text("short output")];
+        let out = tool_result_content(&blocks, 1024 * 1024, 4096);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(&out[0], ToolResultContent::Text(t) if t == "short output"));
+    }
+
+    #[test]
+    fn image_passes_whole_even_when_text_budget_is_small() {
+        let big_text = "x".repeat(10_000);
+        let img = "a".repeat(100_000);
+        let blocks = vec![
+            Content::text(big_text),
+            Content::image(img.clone(), "image/png"),
+        ];
+        let out = tool_result_content(&blocks, 8 * 1024 * 1024, 4096);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(&out[0], ToolResultContent::Text(t) if t.len() <= 4096));
+        assert!(matches!(
+            &out[1],
+            ToolResultContent::Image { data, .. } if data == &img
+        ));
+    }
+
+    #[test]
+    fn truncate_middle_respects_max_and_boundaries() {
+        let s = "é".repeat(60_000); // 2-byte chars stress boundary handling
+        for max in [200usize, 1024, 50 * 1024] {
+            let out = super::truncate_middle(&s, max);
+            assert!(out.len() <= max, "max={max} got {}", out.len());
+            assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+        }
+        assert_eq!(super::truncate_middle("ok", 1024), "ok");
     }
 }
