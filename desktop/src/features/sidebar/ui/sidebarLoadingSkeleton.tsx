@@ -280,17 +280,3 @@ export function SidebarLoadingContent({
     </div>
   );
 }
-
-export function SidebarProfileLoadingCard() {
-  return (
-    <div className="rounded-xl px-2 py-2" data-testid="sidebar-profile-loading">
-      <div className="flex min-w-0 items-center gap-3">
-        <Skeleton className="h-8 w-8 shrink-0 rounded-full" />
-        <div className="min-w-0 flex-1">
-          <Skeleton className="h-4 w-28 max-w-full" />
-          <Skeleton className="mt-1.5 h-3 w-24 max-w-full" />
-        </div>
-      </div>
-    </div>
-  );
-}

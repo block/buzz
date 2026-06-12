@@ -40,7 +40,6 @@ import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDi
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
 import {
   SidebarLoadingContent,
-  SidebarProfileLoadingCard,
   useSidebarLoadingShape,
 } from "@/features/sidebar/ui/sidebarLoadingSkeleton";
 import { SECTION_ACTION_VISIBILITY_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
@@ -739,27 +738,23 @@ export function AppSidebar({
         <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
           <SidebarMenu>
             <SidebarMenuItem>
-              {isLoading ? (
-                <SidebarProfileLoadingCard />
-              ) : (
-                <SidebarProfileCard
-                  activeWorkspace={activeWorkspace}
-                  isPresencePending={isPresencePending}
-                  onOpenAddWorkspace={onOpenAddWorkspace}
-                  onOpenSettings={onSelectSettings}
-                  onRemoveWorkspace={onRemoveWorkspace}
-                  onSetPresenceStatus={onSetPresenceStatus}
-                  onSetUserStatus={onSetUserStatus}
-                  onClearUserStatus={onClearUserStatus}
-                  onSwitchWorkspace={onSwitchWorkspace}
-                  onUpdateWorkspace={onUpdateWorkspace}
-                  profile={profile}
-                  resolvedDisplayName={resolvedDisplayName}
-                  selfPresenceStatus={selfPresenceStatus}
-                  selfUserStatus={selfUserStatus}
-                  workspaces={workspaces}
-                />
-              )}
+              <SidebarProfileCard
+                activeWorkspace={activeWorkspace}
+                isPresencePending={isPresencePending}
+                onOpenAddWorkspace={onOpenAddWorkspace}
+                onOpenSettings={onSelectSettings}
+                onRemoveWorkspace={onRemoveWorkspace}
+                onSetPresenceStatus={onSetPresenceStatus}
+                onSetUserStatus={onSetUserStatus}
+                onClearUserStatus={onClearUserStatus}
+                onSwitchWorkspace={onSwitchWorkspace}
+                onUpdateWorkspace={onUpdateWorkspace}
+                profile={profile}
+                resolvedDisplayName={resolvedDisplayName}
+                selfPresenceStatus={selfPresenceStatus}
+                selfUserStatus={selfUserStatus}
+                workspaces={workspaces}
+              />
             </SidebarMenuItem>
           </SidebarMenu>
         </SidebarFooter>
