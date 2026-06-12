@@ -189,12 +189,17 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   // channel shows its own pill.
   const [isUnreadPillDismissed, setIsUnreadPillDismissed] =
     React.useState(false);
+  // Track whether the pill has been shown at least once this channel visit.
+  // This prevents the dismiss effect from firing on mount (when isAtBottom
+  // initializes as true) before the pill ever renders.
+  const hasShownPillRef = React.useRef(false);
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset on channel switch only
   React.useEffect(() => {
     setIsUnreadPillDismissed(false);
+    hasShownPillRef.current = false;
   }, [channelId]);
   React.useEffect(() => {
-    if (isAtBottom) {
+    if (isAtBottom && hasShownPillRef.current) {
       setIsUnreadPillDismissed(true);
     }
   }, [isAtBottom]);
@@ -203,6 +208,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     unreadCount > 0 &&
     firstUnreadMessageId !== null &&
     !isLoading;
+  if (showUnreadPill) hasShownPillRef.current = true;
   const handleJumpToOldestUnread = React.useCallback(() => {
     setIsUnreadPillDismissed(true);
     if (firstUnreadMessageId) {
