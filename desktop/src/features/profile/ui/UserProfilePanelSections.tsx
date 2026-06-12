@@ -195,11 +195,6 @@ export function ProfileSummaryView({
         </div>
       ) : null}
 
-      {showManageSection ? (
-        <ProfileManageSection isBot={isBot} pubkey={pubkey} />
-      ) : null}
-
-
       {showMemoriesIngress || showChannelsIngress || canViewActivity ? (
         <section className="space-y-2">
           {showMemoriesIngress ? (
@@ -245,6 +240,10 @@ export function ProfileSummaryView({
 
       {metadataFields.length > 0 ? (
         <ProfileFieldGroup fields={metadataFields} />
+      ) : null}
+
+      {showManageSection ? (
+        <ProfileManageSection isBot={isBot} pubkey={pubkey} />
       ) : null}
     </div>
   );
