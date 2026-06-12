@@ -1659,6 +1659,30 @@ mod tests {
         );
     }
 
+    /// A recoverable 403 (stale token 403s, fresh token 200s) forces exactly
+    /// one refresh and the retry succeeds — proving a 403 enters the refresh
+    /// path and a refreshed token clears it, the stale-token-403 recovery case.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_openai_refreshes_once_on_403() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        let always_403 = Arc::new(AtomicBool::new(false));
+        let base = spawn_auth_stub(always_403, 403).await;
+        let auth = Arc::new(CountingAuth {
+            refreshes: AtomicU32::new(0),
+        });
+        let llm = llm_with(auth.clone());
+        let mut c = cfg(Provider::OpenAi);
+        c.base_url = base;
+
+        let out = llm
+            .post_openai(&c, "/v1/x", &json!({}))
+            .await
+            .expect("retry with fresh token should clear the 403");
+        assert_eq!(out, json!({ "ok": true }));
+        assert_eq!(auth.refreshes.load(Ordering::SeqCst), 1, "one refresh");
+    }
+
     /// The default `refresh_now()` on a static source returns the static
     /// token unchanged — a key that can't refresh still answers harmlessly.
     #[tokio::test]
