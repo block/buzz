@@ -3,7 +3,7 @@ import type * as React from "react";
 import { Button } from "@/shared/ui/button";
 
 const MORE_UNREAD_BUTTON_CLASS =
-  "h-7 min-h-7 gap-1.5 rounded-full border-0 bg-primary px-2.5 text-[11px] font-medium text-primary-foreground shadow-md hover:bg-primary/90 [&_svg]:size-3.5";
+  "h-7 min-h-7 gap-1.5 rounded-full border-0 bg-primary px-2.5 text-[11px] font-medium text-primary-foreground shadow-md hover:bg-primary/90 [&_svg]:size-4";
 
 export function MoreUnreadButton({
   bottomClassName = "bottom-0",

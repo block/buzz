@@ -258,7 +258,7 @@ function AllowlistPicker({
                   onClick={() => onRemove(pubkey)}
                   type="button"
                 >
-                  <X className="h-3 w-3" />
+                  <X className="h-4 w-4" />
                 </button>
               </div>
             ))}
