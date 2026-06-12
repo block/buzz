@@ -1,7 +1,10 @@
 import * as React from "react";
 
 import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
-import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
+import {
+  buildMainTimelineEntries,
+  shouldRenderUnreadDivider,
+} from "@/features/messages/lib/threadPanel";
 import {
   buildVideoReviewCommentsByRootId,
   buildVideoReviewContextForMessage,
@@ -162,7 +165,11 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       dayGroups.push(currentDayGroup);
     }
 
-    if (firstUnreadMessageId && message.id === firstUnreadMessageId) {
+    // The unread "New" divider only marks a read/unread boundary when there is
+    // a message above the first unread. When the first unread is the first
+    // rendered top-level entry (fresh/never-read channel), there is nothing
+    // above to separate from, so it is suppressed.
+    if (shouldRenderUnreadDivider(i, message.id, firstUnreadMessageId)) {
       currentDayGroup?.elements.push(
         <UnreadDivider key={`unread-${messageRenderKey}`} />,
       );
