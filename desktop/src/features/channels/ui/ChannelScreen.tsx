@@ -168,6 +168,17 @@ export function ChannelScreen({
       forcedUnreadRef.current.delete(channelId);
     };
   }, [activeChannelId]);
+  // Clear the open-time frontier on channel leave so re-visiting captures a
+  // fresh read position. Without this, switching away and back would reuse the
+  // stale frontier from the first open, producing a phantom "New" divider over
+  // already-read messages.
+  React.useEffect(() => {
+    const channelId = activeChannelId;
+    if (!channelId) return;
+    return () => {
+      openFrontierRef.current.delete(channelId);
+    };
+  }, [activeChannelId]);
   React.useEffect(() => {
     if (!activeChannelId || activeChannel?.isMember === false) {
       return;
