@@ -269,7 +269,12 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     <TooltipProvider delayDuration={200}>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {showUnreadPill ? (
-          <div className="pointer-events-none absolute inset-x-0 top-2 z-20 flex justify-center px-4">
+          <div
+            className={cn(
+              "pointer-events-none absolute inset-x-0 z-20 flex justify-center px-4",
+              channelChrome.top,
+            )}
+          >
             <Button
               className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-primary/40 bg-primary/10 px-2.5 text-[11px] font-medium text-primary shadow-xs backdrop-blur-sm hover:bg-primary/20 [&_svg]:size-3.5"
               data-testid="message-unread-pill"

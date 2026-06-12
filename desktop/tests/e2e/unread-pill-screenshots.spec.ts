@@ -30,25 +30,74 @@ function emitMockMessage(
   page: import("@playwright/test").Page,
   channelName: string,
   content: string,
+  createdAt?: number,
 ) {
   return page.evaluate(
-    ({ ch, msg, pubkey }) => {
+    ({ ch, msg, pubkey, ts }) => {
       (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
             channelName: string;
             content: string;
             pubkey: string;
+            createdAt?: number;
           }) => unknown;
         }
       ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: ch,
         content: msg,
         pubkey,
+        createdAt: ts,
       });
     },
-    { ch: channelName, msg: content, pubkey: TEST_IDENTITIES.alice.pubkey },
+    {
+      ch: channelName,
+      msg: content,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      ts: createdAt,
+    },
   );
+}
+
+// Unread messages must be created strictly after the read frontier captured
+// when the channel was last open. The frontier is captured at the current
+// second on open, and computeChannelUnreadMarker uses a strict
+// `createdAt > frontier` predicate — so emitting at the same wall-clock second
+// leaves the messages on the read side and the pill/divider never render.
+// Dating them a minute ahead puts them deterministically past the frontier.
+const UNREAD_OFFSET_SECONDS = 60;
+
+function unreadTimestamp() {
+  return Math.floor(Date.now() / 1000) + UNREAD_OFFSET_SECONDS;
+}
+
+// Emit `count` unread messages to general, staggered one second apart so they
+// sort deterministically and all land strictly past the read frontier.
+async function emitUnreadMessages(
+  page: import("@playwright/test").Page,
+  count: number,
+) {
+  const base = unreadTimestamp();
+  for (let index = 0; index < count; index += 1) {
+    await emitMockMessage(
+      page,
+      "general",
+      `Unread message ${index + 1}`,
+      base + index,
+    );
+  }
+}
+
+// Scroll the timeline up so the viewport is no longer pinned to the bottom.
+// The pill auto-dismisses once the user reaches the bottom of the timeline, so
+// it only stays rendered while scrolled up — which is the state these shots
+// need to capture. Scrolling part-way (rather than to the very top) keeps real
+// message context on screen instead of the channel's empty-state intro.
+async function scrollTimelineUp(page: import("@playwright/test").Page) {
+  await page.getByTestId("message-timeline").evaluate((el) => {
+    el.scrollTop = Math.floor(el.scrollHeight * 0.35);
+  });
+  await page.waitForTimeout(300);
 }
 
 test.describe("unread pill & divider screenshots", () => {
@@ -64,18 +113,20 @@ test.describe("unread pill & divider screenshots", () => {
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
-    // Emit 3 messages to general while we're away
-    await emitMockMessage(page, "general", "First unread message");
-    await emitMockMessage(page, "general", "Second unread message");
-    await emitMockMessage(page, "general", "Third unread message");
+    await emitUnreadMessages(page, 20);
 
     // Switch back to general — pill should appear
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
+    // Scroll up so the unreads sit below the fold: the pill is the
+    // "jump to oldest unread" affordance and only stays on screen while the
+    // user is scrolled away from the bottom of the timeline.
+    await scrollTimelineUp(page);
+
     const pill = page.getByTestId("message-unread-pill");
     await expect(pill).toBeVisible();
-    await expect(pill).toContainText("3 new messages");
+    await expect(pill).toContainText("20 new messages");
 
     await page.screenshot({
       path: `${SHOTS}/01-unread-pill-visible.png`,
@@ -93,9 +144,7 @@ test.describe("unread pill & divider screenshots", () => {
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
-    await emitMockMessage(page, "general", "First unread message");
-    await emitMockMessage(page, "general", "Second unread message");
-    await emitMockMessage(page, "general", "Third unread message");
+    await emitUnreadMessages(page, 3);
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -123,21 +172,19 @@ test.describe("unread pill & divider screenshots", () => {
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
-    await emitMockMessage(page, "general", "First unread message");
-    await emitMockMessage(page, "general", "Second unread message");
-    await emitMockMessage(page, "general", "Third unread message");
+    await emitUnreadMessages(page, 20);
 
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 
+    // Scroll up so the pill is showing, matching scenario 01's starting state.
+    await scrollTimelineUp(page);
+
     const pill = page.getByTestId("message-unread-pill");
     await expect(pill).toBeVisible();
 
-    // Click the pill to jump to oldest unread. The topbar search overlay
-    // (fixed, higher z-index) sits over the pill's position and swallows a
-    // hit-tested click, so dispatch the event directly to exercise the real
-    // jump-and-dismiss handler.
-    await pill.dispatchEvent("click");
+    // Click the pill to jump to the oldest unread, which dismisses it.
+    await pill.click();
 
     // Pill should be dismissed
     await expect(pill).toHaveCount(0);
