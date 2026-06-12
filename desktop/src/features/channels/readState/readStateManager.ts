@@ -536,6 +536,27 @@ export class ReadStateManager {
       }
       contexts[ctx] = ts;
     }
+
+    // Evict oldest thread:* entries when approaching the MAX_CONTEXTS cap
+    // (10,000). Channel keys are never evicted — only thread read-state keys
+    // are eligible. This prevents silent blob rejection by isValidBlob().
+    const EVICTION_THRESHOLD = 8_000;
+    const contextCount = Object.keys(contexts).length;
+    if (contextCount > EVICTION_THRESHOLD) {
+      const threadEntries: [string, number][] = [];
+      for (const [key, ts] of Object.entries(contexts)) {
+        if (key.startsWith("thread:")) {
+          threadEntries.push([key, ts]);
+        }
+      }
+      // Sort oldest-first (lowest timestamp = oldest)
+      threadEntries.sort((a, b) => a[1] - b[1]);
+      const toEvict = contextCount - EVICTION_THRESHOLD;
+      for (let i = 0; i < Math.min(toEvict, threadEntries.length); i++) {
+        delete contexts[threadEntries[i][0]];
+      }
+    }
+
     return contexts;
   }
 

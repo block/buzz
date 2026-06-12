@@ -431,11 +431,14 @@ export function ChannelScreen({
     };
   }, [openThreadHeadId]);
   // Mark thread read when the panel opens (advance frontier to latest reply).
+  // Only persist read state for threads the user has notification interest in
+  // (participated, authored, or followed) to avoid bloating the context blob.
   React.useEffect(() => {
     if (!openThreadHeadId || threadMessages.length === 0) return;
+    if (!isNotifiedForCurrentThread) return;
     const latestReply = threadMessages[threadMessages.length - 1].message;
     markThreadRead(openThreadHeadId, latestReply.createdAt);
-  }, [openThreadHeadId, threadMessages, markThreadRead]);
+  }, [openThreadHeadId, threadMessages, markThreadRead, isNotifiedForCurrentThread]);
   // Compute the in-thread "New" divider position from the open-time frontier.
   const { firstUnreadReplyId: threadFirstUnreadReplyId } = React.useMemo(
     () => {
@@ -448,11 +451,14 @@ export function ChannelScreen({
     [openThreadHeadId, threadMessages, threadOpenFrontierSeconds],
   );
   // Compute per-thread unread counts for summary rows in the main timeline.
+  // Only compute for threads the user has notification interest in — this
+  // aligns the badge display with the read-state write path.
   // eslint-disable-next-line react-hooks/exhaustive-deps -- readStateVersion is the invalidation signal
   const threadUnreadCounts = React.useMemo(() => {
     const counts = new Map<string, number>();
     for (const message of timelineMessages) {
       if (message.parentId) continue;
+      if (!isNotifiedForThread(message.id)) continue;
       // Only compute for messages that have thread replies
       const directReplies = timelineMessages.filter(
         (m) => m.parentId === message.id,
@@ -465,7 +471,7 @@ export function ChannelScreen({
       }
     }
     return counts;
-  }, [timelineMessages, getThreadReadAt, readStateVersion]);
+  }, [timelineMessages, getThreadReadAt, isNotifiedForThread, readStateVersion]);
   const editTargetMessage = React.useMemo(
     () =>
       timelineMessages.find((message) => message.id === editTargetId) ?? null,
