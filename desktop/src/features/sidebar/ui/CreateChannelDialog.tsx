@@ -282,6 +282,7 @@ export function CreateChannelDialog({
                   </span>
                 </TabsTrigger>
                 <TabsTrigger
+                  aria-label="Ephemeral — auto-archives after 1 day of inactivity"
                   className="group/type-tab relative z-10 h-full min-h-24 flex-col items-start justify-start gap-1.5 whitespace-normal rounded-lg bg-transparent px-3 py-2.5 text-left text-muted-foreground/55 opacity-70 shadow-none transition-[color,opacity] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] hover:text-muted-foreground hover:opacity-85 data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:opacity-100 data-[state=active]:shadow-none motion-reduce:transition-none"
                   disabled={isCreating}
                   value="temporary"
