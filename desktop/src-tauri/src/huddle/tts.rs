@@ -5,20 +5,25 @@
 //! ```text
 //! caller: pipeline.speak("Hello world. How are you?")
 //!   → bounded sync_channel (TEXT_QUEUE_DEPTH = 8)
-//!   → tts_worker thread (owns 1 Pocket TTS engine)
+//!   → tts_worker thread (owns 1 Pocket TTS engine + 1 persistent Player)
 //!       1. Preprocess text
 //!       2. Split into sentences
 //!       3. Synthesize each sentence individually → f32 PCM
-//!       4. Apply volume boost + fade in/out to each sentence
-//!       5. Append each buffer to a single rodio Player (gapless playback)
-//!       6. Wait for player.empty() before accepting next text item
-//!   → tts_active = true while playing, false when idle
-//!   → cancel flag: player.clear() + drain queue
+//!       4. Apply volume boost + fade out to each sentence
+//!       5. Append each buffer to the persistent rodio Player (gapless)
+//!       6. While audio is draining, keep pulling queued text items and
+//!          synthesizing ahead — playback of item N overlaps synthesis of
+//!          item N+1
+//!   → tts_active = true while audio is queued/playing, false when idle
+//!   → cancel flag: player.clear() + drain queue + player.play() (un-pause)
 //! ```
 //!
-//! Lookahead pipelining: synthesis of sentence N+1 begins immediately after
-//! appending sentence N to the Player. Rodio queues buffers and plays them
-//! sequentially — synthesis overlaps with playback for near-zero gaps.
+//! Lookahead pipelining spans *items*, not just sentences within one item:
+//! the worker only blocks on the text channel when the player is empty.
+//! With sentence-per-message delivery (each agent message ≈ one sentence),
+//! a per-item drain barrier would insert a full synth latency of dead air
+//! between every pair of sentences — the cross-item overlap is what keeps
+//! multi-message replies gapless.
 //!
 //! `tts_active` is an `Arc<AtomicBool>` shared with the STT pipeline so STT
 //! can gate microphone input while the agent is speaking.
@@ -295,6 +300,7 @@ fn tts_worker(
     }
 
     // ── 3. Initialise rodio output device ─────────────────────────────────────
+    use rodio::buffer::SamplesBuffer;
     use rodio::Player;
 
     let sink_handle = match super::audio_output::open_output_sink_by_name(output_device.as_deref())
@@ -307,47 +313,89 @@ fn tts_worker(
         }
     };
 
+    let channels = match NonZero::new(1u16) {
+        Some(c) => c,
+        None => {
+            eprintln!("buzz-desktop: TTS channel count invariant violated");
+            return;
+        }
+    };
+    let rate = match NonZero::new(SAMPLE_RATE) {
+        Some(r) => r,
+        None => {
+            eprintln!("buzz-desktop: TTS sample rate invariant violated");
+            return;
+        }
+    };
+
+    // Single persistent Player for the lifetime of the worker — all sentence
+    // buffers from all text items append here, and rodio plays them gaplessly.
+    // Persistence is what enables cross-item pipelining: the worker never
+    // waits for one item to drain before synthesizing the next.
+    let player = Player::connect_new(sink_handle.mixer());
+
     // Prime the audio output stream with a short silent buffer.
     // On macOS, CoreAudio initializes the output device lazily on first use.
-    // Without this, the first real Player races against device startup and
+    // Without this, the first real append races against device startup and
     // player.empty() returns true before audio has started draining — causing
     // the first TTS message to be truncated after a few words.
     {
-        use rodio::buffer::SamplesBuffer;
-        let channels = NonZero::new(1u16).unwrap();
-        let rate = NonZero::new(SAMPLE_RATE).unwrap();
         let silence = vec![0.0f32; SAMPLE_RATE as usize / 10]; // 100ms of silence
-        let player = Player::connect_new(sink_handle.mixer());
         player.append(SamplesBuffer::new(channels, rate, silence));
         // Wait for the silent buffer to drain — this ensures the output stream
-        // is fully initialized before the main loop creates its first Player.
+        // is fully initialized before the first real utterance.
         while !player.empty() {
             thread::sleep(Duration::from_millis(10));
         }
     }
 
     // ── 4. Main loop ──────────────────────────────────────────────────────────
+    //
+    // One iteration = one text item. The worker blocks on the channel for at
+    // most RECV_TIMEOUT and never waits for playback to drain before taking
+    // the next item — synthesis of item N+1 overlaps playback of item N.
+    // `tts_active` lifecycle: set on the first append while idle, cleared
+    // only when the channel is quiet AND the player has fully drained.
+    let silence_buf_len = (INTER_SENTENCE_SILENCE * SAMPLE_RATE as f32) as usize;
+    // `first_append` = "no audio queued since the player last went idle".
+    // Flipped by `build_sentence_append_buffer` on the first real append; the
+    // idle branch below uses it to decide when to drop `tts_active` and to
+    // arm a fresh lead-in cushion for the next utterance.
+    let mut first_append = true;
+
     loop {
-        // Check shutdown/cancel before blocking (no player yet).
-        if handle_cancel_or_shutdown(&cancel, &shutdown, &tts_active, &text_rx, None) {
+        if handle_cancel_or_shutdown(&cancel, &shutdown, &tts_active, &text_rx, Some(&player)) {
             if shutdown.load(Ordering::Acquire) {
                 break;
             }
+            // Cancel consumed: queued audio cleared, queue drained. The next
+            // append starts a new utterance and needs its own lead-in cushion.
+            first_append = true;
             continue;
         }
 
         let raw_text = match text_rx.recv_timeout(RECV_TIMEOUT) {
             Ok(t) => t,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Nothing queued. If playback has also finished, the agent
+                // has gone quiet — release the mic gate and reset the
+                // lead-in so the next utterance gets a fresh cushion.
+                if player.empty() && !first_append {
+                    tts_active.store(false, Ordering::Release);
+                    first_append = true;
+                }
+                continue;
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
         // Check cancel again after unblocking — a cancel may have arrived
         // while we were waiting.
-        if handle_cancel_or_shutdown(&cancel, &shutdown, &tts_active, &text_rx, None) {
+        if handle_cancel_or_shutdown(&cancel, &shutdown, &tts_active, &text_rx, Some(&player)) {
             if shutdown.load(Ordering::Acquire) {
                 break;
             }
+            first_append = true;
             continue;
         }
 
@@ -365,42 +413,9 @@ fn tts_worker(
             .filter(|s| !s.trim().is_empty())
             .collect();
 
-        if sentences.is_empty() {
-            continue;
-        }
-
-        use rodio::buffer::SamplesBuffer;
-        let channels = match NonZero::new(1u16) {
-            Some(c) => c,
-            None => {
-                eprintln!("buzz-desktop: TTS channel count invariant violated");
-                break;
-            }
-        };
-        let rate = match NonZero::new(SAMPLE_RATE) {
-            Some(r) => r,
-            None => {
-                eprintln!("buzz-desktop: TTS sample rate invariant violated");
-                break;
-            }
-        };
-
-        // Single persistent Player — all sentences append here, rodio plays
-        // them gaplessly without per-sentence device setup overhead.
-        let player = Player::connect_new(sink_handle.mixer());
-        // NOTE: tts_active is set AFTER the first player.append(), not before.
-        // Setting it before synthesis would cause STT to discard user speech
-        // during the synthesis window as "echo" even though no audio is
-        // actually playing yet. See crossfire review C3.
-        let mut first_append = true;
-
-        // Lookahead pipeline: synthesize each sentence and append immediately.
-        // Rodio queues buffers sequentially — synthesis of the next sentence
-        // overlaps with playback of the current one.
-        let silence_samples = (INTER_SENTENCE_SILENCE * SAMPLE_RATE as f32) as usize;
-        let silence_buf = vec![0.0f32; silence_samples];
         for sentence in &sentences {
             if handle_cancel_or_shutdown(&cancel, &shutdown, &tts_active, &text_rx, Some(&player)) {
+                first_append = true;
                 break;
             }
 
@@ -422,13 +437,15 @@ fn tts_worker(
                     // a single rodio source preserves the original queue/drain
                     // semantics (one append per sentence) while still giving
                     // every chunk a quiet device warm-up window.
-                    let was_first = first_append;
                     let buf =
-                        build_sentence_append_buffer(&mut first_append, boosted, silence_buf.len());
+                        build_sentence_append_buffer(&mut first_append, boosted, silence_buf_len);
                     player.append(SamplesBuffer::new(channels, rate, buf));
-                    if was_first {
-                        tts_active.store(true, Ordering::Release);
-                    }
+                    // NOTE: tts_active is set AFTER player.append(), not
+                    // before. Setting it before synthesis would cause STT to
+                    // discard user speech during the synthesis window as
+                    // "echo" even though no audio is actually playing yet.
+                    // See crossfire review C3.
+                    tts_active.store(true, Ordering::Release);
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -436,19 +453,6 @@ fn tts_worker(
                 }
             }
         }
-
-        // Wait for all queued audio to finish playing.
-        loop {
-            if handle_cancel_or_shutdown(&cancel, &shutdown, &tts_active, &text_rx, Some(&player)) {
-                break;
-            }
-            if player.empty() {
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-
-        tts_active.store(false, Ordering::Release);
 
         if shutdown.load(Ordering::Acquire) {
             break;
@@ -478,7 +482,13 @@ fn handle_cancel_or_shutdown(
     }
     if cancel.load(Ordering::Acquire) {
         if let Some(p) = player {
+            // `Player::clear()` removes queued sources AND pauses the player
+            // (rodio 0.22 `clear()` ends with `self.pause()`). With one
+            // persistent Player for the worker's lifetime, the un-pause is
+            // mandatory: without `play()`, every append after a barge-in
+            // would queue silently forever.
             p.clear();
+            p.play();
         }
         while text_rx.try_recv().is_ok() {}
         cancel.store(false, Ordering::Release);
@@ -557,9 +567,10 @@ fn apply_fade_out(samples: &mut [f32]) {
 /// tracked source per synthesized sentence, avoiding source-boundary/drain
 /// regressions from enqueueing the lead-in, audio, and tail as separate sounds.
 ///
-/// `first_append` is still accepted and flipped on the first call because the
-/// worker uses it to decide when actual playback has been queued and when it is
-/// safe to set `tts_active` for echo gating.
+/// `first_append` is flipped on the first call after the player goes idle.
+/// The worker uses it in the idle branch of the main loop to distinguish
+/// "never queued anything since last drain" from "drained after speaking",
+/// which controls when `tts_active` is released and the lead-in re-armed.
 fn build_sentence_append_buffer(
     first_append: &mut bool,
     boosted: Vec<f32>,
@@ -695,6 +706,18 @@ mod tests {
             return true;
         }
         false
+    }
+
+    /// Simulate the idle branch of the TTS worker's main loop (the
+    /// recv-timeout arm): with nothing queued, `tts_active` is released and
+    /// the lead-in re-armed only when the player has fully drained AND audio
+    /// was actually queued since the last idle period. Must match the
+    /// production logic in `tts_worker`.
+    fn simulate_idle_check(player_empty: bool, first_append: &mut bool, tts_active: &AtomicBool) {
+        if player_empty && !*first_append {
+            tts_active.store(false, Ordering::Release);
+            *first_append = true;
+        }
     }
 
     // ── Threshold tests ───────────────────────────────────────────────────────
@@ -968,6 +991,57 @@ mod tests {
     }
 
     // ── Full lifecycle tests ──────────────────────────────────────────────────
+
+    /// Idle branch: nothing queued + player drained + audio was played →
+    /// release `tts_active` and re-arm the lead-in for the next utterance.
+    #[test]
+    fn idle_check_releases_mic_gate_after_drain() {
+        let tts_active = AtomicBool::new(true);
+        let mut first_append = false; // audio was appended this utterance
+
+        simulate_idle_check(true, &mut first_append, &tts_active);
+
+        assert!(
+            !tts_active.load(Ordering::Acquire),
+            "tts_active should be released once playback drains",
+        );
+        assert!(
+            first_append,
+            "lead-in should be re-armed for next utterance"
+        );
+    }
+
+    /// Idle branch: nothing queued but audio is STILL DRAINING → `tts_active`
+    /// stays set. This is the cross-item pipelining contract: the per-item
+    /// drain barrier is gone, so the mic gate must hold across the gap
+    /// between item N finishing synthesis and its audio finishing playback.
+    #[test]
+    fn idle_check_holds_mic_gate_while_audio_drains() {
+        let tts_active = AtomicBool::new(true);
+        let mut first_append = false;
+
+        simulate_idle_check(false, &mut first_append, &tts_active);
+
+        assert!(
+            tts_active.load(Ordering::Acquire),
+            "tts_active must stay set while queued audio is still playing",
+        );
+        assert!(!first_append, "lead-in must not re-arm mid-playback");
+    }
+
+    /// Idle branch: player empty but nothing was ever appended (e.g. worker
+    /// just started, or every item preprocessed to empty) → no spurious
+    /// store, lead-in stays armed.
+    #[test]
+    fn idle_check_noop_when_nothing_was_queued() {
+        let tts_active = AtomicBool::new(false);
+        let mut first_append = true;
+
+        simulate_idle_check(true, &mut first_append, &tts_active);
+
+        assert!(!tts_active.load(Ordering::Acquire));
+        assert!(first_append, "lead-in should remain armed");
+    }
 
     /// Full cycle: remote speech → cancel → TTS consumption → new TTS → cancel again.
     /// Validates the cancel mechanism is reusable across TTS sessions.
