@@ -14,6 +14,7 @@ import {
 import { EditAgentDialog } from "@/features/agents/ui/EditAgentDialog";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
+import { useFeatureEnabled } from "@/shared/features";
 import {
   useContactListQuery,
   useFollowMutation,
@@ -183,6 +184,12 @@ export function UserProfilePanel({
   const isSelf =
     currentPubkey !== undefined && pubkeyLower === currentPubkey.toLowerCase();
   const canViewActivity = isOwner === true && Boolean(onOpenAgentSession);
+  // The people-follow graph (kind:3) is only surfaced for consumption inside
+  // Pulse. When Pulse is off there's nowhere to consume the graph, so we hide
+  // the Follow affordance entirely rather than let users write follows that go
+  // nowhere. (Thread-following in features/messages is unrelated localStorage
+  // state and is not gated here.)
+  const showFollowAction = useFeatureEnabled("pulse");
   const isFollowing =
     !isSelf &&
     (contactListQuery.data?.contacts.some(
@@ -320,6 +327,7 @@ export function UserProfilePanel({
           profile={profile}
           pubkey={pubkey}
           relayAgent={relayAgent}
+          showFollowAction={showFollowAction}
           unfollowMutation={unfollowMutation}
           userStatus={userStatus}
         />
