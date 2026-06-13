@@ -74,6 +74,30 @@ function unreadTimestamp() {
   return Math.floor(Date.now() / 1000) + UNREAD_OFFSET_SECONDS;
 }
 
+// Nested replies are collapsed behind a summary row (data-testid
+// "message-thread-summary"); only direct children of the open head show at
+// first. Each summary click expands one level and reveals the next-deeper
+// summary below it, so clicking the *last* summary drills straight down a
+// chain without re-clicking (and thus collapsing) an already-expanded parent.
+// Repeat until the rendered reply count stops growing — full expansion.
+async function expandFullNesting(page: import("@playwright/test").Page) {
+  const replies = page
+    .getByTestId("message-thread-replies")
+    .getByTestId("message-row");
+  const summaries = page.getByTestId("message-thread-summary");
+
+  let previous = -1;
+  for (let guard = 0; guard < 10; guard++) {
+    const current = await replies.count();
+    if (current === previous) break;
+    previous = current;
+    if (await summaries.count()) {
+      await summaries.last().click();
+      await expect(replies).not.toHaveCount(current);
+    }
+  }
+}
+
 test.describe("thread unread indicator screenshots", () => {
   test("01-thread-unread-badge", async ({ page }) => {
     await installMockBridge(page);
@@ -220,6 +244,97 @@ test.describe("thread unread indicator screenshots", () => {
 
     await page.screenshot({
       path: `${SHOTS}/03-thread-no-badge-casual-browse.png`,
+    });
+  });
+
+  test("04-thread-deep-nested-unread", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+
+    // Build a genuinely nested branch by chaining parentEventId: each reply's
+    // id becomes the next reply's parent, so threadPanel increments depth per
+    // level and renders progressive indentation. The first three levels are
+    // dated in the past — they are the "already read" structure.
+    const past = Math.floor(Date.now() / 1000) - 60;
+    const r1 = await emitMockMessage(
+      page,
+      "general",
+      "Kicking off the design",
+      {
+        parentEventId: "mock-general-welcome",
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        createdAt: past,
+      },
+    );
+    const r2 = await emitMockMessage(
+      page,
+      "general",
+      "Replying one level down",
+      {
+        parentEventId: r1!.id,
+        pubkey: TEST_IDENTITIES.bob.pubkey,
+        createdAt: past + 1,
+      },
+    );
+    // A sibling at r1's level so the tree reads as a branching discussion.
+    await emitMockMessage(page, "general", "Separate angle on the same point", {
+      parentEventId: r1!.id,
+      pubkey: TEST_IDENTITIES.charlie.pubkey,
+      createdAt: past + 2,
+    });
+    const r3 = await emitMockMessage(page, "general", "Going deeper still", {
+      parentEventId: r2!.id,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: past + 3,
+    });
+
+    // Open the thread and expand the full chain so the read frontier covers
+    // the existing nested structure, then close. r3 is the current leaf;
+    // expandFullNesting drills down until no deeper summary remains.
+    const summary = page.getByTestId("message-thread-summary").first();
+    await expect(summary).toBeVisible();
+    await summary.click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await expandFullNesting(page);
+    await page.getByTestId("message-thread-close").click();
+    await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+
+    // Switch away, then emit the deeper replies past the frontier — these are
+    // the unread ones living inside the nested structure.
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+    const base = unreadTimestamp();
+    const r4 = await emitMockMessage(page, "general", "New nested follow-up", {
+      parentEventId: r3!.id,
+      pubkey: TEST_IDENTITIES.bob.pubkey,
+      createdAt: base,
+    });
+    await emitMockMessage(page, "general", "Deepest unread reply", {
+      parentEventId: r4!.id,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: base + 1,
+    });
+
+    // Switch back, open the thread, and expand the full chain so the deep
+    // unread replies (r4 → r5) render alongside the boundary divider.
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await page.getByTestId("message-thread-summary").first().click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await expandFullNesting(page);
+
+    const divider = page.getByTestId("message-unread-divider");
+    await expect(divider).toBeVisible();
+    await divider.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(300);
+
+    await page.screenshot({
+      path: `${SHOTS}/04-thread-deep-nested-unread.png`,
     });
   });
 });
