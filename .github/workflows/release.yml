@@ -664,23 +664,30 @@ jobs:
             exit 1
           fi
 
-          # Rename with _alpha-unsigned marker
+          # Tauri 2.x with createUpdaterArtifacts: true (v2 updater) signs the
+          # NSIS installer in place: it emits <name>-setup.exe + <name>-setup.exe.sig
+          # and NO separate .nsis.zip (that was the deprecated v1Compatible format).
+          # The signed installer IS the updater artifact. Capture its .sig before
+          # the rename below so the manifest signature matches the uploaded exe.
+          SIG="${EXE}.sig"
+          if [[ ! -f "$SIG" ]]; then
+            echo "::error::NSIS installer signature not found: $SIG"
+            exit 1
+          fi
+
+          # Rename with _alpha-unsigned marker, keeping the .sig in lockstep so the
+          # rolling-release archive name and its detached signature stay consistent.
           EXE_DIR=$(dirname "$EXE")
           EXE_BASE=$(basename "$EXE" .exe)
           MARKED_EXE="${EXE_DIR}/${EXE_BASE}_alpha-unsigned.exe"
+          MARKED_SIG="${MARKED_EXE}.sig"
           mv "$EXE" "$MARKED_EXE"
+          mv "$SIG" "$MARKED_SIG"
           echo "exe=$MARKED_EXE" >> "$GITHUB_OUTPUT"
 
-          # Find the updater .nsis.zip and .sig
-          ARCHIVE=$(find "$BUNDLE_DIR/nsis" -name '*.nsis.zip' ! -name '*.sig' -type f | head -1)
-          SIG="${ARCHIVE}.sig"
-          if [[ -z "$ARCHIVE" || ! -f "$SIG" ]]; then
-            echo "::error::NSIS updater archive or signature not found in $BUNDLE_DIR/nsis"
-            exit 1
-          fi
-          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
-          echo "archive_name=$(basename "$ARCHIVE")" >> "$GITHUB_OUTPUT"
-          echo "sig=$SIG" >> "$GITHUB_OUTPUT"
+          echo "archive=$MARKED_EXE" >> "$GITHUB_OUTPUT"
+          echo "archive_name=$(basename "$MARKED_EXE")" >> "$GITHUB_OUTPUT"
+          echo "sig=$MARKED_SIG" >> "$GITHUB_OUTPUT"
 
       - name: Read updater signature
         id: read-sig
