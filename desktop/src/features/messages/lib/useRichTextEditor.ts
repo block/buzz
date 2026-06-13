@@ -12,6 +12,7 @@ import { isMacPlatform } from "@/shared/lib/platform";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
 import {
+  findMentionBackspaceDeleteRange,
   MentionHighlightExtension,
   mentionHighlightKey,
 } from "./mentionHighlightExtension";
@@ -340,6 +341,37 @@ export function useRichTextEditor({
         // command/caret logic, fires regardless of selection state, and works
         // the same across browser engines. Returning `true` consumes the key.
         handleKeyDown: (view, event) => {
+          if (event.key === "Backspace") {
+            if (
+              event.metaKey ||
+              event.ctrlKey ||
+              event.altKey ||
+              event.shiftKey ||
+              isAutocompleteOpen?.current
+            ) {
+              return false;
+            }
+
+            const { selection } = view.state;
+            if (!selection.empty) return false;
+
+            const decorations = mentionHighlightKey.getState(view.state);
+            const range = decorations
+              ? findMentionBackspaceDeleteRange(
+                  view.state.doc,
+                  decorations,
+                  selection.from,
+                )
+              : null;
+            if (!range) return false;
+
+            event.preventDefault();
+            view.dispatch(
+              view.state.tr.delete(range.from, range.to).scrollIntoView(),
+            );
+            return true;
+          }
+
           if (event.key !== "ArrowUp") return false;
           // Respect the same guards as before: no modifiers (let ⌥↑/⇧↑/etc.
           // through), autocomplete closed, a handler exists, and the composer
