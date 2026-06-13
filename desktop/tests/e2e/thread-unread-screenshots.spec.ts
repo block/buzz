@@ -342,4 +342,104 @@ test.describe("thread unread indicator screenshots", () => {
       path: `${SHOTS}/04-thread-deep-nested-unread.png`,
     });
   });
+
+  test("05-thread-in-panel-subtree-badge", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+
+    // A branch p (with a child c) plus a leaf sibling of p, all dated in the
+    // past so they form the "already read" structure. p keeps a child, so its
+    // in-panel row renders as a collapsible summary that can carry a subtree
+    // badge; the leaf sibling proves the panel shows other rows too.
+    const past = Math.floor(Date.now() / 1000) - 60;
+    const p = await emitMockMessage(page, "general", "Branch parent", {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: past,
+    });
+    const c = await emitMockMessage(page, "general", "Child of branch parent", {
+      parentEventId: p!.id,
+      pubkey: TEST_IDENTITIES.bob.pubkey,
+      createdAt: past + 1,
+    });
+    await emitMockMessage(page, "general", "Sibling branch at top level", {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.charlie.pubkey,
+      createdAt: past + 2,
+    });
+
+    // Open the thread to snapshot the read frontier over the existing
+    // structure, then close. p stays collapsed — its summary row must remain a
+    // collapsed branch for the subtree badge to render.
+    const summary = page.getByTestId("message-thread-summary").first();
+    await expect(summary).toBeVisible();
+    await summary.click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await page.getByTestId("message-thread-close").click();
+    await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+
+    // Switch away, then emit two unread replies deep under p (children of c) —
+    // p's subtree gains unread descendants while p itself stays collapsed.
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+    const base = unreadTimestamp();
+    const c2 = await emitMockMessage(
+      page,
+      "general",
+      "Unread under the branch",
+      {
+        parentEventId: c!.id,
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        createdAt: base,
+      },
+    );
+    await emitMockMessage(page, "general", "Another unread under the branch", {
+      parentEventId: c2!.id,
+      pubkey: TEST_IDENTITIES.bob.pubkey,
+      createdAt: base + 1,
+    });
+
+    // Switch back and open the panel WITHOUT expanding p. The collapsed p row
+    // must show its subtree unread count (the two unread descendants).
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await page.getByTestId("message-thread-summary").first().click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+
+    // p renders as a collapsed summary row (it has a child); the sibling is a
+    // leaf and renders as a plain row, not a summary. Gate on p's summary row
+    // first — green here means the branch genuinely rendered, so the badge
+    // assertion below is read off a real collapsed row, not an empty panel.
+    const inPanelSummaries = page
+      .getByTestId("message-thread-replies")
+      .getByTestId("message-thread-summary");
+    await expect(inPanelSummaries).toHaveCount(1);
+
+    // Scope to message-thread-replies: this is the in-panel per-branch badge,
+    // NOT the depth-0 channel-timeline badge that lives outside the container.
+    // Against pre-2.5 code the in-panel badge was hard-0, so this fails there.
+    const inPanelBadge = page
+      .getByTestId("message-thread-replies")
+      .getByTestId("thread-unread-badge");
+    await expect(inPanelBadge).toBeVisible();
+    await expect(inPanelBadge).toContainText("2");
+
+    await page.screenshot({
+      path: `${SHOTS}/05-thread-in-panel-subtree-badge.png`,
+    });
+
+    // Expanding p marks its whole subtree read; the descendant-inclusive gate
+    // (Phase 2.5) drops the badge from p and every revealed row beneath it.
+    await expandReply(page, p!.id);
+    await expect(inPanelBadge).toHaveCount(0);
+
+    await page.screenshot({
+      path: `${SHOTS}/06-thread-expand-clears-subtree-badge.png`,
+    });
+  });
 });
