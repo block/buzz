@@ -504,9 +504,16 @@ jobs:
           fi
           echo "appimage=$APPIMAGE" >> "$GITHUB_OUTPUT"
 
-          # Updater archive: Tauri emits <name>.AppImage.tar.gz + .sig when signing is enabled
+          # Updater archive: Tauri 2.11+ with createUpdaterArtifacts signs the
+          # AppImage directly (*.AppImage + *.AppImage.sig). Earlier versions
+          # wrapped it in a tar.gz. Try the new format first, fall back to legacy.
           ARCHIVE=$(find "$BUNDLE_DIR/appimage" -name '*.AppImage.tar.gz' ! -name '*.sig' -type f | head -1)
-          SIG="${ARCHIVE}.sig"
+          if [[ -n "$ARCHIVE" ]]; then
+            SIG="${ARCHIVE}.sig"
+          else
+            ARCHIVE="$APPIMAGE"
+            SIG="${APPIMAGE}.sig"
+          fi
           if [[ -z "$ARCHIVE" || ! -f "$SIG" ]]; then
             echo "::error::AppImage updater archive or signature not found in $BUNDLE_DIR/appimage"
             exit 1

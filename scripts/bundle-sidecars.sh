@@ -6,12 +6,14 @@ HOST=$(rustc -vV | sed -n 's|host: ||p')
 TARGET=${1:-$HOST}
 BINARIES_DIR="desktop/src-tauri/binaries"
 
-# A cross-target build (`cargo build --target <triple>`) emits to
-# target/<triple>/release; a host build emits to target/release.
-if [[ "$TARGET" == "$HOST" ]]; then
-    SRC_DIR="target/release"
-else
+# When --target is passed explicitly to cargo (even if it matches the host),
+# binaries land in target/<triple>/release/. Without --target, they land in
+# target/release/. The script receives the target as $1 only when cargo was
+# invoked with --target, so use the qualified path whenever $1 is set.
+if [[ -n "${1:-}" ]]; then
     SRC_DIR="target/${TARGET}/release"
+else
+    SRC_DIR="target/release"
 fi
 
 # MSVC emits <name>.exe; Tauri's externalBin then expects binaries/<name>-<triple>.exe.
