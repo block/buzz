@@ -30,6 +30,7 @@ test("computeThreadReplyUnreadCounts_collapsedBranch_countsUnreadDescendants", (
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a", "b"],
     expandedReplyIds: new Set(),
+    expandedSubtreeReplyIds: new Set(),
     frontierSeconds: 350,
   });
   assert.equal(counts.get("a"), 1); // a1
@@ -42,10 +43,28 @@ test("computeThreadReplyUnreadCounts_expandedBranch_omitsBadge", () => {
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a", "b"],
     expandedReplyIds: new Set(["b"]),
+    expandedSubtreeReplyIds: new Set(["b1", "b2"]),
     frontierSeconds: 350,
   });
   assert.equal(counts.get("a"), 1);
   assert.equal(counts.has("b"), false);
+});
+
+test("computeThreadReplyUnreadCounts_expandedBranch_revealedChildNoStaleBadge", () => {
+  // Expand b: mark-read-on-expand reads b's whole subtree, and the panel now
+  // reveals collapsed child b1 (descendant b2 still unread vs the open-time
+  // frontier). b1 must carry NO badge — the expanded subtree is excluded.
+  const counts = computeThreadReplyUnreadCounts({
+    timelineMessages: fixture(),
+    subtreeReplyIds: ROOT_SUBTREE,
+    visibleReplyIds: ["a", "b", "b1"],
+    expandedReplyIds: new Set(["b"]),
+    expandedSubtreeReplyIds: new Set(["b1", "b2"]),
+    frontierSeconds: 350,
+  });
+  assert.equal(counts.get("a"), 1);
+  assert.equal(counts.has("b"), false);
+  assert.equal(counts.has("b1"), false);
 });
 
 test("computeThreadReplyUnreadCounts_descendantsButNoneUnread_noBadge", () => {
@@ -55,6 +74,7 @@ test("computeThreadReplyUnreadCounts_descendantsButNoneUnread_noBadge", () => {
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a", "b"],
     expandedReplyIds: new Set(),
+    expandedSubtreeReplyIds: new Set(),
     frontierSeconds: 1000,
   });
   assert.equal(counts.size, 0);
@@ -66,6 +86,7 @@ test("computeThreadReplyUnreadCounts_nullFrontier_allDescendantsUnread", () => {
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a", "b"],
     expandedReplyIds: new Set(),
+    expandedSubtreeReplyIds: new Set(),
     frontierSeconds: null,
   });
   assert.equal(counts.get("a"), 1); // a1
@@ -80,6 +101,7 @@ test("computeThreadReplyUnreadCounts_otherThreadReply_notCounted", () => {
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a", "b", "other"],
     expandedReplyIds: new Set(),
+    expandedSubtreeReplyIds: new Set(),
     frontierSeconds: 350,
   });
   assert.equal(counts.has("other"), false);
@@ -92,6 +114,7 @@ test("computeThreadReplyUnreadCounts_onlyVisibleRowsKeyed", () => {
     subtreeReplyIds: ROOT_SUBTREE,
     visibleReplyIds: ["a"],
     expandedReplyIds: new Set(),
+    expandedSubtreeReplyIds: new Set(),
     frontierSeconds: 350,
   });
   assert.equal(counts.get("a"), 1);

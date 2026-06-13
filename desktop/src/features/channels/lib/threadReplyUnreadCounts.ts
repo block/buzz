@@ -18,12 +18,17 @@ import type { TimelineMessage } from "@/features/messages/types";
  *   replies that belong to a different thread.
  * @param visibleReplyIds Ids of the rows actually rendered in the panel; only
  *   these are keyed, keeping the map consistent with row presence.
+ * @param expandedSubtreeReplyIds Reply ids beneath any expanded row. Expanding
+ *   a branch persistently marks its whole subtree read (mark-read-on-expand),
+ *   so those replies are dropped from the unread set — otherwise a revealed
+ *   child would carry a stale badge for a reply the same gesture just read.
  */
 export function computeThreadReplyUnreadCounts(params: {
   timelineMessages: TimelineMessage[];
   subtreeReplyIds: Iterable<string>;
   visibleReplyIds: Iterable<string>;
   expandedReplyIds: ReadonlySet<string>;
+  expandedSubtreeReplyIds: ReadonlySet<string>;
   frontierSeconds: number | null;
 }): Map<string, number> {
   const {
@@ -31,6 +36,7 @@ export function computeThreadReplyUnreadCounts(params: {
     subtreeReplyIds,
     visibleReplyIds,
     expandedReplyIds,
+    expandedSubtreeReplyIds,
     frontierSeconds,
   } = params;
 
@@ -40,6 +46,7 @@ export function computeThreadReplyUnreadCounts(params: {
       .filter(
         (message) =>
           subtree.has(message.id) &&
+          !expandedSubtreeReplyIds.has(message.id) &&
           (frontierSeconds === null || message.createdAt > frontierSeconds),
       )
       .map((message) => message.id),
