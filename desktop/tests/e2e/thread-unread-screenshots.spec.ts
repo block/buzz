@@ -74,28 +74,22 @@ function unreadTimestamp() {
   return Math.floor(Date.now() / 1000) + UNREAD_OFFSET_SECONDS;
 }
 
-// Nested replies are collapsed behind a summary row (data-testid
-// "message-thread-summary"); only direct children of the open head show at
-// first. Each summary click expands one level and reveals the next-deeper
-// summary below it, so clicking the *last* summary drills straight down a
-// chain without re-clicking (and thus collapsing) an already-expanded parent.
-// Repeat until the rendered reply count stops growing — full expansion.
-async function expandFullNesting(page: import("@playwright/test").Page) {
+// Nested replies are collapsed behind a summary row that carries the parent's
+// id (data-thread-head-id). Expanding one level renders that reply's direct
+// children, so the rendered count MUST grow after the click — asserting that
+// ties the test to genuine rendered depth: a no-op expansion fails here rather
+// than passing silently. A level can reveal several children at once (a
+// branch), so the check is "grew", not "grew by one".
+async function expandReply(
+  page: import("@playwright/test").Page,
+  replyId: string,
+) {
   const replies = page
     .getByTestId("message-thread-replies")
     .getByTestId("message-row");
-  const summaries = page.getByTestId("message-thread-summary");
-
-  let previous = -1;
-  for (let guard = 0; guard < 10; guard++) {
-    const current = await replies.count();
-    if (current === previous) break;
-    previous = current;
-    if (await summaries.count()) {
-      await summaries.last().click();
-      await expect(replies).not.toHaveCount(current);
-    }
-  }
+  const before = await replies.count();
+  await page.locator(`[data-thread-head-id="${replyId}"]`).click();
+  await expect.poll(() => replies.count()).toBeGreaterThan(before);
 }
 
 test.describe("thread unread indicator screenshots", () => {
@@ -292,14 +286,15 @@ test.describe("thread unread indicator screenshots", () => {
       createdAt: past + 3,
     });
 
-    // Open the thread and expand the full chain so the read frontier covers
-    // the existing nested structure, then close. r3 is the current leaf;
-    // expandFullNesting drills down until no deeper summary remains.
+    // Open the thread on the welcome root, expand the read structure
+    // (r1 → r2; r3 is a leaf until r4/r5 arrive), then close. This sets the
+    // read frontier over everything that currently exists.
     const summary = page.getByTestId("message-thread-summary").first();
     await expect(summary).toBeVisible();
     await summary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await expandFullNesting(page);
+    await expandReply(page, r1!.id);
+    await expandReply(page, r2!.id);
     await page.getByTestId("message-thread-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
@@ -320,13 +315,23 @@ test.describe("thread unread indicator screenshots", () => {
       createdAt: base + 1,
     });
 
-    // Switch back, open the thread, and expand the full chain so the deep
-    // unread replies (r4 → r5) render alongside the boundary divider.
+    // Switch back, open the thread, and expand every level down to the
+    // unread tail. Each expandReply asserts a row appeared, so green here
+    // means the nesting genuinely rendered — not just that a divider exists.
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await page.getByTestId("message-thread-summary").first().click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await expandFullNesting(page);
+    await expandReply(page, r1!.id);
+    await expandReply(page, r2!.id);
+    await expandReply(page, r3!.id);
+    await expandReply(page, r4!.id);
+
+    // Fully expanded: r1, r2, sibling, r3, r4, r5 — six rendered replies.
+    const replies = page
+      .getByTestId("message-thread-replies")
+      .getByTestId("message-row");
+    await expect(replies).toHaveCount(6);
 
     const divider = page.getByTestId("message-unread-divider");
     await expect(divider).toBeVisible();
