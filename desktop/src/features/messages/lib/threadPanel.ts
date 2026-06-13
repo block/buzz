@@ -26,8 +26,9 @@ export type MainTimelineEntry = {
   summary: TimelineThreadSummary | null;
 };
 
-type ThreadDescendantStats = {
+export type ThreadDescendantStats = {
   descendantCount: number;
+  unreadDescendantCount: number;
   lastReplyAt: number | null;
   recentParticipantsNewestFirst: TimelineThreadSummaryParticipant[];
 };
@@ -67,8 +68,9 @@ function buildDirectChildrenByParentId(messages: TimelineMessage[]) {
   return childrenByParentId;
 }
 
-function buildDescendantStatsByMessageId(
+export function buildDescendantStatsByMessageId(
   messages: TimelineMessage[],
+  unreadReplyIds: ReadonlySet<string>,
 ): Map<string, ThreadDescendantStats> {
   const messageById = new Map(messages.map((message) => [message.id, message]));
   const descendantStatsByMessageId = new Map<string, ThreadDescendantStats>(
@@ -76,6 +78,7 @@ function buildDescendantStatsByMessageId(
       message.id,
       {
         descendantCount: 0,
+        unreadDescendantCount: 0,
         lastReplyAt: null,
         recentParticipantsNewestFirst: [],
       },
@@ -104,6 +107,7 @@ function buildDescendantStatsByMessageId(
     let ancestorId = message.parentId ?? null;
     let hops = 0;
     const maxHops = messages.length + 1;
+    const isUnread = unreadReplyIds.has(message.id);
 
     while (ancestorId && hops < maxHops) {
       const ancestorStats = descendantStatsByMessageId.get(ancestorId);
@@ -112,6 +116,9 @@ function buildDescendantStatsByMessageId(
       }
 
       ancestorStats.descendantCount += 1;
+      if (isUnread) {
+        ancestorStats.unreadDescendantCount += 1;
+      }
       ancestorStats.lastReplyAt = Math.max(
         ancestorStats.lastReplyAt ?? 0,
         message.createdAt,
@@ -220,8 +227,12 @@ function buildVisibleThreadReplies(params: {
 
 export function buildMainTimelineEntries(
   messages: TimelineMessage[],
+  unreadReplyIds: ReadonlySet<string> = new Set(),
 ): MainTimelineEntry[] {
-  const descendantStatsByMessageId = buildDescendantStatsByMessageId(messages);
+  const descendantStatsByMessageId = buildDescendantStatsByMessageId(
+    messages,
+    unreadReplyIds,
+  );
 
   return messages
     .filter(
@@ -259,6 +270,7 @@ export function buildThreadPanelData(
   openThreadHeadId: string | null,
   threadReplyTargetId: string | null,
   expandedReplyIds: ReadonlySet<string>,
+  unreadReplyIds: ReadonlySet<string> = new Set(),
 ): ThreadPanelData {
   if (!openThreadHeadId) {
     return {
@@ -282,7 +294,10 @@ export function buildThreadPanelData(
   }
 
   const directChildrenByParentId = buildDirectChildrenByParentId(messages);
-  const descendantStatsByMessageId = buildDescendantStatsByMessageId(messages);
+  const descendantStatsByMessageId = buildDescendantStatsByMessageId(
+    messages,
+    unreadReplyIds,
+  );
   const normalizedThreadHead = normalizeHeadMessage(threadHead);
   const visibleReplies = buildVisibleThreadReplies({
     openThreadHeadId,
