@@ -147,13 +147,14 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
   await page.getByTestId("profile-avatar-edit").click();
   await page.getByTestId("profile-avatar-url").fill(avatarUrl);
   await page.getByTestId("profile-avatar-done").click();
+  await waitForAvatarEditorToClose(page);
 
   await expect(page.getByTestId("profile-display-name-value")).toHaveText(
     displayName,
   );
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
   await page.getByTestId("profile-avatar-edit").click();
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(avatarUrl);
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
   await page.getByTestId("profile-avatar-done").click();
   await expandIdentity(page);
 
@@ -168,7 +169,7 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
   await expandIdentity(page);
   await expect(page.getByTestId("profile-nip05")).toContainText("Not set");
   await page.getByTestId("profile-avatar-edit").click();
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(avatarUrl);
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
   await expect(page.getByTestId("profile-about-value")).toHaveText(about);
 });
 
@@ -269,6 +270,51 @@ test("nests the avatar edit button in a clipped notch", async ({ page }) => {
   );
   expect(transitionProperty).toContain("opacity");
   expect(transitionProperty).toContain("scale");
+});
+
+test("swaps the avatar preview and mode tabs while editing", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await openSettings(page, "profile");
+
+  const previewFrame = page.getByTestId("profile-avatar-clip-frame");
+  const closedPreviewBox = await previewFrame.boundingBox();
+  if (!closedPreviewBox) {
+    throw new Error("Profile avatar preview did not render bounds.");
+  }
+
+  await page.getByTestId("profile-avatar-edit").click();
+  const tabList = page.getByRole("tablist", { name: "Avatar type" });
+  await expect(tabList).toBeVisible();
+  await expect(page.getByTestId("profile-avatar-mode-tabs-slot")).toBeVisible();
+  await page.waitForTimeout(350);
+
+  const openPreviewBox = await previewFrame.boundingBox();
+  const tabListBox = await tabList.boundingBox();
+  if (!openPreviewBox || !tabListBox) {
+    throw new Error("Profile avatar edit layout did not render bounds.");
+  }
+
+  const closedPreviewCenterY = closedPreviewBox.y + closedPreviewBox.height / 2;
+  const tabListCenterY = tabListBox.y + tabListBox.height / 2;
+  expect(Math.abs(tabListCenterY - closedPreviewCenterY)).toBeLessThan(16);
+  const tabListBottomY = tabListBox.y + tabListBox.height;
+  const segmentToPreviewGap = openPreviewBox.y - tabListBottomY;
+  expect(segmentToPreviewGap).toBeGreaterThan(48);
+  expect(segmentToPreviewGap).toBeLessThan(72);
+  expect(openPreviewBox.y).toBeGreaterThan(closedPreviewCenterY + 72);
+
+  await page.getByTestId("profile-avatar-done").click();
+  await waitForAvatarEditorToClose(page);
+  await expect(tabList).toHaveCount(0);
+
+  const restoredPreviewBox = await previewFrame.boundingBox();
+  if (!restoredPreviewBox) {
+    throw new Error("Profile avatar preview did not restore bounds.");
+  }
+  expect(Math.abs(restoredPreviewBox.y - closedPreviewBox.y)).toBeLessThan(8);
 });
 
 test("highlights the avatar drop target while dragging an image", async ({
@@ -387,9 +433,7 @@ test("uploads local profile avatar files before saving", async ({ page }) => {
   await page.getByTestId("profile-avatar-done").click();
   await waitForAvatarEditorToClose(page);
   await page.getByTestId("profile-avatar-edit").click();
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(
-    pastedAvatarUrl,
-  );
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
   await page.getByTestId("profile-avatar-url").fill("");
   await page.getByTestId("profile-avatar-done").click();
   await expect(
@@ -397,9 +441,7 @@ test("uploads local profile avatar files before saving", async ({ page }) => {
   ).toHaveCount(1);
   await waitForAvatarEditorToClose(page);
   await page.getByTestId("profile-avatar-edit").click();
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(
-    pastedAvatarUrl,
-  );
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
 
   await expect
     .poll(() =>
@@ -451,9 +493,7 @@ test("reveals emoji background colors only after choosing an emoji", async ({
   await waitForAvatarEditorToClose(page);
 
   await page.getByTestId("profile-avatar-edit").click();
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(
-    imageAvatarUrl,
-  );
+  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
   await page.getByRole("tab", { name: "Emoji" }).click();
 
   const colorGridShell = page.getByTestId("profile-avatar-color-grid-shell");
