@@ -83,7 +83,7 @@ fn fd_real_path(file: &std::fs::File) -> Result<std::path::PathBuf, String> {
     use windows_sys::Win32::Storage::FileSystem::{
         GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED,
     };
-    let handle = file.as_raw_handle() as isize;
+    let handle = file.as_raw_handle() as *mut core::ffi::c_void;
     let mut buf = vec![0u16; 1024];
     let len = unsafe {
         GetFinalPathNameByHandleW(
