@@ -4,7 +4,6 @@ type UseLoadOlderOnScrollOptions = {
   fetchOlder?: () => Promise<void>;
   hasOlderMessages: boolean;
   isLoading: boolean;
-  restoreScrollPosition: (scrollTop: number) => void;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   sentinelRef: React.RefObject<HTMLDivElement | null>;
 };
@@ -18,19 +17,14 @@ export function useLoadOlderOnScroll({
   fetchOlder,
   hasOlderMessages,
   isLoading,
-  restoreScrollPosition,
   scrollContainerRef,
   sentinelRef,
 }: UseLoadOlderOnScrollOptions) {
-  const restoreScrollPositionRef = React.useRef(restoreScrollPosition);
   const [, scheduleRestore] = React.useReducer((count: number) => count + 1, 0);
   const pendingRestoreRef = React.useRef<{
     messageId: string;
     top: number;
   } | null>(null);
-  React.useEffect(() => {
-    restoreScrollPositionRef.current = restoreScrollPosition;
-  });
 
   React.useLayoutEffect(() => {
     const pendingRestore = pendingRestoreRef.current;
@@ -49,7 +43,12 @@ export function useLoadOlderOnScroll({
 
     const delta = anchor.getBoundingClientRect().top - pendingRestore.top;
     if (delta !== 0) {
-      restoreScrollPositionRef.current(container.scrollTop + delta);
+      // Single synchronous pre-paint write. We deliberately do NOT route this
+      // through useTimelineScrollManager.restoreScrollPosition: that helper
+      // schedules a 2-rAF locked-write loop (correct for ResizeObserver-driven
+      // resizes that may settle across frames, wrong for prepend), which
+      // fights live wheel input for 2–3 frames after every fetchOlder.
+      container.scrollTop = container.scrollTop + delta;
     }
   });
 
