@@ -6,6 +6,7 @@ import {
   directRepliesMaxCreatedAt,
   subtreeMaxCreatedAt,
 } from "@/features/channels/lib/subtreeCreatedAt";
+import { computeThreadReplyUnreadCounts } from "@/features/channels/lib/threadReplyUnreadCounts";
 import {
   useChannelMembersQuery,
   useJoinChannelMutation,
@@ -492,6 +493,31 @@ export function ChannelScreen({
     const replies = threadMessages.map((entry) => entry.message);
     return computeThreadUnreadMarker(replies, threadOpenFrontierSeconds);
   }, [openThreadHeadId, threadMessages, threadOpenFrontierSeconds]);
+  // Per-row subtree unread counts for the in-panel thread summary rows. Scoped
+  // to the open thread's subtree and measured against the open-time frontier
+  // snapshot (so the mark-read-on-open advance doesn't zero the badges); see
+  // computeThreadReplyUnreadCounts for the suppress-on-expand and no-"0"-badge
+  // rules.
+  const threadReplyUnreadCounts = React.useMemo(
+    () =>
+      openThreadHeadId
+        ? computeThreadReplyUnreadCounts({
+            timelineMessages,
+            subtreeReplyIds: getReplyDescendantIdsForMessage(openThreadHeadId),
+            visibleReplyIds: threadMessages.map((entry) => entry.message.id),
+            expandedReplyIds: expandedThreadReplyIds,
+            frontierSeconds: threadOpenFrontierSeconds,
+          })
+        : new Map<string, number>(),
+    [
+      openThreadHeadId,
+      threadMessages,
+      timelineMessages,
+      threadOpenFrontierSeconds,
+      expandedThreadReplyIds,
+      getReplyDescendantIdsForMessage,
+    ],
+  );
   // Compute per-thread unread counts for summary rows in the main timeline.
   // Only compute for threads the user has notification interest in — this
   // aligns the badge display with the read-state write path.
@@ -846,6 +872,7 @@ export function ChannelScreen({
                   threadReplyTargetMessage={threadReplyTargetMessage}
                   threadScrollTargetId={threadScrollTargetId}
                   threadUnreadCounts={threadUnreadCounts}
+                  threadReplyUnreadCounts={threadReplyUnreadCounts}
                   threadFirstUnreadReplyId={threadFirstUnreadReplyId}
                   isJoining={joinChannelMutation.isPending}
                   onJoinChannel={joinChannelMutation.mutateAsync}
