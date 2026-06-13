@@ -114,7 +114,9 @@ export function useRichTextEditor({
     {
       extensions: [
         StarterKit.configure({
-          // Use hard breaks (Shift+Enter) — Enter submits the message.
+          // Hard-break node is kept enabled so pasted markdown that contains
+          // explicit hard breaks still round-trips, but Shift+Enter is rebound
+          // below (`smartShiftEnter`) to split into a real new paragraph.
           hardBreak: {
             keepMarks: true,
           },
@@ -260,8 +262,12 @@ export function useRichTextEditor({
                   // Non-empty → split the paragraph within the blockquote.
                   return ed.chain().splitBlock().focus().run();
                 }
-                // Default: hard break (StarterKit handles it).
-                return false;
+                // Default: split into a real new paragraph. WYSIWYG parity
+                // with the rendered timeline — two paragraphs always have
+                // margin between them. Previously inserted a hard break
+                // (<br>), which produced a single \n on send and rendered
+                // visibly tighter than the post-send paragraph spacing.
+                return ed.chain().splitBlock().focus().run();
               },
               ArrowDown: ({ editor: ed }) => {
                 // Empty last list item + Down → exit list to paragraph below.
@@ -322,7 +328,7 @@ export function useRichTextEditor({
       editorProps: {
         attributes: {
           class:
-            "min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-6 md:leading-6 shadow-none focus-visible:ring-0 caret-foreground outline-hidden prose-sm max-w-none",
+            "min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-7 md:leading-7 shadow-none focus-visible:ring-0 caret-foreground outline-hidden max-w-none",
           "data-testid": "message-input",
         },
         // ArrowUp in an empty composer → edit your last message (Slack

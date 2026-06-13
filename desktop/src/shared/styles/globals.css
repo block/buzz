@@ -500,13 +500,66 @@
 }
 
 /* ── Tiptap rich-text composer ──────────────────────────────────────── */
+/*
+ * Composer styles mirror the rendered Markdown timeline (see
+ * desktop/src/shared/ui/markdown.tsx, default variant) so the editor is
+ * visually WYSIWYG with the sent message. The owl rules `& > * + *` drive
+ * inter-block spacing, leaving an isolated single block (e.g. an empty
+ * <ul> when a list is freshly toggled) with zero added margin — so the
+ * composer height stays static until additional items are added.
+ */
 .rich-text-composer .tiptap {
-  outline: none;
-  min-height: 1.5rem; /* single line height */
-  font-size: 0.875rem;
-  line-height: 1.5rem;
+  @apply text-sm leading-7 text-foreground/90 outline-none;
+  min-height: 1.75rem; /* one line at leading-7 (28px) */
 }
 
+/* Inter-block spacing — matches markdown.tsx default variant. */
+.rich-text-composer .tiptap > * + * {
+  @apply mt-3;
+}
+.rich-text-composer .tiptap > *:first-child {
+  margin-top: 0;
+}
+.rich-text-composer .tiptap > *:last-child {
+  margin-bottom: 0;
+}
+
+/* Headings push and pull. */
+.rich-text-composer .tiptap > * + h1,
+.rich-text-composer .tiptap > * + h2,
+.rich-text-composer .tiptap > * + h3 {
+  @apply mt-3.5;
+}
+.rich-text-composer .tiptap > h1 + *,
+.rich-text-composer .tiptap > h2 + *,
+.rich-text-composer .tiptap > h3 + * {
+  @apply mt-0.5;
+}
+
+/* Blockquote, code block, table, and hr breathe more. */
+.rich-text-composer .tiptap > * + blockquote,
+.rich-text-composer .tiptap > blockquote + * {
+  @apply mt-3.5;
+}
+.rich-text-composer .tiptap > * + pre,
+.rich-text-composer .tiptap > pre + * {
+  @apply mt-3.5;
+}
+.rich-text-composer .tiptap > * + hr,
+.rich-text-composer .tiptap > hr + * {
+  @apply mt-4;
+}
+
+/* Lists immediately after a paragraph or block-media div hug a little tighter. */
+.rich-text-composer .tiptap > p + ul,
+.rich-text-composer .tiptap > p + ol,
+.rich-text-composer .tiptap > div + ul,
+.rich-text-composer .tiptap > div + ol {
+  @apply mt-1.5;
+}
+
+/* Paragraph placeholder. Paragraph itself has no margin — the owl rule
+ * above provides spacing between sibling blocks. */
 .rich-text-composer .tiptap p {
   margin: 0;
 }
@@ -533,81 +586,104 @@
   color: hsl(var(--foreground));
 }
 
+/* Inline marks. */
 .rich-text-composer .tiptap strong {
-  font-weight: 600;
+  @apply font-semibold;
 }
-
 .rich-text-composer .tiptap em {
-  font-style: italic;
+  @apply italic;
 }
-
 .rich-text-composer .tiptap s {
   text-decoration: line-through;
 }
+.rich-text-composer .tiptap a {
+  @apply font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80 cursor-pointer;
+}
 
+/* Inline code. */
 .rich-text-composer .tiptap code {
-  border-radius: 0.375rem;
-  background: hsl(var(--muted));
-  padding: 0.125rem 0.375rem;
-  font-family: ui-monospace, monospace;
-  font-size: 0.8125rem;
+  @apply rounded-md bg-muted px-1.5 py-0.5 font-mono text-[13px] text-foreground;
 }
 
+/* Code block. */
 .rich-text-composer .tiptap pre {
-  border-radius: 0.75rem;
-  border: 1px solid hsl(var(--border) / 0.7);
-  background: hsl(var(--muted) / 0.6);
-  padding: 0.375rem 0.75rem;
-  overflow-x: auto;
-  margin: 0.25rem 0;
+  @apply max-h-[400px] overflow-x-auto overflow-y-auto rounded-xl border border-border/70 bg-muted/60 px-3 py-1.5 shadow-xs;
 }
-
 .rich-text-composer .tiptap pre code {
-  background: none;
-  padding: 0;
-  border-radius: 0;
-  font-size: 0.8125rem;
-  line-height: 1.5rem;
+  /* Mirrors CODE_BLOCK_CLASS in markdown.tsx so a pasted/markdown-rendered
+   * code block looks identical in the composer and in the timeline. The
+   * `code-block-lines` marker class from CODE_BLOCK_CLASS is intentionally
+   * omitted — its rules (lines ~478-498 of this file) only target
+   * `[data-line]` children produced by Shiki tokenization, which the
+   * composer never has. The class is also a custom CSS class, not a
+   * Tailwind utility, so `@apply code-block-lines` won't compile. */
+  @apply block min-w-full whitespace-pre font-mono text-[13px] leading-6 text-foreground;
 }
 
+/* Blockquote. */
 .rich-text-composer .tiptap blockquote {
-  border-left: 2px solid hsl(var(--border));
-  padding-left: 1rem;
-  font-style: italic;
-  color: hsl(var(--muted-foreground));
-  margin: 0.25rem 0;
+  @apply border-l-2 border-border pl-4 italic text-muted-foreground;
+}
+.rich-text-composer .tiptap blockquote > *:first-child {
+  margin-top: 0;
+}
+.rich-text-composer .tiptap blockquote > * + * {
+  @apply mt-2;
 }
 
+/* Lists. The owl rule (& > * + *) above handles spacing relative to
+ * surrounding blocks; per-list margin is intentionally not set, so
+ * toggling an empty list does not change the editor height. */
 .rich-text-composer .tiptap ul {
-  list-style-type: disc;
-  padding-left: 1.5rem;
-  margin: 0.25rem 0;
+  @apply list-disc pl-6 space-y-1 marker:text-muted-foreground;
+  margin: 0;
 }
-
 .rich-text-composer .tiptap ol {
-  list-style-type: decimal;
-  padding-left: 1.5rem;
-  margin: 0.25rem 0;
+  @apply list-decimal pl-6 space-y-1 marker:text-muted-foreground;
+  margin: 0;
 }
-
 .rich-text-composer .tiptap li {
-  margin: 0.125rem 0;
+  @apply my-1;
 }
-
 .rich-text-composer .tiptap li p {
   display: inline;
 }
 
-.rich-text-composer .tiptap a {
-  color: hsl(var(--primary));
-  text-decoration: underline;
-  text-underline-offset: 4px;
-  cursor: pointer;
+/* Headings (only reachable via paste, since heading input rules are
+ * disabled in StarterKit — but pasted markdown round-trips). */
+.rich-text-composer .tiptap h1 {
+  @apply text-xl font-semibold leading-8 tracking-tight;
+}
+.rich-text-composer .tiptap h2 {
+  @apply text-lg font-semibold leading-7 tracking-tight;
+}
+.rich-text-composer .tiptap h3 {
+  @apply text-base font-semibold leading-6 tracking-tight;
 }
 
+/* Horizontal rule. */
 .rich-text-composer .tiptap hr {
-  border-color: hsl(var(--border) / 0.8);
-  margin: 0.5rem 0;
+  @apply border-border/80;
+}
+
+/* Tables. Timeline wraps the <table> in a `data-table-block` div with the
+ * overflow/border/rounded chrome; TipTap's StarterKit has no table extension,
+ * so a real table would only appear via raw HTML paste. We mirror the
+ * timeline tokens defensively — chrome applied directly to the <table>
+ * (overflow-x-auto requires a block-display container we can't add here
+ * without a NodeView, so it's intentionally omitted). */
+.rich-text-composer .tiptap table {
+  @apply w-full border-collapse rounded-2xl border border-border/70 text-left text-sm;
+}
+.rich-text-composer .tiptap td {
+  @apply border-t border-border/70 px-3 py-2 align-top;
+}
+.rich-text-composer .tiptap th {
+  @apply bg-muted/60 px-3 py-2 font-semibold text-foreground;
+}
+.rich-text-composer .tiptap > * + table,
+.rich-text-composer .tiptap > table + * {
+  @apply mt-3.5;
 }
 
 .rich-text-composer .tiptap .mention-highlight {
