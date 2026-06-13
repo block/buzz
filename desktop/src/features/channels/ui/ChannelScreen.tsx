@@ -506,6 +506,11 @@ export function ChannelScreen({
             subtreeReplyIds: getReplyDescendantIdsForMessage(openThreadHeadId),
             visibleReplyIds: threadMessages.map((entry) => entry.message.id),
             expandedReplyIds: expandedThreadReplyIds,
+            expandedSubtreeReplyIds: new Set(
+              [...expandedThreadReplyIds].flatMap((id) =>
+                getReplyDescendantIdsForMessage(id),
+              ),
+            ),
             frontierSeconds: threadOpenFrontierSeconds,
           })
         : new Map<string, number>(),
