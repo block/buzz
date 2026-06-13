@@ -6,7 +6,7 @@ use tracing::{debug, error, info, warn};
 
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
-    event_kind_u32, is_ephemeral, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP,
+    event_kind_u32, is_ephemeral, AUTHOR_ONLY_KINDS, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP,
     KIND_MESH_CONNECT_REQUEST, KIND_MESH_STATUS_REPORT, KIND_PRESENCE_UPDATE,
 };
 use buzz_core::observer::{
@@ -138,6 +138,8 @@ pub(crate) async fn dispatch_persistent_event(
                 .find_map(|t| t.content().map(|s| s.to_string()))
         })
         .flatten();
+    // Author-only kinds: only deliver to the event's author.
+    let is_author_only_kind = AUTHOR_ONLY_KINDS.contains(&kind_u32);
     let mut drop_count = 0u32;
     for (target_conn_id, sub_id) in &matches {
         if let Some(ref owner_hex) = dm_visibility_owner {
@@ -146,6 +148,15 @@ pub(crate) async fn dispatch_persistent_event(
                 .pubkey_for(*target_conn_id)
                 .is_some_and(|pk| hex::encode(pk) == *owner_hex);
             if !is_owner {
+                continue;
+            }
+        }
+        if is_author_only_kind {
+            let is_author = state
+                .conn_manager
+                .pubkey_for(*target_conn_id)
+                .is_some_and(|pk| pk == stored_event.event.pubkey.to_bytes());
+            if !is_author {
                 continue;
             }
         }
@@ -162,10 +173,12 @@ pub(crate) async fn dispatch_persistent_event(
         );
     }
 
-    // Skip search indexing for NIP-17 gift wraps (ciphertext) and NIP-DV
-    // visibility snapshots (per-viewer private hide state, owner-gated reads).
+    // Skip search indexing for NIP-17 gift wraps (ciphertext), NIP-DV
+    // visibility snapshots (per-viewer private hide state, owner-gated reads),
+    // and author-only kinds (ciphertext not useful in search, defense in depth).
     if kind_u32 != KIND_GIFT_WRAP
         && kind_u32 != buzz_core::kind::KIND_DM_VISIBILITY
+        && !AUTHOR_ONLY_KINDS.contains(&kind_u32)
         && state
             .search_index_tx
             .try_send(stored_event.clone())
