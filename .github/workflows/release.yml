@@ -15,16 +15,82 @@ on:
         required: true
 
 jobs:
+  create-release:
+    name: Create GitHub Release
+    if: github.repository == 'block/buzz'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Determine version
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$INPUT_VERSION"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Validate version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Invalid version '$VERSION'. Expected semver (e.g. 0.4.0 or 1.0.0-beta.1)"
+            exit 1
+          fi
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || inputs.ref }}
+          persist-credentials: false
+      - name: Create versioned GitHub release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_SHA=$(git rev-parse HEAD)
+          NOTES=""
+          if [[ -f CHANGELOG.md ]]; then
+            NOTES=$(awk "/^## v${VERSION}$/,/^## v/" CHANGELOG.md | sed '$d')
+          fi
+          if [[ -z "$NOTES" ]]; then
+            NOTES="Buzz Desktop v${VERSION}"
+          fi
+          PRERELEASE_FLAGS=()
+          if [[ "$VERSION" =~ -(test|alpha|beta|rc)([.-]|$) ]]; then
+            PRERELEASE_FLAGS=(--prerelease --latest=false)
+          fi
+          gh release create "v${VERSION}" \
+            --target "$RELEASE_SHA" \
+            --title "Buzz Desktop v${VERSION}" \
+            --notes "$NOTES" \
+            "${PRERELEASE_FLAGS[@]}"
+      - name: Ensure rolling release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create buzz-desktop-latest \
+            --prerelease \
+            --title "Buzz Desktop Auto-Update" \
+            --notes "Rolling release for the Tauri auto-updater. Do not download manually — use the versioned release instead." \
+            2>/dev/null || true
+
   release:
     name: Release
     if: github.repository == 'block/buzz'
+    needs: [create-release]
     runs-on: macos-latest
     timeout-minutes: 60
     permissions:
       contents: write
       id-token: write # required by block/apple-codesign-action for OIDC
     outputs:
-      version: ${{ steps.version.outputs.version }}
       archive_name: ${{ steps.artifacts.outputs.archive_name }}
       sig: ${{ steps.read-sig.outputs.sig }}
     steps:
@@ -218,30 +284,12 @@ jobs:
         env:
           SIG_PATH: ${{ steps.artifacts.outputs.sig }}
 
-      - name: Create versioned GitHub release
+      - name: Upload arm64 DMG to versioned GitHub release
         env:
           VERSION: ${{ steps.version.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DMG_PATH: ${{ steps.artifacts.outputs.dmg }}
-        run: |
-          RELEASE_SHA=$(git rev-parse HEAD)
-          NOTES=""
-          if [[ -f CHANGELOG.md ]]; then
-            NOTES=$(awk "/^## v${VERSION}$/,/^## v/" CHANGELOG.md | sed '$d')
-          fi
-          if [[ -z "$NOTES" ]]; then
-            NOTES="Buzz Desktop v${VERSION}"
-          fi
-          PRERELEASE_FLAGS=()
-          if [[ "$VERSION" =~ -(test|alpha|beta|rc)([.-]|$) ]]; then
-            PRERELEASE_FLAGS=(--prerelease --latest=false)
-          fi
-          gh release create "v${VERSION}" \
-            --target "$RELEASE_SHA" \
-            --title "Buzz Desktop v${VERSION}" \
-            --notes "$NOTES" \
-            "${PRERELEASE_FLAGS[@]}" \
-            "$DMG_PATH"
+        run: gh release upload "v${VERSION}" "$DMG_PATH" --clobber
 
       - name: Upload updater archive to rolling release
         run: |
@@ -263,7 +311,7 @@ jobs:
     name: Release macOS (Intel)
     if: github.repository == 'block/buzz'
     runs-on: macos-latest
-    needs: release
+    needs: create-release
     timeout-minutes: 60
     permissions:
       contents: write
@@ -272,7 +320,7 @@ jobs:
       archive_name: ${{ steps.artifacts.outputs.archive_name }}
       sig: ${{ steps.read-sig.outputs.sig }}
     env:
-      VERSION: ${{ needs.release.outputs.version }}
+      VERSION: ${{ needs.create-release.outputs.version }}
       TARGET: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -411,7 +459,7 @@ jobs:
     name: Release Linux
     if: github.repository == 'block/buzz'
     runs-on: ubuntu-latest
-    needs: release
+    needs: create-release
     timeout-minutes: 60
     permissions:
       contents: write
@@ -462,7 +510,7 @@ jobs:
 
       - name: Patch version
         env:
-          VERSION: ${{ needs.release.outputs.version }}
+          VERSION: ${{ needs.create-release.outputs.version }}
         run: |
           cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
           cd src-tauri && cargo update --workspace
@@ -531,7 +579,7 @@ jobs:
       # NOTE: .deb is NOT auto-updatable (Tauri updater constraint — only AppImage supports it on Linux)
       - name: Upload Linux artifacts to versioned GitHub release
         env:
-          VERSION: ${{ needs.release.outputs.version }}
+          VERSION: ${{ needs.create-release.outputs.version }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEB_PATH: ${{ steps.linux-artifacts.outputs.deb }}
           APPIMAGE_PATH: ${{ steps.linux-artifacts.outputs.appimage }}
@@ -555,7 +603,7 @@ jobs:
   release-windows:
     name: Release Windows
     runs-on: windows-latest
-    needs: release
+    needs: create-release
     timeout-minutes: 60
     permissions:
       contents: write
@@ -563,7 +611,7 @@ jobs:
       archive_name: ${{ steps.artifacts.outputs.archive_name }}
       sig: ${{ steps.read-sig.outputs.sig }}
     env:
-      VERSION: ${{ needs.release.outputs.version }}
+      VERSION: ${{ needs.create-release.outputs.version }}
       TARGET: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -678,12 +726,12 @@ jobs:
   assemble-manifest:
     name: Assemble multi-platform latest.json
     runs-on: ubuntu-latest
-    needs: [release, release-macos-x64, release-linux, release-windows]
+    needs: [create-release, release, release-macos-x64, release-linux, release-windows]
     timeout-minutes: 10
     permissions:
       contents: write
     env:
-      VERSION: ${{ needs.release.outputs.version }}
+      VERSION: ${{ needs.create-release.outputs.version }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6

@@ -119,13 +119,19 @@ buzz-media = { path = "crates/buzz-media" }
 buzz-sdk = { path = "crates/buzz-sdk" }
 buzz-ws-client = { path = "crates/buzz-ws-client" }
 
-# CI profile — release-grade codegen for the relay so e2e tests hit a
-# realistic binary, not an unoptimised debug build.  Inherits `release`
-# defaults (opt-level 3, no debug-assertions) but keeps incremental
-# compilation enabled and avoids LTO so the build stays fast.
+# CI profile — builds the relay for desktop e2e. Dependencies keep full
+# release optimization (warm from main's cache; they carry the runtime hot
+# path: tokio/sqlx/axum). Workspace crates build at opt-level 1 — enough for
+# stable e2e timing (PR #307 flakiness was opt-0 + debug-assertions) at
+# roughly half the codegen cost. `incremental` is irrelevant in CI:
+# rust-cache exports CARGO_INCREMENTAL=0 and never caches member artifacts.
 [profile.ci]
 inherits = "release"
 lto = false
+opt-level = 1
+
+[profile.ci.package."*"]
+opt-level = 3
 
 # Sprig profile — optimized for deploy-anywhere Sprig release artifacts.
 # Sprig is distributed over the network and installed on fresh hosts, so binary
