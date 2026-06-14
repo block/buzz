@@ -279,7 +279,7 @@ jobs:
         run: gh release upload "v${VERSION}" "$DMG_PATH" --clobber
 
       - name: Upload updater archive to rolling release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
         run: |
           gh release upload buzz-desktop-latest \
             "$ARCHIVE_PATH" \
@@ -428,7 +428,7 @@ jobs:
           DMG_PATH: ${{ steps.unsigned.outputs.dmg }}
 
       - name: Upload updater archive to rolling release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
         run: |
           gh release upload buzz-desktop-latest \
             "$ARCHIVE_PATH" \
@@ -574,7 +574,7 @@ jobs:
             --clobber
 
       - name: Upload updater archive to rolling release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
         run: |
           gh release upload buzz-desktop-latest \
             "$ARCHIVE_PATH" \
@@ -700,7 +700,7 @@ jobs:
           EXE_PATH: ${{ steps.artifacts.outputs.exe }}
 
       - name: Upload updater archive to rolling release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
         shell: bash
         run: |
           gh release upload buzz-desktop-latest \
@@ -714,9 +714,9 @@ jobs:
 
   assemble-manifest:
     name: Assemble multi-platform latest.json
-    # Only a real tag push assembles latest.json — a branch workflow_dispatch
-    # skips the rolling-release uploads, so its archive URLs never exist.
-    if: github.event_name == 'push'
+    # Only tag-backed releases assemble latest.json. Branch workflow_dispatch
+    # runs skip rolling-release uploads, so their archive URLs never exist.
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
     runs-on: ubuntu-latest
     needs: [setup, release, release-macos-x64, release-linux, release-windows]
     timeout-minutes: 10

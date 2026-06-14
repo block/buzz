@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.3.22
+
+fix(release): publish rolling updater manifest for automated release tags
+
+
 ## v0.3.21
 
 4d19a590 fix(release): use signed NSIS installer for updates (#1036)
