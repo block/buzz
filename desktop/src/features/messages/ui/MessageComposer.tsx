@@ -196,7 +196,7 @@ export function MessageComposer({
   // delegates through this ref to break the hook ordering cycle (the editor
   // needs `onEditLink`, but the link editor needs the editor's `richText`).
   const onEditLinkRef = React.useRef<
-    ((info: LinkSelectionInfo) => void) | null
+    ((info: LinkSelectionInfo, anchorRect: DOMRect) => void) | null
   >(null);
 
   const scrollComposerToBottom = React.useCallback(() => {
@@ -230,7 +230,7 @@ export function MessageComposer({
       return handler ? handler() : false;
     },
     isAutocompleteOpen: isAutocompleteOpenRef,
-    onEditLink: (info) => onEditLinkRef.current?.(info),
+    onEditLink: (info, anchorRect) => onEditLinkRef.current?.(info, anchorRect),
     onUpdate: ({ markdown, text }) => {
       setContent(markdown);
       contentRef.current = markdown;

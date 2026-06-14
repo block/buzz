@@ -82,10 +82,11 @@ export type RichTextEditorOptions = {
    * Called when the user clicks an existing link in the editor. The link
    * extension runs with `openOnClick: false` (a chat composer must not
    * navigate away on click), so we route the click here instead: the owner
-   * opens the link-edit modal to change or remove the URL. `from`/`to` bound
-   * the full link mark range so the owner can apply edits without re-selecting.
+   * shows an info popover (display text + URL, with Edit/Remove). `from`/`to`
+   * bound the full link mark range. `anchorRect` is the viewport rect of the
+   * clicked position so the owner can anchor the popover at the link.
    */
-  onEditLink?: (info: LinkSelectionInfo) => void;
+  onEditLink?: (info: LinkSelectionInfo, anchorRect: DOMRect) => void;
 };
 
 /**
@@ -382,18 +383,28 @@ export function useRichTextEditor({
           // otherwise let ArrowUp fall through to normal caret movement.
           return handler();
         },
-        // Click on an existing link → open the link-edit modal. The link
+        // Click on an existing link → show the link-info popover. The link
         // extension is configured `openOnClick: false` (never navigate away
         // from a chat composer), so without this hook a click on a link does
         // nothing. We resolve the full link mark range under the cursor and
-        // hand it to the owner; returning false leaves caret placement to
-        // ProseMirror so the click still feels native.
+        // hand it to the owner along with the clicked position's viewport rect
+        // (so the popover can anchor at the link). Returning false leaves
+        // caret placement to ProseMirror, so the click moves the caret to the
+        // clicked spot — letting the user tweak display text inline without
+        // being yanked out of the editor.
         handleClick: (view, pos) => {
           const handler = onEditLinkRef.current;
           if (!handler) return false;
           const info = resolveLinkAt(view.state, pos);
           if (!info) return false;
-          handler(info);
+          const coords = view.coordsAtPos(pos);
+          const anchorRect = new DOMRect(
+            coords.left,
+            coords.top,
+            0,
+            coords.bottom - coords.top,
+          );
+          handler(info, anchorRect);
           return false;
         },
       },

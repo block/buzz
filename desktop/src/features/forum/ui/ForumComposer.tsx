@@ -84,7 +84,7 @@ export function ForumComposer({
   // Set after `useLinkEditor` exists; the editor's link-click handler
   // delegates through this ref to break the hook ordering cycle.
   const onEditLinkRef = React.useRef<
-    ((info: LinkSelectionInfo) => void) | null
+    ((info: LinkSelectionInfo, anchorRect: DOMRect) => void) | null
   >(null);
 
   const richText = useRichTextEditor({
@@ -94,7 +94,7 @@ export function ForumComposer({
     channelNames: channelLinks.knownChannelNames,
     onSubmit: () => submitMessageRef.current(),
     isAutocompleteOpen: isAutocompleteOpenRef,
-    onEditLink: (info) => onEditLinkRef.current?.(info),
+    onEditLink: (info, anchorRect) => onEditLinkRef.current?.(info, anchorRect),
     onUpdate: ({ markdown, text }) => {
       setContent(markdown);
       contentRef.current = markdown;
