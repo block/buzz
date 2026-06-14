@@ -7,10 +7,16 @@ import Placeholder from "@tiptap/extension-placeholder";
 import Link from "@tiptap/extension-link";
 import { Extension, type KeyboardShortcutCommand } from "@tiptap/core";
 import { Selection, TextSelection } from "@tiptap/pm/state";
-import type { EditorState } from "@tiptap/pm/state";
 
 import { isMacPlatform } from "@/shared/lib/platform";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
+
+import {
+  resolveLinkAt,
+  type LinkSelectionInfo,
+} from "./resolveLinkAt";
+
+export type { LinkSelectionInfo } from "./resolveLinkAt";
 
 import {
   MentionHighlightExtension,
@@ -80,14 +86,6 @@ export type RichTextEditorOptions = {
    * the full link mark range so the owner can apply edits without re-selecting.
    */
   onEditLink?: (info: LinkSelectionInfo) => void;
-};
-
-/** A link mark range with its href and the text it covers. */
-export type LinkSelectionInfo = {
-  href: string;
-  text: string;
-  from: number;
-  to: number;
 };
 
 /**
@@ -710,51 +708,4 @@ function getMarkdownFromEditor(editor: Editor): string {
   }
   // Fallback: plain text
   return editor.state.doc.textContent;
-}
-
-/**
- * Resolve the link mark covering position `pos`, expanded to the full
- * contiguous range of that same link. Returns the href, the covered text,
- * and the `from`/`to` document positions, or `null` when `pos` is not
- * inside a link.
- *
- * ProseMirror stores links as marks on text nodes, so a single visual link
- * can span several adjacent text nodes. We walk outward from `pos` while the
- * link mark (with the same href) stays present to recover the whole range.
- */
-function resolveLinkAt(
-  state: EditorState,
-  pos: number,
-): LinkSelectionInfo | null {
-  const linkType = state.schema.marks.link;
-  if (!linkType) return null;
-
-  const $pos = state.doc.resolve(pos);
-  // The mark at the caret sits on the character *before* the position, with
-  // the character after as a fallback (caret at a link's left edge).
-  const mark =
-    linkType.isInSet($pos.marks()) ||
-    (pos < state.doc.content.size
-      ? linkType.isInSet(state.doc.resolve(pos + 1).marks())
-      : null);
-  if (!mark) return null;
-
-  const href = mark.attrs.href as string;
-  const parent = $pos.parent;
-  const parentStart = $pos.start();
-
-  // Scan the text block for the contiguous run carrying this same link.
-  let from = pos;
-  let to = pos;
-  parent.forEach((child, childOffset) => {
-    const childFrom = parentStart + childOffset;
-    const childTo = childFrom + child.nodeSize;
-    if (mark.isInSet(child.marks) && childFrom <= pos && pos <= childTo) {
-      from = Math.min(from, childFrom);
-      to = Math.max(to, childTo);
-    }
-  });
-
-  const text = state.doc.textBetween(from, to, "\n", "\n");
-  return { href, text, from, to };
 }
