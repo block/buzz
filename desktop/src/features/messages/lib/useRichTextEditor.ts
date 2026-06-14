@@ -11,10 +11,7 @@ import { Selection, TextSelection } from "@tiptap/pm/state";
 import { isMacPlatform } from "@/shared/lib/platform";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
-import {
-  resolveLinkAt,
-  type LinkSelectionInfo,
-} from "./resolveLinkAt";
+import { resolveLinkAt, type LinkSelectionInfo } from "./resolveLinkAt";
 
 export type { LinkSelectionInfo } from "./resolveLinkAt";
 
@@ -82,10 +79,15 @@ export type RichTextEditorOptions = {
    * Called when the user clicks an existing link in the editor. The link
    * extension runs with `openOnClick: false` (a chat composer must not
    * navigate away on click), so we route the click here instead: the owner
-   * opens the link-edit modal to change or remove the URL. `from`/`to` bound
-   * the full link mark range so the owner can apply edits without re-selecting.
+   * can surface composer-local link controls. `from`/`to` bound the full link
+   * mark range so the owner can apply edits without re-selecting.
    */
   onEditLink?: (info: LinkSelectionInfo) => void;
+  /**
+   * Called when the caret/selection moves onto or away from a link. Owners use
+   * this for link affordances that follow keyboard cursor movement.
+   */
+  onLinkSelectionChange?: (info: LinkSelectionInfo | null) => void;
 };
 
 /**
@@ -109,6 +111,7 @@ export function useRichTextEditor({
   onEditLastOwnMessage,
   isAutocompleteOpen,
   onEditLink,
+  onLinkSelectionChange,
 }: RichTextEditorOptions) {
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
@@ -121,6 +124,9 @@ export function useRichTextEditor({
 
   const onEditLinkRef = React.useRef(onEditLink);
   onEditLinkRef.current = onEditLink;
+
+  const onLinkSelectionChangeRef = React.useRef(onLinkSelectionChange);
+  onLinkSelectionChangeRef.current = onLinkSelectionChange;
 
   const placeholderRef = React.useRef(placeholder);
   placeholderRef.current = placeholder;
@@ -328,7 +334,7 @@ export function useRichTextEditor({
           // stripped on paste/typed input.
           protocols: ["buzz"],
           HTMLAttributes: {
-            class: "text-primary underline underline-offset-4 cursor-pointer",
+            class: "text-primary underline underline-offset-4 cursor-text",
           },
         }),
         TiptapMarkdown.configure({
@@ -347,7 +353,7 @@ export function useRichTextEditor({
         handleDOMEvents: {
           // Native anchor default can still win in the WebView before
           // ProseMirror's semantic click hook runs, so intercept editor links
-          // at the DOM event layer and route them to the modal instead.
+          // at the DOM event layer and route them to composer-local controls.
           click: (view, event) => {
             if (!(event instanceof MouseEvent)) return false;
             const target = event.target;
@@ -360,11 +366,24 @@ export function useRichTextEditor({
 
             event.preventDefault();
             event.stopPropagation();
+            if (!view.state.selection.empty) {
+              return true;
+            }
 
             const position = view.posAtCoords({
               left: event.clientX,
               top: event.clientY,
             });
+            if (position) {
+              view.dispatch(
+                view.state.tr
+                  .setSelection(
+                    TextSelection.create(view.state.doc, position.pos),
+                  )
+                  .scrollIntoView(),
+              );
+              view.focus();
+            }
             const info = position
               ? resolveLinkAt(view.state, position.pos)
               : null;
@@ -410,11 +429,12 @@ export function useRichTextEditor({
           // otherwise let ArrowUp fall through to normal caret movement.
           return handler();
         },
-        // Click on an existing link → open the link-edit modal. The link
+        // Click on an existing link → surface composer-local link controls. The link
         // extension is configured `openOnClick: false` (never navigate away
         // from a chat composer), so without this hook a click on a link does
-        // nothing. We resolve the full link mark range under the cursor,
-        // cancel the anchor's default navigation, and hand it to the owner.
+        // nothing. We resolve the full link mark range under the cursor, move
+        // the editor selection there, cancel anchor navigation, and hand it to
+        // the owner.
         handleClick: (view, pos, event) => {
           const handler = onEditLinkRef.current;
           if (!handler) return false;
@@ -422,6 +442,15 @@ export function useRichTextEditor({
           if (!info) return false;
           event.preventDefault();
           event.stopPropagation();
+          if (!view.state.selection.empty) {
+            return true;
+          }
+          view.dispatch(
+            view.state.tr
+              .setSelection(TextSelection.create(view.state.doc, pos))
+              .scrollIntoView(),
+          );
+          view.focus();
           handler(info);
           return true;
         },
@@ -434,6 +463,15 @@ export function useRichTextEditor({
         // diverge by 1 per hard-break / block boundary.
         const text = buildPlainTextProjection(ed.state.doc).text;
         onUpdateRef.current?.({ markdown, text });
+      },
+      onSelectionUpdate: ({ editor: ed }) => {
+        const handler = onLinkSelectionChangeRef.current;
+        if (!handler) return;
+        if (!ed.state.selection.empty) {
+          handler(null);
+          return;
+        }
+        handler(resolveLinkAt(ed.state, ed.state.selection.from));
       },
     },
     [],

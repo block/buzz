@@ -86,6 +86,9 @@ export function ForumComposer({
   const onEditLinkRef = React.useRef<
     ((info: LinkSelectionInfo) => void) | null
   >(null);
+  const onLinkSelectionChangeRef = React.useRef<
+    ((info: LinkSelectionInfo | null) => void) | null
+  >(null);
 
   const richText = useRichTextEditor({
     placeholder,
@@ -95,6 +98,7 @@ export function ForumComposer({
     onSubmit: () => submitMessageRef.current(),
     isAutocompleteOpen: isAutocompleteOpenRef,
     onEditLink: (info) => onEditLinkRef.current?.(info),
+    onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
     onUpdate: ({ markdown, text }) => {
       setContent(markdown);
       contentRef.current = markdown;
@@ -107,6 +111,7 @@ export function ForumComposer({
 
   const linkEditor = useLinkEditor(richText);
   onEditLinkRef.current = linkEditor.openFromClick;
+  onLinkSelectionChangeRef.current = linkEditor.showFromCursor;
 
   // ── Mention / channel autocomplete insertion ────────────────────────
   // Native ProseMirror transactions — no markdown round-trip.
@@ -277,12 +282,22 @@ export function ForumComposer({
         }
         return;
       }
+
+      if (event.key === "Tab" && !event.shiftKey && linkEditor.isCardOpen) {
+        event.preventDefault();
+        if (!linkEditor.focusCardFirstControl()) {
+          requestAnimationFrame(linkEditor.focusCardFirstControl);
+        }
+        return;
+      }
     },
     [
       channelLinks.handleChannelKeyDown,
       applyChannelInsert,
       mentions.handleMentionKeyDown,
       applyMentionInsert,
+      linkEditor.isCardOpen,
+      linkEditor.focusCardFirstControl,
     ],
   );
 
@@ -394,99 +409,102 @@ export function ForumComposer({
   const autocompletePosition = autocompleteBelow ? "below" : "above";
   return (
     <>
-    <form
-      className={cn(
-        "relative rounded-2xl border border-input bg-card px-3 py-2 sm:px-4",
-        className,
-      )}
-      onBlurCapture={handleFormBlur}
-      onDragEnter={(event) => {
-        expandCompactComposer();
-        media.handleDragEnter(event);
-      }}
-      onDragLeave={media.handleDragLeave}
-      onDragOver={media.handleDragOver}
-      onDrop={(e) => {
-        void media.handleDrop(e);
-      }}
-      onFocusCapture={expandCompactComposer}
-      onSubmit={handleSubmit}
-    >
-      {media.isDragOver && <DropZoneOverlay />}
-      {isCompactLayout ? (
-        <ForumComposerCompactLayout
-          editor={richText.editor}
-          header={header}
-          isSending={isSending}
-          onEditorKeyDown={handleEditorKeyDown}
-          sendDisabled={sendDisabled}
-        />
-      ) : (
-        <>
-          {header ? (
-            <div
-              className={cn("mb-2", compact && "flex min-h-10 items-center")}
-            >
-              {header}
-            </div>
-          ) : null}
-          <ForumComposerAutocompletes
-            channelSelectedIndex={channelLinks.channelSelectedIndex}
-            channelSuggestions={
-              channelLinks.isChannelOpen ? channelLinks.channelSuggestions : []
-            }
-            mentionSelectedIndex={mentions.mentionSelectedIndex}
-            mentionSuggestions={
-              mentions.isMentionOpen ? mentions.suggestions : []
-            }
-            onChannelSelect={applyChannelInsert}
-            onMentionSelect={applyMentionInsert}
-            position={autocompletePosition}
-          />
-
-          <ForumComposerMediaStatus media={media} />
-
-          {/* biome-ignore lint/a11y/noStaticElementInteractions: keydown handler bridges Tiptap editor to autocomplete and submit */}
-          <div
-            className="rich-text-composer max-h-32 overflow-y-auto"
-            onKeyDown={handleEditorKeyDown}
-          >
-            <EditorContent editor={richText.editor} />
-          </div>
-
-          <MessageComposerToolbar
-            composerDisabled={disabled ?? false}
+      <form
+        className={cn(
+          "relative rounded-2xl border border-input bg-card px-3 py-2 sm:px-4",
+          className,
+        )}
+        onBlurCapture={handleFormBlur}
+        onDragEnter={(event) => {
+          expandCompactComposer();
+          media.handleDragEnter(event);
+        }}
+        onDragLeave={media.handleDragLeave}
+        onDragOver={media.handleDragOver}
+        onDrop={(e) => {
+          void media.handleDrop(e);
+        }}
+        onFocusCapture={expandCompactComposer}
+        onSubmit={handleSubmit}
+      >
+        {media.isDragOver && <DropZoneOverlay />}
+        {isCompactLayout ? (
+          <ForumComposerCompactLayout
             editor={richText.editor}
-            extraActions={
-              onCancel ? (
-                <Button
-                  disabled={isSending}
-                  onClick={onCancel}
-                  size="sm"
-                  type="button"
-                  variant="ghost"
-                >
-                  Cancel
-                </Button>
-              ) : undefined
-            }
-            formattingDisabled={disabled ?? false}
-            isEmojiPickerOpen={isEmojiPickerOpen}
-            isFormattingOpen={isFormattingOpen}
-            isSending={isSending ?? false}
-            isUploading={media.isUploading}
-            onCaptureSelection={handleToolbarMouseDown}
-            onEmojiPickerOpenChange={setIsEmojiPickerOpen}
-            onEmojiSelect={insertEmoji}
-            onFormattingToggle={handleFormattingToggle}
-            onLinkButton={linkEditor.openFromToolbar}
-            onOpenMentionPicker={openMentionPicker}
-            onPaperclip={handlePaperclipClick}
+            header={header}
+            isSending={isSending}
+            onEditorKeyDown={handleEditorKeyDown}
             sendDisabled={sendDisabled}
           />
-        </>
-      )}
-    </form>
+        ) : (
+          <>
+            {header ? (
+              <div
+                className={cn("mb-2", compact && "flex min-h-10 items-center")}
+              >
+                {header}
+              </div>
+            ) : null}
+            <ForumComposerAutocompletes
+              channelSelectedIndex={channelLinks.channelSelectedIndex}
+              channelSuggestions={
+                channelLinks.isChannelOpen
+                  ? channelLinks.channelSuggestions
+                  : []
+              }
+              mentionSelectedIndex={mentions.mentionSelectedIndex}
+              mentionSuggestions={
+                mentions.isMentionOpen ? mentions.suggestions : []
+              }
+              onChannelSelect={applyChannelInsert}
+              onMentionSelect={applyMentionInsert}
+              position={autocompletePosition}
+            />
+
+            <ForumComposerMediaStatus media={media} />
+
+            {/* biome-ignore lint/a11y/noStaticElementInteractions: keydown handler bridges Tiptap editor to autocomplete and submit */}
+            <div
+              className="rich-text-composer max-h-32 overflow-y-auto"
+              onKeyDown={handleEditorKeyDown}
+            >
+              <EditorContent editor={richText.editor} />
+            </div>
+
+            <MessageComposerToolbar
+              composerDisabled={disabled ?? false}
+              editor={richText.editor}
+              extraActions={
+                onCancel ? (
+                  <Button
+                    disabled={isSending}
+                    onClick={onCancel}
+                    size="sm"
+                    type="button"
+                    variant="ghost"
+                  >
+                    Cancel
+                  </Button>
+                ) : undefined
+              }
+              formattingDisabled={disabled ?? false}
+              isEmojiPickerOpen={isEmojiPickerOpen}
+              isFormattingOpen={isFormattingOpen}
+              isSending={isSending ?? false}
+              isUploading={media.isUploading}
+              onCaptureSelection={handleToolbarMouseDown}
+              onEmojiPickerOpenChange={setIsEmojiPickerOpen}
+              onEmojiSelect={insertEmoji}
+              onFormattingToggle={handleFormattingToggle}
+              onLinkButton={linkEditor.openFromToolbar}
+              onOpenMentionPicker={openMentionPicker}
+              onPaperclip={handlePaperclipClick}
+              sendDisabled={sendDisabled}
+            />
+          </>
+        )}
+      </form>
+      {linkEditor.card}
       {linkEditor.dialog}
     </>
   );
