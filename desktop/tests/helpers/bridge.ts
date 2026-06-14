@@ -99,7 +99,10 @@ type MockBridgeOptions = {
   profileReadError?: string;
   profileUpdateError?: string;
   searchProfiles?: MockSearchProfileSeed[];
+  updateAvailable?: boolean;
   updateChannelDelayMs?: number;
+  updateDownloadDelayMs?: number;
+  updateVersion?: string;
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
   // NIP-IA gate inputs — drive the archive-button gate matrix in

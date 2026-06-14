@@ -9,11 +9,6 @@ import {
   PenSquare,
   Zap,
 } from "lucide-react";
-import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
-import {
-  isRelayUnreachableError,
-  RELAY_UNREACHABLE_SHORT,
-} from "@/shared/lib/relayError";
 import * as React from "react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
@@ -43,7 +38,12 @@ import {
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
+import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
+import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { SECTION_ACTION_VISIBILITY_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
+import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
+import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
+import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCardVisibility";
 import type {
   Channel,
   ChannelVisibility,
@@ -222,6 +222,29 @@ export function AppSidebar({
   onStarChannel,
   onUnstarChannel,
 }: AppSidebarProps) {
+  const { status: updateStatus } = useUpdaterContext();
+  const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
+  const sidebarRelayConnectionCard =
+    useSidebarRelayConnectionCard(errorMessage);
+  const [isSidebarUpdateCardDismissed, setIsSidebarUpdateCardDismissed] =
+    React.useState(false);
+  const showSidebarUpdateCard =
+    canShowSidebarUpdateCard && !isSidebarUpdateCardDismissed;
+  const sidebarFooterCardCount =
+    (sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? 1 : 0) +
+    (showSidebarUpdateCard ? 1 : 0);
+  const sidebarContentBottomPaddingClass =
+    sidebarFooterCardCount >= 2
+      ? "pb-[18rem]"
+      : sidebarFooterCardCount >= 1
+        ? "pb-52"
+        : "pb-32";
+  const unreadBelowBottomClass =
+    sidebarFooterCardCount >= 2
+      ? "bottom-56"
+      : sidebarFooterCardCount >= 1
+        ? "bottom-44"
+        : "bottom-28";
   const skeletonRows = ["first", "second", "third", "fourth", "fifth", "sixth"];
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
@@ -230,6 +253,12 @@ export function AppSidebar({
   useSidebarScrollLock(scrollRef);
   const [createDialogKind, setCreateDialogKind] =
     React.useState<CreateChannelKind | null>(null);
+
+  React.useEffect(() => {
+    if (!canShowSidebarUpdateCard) {
+      setIsSidebarUpdateCardDismissed(false);
+    }
+  }, [canShowSidebarUpdateCard]);
 
   // Allow the create-channel dialog to be opened from outside (e.g. the
   // ⌘⇧N global shortcut in AppShell), mirroring the controlled new-DM lift.
@@ -282,8 +311,6 @@ export function AppSidebar({
     assignChannel,
     unassignChannel,
   } = useChannelSections(currentPubkey);
-
-  const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
 
   const [createSectionState, setCreateSectionState] = React.useState<{
     open: boolean;
@@ -526,7 +553,10 @@ export function AppSidebar({
             testId="sidebar-more-unread-above"
           />
         ) : null}
-        <SidebarContent className="pb-32" ref={scrollRef}>
+        <SidebarContent
+          className={cn(sidebarContentBottomPaddingClass)}
+          ref={scrollRef}
+        >
           {isLoading ? (
             <SidebarGroup>
               <SidebarGroupLabel>Channels</SidebarGroupLabel>
@@ -726,36 +756,17 @@ export function AppSidebar({
             </>
           ) : null}
 
-          {errorMessage ? (
-            isRelayUnreachableError(errorMessage) ? (
-              <div
-                className="px-3 py-2 text-sm"
-                data-testid="sidebar-relay-unreachable"
-              >
-                <span className="text-muted-foreground">
-                  {RELAY_UNREACHABLE_SHORT}{" "}
-                </span>
-                <button
-                  className="text-primary hover:underline disabled:opacity-50"
-                  data-testid="sidebar-reconnect"
-                  disabled={isReconnectPending}
-                  onClick={() => void reconnect()}
-                  type="button"
-                >
-                  {isReconnectPending ? "Reconnecting…" : "Reconnect"}
-                </button>
-              </div>
-            ) : (
-              <div className="px-3 py-2 text-sm text-destructive">
-                {errorMessage}
-              </div>
-            )
+          {errorMessage &&
+          !sidebarRelayConnectionCard.hasRelayUnreachableError ? (
+            <div className="px-3 py-2 text-sm text-destructive">
+              {errorMessage}
+            </div>
           ) : null}
         </SidebarContent>
 
         {unreadBelowCount > 0 ? (
           <MoreUnreadButton
-            bottomClassName="bottom-28"
+            bottomClassName={unreadBelowBottomClass}
             count={unreadBelowCount}
             icon={<ArrowDown />}
             onClick={scrollToNextBelow}
@@ -765,6 +776,29 @@ export function AppSidebar({
         ) : null}
 
         <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
+          {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
+            <div className="mb-2 group-data-[collapsible=icon]:hidden">
+              <SidebarRelayConnectionCard
+                isConnected={
+                  sidebarRelayConnectionCard.isRelayConnectionSuccess
+                }
+                isReconnectPending={
+                  sidebarRelayConnectionCard.isRelayReconnectPending
+                }
+                onDismiss={
+                  sidebarRelayConnectionCard.onDismissRelayConnectionCard
+                }
+                onReconnect={sidebarRelayConnectionCard.onReconnectRelay}
+              />
+            </div>
+          ) : null}
+          {showSidebarUpdateCard ? (
+            <div className="mb-2 group-data-[collapsible=icon]:hidden">
+              <SidebarUpdateCard
+                onDismiss={() => setIsSidebarUpdateCardDismissed(true)}
+              />
+            </div>
+          ) : null}
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarProfileCard

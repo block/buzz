@@ -74,7 +74,11 @@ type E2eConfig = {
     profileReadError?: string;
     profileUpdateError?: string;
     searchProfiles?: MockSearchProfileSeed[];
+    updateAvailable?: boolean;
     updateChannelDelayMs?: number;
+    updateDownloadDelayMs?: number;
+    restartDelayMs?: number;
+    updateVersion?: string;
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -3627,6 +3631,56 @@ async function handleSetChannelPurpose(
   });
 }
 
+type MockUpdaterChannel = {
+  onmessage?: (event: { event: "Finished" }) => void;
+};
+
+function notifyUpdaterFinished(payload: unknown) {
+  const channel = (payload as { onEvent?: MockUpdaterChannel } | null)?.onEvent;
+  channel?.onmessage?.({ event: "Finished" });
+}
+
+function handleUpdaterCheck(config: E2eConfig | undefined) {
+  if (!config?.mock?.updateAvailable) {
+    return null;
+  }
+
+  const version = config.mock.updateVersion ?? "0.3.18";
+
+  return {
+    rid: 42,
+    currentVersion: "0.3.17",
+    version,
+    date: "2026-06-12T00:00:00Z",
+    body: `Mock update ${version}`,
+    rawJson: null,
+  };
+}
+
+async function handleUpdaterDownloadAndInstall(
+  payload: unknown,
+  config: E2eConfig | undefined,
+) {
+  const delayMs = config?.mock?.updateDownloadDelayMs ?? 0;
+
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
+  notifyUpdaterFinished(payload);
+  return null;
+}
+
+async function handleRestart(config: E2eConfig | undefined) {
+  const delayMs = config?.mock?.restartDelayMs ?? 0;
+
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
+  return null;
+}
+
 async function handleArchiveChannel(
   args: { channelId: string },
   config: E2eConfig | undefined,
@@ -5894,7 +5948,7 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ = (state) => {
     // Directly emit a connection state change on the relay client singleton,
-    // for tests that need to drive ConnectionBanner without waiting for the
+    // for tests that need to drive degraded relay UI without waiting for the
     // real auth-timeout + reconnect-debounce cycle (~10 s). Reaches the
     // TS-private emitter via a cast so the production class carries no
     // test-only seam.
@@ -6513,6 +6567,17 @@ export function maybeInstallE2eTauriMocks() {
       case "plugin:window|set_badge_count":
       case "plugin:window|set_badge_label":
         return null;
+      case "plugin:updater|check":
+        return handleUpdaterCheck(activeConfig);
+      case "plugin:updater|download_and_install":
+        return handleUpdaterDownloadAndInstall(payload, activeConfig);
+      case "connect_warp_vpn":
+      case "refresh_warp_access":
+        return null;
+      case "plugin:resources|close":
+        return null;
+      case "plugin:process|restart":
+        return handleRestart(activeConfig);
       case "get_channel_workflows":
         return handleGetChannelWorkflows(
           payload as Parameters<typeof handleGetChannelWorkflows>[0],

@@ -16,7 +16,7 @@ import { toast } from "sonner";
 import { relayClient } from "@/shared/api/relayClient";
 
 export function useReconnectRelay(): {
-  reconnect: () => Promise<void>;
+  reconnect: () => Promise<boolean>;
   isPending: boolean;
 } {
   const queryClient = useQueryClient();
@@ -27,7 +27,7 @@ export function useReconnectRelay(): {
   const inFlightRef = React.useRef(false);
 
   const reconnect = React.useCallback(async () => {
-    if (inFlightRef.current) return;
+    if (inFlightRef.current) return false;
     inFlightRef.current = true;
     setIsPending(true);
     try {
@@ -35,9 +35,11 @@ export function useReconnectRelay(): {
       await queryClient.invalidateQueries();
       // No success toast — the banner auto-hides once the connection state
       // transitions back to "connected", which is the user-visible confirmation.
+      return true;
     } catch (err) {
       toast.error("Reconnect failed — check your VPN or network.");
       console.error("[useReconnectRelay] reconnect failed:", err);
+      return false;
     } finally {
       inFlightRef.current = false;
       setIsPending(false);

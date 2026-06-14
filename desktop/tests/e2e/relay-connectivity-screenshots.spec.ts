@@ -45,22 +45,26 @@ async function driveConnectionDegraded(
 }
 
 test.describe("relay connectivity screenshots", () => {
-  test("01 — sidebar unreachable banner", async ({ page }) => {
+  test("01 — sidebar unreachable card", async ({ page }) => {
     await installMockBridge(page, { channelsReadError: RELAY_UNREACHABLE });
     await page.goto("/");
 
-    await expect(page.getByTestId("sidebar-relay-unreachable")).toBeVisible();
+    const relayCard = page.getByTestId("sidebar-relay-unreachable");
+    await expect(relayCard).toBeVisible();
+    await expect(relayCard).toContainText("Can't reach the relay");
+    await expect(relayCard).toContainText("Click to connect");
     await expect(page.getByTestId("sidebar-reconnect")).toBeVisible();
+    await expect(page.getByTestId("connection-banner")).toHaveCount(0);
     await settle(page);
 
-    // Clip to sidebar width (256px) so the banner and channel list are both visible.
+    // Clip to sidebar width (256px) so the card and channel list are both visible.
     await page.screenshot({
       path: `${SHOTS}/01-sidebar-unreachable.png`,
       clip: { x: 0, y: 0, width: 256, height: 720 },
     });
   });
 
-  test("02 — connection banner while reconnecting", async ({ page }) => {
+  test("02 — sidebar reconnect card while reconnecting", async ({ page }) => {
     await installMockBridge(page);
     await page.goto("/");
 
@@ -68,18 +72,20 @@ test.describe("relay connectivity screenshots", () => {
     await expect(page.getByTestId("channel-general")).toBeVisible();
     await driveConnectionDegraded(page);
 
-    // ConnectionBanner debounces non-healthy states by 2 s before rendering.
-    await expect(page.getByTestId("connection-banner")).toBeVisible({
+    // useRelayConnection debounces non-healthy states by 2 s before surfacing.
+    const relayCard = page.getByTestId("sidebar-relay-unreachable");
+    await expect(relayCard).toBeVisible({
       timeout: 5_000,
     });
-    await expect(page.getByTestId("connection-banner-reconnect")).toBeVisible();
+    await expect(relayCard).toContainText("Can't reach the relay");
+    await expect(relayCard).toContainText("Click to connect");
+    await expect(page.getByTestId("sidebar-reconnect")).toBeVisible();
     await settle(page);
 
-    // Capture a horizontal strip spanning the full width that shows the banner
-    // above the content pane.
+    // Clip to the sidebar, where degraded relay state is now surfaced.
     await page.screenshot({
-      path: `${SHOTS}/02-connection-banner.png`,
-      clip: { x: 0, y: 0, width: 1280, height: 180 },
+      path: `${SHOTS}/02-sidebar-reconnecting.png`,
+      clip: { x: 0, y: 0, width: 256, height: 720 },
     });
   });
 
@@ -192,8 +198,8 @@ test.describe("relay connectivity screenshots", () => {
     await expect(page.getByTestId("channel-general")).toBeVisible();
     await driveConnectionDegraded(page);
 
-    // 2 s debounce on the "reconnecting" state before ConnectionBanner shows.
-    await expect(page.getByTestId("connection-banner")).toBeVisible({
+    // 2 s debounce on the "reconnecting" state before the sidebar card shows.
+    await expect(page.getByTestId("sidebar-relay-unreachable")).toBeVisible({
       timeout: 5_000,
     });
 
@@ -217,6 +223,31 @@ test.describe("relay connectivity screenshots", () => {
     await page.screenshot({
       path: `${SHOTS}/07-profile-popover-reconnect.png`,
       clip: { x: 0, y: 300, width: 480, height: 420 },
+    });
+  });
+
+  test("08 — sidebar card shows connected after external relay recovery", async ({
+    page,
+  }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await expect(page.getByTestId("channel-general")).toBeVisible();
+    await driveConnectionDegraded(page);
+
+    const relayCard = page.getByTestId("sidebar-relay-unreachable");
+    await expect(relayCard).toBeVisible({
+      timeout: 5_000,
+    });
+    await expect(relayCard).toContainText("Can't reach the relay");
+    await expect(relayCard).toContainText("Click to connect");
+
+    await driveConnectionDegraded(page, "connected");
+
+    await expect(relayCard).toContainText("Connected");
+    await expect(relayCard).not.toContainText("Click to connect");
+    await expect(relayCard).toBeHidden({
+      timeout: 5_000,
     });
   });
 });

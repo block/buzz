@@ -75,7 +75,6 @@ import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
-import { ConnectionBanner } from "@/shared/ui/ConnectionBanner";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 
 type AppView =
@@ -941,7 +940,6 @@ export function AppShell() {
                         className="min-h-0 min-w-0 overflow-hidden"
                         style={chromeCssVarDefaults}
                       >
-                        <ConnectionBanner />
                         <Outlet />
                       </SidebarInset>
                     </MainInsetProvider>
