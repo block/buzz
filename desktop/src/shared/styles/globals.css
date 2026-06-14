@@ -721,6 +721,16 @@
     --secondary-foreground: 234 16.02% 35.49%;
     --muted: 223 15.91% 82.75%;
     --muted-foreground: 233 12.8% 41.37%;
+    --huddle-drawer-surface: 0 0% 0%;
+    --huddle-control-surface: 0 0% 20%;
+    --huddle-control-hover-surface: 0 0% 24%;
+    --huddle-control-chevron-surface: 0 0% 16%;
+    --huddle-control-chevron-hover-surface: 0 0% 22%;
+    --huddle-control-foreground: 0 0% 98%;
+    --huddle-popover-surface: 0 0% 16%;
+    --huddle-popover-border: 0 0% 24%;
+    --huddle-tooltip-surface: 0 0% 20%;
+    --huddle-tooltip-foreground: 0 0% 98%;
     --accent: 223 15.91% 82.75%;
     --accent-foreground: 234 16.02% 35.49%;
     --destructive: 347 86.67% 44.12%;
@@ -761,6 +771,16 @@
     --secondary-foreground: 227 68.25% 87.65%;
     --muted: 230 18.8% 26.08%;
     --muted-foreground: 228 39.22% 80%;
+    --huddle-drawer-surface: 230 18.8% 26.08%;
+    --huddle-control-surface: 231 15.61% 33.92%;
+    --huddle-control-hover-surface: 231 15.61% 38%;
+    --huddle-control-chevron-surface: 231 13.16% 29.8%;
+    --huddle-control-chevron-hover-surface: 231 15.61% 33.92%;
+    --huddle-control-foreground: 227 68.25% 87.65%;
+    --huddle-popover-surface: 231 13.16% 29.8%;
+    --huddle-popover-border: 231 15.61% 38%;
+    --huddle-tooltip-surface: 231 15.61% 33.92%;
+    --huddle-tooltip-foreground: 227 68.25% 87.65%;
     --accent: 230 18.8% 26.08%;
     --accent-foreground: 227 68.25% 87.65%;
     --destructive: 351 73.91% 72.94%;
@@ -838,6 +858,148 @@
 }
 
 @layer components {
+  .buzz-huddle-shell {
+    --buzz-huddle-drawer-height: 5rem;
+    --buzz-huddle-drawer-radius: 24px;
+    --buzz-huddle-drawer-ease: cubic-bezier(0.32, 0.72, 0, 1);
+    --buzz-huddle-drawer-surface: var(--huddle-drawer-surface, 0 0% 0%);
+    background: hsl(var(--buzz-huddle-drawer-surface));
+  }
+
+  .buzz-huddle-app-surface {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+    bottom: 0;
+    box-shadow: none;
+    left: 0;
+    position: absolute;
+    right: 0;
+    top: 0;
+    transition:
+      bottom 260ms var(--buzz-huddle-drawer-ease),
+      border-bottom-left-radius 260ms var(--buzz-huddle-drawer-ease),
+      border-bottom-right-radius 260ms var(--buzz-huddle-drawer-ease),
+      box-shadow 260ms var(--buzz-huddle-drawer-ease);
+    will-change:
+      bottom, border-bottom-left-radius, border-bottom-right-radius, box-shadow;
+  }
+
+  .buzz-huddle-app-surface::after {
+    background: hsl(var(--buzz-huddle-drawer-surface));
+    bottom: -1px;
+    content: "";
+    height: 2px;
+    left: 0;
+    opacity: 0;
+    pointer-events: none;
+    position: absolute;
+    right: 0;
+    transition: opacity 260ms var(--buzz-huddle-drawer-ease);
+    z-index: 60;
+  }
+
+  .buzz-huddle-app-surface-open {
+    border-bottom-left-radius: var(--buzz-huddle-drawer-radius);
+    border-bottom-right-radius: var(--buzz-huddle-drawer-radius);
+    bottom: var(--buzz-huddle-drawer-height);
+    box-shadow:
+      0 10px 24px -12px rgb(0 0 0 / 62%),
+      0 2px 7px -4px rgb(0 0 0 / 42%);
+  }
+
+  .buzz-huddle-app-surface-open::after {
+    opacity: 1;
+  }
+
+  .buzz-huddle-drawer {
+    --buzz-huddle-drawer-surface: var(--huddle-drawer-surface, 0 0% 0%);
+    --background: var(--buzz-huddle-drawer-surface);
+    --foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 0 0% 9%;
+    --secondary: var(--huddle-control-surface, 0 0% 14.9%);
+    --secondary-foreground: var(--huddle-control-foreground, 0 0% 98%);
+    --muted: var(--huddle-control-chevron-surface, 0 0% 14.9%);
+    --muted-foreground: 0 0% 63.9%;
+    --accent: var(
+      --huddle-control-hover-surface,
+      var(--huddle-control-surface, 0 0% 14.9%)
+    );
+    --accent-foreground: 0 0% 98%;
+    --popover: var(--buzz-huddle-drawer-surface);
+    --popover-foreground: 0 0% 98%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 14.9%;
+    --input: 0 0% 14.9%;
+    --ring: 0 0% 83.1%;
+
+    color-scheme: dark;
+    background: hsl(var(--buzz-huddle-drawer-surface));
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .buzz-huddle-drawer::-webkit-scrollbar {
+    display: none;
+  }
+
+  .buzz-huddle-popover {
+    --buzz-huddle-popover-surface: var(
+      --huddle-popover-surface,
+      var(--huddle-control-chevron-surface, 0 0% 16%)
+    );
+    --background: var(--buzz-huddle-popover-surface);
+    --foreground: var(--huddle-control-foreground, 0 0% 98%);
+    --popover: var(--buzz-huddle-popover-surface);
+    --popover-foreground: var(--foreground);
+    --border: var(
+      --huddle-popover-border,
+      var(--huddle-control-hover-surface, 0 0% 24%)
+    );
+
+    background: hsl(var(--buzz-huddle-popover-surface));
+    border-color: hsl(var(--border) / 0.72);
+    box-shadow:
+      0 18px 42px -20px rgb(0 0 0 / 72%),
+      0 8px 18px -12px rgb(0 0 0 / 62%);
+    color: hsl(var(--foreground));
+  }
+
+  .buzz-huddle-headphones-hint {
+    --background: var(
+      --huddle-tooltip-surface,
+      var(--huddle-control-surface, var(--secondary))
+    );
+    --foreground: var(
+      --huddle-tooltip-foreground,
+      var(--huddle-control-foreground, var(--secondary-foreground))
+    );
+    --popover: var(--background);
+    --popover-foreground: var(--foreground);
+
+    background: hsl(var(--background));
+    box-shadow: 0 10px 24px rgb(0 0 0 / 22%);
+    color: hsl(var(--foreground));
+  }
+
+  .buzz-huddle-mic-meter-bar {
+    border-radius: 9999px;
+    height: var(--buzz-huddle-meter-height, 4px);
+    transition: none;
+    width: 4px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .buzz-huddle-app-surface {
+      transition: none;
+    }
+
+    .buzz-huddle-mic-meter-bar {
+      transition: none;
+    }
+  }
+
   .buzz-startup-shell {
     min-height: 100dvh;
     width: 100%;
@@ -1048,6 +1210,59 @@
     .buzz-onboarding-name-placeholder-caret {
       animation: none;
     }
+  }
+}
+
+@layer utilities {
+  .buzz-huddle-tooltip {
+    --primary: var(
+      --huddle-tooltip-surface,
+      var(--huddle-control-surface, 0 0% 20%)
+    );
+    --primary-foreground: var(
+      --huddle-tooltip-foreground,
+      var(--huddle-control-foreground, 0 0% 98%)
+    );
+
+    background: hsl(var(--primary));
+    border: 1px solid
+      hsl(
+        var(
+          --huddle-control-chevron-hover-surface,
+          var(--huddle-control-chevron-surface, 0 0% 22%)
+        ) /
+        0.72
+      );
+    box-shadow: 0 10px 22px rgb(0 0 0 / 35%);
+    color: hsl(var(--primary-foreground));
+  }
+
+  .buzz-huddle-drawer .buzz-huddle-control-button,
+  .buzz-huddle-drawer .buzz-huddle-split-main {
+    background: hsl(var(--huddle-control-surface, var(--secondary)));
+  }
+
+  .buzz-huddle-drawer .buzz-huddle-control-button:hover,
+  .buzz-huddle-drawer .buzz-huddle-split-main:hover {
+    background: hsl(
+      var(
+        --huddle-control-hover-surface,
+        var(--huddle-control-surface, var(--secondary))
+      )
+    );
+  }
+
+  .buzz-huddle-drawer .buzz-huddle-split-chevron {
+    background: hsl(var(--huddle-control-chevron-surface, var(--secondary)));
+  }
+
+  .buzz-huddle-drawer .buzz-huddle-split-chevron:hover {
+    background: hsl(
+      var(
+        --huddle-control-chevron-hover-surface,
+        var(--huddle-control-chevron-surface, var(--secondary))
+      )
+    );
   }
 }
 
