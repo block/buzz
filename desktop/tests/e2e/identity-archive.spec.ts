@@ -42,12 +42,22 @@ test.describe("NIP-IA archive button gate", () => {
   }) => {
     await installMockBridge(page, { relayRole: null, oaOwnerIsMe: false });
     await openSelfProfile(page);
-    await expect(
-      page.getByTestId("user-profile-archive-identity"),
-    ).toBeVisible();
+    const archiveButton = page.getByTestId("user-profile-archive-identity");
+    await expect(archiveButton).toBeVisible();
     await expect(page.getByTestId("user-profile-archived-flair")).toHaveCount(
       0,
     );
+
+    // Archive is now gated behind a confirmation modal — clicking the button
+    // opens the dialog rather than firing immediately. Drive the full flow so
+    // the gate stays meaningful: the modal must surface, then confirm fires.
+    await expect(page.getByTestId("archive-confirm-dialog")).toHaveCount(0);
+    await archiveButton.click();
+    await expect(page.getByTestId("archive-confirm-dialog")).toBeVisible();
+    const confirm = page.getByTestId("archive-confirm-action");
+    await expect(confirm).toBeVisible();
+    await confirm.click();
+    await expect(page.getByTestId("archive-confirm-dialog")).toHaveCount(0);
   });
 
   test("case 2 — relay admin viewing Alice: Archive visible", async ({

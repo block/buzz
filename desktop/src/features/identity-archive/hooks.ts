@@ -26,11 +26,7 @@ export function useArchivedIdentitiesQuery(enabled = true) {
   });
 }
 
-/**
- * `true` iff `pubkey` appears in the relay's latest archive snapshot.
- * Returns `undefined` while the snapshot is loading so callers can hide the
- * flair until we know.
- */
+/** `undefined` while the snapshot loads so callers can defer the flair. */
 export function useIsIdentityArchived(pubkey: string): boolean | undefined {
   const query = useArchivedIdentitiesQuery();
   if (!query.data) return undefined;
@@ -40,20 +36,16 @@ export function useIsIdentityArchived(pubkey: string): boolean | undefined {
 
 /**
  * Predicate for hiding archived identities from forward-looking discovery
- * surfaces (mention autocomplete, DM picker, member-adder, search,
- * panel-fold). Distinct from `useIsIdentityArchived` because callers here
- * need a synchronous boolean: while the `kind:13535` snapshot is loading the
- * predicate returns `false` (no-op — show everyone), never `true` — fail-open
- * so a cold-start can't briefly hide everyone.
+ * surfaces (autocomplete, DM picker, member-adder, search, panel-fold).
+ * Fail-open: returns `false` while the snapshot loads so a cold start can't
+ * briefly hide everyone.
  *
- * Self-exempt by construction: the current user is **never** filtered or
- * folded from their own client, even when archived on the relay. NIP-IA §Self
- * Requests makes archival deliberately non-silent — the anti-shadowban
- * property requires the archived user to see they're archived and be able to
- * self-unarchive. The profile pane's "Archived" flair is the honest
- * disclosure; removing self from member lists / autocomplete / search would
- * build the exact shadowban the NIP is designed to prevent. Self-exemption
- * lives here, in the predicate, so no caller can forget it.
+ * Self-exempt by construction: the current user is never folded from their own
+ * client, even when archived on the relay. NIP-IA §Self Requests makes archival
+ * deliberately non-silent — the anti-shadowban property requires the archived
+ * user to see they're archived and self-unarchive. Folding self would build the
+ * exact shadowban the NIP prevents, so the exemption lives here in the
+ * predicate where no caller can forget it.
  */
 export function useIsArchivedPredicate(): (pubkey: string) => boolean {
   const query = useArchivedIdentitiesQuery();
@@ -71,10 +63,7 @@ export function useIsArchivedPredicate(): (pubkey: string) => boolean {
   }, [query.data, selfPubkey]);
 }
 
-/**
- * Resolve the NIP-OA owner of a target via its live `kind:0`. Gates the
- * owner-path archive button.
- */
+/** Gates the owner-path archive button via the target's live `kind:0`. */
 export function useOaOwnerQuery(pubkey: string, enabled = true) {
   return useQuery({
     enabled,
@@ -110,38 +99,22 @@ export function useUnarchiveIdentityMutation() {
 
 /** Everything the profile panel needs to gate + drive NIP-IA archival. */
 export type IdentityArchiveActions = {
-  /**
-   * UX gate. `true` when ANY auth path will be accepted by the relay: self
-   * (acting on own pubkey), relay admin/owner, or verified NIP-OA owner of the
-   * viewee. The relay re-verifies on submit — this is purely a render guard.
-   */
+  /** Render guard only — the relay re-verifies authority on submit. */
   canArchive: boolean;
-  /**
-   * `true` iff the target is in the relay's latest `kind:13535` snapshot.
-   * `undefined` while the snapshot loads so callers can defer the flair /
-   * Manage section until authority + state are both known.
-   */
+  /** `undefined` while the snapshot loads — defer flair + Manage until known. */
   isArchived: boolean | undefined;
-  /** Either mutation in flight — drives the disabled + "Archiving…" states. */
   isPending: boolean;
-  /** Submit a `kind:9035` archive request for `pubkey` (toasts on result). */
   archive: () => void;
-  /** Submit a `kind:9036` unarchive request for `pubkey` (toasts on result). */
   unarchive: () => void;
 };
 
 /**
  * Self-contained NIP-IA archive controller for a single `pubkey`. Composes the
- * three gate queries, owns both mutations, and exposes the archive/unarchive
- * callbacks with toasts — collapsing what used to be six props drilled through
- * the profile panel into one hook call.
+ * gate queries, owns both mutations, and exposes archive/unarchive with toasts.
  *
  * Safe to call from multiple components on the same `pubkey`: React Query
- * dedupes the underlying subscriptions by queryKey, so the only cost is a
- * second hook invocation, not a second network round-trip.
- *
- * Gate composition is verbatim from the old `UserProfilePanel`:
- * `canArchive = isSelf || isRelayAdminOrOwner || isOaOwnerOfViewee`.
+ * dedupes the underlying subscriptions by queryKey, so a second hook call costs
+ * a render, not a second network round-trip.
  */
 export function useIdentityArchive(pubkey: string): IdentityArchiveActions {
   const identityQuery = useIdentityQuery();
