@@ -9,12 +9,6 @@ import {
   PenSquare,
   Zap,
 } from "lucide-react";
-import {
-  isRelayConnectionDegraded,
-  useRelayConnection,
-} from "@/shared/api/useRelayConnection";
-import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
-import { isRelayUnreachableError } from "@/shared/lib/relayError";
 import * as React from "react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
@@ -45,6 +39,7 @@ import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
 import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
+import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { SECTION_ACTION_VISIBILITY_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
 import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
 import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
@@ -85,7 +80,6 @@ type CollapsibleSidebarGroup =
 // ---------------------------------------------------------------------------
 
 type CreateChannelKind = "stream" | "forum";
-const SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 2_500;
 
 type AppSidebarProps = {
   activeWorkspace: Workspace | null;
@@ -229,31 +223,16 @@ export function AppSidebar({
   onUnstarChannel,
 }: AppSidebarProps) {
   const { status: updateStatus } = useUpdaterContext();
-  const relayConnectionState = useRelayConnection();
-  const hasRelayUnreachableError = errorMessage
-    ? isRelayUnreachableError(errorMessage)
-    : false;
-  const isRelayConnectionActuallyDegraded =
-    hasRelayUnreachableError || isRelayConnectionDegraded(relayConnectionState);
-  const isRelayConnectionConnected = relayConnectionState === "connected";
   const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
-  const [
-    isSidebarRelayConnectionCardDismissed,
-    setIsSidebarRelayConnectionCardDismissed,
-  ] = React.useState(false);
+  const sidebarRelayConnectionCard =
+    useSidebarRelayConnectionCard(errorMessage);
   const [isSidebarUpdateCardDismissed, setIsSidebarUpdateCardDismissed] =
     React.useState(false);
-  const [hasRelayConnectionSuccess, setHasRelayConnectionSuccess] =
-    React.useState(false);
-  const canShowSidebarRelayConnectionCard =
-    isRelayConnectionActuallyDegraded || hasRelayConnectionSuccess;
-  const showSidebarRelayConnectionCard =
-    canShowSidebarRelayConnectionCard && !isSidebarRelayConnectionCardDismissed;
   const showSidebarUpdateCard =
     canShowSidebarUpdateCard && !isSidebarUpdateCardDismissed;
-  const isRelayConnectionCardVisible = showSidebarRelayConnectionCard;
   const sidebarFooterCardCount =
-    (showSidebarRelayConnectionCard ? 1 : 0) + (showSidebarUpdateCard ? 1 : 0);
+    (sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? 1 : 0) +
+    (showSidebarUpdateCard ? 1 : 0);
   const sidebarContentBottomPaddingClass =
     sidebarFooterCardCount >= 2
       ? "pb-[18rem]"
@@ -271,57 +250,9 @@ export function AppSidebar({
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
   const scrollRef = React.useRef<HTMLDivElement>(null);
-  const wasSidebarRelayProblemCardVisibleRef = React.useRef(false);
   useSidebarScrollLock(scrollRef);
   const [createDialogKind, setCreateDialogKind] =
     React.useState<CreateChannelKind | null>(null);
-
-  React.useEffect(() => {
-    if (!isRelayConnectionActuallyDegraded && !hasRelayConnectionSuccess) {
-      setIsSidebarRelayConnectionCardDismissed(false);
-    }
-  }, [hasRelayConnectionSuccess, isRelayConnectionActuallyDegraded]);
-
-  React.useEffect(() => {
-    if (isRelayConnectionActuallyDegraded) {
-      setHasRelayConnectionSuccess(false);
-      setIsSidebarRelayConnectionCardDismissed(false);
-    }
-  }, [isRelayConnectionActuallyDegraded]);
-
-  React.useEffect(() => {
-    if (isRelayConnectionActuallyDegraded) {
-      wasSidebarRelayProblemCardVisibleRef.current =
-        isRelayConnectionCardVisible && !hasRelayConnectionSuccess;
-      return;
-    }
-
-    if (
-      wasSidebarRelayProblemCardVisibleRef.current &&
-      isRelayConnectionConnected
-    ) {
-      wasSidebarRelayProblemCardVisibleRef.current = false;
-      setHasRelayConnectionSuccess(true);
-    }
-  }, [
-    hasRelayConnectionSuccess,
-    isRelayConnectionCardVisible,
-    isRelayConnectionActuallyDegraded,
-    isRelayConnectionConnected,
-  ]);
-
-  React.useEffect(() => {
-    if (!hasRelayConnectionSuccess) {
-      return;
-    }
-
-    const timeout = window.setTimeout(() => {
-      setHasRelayConnectionSuccess(false);
-      setIsSidebarRelayConnectionCardDismissed(true);
-    }, SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS);
-
-    return () => window.clearTimeout(timeout);
-  }, [hasRelayConnectionSuccess]);
 
   React.useEffect(() => {
     if (!canShowSidebarUpdateCard) {
@@ -380,66 +311,6 @@ export function AppSidebar({
     assignChannel,
     unassignChannel,
   } = useChannelSections(currentPubkey);
-
-  const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
-  const [sidebarConnectivityAction, setSidebarConnectivityAction] =
-    React.useState<"relay-connection" | null>(null);
-  const sidebarConnectivityActionRef = React.useRef<"relay-connection" | null>(
-    null,
-  );
-  const sidebarConnectivityFrameRef = React.useRef<number | null>(null);
-  const sidebarConnectivityTimeoutRef = React.useRef<number | null>(null);
-  const isRelayReconnectPending =
-    isReconnectPending || sidebarConnectivityAction === "relay-connection";
-
-  React.useEffect(() => {
-    return () => {
-      if (sidebarConnectivityFrameRef.current !== null) {
-        window.cancelAnimationFrame(sidebarConnectivityFrameRef.current);
-      }
-      if (sidebarConnectivityTimeoutRef.current !== null) {
-        window.clearTimeout(sidebarConnectivityTimeoutRef.current);
-      }
-      sidebarConnectivityActionRef.current = null;
-    };
-  }, []);
-
-  const startSidebarConnectivityAction = React.useCallback(
-    (runAction: () => Promise<void>) => {
-      if (sidebarConnectivityActionRef.current !== null) {
-        return;
-      }
-
-      sidebarConnectivityActionRef.current = "relay-connection";
-      setSidebarConnectivityAction("relay-connection");
-      sidebarConnectivityFrameRef.current = window.requestAnimationFrame(() => {
-        sidebarConnectivityFrameRef.current = null;
-        sidebarConnectivityTimeoutRef.current = window.setTimeout(() => {
-          sidebarConnectivityTimeoutRef.current = null;
-          void Promise.resolve()
-            .then(runAction)
-            .catch((error) => {
-              console.error("[AppSidebar] connectivity action failed:", error);
-            })
-            .finally(() => {
-              sidebarConnectivityActionRef.current = null;
-              setSidebarConnectivityAction(null);
-            });
-        }, 0);
-      });
-    },
-    [],
-  );
-
-  const handleReconnectRelay = React.useCallback(() => {
-    startSidebarConnectivityAction(async () => {
-      setHasRelayConnectionSuccess(false);
-      const didReconnect = await reconnect();
-      if (didReconnect) {
-        setHasRelayConnectionSuccess(true);
-      }
-    });
-  }, [reconnect, startSidebarConnectivityAction]);
 
   const [createSectionState, setCreateSectionState] = React.useState<{
     open: boolean;
@@ -885,7 +756,8 @@ export function AppSidebar({
             </>
           ) : null}
 
-          {errorMessage && !hasRelayUnreachableError ? (
+          {errorMessage &&
+          !sidebarRelayConnectionCard.hasRelayUnreachableError ? (
             <div className="px-3 py-2 text-sm text-destructive">
               {errorMessage}
             </div>
@@ -904,13 +776,19 @@ export function AppSidebar({
         ) : null}
 
         <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
-          {showSidebarRelayConnectionCard ? (
+          {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
             <div className="mb-2 group-data-[collapsible=icon]:hidden">
               <SidebarRelayConnectionCard
-                isConnected={hasRelayConnectionSuccess}
-                isReconnectPending={isRelayReconnectPending}
-                onDismiss={() => setIsSidebarRelayConnectionCardDismissed(true)}
-                onReconnect={handleReconnectRelay}
+                isConnected={
+                  sidebarRelayConnectionCard.isRelayConnectionSuccess
+                }
+                isReconnectPending={
+                  sidebarRelayConnectionCard.isRelayReconnectPending
+                }
+                onDismiss={
+                  sidebarRelayConnectionCard.onDismissRelayConnectionCard
+                }
+                onReconnect={sidebarRelayConnectionCard.onReconnectRelay}
               />
             </div>
           ) : null}

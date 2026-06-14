@@ -5,7 +5,7 @@ import {
   SidebarBlockAccessRefreshCompactCard,
   SidebarBlockVpnOffCompactCard,
 } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
-import { connectWarpVpn, refreshWarpAccess } from "@/shared/api/tauri";
+import { connectWarpVpn, refreshWarpAccess } from "@/shared/api/warp";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { cn } from "@/shared/lib/cn";
 import {
