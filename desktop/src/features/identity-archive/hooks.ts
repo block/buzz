@@ -149,8 +149,7 @@ export function useIdentityArchive(pubkey: string): IdentityArchiveActions {
 
   const pubkeyLower = pubkey.toLowerCase();
   const isSelf =
-    currentPubkey !== undefined &&
-    pubkeyLower === currentPubkey.toLowerCase();
+    currentPubkey !== undefined && pubkeyLower === currentPubkey.toLowerCase();
 
   const myMembershipQuery = useMyRelayMembershipQuery();
   // Skip the kind:0 lookup when viewing yourself — the OA gate is for

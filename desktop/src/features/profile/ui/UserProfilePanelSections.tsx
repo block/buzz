@@ -132,7 +132,6 @@ export function ProfileSummaryView({
 
   const { canArchive, isArchived } = useIdentityArchive(pubkey);
 
-
   const metadataFields = [
     ...buildPublicFields({
       pubkey,
