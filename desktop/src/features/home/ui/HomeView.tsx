@@ -44,7 +44,10 @@ import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { resolveMentionNames } from "@/shared/lib/resolveMentionNames";
 import { useElementWidth } from "@/shared/hooks/use-mobile";
+import { useHistorySearchState } from "@/shared/hooks/useHistorySearchState";
 import { Button } from "@/shared/ui/button";
+
+const INBOX_SEARCH_KEYS = ["item"] as const;
 
 type HomeViewProps = {
   feed?: HomeFeedResponse;
@@ -72,8 +75,25 @@ export function HomeView({
     homeInboxWidthPx > 0 &&
     homeInboxWidthPx < INBOX_SINGLE_COLUMN_BREAKPOINT_PX;
   const [filter, setFilter] = React.useState<InboxFilter>("all");
+  // Explicit selections are mirrored to the URL (`?item=`), so back/forward
+  // restores the detail pane each history entry was showing and reloads
+  // restore it from the URL. Default/automatic selection stays local-only —
+  // background data loads must never trigger navigations.
+  const { applyPatch: applyInboxSearchPatch, values: inboxSearchValues } =
+    useHistorySearchState(INBOX_SEARCH_KEYS);
+  const urlSelectedItemId = inboxSearchValues.item;
   const [selectedItemId, setSelectedItemId] = React.useState<string | null>(
-    null,
+    urlSelectedItemId,
+  );
+  React.useEffect(() => {
+    setSelectedItemId(urlSelectedItemId);
+  }, [urlSelectedItemId]);
+  const handleUserSelectItem = React.useCallback(
+    (itemId: string | null) => {
+      setSelectedItemId(itemId);
+      applyInboxSearchPatch({ item: itemId });
+    },
+    [applyInboxSearchPatch],
   );
   const [isDeletingMessage, setIsDeletingMessage] = React.useState(false);
   const [isSendingReply, setIsSendingReply] = React.useState(false);
@@ -231,6 +251,12 @@ export function HomeView({
     return localReplies.filter((reply) => !contextIds.has(reply.id));
   }, [contextMessages, localRepliesByItemId, selectedItem]);
   React.useEffect(() => {
+    // While the feed is loading (e.g. a reload restoring `?item=` from the
+    // URL) the selected item simply hasn't arrived yet — don't clobber it.
+    if (isLoading || !feed) {
+      return;
+    }
+
     if (filteredItems.length === 0) {
       setSelectedItemId(null);
       return;
@@ -247,7 +273,14 @@ export function HomeView({
         isNarrowHomeViewport ? null : (filteredItems[0]?.id ?? null),
       );
     }
-  }, [filteredItems, homeInboxWidthPx, isNarrowHomeViewport, selectedItemId]);
+  }, [
+    feed,
+    filteredItems,
+    homeInboxWidthPx,
+    isLoading,
+    isNarrowHomeViewport,
+    selectedItemId,
+  ]);
 
   React.useEffect(() => {
     void selectedItemId;
@@ -355,7 +388,7 @@ export function HomeView({
             items={filteredItems}
             onFilterChange={setFilter}
             onSelect={(itemId) => {
-              setSelectedItemId(itemId);
+              handleUserSelectItem(itemId);
               markItemRead(itemId);
             }}
             selectedId={selectedItemId}
@@ -410,7 +443,7 @@ export function HomeView({
             onBack={
               isSinglePanelDetailView
                 ? () => {
-                    setSelectedItemId(null);
+                    handleUserSelectItem(null);
                   }
                 : undefined
             }

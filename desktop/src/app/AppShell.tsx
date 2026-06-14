@@ -57,6 +57,7 @@ import { useProfileQuery } from "@/features/profile/hooks";
 import {
   DEFAULT_SETTINGS_SECTION,
   type SettingsSection,
+  isSettingsSection,
 } from "@/features/settings/ui/SettingsPanels";
 import { HuddleBar, HuddleProvider } from "@/features/huddle";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
@@ -177,11 +178,6 @@ export function AppShell() {
   const workspacesHook = useWorkspaces();
   const [isAddWorkspaceOpen, setIsAddWorkspaceOpen] = React.useState(false);
 
-  const [settingsOpen, setSettingsOpen] = React.useState(false);
-  const [settingsSection, setSettingsSection] = React.useState<SettingsSection>(
-    DEFAULT_SETTINGS_SECTION,
-  );
-
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
   const [searchFocusRequest, setSearchFocusRequest] = React.useState(0);
@@ -199,7 +195,9 @@ export function AppShell() {
     goHome,
     goProjects,
     goPulse,
+    goSettings,
     goWorkflows,
+    closeSettings,
     openSearchHit,
   } = useAppNavigation();
   const { canGoBack, canGoForward, goBack, goForward } =
@@ -208,6 +206,17 @@ export function AppShell() {
     () => deriveShellRoute(location.pathname),
     [location.pathname],
   );
+  // Settings lives in the history stack: /settings?section=… opens it, back
+  // (or "Back to app") returns to the previous entry — panels and all — and
+  // reloads restore the open section from the URL.
+  const settingsOpen = location.pathname === "/settings";
+  const locationSearchSection = (location.search as { section?: unknown })
+    .section;
+  const settingsSection: SettingsSection = isSettingsSection(
+    locationSearchSection,
+  )
+    ? locationSearchSection
+    : DEFAULT_SETTINGS_SECTION;
 
   const startupReady = useDeferredStartup();
 
@@ -407,7 +416,7 @@ export function AppShell() {
       identityQuery.data?.pubkey,
       notificationSettings.settings,
       notificationSettings.setDesktopEnabled,
-      selectedView === "home",
+      selectedView === "home" && !settingsOpen,
       getChannelReadAt,
       readStateVersion,
       highPriorityUnreadChannelIds,
@@ -491,15 +500,23 @@ export function AppShell() {
   const handleOpenSettings = React.useCallback(
     (section: SettingsSection = DEFAULT_SETTINGS_SECTION) => {
       setIsChannelManagementOpen(false);
-      setSettingsSection(section);
-      setSettingsOpen(true);
+      void goSettings(section);
     },
-    [],
+    [goSettings],
   );
 
   const handleCloseSettings = React.useCallback(() => {
-    setSettingsOpen(false);
-  }, []);
+    closeSettings();
+  }, [closeSettings]);
+
+  // Section switches rewrite the settings entry rather than stacking one
+  // history entry per section, so back always exits settings in one step.
+  const handleSettingsSectionChange = React.useCallback(
+    (section: SettingsSection) => {
+      void goSettings(section, { replace: true });
+    },
+    [goSettings],
+  );
 
   const handleOpenSearchResult = React.useCallback(
     (hit: SearchHit) => {
@@ -782,7 +799,7 @@ export function AppShell() {
                       notificationPermission={notificationSettings.permission}
                       notificationSettings={notificationSettings.settings}
                       onClose={handleCloseSettings}
-                      onSectionChange={setSettingsSection}
+                      onSectionChange={handleSettingsSectionChange}
                       onSetDesktopNotificationsEnabled={
                         notificationSettings.setDesktopEnabled
                       }

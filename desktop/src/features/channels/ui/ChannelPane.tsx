@@ -10,7 +10,10 @@ import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
-import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
+import {
+  type ProfilePanelView,
+  UserProfilePanel,
+} from "@/features/profile/ui/UserProfilePanel";
 import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
@@ -120,7 +123,12 @@ type ChannelPaneProps = {
   profiles?: UserProfileLookup;
   openThreadHeadId: string | null;
   openAgentSessionPubkey: string | null;
+  onProfilePanelViewChange: (
+    view: ProfilePanelView,
+    options?: { replace?: boolean },
+  ) => void;
   profilePanelPubkey?: string | null;
+  profilePanelView: ProfilePanelView;
   threadHeadMessage: TimelineMessage | null;
   threadMessages: MainTimelineEntry[];
   threadPanelWidthPx: number;
@@ -242,7 +250,9 @@ export const ChannelPane = React.memo(function ChannelPane({
   profiles,
   openThreadHeadId,
   openAgentSessionPubkey,
+  onProfilePanelViewChange,
   profilePanelPubkey,
+  profilePanelView,
   targetMessageId,
   threadHeadMessage,
   threadMessages,
@@ -903,8 +913,10 @@ export const ChannelPane = React.memo(function ChannelPane({
                     layout={useSplitAuxiliaryPane ? "split" : "standalone"}
                     onClose={onCloseProfilePanel}
                     onOpenDm={onOpenDm}
+                    onViewChange={onProfilePanelViewChange}
                     pubkey={profilePanelPubkey}
                     splitPaneClamp
+                    view={profilePanelView}
                     widthPx={threadPanelWidthPx}
                   />
                 );

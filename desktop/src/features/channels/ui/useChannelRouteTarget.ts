@@ -3,6 +3,7 @@ import * as React from "react";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isBroadcastReply } from "@/features/messages/lib/threading";
 import type { Channel } from "@/shared/api/types";
+import type { PanelValueSetter } from "./useChannelPanelHistoryState";
 
 function getThreadRouteTarget(
   targetMessage: TimelineMessage,
@@ -69,8 +70,8 @@ export function useChannelRouteTarget({
   closeAgentSession: () => void;
   setEditTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   setExpandedThreadReplyIds: React.Dispatch<React.SetStateAction<Set<string>>>;
-  setOpenThreadHeadId: React.Dispatch<React.SetStateAction<string | null>>;
-  setProfilePanelPubkey: React.Dispatch<React.SetStateAction<string | null>>;
+  setOpenThreadHeadId: PanelValueSetter;
+  setProfilePanelPubkey: PanelValueSetter;
   setThreadReplyTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   setThreadScrollTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   targetMessageId: string | null;
@@ -125,9 +126,11 @@ export function useChannelRouteTarget({
     }
 
     closeAgentSession();
-    setProfilePanelPubkey(null);
+    // Replace so the deep-link entry itself carries the opened thread —
+    // back should leave the deep link, not strip the panel from it.
+    setProfilePanelPubkey(null, { replace: true });
     setEditTargetId(null);
-    setOpenThreadHeadId(routeTarget.threadHeadId);
+    setOpenThreadHeadId(routeTarget.threadHeadId, { replace: true });
     setThreadReplyTargetId(routeTarget.threadHeadId);
     setThreadScrollTargetId(targetMessageId);
     setExpandedThreadReplyIds(routeTarget.expandedReplyIds);

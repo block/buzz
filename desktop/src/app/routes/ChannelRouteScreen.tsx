@@ -42,7 +42,7 @@ export function ChannelRouteScreen({
   React.useEffect(() => {
     let isCancelled = false;
 
-    if (!targetMessageId || selectedPostId) {
+    if ((!targetMessageId && !targetThreadRootId) || selectedPostId) {
       setTargetMessageEvents([]);
       return () => {
         isCancelled = true;

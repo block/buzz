@@ -123,10 +123,12 @@ test("Share compute model draft persists across reload", async ({ page }) => {
   await page.getByTestId("mesh-share-compute-vram").fill("42");
 
   await page.reload({ waitUntil: "domcontentloaded" });
-  await expect(page.getByTestId("open-agents-view")).toBeVisible({
+  // Settings now lives in the history stack (/settings?section=…), so a reload
+  // restores the open section straight from the URL — no need to navigate back
+  // through the app shell.
+  await expect(page.getByTestId("settings-view")).toBeVisible({
     timeout: 10_000,
   });
-  await openSettings(page, "compute");
 
   await expect(page.getByTestId("mesh-share-compute-model")).toHaveValue(
     "unsloth/Qwen3.6-35B-A3B-GGUF@main:UD-Q4_K_S",
