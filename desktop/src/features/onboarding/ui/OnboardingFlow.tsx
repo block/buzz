@@ -5,6 +5,7 @@ import {
   profileQueryKey,
   useUpdateProfileMutation,
 } from "@/features/profile/hooks";
+import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
 import { relayClient } from "@/shared/api/relayClient";
 import { getMyRelayMembershipLookup } from "@/shared/api/relayMembers";
 import { getIdentity, importIdentity } from "@/shared/api/tauri";
@@ -146,6 +147,7 @@ export function OnboardingFlow({
   onBackToWorkspaceSetup,
 }: OnboardingFlowProps) {
   const { complete, skipForNow } = actions;
+  const { activeWorkspace } = useWorkspaces();
   const queryClient = useQueryClient();
   const savedProfile = resolveSavedProfile(initialProfile);
   const profileUpdateMutation = useUpdateProfileMutation();
@@ -486,6 +488,7 @@ export function OnboardingFlow({
               updateDisplayName: updateDisplayNameDraft,
             }}
             direction={transitionDirection}
+            relayUrl={activeWorkspace?.relayUrl}
             state={profileStepState}
           />
         ) : currentPage === "key-import" ? (

@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import {
   SidebarBlockAccessRefreshCompactCard,
   SidebarBlockVpnOffCompactCard,
+  SidebarRelayConnectionCompactCard,
 } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import { connectWarpVpn, refreshWarpAccess } from "@/shared/api/warp";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
@@ -24,13 +25,44 @@ import type { ProfileStepActions, ProfileStepState } from "./types";
 type ProfileStepProps = {
   actions: ProfileStepActions;
   direction: OnboardingTransitionDirection;
+  relayUrl?: string | null;
   transitionEffect?: OnboardingTransitionEffect;
   state: ProfileStepState;
 };
 
-type OnboardingConnectivityAction = "connect-vpn" | "refresh-access";
+type OnboardingConnectivityAction =
+  | "connect-vpn"
+  | "reconnect-relay"
+  | "refresh-access";
+type OnboardingRelayCardVariant =
+  | "connect-vpn"
+  | "reconnect-relay"
+  | "refresh-access";
 
 const ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 2_500;
+
+function isBlockRelayUrl(relayUrl: string | null | undefined) {
+  if (!relayUrl) {
+    return false;
+  }
+
+  try {
+    const url = new URL(
+      relayUrl.replace("ws://", "http://").replace("wss://", "https://"),
+    );
+    const host = url.hostname.toLowerCase();
+    return (
+      host === "block.xyz" ||
+      host.endsWith(".block.xyz") ||
+      host === "sqprod.co" ||
+      host.endsWith(".sqprod.co") ||
+      host === "squareup.com" ||
+      host.endsWith(".squareup.com")
+    );
+  } catch {
+    return false;
+  }
+}
 
 function shouldRefreshVpnAccess(errorMessage: string) {
   const detail = relayErrorDetail(errorMessage).toLowerCase();
@@ -44,7 +76,28 @@ function shouldRefreshVpnAccess(errorMessage: string) {
   );
 }
 
-function OnboardingRelayConnectionErrorCard({ message }: { message: string }) {
+function resolveOnboardingRelayCardVariant(
+  errorMessage: string,
+  relayUrl: string | null | undefined,
+): OnboardingRelayCardVariant {
+  if (shouldRefreshVpnAccess(errorMessage)) {
+    return "refresh-access";
+  }
+
+  if (isBlockRelayUrl(relayUrl)) {
+    return "connect-vpn";
+  }
+
+  return "reconnect-relay";
+}
+
+function OnboardingRelayConnectionErrorCard({
+  message,
+  relayUrl,
+}: {
+  message: string;
+  relayUrl?: string | null;
+}) {
   const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
   const [dismissedErrorMessage, setDismissedErrorMessage] = React.useState<
     string | null
@@ -56,7 +109,7 @@ function OnboardingRelayConnectionErrorCard({ message }: { message: string }) {
   const connectivityActionRef =
     React.useRef<OnboardingConnectivityAction | null>(null);
   const successTimeoutRef = React.useRef<number | null>(null);
-  const isRefreshAccessCard = shouldRefreshVpnAccess(message);
+  const cardVariant = resolveOnboardingRelayCardVariant(message, relayUrl);
   const isActionPending = connectivityAction !== null || isReconnectPending;
 
   React.useEffect(() => {
@@ -105,7 +158,9 @@ function OnboardingRelayConnectionErrorCard({ message }: { message: string }) {
           const label =
             action === "refresh-access"
               ? "Could not refresh VPN access."
-              : "Could not turn on VPN.";
+              : action === "connect-vpn"
+                ? "Could not turn on VPN."
+                : "Could not reconnect to the relay.";
           toast.error(`${label} ${detail}`);
         })
         .finally(() => {
@@ -123,6 +178,10 @@ function OnboardingRelayConnectionErrorCard({ message }: { message: string }) {
     });
   }, [reconnect, runConnectivityAction]);
 
+  const handleReconnectRelay = React.useCallback(() => {
+    runConnectivityAction("reconnect-relay", reconnect);
+  }, [reconnect, runConnectivityAction]);
+
   const handleRefreshWarpAccess = React.useCallback(() => {
     runConnectivityAction("refresh-access", async () => {
       await refreshWarpAccess();
@@ -136,7 +195,7 @@ function OnboardingRelayConnectionErrorCard({ message }: { message: string }) {
 
   return (
     <div className="fixed bottom-4 left-4 z-50 w-[calc(100vw-2rem)] text-left sm:bottom-6 sm:left-6 sm:w-[22rem]">
-      {isRefreshAccessCard ? (
+      {cardVariant === "refresh-access" ? (
         <SidebarBlockAccessRefreshCompactCard
           actionTestId="onboarding-refresh-vpn-access"
           isActionDisabled={isActionPending}
@@ -147,7 +206,7 @@ function OnboardingRelayConnectionErrorCard({ message }: { message: string }) {
           surface="secondary"
           testId="onboarding-vpn-access-refresh-card"
         />
-      ) : (
+      ) : cardVariant === "connect-vpn" ? (
         <SidebarBlockVpnOffCompactCard
           actionTestId="onboarding-connect-vpn"
           isActionDisabled={isActionPending}
@@ -158,19 +217,42 @@ function OnboardingRelayConnectionErrorCard({ message }: { message: string }) {
           surface="secondary"
           testId="onboarding-vpn-off-card"
         />
+      ) : (
+        <SidebarRelayConnectionCompactCard
+          actionTestId="onboarding-reconnect-relay"
+          isActionDisabled={isActionPending}
+          isConnected={successAction === "reconnect-relay"}
+          isReconnectPending={
+            connectivityAction === "reconnect-relay" || isReconnectPending
+          }
+          onDismiss={() => setDismissedErrorMessage(message)}
+          onReconnect={handleReconnectRelay}
+          surface="secondary"
+          testId="onboarding-relay-reconnect-card"
+        />
       )}
     </div>
   );
 }
 
-function ErrorBanner({ message }: { message: string | null }) {
+function ErrorBanner({
+  message,
+  relayUrl,
+}: {
+  message: string | null;
+  relayUrl?: string | null;
+}) {
   if (!message) {
     return null;
   }
 
   if (isRelayUnreachableError(message)) {
     return (
-      <OnboardingRelayConnectionErrorCard key={message} message={message} />
+      <OnboardingRelayConnectionErrorCard
+        key={message}
+        message={message}
+        relayUrl={relayUrl}
+      />
     );
   }
 
@@ -184,6 +266,7 @@ function ErrorBanner({ message }: { message: string | null }) {
 export function ProfileStep({
   actions,
   direction,
+  relayUrl,
   transitionEffect = "line-slide",
   state,
 }: ProfileStepProps) {
@@ -268,7 +351,7 @@ export function ProfileStep({
       </label>
 
       {saveRecovery.errorMessage ? (
-        <ErrorBanner message={saveRecovery.errorMessage} />
+        <ErrorBanner message={saveRecovery.errorMessage} relayUrl={relayUrl} />
       ) : null}
 
       <div className="mt-12 flex w-full max-w-[500px] flex-col gap-3">

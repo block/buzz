@@ -1154,6 +1154,69 @@ test("failed first profile saves can be skipped for the current session", async 
   await expectHomeView(page);
 });
 
+test("generic relay save failures use the generic reconnect card", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError: "relay unreachable: could not connect to relay",
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toContainText("Can't reach the relay");
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toContainText("Click to connect");
+  await expect(page.getByTestId("onboarding-vpn-off-card")).toHaveCount(0);
+  await expect(
+    page.getByTestId("onboarding-vpn-access-refresh-card"),
+  ).toHaveCount(0);
+});
+
+test("Block relay save failures offer the VPN card", async ({ page }) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError: "relay unreachable: could not connect to relay",
+    },
+    {
+      relayWsUrl: "wss://buzz-oss.stage.blox.sqprod.co",
+      skipOnboardingSeed: true,
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(page.getByTestId("onboarding-vpn-off-card")).toBeVisible();
+  await expect(page.getByTestId("onboarding-vpn-off-card")).toContainText(
+    "Turn on VPN",
+  );
+  await expect(page.getByTestId("onboarding-vpn-off-card")).toContainText(
+    "Click to connect",
+  );
+  await expect(page.getByTestId("onboarding-relay-reconnect-card")).toHaveCount(
+    0,
+  );
+  await expect(
+    page.getByTestId("onboarding-vpn-access-refresh-card"),
+  ).toHaveCount(0);
+});
+
 test("existing relay profile with display name auto-completes onboarding", async ({
   page,
 }) => {
