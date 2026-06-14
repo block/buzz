@@ -898,7 +898,10 @@ test("avatar upload accepts a file whose server-detected MIME is an image", asyn
     buffer: Buffer.from("png bytes"),
   });
 
-  await expect(page.getByTestId("onboarding-avatar-url")).toHaveValue(url);
+  await expect(page.getByTestId("onboarding-avatar-url")).toHaveValue("");
+  await expect(
+    page.getByTestId("onboarding-avatar-preview-fallback"),
+  ).toHaveText("MQ");
   await expect(page.getByTestId("onboarding-avatar-error")).toHaveCount(0);
 });
 

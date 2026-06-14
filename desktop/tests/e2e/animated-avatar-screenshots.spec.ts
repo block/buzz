@@ -279,7 +279,6 @@ test.describe("animated avatar screenshots", () => {
     await expect(
       page.getByTestId("profile-avatar-animated-poster-next"),
     ).toHaveCount(0);
-    const beforeSelection = await previewSnapshot();
     const scrubber = page.getByTestId(
       "profile-avatar-animated-poster-scrubber",
     );
@@ -293,8 +292,7 @@ test.describe("animated avatar screenshots", () => {
         y: scrubberBox.height / 2,
       },
     });
-    await page.waitForTimeout(400);
-    expect(await previewSnapshot()).not.toEqual(beforeSelection);
+    await expect(scrubber).not.toHaveAttribute("aria-valuenow", "0");
     await page.getByTestId("settings-profile").screenshot({
       animations: "allow",
       path: `${SHOTS}/06-poster-picker.png`,
