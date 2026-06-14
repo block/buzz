@@ -88,6 +88,7 @@ export type ProfileSummaryViewProps = {
   profile: ReturnType<typeof useUserProfileQuery>["data"];
   pubkey: string;
   relayAgent: RelayAgent | undefined;
+  showFollowAction: boolean;
   unfollowMutation: ReturnType<typeof useUnfollowMutation>;
   userStatus: { text: string; emoji: string } | null | undefined;
 };
@@ -120,6 +121,7 @@ export function ProfileSummaryView({
   profile,
   pubkey,
   relayAgent,
+  showFollowAction,
   unfollowMutation,
   userStatus,
 }: ProfileSummaryViewProps) {
@@ -167,6 +169,7 @@ export function ProfileSummaryView({
           isFollowing={isFollowing}
           onMessage={onOpenDm ? handleMessage : undefined}
           pubkey={pubkey}
+          showFollowAction={showFollowAction}
           unfollowMutation={unfollowMutation}
         />
       ) : null}
@@ -420,6 +423,7 @@ function ProfilePrimaryActions({
   onEditAgent,
   onMessage,
   pubkey,
+  showFollowAction,
   unfollowMutation,
 }: {
   canEditAgent: boolean;
@@ -428,40 +432,43 @@ function ProfilePrimaryActions({
   onEditAgent: () => void;
   onMessage?: () => void;
   pubkey: string;
+  showFollowAction: boolean;
   unfollowMutation: ReturnType<typeof useUnfollowMutation>;
 }) {
   return (
     <div className="flex items-start justify-center gap-8">
-      {isFollowing ? (
-        <ProfileQuickAction
-          active
-          disabled={unfollowMutation.isPending}
-          icon={UserMinus}
-          label="Unfollow"
-          onClick={() =>
-            unfollowMutation.mutate(pubkey, {
-              onError: (error) =>
-                toast.error(
-                  `Unfollow failed: ${error instanceof Error ? error.message : String(error)}`,
-                ),
-            })
-          }
-        />
-      ) : (
-        <ProfileQuickAction
-          disabled={followMutation.isPending}
-          icon={UserPlus}
-          label="Follow"
-          onClick={() =>
-            followMutation.mutate(pubkey, {
-              onError: (error) =>
-                toast.error(
-                  `Follow failed: ${error instanceof Error ? error.message : String(error)}`,
-                ),
-            })
-          }
-        />
-      )}
+      {showFollowAction ? (
+        isFollowing ? (
+          <ProfileQuickAction
+            active
+            disabled={unfollowMutation.isPending}
+            icon={UserMinus}
+            label="Unfollow"
+            onClick={() =>
+              unfollowMutation.mutate(pubkey, {
+                onError: (error) =>
+                  toast.error(
+                    `Unfollow failed: ${error instanceof Error ? error.message : String(error)}`,
+                  ),
+              })
+            }
+          />
+        ) : (
+          <ProfileQuickAction
+            disabled={followMutation.isPending}
+            icon={UserPlus}
+            label="Follow"
+            onClick={() =>
+              followMutation.mutate(pubkey, {
+                onError: (error) =>
+                  toast.error(
+                    `Follow failed: ${error instanceof Error ? error.message : String(error)}`,
+                  ),
+              })
+            }
+          />
+        )
+      ) : null}
       {onMessage ? (
         <ProfileQuickAction
           icon={MessageSquare}
