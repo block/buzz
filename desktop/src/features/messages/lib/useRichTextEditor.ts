@@ -22,6 +22,7 @@ import {
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
 import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
 import { buildPlainTextProjection } from "./plainTextProjection";
+import { createLinkInteractionExtension } from "./linkInteractionExtension";
 import {
   CodeBlockAfterHardBreak,
   handleCodeFenceEnter,
@@ -337,6 +338,10 @@ export function useRichTextEditor({
             class: "text-primary underline underline-offset-4 cursor-text",
           },
         }),
+        createLinkInteractionExtension({
+          getEditLinkHandler: () => onEditLinkRef.current,
+          getSelectionChangeHandler: () => onLinkSelectionChangeRef.current,
+        }),
         TiptapMarkdown.configure({
           html: false,
           transformPastedText: true,
@@ -349,47 +354,6 @@ export function useRichTextEditor({
           class:
             "min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-6 md:leading-6 shadow-none focus-visible:ring-0 caret-foreground outline-hidden prose-sm max-w-none",
           "data-testid": "message-input",
-        },
-        handleDOMEvents: {
-          // Native anchor default can still win in the WebView before
-          // ProseMirror's semantic click hook runs, so intercept editor links
-          // at the DOM event layer and route them to composer-local controls.
-          click: (view, event) => {
-            if (!(event instanceof MouseEvent)) return false;
-            const target = event.target;
-            if (!(target instanceof Element)) return false;
-            const anchor = target.closest("a[href]");
-            if (!anchor || !view.dom.contains(anchor)) return false;
-
-            const handler = onEditLinkRef.current;
-            if (!handler) return false;
-
-            event.preventDefault();
-            event.stopPropagation();
-            if (!view.state.selection.empty) {
-              return true;
-            }
-
-            const position = view.posAtCoords({
-              left: event.clientX,
-              top: event.clientY,
-            });
-            if (position) {
-              view.dispatch(
-                view.state.tr
-                  .setSelection(
-                    TextSelection.create(view.state.doc, position.pos),
-                  )
-                  .scrollIntoView(),
-              );
-              view.focus();
-            }
-            const info = position
-              ? resolveLinkAt(view.state, position.pos)
-              : null;
-            if (info) handler(info);
-            return true;
-          },
         },
         // ArrowUp in an empty composer → edit your last message (Slack
         // parity). Handled here in ProseMirror's own DOM `keydown` hook —
@@ -429,31 +393,6 @@ export function useRichTextEditor({
           // otherwise let ArrowUp fall through to normal caret movement.
           return handler();
         },
-        // Click on an existing link → surface composer-local link controls. The link
-        // extension is configured `openOnClick: false` (never navigate away
-        // from a chat composer), so without this hook a click on a link does
-        // nothing. We resolve the full link mark range under the cursor, move
-        // the editor selection there, cancel anchor navigation, and hand it to
-        // the owner.
-        handleClick: (view, pos, event) => {
-          const handler = onEditLinkRef.current;
-          if (!handler) return false;
-          const info = resolveLinkAt(view.state, pos);
-          if (!info) return false;
-          event.preventDefault();
-          event.stopPropagation();
-          if (!view.state.selection.empty) {
-            return true;
-          }
-          view.dispatch(
-            view.state.tr
-              .setSelection(TextSelection.create(view.state.doc, pos))
-              .scrollIntoView(),
-          );
-          view.focus();
-          handler(info);
-          return true;
-        },
       },
       onUpdate: ({ editor: ed }) => {
         const markdown = getMarkdownFromEditor(ed);
@@ -463,15 +402,6 @@ export function useRichTextEditor({
         // diverge by 1 per hard-break / block boundary.
         const text = buildPlainTextProjection(ed.state.doc).text;
         onUpdateRef.current?.({ markdown, text });
-      },
-      onSelectionUpdate: ({ editor: ed }) => {
-        const handler = onLinkSelectionChangeRef.current;
-        if (!handler) return;
-        if (!ed.state.selection.empty) {
-          handler(null);
-          return;
-        }
-        handler(resolveLinkAt(ed.state, ed.state.selection.from));
       },
     },
     [],

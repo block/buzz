@@ -278,8 +278,8 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
       ) : null}
       {cardState ? (
         <PopoverContent
-          align="center"
-          className="w-80 rounded-xl p-3"
+          align="start"
+          className="max-w-96 rounded-xl pl-2 pr-1 py-1"
           onCloseAutoFocus={(event) => event.preventDefault()}
           onInteractOutside={(event) => {
             const target = event.detail.originalEvent.target;
@@ -295,17 +295,9 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
           side="top"
           sideOffset={8}
         >
-          <div className="flex flex-col gap-3">
-            <div className="min-w-0">
-              <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.14em] text-muted-foreground">
-                Display text
-              </p>
-              <p className="truncate text-sm font-medium text-popover-foreground">
-                {cardState.info.text || cardState.info.href}
-              </p>
-            </div>
+          <div className="flex items-center gap-1">
             <a
-              className="break-all text-sm text-primary underline underline-offset-4 outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+              className="min-w-0 flex-1 truncate text-xs leading-5 text-primary underline underline-offset-4 outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
               href={cardState.info.href}
               onClick={openCardUrl}
               rel="noreferrer noopener"
@@ -313,26 +305,24 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
             >
               {cardState.info.href}
             </a>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-0.5">
               <Button
-                aria-label="Unlink"
-                className="h-8 w-8 shrink-0 text-primary hover:text-primary"
-                onClick={removeFromCard}
-                size="icon"
+                aria-label="Edit link"
+                onClick={editFromCard}
+                size="icon-xs"
                 type="button"
                 variant="ghost"
               >
-                <Unlink className="h-4 w-4" />
+                <Pencil />
               </Button>
               <Button
-                className="h-8 px-3"
-                onClick={editFromCard}
-                size="sm"
+                aria-label="Unlink"
+                onClick={removeFromCard}
+                size="icon-xs"
                 type="button"
-                variant="outline"
+                variant="ghost"
               >
-                <Pencil className="h-3.5 w-3.5" />
-                Edit
+                <Unlink />
               </Button>
             </div>
           </div>
