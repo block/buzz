@@ -137,7 +137,6 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     highlightedMessageId,
     isAtBottom,
     newMessageCount,
-    restoreScrollPosition,
     scrollToBottom,
     syncScrollState,
   } = useTimelineScrollManager({
@@ -177,7 +176,6 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     fetchOlder,
     hasOlderMessages,
     isLoading,
-    restoreScrollPosition,
     scrollContainerRef,
     sentinelRef: topSentinelRef,
   });

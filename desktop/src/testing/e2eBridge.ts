@@ -74,6 +74,7 @@ type E2eConfig = {
     profileReadError?: string;
     profileUpdateError?: string;
     searchProfiles?: MockSearchProfileSeed[];
+    historyDelayMs?: number;
     updateChannelDelayMs?: number;
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
@@ -458,6 +459,8 @@ type MockFilter = {
   "#h"?: string[];
   authors?: string[];
   kinds?: number[];
+  limit?: number;
+  until?: number;
 };
 
 type MockSocket = {
@@ -585,6 +588,14 @@ declare global {
       channelName: string;
       pubkey?: string;
     }) => RelayEvent;
+    __BUZZ_E2E_PREPEND_MOCK_HISTORY__?: (input: {
+      channelName: string;
+      count: number;
+      startIndex?: number;
+      lineCount?: number;
+      createdAtStart?: number;
+      emit?: boolean;
+    }) => RelayEvent[];
     __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
       command: string,
       payload?: Record<string, unknown>,
@@ -2192,12 +2203,87 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
   return seeded;
 }
 
-function emitMockHistory(socket: MockSocket, subId: string, channelId: string) {
-  const events = getMockMessageStore(channelId);
-  for (const event of events) {
-    sendWsText(socket.handler, ["EVENT", subId, event]);
+function prependMockHistory(input: {
+  channelName: string;
+  count: number;
+  startIndex?: number;
+  lineCount?: number;
+  createdAtStart?: number;
+  emit?: boolean;
+}) {
+  const channel = mockChannels.find(
+    (candidate) => candidate.name === input.channelName,
+  );
+  if (!channel) {
+    throw new Error(`Unknown mock channel: ${input.channelName}`);
   }
-  sendWsText(socket.handler, ["EOSE", subId]);
+
+  const store = getMockMessageStore(channel.id);
+  const earliestCreatedAt = store.reduce(
+    (earliest, event) => Math.min(earliest, event.created_at),
+    Math.floor(Date.now() / 1000),
+  );
+  const createdAtStart =
+    input.createdAtStart ?? earliestCreatedAt - input.count - 1;
+  const startIndex = input.startIndex ?? 0;
+  const lineCount = input.lineCount ?? 1;
+
+  const events = Array.from({ length: input.count }, (_, offset) => {
+    const index = startIndex + offset;
+    const body = Array.from(
+      { length: lineCount },
+      (_unused, lineIndex) => `mock older ${index} line ${lineIndex + 1}`,
+    ).join("\n");
+
+    return createMockEvent(
+      9,
+      body,
+      [["h", channel.id]],
+      ALICE_PUBKEY,
+      createdAtStart + offset,
+      `mock-older-${channel.name}-${index}`.replace(/[^a-zA-Z0-9]/g, ""),
+    );
+  });
+
+  store.unshift(...events);
+  store.sort((left, right) => left.created_at - right.created_at);
+
+  if (input.emit) {
+    for (const event of events) {
+      emitMockLiveEvent(channel.id, event);
+    }
+  }
+
+  return events;
+}
+
+function emitMockHistory(
+  socket: MockSocket,
+  subId: string,
+  channelId: string,
+  filter: MockFilter = {},
+) {
+  const events = getMockMessageStore(channelId)
+    .filter((event) =>
+      filter.until !== undefined ? event.created_at <= filter.until : true,
+    )
+    .sort((left, right) => right.created_at - left.created_at)
+    .slice(0, filter.limit ?? 50);
+
+  const emit = () => {
+    for (const event of events) {
+      sendWsText(socket.handler, ["EVENT", subId, event]);
+    }
+    sendWsText(socket.handler, ["EOSE", subId]);
+  };
+
+  const delayMs = getConfig()?.mock?.historyDelayMs ?? 0;
+  if (delayMs > 0 && subId.startsWith("history-")) {
+    window.setTimeout(emit, delayMs);
+    return;
+  }
+
+  emit();
 }
 
 function emitMockLiveEvent(channelId: string, event: RelayEvent) {
@@ -5683,7 +5769,7 @@ function sendToMockSocket(args: {
       return;
     }
 
-    emitMockHistory(socket, subId, channelId);
+    emitMockHistory(socket, subId, channelId, filter);
     return;
   }
 
@@ -5801,6 +5887,7 @@ export function maybeInstallE2eTauriMocks() {
     return;
   }
 
+  mockMessages.clear();
   resetMockRelayMembers(config);
   resetMockManagedAgents(config);
   resetMockPersonas(config);
@@ -5842,6 +5929,7 @@ export function maybeInstallE2eTauriMocks() {
       extraTags,
     );
   };
+  window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ = prependMockHistory;
   window.__BUZZ_E2E_EMIT_MOCK_TYPING__ = ({ channelName, pubkey }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,

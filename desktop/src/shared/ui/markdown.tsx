@@ -121,16 +121,28 @@ function useStableArray<T>(arr: T[]): T[] {
   return ref.current;
 }
 
-function aspectRatioFromDim(dim?: string): number | undefined {
+function dimensionsFromDim(
+  dim?: string,
+): { width: number; height: number } | undefined {
   if (!dim) return undefined;
   const match = dim.match(/^(\d+)x(\d+)$/i);
   if (!match) return undefined;
   const width = Number(match[1]);
   const height = Number(match[2]);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || height <= 0) {
+  if (
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
     return undefined;
   }
-  return width / height;
+  return { width, height };
+}
+
+function aspectRatioFromDim(dim?: string): number | undefined {
+  const dimensions = dimensionsFromDim(dim);
+  return dimensions ? dimensions.width / dimensions.height : undefined;
 }
 
 /**
@@ -231,10 +243,12 @@ type MarkdownVariant = "default" | "compact" | "tight";
  */
 function ImageBlock({
   alt,
+  dimensions,
   resolvedSrc,
   src,
 }: {
   alt: string | undefined;
+  dimensions: { width: number; height: number } | undefined;
   resolvedSrc: string | undefined;
   src: string | undefined;
 }) {
@@ -290,7 +304,9 @@ function ImageBlock({
       <img
         alt={alt}
         className="mt-1 block max-h-64 max-w-sm cursor-pointer rounded-xl object-contain"
+        height={dimensions?.height}
         src={resolvedSrc}
+        width={dimensions?.width}
         onClick={() => setLightboxOpen(true)}
         onContextMenuCapture={handleContextMenu}
       />
@@ -899,7 +915,14 @@ function createMarkdownComponents(
       }
       return (
         <span data-block-media="" className="block">
-          <ImageBlock alt={alt} resolvedSrc={resolvedSrc} src={src} />
+          <ImageBlock
+            alt={alt}
+            dimensions={dimensionsFromDim(
+              src ? imetaByUrl?.get(src)?.dim : undefined,
+            )}
+            resolvedSrc={resolvedSrc}
+            src={src}
+          />
         </span>
       );
     },

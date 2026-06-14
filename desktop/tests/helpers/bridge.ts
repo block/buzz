@@ -99,6 +99,7 @@ type MockBridgeOptions = {
   profileReadError?: string;
   profileUpdateError?: string;
   searchProfiles?: MockSearchProfileSeed[];
+  historyDelayMs?: number;
   updateChannelDelayMs?: number;
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
