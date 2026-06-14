@@ -16,7 +16,7 @@ import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { SystemMessageRow } from "./SystemMessageRow";
 
-type TimelineMessageListProps = {
+export type TimelineMessageListProps = {
   agentPubkeys?: ReadonlySet<string>;
   channelId?: string | null;
   channelName?: string;
@@ -56,7 +56,11 @@ type TimelineMessageListProps = {
   searchQuery?: string;
 };
 
-function hasVideoAttachment(message: TimelineMessage): boolean {
+export type TimelineMessageEntry = ReturnType<
+  typeof buildMainTimelineEntries
+>[number];
+
+export function hasVideoAttachment(message: TimelineMessage): boolean {
   if (message.body.includes("![video](")) return true;
 
   return (
@@ -68,7 +72,7 @@ function hasVideoAttachment(message: TimelineMessage): boolean {
   );
 }
 
-function buildReviewCommentsByRootId(
+export function buildReviewCommentsByRootId(
   messages: TimelineMessage[],
 ): Map<string, TimelineMessage[]> {
   const messageById = new Map(messages.map((message) => [message.id, message]));
@@ -98,6 +102,209 @@ function buildReviewCommentsByRootId(
   }
 
   return commentsByRootId;
+}
+
+type BuildVideoReviewContextOptions = Pick<
+  TimelineMessageListProps,
+  | "channelId"
+  | "channelName"
+  | "channelType"
+  | "isSendingVideoReviewComment"
+  | "onSendVideoReviewComment"
+  | "onToggleReaction"
+  | "profiles"
+> & {
+  messages: TimelineMessage[];
+  reviewCommentsByRootId: Map<string, TimelineMessage[]>;
+};
+
+export function buildVideoReviewContextById({
+  channelId,
+  channelName,
+  channelType,
+  isSendingVideoReviewComment = false,
+  messages,
+  onSendVideoReviewComment,
+  onToggleReaction,
+  profiles,
+  reviewCommentsByRootId,
+}: BuildVideoReviewContextOptions): Map<string, VideoReviewContext> {
+  const contexts = new Map<string, VideoReviewContext>();
+  for (const message of messages) {
+    if (!hasVideoAttachment(message)) continue;
+    const comments = reviewCommentsByRootId.get(message.id) ?? [];
+    contexts.set(message.id, {
+      channelId,
+      channelName,
+      channelType,
+      comments,
+      disabled: !onSendVideoReviewComment || message.pending,
+      isSending: isSendingVideoReviewComment,
+      onSendComment: onSendVideoReviewComment
+        ? (content, mentionPubkeys, mediaTags, parentEventId) =>
+            onSendVideoReviewComment(
+              message,
+              content,
+              mentionPubkeys,
+              mediaTags,
+              parentEventId,
+            )
+        : undefined,
+      onToggleCommentReaction: onToggleReaction
+        ? (comment, emoji, remove) => {
+            const sourceComment = comments.find(
+              (candidate) => candidate.id === comment.id,
+            );
+            if (!sourceComment) return Promise.resolve();
+            return onToggleReaction(sourceComment, emoji, remove);
+          }
+        : undefined,
+      profiles,
+      rootEventId: message.id,
+    });
+  }
+  return contexts;
+}
+
+type RenderTimelineMessageEntryOptions = Omit<
+  TimelineMessageListProps,
+  "messages" | "messageFooters"
+> & {
+  entry: TimelineMessageEntry;
+  footer?: React.ReactNode;
+  messageKey?: React.Key;
+  videoReviewContext?: VideoReviewContext;
+};
+
+export function renderTimelineMessageEntry({
+  agentPubkeys,
+  channelId,
+  currentPubkey,
+  entry,
+  followThreadById,
+  footer,
+  highlightedMessageId = null,
+  isFollowingThreadById,
+  messageKey,
+  onDelete,
+  onEdit,
+  onMarkUnread,
+  onReply,
+  onToggleReaction,
+  personaLookup,
+  profiles,
+  searchActiveMessageId = null,
+  searchMatchingMessageIds,
+  searchQuery,
+  unfollowThreadById,
+  videoReviewContext,
+}: RenderTimelineMessageEntryOptions) {
+  const { message, summary } = entry;
+  const key = messageKey ?? message.renderKey ?? message.id;
+
+  if (message.kind === KIND_SYSTEM_MESSAGE) {
+    return (
+      <div key={key} className="flex flex-col gap-1">
+        <SystemMessageRow
+          message={message}
+          agentPubkeys={agentPubkeys}
+          currentPubkey={currentPubkey}
+          onToggleReaction={onToggleReaction}
+          personaLookup={personaLookup}
+          profiles={profiles}
+        />
+        {footer}
+      </div>
+    );
+  }
+
+  if (summary && onReply) {
+    const isHighlighted = message.id === highlightedMessageId;
+    return (
+      <div
+        key={key}
+        className={cn(
+          "group/message relative -mx-1 flex flex-col gap-0 rounded-2xl px-1 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+          isHighlighted &&
+            "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
+        )}
+      >
+        <MessageRow
+          agentPubkeys={agentPubkeys}
+          channelId={channelId}
+          highlighted={false}
+          hoverBackground={false}
+          isFollowingThread={
+            isFollowingThreadById
+              ? isFollowingThreadById(message.id)
+              : undefined
+          }
+          message={message}
+          onDelete={
+            onDelete && currentPubkey && message.pubkey === currentPubkey
+              ? onDelete
+              : undefined
+          }
+          onEdit={
+            onEdit && currentPubkey && message.pubkey === currentPubkey
+              ? onEdit
+              : undefined
+          }
+          onFollowThread={
+            followThreadById ? () => followThreadById(message.id) : undefined
+          }
+          onMarkUnread={onMarkUnread}
+          onToggleReaction={onToggleReaction}
+          onReply={onReply}
+          onUnfollowThread={
+            unfollowThreadById
+              ? () => unfollowThreadById(message.id)
+              : undefined
+          }
+          profiles={profiles}
+          videoReviewContext={videoReviewContext}
+        />
+        <MessageThreadSummaryRow
+          depth={message.depth}
+          message={message}
+          onOpenThread={onReply}
+          summary={summary}
+        />
+        {footer}
+      </div>
+    );
+  }
+
+  const isSearchMatch = searchMatchingMessageIds?.has(message.id) ?? false;
+  const isSearchActive = message.id === searchActiveMessageId;
+
+  return (
+    <div key={key} className="flex flex-col gap-1">
+      <MessageRow
+        agentPubkeys={agentPubkeys}
+        channelId={channelId}
+        highlighted={message.id === highlightedMessageId || isSearchActive}
+        message={message}
+        onDelete={
+          onDelete && currentPubkey && message.pubkey === currentPubkey
+            ? onDelete
+            : undefined
+        }
+        onEdit={
+          onEdit && currentPubkey && message.pubkey === currentPubkey
+            ? onEdit
+            : undefined
+        }
+        onMarkUnread={onMarkUnread}
+        onToggleReaction={onToggleReaction}
+        onReply={onReply}
+        profiles={profiles}
+        searchQuery={isSearchMatch ? searchQuery : undefined}
+        videoReviewContext={videoReviewContext}
+      />
+      {footer}
+    </div>
+  );
 }
 
 export const TimelineMessageList = React.memo(function TimelineMessageList({
@@ -137,53 +344,31 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   // comparisons hold across unrelated timeline re-renders (typing
   // indicators, presence updates) — a fresh context object per render would
   // defeat the memo and re-render every video message on every pass.
-  const videoReviewContextById = React.useMemo(() => {
-    const contexts = new Map<string, VideoReviewContext>();
-    for (const message of messages) {
-      if (!hasVideoAttachment(message)) continue;
-      const comments = reviewCommentsByRootId.get(message.id) ?? [];
-      contexts.set(message.id, {
+  const videoReviewContextById = React.useMemo(
+    () =>
+      buildVideoReviewContextById({
         channelId,
         channelName,
         channelType,
-        comments,
-        disabled: !onSendVideoReviewComment || message.pending,
-        isSending: isSendingVideoReviewComment,
-        onSendComment: onSendVideoReviewComment
-          ? (content, mentionPubkeys, mediaTags, parentEventId) =>
-              onSendVideoReviewComment(
-                message,
-                content,
-                mentionPubkeys,
-                mediaTags,
-                parentEventId,
-              )
-          : undefined,
-        onToggleCommentReaction: onToggleReaction
-          ? (comment, emoji, remove) => {
-              const sourceComment = comments.find(
-                (candidate) => candidate.id === comment.id,
-              );
-              if (!sourceComment) return Promise.resolve();
-              return onToggleReaction(sourceComment, emoji, remove);
-            }
-          : undefined,
+        isSendingVideoReviewComment,
+        messages,
+        onSendVideoReviewComment,
+        onToggleReaction,
         profiles,
-        rootEventId: message.id,
-      });
-    }
-    return contexts;
-  }, [
-    channelId,
-    channelName,
-    channelType,
-    isSendingVideoReviewComment,
-    messages,
-    onSendVideoReviewComment,
-    onToggleReaction,
-    profiles,
-    reviewCommentsByRootId,
-  ]);
+        reviewCommentsByRootId,
+      }),
+    [
+      channelId,
+      channelName,
+      channelType,
+      isSendingVideoReviewComment,
+      messages,
+      onSendVideoReviewComment,
+      onToggleReaction,
+      profiles,
+      reviewCommentsByRootId,
+    ],
+  );
   const dayGroups: Array<{
     key: string;
     label: string;
@@ -192,7 +377,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   let currentDayGroup: (typeof dayGroups)[number] | null = null;
 
   for (let i = 0; i < entries.length; i++) {
-    const { message, summary } = entries[i];
+    const entry = entries[i];
+    const { message } = entry;
     const prev = i > 0 ? entries[i - 1]?.message : null;
     const messageRenderKey = message.renderKey ?? message.id;
 
@@ -205,110 +391,31 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
       dayGroups.push(currentDayGroup);
     }
 
-    if (message.kind === KIND_SYSTEM_MESSAGE) {
-      const footer = messageFooters?.[message.id] ?? null;
-      currentDayGroup?.elements.push(
-        <div key={messageRenderKey} className="flex flex-col gap-1">
-          <SystemMessageRow
-            message={message}
-            agentPubkeys={agentPubkeys}
-            currentPubkey={currentPubkey}
-            onToggleReaction={onToggleReaction}
-            personaLookup={personaLookup}
-            profiles={profiles}
-          />
-          {footer}
-        </div>,
-      );
-    } else if (summary && onReply) {
-      const footer = messageFooters?.[message.id] ?? null;
-      const isHighlighted = message.id === highlightedMessageId;
-      currentDayGroup?.elements.push(
-        <div
-          key={messageRenderKey}
-          className={cn(
-            "group/message relative -mx-1 flex flex-col gap-0 rounded-2xl px-1 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
-            isHighlighted &&
-              "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
-          )}
-        >
-          <MessageRow
-            agentPubkeys={agentPubkeys}
-            channelId={channelId}
-            highlighted={false}
-            hoverBackground={false}
-            isFollowingThread={
-              isFollowingThreadById
-                ? isFollowingThreadById(message.id)
-                : undefined
-            }
-            message={message}
-            onDelete={
-              onDelete && currentPubkey && message.pubkey === currentPubkey
-                ? onDelete
-                : undefined
-            }
-            onEdit={
-              onEdit && currentPubkey && message.pubkey === currentPubkey
-                ? onEdit
-                : undefined
-            }
-            onFollowThread={
-              followThreadById ? () => followThreadById(message.id) : undefined
-            }
-            onMarkUnread={onMarkUnread}
-            onToggleReaction={onToggleReaction}
-            onReply={onReply}
-            onUnfollowThread={
-              unfollowThreadById
-                ? () => unfollowThreadById(message.id)
-                : undefined
-            }
-            profiles={profiles}
-            videoReviewContext={videoReviewContextById.get(message.id)}
-          />
-          <MessageThreadSummaryRow
-            depth={message.depth}
-            message={message}
-            onOpenThread={onReply}
-            summary={summary}
-          />
-          {footer}
-        </div>,
-      );
-    } else {
-      const isSearchMatch = searchMatchingMessageIds?.has(message.id) ?? false;
-      const isSearchActive = message.id === searchActiveMessageId;
-      const footer = messageFooters?.[message.id] ?? null;
-
-      currentDayGroup?.elements.push(
-        <div key={messageRenderKey} className="flex flex-col gap-1">
-          <MessageRow
-            agentPubkeys={agentPubkeys}
-            channelId={channelId}
-            highlighted={message.id === highlightedMessageId || isSearchActive}
-            message={message}
-            onDelete={
-              onDelete && currentPubkey && message.pubkey === currentPubkey
-                ? onDelete
-                : undefined
-            }
-            onEdit={
-              onEdit && currentPubkey && message.pubkey === currentPubkey
-                ? onEdit
-                : undefined
-            }
-            onMarkUnread={onMarkUnread}
-            onToggleReaction={onToggleReaction}
-            onReply={onReply}
-            profiles={profiles}
-            searchQuery={isSearchMatch ? searchQuery : undefined}
-            videoReviewContext={videoReviewContextById.get(message.id)}
-          />
-          {footer}
-        </div>,
-      );
-    }
+    currentDayGroup?.elements.push(
+      renderTimelineMessageEntry({
+        agentPubkeys,
+        channelId,
+        currentPubkey,
+        entry,
+        followThreadById,
+        footer: messageFooters?.[message.id] ?? null,
+        highlightedMessageId,
+        isFollowingThreadById,
+        messageKey: messageRenderKey,
+        onDelete,
+        onEdit,
+        onMarkUnread,
+        onReply,
+        onToggleReaction,
+        personaLookup,
+        profiles,
+        searchActiveMessageId,
+        searchMatchingMessageIds,
+        searchQuery,
+        unfollowThreadById,
+        videoReviewContext: videoReviewContextById.get(message.id),
+      }),
+    );
   }
 
   return dayGroups.map((group) => (
