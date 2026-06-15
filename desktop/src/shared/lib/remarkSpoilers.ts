@@ -100,12 +100,16 @@ function splitDelimiterParts(children: Node[]): Part[] {
   return parts;
 }
 
-function buildSpoilerNode(children: Node[]): Node {
+function buildSpoilerNode(
+  children: Node[],
+  options: { block?: boolean } = {},
+): Node {
   return {
     type: "spoiler",
     children,
     data: {
       hName: "spoiler",
+      ...(options.block ? { hProperties: { "data-block-spoiler": "" } } : {}),
     },
   };
 }
@@ -118,7 +122,7 @@ function groupBlockSpoilers(children: Node[]): Node[] {
   for (const child of children) {
     if (isBlockDelimiter(child)) {
       if (spoilerBuffer) {
-        output.push(buildSpoilerNode(spoilerBuffer));
+        output.push(buildSpoilerNode(spoilerBuffer, { block: true }));
         spoilerBuffer = null;
         openingDelimiter = null;
       } else {

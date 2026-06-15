@@ -444,6 +444,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 
 import { isMessageLink } from "../../features/messages/lib/messageLink.ts";
+import remarkSpoilers from "../lib/remarkSpoilers.ts";
 
 function messageLinkUrlTransform(value, key) {
   if (key === "href" && isMessageLink(value)) {
@@ -504,6 +505,27 @@ test("messageLinkUrlTransform: leaves non-message buzz:// schemes to default", (
     "[connect](buzz://connect?relay=wss://relay.example)",
   );
   assert.match(html, /href=""/);
+});
+
+test("remarkSpoilers: block delimiter spoilers expose a block prop to React", () => {
+  let spoilerProps;
+  renderToStaticMarkup(
+    React.createElement(
+      ReactMarkdown,
+      {
+        components: {
+          spoiler: (props) => {
+            spoilerProps = props;
+            return React.createElement("div", null, props.children);
+          },
+        },
+        remarkPlugins: [remarkSpoilers],
+      },
+      "||\n\nsecret\n\n||",
+    ),
+  );
+
+  assert.equal(spoilerProps?.["data-block-spoiler"], "");
 });
 
 // ── remarkMessageLinks: bare-URL → message-link node ──────────────────

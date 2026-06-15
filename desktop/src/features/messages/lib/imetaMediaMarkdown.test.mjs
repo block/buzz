@@ -33,6 +33,23 @@ test("strip: removes trailing spoilered image line whose URL is in imetaMedia", 
   assert.equal(stripped, "Look at this");
 });
 
+test("strip: removes trailing block-spoilered image line", () => {
+  const body = "Look at this\n||\n![image](https://blossom/abc.png)\n||";
+  const stripped = stripImetaMediaLines(body, [
+    { url: "https://blossom/abc.png", type: "image/png" },
+  ]);
+  assert.equal(stripped, "Look at this");
+});
+
+test("strip: keeps block spoiler text while stripping imeta media", () => {
+  const body =
+    "Look at this\n||\nsecret\n![image](https://blossom/abc.png)\n||";
+  const stripped = stripImetaMediaLines(body, [
+    { url: "https://blossom/abc.png", type: "image/png" },
+  ]);
+  assert.equal(stripped, body);
+});
+
 test("strip: removes trailing video line", () => {
   const body = "Demo:\n![video](https://blossom/clip.mp4)";
   const stripped = stripImetaMediaLines(body, [
@@ -188,16 +205,24 @@ test("findSpoileredImetaMediaUrls: extracts only spoilered matching media urls",
     "||![image](https://b/a.png)||",
     "![image](https://b/b.png)",
     "||![video](https://b/c.mp4)||",
+    "||",
+    "![image](https://b/d.png)",
+    "![video](https://b/e.mp4)",
+    "||",
   ].join("\n");
   const spoilered = findSpoileredImetaMediaUrls(body, [
     { url: "https://b/a.png", type: "image/png" },
     { url: "https://b/b.png", type: "image/png" },
     { url: "https://b/c.mp4", type: "video/mp4" },
+    { url: "https://b/d.png", type: "image/png" },
+    { url: "https://b/e.mp4", type: "video/mp4" },
     { url: "https://b/other.png", type: "image/png" },
   ]);
   assert.deepEqual([...spoilered].sort(), [
     "https://b/a.png",
     "https://b/c.mp4",
+    "https://b/d.png",
+    "https://b/e.mp4",
   ]);
 });
 

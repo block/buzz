@@ -794,10 +794,16 @@ function SyntaxHighlightedCode({
   );
 }
 
-function SpoilerInline({ children }: { children?: React.ReactNode }) {
+function SpoilerInline({
+  block = false,
+  children,
+}: {
+  block?: boolean;
+  children?: React.ReactNode;
+}) {
   const [revealed, setRevealed] = React.useState(false);
   const contentRef = React.useRef<HTMLElement | null>(null);
-  const isBlock = hasBlockMedia(React.Children.toArray(children));
+  const isBlock = block || hasBlockMedia(React.Children.toArray(children));
 
   const setContentElement = React.useCallback((node: HTMLElement | null) => {
     contentRef.current = node;
@@ -908,8 +914,16 @@ function createMarkdownComponents(
       : "space-y-1 pl-6 marker:text-muted-foreground";
 
   return {
-    spoiler: ({ children }: { children?: React.ReactNode }) => (
-      <SpoilerInline>{children}</SpoilerInline>
+    spoiler: ({
+      children,
+      ...props
+    }: {
+      "data-block-spoiler"?: string;
+      children?: React.ReactNode;
+    }) => (
+      <SpoilerInline block={props["data-block-spoiler"] != null}>
+        {children}
+      </SpoilerInline>
     ),
     a: ({ children, href, ...props }) => {
       if (!interactive) {

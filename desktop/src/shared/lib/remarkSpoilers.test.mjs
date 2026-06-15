@@ -103,6 +103,10 @@ test("remarkSpoilers: groups block nodes between delimiter paragraphs", () => {
 
   assert.equal(tree.children.length, 3);
   assert.equal(tree.children[1].type, "spoiler");
+  assert.deepEqual(tree.children[1].data, {
+    hName: "spoiler",
+    hProperties: { "data-block-spoiler": "" },
+  });
   assert.equal(tree.children[1].children[0].children[0].type, "image");
 });
 
