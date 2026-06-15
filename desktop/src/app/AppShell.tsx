@@ -907,25 +907,15 @@ export function AppShell() {
                             });
                           await goChannel(directMessage.id);
                         }}
-                        onSelectAgents={() => {
-                          void goAgents();
-                        }}
-                        onSelectChannel={(channelId) => {
-                          void goChannel(channelId);
-                        }}
-                        onSelectHome={() => {
-                          void goHome();
-                        }}
-                        onSelectProjects={() => {
-                          void goProjects();
-                        }}
-                        onSelectPulse={() => {
-                          void goPulse();
-                        }}
+                        onSelectAgents={() => void goAgents()}
+                        onSelectChannel={(channelId) =>
+                          void goChannel(channelId)
+                        }
+                        onSelectHome={() => void goHome()}
+                        onSelectProjects={() => void goProjects()}
+                        onSelectPulse={() => void goPulse()}
                         onSelectSettings={handleOpenSettings}
-                        onSelectWorkflows={() => {
-                          void goWorkflows();
-                        }}
+                        onSelectWorkflows={() => void goWorkflows()}
                         onSetPresenceStatus={(status) =>
                           presenceSession.setStatus(status)
                         }
