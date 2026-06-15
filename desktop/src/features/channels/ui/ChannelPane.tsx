@@ -7,6 +7,7 @@ import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
 import { MessageThreadPanel } from "@/features/messages/ui/MessageThreadPanel";
 import { MessageTimeline } from "@/features/messages/ui/MessageTimeline";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import { formatDmParticipantDisplayName } from "@/features/channels/lib/dmParticipantDisplay";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
@@ -43,6 +44,7 @@ import type { Channel } from "@/shared/api/types";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type ChannelPaneProps = {
   activeChannel: Channel | null;
@@ -496,30 +498,40 @@ export const ChannelPane = React.memo(function ChannelPane({
         pubkey,
       }),
     );
-    const otherParticipants = currentPubkey
+    const normalizedCurrentPubkey = currentPubkey
+      ? normalizePubkey(currentPubkey)
+      : null;
+    const otherParticipants = normalizedCurrentPubkey
       ? participants.filter(
           (participant) =>
-            participant.pubkey.toLowerCase() !== currentPubkey.toLowerCase(),
+            normalizePubkey(participant.pubkey) !== normalizedCurrentPubkey,
         )
       : participants;
-    const [participant] =
+    const displayParticipants =
       otherParticipants.length > 0 ? otherParticipants : participants;
 
-    if (!participant) {
+    if (displayParticipants.length === 0) {
       return null;
     }
 
-    const profile = profiles?.[participant.pubkey.toLowerCase()] ?? null;
-    const displayName = resolveUserLabel({
-      currentPubkey,
-      fallbackName: participant.fallbackName,
-      profiles,
-      pubkey: participant.pubkey,
+    const introParticipants = displayParticipants.map((participant) => {
+      const profile = profiles?.[normalizePubkey(participant.pubkey)] ?? null;
+
+      return {
+        avatarUrl: profile?.avatarUrl ?? null,
+        displayName: resolveUserLabel({
+          currentPubkey,
+          fallbackName: participant.fallbackName,
+          profiles,
+          pubkey: participant.pubkey,
+        }),
+        pubkey: participant.pubkey,
+      };
     });
 
     return {
-      avatarUrl: profile?.avatarUrl ?? null,
-      displayName,
+      displayName: formatDmParticipantDisplayName(introParticipants),
+      participants: introParticipants,
     };
   }, [activeChannel, currentPubkey, profiles]);
 
@@ -746,7 +758,10 @@ export const ChannelPane = React.memo(function ChannelPane({
                       : activeChannel?.channelType === "forum"
                         ? "Forum posting is not wired in this pass."
                         : activeChannel
-                          ? `Message #${activeChannel.name}`
+                          ? activeChannel.channelType === "dm" &&
+                            directMessageIntro
+                            ? `Message ${directMessageIntro.displayName}`
+                            : `Message #${activeChannel.name}`
                           : "Select a channel"
                   }
                   showTopBorder={false}

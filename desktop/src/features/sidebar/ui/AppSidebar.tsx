@@ -6,7 +6,7 @@ import {
   Bot,
   FolderGit2,
   Home,
-  PenSquare,
+  MessageCirclePlus,
   Zap,
 } from "lucide-react";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
@@ -43,7 +43,7 @@ import {
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
-import { SECTION_ACTION_VISIBILITY_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
+import { SECTION_ICON_BUTTON_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
 import type {
   Channel,
   ChannelVisibility,
@@ -51,13 +51,11 @@ import type {
   Profile,
   UserStatus,
 } from "@/shared/api/types";
-import { cn } from "@/shared/lib/cn";
 import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
   SidebarGroup,
-  SidebarGroupAction,
   SidebarGroupContent,
   SidebarGroupLabel,
   SidebarHeader,
@@ -492,10 +490,10 @@ export function AppSidebar({
             </SidebarMenuButton>
             {shouldShowAgentCount ? (
               <SidebarMenuBadge
-                className="right-2 rounded-full bg-sidebar-accent/70 px-1.5 text-[11px] text-sidebar-foreground/75 peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
+                className="right-2 rounded-full bg-sidebar-accent/70 px-1.5 text-[11px] leading-none text-sidebar-foreground/75 peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
                 data-testid="sidebar-agents-count"
               >
-                {totalAgentCount}
+                <span className="leading-none">{totalAgentCount}</span>
               </SidebarMenuBadge>
             ) : null}
           </SidebarMenuItem>
@@ -688,21 +686,21 @@ export function AppSidebar({
               </FeatureGate>
               <SidebarSection
                 action={
-                  <SidebarGroupAction
-                    aria-expanded={isNewDmOpen}
-                    aria-label="Start a direct message"
-                    className={cn(
-                      "top-1/2 -translate-y-1/2 text-sidebar-foreground/50 hover:bg-sidebar-border/35 hover:text-sidebar-foreground",
-                      SECTION_ACTION_VISIBILITY_CLASS,
-                    )}
-                    data-testid="new-dm-trigger"
-                    onClick={() => {
-                      setIsNewDmOpen(true);
-                    }}
-                    type="button"
-                  >
-                    <PenSquare className="transition-transform" />
-                  </SidebarGroupAction>
+                  <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
+                    <button
+                      aria-expanded={isNewDmOpen}
+                      aria-label="Compose new message"
+                      className={SECTION_ICON_BUTTON_CLASS}
+                      data-testid="new-dm-trigger"
+                      onClick={() => {
+                        setIsNewDmOpen(true);
+                      }}
+                      title="Compose new message"
+                      type="button"
+                    >
+                      <MessageCirclePlus className="h-4 w-4" />
+                    </button>
+                  </div>
                 }
                 dmParticipantsByChannelId={dmParticipantsByChannelId}
                 isCollapsed={collapsedGroups.directMessages}

@@ -1,15 +1,16 @@
 import * as React from "react";
 import { ArrowDown, Hash } from "lucide-react";
 
+import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
-import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { TimelineSkeleton } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
@@ -23,8 +24,8 @@ type MessageTimelineProps = {
   channelType?: ChannelType | null;
   messages: TimelineMessage[];
   directMessageIntro?: {
-    avatarUrl: string | null;
     displayName: string;
+    participants: DirectMessageIntroParticipant[];
   } | null;
   isLoading?: boolean;
   emptyTitle?: string;
@@ -86,6 +87,12 @@ type ChannelIntro = {
   channelName: string;
   description?: string | null;
   icon?: React.ReactNode;
+};
+
+type DirectMessageIntroParticipant = {
+  avatarUrl: string | null;
+  displayName: string;
+  pubkey: string;
 };
 
 export const MessageTimeline = React.memo(function MessageTimeline({
@@ -229,12 +236,8 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                 className="mb-0.5 mt-auto flex w-full flex-col items-start px-3 py-2 text-left"
                 data-testid="message-dm-intro"
               >
-                <ProfileAvatar
-                  avatarUrl={directMessageIntro.avatarUrl}
-                  className="h-[60px] w-[60px] text-base"
-                  iconClassName="h-6 w-6"
-                  label={directMessageIntro.displayName}
-                  testId="message-dm-intro-avatar"
+                <DirectMessageIntroAvatarStack
+                  participants={directMessageIntro.participants}
                 />
                 <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
                   {directMessageIntro.displayName}
@@ -420,3 +423,55 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     </TooltipProvider>
   );
 });
+
+function DirectMessageIntroAvatarStack({
+  participants,
+}: {
+  participants: DirectMessageIntroParticipant[];
+}) {
+  const { hiddenCount, visibleParticipants } =
+    getDmParticipantPreview(participants);
+  const stackItemCount = visibleParticipants.length + (hiddenCount > 0 ? 1 : 0);
+
+  return (
+    <div
+      aria-hidden="true"
+      className="flex shrink-0 items-center"
+      data-testid="message-dm-intro-avatar-stack"
+    >
+      {visibleParticipants.map((participant, index) => (
+        <div
+          className={index > 0 ? "-ml-5" : ""}
+          data-testid="message-dm-intro-avatar-stack-participant"
+          key={participant.pubkey}
+          style={{
+            zIndex: index + 1,
+            ...(index < stackItemCount - 1 && {
+              mask: "radial-gradient(circle 34px at calc(100% + 10px) 50%, transparent 99%, #fff 100%)",
+              WebkitMask:
+                "radial-gradient(circle 34px at calc(100% + 10px) 50%, transparent 99%, #fff 100%)",
+            }),
+          }}
+        >
+          <UserAvatar
+            avatarUrl={participant.avatarUrl}
+            className="h-[60px] w-[60px] text-base"
+            displayName={participant.displayName}
+            size="md"
+          />
+        </div>
+      ))}
+      {hiddenCount > 0 ? (
+        <div
+          className={visibleParticipants.length > 0 ? "-ml-5" : ""}
+          data-testid="message-dm-intro-avatar-stack-more"
+          style={{ zIndex: stackItemCount }}
+        >
+          <span className="flex h-[60px] w-[60px] items-center justify-center rounded-full bg-secondary font-semibold text-secondary-foreground shadow-xs">
+            <span className="text-lg leading-none">+{hiddenCount}</span>
+          </span>
+        </div>
+      ) : null}
+    </div>
+  );
+}

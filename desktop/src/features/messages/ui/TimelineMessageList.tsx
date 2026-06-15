@@ -265,12 +265,14 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
                 : undefined
             }
             profiles={profiles}
+            showDepthGuides={false}
             videoReviewContext={videoReviewContextById.get(message.id)}
           />
           <MessageThreadSummaryRow
             depth={message.depth}
             message={message}
             onOpenThread={onReply}
+            showDepthGuides={false}
             summary={summary}
           />
           {footer}
@@ -303,6 +305,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
             onReply={onReply}
             profiles={profiles}
             searchQuery={isSearchMatch ? searchQuery : undefined}
+            showDepthGuides={false}
             videoReviewContext={videoReviewContextById.get(message.id)}
           />
           {footer}

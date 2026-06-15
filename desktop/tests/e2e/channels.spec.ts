@@ -361,11 +361,107 @@ test("start a new direct message from the sidebar", async ({ page }) => {
   await expect(
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
+  await page
+    .getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+  await expect(
+    page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).not.toBeVisible();
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+  await expect(
+    page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toBeVisible();
 
   await page.getByTestId("new-dm-submit").click();
 
   await expect(page.getByTestId("dm-list")).toContainText("charlie");
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+});
+
+test("shows capped participant stack in group direct message header", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("new-dm-trigger").click();
+  await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
+
+  for (const identity of [
+    TEST_IDENTITIES.alice,
+    TEST_IDENTITIES.bob,
+    TEST_IDENTITIES.charlie,
+    TEST_IDENTITIES.outsider,
+  ]) {
+    await page.getByTestId("new-dm-search").fill(identity.username);
+    await page.getByTestId(`new-dm-result-${identity.pubkey}`).click();
+  }
+
+  await page.getByTestId("new-dm-submit").click();
+
+  await expect(page.getByTestId("channel-dm-count-Group DM (5)")).toHaveText(
+    "4",
+  );
+  await expect(page.getByTestId("chat-title")).toContainText("alice");
+  await expect(page.getByTestId("chat-title")).toContainText("bob");
+  await expect(page.getByTestId("chat-title")).toContainText("charlie");
+  await expect(page.getByTestId("chat-title")).toContainText("+1 more");
+  await expect(page.getByTestId("chat-title")).not.toContainText("outsider");
+  const chatTitle = await page.getByTestId("chat-title").innerText();
+  await expect(
+    page.getByTestId("message-input").locator("[data-placeholder]").first(),
+  ).toHaveAttribute("data-placeholder", `Message ${chatTitle}`);
+  const composerColors = await page
+    .getByTestId("message-input")
+    .evaluate((element) => {
+      const placeholderElement =
+        element.querySelector<HTMLElement>("[data-placeholder]");
+      if (!placeholderElement) {
+        return null;
+      }
+
+      return {
+        placeholderColor: window.getComputedStyle(
+          placeholderElement,
+          "::before",
+        ).color,
+        textColor: window.getComputedStyle(element).color,
+      };
+    });
+  expect(composerColors).not.toBeNull();
+  expect(composerColors?.placeholderColor).not.toBe(composerColors?.textColor);
+  await expect(page.getByTestId("chat-header-dm-avatar")).toHaveCount(0);
+  await expect(page.getByTestId("chat-header-dm-avatar-stack")).toBeVisible();
+  await expect(
+    page.getByTestId("chat-header-dm-avatar-stack-participant"),
+  ).toHaveCount(3);
+  await expect(page.getByTestId("chat-header-dm-avatar-stack-more")).toHaveText(
+    "+1",
+  );
+  const headerStackBox = await page
+    .getByTestId("chat-header-dm-avatar-stack")
+    .boundingBox();
+  const headerTitleBox = await page.getByTestId("chat-title").boundingBox();
+  expect(headerStackBox).not.toBeNull();
+  expect(headerTitleBox).not.toBeNull();
+  expect((headerStackBox?.x ?? 0) + (headerStackBox?.width ?? 0)).toBeLessThan(
+    headerTitleBox?.x ?? 0,
+  );
+  await expect(page.getByTestId("message-dm-intro")).toContainText("alice");
+  await expect(page.getByTestId("message-dm-intro")).toContainText("bob");
+  await expect(page.getByTestId("message-dm-intro")).toContainText("charlie");
+  await expect(page.getByTestId("message-dm-intro")).toContainText("+1 more");
+  await expect(page.getByTestId("message-dm-intro")).not.toContainText(
+    "outsider",
+  );
+  await expect(page.getByTestId("message-dm-intro-avatar-stack")).toBeVisible();
+  await expect(
+    page.getByTestId("message-dm-intro-avatar-stack-participant"),
+  ).toHaveCount(3);
+  await expect(
+    page.getByTestId("message-dm-intro-avatar-stack-more"),
+  ).toHaveText("+1");
 });
 
 test("create stream with name and description", async ({ page }) => {
@@ -1061,6 +1157,14 @@ test("members sidebar can invite and remove members", async ({ page }) => {
     0,
   );
 
+  await expect(page.getByText(/Members · \d+/)).toBeVisible();
+  await page.getByTestId("channel-management-search-users").fill("a");
+  await expect(page.getByText("Members", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Members · \d+/)).toHaveCount(0);
+  await expect(
+    page.getByText("Not in this channel", { exact: true }),
+  ).toBeVisible();
+
   await page.getByTestId("channel-management-search-users").fill("char");
   await expect(
     page.getByTestId(
@@ -1071,21 +1175,17 @@ test("members sidebar can invite and remove members", async ({ page }) => {
     .getByTestId(`channel-user-search-result-${TEST_IDENTITIES.charlie.pubkey}`)
     .click();
   await expect(
-    page.getByTestId(`selected-invitee-${TEST_IDENTITIES.charlie.pubkey}`),
+    page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toContainText("charlie");
-
-  await page.getByTestId("channel-management-add-role").selectOption("admin");
-  await page.getByTestId("channel-management-add-members").click();
-
   await expect(
     page.getByTestId(`selected-invitee-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toHaveCount(0);
-  await expect(page.getByTestId("channel-management-search-users")).toHaveValue(
-    "",
+  await expect(page.getByTestId("channel-management-add-members")).toHaveCount(
+    0,
   );
-  await expect(
-    page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
-  ).toContainText("charlie");
+  await expect(page.getByTestId("channel-management-search-users")).toHaveValue(
+    "char",
+  );
   await expectMembersTriggerCount(page, initialMemberCount + 1);
 
   await openMemberMenu(page, TEST_IDENTITIES.charlie.pubkey);
@@ -1099,31 +1199,19 @@ test("members sidebar can invite and remove members", async ({ page }) => {
   await expectMembersTriggerCount(page, initialMemberCount);
 });
 
-test("members sidebar keeps direct pubkey entry behind a toggle", async ({
-  page,
-}) => {
+test("members modal does not show direct pubkey entry", async ({ page }) => {
   await page.goto("/");
   await openMembersSidebar(page, "general");
-  const initialMemberCount = await readMembersTriggerCount(page);
 
   await expect(page.getByTestId("channel-management-add-pubkeys")).toHaveCount(
     0,
   );
-
-  await page.getByTestId("channel-management-toggle-direct-pubkeys").click();
   await expect(
-    page.getByTestId("channel-management-add-pubkeys"),
-  ).toBeVisible();
-
-  await page
-    .getByTestId("channel-management-add-pubkeys")
-    .fill(TEST_IDENTITIES.outsider.pubkey);
-  await page.getByTestId("channel-management-add-members").click();
-
+    page.getByTestId("channel-management-toggle-direct-pubkeys"),
+  ).toHaveCount(0);
   await expect(
-    page.getByTestId(`sidebar-member-${TEST_IDENTITIES.outsider.pubkey}`),
-  ).toContainText("outsider");
-  await expectMembersTriggerCount(page, initialMemberCount + 1);
+    page.getByTestId("channel-management-search-users"),
+  ).toHaveAttribute("placeholder", "Add people and agents");
 });
 
 test("open-channel members can add agents from the header", async ({
@@ -1172,19 +1260,21 @@ test("private-channel members can add members and bots without admin", async ({
   await expect(
     page.getByTestId("channel-management-search-users"),
   ).toBeVisible();
+  await page.getByTestId("channel-management-search-users").fill("char");
+  await page
+    .getByTestId(`channel-user-search-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
   await expect(
-    page.getByTestId("channel-management-add-members"),
-  ).toBeVisible();
+    page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toContainText("charlie");
 
-  // The role dropdown hides the elevated "admin" option for non-admins — the
-  // relay rejects it anyway — while keeping the non-elevated roles a member
-  // may grant (member, guest, bot).
-  const roleSelect = page.getByTestId("channel-management-add-role");
-  await expect(roleSelect.locator("option")).toHaveText([
-    "member",
-    "guest",
-    "bot",
-  ]);
+  // The modal no longer exposes member/guest/bot role choices or a staged
+  // submit button; selected people are added immediately as members and
+  // selected agents are added as bots.
+  await expect(page.getByTestId("channel-management-add-role")).toHaveCount(0);
+  await expect(page.getByTestId("channel-management-add-members")).toHaveCount(
+    0,
+  );
 });
 
 test("removing a channel-scoped agent preserves the managed agent record", async ({

@@ -136,6 +136,7 @@ export function ChannelScreen({
   const {
     activeChannelTitle,
     activeDmAvatarUrl,
+    activeDmHeaderParticipants,
     activeDmPresenceStatus,
     activeChannelEphemeralDisplay,
   } = useActiveChannelHeader(activeChannel, currentPubkey);
@@ -528,6 +529,7 @@ export function ChannelScreen({
       activeChannelTitle={activeChannelTitle}
       actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
       activeDmAvatarUrl={activeDmAvatarUrl}
+      activeDmHeaderParticipants={activeDmHeaderParticipants}
       activeDmPresenceStatus={activeDmPresenceStatus}
       chromeWrapperRef={channelHeaderChromeRef}
       currentPubkey={currentPubkey}
