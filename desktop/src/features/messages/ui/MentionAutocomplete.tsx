@@ -98,7 +98,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     >
                       <Bot
                         aria-hidden="true"
-                        className="h-3 w-3"
+                        className="h-4 w-4"
                         data-testid="mention-agent-icon"
                       />
                       {agentLabel}

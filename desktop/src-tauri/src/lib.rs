@@ -690,6 +690,7 @@ pub fn run() {
             search_users,
             get_presence,
             get_default_relay_url,
+            get_legacy_workspace_storage,
             is_shared_identity,
             get_relay_ws_url,
             get_relay_http_url,

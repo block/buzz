@@ -76,7 +76,7 @@ function IdentityRow({
           title={`Copy ${label}`}
           type="button"
         >
-          <Copy className="h-3.5 w-3.5 shrink-0" />
+          <Copy className="h-4 w-4 shrink-0" />
           Copy
         </button>
       ) : null}
@@ -116,7 +116,7 @@ function EditProfileMetadataButton({
       title={accessibleLabel}
       type="button"
     >
-      <Icon className="h-3.5 w-3.5 shrink-0" />
+      <Icon className="h-4 w-4 shrink-0" />
       {actionLabel}
     </button>
   );

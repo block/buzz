@@ -504,7 +504,7 @@ release *ARGS:
     # Bump versions and lockfiles
     just bump-version "$VERSION"
     # Generate changelog
-    LAST_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo "")
+    LAST_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' 2>/dev/null || echo "")
     TMPFILE=$(mktemp)
     {
         echo "# Changelog"

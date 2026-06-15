@@ -125,7 +125,7 @@ export function ForumPostCard({
 
       {summary && summary.replyCount > 0 ? (
         <div className="mt-3 flex items-center gap-1.5 text-xs text-muted-foreground">
-          <MessageSquare className="h-3.5 w-3.5" />
+          <MessageSquare className="h-4 w-4" />
           <span>
             {summary.replyCount}{" "}
             {summary.replyCount === 1 ? "reply" : "replies"}

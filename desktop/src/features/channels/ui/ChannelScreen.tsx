@@ -429,11 +429,13 @@ export function ChannelScreen({
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     });
+  const hasTimelineData = messagesQuery.data !== undefined;
   const isTimelineLoading =
     activeChannel !== null &&
     activeChannel.channelType !== "forum" &&
-    (messagesQuery.isPending ||
-      (messagesQuery.isFetching && resolvedMessages.length === 0));
+    !hasTimelineData &&
+    messagesQuery.isPending;
+  const shouldShowInitialChannelLoading = isTimelineLoading;
   const resetComposerTargets = React.useCallback(
     (_channelId: string | null) => {
       setOpenThreadHeadId(null);
@@ -549,7 +551,9 @@ export function ChannelScreen({
           ref={channelContentRef}
         >
           {activeChannel ? (
-            activeChannel.channelType === "forum" ? (
+            shouldShowInitialChannelLoading ? (
+              <ViewLoadingFallback includeHeader kind="channel" />
+            ) : activeChannel.channelType === "forum" ? (
               <>
                 {channelHeader}
                 <React.Suspense fallback={<ViewLoadingFallback kind="forum" />}>
@@ -564,7 +568,9 @@ export function ChannelScreen({
                 </React.Suspense>
               </>
             ) : (
-              <React.Suspense fallback={<ViewLoadingFallback kind="channel" />}>
+              <React.Suspense
+                fallback={<ViewLoadingFallback includeHeader kind="channel" />}
+              >
                 <ChannelPane
                   activeChannel={activeChannel}
                   agentPubkeys={agentPubkeys}

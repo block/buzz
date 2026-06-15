@@ -751,8 +751,8 @@ test("narrow thread view collapses channel header actions into a menu", async ({
     throw new Error("Expected header action menu and thread panel bounds");
   }
   const menuGapPx = threadPanelBox.x - (menuBox.x + menuBox.width);
-  expect(menuGapPx).toBeGreaterThanOrEqual(10);
-  expect(menuGapPx).toBeLessThanOrEqual(14);
+  expect(menuGapPx).toBeGreaterThanOrEqual(22);
+  expect(menuGapPx).toBeLessThanOrEqual(26);
 
   await menuTrigger.click();
 

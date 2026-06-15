@@ -446,6 +446,7 @@ export async function installMockBridge(
   page: Page,
   mock?: MockBridgeOptions,
   options?: {
+    relayWsUrl?: string;
     skipOnboardingSeed?: boolean;
     skipWorkspaceSeed?: boolean;
     seedPreviewFeatures?: boolean;
@@ -454,6 +455,7 @@ export async function installMockBridge(
   await installBridge(page, {
     mode: "mock",
     mock,
+    relayWsUrl: options?.relayWsUrl,
     skipOnboardingSeed: options?.skipOnboardingSeed,
     skipWorkspaceSeed: options?.skipWorkspaceSeed,
     seedPreviewFeatures: options?.seedPreviewFeatures,

@@ -167,7 +167,7 @@ function AvatarStepActions({
             {isSaving || isUploadingAvatar ? (
               <Spinner
                 aria-label={isSaving ? "Saving profile" : "Uploading avatar"}
-                className="h-4 w-4"
+                className="h-4 w-4 border-2"
               />
             ) : (
               "Next"

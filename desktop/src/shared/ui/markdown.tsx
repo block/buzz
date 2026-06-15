@@ -520,7 +520,7 @@ function MarkdownCodeBlock({
             type="button"
             variant="ghost"
           >
-            <Copy className="h-3.5 w-3.5" />
+            <Copy className="h-4 w-4" />
             <span className="sr-only">Copy code block</span>
           </Button>
         </TooltipTrigger>
@@ -579,7 +579,7 @@ function FileCard({
       className="my-1 inline-flex max-w-sm items-center gap-3 rounded-xl border border-border/70 bg-muted/40 px-3 py-2 text-left no-underline transition-colors hover:bg-muted/70"
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-background text-muted-foreground">
-        <FileText className="h-5 w-5" />
+        <FileText className="h-4 w-4" />
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium text-foreground">

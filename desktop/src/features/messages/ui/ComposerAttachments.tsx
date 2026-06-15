@@ -135,7 +135,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                   className="group relative"
                 >
                   <div className="flex h-5 max-w-[10rem] items-center gap-1 rounded border border-border/70 bg-muted px-1.5">
-                    <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
+                    <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
                     <span className="truncate text-[10px] text-muted-foreground">
                       {label}
                     </span>
@@ -186,7 +186,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                             )}
                             <div className="absolute inset-0 bg-black/15" />
                             <div className="absolute flex h-5 w-5 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm">
-                              <Play className="h-3 w-3 fill-white text-white" />
+                              <Play className="h-4 w-4 fill-white text-white" />
                             </div>
                           </div>
                         ) : (
@@ -231,7 +231,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                           />
                         )}
                         <DialogPrimitive.Close className="absolute right-4 top-4 rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30">
-                          <X className="h-5 w-5" />
+                          <X className="h-4 w-4" />
                           <span className="sr-only">Close</span>
                         </DialogPrimitive.Close>
                       </DialogPrimitive.Content>

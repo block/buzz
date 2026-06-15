@@ -31,6 +31,14 @@ type WelcomeSetupProps = {
 };
 
 const DEFAULT_WORKSPACE_HANDOFF_MIN_MS = 200;
+const LOCAL_DEV_RELAY_URLS = new Set([
+  "ws://localhost:3000",
+  "ws://127.0.0.1:3000",
+]);
+
+function isLocalDevRelayUrl(relayUrl: string) {
+  return LOCAL_DEV_RELAY_URLS.has(relayUrl.trim().replace(/\/$/, ""));
+}
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => {
@@ -95,6 +103,12 @@ export function WelcomeSetup({
       const trimmedUrl = relayUrl.trim();
       if (!trimmedUrl) {
         setError("Please enter a workspace URL.");
+        return;
+      }
+      if (!workspaceName && isLocalDevRelayUrl(trimmedUrl)) {
+        setError("Enter your relay URL to join a workspace.");
+        setTransitionMode("forward");
+        setPage("create-workspace");
         return;
       }
 
@@ -220,20 +234,22 @@ export function WelcomeSetup({
             </p>
 
             <div className="mt-8 flex w-full flex-col gap-3">
-              <Button
-                className="h-10 w-full"
-                aria-disabled={isConnecting}
-                onClick={() => {
-                  if (isConnecting) {
-                    return;
-                  }
-                  setError(null);
-                  void handleConnect(defaultRelayUrl);
-                }}
-                type="button"
-              >
-                Continue with Block Inc. workspace
-              </Button>
+              {isLocalDevRelayUrl(defaultRelayUrl) ? null : (
+                <Button
+                  className="h-10 w-full"
+                  aria-disabled={isConnecting}
+                  onClick={() => {
+                    if (isConnecting) {
+                      return;
+                    }
+                    setError(null);
+                    void handleConnect(defaultRelayUrl);
+                  }}
+                  type="button"
+                >
+                  Continue with Block Inc. workspace
+                </Button>
+              )}
 
               <Button
                 className="h-10 w-full"

@@ -2169,7 +2169,24 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
               sig: "mocksig".repeat(20).slice(0, 128),
             },
           ]
-        : [];
+        : channelId === "94a444a4-c0a3-5966-ab05-530c6ddc2301"
+          ? [
+              // Charlie is a `bot` member of #agents (see channel seed), so this
+              // message renders with role="bot" — the surface whose avatar opens
+              // a managed-agent profile panel / hover popover with active-turn
+              // badges. #agents has no message-row index assertions, so seeding
+              // here is safe for existing specs.
+              {
+                id: "mock-agents-charlie",
+                pubkey: CHARLIE_PUBKEY,
+                created_at: Math.floor(Date.now() / 1000) - 90,
+                kind: 9,
+                tags: [["h", channelId]],
+                content: "Indexing the channel catalog now.",
+                sig: "mocksig".repeat(20).slice(0, 128),
+              },
+            ]
+          : [];
 
   mockMessages.set(channelId, seeded);
   return seeded;
@@ -6149,6 +6166,12 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":
         return getRelayWsUrl(activeConfig);
+      case "get_legacy_workspace_storage":
+        return {
+          workspaces: null,
+          activeWorkspaceId: null,
+          onboardingCompletions: [],
+        };
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
       case "discover_acp_providers":

@@ -120,7 +120,7 @@ export function ChannelTemplatesSettingsCard() {
           type="button"
           variant="outline"
         >
-          <Plus className="mr-1.5 h-3.5 w-3.5" />
+          <Plus className="mr-1.5 h-4 w-4" />
           Create
         </Button>
       </div>
@@ -229,13 +229,13 @@ function TemplateRow({
         <div className="mt-1 flex items-center gap-3 text-xs text-muted-foreground">
           {agentCount > 0 ? (
             <span className="flex items-center gap-1">
-              <Users className="h-3 w-3" />
+              <Users className="h-4 w-4" />
               {agentCount} {agentCount === 1 ? "agent" : "agents"}
             </span>
           ) : null}
           {template.canvasTemplate ? (
             <span className="flex items-center gap-1">
-              <MessageSquare className="h-3 w-3" />
+              <MessageSquare className="h-4 w-4" />
               canvas
             </span>
           ) : null}
@@ -255,11 +255,11 @@ function TemplateRow({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
           <DropdownMenuItem onClick={onEdit}>
-            <Pencil className="mr-2 h-3.5 w-3.5" />
+            <Pencil className="mr-2 h-4 w-4" />
             Edit
           </DropdownMenuItem>
           <DropdownMenuItem onClick={onDuplicate}>
-            <Copy className="mr-2 h-3.5 w-3.5" />
+            <Copy className="mr-2 h-4 w-4" />
             Duplicate
           </DropdownMenuItem>
           {!template.isBuiltin ? (
@@ -267,7 +267,7 @@ function TemplateRow({
               className="text-destructive focus:text-destructive"
               onClick={onDelete}
             >
-              <Trash2 className="mr-2 h-3.5 w-3.5" />
+              <Trash2 className="mr-2 h-4 w-4" />
               Delete
             </DropdownMenuItem>
           ) : null}
