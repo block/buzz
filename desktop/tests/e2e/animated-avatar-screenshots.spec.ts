@@ -12,92 +12,109 @@ const SHOTS = "test-results/animated-avatar";
  */
 function installFakeCamera(
   page: import("@playwright/test").Page,
-  options: { cameraDelayMs?: number } = {},
+  options: { cameraDelayMs?: number; holdCamera?: boolean } = {},
 ) {
-  return page.addInitScript((cameraDelayMs) => {
-    const canvas = document.createElement("canvas");
-    canvas.width = 640;
-    canvas.height = 480;
-    const context = canvas.getContext("2d");
-    let hue = 0;
-    setInterval(() => {
-      if (!context) {
-        return;
-      }
-      hue = (hue + 7) % 360;
-      context.fillStyle = `hsl(${hue} 80% 60%)`;
-      context.fillRect(0, 0, canvas.width, canvas.height);
-      context.fillStyle = "#ffffff";
-      context.beginPath();
-      context.arc(
-        canvas.width / 2 + Math.sin(hue / 30) * 60,
-        canvas.height / 2,
-        90,
-        0,
-        Math.PI * 2,
-      );
-      context.fill();
-    }, 90);
-    const stream = canvas.captureStream(15);
-    const mediaDevices = navigator.mediaDevices ?? ({} as MediaDevices);
-    if (!navigator.mediaDevices) {
-      Object.defineProperty(navigator, "mediaDevices", {
-        configurable: true,
-        value: mediaDevices,
-      });
-    }
-    const devices: MediaDeviceInfo[] = [
-      {
-        deviceId: "builtin-camera",
-        groupId: "mac",
-        kind: "videoinput",
-        label: "FaceTime HD Camera",
-        toJSON() {
-          return this;
-        },
-      } as MediaDeviceInfo,
-      {
-        deviceId: "iphone-continuity",
-        groupId: "iphone",
-        kind: "videoinput",
-        label: "Kenny's iPhone Camera",
-        toJSON() {
-          return this;
-        },
-      } as MediaDeviceInfo,
-    ];
-    (
-      window as Window & {
-        __BUZZ_E2E_CAMERA_CONSTRAINTS__?: MediaStreamConstraints[];
-      }
-    ).__BUZZ_E2E_CAMERA_CONSTRAINTS__ = [];
-    Object.defineProperty(mediaDevices, "enumerateDevices", {
-      configurable: true,
-      value: () => Promise.resolve(devices),
-    });
-    Object.defineProperty(mediaDevices, "addEventListener", {
-      configurable: true,
-      value: () => {},
-    });
-    Object.defineProperty(mediaDevices, "removeEventListener", {
-      configurable: true,
-      value: () => {},
-    });
-    Object.defineProperty(mediaDevices, "getUserMedia", {
-      configurable: true,
-      value: async (constraints: MediaStreamConstraints) => {
-        (
-          window as Window & {
-            __BUZZ_E2E_CAMERA_CONSTRAINTS__?: MediaStreamConstraints[];
-          }
-        ).__BUZZ_E2E_CAMERA_CONSTRAINTS__?.push(constraints);
-        if (cameraDelayMs > 0) {
-          await new Promise((resolve) => setTimeout(resolve, cameraDelayMs));
+  return page.addInitScript(
+    (cameraOptions) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 640;
+      canvas.height = 480;
+      const context = canvas.getContext("2d");
+      let hue = 0;
+      setInterval(() => {
+        if (!context) {
+          return;
         }
-        return Promise.resolve(stream);
-      },
-    });
-  }, options.cameraDelayMs ?? 0);
+        hue = (hue + 7) % 360;
+        context.fillStyle = `hsl(${hue} 80% 60%)`;
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.fillStyle = "#ffffff";
+        context.beginPath();
+        context.arc(
+          canvas.width / 2 + Math.sin(hue / 30) * 60,
+          canvas.height / 2,
+          90,
+          0,
+          Math.PI * 2,
+        );
+        context.fill();
+      }, 90);
+      const stream = canvas.captureStream(15);
+      const mediaDevices = navigator.mediaDevices ?? ({} as MediaDevices);
+      if (!navigator.mediaDevices) {
+        Object.defineProperty(navigator, "mediaDevices", {
+          configurable: true,
+          value: mediaDevices,
+        });
+      }
+      const devices: MediaDeviceInfo[] = [
+        {
+          deviceId: "builtin-camera",
+          groupId: "mac",
+          kind: "videoinput",
+          label: "FaceTime HD Camera",
+          toJSON() {
+            return this;
+          },
+        } as MediaDeviceInfo,
+        {
+          deviceId: "iphone-continuity",
+          groupId: "iphone",
+          kind: "videoinput",
+          label: "Kenny's iPhone Camera",
+          toJSON() {
+            return this;
+          },
+        } as MediaDeviceInfo,
+      ];
+      const testWindow = window as Window & {
+        __BUZZ_E2E_CAMERA_CONSTRAINTS__?: MediaStreamConstraints[];
+        __BUZZ_E2E_CAMERA_REQUEST_COUNT__?: number;
+        __BUZZ_E2E_RELEASE_CAMERA__?: () => void;
+      };
+      testWindow.__BUZZ_E2E_CAMERA_CONSTRAINTS__ = [];
+      testWindow.__BUZZ_E2E_CAMERA_REQUEST_COUNT__ = 0;
+      let releaseCamera: (() => void) | null = null;
+      testWindow.__BUZZ_E2E_RELEASE_CAMERA__ = () => {
+        releaseCamera?.();
+        releaseCamera = null;
+      };
+      Object.defineProperty(mediaDevices, "enumerateDevices", {
+        configurable: true,
+        value: () => Promise.resolve(devices),
+      });
+      Object.defineProperty(mediaDevices, "addEventListener", {
+        configurable: true,
+        value: () => {},
+      });
+      Object.defineProperty(mediaDevices, "removeEventListener", {
+        configurable: true,
+        value: () => {},
+      });
+      Object.defineProperty(mediaDevices, "getUserMedia", {
+        configurable: true,
+        value: async (constraints: MediaStreamConstraints) => {
+          testWindow.__BUZZ_E2E_CAMERA_CONSTRAINTS__?.push(constraints);
+          testWindow.__BUZZ_E2E_CAMERA_REQUEST_COUNT__ =
+            (testWindow.__BUZZ_E2E_CAMERA_REQUEST_COUNT__ ?? 0) + 1;
+          if (cameraOptions.holdCamera) {
+            await new Promise<void>((resolve) => {
+              releaseCamera = resolve;
+            });
+          } else if (cameraOptions.cameraDelayMs > 0) {
+            await new Promise((resolve) =>
+              setTimeout(resolve, cameraOptions.cameraDelayMs),
+            );
+          }
+          return Promise.resolve(stream);
+        },
+      });
+    },
+    {
+      cameraDelayMs: options.cameraDelayMs ?? 0,
+      holdCamera: options.holdCamera ?? false,
+    },
+  );
 }
 
 // The review editor (preview + framing + poster strip + backdrop panel) is
@@ -158,7 +175,7 @@ test.describe("animated avatar screenshots", () => {
   });
 
   test("02 — live camera preview", async ({ page }) => {
-    await openAnimatedTab(page, { cameraDelayMs: 600 });
+    await openAnimatedTab(page, { holdCamera: true });
     const animatedTabHeight = () =>
       page
         .getByTestId("profile-avatar-animated")
@@ -168,6 +185,18 @@ test.describe("animated avatar screenshots", () => {
     const idleHeight = await animatedTabHeight();
 
     await page.getByTestId("profile-avatar-animated-camera-iphone").click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (
+              window as Window & {
+                __BUZZ_E2E_CAMERA_REQUEST_COUNT__?: number;
+              }
+            ).__BUZZ_E2E_CAMERA_REQUEST_COUNT__ ?? 0,
+        ),
+      )
+      .toBeGreaterThan(0);
     const previewSlot = page.getByTestId(
       "profile-avatar-animated-preview-slot",
     );
@@ -180,6 +209,13 @@ test.describe("animated avatar screenshots", () => {
     const startingHeight = await animatedTabHeight();
     expect(Math.abs(startingHeight - idleHeight)).toBeLessThanOrEqual(1);
 
+    await page.evaluate(() => {
+      (
+        window as Window & {
+          __BUZZ_E2E_RELEASE_CAMERA__?: () => void;
+        }
+      ).__BUZZ_E2E_RELEASE_CAMERA__?.();
+    });
     await expect(
       page.getByTestId("profile-avatar-animated-record"),
     ).toBeVisible({ timeout: 10_000 });
