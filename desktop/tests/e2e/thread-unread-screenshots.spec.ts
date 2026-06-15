@@ -519,7 +519,9 @@ test.describe("thread unread indicator screenshots", () => {
     });
   });
 
-  test("07-expand-late-branch-clears-older-sibling", async ({ page }) => {
+  test("07-expand-clears-own-branch-badge-sibling-survives", async ({
+    page,
+  }) => {
     await installMockBridge(page);
     await page.goto("/");
 
@@ -561,9 +563,11 @@ test.describe("thread unread indicator screenshots", () => {
     await page.getByTestId("channel-random").click();
     await expect(page.getByTestId("chat-title")).toHaveText("random");
 
-    // The older branch's unread reply is chronologically EARLIER than the
-    // newer branch's. Single thread read position (per Will's ack): reading the
-    // later branch clears everything older — including the old branch's badge.
+    // Each branch gains its own unread reply. Badges are computed against the
+    // open-time frozen frontier snapshot, and expand-clear is driven by the
+    // per-branch `expandedSubtreeReplyIds` gate — NOT a cross-branch live
+    // marker sweep. So expanding one branch clears only its OWN badge; the
+    // sibling's badge survives until that branch is expanded too.
     const base = unreadTimestamp();
     await emitMockMessage(page, "general", "Unread in older branch", {
       parentEventId: oldChild!.id,
@@ -591,16 +595,23 @@ test.describe("thread unread indicator screenshots", () => {
       path: `${SHOTS}/08-two-sibling-badges-before-expand.png`,
     });
 
-    // Expand the LATER branch. Its reply is the newest, so the root marker
-    // advances past the older branch's reply too — the cross-branch
-    // chronological clear (accepted, NIP-RS single thread position). Both
-    // badges drop: the expanded branch by the gate, the older sibling by the
-    // advanced live marker. This asserts the accepted behavior, not a guard.
+    // Expand the LATER branch. Only its OWN badge clears, via the
+    // `expandedSubtreeReplyIds` gate against the frozen open-time frontier.
+    // The older sibling's badge SURVIVES — the design does not sweep across
+    // branches off a live marker.
     await expandReply(page, branchNew!.id);
+    await expect(inPanelBadges).toHaveCount(1);
+
+    await page.screenshot({
+      path: `${SHOTS}/09-expand-clears-own-branch-sibling-survives.png`,
+    });
+
+    // Expanding the older branch clears the last remaining badge.
+    await expandReply(page, branchOld!.id);
     await expect(inPanelBadges).toHaveCount(0);
 
     await page.screenshot({
-      path: `${SHOTS}/09-late-branch-expand-clears-older-sibling.png`,
+      path: `${SHOTS}/10-both-branches-expanded-all-cleared.png`,
     });
   });
 
