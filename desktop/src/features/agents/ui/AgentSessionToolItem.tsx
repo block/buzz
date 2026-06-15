@@ -15,8 +15,11 @@ import {
   formatToolTitle,
   getBuzzToolInfo,
   getToolStatusDisplay,
-  normalizeToolNameText,
 } from "./agentSessionToolCatalog";
+import {
+  buildCompactToolSummary,
+  isCompactDeveloperTool,
+} from "./agentSessionToolSummary";
 import {
   asRecord,
   formatCodeValue,
@@ -46,7 +49,10 @@ export function ToolItem({
   const ToolIcon = buzzTool?.icon ?? Wrench;
   const showStatus = status.state !== "output-available";
   const toolTitle = formatToolTitle(canonicalToolName, item.title);
-  const isCommandTool = isShellCommandTool(item);
+  const useCompactSummary = isCompactDeveloperTool(item);
+  const compactSummary = useCompactSummary
+    ? buildCompactToolSummary(item)
+    : null;
   const duration = getToolDuration(item);
   const handleToggle = React.useCallback(
     (event: React.SyntheticEvent<HTMLDetailsElement>) => {
@@ -73,11 +79,15 @@ export function ToolItem({
         <summary
           className={cn(
             "inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 py-px",
-            isCommandTool && "text-muted-foreground",
+            useCompactSummary && "text-muted-foreground",
           )}
         >
-          {isCommandTool ? (
-            <CommandToolSummary item={item} duration={duration} />
+          {compactSummary ? (
+            <CompactToolSummaryRow
+              duration={duration}
+              preview={compactSummary.preview}
+              label={compactSummary.label}
+            />
           ) : (
             <>
               {ToolIcon ? (
@@ -135,30 +145,24 @@ export function ToolItem({
   );
 }
 
-function CommandToolSummary({
+function CompactToolSummaryRow({
   duration,
-  item,
+  label,
+  preview,
 }: {
   duration: string | null;
-  item: Extract<TranscriptItem, { type: "tool" }>;
+  label: string;
+  preview: string | null;
 }) {
-  const command = getToolString(item.args, ["command"]);
-  const label =
-    item.status === "failed" || item.isError
-      ? "Command failed"
-      : item.status === "executing" || item.status === "pending"
-        ? "Running command"
-        : "Ran command";
-
   return (
     <>
       <span className="shrink-0 text-sm font-semibold">{label}</span>
-      {command ? (
+      {preview ? (
         <span
           className="min-w-0 max-w-48 truncate text-sm text-muted-foreground/70"
-          title={command}
+          title={preview}
         >
-          {command}
+          {preview}
         </span>
       ) : null}
       {duration ? (
@@ -169,14 +173,6 @@ function CommandToolSummary({
       <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
     </>
   );
-}
-
-function isShellCommandTool(item: Extract<TranscriptItem, { type: "tool" }>) {
-  return [item.buzzToolName, item.toolName, item.title].some((value) => {
-    if (!value) return false;
-    const normalized = normalizeToolNameText(value);
-    return normalized === "shell" || normalized.endsWith("_shell");
-  });
 }
 
 function getToolDuration(item: Extract<TranscriptItem, { type: "tool" }>) {
