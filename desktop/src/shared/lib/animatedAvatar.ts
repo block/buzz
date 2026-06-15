@@ -62,6 +62,16 @@ export function parseAnimatedAvatarUrl(
   return { animationUrl, posterUrl };
 }
 
+export function getAvatarSnapshotUrl(
+  url: string | null | undefined,
+): string | null {
+  if (!url) {
+    return null;
+  }
+
+  return parseAnimatedAvatarUrl(url)?.posterUrl ?? url;
+}
+
 function isHttpUrl(value: string): boolean {
   return /^https?:\/\//i.test(value);
 }

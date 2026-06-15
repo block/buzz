@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildAnimatedAvatarUrl,
+  getAvatarSnapshotUrl,
   parseAnimatedAvatarUrl,
 } from "./animatedAvatar.ts";
 
@@ -71,4 +72,22 @@ test("parse returns null when poster part is not an http(s) URL", () => {
 
 test("parse returns null on malformed percent-encoding", () => {
   assert.equal(parseAnimatedAvatarUrl(`${POSTER}#buzz-anim=%E0%A4%A`), null);
+});
+
+// -- snapshot URL -------------------------------------------------------------
+
+test("getAvatarSnapshotUrl strips animated avatars to their poster URL", () => {
+  assert.equal(
+    getAvatarSnapshotUrl(buildAnimatedAvatarUrl(POSTER, GIF)),
+    POSTER,
+  );
+});
+
+test("getAvatarSnapshotUrl preserves plain avatar URLs", () => {
+  assert.equal(getAvatarSnapshotUrl(POSTER), POSTER);
+});
+
+test("getAvatarSnapshotUrl returns null for nullish avatar URLs", () => {
+  assert.equal(getAvatarSnapshotUrl(null), null);
+  assert.equal(getAvatarSnapshotUrl(undefined), null);
 });
