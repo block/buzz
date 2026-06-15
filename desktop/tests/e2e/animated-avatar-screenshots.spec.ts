@@ -428,6 +428,9 @@ test.describe("animated avatar screenshots", () => {
     const doneButton = page.getByTestId("profile-avatar-done");
     await doneButton.click();
     await expect(doneButton).toContainText("Saving", { timeout: 2_000 });
+    await expect(page.getByRole("tab", { name: "Image" })).toBeDisabled();
+    await expect(page.getByRole("tab", { name: "Emoji" })).toBeDisabled();
+    await expect(page.getByRole("tab", { name: "Animated" })).toBeDisabled();
     await expect
       .poll(
         () =>

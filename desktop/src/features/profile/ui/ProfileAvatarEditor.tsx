@@ -198,6 +198,8 @@ export function ProfileAvatarEditor({
     },
     [onUploadedAvatarChange, onUrlChange, updateMode],
   );
+  const [isAnimatedApplyPending, setIsAnimatedApplyPending] =
+    React.useState(false);
   const {
     clearError: clearUploadError,
     errorMessage: uploadErrorMessage,
@@ -207,7 +209,7 @@ export function ProfileAvatarEditor({
     openPicker,
     uploadFile,
   } = useAvatarUpload({ onUploadSuccess: handleUploadSuccess });
-  const isInputDisabled = disabled || isUploading;
+  const isInputDisabled = disabled || isUploading || isAnimatedApplyPending;
   const handleAnimatedApply = React.useCallback(
     (animatedUrl: string) => {
       clearUploadError();
@@ -236,8 +238,6 @@ export function ProfileAvatarEditor({
     },
     [],
   );
-  const [isAnimatedApplyPending, setIsAnimatedApplyPending] =
-    React.useState(false);
   const [isAnimatedDoneQueued, setIsAnimatedDoneQueued] = React.useState(false);
   const isDoneButtonPending =
     donePending ||
@@ -296,8 +296,8 @@ export function ProfileAvatarEditor({
   }, []);
 
   React.useLayoutEffect(() => {
-    onUploadingChange?.(isUploading);
-  }, [isUploading, onUploadingChange]);
+    onUploadingChange?.(isUploading || (!onDone && isAnimatedApplyPending));
+  }, [isAnimatedApplyPending, isUploading, onDone, onUploadingChange]);
 
   React.useEffect(() => {
     const emojiAvatar = parseEmojiAvatarDataUrl(avatarUrl);
@@ -703,6 +703,7 @@ export function ProfileAvatarEditor({
                     setIsAnimatedCustomColorPickerOpen
                   }
                   onApply={handleAnimatedApply}
+                  onApplyPendingChange={setIsAnimatedApplyPending}
                   onPreviewActiveChange={onAnimatedPreviewActiveChange}
                   onPreviewCaptionChange={onAnimatedPreviewCaptionChange}
                   previewContainer={animatedPreviewContainer}

@@ -85,6 +85,7 @@ type AnimatedAvatarCaptureProps = {
   previewContainer?: HTMLElement | null;
   onPreviewActiveChange?: (active: boolean) => void;
   onPreviewCaptionChange?: (caption: string | null) => void;
+  onApplyPendingChange?: (isPending: boolean) => void;
   onCustomColorPickerOpenChange?: (isOpen: boolean) => void;
   /**
    * Receives the current apply function (or null when there is nothing to
@@ -99,6 +100,7 @@ export function AnimatedAvatarCapture({
   disabled = false,
   testIdPrefix,
   onApply,
+  onApplyPendingChange,
   onCustomColorPickerOpenChange,
   previewContainer = null,
   onPreviewActiveChange,
@@ -617,6 +619,14 @@ export function AnimatedAvatarCapture({
   React.useEffect(() => {
     return () => onPreviewActiveChange?.(false);
   }, [onPreviewActiveChange]);
+
+  React.useLayoutEffect(() => {
+    onApplyPendingChange?.(isSaving);
+
+    return () => {
+      onApplyPendingChange?.(false);
+    };
+  }, [isSaving, onApplyPendingChange]);
 
   React.useEffect(() => {
     onPreviewCaptionChange?.(previewCaption);
