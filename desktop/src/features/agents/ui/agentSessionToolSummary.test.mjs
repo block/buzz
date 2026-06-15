@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  buildCompactToolSummary,
-  isCompactDeveloperTool,
-} from "./agentSessionToolSummary.ts";
+import { buildCompactToolSummary } from "./agentSessionToolSummary.ts";
 
 const baseTimestamp = "2026-06-14T19:00:00.000Z";
 
@@ -26,29 +23,19 @@ function makeTool(overrides = {}) {
   };
 }
 
-test("isCompactDeveloperTool returns false for Buzz relay tools", () => {
-  assert.equal(
-    isCompactDeveloperTool(
-      makeTool({
-        toolName: "send_message",
-        buzzToolName: "send_message",
-        title: "Send Message",
-      }),
-    ),
-    false,
+test("buildCompactToolSummary formats Buzz send_message preview", () => {
+  const summary = buildCompactToolSummary(
+    makeTool({
+      toolName: "send_message",
+      buzzToolName: "send_message",
+      title: "Send Message",
+      args: { content: "Hello team" },
+    }),
   );
-});
 
-test("isCompactDeveloperTool detects buzz-dev-mcp shell tools", () => {
-  assert.equal(
-    isCompactDeveloperTool(
-      makeTool({
-        toolName: "buzz-dev-mcp__shell",
-        title: "buzz-dev-mcp__shell",
-      }),
-    ),
-    true,
-  );
+  assert.equal(summary.kind, "buzz");
+  assert.equal(summary.label, "Send Message");
+  assert.equal(summary.preview, "Hello team");
 });
 
 test("buildCompactToolSummary formats shell command preview", () => {

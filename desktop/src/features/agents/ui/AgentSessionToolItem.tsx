@@ -11,9 +11,11 @@ import { asRecord, formatCodeValue, formatDuration } from "./agentSessionUtils";
 
 export function ToolItem({
   compact = false,
+  grouped = false,
   item,
 }: {
   compact?: boolean;
+  grouped?: boolean;
   item: Extract<TranscriptItem, { type: "tool" }>;
 }) {
   const [isExpanded, setIsExpanded] = React.useState(false);
@@ -32,7 +34,11 @@ export function ToolItem({
 
   return (
     <div
-      className={cn("not-prose w-full", compact ? "px-0" : "px-1")}
+      className={cn(
+        "not-prose w-full",
+        compact ? "px-0" : "px-1",
+        grouped ? "py-0" : compact ? "py-0.5" : "py-0.5",
+      )}
       data-testid="transcript-tool-item"
     >
       <details
@@ -42,7 +48,7 @@ export function ToolItem({
       >
         <summary
           className={cn(
-            "inline-flex max-w-full cursor-pointer list-none items-center gap-5 py-px",
+            "inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 py-px",
             compactSummaryTone(),
           )}
         >

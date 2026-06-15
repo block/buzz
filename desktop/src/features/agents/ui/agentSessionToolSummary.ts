@@ -1,9 +1,15 @@
 import type { ToolStatus, TranscriptItem } from "./agentSessionTypes";
 import {
+  formatToolTitle,
   getBuzzToolInfo,
+  isGenericToolTitle,
   normalizeToolNameText,
 } from "./agentSessionToolCatalog";
-import { asRecord, getToolString } from "./agentSessionUtils";
+import {
+  asRecord,
+  getToolString,
+  getToolStringList,
+} from "./agentSessionUtils";
 
 export type CompactToolKind =
   | "shell"
@@ -13,7 +19,9 @@ export type CompactToolKind =
   | "todo"
   | "stop_hook"
   | "post_compact_hook"
-  | "dev_mcp";
+  | "dev_mcp"
+  | "buzz"
+  | "generic";
 
 export type CompactToolSummary = {
   kind: CompactToolKind;
@@ -35,24 +43,31 @@ const DEVELOPER_TOOL_BASES = new Set([
 
 type ToolItem = Extract<TranscriptItem, { type: "tool" }>;
 
-/** Whether this tool row should use the muted compact developer summary. */
-export function isCompactDeveloperTool(item: ToolItem): boolean {
-  if (item.buzzToolName && getBuzzToolInfo(item.buzzToolName)) {
-    return false;
-  }
-  return resolveDeveloperToolKind(item) !== null;
-}
-
-/** Build the compact summary label and preview for developer MCP tool rows. */
+/** Build the muted compact summary label and preview for any tool row. */
 export function buildCompactToolSummary(item: ToolItem): CompactToolSummary {
-  const kind = resolveDeveloperToolKind(item) ?? "dev_mcp";
+  const kind = resolveCompactToolKind(item);
   const { preview, thumbnailSrc } = extractCompactToolPreview(item, kind);
   return {
     kind,
-    label: compactToolLabel(kind, item.status, item.isError),
+    label: compactToolLabel(kind, item, item.status, item.isError),
     preview,
     thumbnailSrc,
   };
+}
+
+function resolveCompactToolKind(item: ToolItem): CompactToolKind {
+  const developerKind = resolveDeveloperToolKind(item);
+  if (developerKind) {
+    return developerKind;
+  }
+
+  for (const value of [item.buzzToolName, item.toolName, item.title]) {
+    if (value && getBuzzToolInfo(value)) {
+      return "buzz";
+    }
+  }
+
+  return "generic";
 }
 
 function resolveDeveloperToolKind(item: ToolItem): CompactToolKind | null {
@@ -98,16 +113,51 @@ function stripMcpServerPrefix(normalized: string): string {
 
 function compactToolLabel(
   kind: CompactToolKind,
+  item: ToolItem,
   status: ToolStatus,
   isError: boolean,
 ): string {
   const failed = isError || status === "failed";
   const running = status === "executing" || status === "pending";
 
+  if (kind === "buzz") {
+    const title = formatToolTitle(
+      item.buzzToolName ?? item.toolName,
+      item.title,
+    );
+    if (failed) return `${title} failed`;
+    if (running) return title;
+    return title;
+  }
+
   const labels: Record<
     CompactToolKind,
     { completed: string; running: string; failed: string }
   > = {
+    generic: {
+      completed: "Ran tool",
+      running: "Running tool",
+      failed: "Tool failed",
+    },
+    ...developerToolLabels(),
+  };
+
+  const labelsMap = labels as Record<
+    CompactToolKind,
+    { completed: string; running: string; failed: string }
+  >;
+
+  const set = labelsMap[kind];
+  if (failed) return set.failed;
+  if (running) return set.running;
+  return set.completed;
+}
+
+function developerToolLabels(): Record<
+  Exclude<CompactToolKind, "buzz" | "generic">,
+  { completed: string; running: string; failed: string }
+> {
+  return {
     shell: {
       completed: "Ran command",
       running: "Running command",
@@ -149,11 +199,6 @@ function compactToolLabel(
       failed: "Tool failed",
     },
   };
-
-  const set = labels[kind];
-  if (failed) return set.failed;
-  if (running) return set.running;
-  return set.completed;
 }
 
 type CompactToolPreview = {
@@ -181,11 +226,54 @@ function extractCompactToolPreview(
     case "post_compact_hook":
       return emptyPreview();
     case "dev_mcp":
+    case "generic":
       return textPreview(
-        getToolString(args, ["command", "path", "source", "query", "name"]) ??
-          null,
+        getToolString(args, [
+          "command",
+          "path",
+          "source",
+          "query",
+          "name",
+          "content",
+          "message",
+        ]) ??
+          (item.title && !isGenericToolTitle(item.title) ? item.title : null),
       );
+    case "buzz":
+      return textPreview(extractBuzzToolPreview(args));
   }
+}
+
+function extractBuzzToolPreview(args: Record<string, unknown>): string | null {
+  const content = getToolString(args, ["content", "message", "text", "body"]);
+  if (content) {
+    return content;
+  }
+
+  const query = getToolString(args, ["query", "search"]);
+  if (query) {
+    return query;
+  }
+
+  const channelId = getToolString(args, ["channel_id", "channelId"]);
+  if (channelId) {
+    return channelId;
+  }
+
+  const workflowId = getToolString(args, ["workflow_id", "workflowId"]);
+  if (workflowId) {
+    return workflowId;
+  }
+
+  const pubkeys = getToolStringList(args, ["pubkeys", "pubkey"]);
+  if (pubkeys.length === 1) {
+    return pubkeys[0];
+  }
+  if (pubkeys.length > 1) {
+    return `${pubkeys.length} users`;
+  }
+
+  return getToolString(args, ["event_id", "eventId", "name"]);
 }
 
 function textPreview(preview: string | null): CompactToolPreview {

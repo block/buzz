@@ -155,6 +155,14 @@ function TranscriptDisplayBlockView({
   profiles?: UserProfileLookup;
 }) {
   if (block.kind === "single") {
+    if (block.item.type === "tool") {
+      return (
+        <div className={cn("first:mt-0", compact ? "mt-3" : "mt-3.5")}>
+          <ToolCallGroup compact={compact} items={[block.item]} />
+        </div>
+      );
+    }
+
     return (
       <TranscriptItemRow
         agentAvatarUrl={agentAvatarUrl}
@@ -169,23 +177,49 @@ function TranscriptDisplayBlockView({
 
   return (
     <div
-      className={cn("first:mt-0", compact ? "mt-2.5" : "mt-4")}
+      className={cn("first:mt-0", compact ? "mt-2.5" : "mt-3.5")}
       data-testid="transcript-turn-group"
       data-turn-id={block.turnId}
     >
-      {block.segments.map((segment) => (
-        <TranscriptTurnSegmentView
-          agentAvatarUrl={agentAvatarUrl}
-          agentName={agentName}
-          agentPubkey={agentPubkey}
-          compact={compact}
+      {block.segments.map((segment, index) => (
+        <div
+          className={getTurnSegmentSpacing(
+            block.segments[index - 1],
+            segment,
+            compact,
+          )}
           key={getTurnSegmentKey(block.turnId, segment)}
-          profiles={profiles}
-          segment={segment}
-        />
+        >
+          <TranscriptTurnSegmentView
+            agentAvatarUrl={agentAvatarUrl}
+            agentName={agentName}
+            agentPubkey={agentPubkey}
+            compact={compact}
+            profiles={profiles}
+            segment={segment}
+          />
+        </div>
       ))}
     </div>
   );
+}
+
+function getTurnSegmentSpacing(
+  previous: TranscriptTurnSegment | undefined,
+  segment: TranscriptTurnSegment,
+  compact: boolean,
+): string | undefined {
+  if (!previous) {
+    return undefined;
+  }
+
+  const involvesTool =
+    previous.kind === "tool_group" || segment.kind === "tool_group";
+  if (involvesTool) {
+    return compact ? "mt-3" : "mt-3.5";
+  }
+
+  return compact ? "mt-2" : "mt-2.5";
 }
 
 function getTurnSegmentKey(turnId: string, segment: TranscriptTurnSegment) {
@@ -194,6 +228,9 @@ function getTurnSegmentKey(turnId: string, segment: TranscriptTurnSegment) {
   }
   if (segment.kind === "prompt") {
     return `turn:${turnId}:prompt`;
+  }
+  if (segment.kind === "tool_group") {
+    return `turn:${turnId}:tools:${segment.items.map((item) => item.id).join("+")}`;
   }
   return segment.item.id;
 }
@@ -226,12 +263,17 @@ function TranscriptTurnSegmentView({
     return <TurnSetupStatus compact={compact} items={segment.items} />;
   }
 
+  if (segment.kind === "tool_group") {
+    return <ToolCallGroup compact={compact} items={segment.items} />;
+  }
+
   return (
     <TranscriptItemRow
       agentAvatarUrl={agentAvatarUrl}
       agentName={agentName}
       agentPubkey={agentPubkey}
       compact={compact}
+      embedded
       item={segment.item}
       profiles={profiles}
     />
@@ -252,10 +294,7 @@ function TurnPromptBlock({
   user: Extract<TranscriptItem, { type: "message" }>;
 }) {
   return (
-    <div
-      className={cn("first:mt-0", compact ? "mt-2.5" : "mt-4")}
-      data-testid="transcript-prompt-bundle"
-    >
+    <div data-testid="transcript-prompt-bundle">
       {SHOW_TRANSCRIPT_ACP_SOURCE ? (
         <div className="mb-1 flex flex-wrap gap-1">
           <TranscriptAcpSourceBadge source="session/prompt:user" />
@@ -464,24 +503,42 @@ function TurnSetupFooter({
   );
 }
 
+function ToolCallGroup({
+  compact,
+  items,
+}: {
+  compact: boolean;
+  items: Extract<TranscriptItem, { type: "tool" }>[];
+}) {
+  return (
+    <div className="flex flex-col gap-0" data-testid="transcript-tool-group">
+      {items.map((item) => (
+        <ToolItem compact={compact} grouped key={item.id} item={item} />
+      ))}
+    </div>
+  );
+}
+
 function TranscriptItemRow({
   agentAvatarUrl,
   agentName,
   agentPubkey,
   compact,
+  embedded = false,
   item,
   profiles,
 }: AgentTranscriptIdentityProps & {
   compact: boolean;
+  embedded?: boolean;
   item: TranscriptItem;
   profiles?: UserProfileLookup;
 }) {
   return (
     <div
       className={cn(
-        "first:mt-0",
-        compact ? "mt-2.5" : "mt-4",
-        getItemSpacingClass(item),
+        !embedded && "first:mt-0",
+        !embedded && (compact ? "mt-2" : "mt-2.5"),
+        !embedded && getItemSpacingClass(item),
       )}
       key={item.id}
     >
@@ -513,7 +570,7 @@ function TurnSetupStatus({
   }
 
   return (
-    <div className={cn("rounded-md px-2 py-1.5", compact ? "mt-2" : "mt-2.5")}>
+    <div className={cn("rounded-md px-2 py-1.5", compact ? "mt-1.5" : "mt-2")}>
       <TurnSetupFooter items={items} timestamp={timestamp} />
     </div>
   );
@@ -521,10 +578,10 @@ function TurnSetupStatus({
 
 function getItemSpacingClass(item: TranscriptItem) {
   if (item.type === "lifecycle") {
-    return "mt-2 first:mt-0";
+    return "mt-1.5 first:mt-0";
   }
   if (item.type === "metadata" || item.type === "thought") {
-    return "mt-2 first:mt-0";
+    return "mt-1.5 first:mt-0";
   }
   return undefined;
 }
@@ -603,7 +660,13 @@ function MessageItem({
       className={cn(
         "flex animate-in fade-in duration-200 motion-reduce:animate-none",
         isAssistant ? "flex-row" : "flex-row items-start justify-end",
-        compact ? "px-0 py-0.5" : "px-1 py-1",
+        isAssistant
+          ? compact
+            ? "px-0 py-0"
+            : "px-1 py-0"
+          : compact
+            ? "px-0 py-0.5"
+            : "px-1 py-1",
       )}
       data-role={isAssistant ? "assistant-message" : "user-message"}
       data-testid={

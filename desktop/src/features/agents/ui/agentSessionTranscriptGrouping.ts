@@ -2,6 +2,7 @@ import type { TranscriptItem } from "./agentSessionTypes";
 
 export type TranscriptTurnSegment =
   | { kind: "item"; item: TranscriptItem }
+  | { kind: "tool_group"; items: Extract<TranscriptItem, { type: "tool" }>[] }
   | { kind: "setup"; items: Extract<TranscriptItem, { type: "lifecycle" }>[] }
   | {
       kind: "prompt";
@@ -62,12 +63,14 @@ function classifyTurnItems(items: TranscriptItem[]): TranscriptTurnSegment[] {
 
   if (userPrompt) consumed.add(userPrompt);
   for (const item of setupLifecycle) consumed.add(item);
-  if (userPrompt && promptContext) consumed.add(promptContext);
+  if (promptContext) consumed.add(promptContext);
 
   const activity = items.filter((item) => !consumed.has(item));
 
   if (!userPrompt) {
-    return activity.map((item) => ({ kind: "item", item }));
+    return groupConsecutiveToolSegments(
+      activity.map((item) => ({ kind: "item", item })),
+    );
   }
 
   const segments: TranscriptTurnSegment[] = [
@@ -90,7 +93,34 @@ function classifyTurnItems(items: TranscriptItem[]): TranscriptTurnSegment[] {
     segments.push({ kind: "item", item });
   }
 
-  return segments;
+  return groupConsecutiveToolSegments(segments);
+}
+
+function groupConsecutiveToolSegments(
+  segments: TranscriptTurnSegment[],
+): TranscriptTurnSegment[] {
+  const grouped: TranscriptTurnSegment[] = [];
+  let toolBuffer: Extract<TranscriptItem, { type: "tool" }>[] = [];
+
+  const flushTools = () => {
+    if (toolBuffer.length === 0) {
+      return;
+    }
+    grouped.push({ kind: "tool_group", items: toolBuffer });
+    toolBuffer = [];
+  };
+
+  for (const segment of segments) {
+    if (segment.kind === "item" && segment.item.type === "tool") {
+      toolBuffer.push(segment.item);
+      continue;
+    }
+    flushTools();
+    grouped.push(segment);
+  }
+
+  flushTools();
+  return grouped;
 }
 
 /**
@@ -162,6 +192,8 @@ export function flattenDisplayBlocks(
     for (const segment of block.segments) {
       if (segment.kind === "item") {
         result.push(segment.item);
+      } else if (segment.kind === "tool_group") {
+        result.push(...segment.items);
       } else if (segment.kind === "prompt") {
         result.push(segment.user);
         result.push(...segment.setup);

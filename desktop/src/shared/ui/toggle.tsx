@@ -10,12 +10,14 @@ const toggleVariants = cva(
     variants: {
       variant: {
         default: "bg-transparent",
+        ghost:
+          "bg-transparent hover:bg-muted/70 hover:text-foreground data-[state=on]:bg-muted data-[state=on]:text-foreground",
         outline:
           "border border-input/40 bg-background hover:bg-muted/70 data-[state=on]:bg-muted data-[state=on]:text-foreground",
       },
       size: {
         default: "h-9 px-3 min-w-9",
-        xs: "h-5 min-h-0 min-w-0 gap-1 rounded-md px-1.5 text-xs font-medium",
+        xs: "h-5 min-h-0 min-w-0 gap-1 rounded-md px-1.5 text-xs font-medium [&_svg]:size-3.5",
         sm: "h-8 px-2 min-w-8",
         lg: "h-10 px-3 min-w-10",
       },
