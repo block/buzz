@@ -783,6 +783,51 @@ test("find-bar active match scrolls and highlights row regardless of position", 
   assertInViewportAndHighlighted(b);
 });
 
+test("switching channels with existing history renders the new initial batch", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  const GENERAL_NEEDLE = "GENERAL-SWITCH-NEEDLE-8f31";
+  const RANDOM_NEEDLE = "RANDOM-SWITCH-NEEDLE-51bc";
+  await page.evaluate(
+    ({ generalNeedle, randomNeedle }) => {
+      for (let index = 0; index < 120; index += 1) {
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: "general",
+          content:
+            index === 119 ? generalNeedle : `general switch filler ${index}`,
+        });
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: "random",
+          content:
+            index === 119 ? randomNeedle : `random switch filler ${index}`,
+        });
+      }
+    },
+    { generalNeedle: GENERAL_NEEDLE, randomNeedle: RANDOM_NEEDLE },
+  );
+
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText(RANDOM_NEEDLE);
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(timeline).toContainText(GENERAL_NEEDLE);
+  await expect(timeline).not.toContainText(RANDOM_NEEDLE);
+
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await expect(timeline).toContainText(RANDOM_NEEDLE);
+  await expect(timeline).not.toContainText(GENERAL_NEEDLE);
+});
+
 // Criterion 6 (composer half): expanding the composer (multi-line input)
 // must not push the bottom row out of the user-visible area of the
 // timeline when the user is following the bottom. On main the composer

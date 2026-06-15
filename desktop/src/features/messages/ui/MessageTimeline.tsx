@@ -177,6 +177,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     }
 
     previousChannelIdRef.current = channelId;
+    fetchOlderInFlightRef.current = false;
     hasInitializedScrollRef.current = false;
     shouldStickToBottomRef.current = true;
     handledTargetMessageIdRef.current = null;
@@ -418,6 +419,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
         >
           {showMessageList ? (
             <VirtualizedTimelineMessageList
+              key={channelId ?? "none"}
               agentPubkeys={agentPubkeys}
               atBottomStateChange={handleAtBottomStateChange}
               bottomFooterHeight={footerSpacerHeight}
