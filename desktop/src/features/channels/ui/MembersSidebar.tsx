@@ -17,6 +17,7 @@ import {
   useUserSearchQuery,
   useUsersBatchQuery,
 } from "@/features/profile/hooks";
+import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { changeChannelMemberRole } from "@/shared/api/tauri";
 import type {
@@ -40,14 +41,14 @@ import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import {
+  MODAL_SEARCH_INPUT_CLASS,
+  MODAL_SEARCH_SHELL_CLASS,
+} from "@/shared/ui/modalSearchStyles";
 import { MembersSidebarAgentControls } from "./MembersSidebarAgentControls";
 import { MembersSidebarMemberCard } from "./MembersSidebarMemberCard";
 import { useMembersSidebarActions } from "./useMembersSidebarActions";
 
-const MEMBERS_SEARCH_SHELL_CLASS =
-  "group/search mt-4 flex cursor-text items-center gap-3 rounded-xl border border-input bg-background px-3 py-2.5 transition-colors duration-150 ease-out hover:border-muted-foreground/40 hover:bg-muted/70 focus-within:border-muted-foreground/50 focus-within:bg-muted/70";
-const MEMBERS_SEARCH_INPUT_CLASS =
-  "block h-6 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm leading-5 text-muted-foreground/55 shadow-none caret-foreground outline-none transition-colors duration-150 ease-out placeholder:text-muted-foreground/55 group-hover/search:text-muted-foreground group-hover/search:placeholder:text-muted-foreground group-focus-within/search:text-foreground group-focus-within/search:placeholder:text-foreground";
 const MEMBER_ADD_RESULT_LIMIT = 50;
 
 function formatAddCandidateName(user: UserSearchResult) {
@@ -56,33 +57,6 @@ function formatAddCandidateName(user: UserSearchResult) {
     user.nip05Handle?.trim() ||
     formatPubkey(user.pubkey)
   );
-}
-
-function scoreAddCandidate(user: UserSearchResult, query: string) {
-  if (query.length === 0) {
-    return null;
-  }
-
-  const labels = [
-    formatAddCandidateName(user),
-    user.nip05Handle?.trim() ?? "",
-    user.isAgent ? "agent" : "",
-  ];
-
-  for (const label of labels) {
-    const lower = label.toLowerCase();
-    if (lower.startsWith(query)) return 0;
-    if (lower.split(/[\s\-_]+/).some((word) => word.startsWith(query))) {
-      return 1;
-    }
-    if (lower.includes(query)) return 2;
-  }
-
-  const pubkey = normalizePubkey(user.pubkey);
-  if (pubkey.startsWith(query)) return 3;
-  if (pubkey.includes(query)) return 4;
-
-  return null;
 }
 
 function memberModalRoleRank(member: ChannelMember) {
@@ -300,25 +274,12 @@ export function MembersSidebar({
       });
     }
 
-    return [...candidatesByPubkey.values()]
-      .map((candidate, order) => ({
-        candidate,
-        order,
-        score: scoreAddCandidate(candidate, normalizedDeferredSearchQuery),
-      }))
-      .filter(
-        (item): item is typeof item & { score: number } => item.score !== null,
-      )
-      .sort(
-        (left, right) =>
-          left.score - right.score ||
-          formatAddCandidateName(left.candidate).localeCompare(
-            formatAddCandidateName(right.candidate),
-          ) ||
-          left.order - right.order,
-      )
-      .slice(0, MEMBER_ADD_RESULT_LIMIT)
-      .map(({ candidate }) => candidate);
+    return rankUserCandidatesBySearch({
+      candidates: [...candidatesByPubkey.values()],
+      getLabel: formatAddCandidateName,
+      limit: MEMBER_ADD_RESULT_LIMIT,
+      query: normalizedDeferredSearchQuery,
+    });
   }, [
     canAddMembers,
     isArchivedDiscovery,
@@ -540,14 +501,14 @@ export function MembersSidebar({
               </DialogClose>
             </div>
             <label
-              className={MEMBERS_SEARCH_SHELL_CLASS}
+              className={MODAL_SEARCH_SHELL_CLASS}
               htmlFor="channel-management-search-users"
             >
               <UserRoundPlus className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-within/search:text-foreground" />
               <input
                 autoCapitalize="none"
                 autoCorrect="off"
-                className={MEMBERS_SEARCH_INPUT_CLASS}
+                className={MODAL_SEARCH_INPUT_CLASS}
                 data-testid="channel-management-search-users"
                 disabled={addMembersMutation.isPending || isArchived}
                 id="channel-management-search-users"

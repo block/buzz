@@ -355,26 +355,31 @@ test("start a new direct message from the sidebar", async ({ page }) => {
   await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
 
   await page.getByTestId("new-dm-search").fill("charlie");
-  await page
-    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
-    .click();
+  await expect(
+    page.getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toBeVisible();
+  await page.keyboard.press("Enter");
   await expect(
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
+  await expect(page.getByTestId("new-dm-search")).toHaveValue("");
   await page
     .getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`)
     .click();
   await expect(
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).not.toBeVisible();
-  await page
-    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
-    .click();
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await expect(
+    page.getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(page.getByTestId("new-dm-search")).toHaveValue("");
   await expect(
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
 
-  await page.getByTestId("new-dm-submit").click();
+  await page.keyboard.press("Enter");
 
   await expect(page.getByTestId("dm-list")).toContainText("charlie");
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");

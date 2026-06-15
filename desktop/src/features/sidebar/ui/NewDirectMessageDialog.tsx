@@ -8,6 +8,7 @@ import {
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import { truncatePubkey } from "@/features/profile/lib/identity";
+import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { UserSearchResult } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -19,11 +20,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
+import {
+  MODAL_SEARCH_INPUT_CLASS,
+  MODAL_SEARCH_SHELL_CLASS,
+} from "@/shared/ui/modalSearchStyles";
 
-const NEW_DM_SEARCH_SHELL_CLASS =
-  "group/search mt-4 flex cursor-text items-center gap-3 rounded-xl border border-input bg-background px-3 py-2.5 transition-colors duration-150 ease-out hover:border-muted-foreground/40 hover:bg-muted/70 focus-within:border-muted-foreground/50 focus-within:bg-muted/70";
-const NEW_DM_SEARCH_INPUT_CLASS =
-  "block h-6 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm leading-5 text-muted-foreground/55 shadow-none caret-foreground outline-none transition-colors duration-150 ease-out placeholder:text-muted-foreground/55 group-hover/search:text-muted-foreground group-hover/search:placeholder:text-muted-foreground group-focus-within/search:text-foreground group-focus-within/search:placeholder:text-foreground";
 const DIRECT_MESSAGE_RECIPIENT_LIMIT = 50;
 const BUTTON_LABEL_MORPH_DURATION_MS = 220;
 const BUTTON_LABEL_MORPH_EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
@@ -40,33 +41,6 @@ function formatUserName(user: UserSearchResult) {
     user.nip05Handle?.trim() ||
     truncatePubkey(user.pubkey)
   );
-}
-
-function scoreRecipientMatch(user: UserSearchResult, query: string) {
-  if (query.length === 0) {
-    return 0;
-  }
-
-  const labels = [
-    formatUserName(user),
-    user.nip05Handle?.trim() ?? "",
-    user.isAgent ? "agent" : "",
-  ];
-
-  for (const label of labels) {
-    const lower = label.toLowerCase();
-    if (lower.startsWith(query)) return 0;
-    if (lower.split(/[\s\-_]+/).some((word) => word.startsWith(query))) {
-      return 1;
-    }
-    if (lower.includes(query)) return 2;
-  }
-
-  const pubkey = normalizePubkey(user.pubkey);
-  if (pubkey.startsWith(query)) return 3;
-  if (pubkey.includes(query)) return 4;
-
-  return null;
 }
 
 function prefersReducedMotion() {
@@ -276,7 +250,6 @@ export function NewDirectMessageDialog({
   const [selectedRecipientsHeight, setSelectedRecipientsHeight] =
     React.useState(0);
   const deferredSearchQuery = React.useDeferredValue(searchQuery.trim());
-  const normalizedDeferredSearchQuery = deferredSearchQuery.toLowerCase();
   const hasReachedRecipientLimit = selectedUsers.length >= 8;
   const selectedPubkeys = React.useMemo(
     () => new Set(selectedUsers.map((user) => normalizePubkey(user.pubkey))),
@@ -367,30 +340,18 @@ export function NewDirectMessageDialog({
       });
     }
 
-    return [...candidatesByPubkey.values()]
-      .map((candidate, order) => ({
-        candidate,
-        order,
-        score: scoreRecipientMatch(candidate, normalizedDeferredSearchQuery),
-      }))
-      .filter(
-        (item): item is typeof item & { score: number } => item.score !== null,
-      )
-      .sort(
-        (left, right) =>
-          left.score - right.score ||
-          formatUserName(left.candidate).localeCompare(
-            formatUserName(right.candidate),
-          ) ||
-          left.order - right.order,
-      )
-      .slice(0, DIRECT_MESSAGE_RECIPIENT_LIMIT)
-      .map(({ candidate }) => candidate);
+    return rankUserCandidatesBySearch({
+      allowEmptyQuery: true,
+      candidates: [...candidatesByPubkey.values()],
+      getLabel: formatUserName,
+      limit: DIRECT_MESSAGE_RECIPIENT_LIMIT,
+      query: deferredSearchQuery,
+    });
   }, [
     currentPubkey,
+    deferredSearchQuery,
     isArchivedDiscovery,
     managedAgentsQuery.data,
-    normalizedDeferredSearchQuery,
     relayAgentsQuery.data,
     selectedPubkeys,
     userSearchQuery.data,
@@ -456,6 +417,27 @@ export function NewDirectMessageDialog({
     setSubmitErrorMessage(null);
   }
 
+  async function submitDirectMessage() {
+    if (isPending || selectedUsers.length === 0) {
+      return;
+    }
+
+    setSubmitErrorMessage(null);
+
+    try {
+      await onSubmit({
+        pubkeys: selectedUsers.map((user) => user.pubkey),
+      });
+      onOpenChange(false);
+    } catch (error) {
+      setSubmitErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "Failed to open direct message.",
+      );
+    }
+  }
+
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent
@@ -476,12 +458,12 @@ export function NewDirectMessageDialog({
               <span className="sr-only">Close</span>
             </DialogClose>
           </div>
-          <label className={NEW_DM_SEARCH_SHELL_CLASS} htmlFor="new-dm-search">
+          <label className={MODAL_SEARCH_SHELL_CLASS} htmlFor="new-dm-search">
             <Search className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-within/search:text-foreground" />
             <input
               autoCapitalize="none"
               autoCorrect="off"
-              className={NEW_DM_SEARCH_INPUT_CLASS}
+              className={MODAL_SEARCH_INPUT_CLASS}
               data-testid="new-dm-search"
               disabled={isPending}
               id="new-dm-search"
@@ -490,7 +472,19 @@ export function NewDirectMessageDialog({
                 setSubmitErrorMessage(null);
               }}
               onKeyDown={(event) => {
-                if (event.key !== "Enter" || searchResults.length === 0) {
+                if (event.key !== "Enter") {
+                  return;
+                }
+
+                if (searchQuery.trim().length === 0) {
+                  if (selectedUsers.length > 0) {
+                    event.preventDefault();
+                    void submitDirectMessage();
+                  }
+                  return;
+                }
+
+                if (searchResults.length === 0) {
                   return;
                 }
 
@@ -510,26 +504,7 @@ export function NewDirectMessageDialog({
           className="flex flex-col"
           onSubmit={(event) => {
             event.preventDefault();
-
-            if (selectedUsers.length === 0) {
-              return;
-            }
-
-            setSubmitErrorMessage(null);
-
-            void onSubmit({
-              pubkeys: selectedUsers.map((user) => user.pubkey),
-            })
-              .then(() => {
-                onOpenChange(false);
-              })
-              .catch((error) => {
-                setSubmitErrorMessage(
-                  error instanceof Error
-                    ? error.message
-                    : "Failed to open direct message.",
-                );
-              });
+            void submitDirectMessage();
           }}
         >
           <div
