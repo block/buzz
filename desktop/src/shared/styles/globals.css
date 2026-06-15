@@ -524,7 +524,7 @@
 .rich-text-composer .tiptap p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
   float: left;
-  color: hsl(var(--muted-foreground));
+  color: hsl(var(--muted-foreground) / 0.65);
   pointer-events: none;
   height: 0;
 }

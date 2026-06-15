@@ -47,6 +47,7 @@ export const MessageRow = React.memo(
     onUnfollowThread,
     profiles,
     searchQuery,
+    showDepthGuides = true,
     agentPubkeys,
     videoReviewContext,
   }: {
@@ -71,6 +72,7 @@ export const MessageRow = React.memo(
     onUnfollowThread?: (message: TimelineMessage) => void;
     profiles?: UserProfileLookup;
     searchQuery?: string;
+    showDepthGuides?: boolean;
     videoReviewContext?: VideoReviewContext;
   }) {
     const [expandedDiffId, setExpandedDiffId] = React.useState<string | null>(
@@ -354,7 +356,7 @@ export const MessageRow = React.memo(
         className="relative"
         style={indentPx > 0 ? { paddingLeft: `${indentPx}px` } : undefined}
       >
-        {depthGuideOffsets.length > 0 ? (
+        {showDepthGuides && depthGuideOffsets.length > 0 ? (
           <div
             aria-hidden
             className="pointer-events-none absolute left-0"

@@ -626,6 +626,17 @@ test("opens a single-level thread panel with inline expansion", async ({
   await expect(
     rootSummaryRow.getByTestId("message-thread-summary-participant"),
   ).toHaveCount(2);
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-participant")
+        .evaluateAll((participants) =>
+          participants
+            .map((participant) => getComputedStyle(participant).zIndex)
+            .join(","),
+        ),
+    )
+    .toBe("1,2");
 
   await expect
     .poll(async () => {
