@@ -1,30 +1,35 @@
 import { expect, test } from "@playwright/test";
+import type { Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
 
 const IMAGE_SHA = "c".repeat(64);
 const IMAGE_URL = "http://127.0.0.1:4173/buzz.svg";
+const IMAGE_DESCRIPTOR = {
+  url: IMAGE_URL,
+  sha256: IMAGE_SHA,
+  size: 646,
+  type: "image/svg+xml",
+  uploaded: Math.floor(Date.now() / 1000),
+  thumb: IMAGE_URL,
+  dim: "64x64",
+  filename: "buzz.svg",
+};
 
-test.beforeEach(async ({ page }) => {
+async function installSpoilerBridge(
+  page: Page,
+  mock: Parameters<typeof installMockBridge>[1] = {},
+) {
   await installMockBridge(page, {
-    uploadDescriptors: [
-      {
-        url: IMAGE_URL,
-        sha256: IMAGE_SHA,
-        size: 646,
-        type: "image/svg+xml",
-        uploaded: Math.floor(Date.now() / 1000),
-        thumb: IMAGE_URL,
-        dim: "64x64",
-        filename: "buzz.svg",
-      },
-    ],
+    ...mock,
+    uploadDescriptors: [IMAGE_DESCRIPTOR],
   });
-});
+}
 
 test("no-selection spoiler applies to every composer paragraph", async ({
   page,
 }) => {
+  await installSpoilerBridge(page);
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
     origin: "http://127.0.0.1:4173",
   });
@@ -67,6 +72,7 @@ test("no-selection spoiler applies to every composer paragraph", async ({
 test("image attachments can be marked and sent as hidden spoilers", async ({
   page,
 }) => {
+  await installSpoilerBridge(page);
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -93,4 +99,27 @@ test("image attachments can be marked and sent as hidden spoilers", async ({
   await spoilerBlock.click();
   await expect(spoilerBlock).toHaveAttribute("data-revealed", "true");
   await expect(page.getByRole("dialog", { name: "image" })).toHaveCount(0);
+});
+
+test("spoiler button is disabled while attachment upload is pending", async ({
+  page,
+}) => {
+  await installSpoilerBridge(page, { uploadDelayMs: 1_000 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const spoilerButton = page.getByRole("button", {
+    name: "Spoiler",
+    exact: true,
+  });
+  await expect(spoilerButton).toBeEnabled();
+
+  await page.getByRole("button", { name: "Attach image" }).click();
+
+  await expect(spoilerButton).toBeDisabled({ timeout: 500 });
+  await expect(
+    page.getByTestId("message-composer").getByAltText("Attachment cccc"),
+  ).toBeVisible();
+  await expect(spoilerButton).toBeEnabled();
 });

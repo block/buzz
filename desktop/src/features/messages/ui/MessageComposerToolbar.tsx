@@ -243,7 +243,7 @@ export const MessageComposerToolbar = React.memo(
                         isSpoilerActive &&
                           "bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground",
                       )}
-                      disabled={composerDisabled || !editor}
+                      disabled={composerDisabled || !editor || isUploading}
                       onClick={handleSpoilerClick}
                       onMouseDown={onCaptureSelection}
                       size="icon"

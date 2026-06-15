@@ -91,6 +91,7 @@ type E2eConfig = {
     // (e.g. a generic PDF) without a real upload pipeline. See
     // tests/helpers/bridge.ts:MockBridgeOptions.uploadDescriptors.
     meshReporterPubkey?: string;
+    uploadDelayMs?: number;
     uploadDescriptors?: RawBlobDescriptor[];
   };
   relayHttpUrl?: string;
@@ -5082,9 +5083,14 @@ async function handleSearchMessages(
  * PDF so the file-attachment flow (chip → send → FileCard) can be exercised
  * out of the box.
  */
-function resolveMockUploadDescriptors(
+async function resolveMockUploadDescriptors(
   config: E2eConfig | undefined,
-): RawBlobDescriptor[] {
+): Promise<RawBlobDescriptor[]> {
+  const delayMs = config?.mock?.uploadDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
   const configured = config?.mock?.uploadDescriptors;
   // `undefined` means "not configured" → default PDF. An explicit `[]` is a
   // valid override (e.g. modelling a picker cancel / no-files-selected), so it
@@ -6415,9 +6421,9 @@ export function maybeInstallE2eTauriMocks() {
       case "get_media_proxy_port":
         return MOCK_MEDIA_PROXY_PORT;
       case "pick_and_upload_media":
-        return resolveMockUploadDescriptors(activeConfig);
+        return await resolveMockUploadDescriptors(activeConfig);
       case "upload_media_bytes":
-        return resolveMockUploadDescriptors(activeConfig)[0];
+        return (await resolveMockUploadDescriptors(activeConfig))[0];
       case "download_image":
       case "download_file":
         // The save dialog can't run headlessly; report a successful save so the
