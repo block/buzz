@@ -1,60 +1,27 @@
 import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { ArrowUpRight, ChevronDown, CircleDot, Wrench } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 
-import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { resolveUserLabel } from "@/features/profile/lib/identity";
-import type { Channel, UserProfileSummary } from "@/shared/api/types";
-import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
-import { Badge } from "@/shared/ui/badge";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type { TranscriptItem } from "./agentSessionTypes";
-import {
-  formatToolTitle,
-  getBuzzToolInfo,
-  getToolStatusDisplay,
-} from "./agentSessionToolCatalog";
-import {
-  buildCompactToolSummary,
-  isCompactDeveloperTool,
-} from "./agentSessionToolSummary";
-import {
-  asRecord,
-  formatCodeValue,
-  formatDuration,
-  formatTranscriptTime,
-  getResultArray,
-  getToolString,
-  getToolStringList,
-  shortenMiddle,
-} from "./agentSessionUtils";
+import { getBuzzToolInfo } from "./agentSessionToolCatalog";
+import { buildCompactToolSummary } from "./agentSessionToolSummary";
+import { asRecord, formatCodeValue, formatDuration } from "./agentSessionUtils";
 
 export function ToolItem({
   compact = false,
-  isActive = false,
   item,
 }: {
   compact?: boolean;
-  isActive?: boolean;
   item: Extract<TranscriptItem, { type: "tool" }>;
 }) {
   const [isExpanded, setIsExpanded] = React.useState(false);
-  const status = getToolStatusDisplay(item.status, item.isError);
   const hasArgs = Object.keys(item.args).length > 0;
   const hasResult = item.result.trim().length > 0;
   const canonicalToolName = item.buzzToolName ?? item.toolName;
   const buzzTool = getBuzzToolInfo(canonicalToolName);
-  const ToolIcon = buzzTool?.icon ?? Wrench;
-  const showStatus = status.state !== "output-available";
-  const toolTitle = formatToolTitle(canonicalToolName, item.title);
-  const useCompactSummary = isCompactDeveloperTool(item);
-  const compactSummary = useCompactSummary
-    ? buildCompactToolSummary(item)
-    : null;
+  const compactSummary = buildCompactToolSummary(item);
   const duration = getToolDuration(item);
   const handleToggle = React.useCallback(
     (event: React.SyntheticEvent<HTMLDetailsElement>) => {
@@ -65,12 +32,7 @@ export function ToolItem({
 
   return (
     <div
-      className={cn(
-        "not-prose w-full",
-        compact ? "px-0" : "px-1",
-        isActive &&
-          "rounded-lg border border-primary/15 bg-primary/3 px-2 py-1",
-      )}
+      className={cn("not-prose w-full", compact ? "px-0" : "px-1")}
       data-testid="transcript-tool-item"
     >
       <details
@@ -80,59 +42,16 @@ export function ToolItem({
       >
         <summary
           className={cn(
-            "inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 py-px",
-            useCompactSummary && "text-muted-foreground",
+            "inline-flex max-w-full cursor-pointer list-none items-center gap-5 py-px",
+            compactSummaryTone(),
           )}
         >
-          {compactSummary ? (
-            <CompactToolSummaryRow
-              duration={duration}
-              preview={compactSummary.preview}
-              thumbnailSrc={compactSummary.thumbnailSrc}
-              label={compactSummary.label}
-            />
-          ) : (
-            <>
-              {ToolIcon ? (
-                <ToolIcon
-                  className={cn(
-                    "h-4 w-4 shrink-0",
-                    buzzTool || isActive
-                      ? "text-primary"
-                      : "text-muted-foreground",
-                  )}
-                />
-              ) : null}
-              <span className="min-w-0 truncate text-sm font-medium">
-                {toolTitle}
-              </span>
-              {isActive ? (
-                <Badge
-                  className="h-4 gap-0.5 px-1 text-xs font-normal"
-                  variant="default"
-                >
-                  <CircleDot className="h-2 w-2" />
-                  Live
-                </Badge>
-              ) : null}
-              {buzzTool ? (
-                <BuzzToolInlineAction args={item.args} result={item.result} />
-              ) : null}
-              {showStatus ? (
-                <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-                  <status.Icon
-                    className={cn(
-                      "h-4 w-4",
-                      item.status === "executing" && "animate-pulse",
-                    )}
-                  />
-                  {status.label}
-                </span>
-              ) : null}
-              <ToolTimestamp item={item} duration={duration} />
-              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
-            </>
-          )}
+          <CompactToolSummaryRow
+            duration={duration}
+            preview={compactSummary.preview}
+            thumbnailSrc={compactSummary.thumbnailSrc}
+            label={compactSummary.label}
+          />
         </summary>
 
         <ToolDetailBlocks
@@ -141,7 +60,7 @@ export function ToolItem({
           hasArgs={hasArgs}
           hasResult={hasResult}
           imagePreview={
-            compactSummary?.kind === "view_image" && isExpanded
+            compactSummary.kind === "view_image" && isExpanded
               ? {
                   src: compactSummary.thumbnailSrc,
                   title: compactSummary.preview,
@@ -156,6 +75,10 @@ export function ToolItem({
   );
 }
 
+function compactSummaryTone() {
+  return "text-muted-foreground/60 group-open:text-muted-foreground";
+}
+
 function CompactToolSummaryRow({
   duration,
   label,
@@ -168,6 +91,7 @@ function CompactToolSummaryRow({
   thumbnailSrc: string | null;
 }) {
   const [thumbnailFailed, setThumbnailFailed] = React.useState(false);
+  const mutedTone = compactSummaryTone();
   const resolvedThumbnail = React.useMemo(() => {
     if (!thumbnailSrc || thumbnailFailed) return null;
     return resolveImageSrc(thumbnailSrc);
@@ -175,7 +99,9 @@ function CompactToolSummaryRow({
 
   return (
     <>
-      <span className="shrink-0 text-sm font-semibold">{label}</span>
+      <span className={cn("shrink-0 text-sm font-semibold", mutedTone)}>
+        {label}
+      </span>
       {resolvedThumbnail ? (
         <img
           alt=""
@@ -188,18 +114,21 @@ function CompactToolSummaryRow({
         />
       ) : preview ? (
         <span
-          className="min-w-0 max-w-48 truncate text-sm text-muted-foreground/70"
+          className={cn("min-w-0 max-w-48 truncate text-sm", mutedTone)}
           title={preview}
         >
           {preview}
         </span>
       ) : null}
       {duration ? (
-        <span className="shrink-0 text-xs text-muted-foreground/70">
-          {duration}
-        </span>
+        <span className={cn("shrink-0 text-xs", mutedTone)}>{duration}</span>
       ) : null}
-      <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+      <ChevronDown
+        className={cn(
+          "h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180",
+          mutedTone,
+        )}
+      />
     </>
   );
 }
@@ -433,239 +362,6 @@ function ToolCodeBlock({
   );
 }
 
-const toolFullDateTimeFormat = new Intl.DateTimeFormat(undefined, {
-  weekday: "long",
-  year: "numeric",
-  month: "long",
-  day: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
-  second: "2-digit",
-});
-
-function ToolTimestamp({
-  duration,
-  item,
-}: {
-  duration: string | null;
-  item: Extract<TranscriptItem, { type: "tool" }>;
-}) {
-  const time = formatTranscriptTime(item.timestamp);
-  if (!time) return null;
-  const date = new Date(item.timestamp);
-  const fullDateTime = Number.isNaN(date.getTime())
-    ? item.timestamp
-    : toolFullDateTimeFormat.format(date);
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="shrink-0 cursor-default text-xs text-muted-foreground/60">
-          {time}
-          {duration ? ` · ${duration}` : null}
-        </span>
-      </TooltipTrigger>
-      <TooltipContent side="top">{fullDateTime}</TooltipContent>
-    </Tooltip>
-  );
-}
-
-function BuzzToolInlineAction({
-  args,
-  result,
-}: {
-  args: Record<string, unknown>;
-  result: string;
-}) {
-  const { channels } = useChannelNavigation();
-  const { goChannel } = useAppNavigation();
-  const resultValue = React.useMemo(
-    () => parseToolResultValue(result),
-    [result],
-  );
-  const resultRecord = asRecord(resultValue);
-  const channelId =
-    getToolString(args, ["channel_id", "channelId"]) ??
-    getToolString(resultRecord, ["channel_id", "channelId"]);
-  const pubkeys = React.useMemo(
-    () => getToolStringList(args, ["pubkeys", "pubkey"]),
-    [args],
-  );
-  const profilesQuery = useUsersBatchQuery(pubkeys, {
-    enabled: pubkeys.length > 0,
-  });
-  const profiles = profilesQuery.data?.profiles;
-  const openChannel = React.useCallback(
-    (messageId?: string) => {
-      if (!channelId) return;
-      void goChannel(channelId, messageId ? { messageId } : undefined);
-    },
-    [channelId, goChannel],
-  );
-  const action = React.useMemo(
-    () =>
-      getBuzzToolInlineAction({
-        args,
-        channelId,
-        channels,
-        openChannel,
-        profiles,
-        resultValue,
-      }),
-    [args, channelId, channels, openChannel, profiles, resultValue],
-  );
-
-  if (!action) {
-    return null;
-  }
-
-  if (action.onClick) {
-    return (
-      <button
-        className="inline-flex max-w-56 shrink min-w-0 items-center gap-1 rounded-full border border-primary/20 bg-primary/5 px-1.5 py-0.5 text-xs font-normal leading-none text-primary/90 transition-colors hover:border-primary/35 hover:bg-primary/10 hover:text-primary"
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          action.onClick?.();
-        }}
-        title={action.title}
-        type="button"
-      >
-        {action.avatar}
-        <span className="shrink-0">{action.label}</span>
-        <span className="truncate">{action.value}</span>
-        <ArrowUpRight className="h-3 w-3 shrink-0" />
-      </button>
-    );
-  }
-
-  return (
-    <span
-      className="inline-flex max-w-56 shrink min-w-0 items-center gap-1 rounded-full border border-border/60 bg-muted/40 px-1.5 py-0.5 text-xs font-normal leading-none text-muted-foreground"
-      title={action.title}
-    >
-      {action.avatar}
-      <span className="shrink-0">{action.label}</span>
-      <span className="truncate">{action.value}</span>
-    </span>
-  );
-}
-
-type BuzzToolInlineActionModel = {
-  avatar?: React.ReactNode;
-  label: string;
-  value: string;
-  title: string;
-  onClick?: () => void;
-};
-
-function getBuzzToolInlineAction({
-  args,
-  channelId,
-  channels,
-  openChannel,
-  profiles,
-  resultValue,
-}: {
-  args: Record<string, unknown>;
-  channelId: string | null;
-  channels: Channel[];
-  openChannel: (messageId?: string) => void;
-  profiles: Record<string, UserProfileSummary> | undefined;
-  resultValue: unknown;
-}): BuzzToolInlineActionModel | null {
-  const resultRecord = asRecord(resultValue);
-  const eventId =
-    getToolString(args, ["event_id", "eventId"]) ??
-    getToolString(resultRecord, ["event_id", "eventId", "id"]);
-
-  if (eventId && channelId) {
-    return {
-      label: resultRecord.accepted === true ? "posted" : "event",
-      onClick: () => openChannel(eventId),
-      title: eventId,
-      value: getChannelChipLabel(channels, channelId),
-    };
-  }
-
-  const messages = getResultArray(resultValue, resultRecord, "messages");
-  if (messages) {
-    return {
-      label: "read",
-      onClick: channelId ? () => openChannel() : undefined,
-      title: `${messages.length} messages`,
-      value: `${messages.length} message${messages.length === 1 ? "" : "s"}`,
-    };
-  }
-
-  if (channelId) {
-    return {
-      label: "channel",
-      onClick: () => openChannel(),
-      title: channelId,
-      value: getChannelChipLabel(channels, channelId),
-    };
-  }
-
-  const workflowId =
-    getToolString(args, ["workflow_id", "workflowId"]) ??
-    getToolString(resultRecord, ["workflow_id", "workflowId"]);
-  if (workflowId) {
-    return {
-      label: "workflow",
-      title: workflowId,
-      value: shortenMiddle(workflowId, 26),
-    };
-  }
-
-  const pubkeys = getToolStringList(args, ["pubkeys", "pubkey"]);
-  if (pubkeys.length > 0) {
-    if (pubkeys.length === 1) {
-      const pk = pubkeys[0];
-      const displayName = resolveUserLabel({ pubkey: pk, profiles });
-      const profile = profiles?.[pk.toLowerCase()];
-      return {
-        avatar: (
-          <UserAvatar
-            avatarUrl={profile?.avatarUrl ?? null}
-            className="shrink-0"
-            displayName={displayName}
-            size="xs"
-          />
-        ),
-        label: "user",
-        title: pk,
-        value: displayName,
-      };
-    }
-    return {
-      label: "users",
-      title: pubkeys
-        .map((pk) => resolveUserLabel({ pubkey: pk, profiles }))
-        .join(", "),
-      value: `${pubkeys.length} users`,
-    };
-  }
-
-  const query = getToolString(args, ["query"]);
-  if (query) {
-    return {
-      label: "query",
-      title: query,
-      value: shortenMiddle(query, 30),
-    };
-  }
-
-  if (typeof resultRecord.accepted === "boolean") {
-    return {
-      label: "relay",
-      title: resultRecord.accepted ? "accepted" : "rejected",
-      value: resultRecord.accepted ? "accepted" : "rejected",
-    };
-  }
-
-  return null;
-}
-
 function parseToolResultValue(result: string): unknown {
   const trimmed = result.trim();
   if (!trimmed) return null;
@@ -681,9 +377,4 @@ function parseToolResultValue(result: string): unknown {
   } catch {
     return null;
   }
-}
-
-function getChannelChipLabel(channels: Channel[], channelId: string) {
-  const channel = channels.find((candidate) => candidate.id === channelId);
-  return channel ? `#${channel.name}` : `#${shortenMiddle(channelId, 22)}`;
 }

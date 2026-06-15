@@ -15,7 +15,6 @@ import {
 } from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { Badge } from "@/shared/ui/badge";
 import { Markdown } from "@/shared/ui/markdown";
 import { Toggle } from "@/shared/ui/toggle";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -29,12 +28,35 @@ import {
   type TranscriptDisplayBlock,
   type TranscriptTurnSegment,
 } from "./agentSessionTranscriptGrouping";
-import { buildTranscriptPresentation } from "./agentSessionTranscriptPresentation";
 import { formatTranscriptTime } from "./agentSessionUtils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
-/** Dev-only: surface the observer wire label that produced each transcript row. */
-const SHOW_TRANSCRIPT_ACP_SOURCE = import.meta.env.DEV;
+const TRANSCRIPT_ACP_SOURCE_STORAGE_KEY = "buzz:show-transcript-acp-source";
+
+/**
+ * Opt-in only: source pills are useful while iterating on observer parsing, but
+ * they should not appear for every local dev session.
+ */
+const SHOW_TRANSCRIPT_ACP_SOURCE = shouldShowTranscriptAcpSource();
+
+function shouldShowTranscriptAcpSource() {
+  const envValue = import.meta.env.VITE_SHOW_TRANSCRIPT_ACP_SOURCE;
+  if (envValue === "1" || envValue === "true") {
+    return true;
+  }
+
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    return (
+      window.localStorage.getItem(TRANSCRIPT_ACP_SOURCE_STORAGE_KEY) === "1"
+    );
+  } catch {
+    return false;
+  }
+}
 
 type AgentTranscriptIdentityProps = {
   agentAvatarUrl: string | null;
@@ -48,7 +70,6 @@ export function AgentSessionTranscriptList({
   agentPubkey,
   compact = false,
   emptyDescription,
-  isWorking = false,
   items,
   profiles,
 }: AgentTranscriptIdentityProps & {
@@ -58,10 +79,6 @@ export function AgentSessionTranscriptList({
   items: TranscriptItem[];
   profiles?: UserProfileLookup;
 }) {
-  const presentation = React.useMemo(
-    () => buildTranscriptPresentation(items, isWorking),
-    [items, isWorking],
-  );
   const displayBlocks = React.useMemo(
     () => buildTranscriptDisplayBlocks(items),
     [items],
@@ -92,7 +109,6 @@ export function AgentSessionTranscriptList({
       >
         {displayBlocks.map((block) => (
           <TranscriptDisplayBlockView
-            activeItemIds={presentation.activeItemIds}
             agentAvatarUrl={agentAvatarUrl}
             agentName={agentName}
             agentPubkey={agentPubkey}
@@ -127,7 +143,6 @@ function getDisplayBlockKey(block: TranscriptDisplayBlock) {
 }
 
 function TranscriptDisplayBlockView({
-  activeItemIds,
   agentAvatarUrl,
   agentName,
   agentPubkey,
@@ -135,7 +150,6 @@ function TranscriptDisplayBlockView({
   compact,
   profiles,
 }: AgentTranscriptIdentityProps & {
-  activeItemIds: ReadonlySet<string>;
   block: TranscriptDisplayBlock;
   compact: boolean;
   profiles?: UserProfileLookup;
@@ -143,7 +157,6 @@ function TranscriptDisplayBlockView({
   if (block.kind === "single") {
     return (
       <TranscriptItemRow
-        activeItemIds={activeItemIds}
         agentAvatarUrl={agentAvatarUrl}
         agentName={agentName}
         agentPubkey={agentPubkey}
@@ -162,7 +175,6 @@ function TranscriptDisplayBlockView({
     >
       {block.segments.map((segment) => (
         <TranscriptTurnSegmentView
-          activeItemIds={activeItemIds}
           agentAvatarUrl={agentAvatarUrl}
           agentName={agentName}
           agentPubkey={agentPubkey}
@@ -187,7 +199,6 @@ function getTurnSegmentKey(turnId: string, segment: TranscriptTurnSegment) {
 }
 
 function TranscriptTurnSegmentView({
-  activeItemIds,
   agentAvatarUrl,
   agentName,
   agentPubkey,
@@ -195,7 +206,6 @@ function TranscriptTurnSegmentView({
   profiles,
   segment,
 }: AgentTranscriptIdentityProps & {
-  activeItemIds: ReadonlySet<string>;
   compact: boolean;
   profiles?: UserProfileLookup;
   segment: TranscriptTurnSegment;
@@ -218,7 +228,6 @@ function TranscriptTurnSegmentView({
 
   return (
     <TranscriptItemRow
-      activeItemIds={activeItemIds}
       agentAvatarUrl={agentAvatarUrl}
       agentName={agentName}
       agentPubkey={agentPubkey}
@@ -313,7 +322,7 @@ function PromptUserMessage({
         >
           <p className="whitespace-pre-wrap wrap-break-word">{text}</p>
           {contextOpen && context ? (
-            <PromptContextSections sections={context.sections} />
+            <PromptContextSections sections={context.sections} setup={setup} />
           ) : null}
         </div>
         <TurnSetupFooter
@@ -328,12 +337,19 @@ function PromptUserMessage({
   );
 }
 
-function PromptContextSections({ sections }: { sections: PromptSection[] }) {
+function PromptContextSections({
+  sections,
+  setup,
+}: {
+  sections: PromptSection[];
+  setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
+}) {
   return (
     <div
       className="mt-2 space-y-2 border-t border-border/40 pt-2"
       data-testid="transcript-prompt-context-sections"
     >
+      <PromptSetupSummary items={setup} />
       {sections.map((section) => (
         <details
           className="group/section"
@@ -349,6 +365,29 @@ function PromptContextSections({ sections }: { sections: PromptSection[] }) {
         </details>
       ))}
     </div>
+  );
+}
+
+function PromptSetupSummary({
+  items,
+}: {
+  items: Extract<TranscriptItem, { type: "lifecycle" }>[];
+}) {
+  const label = formatTurnSetupLabel(items);
+  const detail = turnSetupDetail(items);
+  const setupText = [label, detail].filter(Boolean).join(" · ");
+
+  if (!setupText) {
+    return null;
+  }
+
+  return (
+    <p
+      className="text-xs leading-5 text-muted-foreground"
+      data-testid="transcript-prompt-setup-summary"
+    >
+      {setupText}
+    </p>
   );
 }
 
@@ -375,12 +414,35 @@ function TurnSetupFooter({
     return <TranscriptTimestamp timestamp={timestamp} />;
   }
 
+  const contextToggle = showContext ? (
+    <Toggle
+      aria-label={`${contextOpen ? "Hide" : "Show"} prompt context`}
+      data-testid="transcript-prompt-context-toggle"
+      className="data-[state=on]:bg-primary/10 data-[state=on]:text-primary dark:data-[state=on]:bg-primary/15"
+      onPressedChange={onContextOpenChange}
+      pressed={contextOpen}
+      size="xs"
+      variant="ghost"
+    >
+      {showSetup ? <CheckCheck aria-hidden="true" /> : null}
+      Context
+    </Toggle>
+  ) : null;
+
   return (
     <div
       className="flex items-center gap-1.5 text-muted-foreground/80"
       data-testid="transcript-turn-setup"
     >
-      {showSetup ? (
+      {showContext && showSetup ? (
+        <Tooltip>
+          <TooltipTrigger asChild>{contextToggle}</TooltipTrigger>
+          <TooltipContent side="top">
+            <p>{tooltipText}</p>
+          </TooltipContent>
+        </Tooltip>
+      ) : null}
+      {!showContext && showSetup ? (
         <Tooltip>
           <TooltipTrigger asChild>
             <button
@@ -396,25 +458,13 @@ function TurnSetupFooter({
           </TooltipContent>
         </Tooltip>
       ) : null}
-      {showContext ? (
-        <Toggle
-          aria-label={`${contextOpen ? "Hide" : "Show"} prompt context`}
-          data-testid="transcript-prompt-context-toggle"
-          onPressedChange={onContextOpenChange}
-          pressed={contextOpen}
-          size="xs"
-          variant="outline"
-        >
-          Context
-        </Toggle>
-      ) : null}
+      {showContext && !showSetup ? contextToggle : null}
       <TranscriptTimestamp timestamp={timestamp} />
     </div>
   );
 }
 
 function TranscriptItemRow({
-  activeItemIds,
   agentAvatarUrl,
   agentName,
   agentPubkey,
@@ -422,7 +472,6 @@ function TranscriptItemRow({
   item,
   profiles,
 }: AgentTranscriptIdentityProps & {
-  activeItemIds: ReadonlySet<string>;
   compact: boolean;
   item: TranscriptItem;
   profiles?: UserProfileLookup;
@@ -444,7 +493,6 @@ function TranscriptItemRow({
         agentName={agentName}
         agentPubkey={agentPubkey}
         compact={compact}
-        isActive={activeItemIds.has(item.id)}
         item={item}
         profiles={profiles}
       />
@@ -486,12 +534,10 @@ const TranscriptItemView = React.memo(function TranscriptItemView({
   agentName,
   agentPubkey,
   compact,
-  isActive,
   item,
   profiles,
 }: AgentTranscriptIdentityProps & {
   compact: boolean;
-  isActive: boolean;
   item: TranscriptItem;
   profiles?: UserProfileLookup;
 }) {
@@ -502,17 +548,16 @@ const TranscriptItemView = React.memo(function TranscriptItemView({
         agentName={agentName}
         agentPubkey={agentPubkey}
         compact={compact}
-        isActive={isActive}
         item={item}
         profiles={profiles}
       />
     );
   }
   if (item.type === "tool") {
-    return <ToolItem compact={compact} isActive={isActive} item={item} />;
+    return <ToolItem compact={compact} item={item} />;
   }
   if (item.type === "thought") {
-    return <ThoughtItem compact={compact} isActive={isActive} item={item} />;
+    return <ThoughtItem compact={compact} item={item} />;
   }
   if (item.type === "metadata") {
     return <MetadataItem compact={compact} item={item} />;
@@ -525,12 +570,10 @@ function MessageItem({
   agentName,
   agentPubkey,
   compact,
-  isActive,
   item,
   profiles,
 }: AgentTranscriptIdentityProps & {
   compact: boolean;
-  isActive: boolean;
   item: Extract<TranscriptItem, { type: "message" }>;
   profiles?: UserProfileLookup;
 }) {
@@ -561,9 +604,6 @@ function MessageItem({
         "flex animate-in fade-in duration-200 motion-reduce:animate-none",
         isAssistant ? "flex-row" : "flex-row items-start justify-end",
         compact ? "px-0 py-0.5" : "px-1 py-1",
-        isAssistant &&
-          isActive &&
-          "rounded-lg border border-primary/15 bg-primary/3 px-2 py-1.5",
       )}
       data-role={isAssistant ? "assistant-message" : "user-message"}
       data-testid={
@@ -596,15 +636,6 @@ function MessageItem({
             <span className="text-xs font-semibold text-foreground">
               {assistantLabel}
             </span>
-            {isActive ? (
-              <Badge
-                className="h-4 gap-0.5 px-1 text-xs font-normal"
-                variant="default"
-              >
-                <CircleDot className="h-2 w-2" />
-                Live
-              </Badge>
-            ) : null}
             <TranscriptTimestamp timestamp={item.timestamp} />
           </div>
         ) : null}
@@ -630,11 +661,9 @@ function MessageItem({
 
 function ThoughtItem({
   compact,
-  isActive,
   item,
 }: {
   compact: boolean;
-  isActive: boolean;
   item: Extract<TranscriptItem, { type: "thought" }>;
 }) {
   return (
@@ -642,22 +671,12 @@ function ThoughtItem({
       className={cn(
         "group not-prose w-full rounded-md border border-transparent",
         compact ? "px-0" : "px-1",
-        isActive && "border-primary/15 bg-primary/3 px-2 py-1",
       )}
       data-testid="transcript-thought-item"
     >
       <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 py-px text-muted-foreground">
-        <Brain className={cn("h-4 w-4", isActive && "text-primary")} />
+        <Brain className="h-4 w-4" />
         <span className="truncate text-sm font-medium">{item.title}</span>
-        {isActive ? (
-          <Badge
-            className="h-4 gap-0.5 px-1 text-xs font-normal"
-            variant="default"
-          >
-            <CircleDot className="h-2 w-2" />
-            Live
-          </Badge>
-        ) : null}
         <TranscriptTimestamp timestamp={item.timestamp} />
         <ChevronDown className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
       </summary>
