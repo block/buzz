@@ -1041,6 +1041,12 @@
   width: var(--buzz-spoiler-media-width);
 }
 
+.buzz-spoiler--inert,
+.buzz-spoiler--inert * {
+  cursor: inherit;
+  pointer-events: none;
+}
+
 .buzz-spoiler[data-revealed="true"],
 .buzz-spoiler:hover,
 .buzz-spoiler:focus-visible {

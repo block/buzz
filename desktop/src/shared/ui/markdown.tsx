@@ -797,9 +797,11 @@ function SyntaxHighlightedCode({
 function SpoilerInline({
   block = false,
   children,
+  interactive = true,
 }: {
   block?: boolean;
   children?: React.ReactNode;
+  interactive?: boolean;
 }) {
   const [revealed, setRevealed] = React.useState(false);
   const contentRef = React.useRef<HTMLElement | null>(null);
@@ -858,6 +860,36 @@ function SpoilerInline({
     role: "button",
     tabIndex: 0,
   } as const;
+
+  if (!interactive) {
+    if (isBlock) {
+      return (
+        <div
+          className="buzz-spoiler buzz-spoiler--block buzz-spoiler--inert"
+          data-revealed="false"
+          data-spoiler=""
+        >
+          <SpoilerParticles active contentRef={contentRef} />
+          <div className="buzz-spoiler__content" ref={setContentElement}>
+            {children}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <span
+        className="buzz-spoiler buzz-spoiler--inert"
+        data-revealed="false"
+        data-spoiler=""
+      >
+        <SpoilerParticles active contentRef={contentRef} />
+        <span className="buzz-spoiler__content" ref={setContentElement}>
+          {children}
+        </span>
+      </span>
+    );
+  }
 
   if (isBlock) {
     return (
@@ -921,7 +953,10 @@ function createMarkdownComponents(
       "data-block-spoiler"?: string;
       children?: React.ReactNode;
     }) => (
-      <SpoilerInline block={props["data-block-spoiler"] != null}>
+      <SpoilerInline
+        block={props["data-block-spoiler"] != null}
+        interactive={interactive}
+      >
         {children}
       </SpoilerInline>
     ),

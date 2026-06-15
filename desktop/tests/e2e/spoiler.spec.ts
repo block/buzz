@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
-import { installMockBridge } from "../helpers/bridge";
+import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const IMAGE_SHA = "c".repeat(64);
 const IMAGE_URL = "http://127.0.0.1:4173/buzz.svg";
@@ -15,6 +15,24 @@ const IMAGE_DESCRIPTOR = {
   dim: "64x64",
   filename: "buzz.svg",
 };
+const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+
+type MockFeedItem = {
+  id: string;
+  kind: number;
+  pubkey: string;
+  content: string;
+  created_at: number;
+  channel_id: string | null;
+  channel_name: string;
+  tags: string[][];
+  category: "mention" | "needs_action" | "activity" | "agent_activity";
+};
+
+type MockFeedWindow = Window &
+  typeof globalThis & {
+    __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: MockFeedItem) => MockFeedItem;
+  };
 
 async function installSpoilerBridge(
   page: Page,
@@ -150,4 +168,68 @@ test("hidden spoiler links reveal without opening on the first click", async ({
   await popup?.close();
   expect(popup).toBeNull();
   await expect(spoiler).toHaveAttribute("data-revealed", "true");
+});
+
+test("non-interactive inbox preview spoilers let row clicks pass through", async ({
+  page,
+}) => {
+  await installSpoilerBridge(page);
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await page.waitForFunction(
+    () =>
+      typeof (window as MockFeedWindow).__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ ===
+      "function",
+  );
+
+  await page.evaluate(
+    ({ channelId, createdAt, currentPubkey, senderPubkey }) => {
+      const pushFeedItem = (window as MockFeedWindow)
+        .__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!pushFeedItem) {
+        throw new Error("Mock feed injection helper is not installed.");
+      }
+
+      pushFeedItem({
+        id: "mock-feed-spoiler-preview",
+        kind: 9,
+        pubkey: senderPubkey,
+        content: "Preview contains ||hidden launch note|| for review.",
+        created_at: createdAt,
+        channel_id: channelId,
+        channel_name: "general",
+        tags: [
+          ["e", channelId],
+          ["p", currentPubkey],
+        ],
+        category: "mention",
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      createdAt: Math.floor(Date.now() / 1000),
+      currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  const item = page.getByTestId("home-inbox-item-mock-feed-spoiler-preview");
+  await expect(item).toContainText("Preview contains");
+
+  const spoiler = item.locator(".buzz-spoiler").first();
+  await expect(spoiler).toBeVisible();
+  await expect(spoiler).not.toHaveAttribute("role", "button");
+  await expect(spoiler).not.toHaveAttribute("tabindex", "0");
+  await expect(spoiler).toHaveCSS("pointer-events", "none");
+
+  const box = await spoiler.boundingBox();
+  expect(box).not.toBeNull();
+  if (!box) {
+    throw new Error("Expected inbox preview spoiler to have a bounding box.");
+  }
+
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(page.getByTestId("home-inbox-detail")).toContainText(
+    "Preview contains",
+  );
 });
