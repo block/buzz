@@ -123,3 +123,31 @@ test("spoiler button is disabled while attachment upload is pending", async ({
   ).toBeVisible();
   await expect(spoilerButton).toBeEnabled();
 });
+
+test("hidden spoiler links reveal without opening on the first click", async ({
+  page,
+}) => {
+  await installSpoilerBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type("||[secret](https://example.com)||");
+  await page.getByTestId("send-message").click();
+
+  const lastMessage = page.getByTestId("message-row").last();
+  const spoiler = lastMessage.locator(".buzz-spoiler").first();
+  await expect(spoiler).toHaveAttribute("data-revealed", "false");
+
+  const popupPromise = page
+    .waitForEvent("popup", { timeout: 500 })
+    .catch(() => null);
+  await spoiler.getByRole("link", { name: "secret" }).click({ force: true });
+
+  const popup = await popupPromise;
+  await popup?.close();
+  expect(popup).toBeNull();
+  await expect(spoiler).toHaveAttribute("data-revealed", "true");
+});

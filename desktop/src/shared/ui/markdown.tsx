@@ -807,6 +807,24 @@ function SpoilerInline({ children }: { children?: React.ReactNode }) {
     setRevealed((value) => !value);
   }, []);
 
+  const handlePointerDownCapture = React.useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      if (revealed) return;
+      event.stopPropagation();
+    },
+    [revealed],
+  );
+
+  const handleClickCapture = React.useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      if (revealed) return;
+      event.preventDefault();
+      event.stopPropagation();
+      toggleRevealed();
+    },
+    [revealed, toggleRevealed],
+  );
+
   const handleClick = React.useCallback(
     (event: React.MouseEvent<HTMLElement>) => {
       if (revealed && isBlock && event.target !== event.currentTarget) return;
@@ -828,7 +846,9 @@ function SpoilerInline({ children }: { children?: React.ReactNode }) {
     "aria-label": revealed ? "Hide spoiler" : "Reveal spoiler",
     "aria-pressed": revealed,
     onClick: handleClick,
+    onClickCapture: handleClickCapture,
     onKeyDown: handleKeyDown,
+    onPointerDownCapture: handlePointerDownCapture,
     role: "button",
     tabIndex: 0,
   } as const;

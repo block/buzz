@@ -56,6 +56,14 @@ test("matches _@Name_ (underscore italic-wrapped)", () => {
   assert.equal(hasMention("_@Alice_", "Alice"), true);
 });
 
+test("matches ||@Name|| (spoiler-wrapped)", () => {
+  assert.equal(hasMention("||@Alice||", "Alice"), true);
+});
+
+test("matches @Name at the end of spoiler content", () => {
+  assert.equal(hasMention("||hi @Alice||", "Alice"), true);
+});
+
 // ── Boundary conditions ───────────────────────────────────────────────
 
 test("matches @Name followed by punctuation", () => {

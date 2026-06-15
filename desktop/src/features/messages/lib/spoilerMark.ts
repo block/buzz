@@ -44,13 +44,20 @@ export function registerSpoilerMarkdownIt(
     return true;
   };
 
+  // Composer parsing is intentionally inline-only. Block delimiter spoilers
+  // are rendered by remarkSpoilers as receive-only interop, but are not part of
+  // the composer WYSIWYG surface.
   md.inline.ruler.before("emphasis", SPOILER_MARKDOWN_RULE, rule);
   md.renderer.rules[SPOILER_OPEN_TOKEN] = () =>
     '<span data-spoiler="" class="buzz-spoiler">';
   md.renderer.rules[SPOILER_CLOSE_TOKEN] = () => "</span>";
 }
 
-function findClosingDelimiter(
+/**
+ * Match the first closing delimiter, mirroring Discord-style spoiler parsing.
+ * Inner `||` text closes the spoiler instead of nesting or scanning greedily.
+ */
+export function findClosingDelimiter(
   source: string,
   start: number,
   end: number,
