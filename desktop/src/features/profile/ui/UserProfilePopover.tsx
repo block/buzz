@@ -284,7 +284,7 @@ export function UserProfilePopover({
               }}
               type="button"
             >
-              <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+              <Activity className="h-4 w-4 text-muted-foreground" />
               View activity log
             </button>
           ) : null}

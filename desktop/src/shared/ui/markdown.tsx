@@ -145,6 +145,21 @@ const VideoReviewMarkdownContext = React.createContext<
   VideoReviewContext | undefined
 >(undefined);
 
+type MarkdownRuntime = {
+  agentMentionPubkeysByName?: Record<string, string>;
+  channels: Channel[];
+  imetaByUrl?: ImetaLookup;
+  mentionPubkeysByName?: Record<string, string>;
+  onOpenChannel: (channelId: string) => void;
+  onOpenMessageLink: (link: ParsedMessageLink) => void;
+};
+
+function useLatestRef<T>(value: T) {
+  const ref = React.useRef(value);
+  ref.current = value;
+  return ref;
+}
+
 function MarkdownVideoPlayer({
   alt,
   entry,
@@ -201,6 +216,7 @@ function messageLinkUrlTransform(value: string, key: string): string {
 type MarkdownProps = {
   channelNames?: string[];
   className?: string;
+  compact?: boolean;
   content: string;
   customEmoji?: CustomEmoji[];
   imetaByUrl?: ImetaLookup;
@@ -209,8 +225,11 @@ type MarkdownProps = {
   mentionNames?: string[];
   mentionPubkeysByName?: Record<string, string>;
   searchQuery?: string;
+  tight?: boolean;
   videoReviewContext?: VideoReviewContext;
 };
+
+type MarkdownVariant = "default" | "compact" | "tight";
 
 /**
  * Inline image embed with click-to-zoom lightbox and right-click download.
@@ -497,7 +516,7 @@ function MarkdownCodeBlock({
 
   return (
     <div className="group relative" data-code-block="">
-      <pre className="max-h-[400px] overflow-x-auto overflow-y-auto rounded-lg border border-border/70 bg-muted/60 px-3 py-1.5 pr-12 shadow-xs">
+      <pre className="max-h-[400px] overflow-x-auto overflow-y-auto rounded-xl border border-border/70 bg-muted/60 px-3 py-1.5 pr-12 shadow-xs">
         {language && (
           <div className="mb-1 text-xs text-muted-foreground/70">
             {language}
@@ -516,7 +535,7 @@ function MarkdownCodeBlock({
             type="button"
             variant="ghost"
           >
-            <Copy className="h-3.5 w-3.5" />
+            <Copy className="h-4 w-4" />
             <span className="sr-only">Copy code block</span>
           </Button>
         </TooltipTrigger>
@@ -575,7 +594,7 @@ function FileCard({
       className="my-1 inline-flex max-w-sm items-center gap-3 rounded-xl border border-border/70 bg-muted/40 px-3 py-2 text-left no-underline transition-colors hover:bg-muted/70"
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-background text-muted-foreground">
-        <FileText className="h-5 w-5" />
+        <FileText className="h-4 w-4" />
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium text-foreground">
@@ -726,20 +745,26 @@ function SyntaxHighlightedCode({
   );
 }
 function createMarkdownComponents(
-  channels: Channel[],
-  onOpenChannel: (channelId: string) => void,
-  onOpenMessageLink: (link: ParsedMessageLink) => void,
-  imetaByUrl?: ImetaLookup,
-  mentionPubkeysByName?: Record<string, string>,
-  agentMentionPubkeysByName?: Record<string, string>,
+  variant: MarkdownVariant,
+  runtimeRef: React.RefObject<MarkdownRuntime>,
   interactive = true,
 ): Components {
-  const paragraphClassName = "leading-6";
-  const listItemClassName = "my-1 [&_p]:inline";
-  const listClassName = "space-y-1 pl-6 marker:text-muted-foreground";
+  const paragraphClassName =
+    variant === "tight"
+      ? "leading-5"
+      : variant === "compact"
+        ? "leading-6"
+        : "leading-7";
+  const listItemClassName =
+    variant === "tight" ? "my-0.5 [&_p]:inline" : "my-1 [&_p]:inline";
+  const listClassName =
+    variant === "tight"
+      ? "space-y-0.5 pl-6 marker:text-muted-foreground"
+      : "space-y-1 pl-6 marker:text-muted-foreground";
 
   return {
     a: ({ children, href, ...props }) => {
+      const { imetaByUrl, onOpenMessageLink } = runtimeRef.current;
       if (!interactive) {
         return <span className="font-medium text-current">{children}</span>;
       }
@@ -861,6 +886,7 @@ function createMarkdownComponents(
     ),
     hr: () => <hr className="border-border/80" />,
     img: ({ alt, src }) => {
+      const { imetaByUrl } = runtimeRef.current;
       const resolvedSrc = src ? rewriteRelayUrl(src) : src;
       if (!interactive) {
         const fallbackLabel = resolvedSrc?.endsWith(".mp4")
@@ -957,6 +983,8 @@ function createMarkdownComponents(
       <ul className={cn("list-disc", listClassName)}>{children}</ul>
     ),
     mention: ({ children }: { children?: React.ReactNode }) => {
+      const { agentMentionPubkeysByName, mentionPubkeysByName } =
+        runtimeRef.current;
       const mentionText = String(children ?? "");
       const mentionName = mentionText.replace(/^@/, "").trim().toLowerCase();
       const pubkey = mentionPubkeysByName?.[mentionName];
@@ -1003,6 +1031,7 @@ function createMarkdownComponents(
       return <InlineEmojiPopover alt={alt} resolvedSrc={resolvedSrc} />;
     },
     "channel-link": ({ children }: { children?: React.ReactNode }) => {
+      const { channels, onOpenChannel } = runtimeRef.current;
       const text = String(children ?? "");
       const channelName = text.startsWith("#") ? text.slice(1) : text;
       const channel = channels.find(
@@ -1038,6 +1067,7 @@ function createMarkdownComponents(
       );
     },
     "message-link": ({ children }: { children?: React.ReactNode }) => {
+      const { channels, onOpenMessageLink } = runtimeRef.current;
       const href = String(children ?? "");
       const parsed = parseMessageLink(href);
       if (!parsed.ok) {
@@ -1084,6 +1114,7 @@ function createMarkdownComponents(
 function MarkdownInner({
   channelNames,
   className,
+  compact = false,
   content,
   customEmoji,
   imetaByUrl,
@@ -1092,45 +1123,51 @@ function MarkdownInner({
   mentionNames,
   mentionPubkeysByName,
   searchQuery,
+  tight = false,
   videoReviewContext,
 }: MarkdownProps) {
+  const variant: MarkdownVariant = tight
+    ? "tight"
+    : compact
+      ? "compact"
+      : "default";
   const { channels: rawChannels } = useChannelNavigation();
   const channels = useStableArray(rawChannels);
   const { goChannel } = useAppNavigation();
+  const onOpenChannel = React.useCallback(
+    (channelId: string) => {
+      void goChannel(channelId);
+    },
+    [goChannel],
+  );
+  const onOpenMessageLink = React.useCallback(
+    (link: ParsedMessageLink) => {
+      // Always route through `goChannel` with `messageId` set: the channel
+      // route already handles scroll-into-view + highlight via
+      // `useTimelineScrollManager` + `getEventById` backfill, and works for
+      // both stream-message replies and forum threads. Detecting "the thread
+      // root is a forum post" up front would require an event lookup we don't
+      // currently have synchronously; the brief explicitly allows skipping
+      // that detection and falling through.
+      void goChannel(link.channelId, {
+        messageId: link.messageId,
+        threadRootId: link.threadRootId,
+      });
+    },
+    [goChannel],
+  );
+  const runtimeRef = useLatestRef<MarkdownRuntime>({
+    agentMentionPubkeysByName,
+    channels,
+    imetaByUrl,
+    mentionPubkeysByName,
+    onOpenChannel,
+    onOpenMessageLink,
+  });
 
   const components = React.useMemo(
-    () =>
-      createMarkdownComponents(
-        channels,
-        (channelId) => {
-          void goChannel(channelId);
-        },
-        (link) => {
-          // Always route through `goChannel` with `messageId` set: the
-          // channel route already handles scroll-into-view + highlight via
-          // `useTimelineScrollManager` + `getEventById` backfill, and works
-          // for both stream-message replies and forum threads. Detecting
-          // "the thread root is a forum post" up front would require an
-          // event lookup we don't currently have synchronously; the brief
-          // explicitly allows skipping that detection and falling through.
-          void goChannel(link.channelId, {
-            messageId: link.messageId,
-            threadRootId: link.threadRootId,
-          });
-        },
-        imetaByUrl,
-        mentionPubkeysByName,
-        agentMentionPubkeysByName,
-        interactive,
-      ),
-    [
-      goChannel,
-      channels,
-      imetaByUrl,
-      mentionPubkeysByName,
-      agentMentionPubkeysByName,
-      interactive,
-    ],
+    () => createMarkdownComponents(variant, runtimeRef, interactive),
+    [variant, runtimeRef, interactive],
   );
 
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
@@ -1180,18 +1217,52 @@ function MarkdownInner({
   return (
     <div
       className={cn(
-        [
-          "max-w-none break-words text-sm leading-6 text-foreground/90",
-          "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
-          "[&>*+*]:mt-3",
-          "[&>*+h1]:mt-3.5 [&>*+h2]:mt-3.5 [&>*+h3]:mt-3.5",
-          "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5",
-          "[&>*+blockquote]:mt-3.5 [&>blockquote+*]:mt-3.5",
-          "[&>*+[data-code-block]]:mt-3.5 [&>[data-code-block]+*]:mt-3.5",
-          "[&>*+[data-table-block]]:mt-3.5 [&>[data-table-block]+*]:mt-3.5",
-          "[&>*+hr]:mt-4 [&>hr+*]:mt-4",
-          "[&>p+ul]:mt-1.5 [&>p+ol]:mt-1.5 [&>div+ul]:mt-1.5 [&>div+ol]:mt-1.5",
-        ].join(" "),
+        tight
+          ? [
+              "max-w-none break-words text-sm leading-5 text-foreground/90",
+              // Reset first/last
+              "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+              // Base owl: p+p, list+p, etc.
+              "[&>*+*]:mt-2",
+              // Headings: flat push/pull — size does the hierarchy work
+              "[&>*+h1]:mt-2.5 [&>*+h2]:mt-2.5 [&>*+h3]:mt-2.5",
+              "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5",
+              // Blockquotes: breathe above and below
+              "[&>*+blockquote]:mt-3 [&>blockquote+*]:mt-3",
+              // Code blocks: breathe above and below
+              "[&>*+[data-code-block]]:mt-3 [&>[data-code-block]+*]:mt-3",
+              // Tables: breathe above and below
+              "[&>*+[data-table-block]]:mt-3 [&>[data-table-block]+*]:mt-3",
+              // hr: clear section divider
+              "[&>*+hr]:mt-3.5 [&>hr+*]:mt-3.5",
+              // Lists after paragraphs: tighter to feel related
+              "[&>p+ul]:mt-1 [&>p+ol]:mt-1 [&>div+ul]:mt-1 [&>div+ol]:mt-1",
+            ].join(" ")
+          : compact
+            ? [
+                "max-w-none break-words text-sm leading-6 text-foreground/90",
+                "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+                "[&>*+*]:mt-2",
+                "[&>*+h1]:mt-3 [&>*+h2]:mt-3 [&>*+h3]:mt-3",
+                "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5",
+                "[&>*+blockquote]:mt-3 [&>blockquote+*]:mt-3",
+                "[&>*+[data-code-block]]:mt-3 [&>[data-code-block]+*]:mt-3",
+                "[&>*+[data-table-block]]:mt-3 [&>[data-table-block]+*]:mt-3",
+                "[&>*+hr]:mt-3.5 [&>hr+*]:mt-3.5",
+                "[&>p+ul]:mt-1 [&>p+ol]:mt-1 [&>div+ul]:mt-1 [&>div+ol]:mt-1",
+              ].join(" ")
+            : [
+                "max-w-none break-words text-sm leading-7 text-foreground/90",
+                "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+                "[&>*+*]:mt-3",
+                "[&>*+h1]:mt-3.5 [&>*+h2]:mt-3.5 [&>*+h3]:mt-3.5",
+                "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5",
+                "[&>*+blockquote]:mt-3.5 [&>blockquote+*]:mt-3.5",
+                "[&>*+[data-code-block]]:mt-3.5 [&>[data-code-block]+*]:mt-3.5",
+                "[&>*+[data-table-block]]:mt-3.5 [&>[data-table-block]+*]:mt-3.5",
+                "[&>*+hr]:mt-4 [&>hr+*]:mt-4",
+                "[&>p+ul]:mt-1.5 [&>p+ol]:mt-1.5 [&>div+ul]:mt-1.5 [&>div+ol]:mt-1.5",
+              ].join(" "),
         className,
       )}
     >
@@ -1207,8 +1278,10 @@ export const Markdown = React.memo(
   (prev, next) =>
     prev.content === next.content &&
     prev.className === next.className &&
+    prev.compact === next.compact &&
     prev.customEmoji === next.customEmoji &&
     prev.interactive === next.interactive &&
+    prev.tight === next.tight &&
     prev.agentMentionPubkeysByName === next.agentMentionPubkeysByName &&
     prev.mentionPubkeysByName === next.mentionPubkeysByName &&
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&

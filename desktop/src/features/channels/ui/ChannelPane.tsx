@@ -4,9 +4,17 @@ import { Bot, Hash, LogIn, Plus, Sparkles, UserPlus } from "lucide-react";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
-import { MessageThreadPanel } from "@/features/messages/ui/MessageThreadPanel";
+import {
+  MessageThreadPanel,
+  MessageThreadPanelSkeleton,
+} from "@/features/messages/ui/MessageThreadPanel";
 import { MessageTimeline } from "@/features/messages/ui/MessageTimeline";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import { buildDirectMessageIntro } from "@/features/channels/lib/dmParticipantDisplay";
+import {
+  buildVideoReviewCommentsByRootId,
+  buildVideoReviewContextForMessage,
+} from "@/features/messages/lib/videoReviewContext";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
@@ -33,10 +41,7 @@ import { Button } from "@/shared/ui/button";
 import type { useChannelFind } from "@/features/search/useChannelFind";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
-import {
-  resolveUserLabel,
-  type UserProfileLookup,
-} from "@/features/profile/lib/identity";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { isWelcomeChannel } from "@/features/onboarding/welcome";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import type { Channel } from "@/shared/api/types";
@@ -485,43 +490,15 @@ export const ChannelPane = React.memo(function ChannelPane({
   }, [botTypingEntries, openThreadHeadId]);
   const hasThreadComposerBotActivity =
     threadComposerBotTypingPubkeys.length > 0;
-  const directMessageIntro = React.useMemo(() => {
-    if (activeChannel?.channelType !== "dm") {
-      return null;
-    }
-
-    const participants = activeChannel.participantPubkeys.map(
-      (pubkey, index) => ({
-        fallbackName: activeChannel.participants[index] ?? null,
-        pubkey,
+  const directMessageIntro = React.useMemo(
+    () =>
+      buildDirectMessageIntro({
+        channel: activeChannel,
+        currentPubkey,
+        profiles,
       }),
-    );
-    const otherParticipants = currentPubkey
-      ? participants.filter(
-          (participant) =>
-            participant.pubkey.toLowerCase() !== currentPubkey.toLowerCase(),
-        )
-      : participants;
-    const [participant] =
-      otherParticipants.length > 0 ? otherParticipants : participants;
-
-    if (!participant) {
-      return null;
-    }
-
-    const profile = profiles?.[participant.pubkey.toLowerCase()] ?? null;
-    const displayName = resolveUserLabel({
-      currentPubkey,
-      fallbackName: participant.fallbackName,
-      profiles,
-      pubkey: participant.pubkey,
-    });
-
-    return {
-      avatarUrl: profile?.avatarUrl ?? null,
-      displayName,
-    };
-  }, [activeChannel, currentPubkey, profiles]);
+    [activeChannel, currentPubkey, profiles],
+  );
 
   const channelIntro = React.useMemo(() => {
     if (!activeChannel || activeChannel.channelType === "dm") {
@@ -594,6 +571,38 @@ export const ChannelPane = React.memo(function ChannelPane({
 
     return messages.filter((message) => !isWelcomeSetupSystemMessage(message));
   }, [activeChannel, messages]);
+  const videoReviewCommentsByRootId = React.useMemo(
+    () => buildVideoReviewCommentsByRootId(messages),
+    [messages],
+  );
+  const activeVideoReviewCommentSender = activeChannel?.archivedAt
+    ? undefined
+    : onSendVideoReviewComment;
+  const threadHeadVideoReviewContext = React.useMemo(() => {
+    if (!threadHeadMessage) {
+      return undefined;
+    }
+
+    return buildVideoReviewContextForMessage({
+      channelId: activeChannel?.id ?? null,
+      channelName: activeChannel?.name,
+      channelType: activeChannel?.channelType ?? null,
+      comments: videoReviewCommentsByRootId.get(threadHeadMessage.id) ?? [],
+      isSendingVideoReviewComment: isSending,
+      message: threadHeadMessage,
+      onSendVideoReviewComment: activeVideoReviewCommentSender,
+      onToggleReaction,
+      profiles,
+    });
+  }, [
+    activeChannel,
+    activeVideoReviewCommentSender,
+    isSending,
+    onToggleReaction,
+    profiles,
+    threadHeadMessage,
+    videoReviewCommentsByRootId,
+  ]);
 
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
@@ -714,7 +723,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 size="sm"
                 variant="default"
               >
-                <LogIn className="mr-1.5 h-3.5 w-3.5" />
+                <LogIn className="mr-1.5 h-4 w-4" />
                 {isJoining ? "Joining..." : "Join to participate"}
               </Button>
             </div>
@@ -746,7 +755,10 @@ export const ChannelPane = React.memo(function ChannelPane({
                       : activeChannel?.channelType === "forum"
                         ? "Forum posting is not wired in this pass."
                         : activeChannel
-                          ? `Message #${activeChannel.name}`
+                          ? activeChannel.channelType === "dm" &&
+                            directMessageIntro
+                            ? `Message ${directMessageIntro.displayName}`
+                            : `Message #${activeChannel.name}`
                           : "Select a channel"
                   }
                   showTopBorder={false}
@@ -822,6 +834,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 replyTargetMessage={threadReplyTargetMessage}
                 scrollTargetId={threadScrollTargetId}
                 threadHead={threadHeadMessage}
+                threadHeadVideoReviewContext={threadHeadVideoReviewContext}
                 widthPx={threadPanelWidthPx}
                 threadReplies={threadMessages}
                 threadTypingPubkeys={threadTypingPubkeys}
@@ -854,27 +867,15 @@ export const ChannelPane = React.memo(function ChannelPane({
               panel
             );
           })()
-        : activeChannel && selectedAgent
+        : openThreadHeadId && activeChannel
           ? (() => {
               const panel = (
-                <AgentSessionThreadPanel
-                  agent={selectedAgent}
-                  canInterruptTurn={selectedAgent.canInterruptTurn}
-                  channel={activeChannel}
-                  isWorking={botTypingEntries.some(
-                    (entry) =>
-                      entry.pubkey.toLowerCase() ===
-                      selectedAgent.pubkey.toLowerCase(),
-                  )}
+                <MessageThreadPanelSkeleton
                   isSinglePanelView={
                     useSplitAuxiliaryPane ? false : isSinglePanelView
                   }
                   layout={useSplitAuxiliaryPane ? "split" : "standalone"}
-                  profiles={profiles}
-                  onBackToProfile={() =>
-                    onOpenProfilePanel(selectedAgent.pubkey)
-                  }
-                  onClose={onCloseAgentSession}
+                  onClose={onCloseThread}
                   widthPx={threadPanelWidthPx}
                 />
               );
@@ -883,7 +884,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   canResetWidth={canResetThreadPanelWidth}
                   onResetWidth={onResetThreadPanelWidth}
                   onResizeStart={onThreadPanelResizeStart}
-                  testId="agent-session-thread-panel"
+                  testId="message-thread-panel"
                   widthPx={threadPanelWidthPx}
                 >
                   {panel}
@@ -892,19 +893,27 @@ export const ChannelPane = React.memo(function ChannelPane({
                 panel
               );
             })()
-          : profilePanelPubkey
+          : activeChannel && selectedAgent
             ? (() => {
                 const panel = (
-                  <UserProfilePanel
-                    currentPubkey={currentPubkey}
+                  <AgentSessionThreadPanel
+                    agent={selectedAgent}
+                    canInterruptTurn={selectedAgent.canInterruptTurn}
+                    channel={activeChannel}
+                    isWorking={botTypingEntries.some(
+                      (entry) =>
+                        entry.pubkey.toLowerCase() ===
+                        selectedAgent.pubkey.toLowerCase(),
+                    )}
                     isSinglePanelView={
                       useSplitAuxiliaryPane ? false : isSinglePanelView
                     }
                     layout={useSplitAuxiliaryPane ? "split" : "standalone"}
-                    onClose={onCloseProfilePanel}
-                    onOpenDm={onOpenDm}
-                    pubkey={profilePanelPubkey}
-                    splitPaneClamp
+                    profiles={profiles}
+                    onBackToProfile={() =>
+                      onOpenProfilePanel(selectedAgent.pubkey)
+                    }
+                    onClose={onCloseAgentSession}
                     widthPx={threadPanelWidthPx}
                   />
                 );
@@ -913,7 +922,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     canResetWidth={canResetThreadPanelWidth}
                     onResetWidth={onResetThreadPanelWidth}
                     onResizeStart={onThreadPanelResizeStart}
-                    testId="user-profile-panel"
+                    testId="agent-session-thread-panel"
                     widthPx={threadPanelWidthPx}
                   >
                     {panel}
@@ -922,7 +931,37 @@ export const ChannelPane = React.memo(function ChannelPane({
                   panel
                 );
               })()
-            : null}
+            : profilePanelPubkey
+              ? (() => {
+                  const panel = (
+                    <UserProfilePanel
+                      currentPubkey={currentPubkey}
+                      isSinglePanelView={
+                        useSplitAuxiliaryPane ? false : isSinglePanelView
+                      }
+                      layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+                      onClose={onCloseProfilePanel}
+                      onOpenDm={onOpenDm}
+                      pubkey={profilePanelPubkey}
+                      splitPaneClamp
+                      widthPx={threadPanelWidthPx}
+                    />
+                  );
+                  return useSplitAuxiliaryPane ? (
+                    <RightAuxiliaryPane
+                      canResetWidth={canResetThreadPanelWidth}
+                      onResetWidth={onResetThreadPanelWidth}
+                      onResizeStart={onThreadPanelResizeStart}
+                      testId="user-profile-panel"
+                      widthPx={threadPanelWidthPx}
+                    >
+                      {panel}
+                    </RightAuxiliaryPane>
+                  ) : (
+                    panel
+                  );
+                })()
+              : null}
     </div>
   );
 });

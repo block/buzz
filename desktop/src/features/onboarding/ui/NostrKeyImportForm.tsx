@@ -222,7 +222,7 @@ export function NostrKeyImportForm({
           className="flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs"
           data-testid="nostr-import-npub-preview"
         >
-          <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+          <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
           <div className="min-w-0 space-y-0.5">
             <p className="font-medium text-foreground">
               This will use this Nostr identity:

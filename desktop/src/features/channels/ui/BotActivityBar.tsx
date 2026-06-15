@@ -201,7 +201,7 @@ export function BotActivityComposerAction({
             {isInline ? <Shimmer>{visibleStatusLabel}</Shimmer> : "working"}
           </span>
           {isInline ? null : (
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin opacity-70" />
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin opacity-70" />
           )}
         </button>
       </PopoverTrigger>
@@ -244,7 +244,7 @@ export function BotActivityComposerAction({
                   displayName={agent.name}
                 />
                 <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground/70" />
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground/70" />
               </button>
             );
           })}

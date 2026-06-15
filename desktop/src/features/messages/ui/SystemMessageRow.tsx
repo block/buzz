@@ -5,17 +5,25 @@ import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import type { TimelineMessage } from "@/features/messages/types";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
+import { recordQuickReactionEmoji } from "@/features/messages/ui/useQuickReactionEmojis";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
+import {
+  MENTION_CHIP_BASE_CLASSES,
+  MENTION_CHIP_HOVER_CLASSES,
+} from "@/shared/ui/mentionChip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
+
+const SYSTEM_ACTION_BUTTON_CLASS = "h-6 w-6 rounded-full p-0";
+const SYSTEM_ACTION_ICON_CLASS = "!h-4 !w-4";
 
 type SystemMessagePayload = {
   type: string;
@@ -59,18 +67,31 @@ function resolveDisplayLabel(
 
 function ProfileName({
   children,
+  highlight = false,
+  isAgent = false,
   pubkey,
 }: {
   children: React.ReactNode;
+  highlight?: boolean;
+  isAgent?: boolean;
   pubkey: string | undefined;
 }) {
+  const isAgentMention = highlight && isAgent;
   const node = (
     <span
+      data-mention={highlight ? "" : undefined}
       className={cn(
         pubkey && "cursor-pointer",
-        "rounded-xs transition-colors hover:text-foreground",
+        highlight
+          ? cn(
+              MENTION_CHIP_BASE_CLASSES,
+              MENTION_CHIP_HOVER_CLASSES,
+              isAgentMention && "agent-mention-highlight",
+            )
+          : "rounded-xs transition-colors hover:text-foreground",
       )}
     >
+      {highlight && !isAgentMention ? "@" : null}
       {children}
     </span>
   );
@@ -175,7 +196,14 @@ function describeSystemEvent(
   payload: SystemMessagePayload,
   currentPubkey: string | undefined,
   profiles: UserProfileLookup | undefined,
+  personaLookup?: Map<string, string>,
+  agentPubkeys?: ReadonlySet<string>,
 ): SystemMessageDescription | null {
+  const isTargetAgent =
+    payload.target !== undefined &&
+    (agentPubkeys?.has(normalizePubkey(payload.target)) === true ||
+      profiles?.[normalizePubkey(payload.target)]?.isAgent === true ||
+      personaLookup?.has(normalizePubkey(payload.target)) === true);
   const actorLabel = resolveDisplayLabel(
     payload.actor,
     currentPubkey,
@@ -190,7 +218,7 @@ function describeSystemEvent(
     <ProfileName pubkey={payload.actor}>{actorLabel}</ProfileName>
   );
   const targetName = (
-    <ProfileName pubkey={payload.target}>
+    <ProfileName highlight isAgent={isTargetAgent} pubkey={payload.target}>
       {targetLabel}
     </ProfileName>
   );
@@ -251,12 +279,17 @@ function describeSystemEvent(
 export const SystemMessageRow = React.memo(function SystemMessageRow({
   message,
   currentPubkey,
+  agentPubkeys,
   profiles,
+  personaLookup,
   onToggleReaction,
 }: {
   message: TimelineMessage;
   currentPubkey?: string;
+  agentPubkeys?: ReadonlySet<string>;
   profiles?: UserProfileLookup;
+  /** Map from lowercase pubkey → persona display name for bot members. */
+  personaLookup?: Map<string, string>;
   onToggleReaction?: (
     message: TimelineMessage,
     emoji: string,
@@ -286,6 +319,8 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     payload,
     currentPubkey,
     profiles,
+    personaLookup,
+    agentPubkeys,
   );
   if (!description) {
     return null;
@@ -308,21 +343,19 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
           profiles={profiles}
           targetPubkey={payload.target}
         />
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <MessageHeaderRow>
-            <MessageAuthorText as="div" className="text-foreground/90">
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <div className="truncate text-sm font-semibold leading-none tracking-tight text-foreground/90">
               {description.title}
-            </MessageAuthorText>
+            </div>
             <MessageTimestamp
               createdAt={message.createdAt}
               time={message.time}
             />
-          </MessageHeaderRow>
-          <div>
-            <p className="text-base leading-6 text-muted-foreground/70">
-              {description.action}
-            </p>
           </div>
+          <p className="mt-1 text-sm leading-snug text-muted-foreground/70">
+            {description.action}
+          </p>
           <div>
             <MessageReactions
               messageId={message.id}
@@ -347,7 +380,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
             ) : null}
           </div>
         </div>
-        <div className="absolute right-2 top-1 z-10">
+        <div className="absolute right-2 top-1 z-10 sm:top-0 sm:-translate-y-1/2">
           {canToggleReactions ? (
             <div
               className={cn(
@@ -370,12 +403,12 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
                       <PopoverTrigger asChild>
                         <Button
                           aria-label="Open reactions"
-                          className="h-6 w-6 rounded-full p-0"
+                          className={SYSTEM_ACTION_BUTTON_CLASS}
                           size="sm"
                           type="button"
                           variant={isReactionPickerOpen ? "secondary" : "ghost"}
                         >
-                          <SmilePlus className="h-3 w-3" />
+                          <SmilePlus className={SYSTEM_ACTION_ICON_CLASS} />
                         </Button>
                       </PopoverTrigger>
                     </TooltipTrigger>
@@ -403,9 +436,14 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
                         ) {
                           setBadgeBurstEmoji(value);
                         }
-                        void handleReactionSelect(value).finally(() => {
-                          setIsReactionPickerOpen(false);
-                        });
+                        void handleReactionSelect(value)
+                          .then(() => {
+                            recordQuickReactionEmoji(value);
+                          })
+                          .catch(() => {})
+                          .finally(() => {
+                            setIsReactionPickerOpen(false);
+                          });
                       }}
                     />
                   </PopoverContent>

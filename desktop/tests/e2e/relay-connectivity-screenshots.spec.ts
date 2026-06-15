@@ -16,7 +16,7 @@ const SELF_PROFILE_CACHE_KEY = `buzz-self-profile.v1:${MOCK_RELAY_URL}:${MOCK_PU
 
 async function settle(page: import("@playwright/test").Page) {
   await page.evaluate(() =>
-    Promise.all(document.getAnimations().map((a) => a.finished)),
+    Promise.allSettled(document.getAnimations().map((a) => a.finished)),
   );
 }
 

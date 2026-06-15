@@ -93,7 +93,7 @@ export function WorkflowDetailPanel({
               size="sm"
               variant="outline"
             >
-              <Pencil className="mr-1 h-3 w-3" />
+              <Pencil className="mr-1 h-4 w-4" />
               Edit
             </Button>
           ) : null}
@@ -103,7 +103,7 @@ export function WorkflowDetailPanel({
             size="sm"
             variant="outline"
           >
-            <Play className="mr-1 h-3 w-3" />
+            <Play className="mr-1 h-4 w-4" />
             {triggerMutation.isPending ? "Triggering..." : "Trigger"}
           </Button>
           <Button

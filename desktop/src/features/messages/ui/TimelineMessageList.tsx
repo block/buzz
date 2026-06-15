@@ -5,12 +5,15 @@ import {
   isSameDay,
 } from "@/features/messages/lib/dateFormatters";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
+import {
+  buildVideoReviewCommentsByRootId,
+  buildVideoReviewContextForMessage,
+} from "@/features/messages/lib/videoReviewContext";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
-import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { DayDivider } from "./DayDivider";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
@@ -56,50 +59,6 @@ type TimelineMessageListProps = {
   searchQuery?: string;
 };
 
-function hasVideoAttachment(message: TimelineMessage): boolean {
-  if (message.body.includes("![video](")) return true;
-
-  return (
-    message.tags?.some(
-      (tag) =>
-        tag[0] === "imeta" &&
-        tag.some((part) => part.toLowerCase().startsWith("m video/")),
-    ) ?? false
-  );
-}
-
-function buildReviewCommentsByRootId(
-  messages: TimelineMessage[],
-): Map<string, TimelineMessage[]> {
-  const messageById = new Map(messages.map((message) => [message.id, message]));
-  const commentsByRootId = new Map<string, TimelineMessage[]>();
-
-  for (const message of messages) {
-    let ancestorId = message.parentId ?? null;
-    let hops = 0;
-    const maxHops = messages.length + 1;
-
-    while (ancestorId && hops < maxHops) {
-      const comments = commentsByRootId.get(ancestorId) ?? [];
-      comments.push(message);
-      commentsByRootId.set(ancestorId, comments);
-      ancestorId = messageById.get(ancestorId)?.parentId ?? null;
-      hops += 1;
-    }
-  }
-
-  for (const comments of commentsByRootId.values()) {
-    comments.sort((left, right) => {
-      if (left.createdAt !== right.createdAt) {
-        return left.createdAt - right.createdAt;
-      }
-      return left.id.localeCompare(right.id);
-    });
-  }
-
-  return commentsByRootId;
-}
-
 export const TimelineMessageList = React.memo(function TimelineMessageList({
   agentPubkeys,
   channelId,
@@ -130,7 +89,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     [messages],
   );
   const reviewCommentsByRootId = React.useMemo(
-    () => buildReviewCommentsByRootId(messages),
+    () => buildVideoReviewCommentsByRootId(messages),
     [messages],
   );
   // Contexts are memoized per message id so MessageRow/Markdown memo
@@ -138,39 +97,26 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   // indicators, presence updates) — a fresh context object per render would
   // defeat the memo and re-render every video message on every pass.
   const videoReviewContextById = React.useMemo(() => {
-    const contexts = new Map<string, VideoReviewContext>();
+    const contexts = new Map<
+      string,
+      NonNullable<ReturnType<typeof buildVideoReviewContextForMessage>>
+    >();
     for (const message of messages) {
-      if (!hasVideoAttachment(message)) continue;
       const comments = reviewCommentsByRootId.get(message.id) ?? [];
-      contexts.set(message.id, {
+      const context = buildVideoReviewContextForMessage({
         channelId,
         channelName,
         channelType,
         comments,
-        disabled: !onSendVideoReviewComment || message.pending,
-        isSending: isSendingVideoReviewComment,
-        onSendComment: onSendVideoReviewComment
-          ? (content, mentionPubkeys, mediaTags, parentEventId) =>
-              onSendVideoReviewComment(
-                message,
-                content,
-                mentionPubkeys,
-                mediaTags,
-                parentEventId,
-              )
-          : undefined,
-        onToggleCommentReaction: onToggleReaction
-          ? (comment, emoji, remove) => {
-              const sourceComment = comments.find(
-                (candidate) => candidate.id === comment.id,
-              );
-              if (!sourceComment) return Promise.resolve();
-              return onToggleReaction(sourceComment, emoji, remove);
-            }
-          : undefined,
+        isSendingVideoReviewComment,
+        message,
+        onSendVideoReviewComment,
+        onToggleReaction,
         profiles,
-        rootEventId: message.id,
       });
+      if (context) {
+        contexts.set(message.id, context);
+      }
     }
     return contexts;
   }, [
@@ -211,8 +157,10 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         <div key={messageRenderKey} className="flex flex-col gap-1">
           <SystemMessageRow
             message={message}
+            agentPubkeys={agentPubkeys}
             currentPubkey={currentPubkey}
             onToggleReaction={onToggleReaction}
+            personaLookup={personaLookup}
             profiles={profiles}
           />
           {footer}
@@ -263,12 +211,14 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
                 : undefined
             }
             profiles={profiles}
+            showDepthGuides={false}
             videoReviewContext={videoReviewContextById.get(message.id)}
           />
           <MessageThreadSummaryRow
             depth={message.depth}
             message={message}
             onOpenThread={onReply}
+            showDepthGuides={false}
             summary={summary}
           />
           {footer}
@@ -301,6 +251,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
             onReply={onReply}
             profiles={profiles}
             searchQuery={isSearchMatch ? searchQuery : undefined}
+            showDepthGuides={false}
             videoReviewContext={videoReviewContextById.get(message.id)}
           />
           {footer}

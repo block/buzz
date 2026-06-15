@@ -108,7 +108,7 @@ export function TeamsSection({
             onClick={onInstallFromDirectory}
             type="button"
           >
-            <FolderOpen className="h-3.5 w-3.5" />
+            <FolderOpen className="h-4 w-4" />
             Install from directory
           </button>
           <CreateNewButton
@@ -161,7 +161,7 @@ export function TeamsSection({
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <span className="flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground">
-                              <Link className="h-3.5 w-3.5" />
+                              <Link className="h-4 w-4" />
                             </span>
                           </TooltipTrigger>
                           <TooltipContent side="bottom" className="max-w-xs">
@@ -184,7 +184,7 @@ export function TeamsSection({
                               className="flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
                               type="button"
                             >
-                              <Info className="h-3.5 w-3.5" />
+                              <Info className="h-4 w-4" />
                             </button>
                           </TooltipTrigger>
                           <TooltipContent side="bottom" className="max-w-xs">

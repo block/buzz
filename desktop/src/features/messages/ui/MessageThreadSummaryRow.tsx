@@ -13,20 +13,22 @@ const NESTED_REPLY_OFFSET_PX = 28;
 function ParticipantAvatar({
   participant,
   index,
+  participantCount,
 }: {
   participant: TimelineThreadSummaryParticipant;
   index: number;
+  participantCount: number;
 }) {
   return (
     <div
       className={index > 0 ? "-ml-2" : ""}
       data-testid="message-thread-summary-participant"
       style={{
-        zIndex: 10 - index,
-        ...(index > 0 && {
-          mask: "radial-gradient(circle 16px at -4px 50%, transparent 99%, #fff 100%)",
+        zIndex: index + 1,
+        ...(index < participantCount - 1 && {
+          mask: "radial-gradient(circle 16px at calc(100% + 4px) 50%, transparent 99%, #fff 100%)",
           WebkitMask:
-            "radial-gradient(circle 16px at -4px 50%, transparent 99%, #fff 100%)",
+            "radial-gradient(circle 16px at calc(100% + 4px) 50%, transparent 99%, #fff 100%)",
         }),
       }}
     >
@@ -44,11 +46,13 @@ export function MessageThreadSummaryRow({
   depth = 0,
   message,
   onOpenThread,
+  showDepthGuides = true,
   summary,
 }: {
   depth?: number;
   message: TimelineMessage;
   onOpenThread: (message: TimelineMessage) => void;
+  showDepthGuides?: boolean;
   summary: TimelineThreadSummary;
 }) {
   const visibleDepth = Math.min(Math.max(depth, 0), 6);
@@ -74,7 +78,7 @@ export function MessageThreadSummaryRow({
 
   return (
     <div className="relative pb-1 pt-0.5">
-      {depthGuideOffsets.length > 0 ? (
+      {showDepthGuides && depthGuideOffsets.length > 0 ? (
         <div
           aria-hidden
           className="pointer-events-none absolute left-0"
@@ -108,6 +112,7 @@ export function MessageThreadSummaryRow({
               index={index}
               key={participant.id}
               participant={participant}
+              participantCount={summary.participants.length}
             />
           ))}
         </div>

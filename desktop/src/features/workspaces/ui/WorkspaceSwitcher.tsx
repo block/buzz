@@ -121,7 +121,7 @@ export function WorkspaceSwitcher({
               data-testid="relay-connection-warning"
               role="img"
             >
-              <WifiOff className={isProfileVariant ? "h-3 w-3" : "h-4 w-4"} />
+              <WifiOff className={isProfileVariant ? "h-4 w-4" : "h-4 w-4"} />
             </span>
           </TooltipTrigger>
           <TooltipContent side={isProfileVariant ? "top" : "bottom"}>
@@ -154,8 +154,8 @@ export function WorkspaceSwitcher({
         <ChevronDown
           className={
             isProfileVariant
-              ? "h-3 w-3 shrink-0 text-sidebar-foreground/45"
-              : "h-3.5 w-3.5 shrink-0 text-sidebar-foreground/50"
+              ? "h-4 w-4 shrink-0 text-sidebar-foreground/45"
+              : "h-4 w-4 shrink-0 text-sidebar-foreground/50"
           }
         />
       )}
@@ -209,7 +209,7 @@ export function WorkspaceSwitcher({
                 >
                   <span className="flex h-4 w-4 shrink-0 items-center justify-center">
                     {activeWorkspace?.id === workspace.id ? (
-                      <Check className="h-3.5 w-3.5 text-primary" />
+                      <Check className="h-4 w-4 text-primary" />
                     ) : null}
                   </span>
                   <span className="min-w-0 flex-1 truncate">
@@ -226,7 +226,7 @@ export function WorkspaceSwitcher({
                   }}
                   type="button"
                 >
-                  <MoreHorizontal className="h-3.5 w-3.5" />
+                  <MoreHorizontal className="h-4 w-4" />
                 </button>
               </div>
             ))}
@@ -296,7 +296,7 @@ export function WorkspaceSwitcher({
           >
             <span className="flex h-4 w-4 shrink-0 items-center justify-center">
               {activeWorkspace?.id === workspace.id ? (
-                <Check className="h-3.5 w-3.5 text-primary" />
+                <Check className="h-4 w-4 text-primary" />
               ) : null}
             </span>
             <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
@@ -311,7 +311,7 @@ export function WorkspaceSwitcher({
               }}
               type="button"
             >
-              <MoreHorizontal className="h-3.5 w-3.5" />
+              <MoreHorizontal className="h-4 w-4" />
             </button>
           </DropdownMenuItem>
         ))}

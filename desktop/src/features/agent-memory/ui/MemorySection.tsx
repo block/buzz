@@ -85,7 +85,7 @@ export function MemoryRefreshButton({
     >
       <RefreshCw
         className={cn(
-          iconClassName ?? "h-3.5 w-3.5",
+          iconClassName ?? "h-4 w-4",
           query.isFetching && "animate-spin",
         )}
       />
@@ -169,7 +169,7 @@ function MemoryErrorState({
       role="alert"
     >
       <div className="flex items-start gap-2">
-        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" />
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
         <div className="space-y-1">
           <div className="font-medium text-destructive">
             Couldn't load memory
@@ -196,7 +196,7 @@ function MemoryStaleErrorBanner({ onRetry }: { onRetry: () => void }) {
       className="mb-2 flex items-center gap-2 rounded-md border border-warning/30 bg-warning/5 px-2 py-1.5 text-xs"
       data-testid="agent-memory-stale-error"
     >
-      <AlertTriangle className="h-3 w-3 shrink-0 text-warning" />
+      <AlertTriangle className="h-4 w-4 shrink-0 text-warning" />
       <span className="flex-1 text-muted-foreground">Refresh failed.</span>
       <button
         className="font-medium text-warning hover:underline"
@@ -511,7 +511,7 @@ function MemoryEntryAccordion({
           ref={titleRef}
         >
           {hasDanglingRefs ? (
-            <AlertTriangle className="mr-1 inline-block h-3.5 w-3.5 align-[-2px] text-warning" />
+            <AlertTriangle className="mr-1 inline-block h-4 w-4 align-[-2px] text-warning" />
           ) : null}
           <MemorySlugTitle slug={entry.slug} />
         </div>

@@ -89,7 +89,7 @@ export function WorkflowCard({
             {channelName ? <span>{channelName}</span> : null}
             {triggerSummary ? <span>{triggerSummary}</span> : null}
             <span className="flex items-center gap-1">
-              <Clock className="h-3 w-3" />
+              <Clock className="h-4 w-4" />
               {new Date(workflow.updatedAt * 1000).toLocaleDateString()}
             </span>
           </div>
