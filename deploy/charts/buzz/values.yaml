@@ -176,25 +176,35 @@ persistence:
     existingClaim: ""
 
 # ── Postgres ─────────────────────────────────────────────────────────────────
+# Eval-only CloudPirates subchart. The relay's DATABASE_URL is composed in the
+# chart-managed Secret with a chart-generated password; auth.existingSecret
+# points this subchart at that same Secret/key so server and client agree.
 postgresql:
   enabled: false
   auth:
     database: buzz
     username: buzz
-  primary:
-    persistence:
-      enabled: true
-      size: 10Gi
+    existingSecret: '{{ if contains "buzz" .Release.Name }}{{ .Release.Name }}-relay{{ else }}{{ .Release.Name }}-buzz-relay{{ end }}'
+    secretKeys:
+      adminPasswordKey: postgres-password
+  persistence:
+    enabled: true
+    size: 10Gi
 externalPostgresql:
   url: ""                        # postgres://user:pass@host:5432/db
 
 # ── Redis ────────────────────────────────────────────────────────────────────
+# Eval-only CloudPirates subchart (standalone). REDIS_URL is composed in the
+# chart-managed Secret; auth.existingSecret points the subchart at that Secret
+# so the server password matches the URL the relay dials.
 redis:
   enabled: false
-  master:
-    persistence:
-      enabled: true
-      size: 4Gi
+  auth:
+    existingSecret: '{{ if contains "buzz" .Release.Name }}{{ .Release.Name }}-relay{{ else }}{{ .Release.Name }}-buzz-relay{{ end }}'
+    existingSecretPasswordKey: redis-password
+  persistence:
+    enabled: true
+    size: 4Gi
 externalRedis:
   url: ""                        # redis://:pass@host:6379
 
