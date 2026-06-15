@@ -28,7 +28,7 @@ import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
 import { useComposerHeightPadding } from "./useComposerHeightPadding";
-import { useTimelineScrollManager } from "./useTimelineScrollManager";
+import { useAnchoredScroll } from "./useAnchoredScroll";
 
 type MessageThreadPanelProps = {
   agentPubkeys?: ReadonlySet<string>;
@@ -155,21 +155,33 @@ export function MessageThreadPanel({
     [threadReplies],
   );
 
+  const threadMessageIds = React.useMemo(
+    () => threadMessages.map((m) => m.id),
+    [threadMessages],
+  );
+
   const {
-    bottomAnchorRef,
-    contentRef,
     isAtBottom,
     newMessageCount,
+    scrollContainerRef: anchoredScrollRef,
     scrollToBottom,
-    syncScrollState,
-  } = useTimelineScrollManager({
-    channelId: threadHeadId,
+    topSentinelRef,
+  } = useAnchoredScroll({
+    resetKey: threadHeadId,
+    messageIds: threadMessageIds,
     isLoading: false,
-    messages: threadMessages,
-    onTargetReached: onScrollTargetResolved,
-    scrollContainerRef: threadBodyRef,
     targetMessageId: scrollTargetId,
+    onTargetReached: onScrollTargetResolved,
   });
+
+  // Mirror the anchored hook's internal ref into `threadBodyRef` so existing
+  // refs (composer-height padding) keep observing the same DOM node.
+  React.useEffect(() => {
+    threadBodyRef.current = anchoredScrollRef.current;
+    return () => {
+      threadBodyRef.current = null;
+    };
+  }, [anchoredScrollRef]);
 
   if (!threadHead) {
     return null;
@@ -178,15 +190,15 @@ export function MessageThreadPanel({
   const threadScrollRegion = (
     <div
       className={cn(
-        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24 [overflow-anchor:none]",
+        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24",
         isSplitLayout && auxiliaryPanelContentPaddingClass,
         !isSplitLayout && !isFloatingOverlay && "pt-[4.75rem]",
       )}
       data-testid="message-thread-body"
-      onScroll={syncScrollState}
-      ref={threadBodyRef}
+      ref={anchoredScrollRef}
     >
-      <div ref={contentRef}>
+      <div ref={topSentinelRef} aria-hidden className="h-px" />
+      <div>
         <div className="px-3 pb-1 pt-0" data-testid="message-thread-head">
           <div className="rounded-2xl">
             <MessageRow
@@ -275,7 +287,7 @@ export function MessageThreadPanel({
               </p>
             </div>
           )}
-          <div aria-hidden className="h-px" ref={bottomAnchorRef} />
+          <div aria-hidden className="h-px" />
         </div>
       </div>
     </div>
