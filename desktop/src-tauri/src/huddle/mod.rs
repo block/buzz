@@ -427,6 +427,7 @@ async fn emit_end_and_archive(
             }
         }
     }
+    remove_huddle_agents(ephemeral_channel_id, state).await;
     if !ephemeral_channel_id.is_empty() {
         if let Ok(uuid) = parse_channel_uuid(ephemeral_channel_id) {
             if let Ok(archive_builder) = events::build_archive(uuid) {
@@ -434,6 +435,38 @@ async fn emit_end_and_archive(
                     eprintln!("buzz-desktop: archive ephemeral channel failed: {e}");
                 }
             }
+        }
+    }
+}
+
+/// Best-effort agent removal before archiving an ended huddle.
+///
+/// Archive should make the ephemeral channel unavailable on its own, but removing
+/// bot-role members first prevents an agent-only huddle from lingering if the
+/// archive publish is delayed or rejected.
+async fn remove_huddle_agents(ephemeral_channel_id: &str, state: &AppState) {
+    if ephemeral_channel_id.is_empty() {
+        return;
+    }
+    let Ok(eph_uuid) = parse_channel_uuid(ephemeral_channel_id) else {
+        return;
+    };
+
+    let agent_pubkeys = match fetch_channel_members(ephemeral_channel_id, Some("bot"), state).await
+    {
+        Ok(pubkeys) => pubkeys,
+        Err(e) => {
+            eprintln!("buzz-desktop: fetch huddle agents for cleanup failed: {e}");
+            return;
+        }
+    };
+
+    for pubkey in agent_pubkeys {
+        let Ok(remove_builder) = events::build_remove_member(eph_uuid, &pubkey) else {
+            continue;
+        };
+        if let Err(e) = submit_event(remove_builder, state).await {
+            eprintln!("buzz-desktop: remove huddle agent {pubkey} failed: {e}");
         }
     }
 }
