@@ -264,14 +264,14 @@ function buildDecorations(
       node.text,
       pos,
       mentionPatterns,
-      "mention-highlight",
+      "mention-highlight mention-chip",
     );
     addMatchesForPatterns(
       decorations,
       node.text,
       pos,
       agentMentionPatterns,
-      "mention-highlight agent-mention-highlight",
+      "mention-highlight mention-chip agent-mention-highlight",
       { hideMentionPrefix: true },
     );
     addMatchesForPatterns(
@@ -279,7 +279,7 @@ function buildDecorations(
       node.text,
       pos,
       channelPatterns,
-      "mention-highlight",
+      "mention-highlight mention-chip",
     );
   });
 

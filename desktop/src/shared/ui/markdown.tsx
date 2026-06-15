@@ -497,7 +497,7 @@ function MarkdownCodeBlock({
 
   return (
     <div className="group relative" data-code-block="">
-      <pre className="max-h-[400px] overflow-x-auto overflow-y-auto rounded-xl border border-border/70 bg-muted/60 px-3 py-1.5 pr-12 shadow-xs">
+      <pre className="max-h-[400px] overflow-x-auto overflow-y-auto rounded-lg border border-border/70 bg-muted/60 px-3 py-1.5 pr-12 shadow-xs">
         {language && (
           <div className="mb-1 text-xs text-muted-foreground/70">
             {language}
@@ -837,7 +837,7 @@ function createMarkdownComponents(
         <code
           {...props}
           className={cn(
-            "rounded-md bg-muted px-1.5 py-0.5 font-mono text-sm text-foreground",
+            "rounded-sm bg-muted px-1.5 py-0.5 font-mono text-sm text-foreground",
             className,
           )}
         >
@@ -1018,7 +1018,11 @@ function createMarkdownComponents(
             type="button"
             data-channel-link=""
             aria-label={`Open channel ${channelName}`}
-            className="rounded-md bg-primary/15 px-1 py-0.5 text-sm font-medium text-primary cursor-pointer hover:bg-primary/25 transition-colors"
+            className={cn(
+              "cursor-pointer",
+              MENTION_CHIP_BASE_CLASSES,
+              MENTION_CHIP_HOVER_CLASSES,
+            )}
             onClick={() => {
               onOpenChannel(channel.id);
             }}
@@ -1031,7 +1035,7 @@ function createMarkdownComponents(
       return (
         <span
           data-channel-link=""
-          className="rounded-md bg-primary/15 px-1 py-0.5 text-sm text-primary"
+          className={MENTION_CHIP_BASE_CLASSES}
         >
           {children}
         </span>
@@ -1065,7 +1069,11 @@ function createMarkdownComponents(
           data-message-link=""
           aria-label={`Open message in ${channelLabel}`}
           title={href}
-          className="rounded-md bg-primary/15 px-1 py-0.5 text-sm font-medium text-primary cursor-pointer hover:bg-primary/25 transition-colors"
+          className={cn(
+            "cursor-pointer",
+            MENTION_CHIP_BASE_CLASSES,
+            MENTION_CHIP_HOVER_CLASSES,
+          )}
           onClick={() => {
             onOpenMessageLink(parsed.value);
           }}
