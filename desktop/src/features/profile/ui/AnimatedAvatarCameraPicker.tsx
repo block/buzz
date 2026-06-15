@@ -43,7 +43,7 @@ export function AnimatedAvatarCameraPicker({
           <button
             aria-pressed={isSelected}
             className={cn(
-              "relative flex h-[120px] flex-col items-center justify-center gap-3 overflow-hidden rounded-xl border border-transparent bg-muted text-foreground transition-[background-color,border-color,box-shadow,color,opacity] duration-[250ms] ease-out hover:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+              "relative flex h-[120px] flex-col items-center justify-center gap-3 overflow-hidden rounded-xl border border-transparent bg-muted text-foreground transition-[background-color,border-color,color,opacity] duration-[250ms] ease-out hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               isSelected &&
                 "border-primary bg-primary/10 text-primary ring-1 ring-primary/35 hover:bg-primary/10",
               isDisabled && "cursor-not-allowed opacity-45 hover:bg-muted",
@@ -57,13 +57,13 @@ export function AnimatedAvatarCameraPicker({
             <Icon
               aria-hidden="true"
               className={cn(
-                "h-5 w-5 text-muted-foreground transition-colors duration-[250ms] ease-out",
+                "h-5 w-5 text-foreground transition-colors duration-[250ms] ease-out",
                 isSelected && "text-primary",
               )}
             />
             <span
               className={cn(
-                "text-sm font-medium text-muted-foreground transition-colors duration-[250ms] ease-out",
+                "text-sm font-medium text-foreground transition-colors duration-[250ms] ease-out",
                 isSelected && "text-primary",
               )}
             >

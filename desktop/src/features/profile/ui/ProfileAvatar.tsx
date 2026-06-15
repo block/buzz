@@ -6,7 +6,6 @@ import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
-import { Spinner } from "@/shared/ui/spinner";
 
 type ProfileAvatarProps = {
   avatarUrl: string | null;
@@ -15,7 +14,6 @@ type ProfileAvatarProps = {
   className?: string;
   iconClassName?: string;
   plain?: boolean;
-  showAnimationLoader?: boolean;
   testId?: string;
 };
 
@@ -26,7 +24,6 @@ export function ProfileAvatar({
   className,
   iconClassName,
   plain = false,
-  showAnimationLoader = false,
   testId,
 }: ProfileAvatarProps) {
   const initials = getInitials(label);
@@ -35,9 +32,6 @@ export function ProfileAvatar({
   // the animation.
   const animated = parseAnimatedAvatarUrl(avatarUrl);
   const [isHovered, setIsHovered] = React.useState(false);
-  const [loadedAnimationSrc, setLoadedAnimationSrc] = React.useState<
-    string | null
-  >(null);
   const baseUrl = animated
     ? isHovered
       ? animated.animationUrl
@@ -47,11 +41,8 @@ export function ProfileAvatar({
   // Compute the live (proxied) source. Failures are tracked per resolved URL so
   // the poster and hover animation can recover independently.
   const liveSrc = baseUrl ? rewriteRelayUrl(baseUrl) : null;
-  const animationSrc = animated ? rewriteRelayUrl(animated.animationUrl) : null;
-  const posterSrc = animated ? rewriteRelayUrl(animated.posterUrl) : null;
   const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
   const liveFailed = liveSrc !== null && failedSrc === liveSrc;
-  const posterFailed = posterSrc !== null && failedSrc === posterSrc;
 
   // When the relay is unreachable the proxied avatar URL 404s/times out; fall
   // back to the locally cached data URL instead of dropping to initials.
@@ -59,19 +50,6 @@ export function ProfileAvatar({
     ? (avatarDataUrl ?? undefined)
     : (liveSrc ?? avatarDataUrl ?? undefined);
   const shouldShowFallback = src === undefined || (!animated && liveFailed);
-  const shouldUseAnimationLoader = showAnimationLoader && animated !== null;
-  const shouldShowAnimationLoader =
-    shouldUseAnimationLoader &&
-    isHovered &&
-    animationSrc !== null &&
-    liveSrc === animationSrc &&
-    failedSrc !== animationSrc &&
-    loadedAnimationSrc !== animationSrc;
-  const posterUnderlaySrc = shouldShowAnimationLoader
-    ? posterFailed
-      ? (avatarDataUrl ?? undefined)
-      : (posterSrc ?? avatarDataUrl ?? undefined)
-    : undefined;
 
   return (
     <Avatar
@@ -86,48 +64,20 @@ export function ProfileAvatar({
       onMouseEnter={animated ? () => setIsHovered(true) : undefined}
       onMouseLeave={animated ? () => setIsHovered(false) : undefined}
     >
-      {posterUnderlaySrc ? (
-        <img
-          alt=""
-          aria-hidden="true"
-          className="absolute inset-0 h-full w-full object-cover"
-          draggable={false}
-          referrerPolicy="no-referrer"
-          src={posterUnderlaySrc}
-        />
-      ) : null}
       {src !== undefined ? (
         <AvatarImage
           alt={`${label} avatar`}
-          className={cn(
-            "object-cover",
-            shouldUseAnimationLoader && "absolute inset-0",
-          )}
+          className="object-cover"
           data-testid={testId ? `${testId}-image` : undefined}
           onLoadingStatusChange={(status) => {
             if (status === "error") setFailedSrc(liveSrc);
             if (status === "loaded" && src === liveSrc) {
               setFailedSrc(null);
-              if (liveSrc === animationSrc) {
-                setLoadedAnimationSrc(liveSrc);
-              }
             }
           }}
           referrerPolicy="no-referrer"
           src={src}
         />
-      ) : null}
-      {shouldShowAnimationLoader ? (
-        <span
-          aria-live="polite"
-          className="pointer-events-none absolute inset-0 grid place-items-center rounded-[inherit] bg-background/35 text-foreground/80"
-          data-testid={testId ? `${testId}-animation-loader` : undefined}
-        >
-          <Spinner
-            aria-label="Loading animated avatar"
-            className="h-1/4 w-1/4 min-h-3 min-w-3 max-h-5 max-w-5"
-          />
-        </span>
       ) : null}
       {shouldShowFallback ? (
         <AvatarFallback

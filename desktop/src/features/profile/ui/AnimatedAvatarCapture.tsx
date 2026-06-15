@@ -579,7 +579,7 @@ export function AnimatedAvatarCapture({
   // composed preview render inside the page's main avatar preview (via a
   // portal) so edits show exactly where the avatar will live.
   const usePortal = previewContainer !== null;
-  const isPreviewActive = usePortal && phase !== "idle" && phase !== "starting";
+  const isPreviewActive = usePortal;
   const reviewWarning =
     phase === "review" && recording && !recording.backgroundRemoved
       ? "Background removal model couldn't be loaded, so the background was kept. Retake while online to remove it."
@@ -767,9 +767,9 @@ export function AnimatedAvatarCapture({
         />
       </div>
 
-      {phase === "idle" && !usePortal ? (
-        <div className="grid h-full w-full place-items-center rounded-full bg-background/60 shadow-inner">
-          <Camera className="h-10 w-10 text-muted-foreground" />
+      {phase === "idle" ? (
+        <div className="grid h-full w-full place-items-center rounded-full border-2 border-dashed border-border bg-background text-primary shadow-xs">
+          <Camera className="h-10 w-10" />
         </div>
       ) : phase === "starting" ? (
         <div className="absolute inset-0 grid place-items-center rounded-full bg-background/70 text-center shadow-inner">

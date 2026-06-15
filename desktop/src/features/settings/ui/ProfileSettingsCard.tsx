@@ -585,7 +585,6 @@ export function ProfileSettingsCard({
                             className="h-full w-full rounded-full text-5xl"
                             iconClassName="h-14 w-14"
                             label={resolvedName}
-                            showAnimationLoader
                             testId="profile-avatar-preview"
                           />
                         )}
@@ -629,7 +628,7 @@ export function ProfileSettingsCard({
                       {visibleAnimatedPreviewCaption ? (
                         <motion.p
                           animate={{ opacity: 1, y: 0 }}
-                          className="text-center text-sm text-muted-foreground"
+                          className="w-48 text-center text-sm text-muted-foreground"
                           exit={
                             shouldReduceMotion
                               ? { opacity: 0, y: 0 }

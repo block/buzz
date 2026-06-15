@@ -77,6 +77,7 @@ type ProfileAvatarEditorProps = {
   onModeChange?: (mode: AvatarMode) => void;
   onUploadedAvatarChange?: (url: string | null) => void;
   onUploadingChange?: (isUploading: boolean) => void;
+  onAnimatedAvatarApply?: (url: string) => void;
   onDone?: () => void;
   donePending?: boolean;
   showEmojiColorControlsWhenEmpty?: boolean;
@@ -121,6 +122,7 @@ export function ProfileAvatarEditor({
   onModeChange,
   onUploadedAvatarChange,
   onUrlChange,
+  onAnimatedAvatarApply,
   onDone,
   onUploadingChange,
   showEmojiColorControlsWhenEmpty = false,
@@ -212,8 +214,14 @@ export function ProfileAvatarEditor({
       setUrlDraft("");
       onUploadedAvatarChange?.(animatedUrl);
       onUrlChange(animatedUrl);
+      onAnimatedAvatarApply?.(animatedUrl);
     },
-    [clearUploadError, onUploadedAvatarChange, onUrlChange],
+    [
+      clearUploadError,
+      onAnimatedAvatarApply,
+      onUploadedAvatarChange,
+      onUrlChange,
+    ],
   );
   // Done on the animated tab uploads the pending recording first, then
   // saves. The save is queued through state so it runs on the next render,
