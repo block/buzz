@@ -16,6 +16,12 @@ type RankUserCandidatesInput = {
   query: string;
 };
 
+type KeyboardSearchSelectionInput = {
+  currentQuery: string;
+  rankedQuery: string;
+  results: UserSearchResult[];
+};
+
 export function scoreUserCandidate({
   allowEmptyQuery = false,
   label,
@@ -86,4 +92,21 @@ export function rankUserCandidatesBySearch({
     )
     .slice(0, limit)
     .map(({ candidate }) => candidate);
+}
+
+export function getKeyboardSearchSelection({
+  currentQuery,
+  rankedQuery,
+  results,
+}: KeyboardSearchSelectionInput) {
+  const trimmedCurrentQuery = currentQuery.trim();
+  if (trimmedCurrentQuery.length === 0) {
+    return null;
+  }
+
+  if (rankedQuery.trim() !== trimmedCurrentQuery) {
+    return null;
+  }
+
+  return results[0] ?? null;
 }

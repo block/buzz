@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getKeyboardSearchSelection,
   rankUserCandidatesBySearch,
   scoreUserCandidate,
 } from "./userCandidateSearch.ts";
@@ -94,5 +95,35 @@ test("rankUserCandidatesBySearch applies score, label, and stable order sorting"
       query: "",
     }).map((user) => user.displayName),
     ["Alice", "Beta Build"],
+  );
+});
+
+test("getKeyboardSearchSelection ignores stale ranked results", () => {
+  const alice = makeUser({ displayName: "Alice", pubkey: "1000" });
+  const charlie = makeUser({ displayName: "Charlie", pubkey: "3000" });
+
+  assert.equal(
+    getKeyboardSearchSelection({
+      currentQuery: "charlie",
+      rankedQuery: "",
+      results: [alice],
+    }),
+    null,
+  );
+  assert.equal(
+    getKeyboardSearchSelection({
+      currentQuery: "charlie",
+      rankedQuery: "charlie",
+      results: [charlie],
+    }),
+    charlie,
+  );
+  assert.equal(
+    getKeyboardSearchSelection({
+      currentQuery: "   ",
+      rankedQuery: "",
+      results: [alice],
+    }),
+    null,
   );
 });

@@ -8,7 +8,10 @@ import {
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
 import { truncatePubkey } from "@/features/profile/lib/identity";
-import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
+import {
+  getKeyboardSearchSelection,
+  rankUserCandidatesBySearch,
+} from "@/features/profile/lib/userCandidateSearch";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { UserSearchResult } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -484,12 +487,17 @@ export function NewDirectMessageDialog({
                   return;
                 }
 
-                if (searchResults.length === 0) {
+                const keyboardSelection = getKeyboardSearchSelection({
+                  currentQuery: searchQuery,
+                  rankedQuery: deferredSearchQuery,
+                  results: searchResults,
+                });
+                if (!keyboardSelection) {
                   return;
                 }
 
                 event.preventDefault();
-                handleSelectUser(searchResults[0]);
+                handleSelectUser(keyboardSelection);
               }}
               placeholder="Search people and agents"
               ref={searchInputRef}
