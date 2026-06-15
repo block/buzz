@@ -808,10 +808,7 @@ export function ProfileSettingsCard({
                         <ProfileAvatarEditor
                           animatedPreviewContainer={animatedPreviewEl}
                           avatarUrl={avatarUrlDraft}
-                          disabled={
-                            updateProfileMutation.isPending &&
-                            !isAvatarEditorFinishing
-                          }
+                          disabled={isAvatarEditorSaving}
                           donePending={isAvatarEditorSaving}
                           modeTabsContainer={avatarModeTabsEl}
                           onAnimatedPreviewActiveChange={
