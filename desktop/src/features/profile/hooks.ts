@@ -1,5 +1,10 @@
 import * as React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import {
   getProfile,
@@ -279,6 +284,7 @@ export function useUsersBatchQuery(
     enabled,
     queryKey: ["users-batch", ...normalizedPubkeys],
     queryFn: () => getUsersBatch(normalizedPubkeys),
+    placeholderData: enabled ? keepPreviousData : undefined,
     staleTime: 60_000,
     gcTime: 5 * 60 * 1_000,
   });
