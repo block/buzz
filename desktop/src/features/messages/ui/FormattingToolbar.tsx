@@ -14,10 +14,16 @@ import {
 
 import { cn } from "@/shared/lib/cn";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { SPOILER_MARK_NAME } from "@/features/messages/lib/spoilerMark";
 
 type FormattingToolbarProps = {
   editor: Editor | null;
   disabled?: boolean;
+};
+
+export type SpoilerToggleState = {
+  emptySelection: boolean;
+  nextSpoilered?: boolean;
 };
 
 type ActiveStates = {
@@ -44,6 +50,67 @@ function getActiveStates(editor: Editor): ActiveStates {
     orderedList: editor.isActive("orderedList"),
     blockquote: editor.isActive("blockquote"),
   };
+}
+
+export function isSpoilerFormattingActive(editor: Editor): boolean {
+  return editor.isActive(SPOILER_MARK_NAME);
+}
+
+function documentRangeForEmptySelection(editor: Editor): {
+  from: number;
+  to: number;
+} | null {
+  const { doc, selection } = editor.state;
+  if (!selection.empty) return null;
+
+  if (doc.textContent.trim().length === 0) return null;
+
+  const from = 1;
+  const to = doc.content.size - 1;
+  return from < to ? { from, to } : null;
+}
+
+function isRangeFullySpoiled(
+  editor: Editor,
+  from: number,
+  to: number,
+): boolean {
+  const spoilerMark = editor.schema.marks[SPOILER_MARK_NAME];
+  if (!spoilerMark) return false;
+
+  let hasInlineContent = false;
+  let isFullySpoiled = true;
+
+  editor.state.doc.nodesBetween(from, to, (node) => {
+    if (!node.isText || node.textContent.length === 0) return;
+
+    hasInlineContent = true;
+    if (!spoilerMark.isInSet(node.marks)) {
+      isFullySpoiled = false;
+      return false;
+    }
+  });
+
+  return hasInlineContent && isFullySpoiled;
+}
+
+export function toggleSpoilerFormatting(editor: Editor): SpoilerToggleState {
+  const emptySelection = editor.state.selection.empty;
+  const range = documentRangeForEmptySelection(editor);
+  if (!range) {
+    editor.chain().focus().toggleMark(SPOILER_MARK_NAME).run();
+    return { emptySelection };
+  }
+
+  const cursorPosition = editor.state.selection.from;
+  const chain = editor.chain().focus().setTextSelection(range);
+  const nextSpoilered = !isRangeFullySpoiled(editor, range.from, range.to);
+  if (nextSpoilered) {
+    chain.setMark(SPOILER_MARK_NAME).setTextSelection(cursorPosition).run();
+  } else {
+    chain.unsetMark(SPOILER_MARK_NAME).setTextSelection(cursorPosition).run();
+  }
+  return { emptySelection, nextSpoilered };
 }
 
 /**

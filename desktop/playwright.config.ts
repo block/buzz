@@ -35,6 +35,7 @@ export default defineConfig({
         "**/profile-active-turn-screenshots.spec.ts",
         "**/file-attachment.spec.ts",
         "**/video-attachment.spec.ts",
+        "**/spoiler.spec.ts",
         "**/mentions.spec.ts",
         "**/relay-reconnect.spec.ts",
         "**/workflows.spec.ts",

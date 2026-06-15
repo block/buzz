@@ -101,7 +101,10 @@ export function buildImetaTags(
   ]);
 }
 
-const MEDIA_LINE_RE = /^!\[(?:image|video)\]\(([^)\s]+)\)\s*$/;
+const MEDIA_LINE_RE =
+  /^(?:\|\|)?!\[(?:image|video)\]\(([^)\s]+)\)(?:\|\|)?\s*$/;
+const SPOILERED_MEDIA_LINE_RE =
+  /^\|\|!\[(?:image|video)\]\(([^)\s]+)\)\|\|\s*$/;
 /**
  * Matches a generic file-attachment line `[label](url)` (no leading `!`, so it's
  * a link not an image). The label can contain spaces and backslash-escaped
@@ -143,6 +146,23 @@ export function stripImetaMediaLines(
   return lines.slice(0, end).join("\n").replace(/\s+$/, "");
 }
 
+export function findSpoileredImetaMediaUrls(
+  body: string,
+  imetaMedia: ReadonlyArray<ImetaMedia>,
+): Set<string> {
+  if (imetaMedia.length === 0) return new Set();
+
+  const urls = new Set(imetaMedia.map((m) => m.url));
+  const spoileredUrls = new Set<string>();
+  for (const line of body.split("\n")) {
+    const match = line.match(SPOILERED_MEDIA_LINE_RE);
+    if (match && urls.has(match[1])) {
+      spoileredUrls.add(match[1]);
+    }
+  }
+  return spoileredUrls;
+}
+
 /**
  * Format a single imeta entry as a leading-newline markdown line.
  *
@@ -151,13 +171,18 @@ export function stripImetaMediaLines(
  * href as a local media blob with a non-media MIME and upgrades it to a file
  * card. Mime-driven so the form is correct regardless of URL suffix.
  */
-export function formatImetaMediaLine({
-  url,
-  type,
-  filename,
-}: ImetaMedia): string {
-  if (type.startsWith("video/")) return `\n![video](${url})`;
-  if (type.startsWith("image/")) return `\n![image](${url})`;
+export function formatImetaMediaLine(
+  { url, type, filename }: ImetaMedia,
+  options: { spoiler?: boolean } = {},
+): string {
+  if (type.startsWith("video/")) {
+    const line = `![video](${url})`;
+    return options.spoiler ? `\n||${line}||` : `\n${line}`;
+  }
+  if (type.startsWith("image/")) {
+    const line = `![image](${url})`;
+    return options.spoiler ? `\n||${line}||` : `\n${line}`;
+  }
   // Generic file: plain link, label is the original filename (fallback to url tail).
   const label = filename || url.split("/").pop() || "file";
   // Escape markdown link-label metacharacters so filenames containing `[`, `]`,
@@ -181,9 +206,14 @@ export function formatImetaMediaLine({
 export function buildOutgoingMessage(
   body: string,
   pendingImeta: ReadonlyArray<ImetaMedia>,
+  spoileredMediaUrls: ReadonlySet<string> = new Set(),
 ): { content: string; mediaTags: string[][] | undefined } {
   let content = body;
-  for (const d of pendingImeta) content += formatImetaMediaLine(d);
+  for (const d of pendingImeta) {
+    content += formatImetaMediaLine(d, {
+      spoiler: spoileredMediaUrls.has(d.url),
+    });
+  }
   const mediaTags =
     pendingImeta.length > 0 ? buildImetaTags(pendingImeta) : undefined;
   return { content, mediaTags };
