@@ -14,7 +14,7 @@ export function MessageHeaderRow({
   return (
     <div
       className={cn(
-        "flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0 leading-none",
+        "flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0 leading-4",
         className,
       )}
     >
@@ -39,7 +39,7 @@ export function MessageAuthorText({
   return (
     <Component
       className={cn(
-        "truncate text-sm font-semibold leading-none tracking-tight",
+        "truncate text-sm font-semibold leading-4 tracking-tight",
         hoverUnderline && "hover:underline",
         className,
       )}

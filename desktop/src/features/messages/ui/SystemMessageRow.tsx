@@ -308,7 +308,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
           profiles={profiles}
           targetPubkey={payload.target}
         />
-        <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <MessageHeaderRow>
             <MessageAuthorText as="div" className="text-foreground/90">
               {description.title}

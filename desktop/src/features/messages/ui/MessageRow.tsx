@@ -208,7 +208,7 @@ export const MessageRow = React.memo(
 
     const isThreadReplyLayout = layoutVariant === "thread-reply";
     const guideBleedPx = isThreadReplyLayout ? 4 : 0;
-    const avatarSizeClass = "!h-9 !w-9";
+    const avatarSizeClass = "!h-10 !w-10";
     const avatarButtonRadiusClass = "rounded-full";
 
     const respondToDotColor =
@@ -400,7 +400,7 @@ export const MessageRow = React.memo(
               ) : (
                 <div className="flex shrink-0 items-start">{avatarNode}</div>
               )}
-              <div className="-mt-1 min-w-0 flex-1 space-y-0">
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <MessageHeaderRow>
                   {message.pubkey ? (
                     <UserProfilePopover
@@ -409,7 +409,7 @@ export const MessageRow = React.memo(
                       botIdenticonValue={message.author}
                     >
                       <button
-                        className="truncate rounded leading-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                        className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                         type="button"
                       >
                         {authorNode}
@@ -450,7 +450,7 @@ export const MessageRow = React.memo(
               ) : (
                 <div className="flex shrink-0 items-start">{avatarNode}</div>
               )}
-              <div className="-mt-1 min-w-0 flex-1 space-y-0">
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <MessageHeaderRow>
                   {message.pubkey ? (
                     <UserProfilePopover
@@ -459,7 +459,7 @@ export const MessageRow = React.memo(
                       botIdenticonValue={message.author}
                     >
                       <button
-                        className="truncate rounded leading-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                        className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                         type="button"
                       >
                         {authorNode}
