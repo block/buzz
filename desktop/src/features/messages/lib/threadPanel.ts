@@ -67,7 +67,12 @@ function buildDirectChildrenByParentId(messages: TimelineMessage[]) {
   return childrenByParentId;
 }
 
-function buildDescendantStatsByMessageId(
+// A.3.1: the channel-wide descendant walk is O(N x avg-depth) and depends ONLY
+// on the timeline message set. Both render paths (main timeline + thread panel)
+// need it, so it is exported to be computed once per `timelineMessages` change
+// and shared, instead of re-walking the whole channel on every thread-open /
+// expand. Memoize this on `messages` identity at the call site.
+export function buildDescendantStatsByMessageId(
   messages: TimelineMessage[],
 ): Map<string, ThreadDescendantStats> {
   const messageById = new Map(messages.map((message) => [message.id, message]));
@@ -220,8 +225,11 @@ function buildVisibleThreadReplies(params: {
 
 export function buildMainTimelineEntries(
   messages: TimelineMessage[],
+  precomputedDescendantStatsByMessageId?: Map<string, ThreadDescendantStats>,
 ): MainTimelineEntry[] {
-  const descendantStatsByMessageId = buildDescendantStatsByMessageId(messages);
+  const descendantStatsByMessageId =
+    precomputedDescendantStatsByMessageId ??
+    buildDescendantStatsByMessageId(messages);
 
   return messages
     .filter(
@@ -244,6 +252,7 @@ export function buildThreadPanelData(
   openThreadHeadId: string | null,
   threadReplyTargetId: string | null,
   expandedReplyIds: ReadonlySet<string>,
+  precomputedDescendantStatsByMessageId?: Map<string, ThreadDescendantStats>,
 ): ThreadPanelData {
   if (!openThreadHeadId) {
     return {
@@ -267,7 +276,9 @@ export function buildThreadPanelData(
   }
 
   const directChildrenByParentId = buildDirectChildrenByParentId(messages);
-  const descendantStatsByMessageId = buildDescendantStatsByMessageId(messages);
+  const descendantStatsByMessageId =
+    precomputedDescendantStatsByMessageId ??
+    buildDescendantStatsByMessageId(messages);
   const normalizedThreadHead = normalizeHeadMessage(threadHead);
   const visibleReplies = buildVisibleThreadReplies({
     openThreadHeadId,

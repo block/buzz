@@ -1,7 +1,10 @@
 import * as React from "react";
 
 import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
-import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
+import {
+  buildDescendantStatsByMessageId,
+  buildMainTimelineEntries,
+} from "@/features/messages/lib/threadPanel";
 import { buildDayGroupBoundaries } from "@/features/messages/lib/timelineSnapshot";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -123,9 +126,13 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   searchQuery,
   unfollowThreadById,
 }: TimelineMessageListProps) {
-  const entries = React.useMemo(
-    () => buildMainTimelineEntries(messages),
+  const descendantStatsByMessageId = React.useMemo(
+    () => buildDescendantStatsByMessageId(messages),
     [messages],
+  );
+  const entries = React.useMemo(
+    () => buildMainTimelineEntries(messages, descendantStatsByMessageId),
+    [descendantStatsByMessageId, messages],
   );
   const reviewCommentsByRootId = React.useMemo(
     () => buildReviewCommentsByRootId(messages),

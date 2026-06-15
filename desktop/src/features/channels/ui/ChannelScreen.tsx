@@ -33,7 +33,10 @@ import {
   collectMessageMentionPubkeys,
   formatTimelineMessages,
 } from "@/features/messages/lib/formatTimelineMessages";
-import { buildThreadPanelData } from "@/features/messages/lib/threadPanel";
+import {
+  buildDescendantStatsByMessageId,
+  buildThreadPanelData,
+} from "@/features/messages/lib/threadPanel";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
@@ -317,6 +320,16 @@ export function ChannelScreen({
     },
     [directReplyIdsByParentId],
   );
+  // A.3.1: the channel-wide descendant walk is the expensive O(N x avg-depth)
+  // pass. Keying it on `timelineMessages` ALONE means a thread-open or expand
+  // (which flip `openThreadHeadId` / `expandedThreadReplyIds`) no longer
+  // re-fires the whole-channel walk — only the cheap per-thread slice below
+  // re-runs. The same map is shared with `buildThreadPanelData` so the channel
+  // is walked once, not twice, per `timelineMessages` change.
+  const descendantStatsByMessageId = React.useMemo(
+    () => buildDescendantStatsByMessageId(timelineMessages),
+    [timelineMessages],
+  );
   const threadPanelData = React.useMemo(
     () =>
       buildThreadPanelData(
@@ -324,8 +337,10 @@ export function ChannelScreen({
         openThreadHeadId,
         threadReplyTargetId,
         expandedThreadReplyIds,
+        descendantStatsByMessageId,
       ),
     [
+      descendantStatsByMessageId,
       expandedThreadReplyIds,
       openThreadHeadId,
       threadReplyTargetId,
