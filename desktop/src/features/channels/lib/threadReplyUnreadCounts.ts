@@ -30,6 +30,7 @@ export function computeThreadReplyUnreadCounts(params: {
   expandedReplyIds: ReadonlySet<string>;
   expandedSubtreeReplyIds: ReadonlySet<string>;
   frontierSeconds: number | null;
+  currentPubkey?: string;
 }): Map<string, number> {
   const {
     timelineMessages,
@@ -38,6 +39,7 @@ export function computeThreadReplyUnreadCounts(params: {
     expandedReplyIds,
     expandedSubtreeReplyIds,
     frontierSeconds,
+    currentPubkey,
   } = params;
 
   const subtree = new Set(subtreeReplyIds);
@@ -47,6 +49,7 @@ export function computeThreadReplyUnreadCounts(params: {
         (message) =>
           subtree.has(message.id) &&
           !expandedSubtreeReplyIds.has(message.id) &&
+          (!currentPubkey || message.pubkey !== currentPubkey) &&
           (frontierSeconds === null || message.createdAt > frontierSeconds),
       )
       .map((message) => message.id),

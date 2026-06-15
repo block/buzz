@@ -120,3 +120,27 @@ test("computeThreadReplyUnreadCounts_onlyVisibleRowsKeyed", () => {
   assert.equal(counts.get("a"), 1);
   assert.equal(counts.has("b"), false);
 });
+
+test("computeThreadReplyUnreadCounts_selfAuthored_skipsOwnReplies", () => {
+  // a1(400) is authored by "me" — should not count as unread.
+  // b1(500) and b2(600) are authored by "other" — should count.
+  const messages = [
+    { id: "root", createdAt: 100, parentId: null, pubkey: "other" },
+    { id: "a", createdAt: 200, parentId: "root", pubkey: "other" },
+    { id: "b", createdAt: 300, parentId: "root", pubkey: "other" },
+    { id: "a1", createdAt: 400, parentId: "a", pubkey: "me" },
+    { id: "b1", createdAt: 500, parentId: "b", pubkey: "other" },
+    { id: "b2", createdAt: 600, parentId: "b1", pubkey: "other" },
+  ];
+  const counts = computeThreadReplyUnreadCounts({
+    timelineMessages: messages,
+    subtreeReplyIds: ["a", "b", "a1", "b1", "b2"],
+    visibleReplyIds: ["a", "b"],
+    expandedReplyIds: new Set(),
+    expandedSubtreeReplyIds: new Set(),
+    frontierSeconds: 350,
+    currentPubkey: "me",
+  });
+  assert.equal(counts.has("a"), false); // a1 is self-authored, so 0 unread
+  assert.equal(counts.get("b"), 2); // b1, b2 are by "other"
+});

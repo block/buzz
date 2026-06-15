@@ -172,3 +172,68 @@ test("computeThreadUnreadMarker_emptyRepliesNullFrontier_returnsNoUnread", () =>
   assert.equal(marker.firstUnreadReplyId, null);
   assert.equal(marker.unreadCount, 0);
 });
+
+// --- Self-authored skip tests ---
+
+test("computeChannelUnreadMarker_selfAuthored_skipsOwnMessages", () => {
+  const messages = [
+    { ...topLevel("a", 10), pubkey: "me" },
+    { ...topLevel("b", 20), pubkey: "other" },
+    { ...topLevel("c", 30), pubkey: "me" },
+  ];
+  const marker = computeChannelUnreadMarker(messages, 5, false, "me");
+  assert.equal(marker.firstUnreadMessageId, "b");
+  assert.equal(marker.unreadCount, 1);
+});
+
+test("computeChannelUnreadMarker_allSelfAuthored_returnsNoUnread", () => {
+  const messages = [
+    { ...topLevel("a", 10), pubkey: "me" },
+    { ...topLevel("b", 20), pubkey: "me" },
+  ];
+  const marker = computeChannelUnreadMarker(messages, 5, false, "me");
+  assert.equal(marker.firstUnreadMessageId, null);
+  assert.equal(marker.unreadCount, 0);
+});
+
+test("computeChannelUnreadMarker_noPubkey_countsNormally", () => {
+  // When currentPubkey is not provided, all messages count.
+  const messages = [
+    { ...topLevel("a", 10), pubkey: "me" },
+    { ...topLevel("b", 20), pubkey: "other" },
+  ];
+  const marker = computeChannelUnreadMarker(messages, 5);
+  assert.equal(marker.firstUnreadMessageId, "a");
+  assert.equal(marker.unreadCount, 2);
+});
+
+test("computeThreadUnreadMarker_selfAuthored_skipsOwnReplies", () => {
+  const replies = [
+    { id: "r1", createdAt: 10, pubkey: "me" },
+    { id: "r2", createdAt: 20, pubkey: "other" },
+    { id: "r3", createdAt: 30, pubkey: "me" },
+  ];
+  const marker = computeThreadUnreadMarker(replies, 5, "me");
+  assert.equal(marker.firstUnreadReplyId, "r2");
+  assert.equal(marker.unreadCount, 1);
+});
+
+test("computeThreadUnreadMarker_allSelfAuthored_returnsNoUnread", () => {
+  const replies = [
+    { id: "r1", createdAt: 10, pubkey: "me" },
+    { id: "r2", createdAt: 20, pubkey: "me" },
+  ];
+  const marker = computeThreadUnreadMarker(replies, 5, "me");
+  assert.equal(marker.firstUnreadReplyId, null);
+  assert.equal(marker.unreadCount, 0);
+});
+
+test("computeThreadUnreadMarker_noPubkey_countsNormally", () => {
+  const replies = [
+    { id: "r1", createdAt: 10, pubkey: "me" },
+    { id: "r2", createdAt: 20, pubkey: "other" },
+  ];
+  const marker = computeThreadUnreadMarker(replies, 5);
+  assert.equal(marker.firstUnreadReplyId, "r1");
+  assert.equal(marker.unreadCount, 2);
+});

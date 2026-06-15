@@ -30,11 +30,14 @@ const EMPTY_MARKER: ChannelUnreadMarker = {
  * @param suppressed When true, the channel was manually marked unread this
  *   session; there is no meaningful in-timeline boundary, so no marker is
  *   produced regardless of the frontier.
+ * @param currentPubkey When provided, messages authored by this pubkey are
+ *   never counted as unread (the user knows about their own posts).
  */
 export function computeChannelUnreadMarker(
   messages: TimelineMessage[],
   frontierSeconds: number | null,
   suppressed = false,
+  currentPubkey?: string,
 ): ChannelUnreadMarker {
   if (suppressed) {
     return EMPTY_MARKER;
@@ -45,6 +48,9 @@ export function computeChannelUnreadMarker(
 
   for (const message of messages) {
     if (message.parentId) {
+      continue;
+    }
+    if (currentPubkey && message.pubkey === currentPubkey) {
       continue;
     }
     const isUnread =
@@ -87,15 +93,21 @@ const EMPTY_THREAD_MARKER: ThreadUnreadMarker = {
  * @param frontierSeconds Read frontier in unix seconds captured at thread
  *   open. `null` means the thread was never read, so every reply counts as
  *   unread.
+ * @param currentPubkey When provided, replies authored by this pubkey are
+ *   never counted as unread (the user knows about their own posts).
  */
 export function computeThreadUnreadMarker(
-  replies: Pick<TimelineMessage, "id" | "createdAt">[],
+  replies: Pick<TimelineMessage, "id" | "createdAt" | "pubkey">[],
   frontierSeconds: number | null,
+  currentPubkey?: string,
 ): ThreadUnreadMarker {
   let firstUnreadReplyId: string | null = null;
   let unreadCount = 0;
 
   for (const reply of replies) {
+    if (currentPubkey && reply.pubkey === currentPubkey) {
+      continue;
+    }
     const isUnread =
       frontierSeconds === null || reply.createdAt > frontierSeconds;
     if (!isUnread) {
