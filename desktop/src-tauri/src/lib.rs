@@ -838,6 +838,7 @@ pub fn run() {
             get_active_workspace,
             set_prevent_sleep_active,
             get_agent_memory,
+            relay_reconnect_hook,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
