@@ -138,6 +138,8 @@ function AvatarStepActions({
   onSubmit: () => void;
   saveRecovery: ProfileStepState["saveRecovery"];
 }) {
+  const areNavigationActionsDisabled = isSaving || isUploadingAvatar;
+
   return (
     <AnimatePresence initial={false} mode="popLayout">
       {hidden ? null : (
@@ -178,7 +180,7 @@ function AvatarStepActions({
             <Button
               className="h-10 w-full text-muted-foreground hover:text-accent-foreground max-lg:pointer-events-auto"
               data-testid="onboarding-skip"
-              disabled={isSaving}
+              disabled={areNavigationActionsDisabled}
               onClick={onSkipForNow}
               type="button"
               variant="ghost"
@@ -191,7 +193,7 @@ function AvatarStepActions({
             <Button
               className="h-10 w-full text-muted-foreground hover:text-accent-foreground max-lg:pointer-events-auto"
               data-testid="onboarding-next-without-saving"
-              disabled={isSaving}
+              disabled={areNavigationActionsDisabled}
               onClick={onContinueWithoutSaving}
               type="button"
               variant="ghost"
@@ -203,7 +205,7 @@ function AvatarStepActions({
           <Button
             className="h-10 w-full text-muted-foreground hover:text-accent-foreground max-lg:pointer-events-auto"
             data-testid="onboarding-back"
-            disabled={isSaving}
+            disabled={areNavigationActionsDisabled}
             onClick={onBack}
             type="button"
             variant="ghost"
