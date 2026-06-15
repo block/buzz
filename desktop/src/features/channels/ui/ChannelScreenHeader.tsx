@@ -60,7 +60,7 @@ export function ChannelScreenHeader({
         size="sm"
         variant="default"
       >
-        <LogIn className="mr-1.5 h-3.5 w-3.5" />
+        <LogIn className="mr-1.5 h-4 w-4" />
         {isJoining ? "Joining…" : "Join"}
       </Button>
     ) : (

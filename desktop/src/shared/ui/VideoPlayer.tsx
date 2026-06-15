@@ -1627,7 +1627,7 @@ function VideoReviewDialog({
                           type="button"
                           onClick={() => setIsEmojiPickerOpen((open) => !open)}
                         >
-                          <SmilePlus className="pointer-events-none h-5 w-5" />
+                          <SmilePlus className="pointer-events-none h-4 w-4" />
                         </button>
                       </TooltipTrigger>
                       <TooltipContent>More reactions</TooltipContent>
@@ -1900,7 +1900,7 @@ function VideoReviewCommentBody({
         </p>
         {reactions.some((reaction) => reaction.reactedByCurrentUser) ? (
           <Check
-            className="ml-auto h-3.5 w-3.5 shrink-0 text-primary"
+            className="ml-auto h-4 w-4 shrink-0 text-primary"
             aria-hidden
           />
         ) : null}

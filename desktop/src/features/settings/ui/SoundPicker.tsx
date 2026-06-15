@@ -135,9 +135,9 @@ export function SoundPicker({
         variant="ghost"
       >
         {isPlaying ? (
-          <Pause className="h-3 w-3" />
+          <Pause className="h-4 w-4" />
         ) : (
-          <Play className="h-3 w-3" />
+          <Play className="h-4 w-4" />
         )}
       </Button>
     </span>

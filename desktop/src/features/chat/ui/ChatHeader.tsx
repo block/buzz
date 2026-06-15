@@ -32,8 +32,8 @@ type ChatHeaderProps = {
   statusBadge?: React.ReactNode;
 };
 
-const HEADER_ICON_CLASS = "h-[14px] w-[14px] text-muted-foreground";
-const CHANNEL_HASH_ICON_CLASS = "h-[14px] w-[14px] translate-y-px";
+const HEADER_ICON_CLASS = "h-4 w-4 text-muted-foreground";
+const CHANNEL_HASH_ICON_CLASS = "h-4 w-4 translate-y-px";
 
 function ChannelIcon({
   channelType,
@@ -98,12 +98,12 @@ export function ChatHeader({
   const header = (
     <header
       className={cn(
-        "pointer-events-auto relative z-30 flex min-w-0 shrink-0 cursor-default select-none items-center gap-2.5 bg-transparent pl-4 pr-2 transition-[margin,padding] duration-200 ease-linear sm:pr-3",
+        "pointer-events-auto relative z-30 flex min-w-0 shrink-0 cursor-default select-none items-center gap-2.5 bg-transparent px-4 transition-[margin,padding] duration-200 ease-linear sm:px-6",
         density === "compact"
           ? belowSystemChrome
             ? "min-h-8 py-1.5"
             : "min-h-8 py-0"
-          : "min-h-11 py-1.5 sm:pl-6",
+          : "min-h-11 py-1.5",
         overlaysContent && !belowSystemChrome && "-mb-11",
       )}
       data-testid="chat-header"

@@ -3,7 +3,6 @@ import {
   CircleAlert,
   CircleDot,
   Clock3,
-  Loader2,
   TerminalSquare,
   XCircle,
 } from "lucide-react";
@@ -14,6 +13,7 @@ import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
 import { Skeleton } from "@/shared/ui/skeleton";
+import { Spinner } from "@/shared/ui/spinner";
 import { AgentSessionTranscriptList } from "./AgentSessionTranscriptList";
 import { RawEventRail } from "./RawEventRail";
 import type {
@@ -229,7 +229,7 @@ function ObserverStatusBadge({ state }: { state: ConnectionState }) {
     state === "open"
       ? { label: "Live", Icon: CircleDot, variant: "default" as const }
       : state === "connecting"
-        ? { label: "Connecting", Icon: Loader2, variant: "secondary" as const }
+        ? { label: "Connecting", variant: "secondary" as const }
         : state === "error"
           ? {
               label: "Unavailable",
@@ -239,12 +239,15 @@ function ObserverStatusBadge({ state }: { state: ConnectionState }) {
           : state === "closed"
             ? { label: "Closed", Icon: Clock3, variant: "secondary" as const }
             : { label: "Idle", Icon: Clock3, variant: "secondary" as const };
+  const StatusIcon = display.Icon;
 
   return (
     <Badge className="gap-1.5" variant={display.variant}>
-      <display.Icon
-        className={cn("h-3.5 w-3.5", state === "connecting" && "animate-spin")}
-      />
+      {StatusIcon ? (
+        <StatusIcon aria-hidden className="h-4 w-4" />
+      ) : (
+        <Spinner aria-hidden className="h-4 w-4 border-2" />
+      )}
       {display.label}
     </Badge>
   );
@@ -253,7 +256,7 @@ function ObserverStatusBadge({ state }: { state: ConnectionState }) {
 function EmptyObserverState() {
   return (
     <div className="mt-4 flex min-h-48 flex-col items-center justify-center px-6 py-8 text-center">
-      <TerminalSquare className="mx-auto h-5 w-5 text-muted-foreground" />
+      <TerminalSquare className="mx-auto h-4 w-4 text-muted-foreground" />
       <p className="mt-3 text-sm font-medium">Observer not attached</p>
       <p className="mt-1 text-sm text-muted-foreground">
         The live feed is available for local agents started after this update.

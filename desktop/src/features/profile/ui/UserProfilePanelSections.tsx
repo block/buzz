@@ -393,7 +393,7 @@ function ProfileHeroDescription({ about }: { about: string }) {
           type="button"
         >
           more
-          <ChevronDown className="h-3 w-3" />
+          <ChevronDown className="h-4 w-4" />
         </button>
       ) : null}
       {expanded ? (
@@ -404,7 +404,7 @@ function ProfileHeroDescription({ about }: { about: string }) {
           type="button"
         >
           less
-          <ChevronUp className="h-3 w-3" />
+          <ChevronUp className="h-4 w-4" />
         </button>
       ) : null}
     </div>

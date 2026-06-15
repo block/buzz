@@ -22,6 +22,7 @@ type AppShellContextValue = {
   isFollowingThread: (rootId: string) => boolean;
   isNotifiedForThread: (rootId: string) => boolean;
   setTopbarSearchHidden: (hidden: boolean) => void;
+  setTopbarSearchLoading: (loading: boolean) => void;
   threadActivityItems: ThreadActivityItem[];
 };
 
@@ -38,6 +39,7 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   isFollowingThread: () => false,
   isNotifiedForThread: () => false,
   setTopbarSearchHidden: () => {},
+  setTopbarSearchLoading: () => {},
   threadActivityItems: [],
 });
 

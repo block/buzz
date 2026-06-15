@@ -20,7 +20,7 @@ export function PersonaCatalogSelectionBadge({
           : "border border-border/70 bg-background/85 text-muted-foreground",
       )}
     >
-      {isActive ? <Check className="h-3 w-3" /> : null}
+      {isActive ? <Check className="h-4 w-4" /> : null}
       {isActive
         ? personaCatalogCopy.selectedState
         : personaCatalogCopy.availableState}
