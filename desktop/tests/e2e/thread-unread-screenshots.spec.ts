@@ -442,4 +442,265 @@ test.describe("thread unread indicator screenshots", () => {
       path: `${SHOTS}/06-thread-expand-clears-subtree-badge.png`,
     });
   });
+
+  test("06-in-panel-badge-bumps-on-live-reply", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+
+    // Collapsed branch p with one read child, plus an unread descendant so the
+    // in-panel subtree badge starts at a known count.
+    const past = Math.floor(Date.now() / 1000) - 60;
+    const p = await emitMockMessage(page, "general", "Branch parent", {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: past,
+    });
+    const c = await emitMockMessage(page, "general", "Child of branch parent", {
+      parentEventId: p!.id,
+      pubkey: TEST_IDENTITIES.bob.pubkey,
+      createdAt: past + 1,
+    });
+
+    const summary = page.getByTestId("message-thread-summary").first();
+    await expect(summary).toBeVisible();
+    await summary.click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await page.getByTestId("message-thread-close").click();
+    await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+    const base = unreadTimestamp();
+    await emitMockMessage(page, "general", "First unread under branch", {
+      parentEventId: c!.id,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: base,
+    });
+
+    // Reopen WITHOUT expanding p: badge shows the single unread descendant.
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await page.getByTestId("message-thread-summary").first().click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+
+    const inPanelBadge = page
+      .getByTestId("message-thread-replies")
+      .getByTestId("thread-unread-badge");
+    await expect(inPanelBadge).toBeVisible();
+    await expect(inPanelBadge).toContainText("1");
+
+    // A live reply from another author lands under the open, collapsed branch.
+    // The live root marker did NOT advance (panel open ≠ branch expanded), so
+    // the badge must bump to 2 on the same tick — readStateVersion-driven
+    // recompute is what makes this fire live rather than on a later re-render.
+    await emitMockMessage(page, "general", "Second unread under branch", {
+      parentEventId: c!.id,
+      pubkey: TEST_IDENTITIES.bob.pubkey,
+      createdAt: base + 1,
+    });
+    await expect(inPanelBadge).toContainText("2");
+
+    await page.screenshot({
+      path: `${SHOTS}/07-in-panel-badge-bumps-on-live-reply.png`,
+    });
+  });
+
+  test("07-expand-late-branch-clears-older-sibling", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+
+    // Two collapsed sibling branches, each with one read child. branchOld will
+    // gain a chronologically EARLIER unread reply; branchNew a LATER one.
+    const past = Math.floor(Date.now() / 1000) - 120;
+    const branchOld = await emitMockMessage(page, "general", "Older branch", {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: past,
+    });
+    const oldChild = await emitMockMessage(page, "general", "Old child", {
+      parentEventId: branchOld!.id,
+      pubkey: TEST_IDENTITIES.bob.pubkey,
+      createdAt: past + 1,
+    });
+    const branchNew = await emitMockMessage(page, "general", "Newer branch", {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.charlie.pubkey,
+      createdAt: past + 2,
+    });
+    const newChild = await emitMockMessage(page, "general", "New child", {
+      parentEventId: branchNew!.id,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: past + 3,
+    });
+
+    const summary = page.getByTestId("message-thread-summary").first();
+    await expect(summary).toBeVisible();
+    await summary.click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await page.getByTestId("message-thread-close").click();
+    await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+    // The older branch's unread reply is chronologically EARLIER than the
+    // newer branch's. Single thread read position (per Will's ack): reading the
+    // later branch clears everything older — including the old branch's badge.
+    const base = unreadTimestamp();
+    await emitMockMessage(page, "general", "Unread in older branch", {
+      parentEventId: oldChild!.id,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: base,
+    });
+    await emitMockMessage(page, "general", "Unread in newer branch", {
+      parentEventId: newChild!.id,
+      pubkey: TEST_IDENTITIES.bob.pubkey,
+      createdAt: base + 30,
+    });
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await page.getByTestId("message-thread-summary").first().click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+
+    // Both collapsed branches carry an unread badge before any expand.
+    const inPanelBadges = page
+      .getByTestId("message-thread-replies")
+      .getByTestId("thread-unread-badge");
+    await expect(inPanelBadges).toHaveCount(2);
+
+    await page.screenshot({
+      path: `${SHOTS}/08-two-sibling-badges-before-expand.png`,
+    });
+
+    // Expand the LATER branch. Its reply is the newest, so the root marker
+    // advances past the older branch's reply too — the cross-branch
+    // chronological clear (accepted, NIP-RS single thread position). Both
+    // badges drop: the expanded branch by the gate, the older sibling by the
+    // advanced live marker. This asserts the accepted behavior, not a guard.
+    await expandReply(page, branchNew!.id);
+    await expect(inPanelBadges).toHaveCount(0);
+
+    await page.screenshot({
+      path: `${SHOTS}/09-late-branch-expand-clears-older-sibling.png`,
+    });
+  });
+
+  // Regression guard for the Option-1 channel-marker fix: viewing a channel
+  // marks ONLY its top-level timeline read, never its thread replies. Before
+  // the fix, the channel marker advanced past the newest reply on every view,
+  // so the hierarchical effective(thread)=max(thread,channel) cleared the
+  // badge the instant the channel was re-entered. This walks open -> badge
+  // present -> leave -> RE-ENTER -> badge STILL present. Without the top-level
+  // filter on activeReadAt this fails on the second entry.
+  test("10-thread-badge-survives-channel-reentry", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+
+    // Read frontier over an initial reply, then close the thread.
+    await emitMockMessage(page, "general", "First reply to welcome", {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: Math.floor(Date.now() / 1000) - 10,
+    });
+    const threadSummary = page.getByTestId("message-thread-summary").first();
+    await expect(threadSummary).toBeVisible();
+    await threadSummary.click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await page.getByTestId("message-thread-close").click();
+    await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+
+    // Leave, emit unread replies, return — badge appears (same as test 01).
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+    const base = unreadTimestamp();
+    for (let i = 0; i < 3; i++) {
+      await emitMockMessage(page, "general", `Unread reply ${i + 1}`, {
+        parentEventId: "mock-general-welcome",
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        createdAt: base + i,
+      });
+    }
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    const badge = page.getByTestId("thread-unread-badge");
+    await expect(badge).toBeVisible();
+    await expect(badge).toContainText("3");
+
+    // The crux: the first entry above marked the channel read WHILE the unread
+    // replies were present. Leave and re-enter WITHOUT opening the thread. If
+    // the channel marker had absorbed the replies, the badge would be gone now.
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await expect(badge).toBeVisible();
+    await expect(badge).toContainText("3");
+
+    await page.screenshot({
+      path: `${SHOTS}/10-thread-badge-survives-channel-reentry.png`,
+    });
+  });
+
+  // Pins the Fix-A sidebar consequence Will approved on the record: a channel
+  // whose ONLY unread is an unopened thread reply KEEPS its sidebar dot after
+  // the channel is viewed. Channel-open advances the marker over top-level
+  // messages only and does NOT clear observed-latest, so the reply still counts
+  // as unread for the sidebar. A future change that re-folds replies into the
+  // channel-view marker would drop the dot on view and fail here.
+  test("11-sidebar-dot-persists-after-channel-view", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    // Open general and read its thread frontier, so the only thing that can be
+    // unread afterward is a NEW reply — not the channel timeline.
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+    await emitMockMessage(page, "general", "First reply to welcome", {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: Math.floor(Date.now() / 1000) - 10,
+    });
+    const threadSummary = page.getByTestId("message-thread-summary").first();
+    await expect(threadSummary).toBeVisible();
+    await threadSummary.click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await page.getByTestId("message-thread-close").click();
+
+    // Leave, emit an unread reply (thread-reply-only unread), then RE-ENTER
+    // general so the channel-open marker fires while the reply is unread.
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+    await emitMockMessage(page, "general", "Unread reply", {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: unreadTimestamp(),
+    });
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+    // The crux: leave general. Its sidebar dot must remain — viewing the
+    // channel did NOT absorb the unopened thread reply (Fix A).
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+    await expect(page.getByTestId("channel-unread-general")).toBeVisible();
+
+    await page.screenshot({
+      path: `${SHOTS}/11-sidebar-dot-persists.png`,
+    });
+  });
 });

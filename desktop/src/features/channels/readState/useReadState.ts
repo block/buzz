@@ -1,10 +1,14 @@
 import * as React from "react";
-import { ReadStateManager } from "@/features/channels/readState/readStateManager";
+import {
+  ReadStateManager,
+  type ContextParentResolver,
+} from "@/features/channels/readState/readStateManager";
 import type { RelayClient } from "@/shared/api/relayClientSession";
 
 const noopGetTimestamp = () => null;
 const noopMarkRead = () => {};
 const noopDrainAdvances = (): ReadonlySet<string> => new Set<string>();
+const noopSetResolver = () => {};
 
 /**
  * React hook that creates and manages a ReadStateManager instance.
@@ -75,6 +79,13 @@ export function useReadState(
     return managerRef.current?.drainSyncedAdvances() ?? new Set<string>();
   }, []);
 
+  const setContextParentResolver = React.useCallback(
+    (resolver: ContextParentResolver | null): void => {
+      managerRef.current?.setContextParentResolver(resolver);
+    },
+    [],
+  );
+
   const isReady = Boolean(
     pubkey && relayClient && initializedPubkey === pubkey,
   );
@@ -86,6 +97,7 @@ export function useReadState(
       markContextRead: noopMarkRead,
       seedContextRead: noopMarkRead,
       drainSyncedAdvances: noopDrainAdvances,
+      setContextParentResolver: noopSetResolver,
       readStateVersion: 0,
     };
   }
@@ -96,6 +108,7 @@ export function useReadState(
     markContextRead,
     seedContextRead,
     drainSyncedAdvances,
+    setContextParentResolver,
     readStateVersion,
   };
 }

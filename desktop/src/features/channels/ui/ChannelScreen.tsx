@@ -42,6 +42,7 @@ import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
 } from "@/features/messages/lib/threadPanel";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import {
   computeChannelUnreadMarker,
   computeThreadUnreadMarker,
@@ -95,6 +96,7 @@ export function ChannelScreen({
     getThreadReadAt,
     markThreadRead,
     readStateVersion,
+    setContextParentResolver,
     openCreateChannel,
     openChannelManagement,
     followThread,
@@ -138,8 +140,24 @@ export function ChannelScreen({
   useChannelSubscription(activeChannel);
   const { fetchOlder, hasOlderMessages, isFetchingOlder } =
     useFetchOlderMessages(activeChannel);
-  const latestActiveMessage =
-    messagesQuery.data?.[messagesQuery.data.length - 1] ?? null;
+  // Newest TOP-LEVEL message only. The channel read-marker must clear the
+  // channel timeline without clearing its threads (NIP-RS Option 1): thread
+  // replies are kind-9 channel events, so taking the last message outright
+  // would advance the channel frontier past unread replies and the hierarchical
+  // effective(thread) = max(thread, channel) would silently clear every thread
+  // badge on channel entry. Scanning from the end for the last message with no
+  // reply tag keeps the frontier at the last top-level message, leaving thread
+  // badges intact until the thread itself is read.
+  const latestActiveMessage = React.useMemo(() => {
+    const messages = messagesQuery.data;
+    if (!messages) return null;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (getThreadReference(messages[index].tags).parentId === null) {
+        return messages[index];
+      }
+    }
+    return null;
+  }, [messagesQuery.data]);
   const activeReadAt = latestActiveMessage
     ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
     : (activeChannel?.lastMessageAt ?? null);
@@ -194,8 +212,29 @@ export function ChannelScreen({
     if (!activeChannelId || activeChannel?.isMember === false) {
       return;
     }
-    markChannelRead(activeChannelId, activeReadAt);
+    // Passive channel-open: advance the marker to the newest top-level message
+    // only (NIP-RS Option 1). `topLevelOnly` stops the read-state layer folding
+    // in observed thread replies, so opening a channel clears the timeline but
+    // leaves thread badges intact until each thread is opened — and leaves the
+    // channel's sidebar dot lit (the reply is still unread for the channel).
+    markChannelRead(activeChannelId, activeReadAt, { topLevelOnly: true });
   }, [activeChannel?.isMember, activeChannelId, activeReadAt, markChannelRead]);
+  // Install the NIP-RS parent resolver: every `thread:<root>` context evaluated
+  // while this channel is active belongs to it (getThreadReadAt is only ever
+  // called on the active channel's timeline messages), so the parent is always
+  // the active channel. Non-thread keys (channels) have no parent → null, which
+  // degrades effective() to the own term. Cleared on channel leave / unmount so
+  // a stale channel id never becomes the parent of another channel's threads.
+  React.useEffect(() => {
+    if (!activeChannelId) {
+      setContextParentResolver(null);
+      return;
+    }
+    setContextParentResolver((contextId) =>
+      contextId.startsWith("thread:") ? activeChannelId : null,
+    );
+    return () => setContextParentResolver(null);
+  }, [activeChannelId, setContextParentResolver]);
   const {
     activeChannelTitle,
     activeDmAvatarUrl,
@@ -494,10 +533,15 @@ export function ChannelScreen({
     return computeThreadUnreadMarker(replies, threadOpenFrontierSeconds);
   }, [openThreadHeadId, threadMessages, threadOpenFrontierSeconds]);
   // Per-row subtree unread counts for the in-panel thread summary rows. Scoped
-  // to the open thread's subtree and measured against the open-time frontier
-  // snapshot (so the mark-read-on-open advance doesn't zero the badges); see
-  // computeThreadReplyUnreadCounts for the suppress-on-expand and no-"0"-badge
-  // rules.
+  // to the open thread's subtree and measured against the LIVE root read marker
+  // (getThreadReadAt(rootId)) so the badge drops on the same gesture that marks
+  // the expanded branch read — expand advances that exact root marker via
+  // markThreadRead(rootId, ...). readStateVersion is the sole signal the marker
+  // moved (getThreadReadAt is a stable-identity callback); see consumer
+  // threadUnreadCounts below for the same pattern. Cross-branch chronological
+  // clear is intended (NIP-RS); the expandedSubtreeReplyIds gate still
+  // suppresses the expanded branch's own revealed-child rows.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates getThreadReadAt without changing its identity
   const threadReplyUnreadCounts = React.useMemo(
     () =>
       openThreadHeadId
@@ -511,14 +555,15 @@ export function ChannelScreen({
                 getReplyDescendantIdsForMessage(id),
               ),
             ),
-            frontierSeconds: threadOpenFrontierSeconds,
+            frontierSeconds: getThreadReadAt(openThreadHeadId),
           })
         : new Map<string, number>(),
     [
       openThreadHeadId,
       threadMessages,
       timelineMessages,
-      threadOpenFrontierSeconds,
+      getThreadReadAt,
+      readStateVersion,
       expandedThreadReplyIds,
       getReplyDescendantIdsForMessage,
     ],

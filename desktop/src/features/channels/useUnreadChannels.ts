@@ -264,6 +264,7 @@ export function useUnreadChannels(
     isReady: isReadStateReady,
     markContextRead,
     drainSyncedAdvances,
+    setContextParentResolver,
     readStateVersion,
   } = useReadState(pubkey, relayClient);
 
@@ -353,12 +354,28 @@ export function useUnreadChannels(
     bumpLatestVersion();
   }, [pubkey, relayClient]);
 
+  // `topLevelOnly` is the passive channel-open path (NIP-RS Option 1): the
+  // caller's `readAt` is already the newest TOP-LEVEL message, so the marker
+  // must land exactly there without folding in `observedLatest` (which counts
+  // thread replies) and without clearing observed refs. Leaving the refs intact
+  // keeps the sidebar dot lit for a channel whose only unread is an unopened
+  // thread reply — viewing the channel no longer absorbs the reply, so the dot
+  // persists until an explicit mark-read (Esc, sidebar, mark-all) or a newer
+  // top-level message advances the channel marker past it. Those explicit
+  // "mark read" actions omit the flag and keep the fold, since they mean
+  // "clear everything in this channel."
   const markChannelRead = React.useCallback(
-    (channelId: string, readAt: string | null | undefined) => {
+    (
+      channelId: string,
+      readAt: string | null | undefined,
+      { topLevelOnly = false }: { topLevelOnly?: boolean } = {},
+    ) => {
       if (forcedUnreadRef.current.delete(channelId)) {
         bumpLatestVersion();
       }
-      const observedLatest = latestByChannelRef.current.get(channelId);
+      const observedLatest = topLevelOnly
+        ? undefined
+        : latestByChannelRef.current.get(channelId);
       const { markAt, clearObserved } = resolveChannelReadMarker(
         readAt,
         observedLatest,
@@ -865,6 +882,7 @@ export function useUnreadChannels(
     // should include in memo deps.
     getEffectiveTimestamp,
     readStateVersion,
+    setContextParentResolver,
     participatedRootIds: participatedRootIdsRef.current as ReadonlySet<string>,
     authoredRootIds: authoredRootIdsRef.current as ReadonlySet<string>,
     threadActivityItems: threadActivityRef.current,
