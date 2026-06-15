@@ -4,6 +4,7 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod leader;
 mod observer;
 mod pool;
 mod queue;
@@ -1295,6 +1296,7 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
+        leader: Arc::new(leader::FileLeaderCheck::from_env()),
     });
 
     if !config.memory_enabled {
@@ -1339,6 +1341,13 @@ async fn tokio_main() -> Result<()> {
     };
     let mut typing_channels: HashMap<Uuid, ThreadTags> = HashMap::new();
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
+
+    // ── Step 6c2: Leader-status refresh timer ────────────────────────────────
+    // Re-reads the per-key leader lock every 5s so a leadership change (another
+    // instance claiming/releasing this agent) takes effect without a restart.
+    // Faster cadence than the 30s maintenance tick because failover latency is
+    // user-visible. Cheap: one file read per known agent key.
+    let mut leader_refresh = tokio::time::interval(Duration::from_secs(5));
 
     // ── Step 6d: Maintenance (slot refill + queue compaction) ────────────────
     // Runs at the TOP of every loop iteration via Instant check — cannot be
@@ -1828,11 +1837,15 @@ async fn tokio_main() -> Result<()> {
                                 prompt_tag,
                             });
                             // 👀 — immediate "seen" reaction, only if the event
-                            // was actually queued (not dropped by DedupMode::Drop).
+                            // was actually queued (not dropped by DedupMode::Drop)
+                            // AND this instance is the leader for this agent key.
+                            // The reaction fires at queue-push time, BEFORE
+                            // dispatch, so the dispatch gate alone would let
+                            // every sharing instance emit a redundant 👀.
                             // Fire-and-forget: on rare fast-failure paths the
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
-                            if accepted {
+                            if accepted && ctx.leader.is_leader(&pubkey_hex) {
                                 let rc = ctx.rest_client.clone();
                                 tokio::spawn(async move {
                                     pool::reaction_add(&rc, &event_id_hex, "👀").await;
@@ -1940,6 +1953,14 @@ async fn tokio_main() -> Result<()> {
                             }
                         }
                     }
+                    None
+                }
+                _ = leader_refresh.tick() => {
+                    let _ = result_rx;
+                    // Re-read leader lock(s) so claim/release/failover by
+                    // another instance flips this process between active and
+                    // observer without a restart.
+                    ctx.leader.refresh();
                     None
                 }
                 _ = shutdown_rx.changed() => {
@@ -2177,6 +2198,14 @@ fn dispatch_pending(
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
 ) -> Vec<(Uuid, ThreadTags)> {
+    // Multi-instance leader gate: when this agent's keypair is shared across
+    // several Buzz instances, only the leader promotes queued events to
+    // prompts. Non-leaders keep the queue populated (so the UI still renders
+    // the conversation) but never dispatch. Solo dev has no lock file, so this
+    // is unconditionally `true` and behavior is unchanged.
+    if !ctx.leader.is_leader(&ctx.agent_keys.public_key().to_hex()) {
+        return Vec::new();
+    }
     let mut dispatched_channels = Vec::new();
     loop {
         let batch = match queue.flush_next() {
