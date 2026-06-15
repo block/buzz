@@ -407,8 +407,14 @@ export function ChannelScreen({
         timelineMessages,
         openFrontierSeconds,
         isActiveChannelForcedUnread,
+        currentPubkey,
       ),
-    [isActiveChannelForcedUnread, openFrontierSeconds, timelineMessages],
+    [
+      currentPubkey,
+      isActiveChannelForcedUnread,
+      openFrontierSeconds,
+      timelineMessages,
+    ],
   );
   const directReplyIdsByParentId = React.useMemo(() => {
     const map = new Map<string, string[]>();
@@ -536,8 +542,17 @@ export function ChannelScreen({
       return { firstUnreadReplyId: null, unreadCount: 0 };
     }
     const replies = threadMessages.map((entry) => entry.message);
-    return computeThreadUnreadMarker(replies, threadOpenFrontierSeconds);
-  }, [openThreadHeadId, threadMessages, threadOpenFrontierSeconds]);
+    return computeThreadUnreadMarker(
+      replies,
+      threadOpenFrontierSeconds,
+      currentPubkey,
+    );
+  }, [
+    currentPubkey,
+    openThreadHeadId,
+    threadMessages,
+    threadOpenFrontierSeconds,
+  ]);
   // Per-row subtree unread counts for the in-panel thread summary rows. Scoped
   // to the open thread's subtree and measured against the LIVE root read marker
   // (getThreadReadAt(rootId)) so the badge drops on the same gesture that marks
@@ -562,6 +577,7 @@ export function ChannelScreen({
               ),
             ),
             frontierSeconds: getThreadReadAt(openThreadHeadId),
+            currentPubkey,
           })
         : new Map<string, number>(),
     [
@@ -572,38 +588,73 @@ export function ChannelScreen({
       readStateVersion,
       expandedThreadReplyIds,
       getReplyDescendantIdsForMessage,
+      currentPubkey,
     ],
   );
-  // Compute per-thread unread counts for summary rows in the main timeline.
-  // Only compute for threads the user has notification interest in — this
-  // aligns the badge display with the read-state write path.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates getThreadReadAt and isNotifiedForThread without changing their identity
-  const threadUnreadCounts = React.useMemo(() => {
-    const counts = new Map<string, number>();
+  // Snapshot per-thread read frontiers at channel-open time. Same pattern as
+  // openFrontierRef: captured during render (before the mark-read effect) so
+  // the badge reflects "what was unread on open" rather than the post-advance
+  // frontier. Keyed by activeChannelId → rootId → frontier value.
+  const threadBadgeFrontiersRef = React.useRef(
+    new Map<string, Map<string, number | null>>(),
+  );
+  if (activeChannelId) {
+    let channelFrontiers = threadBadgeFrontiersRef.current.get(activeChannelId);
+    if (!channelFrontiers) {
+      channelFrontiers = new Map();
+      threadBadgeFrontiersRef.current.set(activeChannelId, channelFrontiers);
+    }
     for (const message of timelineMessages) {
       if (message.parentId) continue;
       if (!isNotifiedForThread(message.id)) continue;
-      // Only compute for messages that have thread replies
+      if (channelFrontiers.has(message.id)) continue;
+      // Only capture for messages that have thread replies
+      const hasReplies = timelineMessages.some(
+        (m) => m.parentId === message.id,
+      );
+      if (!hasReplies) continue;
+      channelFrontiers.set(message.id, getThreadReadAt(message.id));
+    }
+  }
+  // Clear the thread badge frontiers on channel leave (same cleanup as
+  // openFrontierRef) so re-visiting captures fresh snapshots.
+  React.useEffect(() => {
+    const channelId = activeChannelId;
+    if (!channelId) return;
+    return () => {
+      threadBadgeFrontiersRef.current.delete(channelId);
+    };
+  }, [activeChannelId]);
+  // Compute per-thread unread counts for summary rows in the main timeline.
+  // Only compute for threads the user has notification interest in — this
+  // aligns the badge display with the read-state write path. Uses the
+  // snapshotted frontier (threadBadgeFrontiersRef) so badges are stable for
+  // the session and don't flash when markChannelRead advances the channel
+  // marker.
+  const threadUnreadCounts = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    const channelFrontiers = activeChannelId
+      ? threadBadgeFrontiersRef.current.get(activeChannelId)
+      : undefined;
+    for (const message of timelineMessages) {
+      if (message.parentId) continue;
+      if (!isNotifiedForThread(message.id)) continue;
       const directReplies = timelineMessages.filter(
         (m) => m.parentId === message.id,
       );
       if (directReplies.length === 0) continue;
-      const frontier = getThreadReadAt(message.id);
+      const frontier = channelFrontiers?.get(message.id) ?? null;
       const { unreadCount } = computeThreadUnreadMarker(
         directReplies,
         frontier,
+        currentPubkey,
       );
       if (unreadCount > 0) {
         counts.set(message.id, unreadCount);
       }
     }
     return counts;
-  }, [
-    timelineMessages,
-    getThreadReadAt,
-    isNotifiedForThread,
-    readStateVersion,
-  ]);
+  }, [activeChannelId, currentPubkey, timelineMessages, isNotifiedForThread]);
   const editTargetMessage = React.useMemo(
     () =>
       timelineMessages.find((message) => message.id === editTargetId) ?? null,
