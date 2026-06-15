@@ -199,7 +199,6 @@ export const MessageRow = React.memo(
               mentionNames={mentionNames}
               mentionPubkeysByName={mentionPubkeysByName}
               searchQuery={searchQuery}
-              tight
               videoReviewContext={videoReviewContext}
             />
           );

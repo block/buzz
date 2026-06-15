@@ -139,7 +139,7 @@ function MessageItem({
           )}
         >
           {isAssistant ? (
-            <Markdown compact content={text || " "} />
+            <Markdown content={text || " "} />
           ) : (
             <>
               <p className="whitespace-pre-wrap break-words">{text}</p>
@@ -166,7 +166,7 @@ function ThoughtItem({
         <ChevronDown className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180" />
       </summary>
       <div className="py-2 pl-5 text-sm leading-6 text-muted-foreground">
-        <Markdown compact content={item.text.trim() || " "} />
+        <Markdown content={item.text.trim() || " "} />
       </div>
     </details>
   );

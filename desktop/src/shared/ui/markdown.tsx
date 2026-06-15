@@ -201,7 +201,6 @@ function messageLinkUrlTransform(value: string, key: string): string {
 type MarkdownProps = {
   channelNames?: string[];
   className?: string;
-  compact?: boolean;
   content: string;
   customEmoji?: CustomEmoji[];
   imetaByUrl?: ImetaLookup;
@@ -210,11 +209,8 @@ type MarkdownProps = {
   mentionNames?: string[];
   mentionPubkeysByName?: Record<string, string>;
   searchQuery?: string;
-  tight?: boolean;
   videoReviewContext?: VideoReviewContext;
 };
-
-type MarkdownVariant = "default" | "compact" | "tight";
 
 /**
  * Inline image embed with click-to-zoom lightbox and right-click download.
@@ -730,7 +726,6 @@ function SyntaxHighlightedCode({
   );
 }
 function createMarkdownComponents(
-  variant: MarkdownVariant,
   channels: Channel[],
   onOpenChannel: (channelId: string) => void,
   onOpenMessageLink: (link: ParsedMessageLink) => void,
@@ -739,18 +734,10 @@ function createMarkdownComponents(
   agentMentionPubkeysByName?: Record<string, string>,
   interactive = true,
 ): Components {
-  const paragraphClassName =
-    variant === "tight"
-      ? "leading-5"
-      : variant === "compact"
-        ? "leading-6"
-        : "leading-7";
-  const listItemClassName =
-    variant === "tight" ? "my-0.5 [&_p]:inline" : "my-1 [&_p]:inline";
+  const paragraphClassName = "leading-6";
+  const listItemClassName = "my-1 [&_p]:inline";
   const listClassName =
-    variant === "tight"
-      ? "space-y-0.5 pl-6 marker:text-muted-foreground"
-      : "space-y-1 pl-6 marker:text-muted-foreground";
+    "space-y-1 pl-6 marker:text-muted-foreground";
 
   return {
     a: ({ children, href, ...props }) => {
@@ -1093,7 +1080,6 @@ function createMarkdownComponents(
 function MarkdownInner({
   channelNames,
   className,
-  compact = false,
   content,
   customEmoji,
   imetaByUrl,
@@ -1102,14 +1088,8 @@ function MarkdownInner({
   mentionNames,
   mentionPubkeysByName,
   searchQuery,
-  tight = false,
   videoReviewContext,
 }: MarkdownProps) {
-  const variant: MarkdownVariant = tight
-    ? "tight"
-    : compact
-      ? "compact"
-      : "default";
   const { channels: rawChannels } = useChannelNavigation();
   const channels = useStableArray(rawChannels);
   const { goChannel } = useAppNavigation();
@@ -1117,7 +1097,6 @@ function MarkdownInner({
   const components = React.useMemo(
     () =>
       createMarkdownComponents(
-        variant,
         channels,
         (channelId) => {
           void goChannel(channelId);
@@ -1142,7 +1121,6 @@ function MarkdownInner({
       ),
     [
       goChannel,
-      variant,
       channels,
       imetaByUrl,
       mentionPubkeysByName,
@@ -1198,52 +1176,18 @@ function MarkdownInner({
   return (
     <div
       className={cn(
-        tight
-          ? [
-              "max-w-none break-words text-sm leading-5 text-foreground/90",
-              // Reset first/last
-              "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
-              // Base owl: p+p, list+p, etc.
-              "[&>*+*]:mt-2",
-              // Headings: flat push/pull — size does the hierarchy work
-              "[&>*+h1]:mt-2.5 [&>*+h2]:mt-2.5 [&>*+h3]:mt-2.5",
-              "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5",
-              // Blockquotes: breathe above and below
-              "[&>*+blockquote]:mt-3 [&>blockquote+*]:mt-3",
-              // Code blocks: breathe above and below
-              "[&>*+[data-code-block]]:mt-3 [&>[data-code-block]+*]:mt-3",
-              // Tables: breathe above and below
-              "[&>*+[data-table-block]]:mt-3 [&>[data-table-block]+*]:mt-3",
-              // hr: clear section divider
-              "[&>*+hr]:mt-3.5 [&>hr+*]:mt-3.5",
-              // Lists after paragraphs: tighter to feel related
-              "[&>p+ul]:mt-1 [&>p+ol]:mt-1 [&>div+ul]:mt-1 [&>div+ol]:mt-1",
-            ].join(" ")
-          : compact
-            ? [
-                "max-w-none break-words text-base text-foreground/90",
-                "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
-                "[&>*+*]:mt-2",
-                "[&>*+h1]:mt-3 [&>*+h2]:mt-3 [&>*+h3]:mt-3",
-                "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5",
-                "[&>*+blockquote]:mt-3 [&>blockquote+*]:mt-3",
-                "[&>*+[data-code-block]]:mt-3 [&>[data-code-block]+*]:mt-3",
-                "[&>*+[data-table-block]]:mt-3 [&>[data-table-block]+*]:mt-3",
-                "[&>*+hr]:mt-3.5 [&>hr+*]:mt-3.5",
-                "[&>p+ul]:mt-1 [&>p+ol]:mt-1 [&>div+ul]:mt-1 [&>div+ol]:mt-1",
-              ].join(" ")
-            : [
-                "max-w-none break-words text-sm leading-7 text-foreground/90",
-                "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
-                "[&>*+*]:mt-3",
-                "[&>*+h1]:mt-3.5 [&>*+h2]:mt-3.5 [&>*+h3]:mt-3.5",
-                "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5",
-                "[&>*+blockquote]:mt-3.5 [&>blockquote+*]:mt-3.5",
-                "[&>*+[data-code-block]]:mt-3.5 [&>[data-code-block]+*]:mt-3.5",
-                "[&>*+[data-table-block]]:mt-3.5 [&>[data-table-block]+*]:mt-3.5",
-                "[&>*+hr]:mt-4 [&>hr+*]:mt-4",
-                "[&>p+ul]:mt-1.5 [&>p+ol]:mt-1.5 [&>div+ul]:mt-1.5 [&>div+ol]:mt-1.5",
-              ].join(" "),
+        [
+          "max-w-none break-words text-sm leading-6 text-foreground/90",
+          "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+          "[&>*+*]:mt-3",
+          "[&>*+h1]:mt-3.5 [&>*+h2]:mt-3.5 [&>*+h3]:mt-3.5",
+          "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5",
+          "[&>*+blockquote]:mt-3.5 [&>blockquote+*]:mt-3.5",
+          "[&>*+[data-code-block]]:mt-3.5 [&>[data-code-block]+*]:mt-3.5",
+          "[&>*+[data-table-block]]:mt-3.5 [&>[data-table-block]+*]:mt-3.5",
+          "[&>*+hr]:mt-4 [&>hr+*]:mt-4",
+          "[&>p+ul]:mt-1.5 [&>p+ol]:mt-1.5 [&>div+ul]:mt-1.5 [&>div+ol]:mt-1.5",
+        ].join(" "),
         className,
       )}
     >
@@ -1259,10 +1203,8 @@ export const Markdown = React.memo(
   (prev, next) =>
     prev.content === next.content &&
     prev.className === next.className &&
-    prev.compact === next.compact &&
     prev.customEmoji === next.customEmoji &&
     prev.interactive === next.interactive &&
-    prev.tight === next.tight &&
     prev.agentMentionPubkeysByName === next.agentMentionPubkeysByName &&
     prev.mentionPubkeysByName === next.mentionPubkeysByName &&
     shallowArrayEqual(prev.mentionNames, next.mentionNames) &&

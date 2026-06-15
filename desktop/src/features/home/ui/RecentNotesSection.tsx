@@ -85,7 +85,7 @@ export function RecentNotesSection({
                   </span>
                 </div>
                 <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-                  <Markdown compact content={note.content} />
+                  <Markdown content={note.content} />
                 </div>
               </div>
             </div>

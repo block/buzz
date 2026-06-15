@@ -213,7 +213,7 @@ export function NoteCard({
         ) : null}
 
         <div className="mt-0.5 pb-3 text-sm text-foreground">
-          <Markdown content={note.content} tight />
+          <Markdown content={note.content} />
         </div>
 
         <div className="flex flex-wrap items-center gap-5 text-xs font-medium">
