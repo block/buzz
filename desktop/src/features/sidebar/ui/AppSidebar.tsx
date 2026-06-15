@@ -9,6 +9,10 @@ import {
   MessageCirclePlus,
   Zap,
 } from "lucide-react";
+import {
+  isRelayConnectionDegraded,
+  useRelayConnection,
+} from "@/shared/api/useRelayConnection";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import {
   isRelayUnreachableError,
@@ -281,6 +285,18 @@ export function AppSidebar({
   } = useChannelSections(currentPubkey);
 
   const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
+
+  // The sidebar reconnect prompt must surface the moment the relay drops, not
+  // only after `channelsQuery` finally errors (it has a 60s staleTime +
+  // refetchInterval, so the error lags 60-120s behind a dropped socket).
+  // OR-in the live, debounced connection state — same signal that drives
+  // ConnectionBanner — so the prompt flips within ~2s of degradation.
+  const relayConnectionState = useRelayConnection();
+  const hasRelayUnreachableError = errorMessage
+    ? isRelayUnreachableError(errorMessage)
+    : false;
+  const isRelayConnectionDegradedNow =
+    hasRelayUnreachableError || isRelayConnectionDegraded(relayConnectionState);
 
   const [createSectionState, setCreateSectionState] = React.useState<{
     open: boolean;
@@ -722,30 +738,28 @@ export function AppSidebar({
             </>
           ) : null}
 
-          {errorMessage ? (
-            isRelayUnreachableError(errorMessage) ? (
-              <div
-                className="px-3 py-2 text-sm"
-                data-testid="sidebar-relay-unreachable"
+          {isRelayConnectionDegradedNow ? (
+            <div
+              className="px-3 py-2 text-sm"
+              data-testid="sidebar-relay-unreachable"
+            >
+              <span className="text-muted-foreground">
+                {RELAY_UNREACHABLE_SHORT}{" "}
+              </span>
+              <button
+                className="text-primary hover:underline disabled:opacity-50"
+                data-testid="sidebar-reconnect"
+                disabled={isReconnectPending}
+                onClick={() => void reconnect()}
+                type="button"
               >
-                <span className="text-muted-foreground">
-                  {RELAY_UNREACHABLE_SHORT}{" "}
-                </span>
-                <button
-                  className="text-primary hover:underline disabled:opacity-50"
-                  data-testid="sidebar-reconnect"
-                  disabled={isReconnectPending}
-                  onClick={() => void reconnect()}
-                  type="button"
-                >
-                  {isReconnectPending ? "Reconnecting…" : "Reconnect"}
-                </button>
-              </div>
-            ) : (
-              <div className="px-3 py-2 text-sm text-destructive">
-                {errorMessage}
-              </div>
-            )
+                {isReconnectPending ? "Reconnecting…" : "Reconnect"}
+              </button>
+            </div>
+          ) : errorMessage ? (
+            <div className="px-3 py-2 text-sm text-destructive">
+              {errorMessage}
+            </div>
           ) : null}
         </SidebarContent>
 
