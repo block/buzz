@@ -132,7 +132,7 @@ const UPLOADED_PNG_DESCRIPTOR = {
 
 async function openAnimatedTab(
   page: import("@playwright/test").Page,
-  options: { cameraDelayMs?: number } = {},
+  options: { cameraDelayMs?: number; holdCamera?: boolean } = {},
 ) {
   await installFakeCamera(page, options);
   await installMockBridge(page, {
@@ -200,8 +200,12 @@ test.describe("animated avatar screenshots", () => {
     const previewSlot = page.getByTestId(
       "profile-avatar-animated-preview-slot",
     );
-    await expect(page.getByLabel("Starting camera")).toBeVisible();
-    await expect(previewSlot.getByLabel("Starting camera")).toBeVisible();
+    await expect(
+      page.getByRole("status").filter({ hasText: "Starting camera" }),
+    ).toBeVisible();
+    await expect(
+      previewSlot.getByRole("status").filter({ hasText: "Starting camera" }),
+    ).toBeVisible();
     await expect(page.getByTestId("profile-avatar-preview")).toHaveCount(0);
     await expect(
       page.getByTestId("profile-avatar-animated-record"),
