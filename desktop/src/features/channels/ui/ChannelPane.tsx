@@ -82,6 +82,7 @@ type ChannelPaneProps = {
   onExpandThreadReplies: (message: TimelineMessage) => void;
   onJoinChannel?: () => Promise<void>;
   onOpenAgentSession: (pubkey: string) => void;
+  onOpenAgentWindow?: (pubkey: string) => void;
   onOpenDm?: (pubkeys: string[]) => void;
   onOpenMembers?: () => void;
   onOpenProfilePanel: (pubkey: string) => void;
@@ -223,6 +224,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onExpandThreadReplies,
   onJoinChannel,
   onOpenAgentSession,
+  onOpenAgentWindow,
   onOpenDm,
   onOpenMembers,
   onOpenProfilePanel,
@@ -759,6 +761,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                           agents={activityAgents}
                           channelId={activeChannel?.id ?? null}
                           onOpenAgentSession={onOpenAgentSession}
+                          onOpenAgentWindow={onOpenAgentWindow}
                           openAgentSessionPubkey={openAgentSessionPubkey}
                           profiles={profiles}
                           typingBotPubkeys={composerBotTypingPubkeys}
@@ -831,6 +834,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                       agents={activityAgents}
                       channelId={activeChannel?.id ?? null}
                       onOpenAgentSession={onOpenAgentSession}
+                      onOpenAgentWindow={onOpenAgentWindow}
                       openAgentSessionPubkey={openAgentSessionPubkey}
                       profiles={profiles}
                       typingBotPubkeys={threadComposerBotTypingPubkeys}
@@ -875,6 +879,11 @@ export const ChannelPane = React.memo(function ChannelPane({
                     onOpenProfilePanel(selectedAgent.pubkey)
                   }
                   onClose={onCloseAgentSession}
+                  onOpenWindow={
+                    onOpenAgentWindow
+                      ? () => onOpenAgentWindow(selectedAgent.pubkey)
+                      : undefined
+                  }
                   widthPx={threadPanelWidthPx}
                 />
               );

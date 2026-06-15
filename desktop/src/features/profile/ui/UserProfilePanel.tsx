@@ -162,7 +162,7 @@ export function UserProfilePanel({
   const contactListQuery = useContactListQuery(currentPubkey);
   const followMutation = useFollowMutation(currentPubkey);
   const unfollowMutation = useUnfollowMutation(currentPubkey);
-  const { onOpenAgentSession } = useAgentSession();
+  const { onOpenAgentSession, onOpenAgentWindow } = useAgentSession();
   const { goChannel } = useAppNavigation();
 
   const profile = profileQuery.data;
@@ -197,6 +197,7 @@ export function UserProfilePanel({
   const isSelf =
     currentPubkey !== undefined && pubkeyLower === currentPubkey.toLowerCase();
   const canViewActivity = isOwner === true && Boolean(onOpenAgentSession);
+  const canOpenActivityWindow = isOwner === true && Boolean(onOpenAgentWindow);
   const isFollowing =
     !isSelf &&
     (contactListQuery.data?.contacts.some(
@@ -242,6 +243,11 @@ export function UserProfilePanel({
     onClose();
     onOpenAgentSession?.(pubkey);
   }, [onClose, onOpenAgentSession, pubkey]);
+
+  const handleOpenActivityWindow = React.useCallback(() => {
+    onClose();
+    onOpenAgentWindow?.(pubkey);
+  }, [onClose, onOpenAgentWindow, pubkey]);
 
   const handleOpenChannel = React.useCallback(
     (channelId: string) => {
@@ -318,6 +324,7 @@ export function UserProfilePanel({
         <ProfileSummaryView
           canEditAgent={canEditAgent}
           canViewActivity={canViewActivity}
+          canOpenActivityWindow={canOpenActivityWindow}
           channelCount={profileChannels.length}
           channelIdToName={channelIdToName}
           channelsLoading={channelsQuery.isLoading}
@@ -326,6 +333,7 @@ export function UserProfilePanel({
           handleEditAgent={handleEditAgent}
           handleMessage={handleMessage}
           handleOpenActivity={handleOpenActivity}
+          handleOpenActivityWindow={handleOpenActivityWindow}
           isBot={isBot}
           isFollowing={isFollowing}
           isOwner={isOwner}

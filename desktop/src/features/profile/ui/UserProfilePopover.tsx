@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Activity } from "lucide-react";
+import { Activity, PictureInPicture2 } from "lucide-react";
 
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import {
@@ -84,13 +84,14 @@ export function UserProfilePopover({
   });
   const userStatusQuery = useUserStatusQuery(open ? [pubkey] : []);
 
-  const { onOpenAgentSession } = useAgentSession();
+  const { onOpenAgentSession, onOpenAgentWindow } = useAgentSession();
   const { openProfilePanel } = useProfilePanel();
   const relayAgent = relayAgentsQuery.data?.find((a) => a.pubkey === pubkey);
   const managedAgent = managedAgentsQuery.data?.find(
     (a) => a.pubkey === pubkey,
   );
   const canViewActivity = role === "bot" && Boolean(onOpenAgentSession);
+  const canOpenActivityWindow = role === "bot" && Boolean(onOpenAgentWindow);
   const profile = profileQuery.data;
   const presenceStatus = presenceQuery.data?.[pubkey.toLowerCase()];
   const userStatus = userStatusQuery.data?.[pubkey.toLowerCase()];
@@ -286,6 +287,21 @@ export function UserProfilePopover({
             >
               <Activity className="h-3.5 w-3.5 text-muted-foreground" />
               View activity log
+            </button>
+          ) : null}
+
+          {canOpenActivityWindow ? (
+            <button
+              className="flex w-full items-center gap-2 rounded-lg border border-border/60 px-3 py-2 text-left text-xs font-medium text-foreground transition-colors hover:bg-muted/50"
+              data-testid={`user-profile-open-activity-window-${pubkey}`}
+              onClick={() => {
+                setOpen(false);
+                onOpenAgentWindow?.(pubkey);
+              }}
+              type="button"
+            >
+              <PictureInPicture2 className="h-3.5 w-3.5 text-muted-foreground" />
+              Open conversation window
             </button>
           ) : null}
         </div>

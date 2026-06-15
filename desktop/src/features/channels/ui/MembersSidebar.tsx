@@ -49,6 +49,7 @@ type MembersSidebarProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onViewActivity?: (pubkey: string) => void;
+  onOpenActivityWindow?: (pubkey: string) => void;
 };
 
 export function MembersSidebar({
@@ -57,6 +58,7 @@ export function MembersSidebar({
   open,
   onOpenChange,
   onViewActivity,
+  onOpenActivityWindow,
 }: MembersSidebarProps) {
   const channelId = channel?.id ?? null;
   const queryClient = useQueryClient();
@@ -215,6 +217,14 @@ export function MembersSidebar({
             ? (pubkey: string) => {
                 onOpenChange(false);
                 onViewActivity(pubkey);
+              }
+            : undefined
+        }
+        onOpenActivityWindow={
+          onOpenActivityWindow
+            ? (pubkey: string) => {
+                onOpenChange(false);
+                onOpenActivityWindow(pubkey);
               }
             : undefined
         }

@@ -2,6 +2,7 @@ import {
   Activity,
   Ellipsis,
   Pencil,
+  PictureInPicture2,
   Play,
   RotateCcw,
   Shield,
@@ -49,6 +50,7 @@ type MembersSidebarMemberCardProps = {
   onOpenProfile?: (pubkey: string) => void;
   onRemoveMember: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
+  onOpenActivityWindow?: (pubkey: string) => void;
   presenceStatus?: PresenceStatus | null;
   profileAvatarUrl?: string | null;
 };
@@ -101,6 +103,7 @@ export function MembersSidebarMemberCard({
   onOpenProfile,
   onRemoveMember,
   onViewActivity,
+  onOpenActivityWindow,
   presenceStatus,
   profileAvatarUrl,
 }: MembersSidebarMemberCardProps) {
@@ -110,8 +113,15 @@ export function MembersSidebarMemberCard({
     memberIsBot &&
     managedAgent?.backend.type === "local" &&
     Boolean(onViewActivity);
+  const canOpenActivityWindow =
+    memberIsBot &&
+    managedAgent?.backend.type === "local" &&
+    Boolean(onOpenActivityWindow);
   const hasActions = memberIsBot
-    ? Boolean(managedAgent) || canRemoveMember || canViewActivity
+    ? Boolean(managedAgent) ||
+      canRemoveMember ||
+      canViewActivity ||
+      canOpenActivityWindow
     : canRemoveMember || canChangeRole;
 
   const memberIdentity = (
@@ -187,6 +197,7 @@ export function MembersSidebarMemberCard({
       {hasActions ? (
         <MemberActionsMenu
           canChangeRole={canChangeRole}
+          canOpenActivityWindow={canOpenActivityWindow}
           canRemoveMember={canRemoveMember}
           canViewActivity={canViewActivity}
           disabled={disabled}
@@ -196,6 +207,7 @@ export function MembersSidebarMemberCard({
           onChangeRole={onChangeRole}
           onEditRespondTo={onEditRespondTo}
           onManagedAgentAction={onManagedAgentAction}
+          onOpenActivityWindow={onOpenActivityWindow}
           onRemoveMember={onRemoveMember}
           onViewActivity={onViewActivity}
         />
@@ -208,6 +220,7 @@ const PEOPLE_ROLES = ["admin", "member", "guest"] as const;
 
 function MemberActionsMenu({
   canChangeRole,
+  canOpenActivityWindow,
   canRemoveMember,
   canViewActivity,
   disabled,
@@ -217,10 +230,12 @@ function MemberActionsMenu({
   onChangeRole,
   onEditRespondTo,
   onManagedAgentAction,
+  onOpenActivityWindow,
   onRemoveMember,
   onViewActivity,
 }: {
   canChangeRole: boolean;
+  canOpenActivityWindow: boolean;
   canRemoveMember: boolean;
   canViewActivity: boolean;
   disabled: boolean;
@@ -230,6 +245,7 @@ function MemberActionsMenu({
   onChangeRole: (member: ChannelMember, role: string) => void;
   onEditRespondTo?: (agent: ManagedAgent) => void;
   onManagedAgentAction: (agent: ManagedAgent) => void;
+  onOpenActivityWindow?: (pubkey: string) => void;
   onRemoveMember: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
 }) {
@@ -260,9 +276,20 @@ function MemberActionsMenu({
             View activity
           </DropdownMenuItem>
         ) : null}
+        {canOpenActivityWindow ? (
+          <DropdownMenuItem
+            data-testid={`sidebar-open-activity-window-${member.pubkey}`}
+            onClick={() => onOpenActivityWindow?.(member.pubkey)}
+          >
+            <PictureInPicture2 className="h-4 w-4" />
+            Open in window
+          </DropdownMenuItem>
+        ) : null}
         {memberIsBot && managedAgent ? (
           <>
-            {canViewActivity ? <DropdownMenuSeparator /> : null}
+            {canViewActivity || canOpenActivityWindow ? (
+              <DropdownMenuSeparator />
+            ) : null}
             <DropdownMenuItem
               data-testid={`sidebar-agent-action-${member.pubkey}`}
               disabled={disabled}

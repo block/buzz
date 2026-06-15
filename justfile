@@ -277,6 +277,10 @@ dev *ARGS: _ensure-sidecar-stubs
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
+    # Worktree desktop runs should reuse the canonical dev identity by default
+    # so branch-specific app profiles do not force onboarding again. Override
+    # with BUZZ_SHARE_IDENTITY=0 when intentionally testing an isolated profile.
+    export BUZZ_SHARE_IDENTITY="${BUZZ_SHARE_IDENTITY:-1}"
     source ../scripts/instance-env.sh
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.
@@ -297,6 +301,10 @@ staging *ARGS: _ensure-sidecar-stubs
     cp target/release/buzz "desktop/src-tauri/binaries/buzz-${TARGET}"
     chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
     cd {{desktop_dir}}
+    # Worktree desktop runs should reuse the canonical dev identity by default
+    # so branch-specific app profiles do not force onboarding again. Override
+    # with BUZZ_SHARE_IDENTITY=0 when intentionally testing an isolated profile.
+    export BUZZ_SHARE_IDENTITY="${BUZZ_SHARE_IDENTITY:-1}"
     source ../scripts/instance-env.sh
     export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking

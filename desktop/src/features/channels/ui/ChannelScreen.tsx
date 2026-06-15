@@ -19,6 +19,7 @@ import {
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
+import { openAgentConversationWindow } from "@/features/agents/lib/openAgentConversationWindow";
 import {
   mergeMessages,
   useChannelMessagesQuery,
@@ -420,6 +421,29 @@ export function ChannelScreen({
     setThreadReplyTargetId,
     setThreadScrollTargetId,
   });
+  const handleOpenAgentWindow = React.useCallback(
+    (pubkey: string) => {
+      if (!activeChannel) {
+        return;
+      }
+      const agent = channelAgentSessionAgents.find(
+        (candidate) =>
+          normalizePubkey(candidate.pubkey) === normalizePubkey(pubkey),
+      );
+      if (!agent) {
+        return;
+      }
+      void openAgentConversationWindow({
+        agentPubkey: agent.pubkey,
+        agentName: agent.name,
+        agentStatus: agent.status,
+        channelId: activeChannel.id,
+        channelName: activeChannel.name,
+        channelType: activeChannel.channelType,
+      });
+    },
+    [activeChannel, channelAgentSessionAgents],
+  );
   const { handleOpenProfilePanel, handleCloseProfilePanel, handleOpenDm } =
     useChannelProfilePanel({
       closeAgentSession: handleCloseAgentSession,
@@ -542,7 +566,10 @@ export function ChannelScreen({
   );
 
   return (
-    <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>
+    <AgentSessionProvider
+      onOpenAgentSession={handleOpenAgentSession}
+      onOpenAgentWindow={handleOpenAgentWindow}
+    >
       <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
         <div
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
@@ -624,6 +651,7 @@ export function ChannelScreen({
                   onMarkUnread={handleMarkUnread}
                   onExpandThreadReplies={handleExpandThreadReplies}
                   onOpenAgentSession={handleOpenAgentSession}
+                  onOpenAgentWindow={handleOpenAgentWindow}
                   onOpenDm={handleOpenDm}
                   onOpenProfilePanel={handleOpenProfilePanel}
                   onResetThreadPanelWidth={handleThreadPanelWidthReset}
@@ -667,6 +695,7 @@ export function ChannelScreen({
           open={isMembersSidebarOpen}
           onOpenChange={setIsMembersSidebarOpen}
           onViewActivity={handleOpenAgentSession}
+          onOpenActivityWindow={handleOpenAgentWindow}
         />
       </ProfilePanelProvider>
     </AgentSessionProvider>

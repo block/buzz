@@ -1,4 +1,10 @@
-import { ArrowLeft, CircleDot, Octagon, X } from "lucide-react";
+import {
+  ArrowLeft,
+  CircleDot,
+  Octagon,
+  PictureInPicture2,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
@@ -38,6 +44,7 @@ type AgentSessionThreadPanelProps = {
   profiles?: UserProfileLookup;
   onBackToProfile: () => void;
   onClose: () => void;
+  onOpenWindow?: () => void;
   widthPx: number;
 };
 
@@ -51,6 +58,7 @@ export function AgentSessionThreadPanel({
   profiles,
   onBackToProfile,
   onClose,
+  onOpenWindow,
   widthPx,
 }: AgentSessionThreadPanelProps) {
   const isLive = isManagedAgentActive(agent);
@@ -110,6 +118,25 @@ export function AgentSessionThreadPanel({
             {canInterruptTurn
               ? "Interrupt the current ACP turn without stopping the agent process."
               : "This agent cannot be interrupted from this workspace."}
+          </TooltipContent>
+        </Tooltip>
+      ) : null}
+      {onOpenWindow ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label="Open in conversation window"
+              data-testid="agent-session-open-window"
+              onClick={onOpenWindow}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              <PictureInPicture2 />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="text-xs">
+            Pop out into a floating conversation window.
           </TooltipContent>
         </Tooltip>
       ) : null}

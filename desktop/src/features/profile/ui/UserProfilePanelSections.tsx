@@ -13,6 +13,7 @@ import {
   Hash,
   MessageSquare,
   Pencil,
+  PictureInPicture2,
   Server,
   Terminal,
   UserMinus,
@@ -63,6 +64,7 @@ async function copyToClipboard(value: string, label?: string) {
 export type ProfileSummaryViewProps = {
   canEditAgent: boolean;
   canViewActivity: boolean;
+  canOpenActivityWindow: boolean;
   channelCount: number;
   channelIdToName: Record<string, string>;
   channelsLoading: boolean;
@@ -71,6 +73,7 @@ export type ProfileSummaryViewProps = {
   handleEditAgent: () => void;
   handleMessage: () => void;
   handleOpenActivity: () => void;
+  handleOpenActivityWindow: () => void;
   isBot: boolean;
   isFollowing: boolean;
   isOwner: boolean | undefined;
@@ -95,6 +98,7 @@ export type ProfileSummaryViewProps = {
 export function ProfileSummaryView({
   canEditAgent,
   canViewActivity,
+  canOpenActivityWindow,
   channelCount,
   channelIdToName,
   channelsLoading,
@@ -103,6 +107,7 @@ export function ProfileSummaryView({
   handleEditAgent,
   handleMessage,
   handleOpenActivity,
+  handleOpenActivityWindow,
   isBot,
   isFollowing,
   isOwner,
@@ -185,7 +190,10 @@ export function ProfileSummaryView({
         </div>
       ) : null}
 
-      {showMemoriesIngress || showChannelsIngress || canViewActivity ? (
+      {showMemoriesIngress ||
+      showChannelsIngress ||
+      canViewActivity ||
+      canOpenActivityWindow ? (
         <section className="space-y-2">
           {showMemoriesIngress ? (
             <ProfileIngressRow
@@ -223,6 +231,14 @@ export function ProfileSummaryView({
               label="Activity log"
               onClick={handleOpenActivity}
               testId={`user-profile-view-activity-${pubkey}`}
+            />
+          ) : null}
+          {canOpenActivityWindow ? (
+            <ProfileIngressRow
+              icon={PictureInPicture2}
+              label="Conversation window"
+              onClick={handleOpenActivityWindow}
+              testId={`user-profile-open-activity-window-${pubkey}`}
             />
           ) : null}
         </section>

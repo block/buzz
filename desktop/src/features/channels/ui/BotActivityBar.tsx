@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Loader2 } from "lucide-react";
+import { Loader2, PictureInPicture2 } from "lucide-react";
 
 import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
 import type { TranscriptItem } from "@/features/agents/ui/agentSessionTypes";
@@ -17,6 +17,7 @@ type BotActivityBarProps = {
   agents: BotActivityAgent[];
   channelId?: string | null;
   onOpenAgentSession: (pubkey: string) => void;
+  onOpenAgentWindow?: (pubkey: string) => void;
   openAgentSessionPubkey: string | null;
   profiles?: UserProfileLookup;
   typingBotPubkeys: string[];
@@ -43,6 +44,7 @@ export function BotActivityComposerAction({
   agents,
   channelId = null,
   onOpenAgentSession,
+  onOpenAgentWindow,
   openAgentSessionPubkey,
   profiles,
   typingBotPubkeys,
@@ -222,30 +224,49 @@ export function BotActivityComposerAction({
             const isSelected = selectedPubkey === agent.pubkey.toLowerCase();
 
             return (
-              <button
+              <div
                 className={cn(
-                  "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                  "flex w-full items-center gap-1 rounded-md transition-colors",
                   isSelected
                     ? "bg-primary/10 text-primary"
                     : "text-foreground hover:bg-accent hover:text-accent-foreground",
                 )}
-                data-testid={`bot-activity-composer-item-${agent.pubkey}`}
                 key={agent.pubkey}
-                onClick={() => {
-                  clearHoverTimer();
-                  setOpen(false);
-                  onOpenAgentSession(agent.pubkey);
-                }}
-                type="button"
               >
-                <UserAvatar
-                  avatarUrl={agentAvatarUrl(agent)}
-                  className="!h-6 !w-6 shrink-0 text-[9px]"
-                  displayName={agent.name}
-                />
-                <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground/70" />
-              </button>
+                <button
+                  className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm"
+                  data-testid={`bot-activity-composer-item-${agent.pubkey}`}
+                  onClick={() => {
+                    clearHoverTimer();
+                    setOpen(false);
+                    onOpenAgentSession(agent.pubkey);
+                  }}
+                  type="button"
+                >
+                  <UserAvatar
+                    avatarUrl={agentAvatarUrl(agent)}
+                    className="!h-6 !w-6 shrink-0 text-[9px]"
+                    displayName={agent.name}
+                  />
+                  <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground/70" />
+                </button>
+                {onOpenAgentWindow ? (
+                  <button
+                    aria-label={`Open ${agent.name} in a conversation window`}
+                    className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
+                    data-testid={`bot-activity-composer-window-${agent.pubkey}`}
+                    onClick={() => {
+                      clearHoverTimer();
+                      setOpen(false);
+                      onOpenAgentWindow(agent.pubkey);
+                    }}
+                    type="button"
+                  >
+                    <PictureInPicture2 className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+              </div>
             );
           })}
         </div>
