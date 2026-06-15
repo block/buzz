@@ -2,6 +2,7 @@ import * as React from "react";
 import {
   Virtuoso,
   type FollowOutput,
+  type ListRange,
   type VirtuosoHandle,
 } from "react-virtuoso";
 
@@ -45,6 +46,7 @@ type VirtualizedTimelineMessageListProps = TimelineMessageListProps & {
 };
 
 const FIRST_ITEM_INDEX_BASE = 1_000_000;
+const LOAD_OLDER_RANGE_THRESHOLD = 8;
 
 const TimelineList = React.forwardRef<
   HTMLDivElement,
@@ -196,6 +198,22 @@ export const VirtualizedTimelineMessageList = React.memo(
       return state.firstItemIndex;
     }, [items]);
 
+    const canLoadOlder =
+      hasOlderMessages && !isFetchingOlder && Boolean(onStartReached);
+    const maybeLoadOlder = React.useCallback(() => {
+      if (canLoadOlder) {
+        onStartReached?.();
+      }
+    }, [canLoadOlder, onStartReached]);
+    const handleRangeChanged = React.useCallback(
+      (range: ListRange) => {
+        if (range.startIndex <= firstItemIndex + LOAD_OLDER_RANGE_THRESHOLD) {
+          maybeLoadOlder();
+        }
+      },
+      [firstItemIndex, maybeLoadOlder],
+    );
+
     const components = React.useMemo(
       () => ({
         Footer: () => <div aria-hidden className={bottomFooterClassName} />,
@@ -252,14 +270,11 @@ export const VirtualizedTimelineMessageList = React.memo(
         }}
         overscan={{ main: 800, reverse: 800 }}
         ref={virtuosoRef}
+        rangeChanged={handleRangeChanged}
         scrollerRef={(element) => {
           scrollerRef?.(element instanceof HTMLDivElement ? element : null);
         }}
-        startReached={() => {
-          if (hasOlderMessages && !isFetchingOlder) {
-            onStartReached?.();
-          }
-        }}
+        startReached={maybeLoadOlder}
       />
     );
   },
