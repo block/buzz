@@ -433,6 +433,7 @@ test("shows capped participant stack in group direct message header", async ({
   expect(composerColors?.placeholderColor).not.toBe(composerColors?.textColor);
   await expect(page.getByTestId("chat-header-dm-avatar")).toHaveCount(0);
   await expect(page.getByTestId("chat-header-dm-avatar-stack")).toBeVisible();
+  await expect(page.getByTestId("chat-presence-badge")).toHaveCount(0);
   await expect(
     page.getByTestId("chat-header-dm-avatar-stack-participant"),
   ).toHaveCount(3);

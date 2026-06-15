@@ -117,7 +117,7 @@ export function ChannelScreenHeader({
         <ChannelHeaderStatusBadge
           channelType={activeChannel?.channelType}
           ephemeralDisplay={activeChannelEphemeralDisplay}
-          presenceStatus={activeDmPresenceStatus}
+          presenceStatus={isGroupDm ? null : activeDmPresenceStatus}
         />
       }
       title={activeChannelTitle}
