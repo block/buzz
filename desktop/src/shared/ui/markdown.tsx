@@ -1125,7 +1125,7 @@ function MarkdownInner({
         (link) => {
           // Always route through `goChannel` with `messageId` set: the
           // channel route already handles scroll-into-view + highlight via
-          // `useTimelineScrollManager` + `getEventById` backfill, and works
+          // `useAnchoredScroll` + `getEventById` backfill, and works
           // for both stream-message replies and forum threads. Detecting
           // "the thread root is a forum post" up front would require an
           // event lookup we don't currently have synchronously; the brief

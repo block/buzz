@@ -128,10 +128,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     ? `message-timeline:${channelId ?? "none"}:target:${targetMessageId}`
     : `message-timeline:${channelId ?? "none"}`;
 
-  const messageIds = React.useMemo(
-    () => messages.map((m) => m.id),
-    [messages],
-  );
+  const messageIds = React.useMemo(() => messages.map((m) => m.id), [messages]);
 
   const {
     highlightedMessageId,
