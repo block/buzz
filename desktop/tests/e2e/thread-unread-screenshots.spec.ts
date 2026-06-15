@@ -34,10 +34,11 @@ function emitMockMessage(
     parentEventId?: string;
     pubkey?: string;
     createdAt?: number;
+    mentionPubkeys?: string[];
   },
 ) {
   return page.evaluate(
-    ({ ch, msg, parentEventId, pubkey, ts }) => {
+    ({ ch, msg, parentEventId, pubkey, ts, mentionPubkeys }) => {
       return (
         window as Window & {
           __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
@@ -46,6 +47,7 @@ function emitMockMessage(
             parentEventId?: string | null;
             pubkey?: string;
             createdAt?: number;
+            mentionPubkeys?: string[];
           }) => { id: string; created_at: number; pubkey: string };
         }
       ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
@@ -54,6 +56,7 @@ function emitMockMessage(
         parentEventId: parentEventId ?? undefined,
         pubkey: pubkey ?? undefined,
         createdAt: ts,
+        mentionPubkeys: mentionPubkeys ?? undefined,
       });
     },
     {
@@ -62,6 +65,7 @@ function emitMockMessage(
       parentEventId: options?.parentEventId ?? null,
       pubkey: options?.pubkey ?? TEST_IDENTITIES.alice.pubkey,
       ts: options?.createdAt,
+      mentionPubkeys: options?.mentionPubkeys,
     },
   );
 }
@@ -73,6 +77,11 @@ const UNREAD_OFFSET_SECONDS = 60;
 function unreadTimestamp() {
   return Math.floor(Date.now() / 1000) + UNREAD_OFFSET_SECONDS;
 }
+
+// The pubkey the mock bridge logs in as (mirrors `e2eBridge`'s self identity).
+// Mentioning it clears the notify gate so an external reply lights the sidebar
+// dot without the user having to participate in the thread first.
+const SELF_PUBKEY = "deadbeef".repeat(8);
 
 // Nested replies are collapsed behind a summary row that carries the parent's
 // id (data-thread-head-id). Expanding one level renders that reply's direct
@@ -701,6 +710,56 @@ test.describe("thread unread indicator screenshots", () => {
 
     await page.screenshot({
       path: `${SHOTS}/11-sidebar-dot-persists.png`,
+    });
+  });
+
+  // Regression guard for the all-replies window: when the loaded window holds
+  // ONLY thread replies (the top-level root has scrolled past the history
+  // limit), `latestActiveMessage` is null and `activeReadAt` must NOT fall back
+  // to the channel's `lastMessageAt` — that value is reply-inclusive (a reply's
+  // own timestamp), so advancing the channel marker to it silently absorbs the
+  // unread reply and clears the dot, defeating Fix A. The fix nulls the
+  // fallback so the marker advance is suppressed until a real top-level
+  // position is known; this pins the dot's survival in that window.
+  //
+  // The `all-replies` fixture carries a far-future `lastMessageAt` (standing in
+  // for the backend's reply-inclusive MAX) with no top-level message in its
+  // window — so the buggy fallback would advance the marker past the reply.
+  test("12-sidebar-dot-survives-all-replies-window", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    // Emit ONE reply whose parent root is NOT in the window (orphan parent id),
+    // so the loaded window is all-replies: no top-level message exists for
+    // `latestActiveMessage` to find. The reply mentions the current user so it
+    // clears the notify gate and lights the sidebar dot — the observable this
+    // test asserts on. (Any notify trigger works; a mention is the simplest.
+    // The bug is independent of why the reply is notified.)
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "all-replies");
+    await emitMockMessage(page, "all-replies", "Orphan reply mentioning you", {
+      parentEventId: "mock-root-scrolled-past-window",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      mentionPubkeys: [SELF_PUBKEY],
+      createdAt: unreadTimestamp(),
+    });
+    await expect(page.getByTestId("channel-unread-all-replies")).toBeVisible();
+
+    // View all-replies while the reply is unread. The all-replies window forces
+    // the `activeReadAt` fallback; the bug would advance the channel marker to
+    // the far-future `lastMessageAt` and clear the dot.
+    await page.getByTestId("channel-all-replies").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("all-replies");
+
+    // The crux: leave the channel. Its sidebar dot must remain — the reply is
+    // still unread, and viewing the all-replies window must not absorb it.
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await expect(page.getByTestId("channel-unread-all-replies")).toBeVisible();
+
+    await page.screenshot({
+      path: `${SHOTS}/12-sidebar-dot-all-replies.png`,
     });
   });
 });

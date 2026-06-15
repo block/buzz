@@ -158,9 +158,15 @@ export function ChannelScreen({
     }
     return null;
   }, [messagesQuery.data]);
+  // No `lastMessageAt` fallback: that timestamp is reply-inclusive (the backend
+  // takes MAX(created_at) over kind-9 events without a parent filter), so using
+  // it when the window has no top-level message would advance the channel
+  // marker past an unread reply and clear its thread/sidebar unread — the exact
+  // regression Fix A prevents. null suppresses the marker advance (markChannelRead
+  // early-returns on markAt === null) until a real top-level position is known.
   const activeReadAt = latestActiveMessage
     ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
-    : (activeChannel?.lastMessageAt ?? null);
+    : null;
   // Capture the read frontier as it stood the instant this channel was opened,
   // BEFORE the mark-read effect below advances it to latest. Written during
   // render (not in an effect) so the value is read prior to any effect for
