@@ -2429,6 +2429,14 @@ fn dispatch_heartbeat(
     if *heartbeat_in_flight {
         return;
     }
+    // Multi-instance leader gate: the heartbeat prompt acts autonomously on the
+    // wire (sends messages, approves workflows), so non-leaders must not fire it
+    // — otherwise N instances on a shared key would each self-prompt and act,
+    // the same duplicate-actor bug the dispatch gate prevents. Solo dev has no
+    // lock file, so this is unconditionally `true` and behavior is unchanged.
+    if !ctx.leader.is_leader(&ctx.agent_keys.public_key().to_hex()) {
+        return;
+    }
     let agent = match pool.try_claim(None) {
         Some(a) => a,
         None => return,
@@ -3316,5 +3324,77 @@ mod error_outcome_emission_tests {
     async fn application_error_emits_exactly_one_feed_event() {
         let app = AcpError::IdleTimeout(std::time::Duration::from_secs(1));
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
+    }
+
+    /// Stub [`LeaderCheck`] that always reports a fixed leadership verdict —
+    /// isolates the heartbeat gate from the filesystem reader (cleared
+    /// separately in `leader::tests`).
+    struct FixedLeader(bool);
+    impl crate::leader::LeaderCheck for FixedLeader {
+        fn is_leader(&self, _agent_pubkey_hex: &str) -> bool {
+            self.0
+        }
+        fn refresh(&self) {}
+    }
+
+    fn prompt_context_with_leader(keys: nostr::Keys, is_leader: bool) -> Arc<PromptContext> {
+        Arc::new(PromptContext {
+            mcp_servers: vec![],
+            initial_message: None,
+            idle_timeout: Duration::from_secs(60),
+            max_turn_duration: Duration::from_secs(60),
+            turn_liveness_interval: Duration::ZERO,
+            dedup_mode: config::DedupMode::Queue,
+            system_prompt: None,
+            heartbeat_prompt: None,
+            base_prompt: None,
+            cwd: "/".into(),
+            rest_client: crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url: "http://localhost:3000".into(),
+                keys: keys.clone(),
+                auth_tag_json: None,
+            },
+            channel_info: std::collections::HashMap::new(),
+            context_message_limit: 0,
+            max_turns_per_session: 0,
+            permission_mode: config::PermissionMode::BypassPermissions,
+            agent_keys: keys,
+            agent_owner_pubkey: None,
+            memory_enabled: false,
+            leader: Arc::new(FixedLeader(is_leader)),
+        })
+    }
+
+    /// Pins the second half of the leader invariant: the autonomous heartbeat
+    /// prompt (which sends messages / approves workflows on the wire) must not
+    /// fire on a non-leader, even with an idle agent ready. Without the gate,
+    /// N instances sharing one key would each self-prompt and act — the exact
+    /// duplicate-actor bug the dispatch gate already prevents on the event path.
+    #[tokio::test]
+    async fn test_non_leader_heartbeat_claims_no_agent() {
+        let ctx = prompt_context_with_leader(nostr::Keys::generate(), false);
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(0).await)]);
+        let mut heartbeat_in_flight = false;
+
+        dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
+
+        assert!(pool.any_idle(), "non-leader must not claim the idle agent");
+        assert!(!heartbeat_in_flight, "non-leader heartbeat must not fire");
+    }
+
+    /// Companion to the gate test: the same idle agent + fired heartbeat path,
+    /// but as the leader, DOES claim and fire — so the gate test proves the
+    /// gate, not a broken dispatch path.
+    #[tokio::test]
+    async fn test_leader_heartbeat_claims_idle_agent() {
+        let ctx = prompt_context_with_leader(nostr::Keys::generate(), true);
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(0).await)]);
+        let mut heartbeat_in_flight = false;
+
+        dispatch_heartbeat(&mut pool, &ctx, &mut heartbeat_in_flight);
+
+        assert!(!pool.any_idle(), "leader must claim the idle agent");
+        assert!(heartbeat_in_flight, "leader heartbeat must fire");
     }
 }
