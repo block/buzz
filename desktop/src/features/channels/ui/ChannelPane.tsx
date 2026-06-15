@@ -7,7 +7,6 @@ import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
 import { MessageThreadPanel } from "@/features/messages/ui/MessageThreadPanel";
 import { MessageTimeline } from "@/features/messages/ui/MessageTimeline";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
-import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
@@ -29,6 +28,7 @@ import {
 } from "@/features/channels/ui/WelcomeComposerBanner";
 import { isEphemeralChannel } from "@/features/channels/lib/ephemeralChannel";
 import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
+import { observeElementBlockSize } from "@/shared/layout/observeElementBlockSize";
 import { Button } from "@/shared/ui/button";
 import type { useChannelFind } from "@/features/search/useChannelFind";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
@@ -254,6 +254,8 @@ export const ChannelPane = React.memo(function ChannelPane({
 }: ChannelPaneProps) {
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
+  const [mainComposerOverlayHeight, setMainComposerOverlayHeight] =
+    React.useState(0);
   const completedWelcomeBannerChannelIdsRef = React.useRef(new Set<string>());
   const welcomeComposerDismissTimerRef = React.useRef<number | null>(null);
   const welcomeComposerHideTimerRef = React.useRef<number | null>(null);
@@ -269,11 +271,21 @@ export const ChannelPane = React.memo(function ChannelPane({
   const activeChannelId = activeChannel?.id ?? null;
   const isActiveWelcomeChannel =
     activeChannel !== null && isWelcomeChannel(activeChannel);
-  useComposerHeightPadding(
-    timelineScrollRef,
-    composerWrapperRef,
-    `${isSinglePanelView}:${hasMainComposerOverlay}`,
-  );
+  React.useLayoutEffect(() => {
+    if (!hasMainComposerOverlay) {
+      setMainComposerOverlayHeight(0);
+      return;
+    }
+
+    const composerEl = composerWrapperRef.current;
+    if (!composerEl) {
+      return;
+    }
+
+    return observeElementBlockSize(composerEl, (height) => {
+      setMainComposerOverlayHeight(Math.ceil(height));
+    });
+  }, [hasMainComposerOverlay]);
 
   const clearWelcomeComposerDismissTimer = React.useCallback(() => {
     if (welcomeComposerDismissTimerRef.current !== null) {
@@ -655,6 +667,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             fetchOlder={fetchOlder}
             followThreadById={followThreadById}
             hasComposerOverlay={hasMainComposerOverlay}
+            composerOverlayHeight={mainComposerOverlayHeight}
             hasOlderMessages={hasOlderMessages}
             isFetchingOlder={isFetchingOlder}
             isFollowingThreadById={isFollowingThreadById}

@@ -5,7 +5,6 @@ import type { VirtuosoHandle } from "react-virtuoso";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
-import { isSameDay } from "@/features/messages/lib/dateFormatters";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
@@ -13,7 +12,11 @@ import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { TimelineSkeleton } from "./TimelineSkeleton";
-import { VirtualizedTimelineMessageList } from "./VirtualizedTimelineMessageList";
+import {
+  buildVirtualizedTimelineModel,
+  useVirtualizedFirstItemIndex,
+  VirtualizedTimelineMessageList,
+} from "./VirtualizedTimelineMessageList";
 
 type MessageTimelineProps = {
   agentPubkeys?: ReadonlySet<string>;
@@ -37,6 +40,7 @@ type MessageTimelineProps = {
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
   /** True when the timeline has the composer overlay below it. */
   hasComposerOverlay?: boolean;
+  composerOverlayHeight?: number;
   isFetchingOlder?: boolean;
   messageFooters?: Record<string, React.ReactNode>;
   /** Map from lowercase pubkey → persona display name for bot members. */
@@ -101,22 +105,6 @@ function mergeRefs<T>(...refs: Array<React.Ref<T> | undefined>) {
   };
 }
 
-function getTimelineItemIndex(messages: TimelineMessage[], messageId: string) {
-  let itemIndex = 0;
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    const previous = index > 0 ? messages[index - 1] : null;
-    if (!previous || !isSameDay(previous.createdAt, message.createdAt)) {
-      itemIndex += 1;
-    }
-    if (message.id === messageId) {
-      return itemIndex;
-    }
-    itemIndex += 1;
-  }
-  return -1;
-}
-
 export const MessageTimeline = React.memo(function MessageTimeline({
   agentPubkeys,
   channelId,
@@ -129,6 +117,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   currentPubkey,
   fetchOlder,
   hasComposerOverlay = true,
+  composerOverlayHeight = 0,
   hasOlderMessages = true,
   isFetchingOlder = false,
   followThreadById,
@@ -168,6 +157,16 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   >(null);
   const [isAtBottom, setIsAtBottom] = React.useState(true);
   const [newMessageCount, setNewMessageCount] = React.useState(0);
+  const timelineModel = React.useMemo(
+    () => buildVirtualizedTimelineModel(messages),
+    [messages],
+  );
+  const firstItemIndex = useVirtualizedFirstItemIndex(timelineModel.items);
+  const previousSearchActiveMessageIdRef = React.useRef<string | null>(null);
+  const footerSpacerHeight = hasComposerOverlay
+    ? Math.max(96, Math.ceil(composerOverlayHeight) + 8)
+    : 16;
+
   const scrollRestorationId = targetMessageId
     ? `message-timeline:${channelId ?? "none"}:target:${targetMessageId}`
     : `message-timeline:${channelId ?? "none"}`;
@@ -209,16 +208,58 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     ? (latestMessage.renderKey ?? latestMessage.id)
     : undefined;
 
+  React.useEffect(() => {
+    const scroller = scrollContainerRef.current;
+    if (!scroller || !showMessageList) {
+      return;
+    }
+
+    const syncAtBottomFromScroll = () => {
+      const atBottom =
+        scroller.scrollTop + scroller.clientHeight >=
+        scroller.scrollHeight - 32;
+      shouldStickToBottomRef.current = atBottom;
+      setIsAtBottom(atBottom);
+      if (atBottom) {
+        setNewMessageCount(0);
+      }
+    };
+
+    scroller.addEventListener("scroll", syncAtBottomFromScroll, {
+      passive: true,
+    });
+    return () => {
+      scroller.removeEventListener("scroll", syncAtBottomFromScroll);
+    };
+  }, [scrollContainerRef, showMessageList]);
+
+  const scrollToTimelineRow = React.useCallback(
+    (
+      rowIndex: number,
+      align: "start" | "center" | "end",
+      behavior: ScrollBehavior,
+    ) => {
+      virtuosoRef.current?.scrollToIndex({
+        align,
+        behavior: behavior === "smooth" ? "smooth" : "auto",
+        index: rowIndex,
+      });
+    },
+    [],
+  );
+
   const scrollToBottom = React.useCallback(
     (behavior: ScrollBehavior) => {
       if (messages.length === 0) return;
       shouldStickToBottomRef.current = true;
       setIsAtBottom(true);
       setNewMessageCount(0);
-      virtuosoRef.current?.scrollToIndex({
-        align: "end",
-        behavior: behavior === "smooth" ? "smooth" : "auto",
-        index: "LAST",
+      requestAnimationFrame(() => {
+        virtuosoRef.current?.scrollToIndex({
+          align: "end",
+          behavior: behavior === "smooth" ? "smooth" : "auto",
+          index: "LAST",
+        });
       });
     },
     [messages.length],
@@ -301,15 +342,30 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   ]);
 
   React.useEffect(() => {
-    if (!searchActiveMessageId) return;
-    const index = getTimelineItemIndex(messages, searchActiveMessageId);
-    if (index < 0) return;
-    virtuosoRef.current?.scrollToIndex({
-      align: "center",
-      behavior: "smooth",
-      index,
-    });
-  }, [messages, searchActiveMessageId]);
+    if (!searchActiveMessageId) {
+      previousSearchActiveMessageIdRef.current = null;
+      return;
+    }
+    if (previousSearchActiveMessageIdRef.current === searchActiveMessageId) {
+      return;
+    }
+    const index = timelineModel.messageIdToRowIndex.get(searchActiveMessageId);
+    if (index === undefined) return;
+    shouldStickToBottomRef.current = false;
+    previousSearchActiveMessageIdRef.current = searchActiveMessageId;
+    scrollToTimelineRow(index, "center", "auto");
+  }, [scrollToTimelineRow, searchActiveMessageId, timelineModel]);
+
+  React.useEffect(() => {
+    if (!targetMessageId || isLoading) {
+      return;
+    }
+    if (timelineModel.messageIdToRowIndex.has(targetMessageId)) {
+      return;
+    }
+
+    handleStartReached();
+  }, [handleStartReached, isLoading, targetMessageId, timelineModel]);
 
   React.useEffect(() => {
     if (!targetMessageId) {
@@ -322,17 +378,15 @@ export const MessageTimeline = React.memo(function MessageTimeline({
       return;
     }
 
-    const index = getTimelineItemIndex(messages, targetMessageId);
-    if (index < 0) return;
+    const index = timelineModel.messageIdToRowIndex.get(targetMessageId);
+    if (index === undefined) return;
 
     handledTargetMessageIdRef.current = targetMessageId;
     shouldStickToBottomRef.current = false;
     setHighlightedMessageId(targetMessageId);
     setNewMessageCount(0);
-    virtuosoRef.current?.scrollToIndex({
-      align: "center",
-      behavior: "auto",
-      index,
+    requestAnimationFrame(() => {
+      scrollToTimelineRow(index, "center", "auto");
     });
     onTargetReached?.(targetMessageId);
 
@@ -345,7 +399,13 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     return () => {
       window.clearTimeout(timeout);
     };
-  }, [isLoading, messages, onTargetReached, targetMessageId]);
+  }, [
+    isLoading,
+    onTargetReached,
+    scrollToTimelineRow,
+    targetMessageId,
+    timelineModel,
+  ]);
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -360,11 +420,12 @@ export const MessageTimeline = React.memo(function MessageTimeline({
             <VirtualizedTimelineMessageList
               agentPubkeys={agentPubkeys}
               atBottomStateChange={handleAtBottomStateChange}
-              bottomFooterClassName={hasComposerOverlay ? "h-24" : "h-4"}
+              bottomFooterHeight={footerSpacerHeight}
               channelId={channelId}
               channelName={channelName}
               channelType={channelType}
               currentPubkey={currentPubkey}
+              firstItemIndex={firstItemIndex}
               followOutput={() =>
                 shouldStickToBottomRef.current ? "auto" : false
               }
@@ -375,6 +436,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
               isFollowingThreadById={isFollowingThreadById}
               messageFooters={messageFooters}
               messages={messages}
+              items={timelineModel.items}
               onDelete={onDelete}
               onEdit={onEdit}
               onMarkUnread={onMarkUnread}

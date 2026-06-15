@@ -2,14 +2,10 @@ import * as React from "react";
 import {
   Virtuoso,
   type FollowOutput,
-  type ListRange,
   type VirtuosoHandle,
 } from "react-virtuoso";
 
-import {
-  formatDayHeading,
-  isSameDay,
-} from "@/features/messages/lib/dateFormatters";
+import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
 import { DayDivider } from "./DayDivider";
@@ -20,7 +16,7 @@ import {
   type TimelineMessageListProps,
 } from "./TimelineMessageList";
 
-type TimelineEntry =
+export type VirtualizedTimelineEntry =
   | {
       key: string;
       type: "day";
@@ -33,11 +29,19 @@ type TimelineEntry =
       summary: ReturnType<typeof buildMainTimelineEntries>[number]["summary"];
     };
 
+export type VirtualizedTimelineModel = {
+  items: VirtualizedTimelineEntry[];
+  keyToRowIndex: Map<string, number>;
+  messageIdToRowIndex: Map<string, number>;
+};
+
 type VirtualizedTimelineMessageListProps = TimelineMessageListProps & {
   atBottomStateChange?: (atBottom: boolean) => void;
-  bottomFooterClassName?: string;
+  bottomFooterHeight?: number;
+  firstItemIndex: number;
   followOutput?: FollowOutput;
   hasOlderMessages: boolean;
+  items: VirtualizedTimelineEntry[];
   isFetchingOlder: boolean;
   onStartReached?: () => void;
   scrollerRef?: (element: HTMLDivElement | null) => void;
@@ -46,7 +50,62 @@ type VirtualizedTimelineMessageListProps = TimelineMessageListProps & {
 };
 
 const FIRST_ITEM_INDEX_BASE = 1_000_000;
-const LOAD_OLDER_RANGE_THRESHOLD = 8;
+
+export function useVirtualizedFirstItemIndex(
+  items: readonly VirtualizedTimelineEntry[],
+) {
+  const firstItemIndexStateRef = React.useRef({
+    firstItemIndex: FIRST_ITEM_INDEX_BASE,
+    previousFirstMessageId: null as string | null,
+    previousFirstMessageRowIndex: -1,
+    previousItems: [] as readonly VirtualizedTimelineEntry[],
+  });
+
+  return React.useMemo(() => {
+    const state = firstItemIndexStateRef.current;
+    const previousItems = state.previousItems;
+    const previousFirstMessageId = state.previousFirstMessageId;
+    const previousFirstMessageRowIndex = state.previousFirstMessageRowIndex;
+    const firstMessageRowIndex = items.findIndex(
+      (item) => item.type === "message",
+    );
+    const firstMessage =
+      firstMessageRowIndex >= 0 ? items[firstMessageRowIndex] : null;
+    const firstMessageId =
+      firstMessage?.type === "message" ? firstMessage.message.id : null;
+
+    if (items.length === 0) {
+      state.firstItemIndex = FIRST_ITEM_INDEX_BASE;
+      state.previousFirstMessageId = null;
+      state.previousFirstMessageRowIndex = -1;
+      state.previousItems = items;
+      return state.firstItemIndex;
+    }
+
+    if (previousItems !== items) {
+      if (previousFirstMessageId && previousFirstMessageRowIndex >= 0) {
+        const currentFirstLoadedMessageRowIndex = items.findIndex(
+          (item) =>
+            item.type === "message" &&
+            item.message.id === previousFirstMessageId,
+        );
+
+        if (currentFirstLoadedMessageRowIndex >= 0) {
+          state.firstItemIndex -=
+            currentFirstLoadedMessageRowIndex - previousFirstMessageRowIndex;
+        } else {
+          state.firstItemIndex = FIRST_ITEM_INDEX_BASE;
+        }
+      }
+
+      state.previousFirstMessageId = firstMessageId;
+      state.previousFirstMessageRowIndex = firstMessageRowIndex;
+      state.previousItems = items;
+    }
+
+    return state.firstItemIndex;
+  }, [items]);
+}
 
 const TimelineList = React.forwardRef<
   HTMLDivElement,
@@ -60,42 +119,64 @@ const TimelineList = React.forwardRef<
 });
 TimelineList.displayName = "VirtualizedTimelineList";
 
-function buildTimelineItems(messages: TimelineMessage[]): TimelineEntry[] {
+function getLocalDayKey(unixSeconds: number): string {
+  const date = new Date(unixSeconds * 1_000);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+export function buildVirtualizedTimelineModel(
+  messages: TimelineMessage[],
+): VirtualizedTimelineModel {
   const entries = buildMainTimelineEntries(messages);
-  const items: TimelineEntry[] = [];
+  const items: VirtualizedTimelineEntry[] = [];
+  const keyToRowIndex = new Map<string, number>();
+  const messageIdToRowIndex = new Map<string, number>();
+  let previousDayKey: string | null = null;
 
-  for (let index = 0; index < entries.length; index += 1) {
-    const { message, summary } = entries[index];
-    const prev = index > 0 ? entries[index - 1]?.message : null;
+  const pushItem = (item: VirtualizedTimelineEntry) => {
+    keyToRowIndex.set(item.key, items.length);
+    if (item.type === "message") {
+      messageIdToRowIndex.set(item.message.id, items.length);
+    }
+    items.push(item);
+  };
 
-    if (!prev || !isSameDay(prev.createdAt, message.createdAt)) {
-      items.push({
-        key: `day-${message.createdAt}`,
+  for (const { message, summary } of entries) {
+    const dayKey = getLocalDayKey(message.createdAt);
+
+    if (dayKey !== previousDayKey) {
+      pushItem({
+        key: `day:${dayKey}`,
         label: formatDayHeading(message.createdAt),
         type: "day",
       });
+      previousDayKey = dayKey;
     }
 
-    items.push({
-      key: message.renderKey ?? message.id,
+    pushItem({
+      key: `msg:${message.renderKey ?? message.id}`,
       message,
       summary,
       type: "message",
     });
   }
 
-  return items;
+  return { items, keyToRowIndex, messageIdToRowIndex };
 }
 
 export const VirtualizedTimelineMessageList = React.memo(
   function VirtualizedTimelineMessageList({
     agentPubkeys,
     atBottomStateChange,
-    bottomFooterClassName,
+    bottomFooterHeight = 16,
     channelId,
     channelName,
     channelType,
     currentPubkey,
+    firstItemIndex,
     followOutput = false,
     followThreadById,
     hasOlderMessages,
@@ -104,6 +185,7 @@ export const VirtualizedTimelineMessageList = React.memo(
     isFollowingThreadById,
     messageFooters,
     messages,
+    items,
     onDelete,
     onEdit,
     onMarkUnread,
@@ -122,7 +204,6 @@ export const VirtualizedTimelineMessageList = React.memo(
     unfollowThreadById,
     virtuosoRef,
   }: VirtualizedTimelineMessageListProps) {
-    const items = React.useMemo(() => buildTimelineItems(messages), [messages]);
     const reviewCommentsByRootId = React.useMemo(
       () => buildReviewCommentsByRootId(messages),
       [messages],
@@ -153,51 +234,6 @@ export const VirtualizedTimelineMessageList = React.memo(
       ],
     );
 
-    const firstItemIndexStateRef = React.useRef({
-      anchorIndex: -1,
-      anchorKey: null as string | null,
-      firstItemIndex: FIRST_ITEM_INDEX_BASE,
-      items: [] as readonly TimelineEntry[],
-    });
-
-    const firstItemIndex = React.useMemo(() => {
-      const state = firstItemIndexStateRef.current;
-      const previousItems = state.items;
-
-      if (items.length === 0) {
-        state.anchorIndex = -1;
-        state.anchorKey = null;
-        state.firstItemIndex = FIRST_ITEM_INDEX_BASE;
-        state.items = items;
-        return state.firstItemIndex;
-      }
-
-      const anchorEntryIndex = items.findIndex(
-        (item) => item.type === "message",
-      );
-      const anchorKey =
-        anchorEntryIndex >= 0 ? (items[anchorEntryIndex]?.key ?? null) : null;
-
-      if (previousItems !== items) {
-        if (state.anchorKey) {
-          const nextAnchorIndex = items.findIndex(
-            (item) => item.key === state.anchorKey,
-          );
-          if (nextAnchorIndex >= 0 && state.anchorIndex >= 0) {
-            state.firstItemIndex -= nextAnchorIndex - state.anchorIndex;
-          } else {
-            state.firstItemIndex = FIRST_ITEM_INDEX_BASE;
-          }
-        }
-
-        state.anchorIndex = anchorEntryIndex;
-        state.anchorKey = anchorKey;
-        state.items = items;
-      }
-
-      return state.firstItemIndex;
-    }, [items]);
-
     const canLoadOlder =
       hasOlderMessages && !isFetchingOlder && Boolean(onStartReached);
     const maybeLoadOlder = React.useCallback(() => {
@@ -205,28 +241,44 @@ export const VirtualizedTimelineMessageList = React.memo(
         onStartReached?.();
       }
     }, [canLoadOlder, onStartReached]);
-    const handleRangeChanged = React.useCallback(
-      (range: ListRange) => {
-        if (range.startIndex <= firstItemIndex + LOAD_OLDER_RANGE_THRESHOLD) {
+    const [scrollerElement, setScrollerElement] =
+      React.useState<HTMLDivElement | null>(null);
+
+    React.useEffect(() => {
+      if (!scrollerElement) return;
+
+      const handleScroll = () => {
+        if (scrollerElement.scrollTop <= 240) {
           maybeLoadOlder();
         }
-      },
-      [firstItemIndex, maybeLoadOlder],
-    );
+      };
 
+      scrollerElement.addEventListener("scroll", handleScroll, {
+        passive: true,
+      });
+      return () => {
+        scrollerElement.removeEventListener("scroll", handleScroll);
+      };
+    }, [maybeLoadOlder, scrollerElement]);
     const components = React.useMemo(
       () => ({
-        Footer: () => <div aria-hidden className={bottomFooterClassName} />,
+        Footer: () => (
+          <div aria-hidden style={{ height: bottomFooterHeight }} />
+        ),
         Header: topHeader
           ? () => <div className="flex flex-col gap-2 pb-2">{topHeader}</div>
           : undefined,
         List: TimelineList,
       }),
-      [bottomFooterClassName, topHeader],
+      [bottomFooterHeight, topHeader],
     );
+    const [initialTopMostItemIndex] = React.useState(() => ({
+      align: "end" as const,
+      index: Math.max(0, items.length - 1),
+    }));
 
     return (
-      <Virtuoso<TimelineEntry>
+      <Virtuoso<VirtualizedTimelineEntry>
         atBottomStateChange={atBottomStateChange}
         atBottomThreshold={32}
         className="h-full w-full"
@@ -238,7 +290,7 @@ export const VirtualizedTimelineMessageList = React.memo(
         defaultItemHeight={96}
         firstItemIndex={firstItemIndex}
         followOutput={followOutput}
-        initialTopMostItemIndex={{ align: "end", index: items.length - 1 }}
+        initialTopMostItemIndex={initialTopMostItemIndex}
         increaseViewportBy={{ bottom: 600, top: 900 }}
         itemContent={(_index, item) => {
           if (item.type === "day") {
@@ -270,9 +322,10 @@ export const VirtualizedTimelineMessageList = React.memo(
         }}
         overscan={{ main: 800, reverse: 800 }}
         ref={virtuosoRef}
-        rangeChanged={handleRangeChanged}
         scrollerRef={(element) => {
-          scrollerRef?.(element instanceof HTMLDivElement ? element : null);
+          const scroller = element instanceof HTMLDivElement ? element : null;
+          setScrollerElement(scroller);
+          scrollerRef?.(scroller);
         }}
         startReached={maybeLoadOlder}
       />

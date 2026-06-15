@@ -133,6 +133,25 @@ function aspectRatioFromDim(dim?: string): number | undefined {
   return width / height;
 }
 
+function dimensionsFromDim(
+  dim?: string,
+): { width: number; height: number } | undefined {
+  if (!dim) return undefined;
+  const match = dim.match(/^(\d+)x(\d+)$/i);
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return undefined;
+  }
+  return { width, height };
+}
+
 /**
  * Video review context flows through React context instead of
  * `createMarkdownComponents` arguments. The component map must keep a stable
@@ -231,13 +250,19 @@ type MarkdownVariant = "default" | "compact" | "tight";
  */
 function ImageBlock({
   alt,
+  entry,
   resolvedSrc,
   src,
 }: {
   alt: string | undefined;
+  entry?: ImetaEntry;
   resolvedSrc: string | undefined;
   src: string | undefined;
 }) {
+  const dimensions = dimensionsFromDim(entry?.dim);
+  const imageDimensions = dimensions
+    ? { width: dimensions.width, height: dimensions.height }
+    : {};
   const [lightboxOpen, setLightboxOpen] = React.useState(false);
   const [menu, setMenu] = React.useState<{ x: number; y: number } | null>(null);
 
@@ -291,6 +316,7 @@ function ImageBlock({
         alt={alt}
         className="mt-1 block max-h-64 max-w-sm cursor-pointer rounded-xl object-contain"
         src={resolvedSrc}
+        {...imageDimensions}
         onClick={() => setLightboxOpen(true)}
         onContextMenuCapture={handleContextMenu}
       />
@@ -332,6 +358,7 @@ function ImageBlock({
               alt={alt}
               className="relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain"
               src={resolvedSrc}
+              {...imageDimensions}
               onContextMenuCapture={handleContextMenu}
             />
             <DialogPrimitive.Close className="absolute right-4 top-4 rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30">
@@ -897,9 +924,15 @@ function createMarkdownComponents(
           </span>
         );
       }
+      const entry = src ? imetaByUrl?.get(src) : undefined;
       return (
         <span data-block-media="" className="block">
-          <ImageBlock alt={alt} resolvedSrc={resolvedSrc} src={src} />
+          <ImageBlock
+            alt={alt}
+            entry={entry}
+            resolvedSrc={resolvedSrc}
+            src={src}
+          />
         </span>
       );
     },
