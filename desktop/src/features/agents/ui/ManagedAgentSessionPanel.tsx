@@ -25,7 +25,9 @@ import { shorten } from "./agentSessionUtils";
 import { useObserverEvents, useAgentTranscript } from "./useObserverEvents";
 
 type ManagedAgentSessionPanelProps = {
-  agent: Pick<ManagedAgent, "pubkey" | "name" | "status">;
+  agent: Pick<ManagedAgent, "pubkey" | "name" | "status"> & {
+    avatarUrl?: string | null;
+  };
   channelId?: string | null;
   className?: string;
   compact?: boolean;
@@ -101,7 +103,9 @@ export function ManagedAgentSessionPanel({
       ) : null}
 
       <SessionBody
+        agentAvatarUrl={agent.avatarUrl ?? null}
         agentName={agent.name}
+        agentPubkey={agent.pubkey}
         compact={compact}
         connectionState={connectionState}
         emptyDescription={emptyDescription}
@@ -155,7 +159,9 @@ function SessionHeader({
 }
 
 function SessionBody({
+  agentAvatarUrl,
   agentName,
+  agentPubkey,
   compact,
   connectionState,
   emptyDescription,
@@ -169,7 +175,9 @@ function SessionBody({
   showRaw,
   transcript,
 }: {
+  agentAvatarUrl: string | null;
   agentName: string;
+  agentPubkey: string;
   compact: boolean;
   connectionState: ConnectionState;
   emptyDescription: string;
@@ -213,7 +221,9 @@ function SessionBody({
           )}
         >
           <AgentSessionTranscriptList
+            agentAvatarUrl={agentAvatarUrl}
             agentName={agentName}
+            agentPubkey={agentPubkey}
             compact={compact}
             emptyDescription={emptyDescription}
             isWorking={isWorking}

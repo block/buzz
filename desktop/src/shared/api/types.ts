@@ -282,6 +282,7 @@ export type ManagedAgent = {
   maxTurnDurationSeconds: number | null;
   parallelism: number;
   systemPrompt: string | null;
+  avatarUrl: string | null;
   model: string | null;
   mcpToolsets: string | null;
   /** Per-agent env vars. Layered on top of persona envVars. */

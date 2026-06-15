@@ -1356,6 +1356,7 @@ pub fn build_managed_agent_summary(
         max_turn_duration_seconds: record.max_turn_duration_seconds,
         parallelism: record.parallelism,
         system_prompt: effective_prompt,
+        avatar_url: record.avatar_url.clone(),
         model: effective_model,
         mcp_toolsets: record.mcp_toolsets.clone(),
         env_vars: record.env_vars.clone(),

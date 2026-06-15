@@ -45,10 +45,7 @@ import type {
   OpenDmInput,
 } from "@/shared/api/types";
 
-type RawIdentity = {
-  pubkey: string;
-  display_name: string;
-};
+type RawIdentity = { pubkey: string; display_name: string };
 
 type RawProfile = {
   pubkey: string;
@@ -213,6 +210,7 @@ export type RawManagedAgent = {
   max_turn_duration_seconds: number | null;
   parallelism: number;
   system_prompt: string | null;
+  avatar_url?: string | null;
   model: string | null;
   mcp_toolsets: string | null;
   env_vars?: Record<string, string>;
@@ -868,6 +866,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     maxTurnDurationSeconds: agent.max_turn_duration_seconds,
     parallelism: agent.parallelism,
     systemPrompt: agent.system_prompt,
+    avatarUrl: agent.avatar_url ?? null,
     model: agent.model,
     mcpToolsets: agent.mcp_toolsets,
     envVars: agent.env_vars ?? {},

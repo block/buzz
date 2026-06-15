@@ -11,6 +11,7 @@ export type ChannelAgentSessionAgent = Pick<
   "pubkey" | "name" | "status"
 > & {
   agentSource: "managed" | "member-bot" | "relay";
+  avatarUrl?: string | null;
   canInterruptTurn: boolean;
   channelIds?: string[];
   channels?: string[];
@@ -57,6 +58,7 @@ export function buildChannelAgentSessionCandidates({
       name: agent.name,
       status: agent.status,
       agentSource: "managed",
+      avatarUrl: agent.avatarUrl,
       canInterruptTurn: true,
       channelIds: existing?.channelIds,
       channels: existing?.channels,

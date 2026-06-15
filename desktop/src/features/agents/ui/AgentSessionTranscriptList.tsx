@@ -17,6 +17,7 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Badge } from "@/shared/ui/badge";
 import { Markdown } from "@/shared/ui/markdown";
 import { Shimmer } from "@/shared/ui/Shimmer";
@@ -39,16 +40,23 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 /** Dev-only: surface the observer wire label that produced each transcript row. */
 const SHOW_TRANSCRIPT_ACP_SOURCE = import.meta.env.DEV;
 
+type AgentTranscriptIdentityProps = {
+  agentAvatarUrl: string | null;
+  agentName: string;
+  agentPubkey: string;
+};
+
 export function AgentSessionTranscriptList({
+  agentAvatarUrl,
   agentName,
+  agentPubkey,
   compact = false,
   emptyDescription,
   isWorking = false,
   items,
   profiles,
   showInterventionHint = false,
-}: {
-  agentName: string;
+}: AgentTranscriptIdentityProps & {
   compact?: boolean;
   emptyDescription: string;
   isWorking?: boolean;
@@ -98,7 +106,9 @@ export function AgentSessionTranscriptList({
         {displayBlocks.map((block) => (
           <TranscriptDisplayBlockView
             activeItemIds={presentation.activeItemIds}
+            agentAvatarUrl={agentAvatarUrl}
             agentName={agentName}
+            agentPubkey={agentPubkey}
             block={block}
             compact={compact}
             key={getDisplayBlockKey(block)}
@@ -113,7 +123,7 @@ export function AgentSessionTranscriptList({
 function TranscriptAcpSourceBadge({ source }: { source: string }) {
   return (
     <span
-      className="mb-1 inline-flex max-w-full rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] leading-none text-amber-800 dark:text-amber-200"
+      className="mb-1 inline-flex max-w-full rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 font-mono text-xs leading-none text-amber-800 dark:text-amber-200"
       data-testid="transcript-acp-source"
       title={`ACP wire source: ${source}`}
     >
@@ -182,15 +192,15 @@ function TranscriptNowSummary({
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-            <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
               Now
             </p>
-            <span className="text-[11px] text-muted-foreground/70">·</span>
-            <p className="text-[11px] text-muted-foreground">{agentName}</p>
+            <span className="text-xs text-muted-foreground/70">·</span>
+            <p className="text-xs text-muted-foreground">{agentName}</p>
             {lastUpdated ? (
               <>
-                <span className="text-[11px] text-muted-foreground/70">·</span>
-                <p className="text-[11px] text-muted-foreground/70">
+                <span className="text-xs text-muted-foreground/70">·</span>
+                <p className="text-xs text-muted-foreground/70">
                   {lastUpdated}
                 </p>
               </>
@@ -210,7 +220,7 @@ function TranscriptNowSummary({
           </p>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             <Badge
-              className="h-5 px-1.5 text-[10px] font-normal"
+              className="h-5 px-1.5 text-xs font-normal"
               variant={
                 hasError ? "destructive" : isWorking ? "default" : "secondary"
               }
@@ -232,7 +242,7 @@ function TranscriptNowSummary({
             ) : null}
           </div>
           {showInterventionHint && isWorking ? (
-            <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
               Use <span className="font-medium text-foreground">Stop</span>{" "}
               above to interrupt this turn without stopping the agent process.
             </p>
@@ -254,7 +264,7 @@ function ActivityCountBadge({
 }) {
   return (
     <Badge
-      className="h-5 px-1.5 text-[10px] font-normal"
+      className="h-5 px-1.5 text-xs font-normal"
       variant={tone === "error" ? "destructive" : "outline"}
     >
       {count} {label}
@@ -327,13 +337,14 @@ function getDisplayBlockKey(block: TranscriptDisplayBlock) {
 
 function TranscriptDisplayBlockView({
   activeItemIds,
+  agentAvatarUrl,
   agentName,
+  agentPubkey,
   block,
   compact,
   profiles,
-}: {
+}: AgentTranscriptIdentityProps & {
   activeItemIds: ReadonlySet<string>;
-  agentName: string;
   block: TranscriptDisplayBlock;
   compact: boolean;
   profiles?: UserProfileLookup;
@@ -342,7 +353,9 @@ function TranscriptDisplayBlockView({
     return (
       <TranscriptItemRow
         activeItemIds={activeItemIds}
+        agentAvatarUrl={agentAvatarUrl}
         agentName={agentName}
+        agentPubkey={agentPubkey}
         compact={compact}
         item={block.item}
         profiles={profiles}
@@ -359,7 +372,9 @@ function TranscriptDisplayBlockView({
       {block.segments.map((segment) => (
         <TranscriptTurnSegmentView
           activeItemIds={activeItemIds}
+          agentAvatarUrl={agentAvatarUrl}
           agentName={agentName}
+          agentPubkey={agentPubkey}
           compact={compact}
           key={getTurnSegmentKey(block.turnId, segment)}
           profiles={profiles}
@@ -382,13 +397,14 @@ function getTurnSegmentKey(turnId: string, segment: TranscriptTurnSegment) {
 
 function TranscriptTurnSegmentView({
   activeItemIds,
+  agentAvatarUrl,
   agentName,
+  agentPubkey,
   compact,
   profiles,
   segment,
-}: {
+}: AgentTranscriptIdentityProps & {
   activeItemIds: ReadonlySet<string>;
-  agentName: string;
   compact: boolean;
   profiles?: UserProfileLookup;
   segment: TranscriptTurnSegment;
@@ -412,7 +428,9 @@ function TranscriptTurnSegmentView({
   return (
     <TranscriptItemRow
       activeItemIds={activeItemIds}
+      agentAvatarUrl={agentAvatarUrl}
       agentName={agentName}
+      agentPubkey={agentPubkey}
       compact={compact}
       item={segment.item}
       profiles={profiles}
@@ -491,7 +509,7 @@ function PromptUserMessage({
     >
       <UserAvatar
         avatarUrl={authorProfile?.avatarUrl ?? null}
-        className="mr-2 mt-1 h-5 w-5 shrink-0 text-[8px]"
+        className="mr-2 mt-1 shrink-0"
         displayName={authorLabel}
         size="xs"
       />
@@ -534,7 +552,7 @@ function PromptContextSections({ sections }: { sections: PromptSection[] }) {
             <span className="truncate">{section.title}</span>
             <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open/section:rotate-180" />
           </summary>
-          <pre className="mt-1.5 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-background/40 px-2 py-1.5 font-mono text-[11px] leading-5 text-muted-foreground">
+          <pre className="mt-1.5 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-background/40 px-2 py-1.5 font-mono text-xs leading-5 text-muted-foreground">
             {section.body.trim() || "No metadata."}
           </pre>
         </details>
@@ -590,7 +608,7 @@ function TurnSetupFooter({
       {showContext ? (
         <Toggle
           aria-label={`${contextOpen ? "Hide" : "Show"} prompt context`}
-          className="h-5 min-h-0 min-w-0 gap-1 rounded-md px-1.5 text-[10px] font-medium data-[state=on]:bg-muted data-[state=on]:text-foreground"
+          className="h-5 min-h-0 min-w-0 gap-1 rounded-md px-1.5 text-xs font-medium data-[state=on]:bg-muted data-[state=on]:text-foreground"
           data-testid="transcript-prompt-context-toggle"
           onPressedChange={onContextOpenChange}
           pressed={contextOpen}
@@ -610,13 +628,14 @@ function TurnSetupFooter({
 
 function TranscriptItemRow({
   activeItemIds,
+  agentAvatarUrl,
   agentName,
+  agentPubkey,
   compact,
   item,
   profiles,
-}: {
+}: AgentTranscriptIdentityProps & {
   activeItemIds: ReadonlySet<string>;
-  agentName: string;
   compact: boolean;
   item: TranscriptItem;
   profiles?: UserProfileLookup;
@@ -634,7 +653,9 @@ function TranscriptItemRow({
         <TranscriptAcpSourceBadge source={item.acpSource} />
       ) : null}
       <TranscriptItemView
+        agentAvatarUrl={agentAvatarUrl}
         agentName={agentName}
+        agentPubkey={agentPubkey}
         compact={compact}
         isActive={activeItemIds.has(item.id)}
         item={item}
@@ -674,13 +695,14 @@ function getItemSpacingClass(item: TranscriptItem) {
 }
 
 const TranscriptItemView = React.memo(function TranscriptItemView({
+  agentAvatarUrl,
   agentName,
+  agentPubkey,
   compact,
   isActive,
   item,
   profiles,
-}: {
-  agentName: string;
+}: AgentTranscriptIdentityProps & {
   compact: boolean;
   isActive: boolean;
   item: TranscriptItem;
@@ -689,7 +711,9 @@ const TranscriptItemView = React.memo(function TranscriptItemView({
   if (item.type === "message") {
     return (
       <MessageItem
+        agentAvatarUrl={agentAvatarUrl}
         agentName={agentName}
+        agentPubkey={agentPubkey}
         compact={compact}
         isActive={isActive}
         item={item}
@@ -710,13 +734,14 @@ const TranscriptItemView = React.memo(function TranscriptItemView({
 });
 
 function MessageItem({
+  agentAvatarUrl,
   agentName,
+  agentPubkey,
   compact,
   isActive,
   item,
   profiles,
-}: {
-  agentName: string;
+}: AgentTranscriptIdentityProps & {
   compact: boolean;
   isActive: boolean;
   item: Extract<TranscriptItem, { type: "message" }>;
@@ -734,6 +759,14 @@ function MessageItem({
         profiles,
       })
     : item.title || "User";
+  const agentProfile = profiles?.[normalizePubkey(agentPubkey)] ?? null;
+  const assistantLabel = resolveUserLabel({
+    pubkey: agentPubkey,
+    fallbackName: agentName,
+    profiles,
+    preferResolvedSelfLabel: true,
+  });
+  const assistantAvatarUrl = agentProfile?.avatarUrl ?? agentAvatarUrl;
 
   return (
     <div
@@ -752,7 +785,7 @@ function MessageItem({
       {!isAssistant ? (
         <UserAvatar
           avatarUrl={authorProfile?.avatarUrl ?? null}
-          className="mr-2 mt-1 h-5 w-5 shrink-0 text-[8px]"
+          className="mr-2 mt-1 shrink-0"
           displayName={authorLabel}
           size="xs"
         />
@@ -764,14 +797,20 @@ function MessageItem({
         )}
       >
         {isAssistant ? (
-          <div className="mb-0.5 flex items-center gap-1 text-xs">
-            <span className="flex h-5 w-5 items-center justify-center">
-              <Bot className="h-4 w-4 text-muted-foreground" />
+          <div className="mb-0.5 flex items-center gap-1.5 text-xs">
+            <UserAvatar
+              avatarUrl={assistantAvatarUrl}
+              className="h-5 w-5 shrink-0 text-[8px]"
+              displayName={assistantLabel}
+              size="xs"
+              testId="transcript-assistant-avatar"
+            />
+            <span className="text-xs font-semibold text-foreground">
+              {assistantLabel}
             </span>
-            <span className="font-normal text-foreground">{agentName}</span>
             {isActive ? (
               <Badge
-                className="h-4 gap-0.5 px-1 text-[9px] font-normal"
+                className="h-4 gap-0.5 px-1 text-xs font-normal"
                 variant="default"
               >
                 <CircleDot className="h-2 w-2" />
@@ -824,7 +863,7 @@ function ThoughtItem({
         <span className="truncate text-sm font-medium">{item.title}</span>
         {isActive ? (
           <Badge
-            className="h-4 gap-0.5 px-1 text-[9px] font-normal"
+            className="h-4 gap-0.5 px-1 text-xs font-normal"
             variant="default"
           >
             <CircleDot className="h-2 w-2" />
@@ -868,7 +907,7 @@ function MetadataItem({
       <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 py-px text-muted-foreground">
         <TerminalSquare className="h-3.5 w-3.5 shrink-0 opacity-70" />
         <span className="truncate text-xs font-medium">{item.title}</span>
-        <span className="shrink-0 text-[10px] text-muted-foreground/70">
+        <span className="shrink-0 text-xs text-muted-foreground/70">
           {item.sections.length} section{item.sections.length === 1 ? "" : "s"}
         </span>
         <TranscriptTimestamp timestamp={item.timestamp} />
@@ -884,7 +923,7 @@ function MetadataItem({
               <span className="truncate">{section.title}</span>
               <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open/section:rotate-180" />
             </summary>
-            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground">
+            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-3 py-2 font-mono text-xs leading-5 text-muted-foreground">
               {section.body.trim() || "No metadata."}
             </pre>
           </details>
@@ -942,7 +981,7 @@ function TranscriptTimestamp({ timestamp }: { timestamp: string }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="shrink-0 cursor-default text-[11px] text-muted-foreground/60">
+        <span className="shrink-0 cursor-default text-xs text-muted-foreground/60">
           {formatted}
         </span>
       </TooltipTrigger>

@@ -224,6 +224,7 @@ pub struct ManagedAgentSummary {
     pub max_turn_duration_seconds: Option<u64>,
     pub parallelism: u32,
     pub system_prompt: Option<String>,
+    pub avatar_url: Option<String>,
     pub model: Option<String>,
     pub mcp_toolsets: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
