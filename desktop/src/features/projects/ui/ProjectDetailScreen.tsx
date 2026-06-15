@@ -30,7 +30,7 @@ function CloneUrlRow({ url }: { url: string }) {
 
   return (
     <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2">
-      <GitFork className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+      <GitFork className="h-4 w-4 shrink-0 text-muted-foreground" />
       <code className="min-w-0 flex-1 truncate text-xs">{url}</code>
       <Button
         className="h-6 w-6 shrink-0"
@@ -39,9 +39,9 @@ function CloneUrlRow({ url }: { url: string }) {
         variant="ghost"
       >
         {copied ? (
-          <Check className="h-3 w-3 text-green-500" />
+          <Check className="h-4 w-4 text-green-500" />
         ) : (
-          <Copy className="h-3 w-3" />
+          <Copy className="h-4 w-4" />
         )}
       </Button>
     </div>
@@ -89,7 +89,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
             size="sm"
             variant="ghost"
           >
-            <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
+            <ArrowLeft className="mr-1.5 h-4 w-4" />
             Back to Projects
           </Button>
         </div>
@@ -111,7 +111,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
           size="sm"
           variant="outline"
         >
-          <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
+          <ArrowLeft className="mr-1.5 h-4 w-4" />
           Back to Projects
         </Button>
       </div>
@@ -136,7 +136,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
             size="sm"
             variant="ghost"
           >
-            <ArrowLeft className="h-3.5 w-3.5" />
+            <ArrowLeft className="h-4 w-4" />
             Back to Projects
           </Button>
         </div>
@@ -144,7 +144,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
         <div className="mx-auto w-full max-w-2xl space-y-6">
           <section className="space-y-2">
             <div className="flex items-center gap-2">
-              <FolderGit2 className="h-5 w-5 text-muted-foreground" />
+              <FolderGit2 className="h-4 w-4 text-muted-foreground" />
               <h2 className="text-lg font-semibold">{project.name}</h2>
             </div>
             {project.description ? (
@@ -178,7 +178,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
                 rel="noopener noreferrer"
                 target="_blank"
               >
-                <ExternalLink className="h-3.5 w-3.5" />
+                <ExternalLink className="h-4 w-4" />
                 {project.webUrl}
               </a>
             </section>
@@ -188,7 +188,7 @@ export function ProjectDetailScreen({ projectId }: ProjectDetailScreenProps) {
             <section className="space-y-2">
               <h3 className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
                 <span className="flex items-center gap-1.5">
-                  <Users className="h-3.5 w-3.5" />
+                  <Users className="h-4 w-4" />
                   Contributors ({project.contributors.length})
                 </span>
               </h3>

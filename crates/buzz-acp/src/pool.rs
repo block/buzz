@@ -216,6 +216,10 @@ pub struct PromptContext {
     pub initial_message: Option<String>,
     pub idle_timeout: Duration,
     pub max_turn_duration: Duration,
+    /// Interval between per-turn `turn_liveness` observer pings. `Duration::ZERO`
+    /// disables emission. This is the desktop crash-backstop signal — distinct
+    /// from `heartbeat_prompt` (agent self-prompting).
+    pub turn_liveness_interval: Duration,
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
     pub heartbeat_prompt: Option<String>,
@@ -1088,18 +1092,36 @@ pub async fn run_prompt_task(
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
+    //
+    // The liveness future emits `turn_liveness` pings on an interval and never
+    // resolves; it rides every prompt-await path as a non-winning select arm so
+    // a turn stays alive on the desktop while it runs. Built from a captured
+    // observer handle (not `&agent.acp`) because the prompt holds `&mut agent.acp`.
+    let liveness = run_turn_liveness(
+        agent.acp.observer_handle(),
+        agent.acp.observer_agent_index(),
+        observer::context_for(
+            observer_channel_id,
+            Some(session_id.clone()),
+            Some(turn_id.clone()),
+        ),
+        ctx.turn_liveness_interval,
+    );
+    tokio::pin!(liveness);
+
     let prompt_result = match control_rx {
         None => {
             // Heartbeat / non-cancellable path.
-            agent
-                .acp
-                .session_prompt_blocks_with_idle_timeout(
+            tokio::select! {
+                biased;
+                result = agent.acp.session_prompt_blocks_with_idle_timeout(
                     &session_id,
                     &prompt_blocks,
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
-                )
-                .await
+                ) => result,
+                _ = &mut liveness => unreachable!("liveness future never resolves"),
+            }
         }
         Some(rx) => {
             tokio::select! {
@@ -1110,6 +1132,7 @@ pub async fn run_prompt_task(
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
+                _ = &mut liveness => unreachable!("liveness future never resolves"),
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
                     // Control signal received. Guard against Race 1: the turn may
@@ -2017,6 +2040,49 @@ impl Drop for ReactionGuard {
     }
 }
 
+// ── Turn liveness emission ───────────────────────────────────────────────────
+// Periodically emits a `turn_liveness` observer event while a turn is in-flight,
+// so the desktop can prune turns whose host died without unwinding (kill -9 /
+// crash) far sooner than the no-activity backstop. Runs as a non-resolving
+// `select!` arm in `run_prompt_task`: it lives and dies with the prompt future,
+// so emission stops on every exit path (complete / cancel / error / panic) with
+// no separate teardown to forget.
+//
+// Takes a captured `ObserverHandle` rather than `&agent.acp` because the prompt
+// future holds `&mut agent.acp` for its whole duration — a second borrow would
+// not compile.
+//
+// This future never resolves; callers must race it against the prompt and rely
+// on drop for teardown. When `interval` is zero, liveness is disabled and the
+// future parks forever without emitting.
+async fn run_turn_liveness(
+    observer: Option<observer::ObserverHandle>,
+    agent_index: Option<usize>,
+    context: observer::ObserverContext,
+    interval: Duration,
+) {
+    let Some(observer) = observer else {
+        return std::future::pending::<()>().await;
+    };
+    if interval.is_zero() {
+        return std::future::pending::<()>().await;
+    }
+    let mut ticker = tokio::time::interval(interval);
+    // The first tick completes immediately; skip it so the first liveness ping
+    // fires one interval after the turn starts, not at t=0 (turn_started already
+    // marks t=0).
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        observer.emit(
+            "turn_liveness",
+            agent_index,
+            &context,
+            serde_json::json!({}),
+        );
+    }
+}
+
 // ── Turn completion scope guard ──────────────────────────────────────────────
 // Emits a `turn_completed` observer event on drop, covering ALL exit paths
 // (success, error, timeout, cancel, panic) from `run_prompt_task`. Captures
@@ -2789,5 +2855,86 @@ mod tests {
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+    }
+
+    // ── turn liveness emission ───────────────────────────────────────────────
+    // `run_turn_liveness` is raced against a "prompt" future the same way
+    // `run_prompt_task` does it: the prompt wins the select and the liveness
+    // future is dropped. We assert what the observer saw.
+
+    fn liveness_count(handle: &observer::ObserverHandle) -> usize {
+        handle
+            .snapshot()
+            .iter()
+            .filter(|e| e.kind == "turn_liveness")
+            .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_liveness_fires_while_prompt_pends_then_stops() {
+        let observer = observer::ObserverHandle::in_process();
+        let context = observer::context_for(None, None, Some("t-1".into()));
+        let liveness = run_turn_liveness(
+            Some(observer.clone()),
+            Some(0),
+            context,
+            Duration::from_secs(10),
+        );
+        tokio::pin!(liveness);
+
+        // Prompt pends for 25s, then completes — first liveness tick at 10s,
+        // second at 20s, so the observer must see exactly two pings.
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep(Duration::from_secs(25)) => {}
+            _ = &mut liveness => unreachable!("liveness future never resolves"),
+        }
+
+        assert_eq!(liveness_count(&observer), 2);
+
+        // The turn carried the live turn_id on each ping.
+        let pings: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.kind == "turn_liveness")
+            .collect();
+        assert!(pings.iter().all(|e| e.turn_id.as_deref() == Some("t-1")));
+
+        // After the prompt wins the select, the liveness future is dropped —
+        // advancing the clock further produces no new pings.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(liveness_count(&observer), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_liveness_disabled_when_interval_zero_emits_nothing() {
+        let observer = observer::ObserverHandle::in_process();
+        let context = observer::context_for(None, None, Some("t-1".into()));
+        let liveness = run_turn_liveness(Some(observer.clone()), Some(0), context, Duration::ZERO);
+        tokio::pin!(liveness);
+
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep(Duration::from_secs(120)) => {}
+            _ = &mut liveness => unreachable!("disabled liveness future never resolves"),
+        }
+
+        assert_eq!(liveness_count(&observer), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_liveness_without_observer_emits_nothing() {
+        // A turn that never started has no observer handle — the future must
+        // park without emitting or panicking.
+        let context = observer::context_for(None, None, Some("t-1".into()));
+        let liveness = run_turn_liveness(None, None, context, Duration::from_secs(10));
+        tokio::pin!(liveness);
+
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep(Duration::from_secs(120)) => {}
+            _ = &mut liveness => unreachable!("handle-less liveness future never resolves"),
+        }
+        // No observer to assert against — reaching here without panic is the test.
     }
 }

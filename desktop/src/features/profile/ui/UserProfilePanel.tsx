@@ -11,6 +11,8 @@ import {
   useRelayAgentsQuery,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
+import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsStore";
+import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import { EditAgentDialog } from "@/features/agents/ui/EditAgentDialog";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
@@ -176,6 +178,18 @@ export function UserProfilePanel({
   );
   const isBot = Boolean(relayAgent || managedAgent);
   const isOwner = useIsManagedAgent(isBot ? pubkey : null);
+
+  // Populate the active-turns store for this agent so useActiveAgentTurns works
+  // even if the Agents page hasn't been visited yet.
+  const bridgeAgents = React.useMemo(
+    () =>
+      managedAgent
+        ? [{ pubkey: managedAgent.pubkey, status: managedAgent.status }]
+        : [],
+    [managedAgent],
+  );
+  useActiveAgentTurnsBridge(bridgeAgents);
+  useManagedAgentObserverBridge(bridgeAgents);
   const canEditAgent = isOwner === true && managedAgent !== undefined;
   const memoryQuery = useAgentMemoryQuery(pubkey, {
     enabled: isOwner === true,
@@ -200,6 +214,14 @@ export function UserProfilePanel({
       ),
     [pubkeyLower, relayAgent, managedAgent, channelsQuery.data],
   );
+
+  const channelIdToName = React.useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const channel of channelsQuery.data ?? []) {
+      map[channel.id] = channel.name;
+    }
+    return map;
+  }, [channelsQuery.data]);
 
   const prevPubkeyRef = React.useRef(pubkey);
   if (prevPubkeyRef.current !== pubkey) {
@@ -297,6 +319,7 @@ export function UserProfilePanel({
           canEditAgent={canEditAgent}
           canViewActivity={canViewActivity}
           channelCount={profileChannels.length}
+          channelIdToName={channelIdToName}
           channelsLoading={channelsQuery.isLoading}
           displayName={displayName}
           followMutation={followMutation}

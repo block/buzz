@@ -1,6 +1,6 @@
 import emojiData from "@emoji-mart/data";
 import Picker from "@emoji-mart/react";
-import { Link2, Loader2, UploadCloud } from "lucide-react";
+import { Link2, UploadCloud } from "lucide-react";
 import { motion } from "motion/react";
 import * as React from "react";
 
@@ -579,7 +579,10 @@ export function ProfileAvatarEditor({
                       data-testid={`${testIdPrefix}-drop-mask`}
                     />
                     {isUploading ? (
-                      <Loader2 className="relative h-8 w-8 animate-spin text-muted-foreground" />
+                      <Spinner
+                        aria-hidden
+                        className="relative h-8 w-8 text-muted-foreground"
+                      />
                     ) : (
                       <UploadCloud
                         className={cn(
@@ -612,6 +615,8 @@ export function ProfileAvatarEditor({
                   <div className="flex h-16 items-center gap-3 rounded-xl bg-muted px-5 transition-colors duration-[250ms] ease-out focus-within:bg-muted/80">
                     <Link2 className="h-4 w-4 text-muted-foreground" />
                     <input
+                      autoCapitalize="none"
+                      autoCorrect="off"
                       className="min-w-0 flex-1 bg-transparent text-sm font-medium text-foreground outline-none placeholder:text-muted-foreground"
                       data-testid={`${testIdPrefix}-url`}
                       disabled={isInputDisabled}
@@ -636,6 +641,7 @@ export function ProfileAvatarEditor({
                         }
                       }}
                       placeholder="Paste a URL (Slack profile, etc.)"
+                      spellCheck={false}
                       type="url"
                       value={urlDraft}
                     />
@@ -960,7 +966,10 @@ export function ProfileAvatarEditor({
               type="button"
             >
               {donePending ? (
-                <Spinner aria-label="Saving avatar" className="h-4 w-4" />
+                <Spinner
+                  aria-label="Saving avatar"
+                  className="h-4 w-4 border-2"
+                />
               ) : (
                 "Done"
               )}

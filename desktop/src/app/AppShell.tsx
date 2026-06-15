@@ -186,6 +186,7 @@ export function AppShell() {
     React.useState(false);
   const [searchFocusRequest, setSearchFocusRequest] = React.useState(0);
   const [topbarSearchHidden, setTopbarSearchHidden] = React.useState(false);
+  const [topbarSearchLoading, setTopbarSearchLoading] = React.useState(false);
   const [browseDialogType, setBrowseDialogType] =
     React.useState<BrowseDialogType>(null);
   const [isNewDmOpen, setIsNewDmOpen] = React.useState(false);
@@ -746,6 +747,7 @@ export function AppShell() {
             isFollowingThread,
             isNotifiedForThread,
             setTopbarSearchHidden,
+            setTopbarSearchLoading,
             threadActivityItems,
           }}
         >
@@ -765,6 +767,7 @@ export function AppShell() {
                     }}
                     onOpenResult={handleOpenSearchResult}
                     searchHidden={topbarSearchHidden}
+                    searchLoading={topbarSearchLoading}
                     searchFocusRequest={searchFocusRequest}
                   />
                 ) : null}

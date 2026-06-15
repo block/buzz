@@ -273,14 +273,22 @@ fn truncate_output(s: String) -> String {
     if s.len() <= LIMIT {
         return s;
     }
-    let head_end = s.floor_char_boundary(HEAD);
-    let tail_start = s.floor_char_boundary(s.len().saturating_sub(TAIL));
+    let head_end = floor_char_boundary(&s, HEAD);
+    let tail_start = floor_char_boundary(&s, s.len().saturating_sub(TAIL));
     let omitted = tail_start - head_end;
     format!(
         "{}\n... ({omitted} bytes omitted) ...\n{}",
         &s[..head_end],
         &s[tail_start..]
     )
+}
+
+fn floor_char_boundary(s: &str, mut index: usize) -> usize {
+    index = index.min(s.len());
+    while index > 0 && !s.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 #[tauri::command]

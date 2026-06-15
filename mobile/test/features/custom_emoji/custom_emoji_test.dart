@@ -2,11 +2,15 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/relay/nostr_models.dart';
 
-NostrEvent _event(String pubkey, List<List<String>> emojiTags) {
+NostrEvent _event(
+  String pubkey,
+  List<List<String>> emojiTags, {
+  int createdAt = 0,
+}) {
   return NostrEvent(
     id: 'id-$pubkey',
     pubkey: pubkey,
-    createdAt: 0,
+    createdAt: createdAt,
     kind: kindEmojiSet,
     tags: [
       ['d', customEmojiSetDTag],
@@ -60,20 +64,35 @@ void main() {
   });
 
   group('unionCustomEmoji', () {
-    test('collapses to one per shortcode, smallest URL wins, sorted', () {
-      final palette = unionCustomEmoji([
-        _event('alice', [
-          ['emoji', 'meow', 'https://z/meow.png'],
-          ['emoji', 'wave', 'https://a/wave.png'],
-        ]),
-        _event('bob', [
-          ['emoji', 'meow', 'https://a/meow.png'], // smaller URL wins
-        ]),
-      ]);
-      expect(palette, [
-        const CustomEmoji(shortcode: 'meow', url: 'https://a/meow.png'),
-        const CustomEmoji(shortcode: 'wave', url: 'https://a/wave.png'),
-      ]);
+    test(
+      'collapses to one per shortcode; same-time tie-breaks to smaller URL',
+      () {
+        final palette = unionCustomEmoji([
+          _event('alice', [
+            ['emoji', 'meow', 'https://z/meow.png'],
+            ['emoji', 'wave', 'https://a/wave.png'],
+          ]),
+          _event('bob', [
+            ['emoji', 'meow', 'https://a/meow.png'], // tie → smaller URL wins
+          ]),
+        ]);
+        expect(palette, [
+          const CustomEmoji(shortcode: 'meow', url: 'https://a/meow.png'),
+          const CustomEmoji(shortcode: 'wave', url: 'https://a/wave.png'),
+        ]);
+      },
+    );
+
+    test('most recently published set wins, regardless of URL order', () {
+      final older = _event('alice', [
+        ['emoji', 'x', 'https://a/x.png'],
+      ], createdAt: 100);
+      final newer = _event('bob', [
+        ['emoji', 'x', 'https://z/x.png'],
+      ], createdAt: 200);
+      const expected = [CustomEmoji(shortcode: 'x', url: 'https://z/x.png')];
+      expect(unionCustomEmoji([older, newer]), expected);
+      expect(unionCustomEmoji([newer, older]), expected);
     });
 
     test('deterministic regardless of event order', () {

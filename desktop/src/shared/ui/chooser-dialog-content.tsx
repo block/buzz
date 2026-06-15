@@ -2,12 +2,7 @@ import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
 
-import {
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "./dialog";
+import { DialogContent, DialogHeader, DialogTitle } from "./dialog";
 
 type ChooserDialogContentProps = React.ComponentPropsWithoutRef<
   typeof DialogContent
@@ -16,6 +11,7 @@ type ChooserDialogContentProps = React.ComponentPropsWithoutRef<
   footer?: React.ReactNode;
   footerClassName?: string;
   footerTestId?: string;
+  contentClassName?: string;
   headerClassName?: string;
   headerTestId?: string;
   scrollAreaClassName?: string;
@@ -31,7 +27,8 @@ export const ChooserDialogContent = React.forwardRef<
     {
       children,
       className,
-      description,
+      contentClassName,
+      description: _description,
       footer,
       footerClassName,
       footerTestId,
@@ -40,11 +37,13 @@ export const ChooserDialogContent = React.forwardRef<
       scrollAreaClassName,
       scrollAreaTestId,
       title,
+      "aria-describedby": ariaDescribedBy,
       ...props
     },
     ref,
   ) => (
     <DialogContent
+      aria-describedby={ariaDescribedBy}
       className={cn(
         "flex max-h-[85vh] flex-col gap-0 overflow-hidden p-0",
         className,
@@ -53,16 +52,10 @@ export const ChooserDialogContent = React.forwardRef<
       {...props}
     >
       <DialogHeader
-        className={cn(
-          "shrink-0 border-b border-border/60 px-6 py-5 pr-14",
-          headerClassName,
-        )}
+        className={cn("shrink-0 px-6 py-5 pr-14", headerClassName)}
         data-testid={headerTestId}
       >
         <DialogTitle>{title}</DialogTitle>
-        {description ? (
-          <DialogDescription>{description}</DialogDescription>
-        ) : null}
       </DialogHeader>
 
       <div
@@ -72,7 +65,7 @@ export const ChooserDialogContent = React.forwardRef<
         )}
         data-testid={scrollAreaTestId}
       >
-        <div className="py-5">{children}</div>
+        <div className={cn("py-5", contentClassName)}>{children}</div>
       </div>
 
       {footer ? (

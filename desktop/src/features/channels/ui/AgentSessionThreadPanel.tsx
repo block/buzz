@@ -102,7 +102,7 @@ export function AgentSessionThreadPanel({
               type="button"
               variant="outline"
             >
-              <Octagon className="h-3 w-3" />
+              <Octagon className="h-4 w-4" />
               Stop
             </Button>
           </TooltipTrigger>

@@ -42,19 +42,33 @@ fn emoji_tags_of(event: &serde_json::Value) -> Vec<EmojiEntry> {
     out
 }
 
-/// Union every member's kind:30030 set, deduped by `(shortcode, url)`.
-/// Stable, sorted by shortcode then url, so identical input yields identical output.
+/// Union every member's kind:30030 set, collapsed to one entry per shortcode.
+/// The most recently published set (`created_at`) wins; equal timestamps
+/// tie-break to the lexicographically-smallest URL. Deterministic and
+/// fetch-order-independent. Sorted by shortcode.
 fn union_custom_emoji(events: &[serde_json::Value]) -> Vec<EmojiEntry> {
-    let mut seen = std::collections::HashSet::new();
-    let mut out: Vec<EmojiEntry> = Vec::new();
+    let mut by_shortcode: std::collections::HashMap<String, (String, i64)> =
+        std::collections::HashMap::new();
     for event in events {
+        let created_at = event
+            .get("created_at")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         for entry in emoji_tags_of(event) {
-            if seen.insert((entry.shortcode.clone(), entry.url.clone())) {
-                out.push(entry);
+            match by_shortcode.get(&entry.shortcode) {
+                Some((url, at)) if *at > created_at || (*at == created_at && *url <= entry.url) => {
+                }
+                _ => {
+                    by_shortcode.insert(entry.shortcode, (entry.url, created_at));
+                }
             }
         }
     }
-    out.sort_by(|a, b| a.shortcode.cmp(&b.shortcode).then(a.url.cmp(&b.url)));
+    let mut out: Vec<EmojiEntry> = by_shortcode
+        .into_iter()
+        .map(|(shortcode, (url, _))| EmojiEntry { shortcode, url })
+        .collect();
+    out.sort_by(|a, b| a.shortcode.cmp(&b.shortcode));
     out
 }
 
@@ -318,9 +332,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn union_dedups_by_shortcode_and_url_across_members() {
+    fn union_latest_set_wins_per_shortcode() {
         let events = vec![
             serde_json::json!({
+                "created_at": 100,
                 "tags": [
                     ["d", "buzz:custom-emoji"],
                     ["emoji", "zort", "https://example.com/zort.png"],
@@ -328,11 +343,10 @@ mod tests {
                 ]
             }),
             serde_json::json!({
+                "created_at": 200,
                 "tags": [
                     ["d", "buzz:custom-emoji"],
-                    // exact duplicate (same shortcode+url) — collapses
-                    ["emoji", "narf", "https://example.com/narf.png"],
-                    // same shortcode, different url — both kept (distinct pair)
+                    // newer set claims zort with a different url — newer wins
                     ["emoji", "zort", "https://example.com/zort2.png"]
                 ]
             }),
@@ -346,9 +360,34 @@ mod tests {
             pairs,
             vec![
                 ("narf", "https://example.com/narf.png"),
-                ("zort", "https://example.com/zort.png"),
                 ("zort", "https://example.com/zort2.png"),
             ]
         );
+        // Order-independence: reversed input yields the identical palette.
+        let reversed: Vec<_> = events.into_iter().rev().collect();
+        let emojis_rev = union_custom_emoji(&reversed);
+        let pairs_rev: Vec<(&str, &str)> = emojis_rev
+            .iter()
+            .map(|e| (e.shortcode.as_str(), e.url.as_str()))
+            .collect();
+        assert_eq!(pairs, pairs_rev);
+    }
+
+    #[test]
+    fn union_equal_timestamps_tie_break_to_smallest_url() {
+        let events = vec![
+            serde_json::json!({
+                "created_at": 100,
+                "tags": [["emoji", "zort", "https://example.com/zort2.png"]]
+            }),
+            serde_json::json!({
+                "created_at": 100,
+                "tags": [["emoji", "zort", "https://example.com/zort.png"]]
+            }),
+        ];
+        let emojis = union_custom_emoji(&events);
+        assert_eq!(emojis.len(), 1);
+        assert_eq!(emojis[0].shortcode, "zort");
+        assert_eq!(emojis[0].url, "https://example.com/zort.png");
     }
 }

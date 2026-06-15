@@ -2,8 +2,10 @@ import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import type { Channel, SearchHit } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { SidebarTrigger, useSidebar } from "@/shared/ui/sidebar";
+import { Skeleton } from "@/shared/ui/skeleton";
 
 type AppTopChromeProps = {
   canGoBack: boolean;
@@ -16,6 +18,7 @@ type AppTopChromeProps = {
   onOpenResult: (hit: SearchHit) => void;
   searchHidden?: boolean;
   searchFocusRequest: number;
+  searchLoading?: boolean;
 };
 
 function GlobalTopDivider() {
@@ -39,6 +42,7 @@ function CenterColumnTopbarSearch({
   onOpenChannel,
   onOpenResult,
   searchFocusRequest,
+  searchLoading = false,
 }: Pick<
   AppTopChromeProps,
   | "channels"
@@ -46,8 +50,11 @@ function CenterColumnTopbarSearch({
   | "onOpenChannel"
   | "onOpenResult"
   | "searchFocusRequest"
+  | "searchLoading"
 >) {
   const { isResizing, state } = useSidebar();
+  const searchClassName =
+    "pointer-events-auto w-[220px] max-w-full md:w-[300px] lg:w-[360px] xl:w-[420px] 2xl:w-[480px]";
 
   return (
     <div
@@ -59,20 +66,30 @@ function CenterColumnTopbarSearch({
         right: 0,
       }}
     >
-      <TopbarSearch
-        channels={channels}
-        className="pointer-events-auto w-[220px] max-w-full md:w-[300px] lg:w-[360px] xl:w-[420px] 2xl:w-[480px]"
-        currentPubkey={currentPubkey}
-        focusRequest={searchFocusRequest}
-        onOpenChannel={onOpenChannel}
-        onOpenResult={onOpenResult}
-      />
+      {searchLoading ? (
+        <div
+          aria-hidden="true"
+          className={cn("h-7", searchClassName)}
+          data-testid="topbar-search-loading"
+        >
+          <Skeleton className="h-full w-full rounded-lg" />
+        </div>
+      ) : (
+        <TopbarSearch
+          channels={channels}
+          className={searchClassName}
+          currentPubkey={currentPubkey}
+          focusRequest={searchFocusRequest}
+          onOpenChannel={onOpenChannel}
+          onOpenResult={onOpenResult}
+        />
+      )}
     </div>
   );
 }
 
 const TOP_CHROME_ICON_BUTTON_CLASS =
-  "rounded-[4px] text-muted-foreground/70 hover:bg-border/45 hover:text-foreground";
+  "h-7 w-7 rounded-[4px] text-muted-foreground/70 hover:bg-border/45 hover:text-foreground [&_svg]:size-4";
 
 export function AppTopChrome({
   canGoBack,
@@ -85,6 +102,7 @@ export function AppTopChrome({
   onOpenResult,
   searchHidden = false,
   searchFocusRequest,
+  searchLoading = false,
 }: AppTopChromeProps) {
   return (
     <>
@@ -94,7 +112,7 @@ export function AppTopChrome({
         data-tauri-drag-region
       />
       <GlobalTopDivider />
-      <div className="fixed left-[80px] top-[9px] z-45 flex items-center gap-0.5">
+      <div className="fixed left-[80px] top-[6px] z-45 flex items-center gap-0.5">
         <SidebarTrigger className={TOP_CHROME_ICON_BUTTON_CLASS} />
         <Button
           aria-label="Go back"
@@ -126,6 +144,7 @@ export function AppTopChrome({
           onOpenChannel={onOpenChannel}
           onOpenResult={onOpenResult}
           searchFocusRequest={searchFocusRequest}
+          searchLoading={searchLoading}
         />
       )}
     </>

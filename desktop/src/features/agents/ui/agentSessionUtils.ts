@@ -131,3 +131,19 @@ export function formatDuration(
   }
   return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
 }
+
+/**
+ * Format a live elapsed duration (epoch-ms delta) for a ticking counter.
+ * Tiers: `<60s → "Ns"` · `<60m → "Nm Ns"` · `≥60m → "Nh Nm Ns"`.
+ * Negative input clamps to 0; carries roll cleanly (e.g. 3600s → "1h 0m 0s").
+ */
+export function formatElapsed(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m ${seconds}s`;
+  const minutes = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60);
+  return `${hours}h ${minutes}m ${seconds}s`;
+}

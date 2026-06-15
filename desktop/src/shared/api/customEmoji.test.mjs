@@ -9,11 +9,11 @@ import {
   suggestShortcodeFromFilename,
 } from "./customEmoji.ts";
 
-function ev(tags) {
+function ev(tags, createdAt = 1) {
   return {
     id: "x",
     pubkey: "relay",
-    created_at: 1,
+    created_at: createdAt,
     kind: 30030,
     tags,
     content: "",
@@ -135,9 +135,9 @@ test("unionCustomEmoji merges members and sorts by shortcode", () => {
 });
 
 test("unionCustomEmoji collapses a shortcode to ONE deterministic winner", () => {
-  // Two members claim :party_parrot: with different URLs. The palette must
-  // expose exactly one (lexicographically-smallest URL), since downstream
-  // identity is shortcode-only and cannot disambiguate two URLs.
+  // Two members claim :party_parrot: at the same created_at. The palette must
+  // expose exactly one (tie-break: lexicographically-smallest URL), since
+  // downstream identity is shortcode-only and cannot disambiguate two URLs.
   const out = unionCustomEmoji([
     ev([["emoji", "party_parrot", "https://relay/zebra.gif"]]),
     ev([["emoji", "party_parrot", "https://relay/alpha.gif"]]),
@@ -145,6 +145,15 @@ test("unionCustomEmoji collapses a shortcode to ONE deterministic winner", () =>
   assert.deepEqual(out, [
     { shortcode: "party_parrot", url: "https://relay/alpha.gif" },
   ]);
+});
+
+test("unionCustomEmoji prefers the most recently published set", () => {
+  // Newer event wins regardless of URL sort order or input position.
+  const older = ev([["emoji", "dup", "https://relay/alpha.gif"]], 100);
+  const newer = ev([["emoji", "dup", "https://relay/zebra.gif"]], 200);
+  const expected = [{ shortcode: "dup", url: "https://relay/zebra.gif" }];
+  assert.deepEqual(unionCustomEmoji([older, newer]), expected);
+  assert.deepEqual(unionCustomEmoji([newer, older]), expected);
 });
 
 test("unionCustomEmoji winner is independent of member order", () => {
