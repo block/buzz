@@ -92,6 +92,7 @@ export function ProfileStep({
           ) : null}
           <input
             aria-label="Name"
+            autoCapitalize="none"
             autoComplete="off"
             autoCorrect="off"
             className={cn(
@@ -128,7 +129,7 @@ export function ProfileStep({
           type="button"
         >
           {isSaving ? (
-            <Spinner aria-label="Saving profile" className="h-4 w-4" />
+            <Spinner aria-label="Saving profile" className="h-4 w-4 border-2" />
           ) : (
             "Next"
           )}

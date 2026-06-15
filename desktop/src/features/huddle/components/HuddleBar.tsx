@@ -304,7 +304,7 @@ export function HuddleBar({ className }: HuddleBarProps) {
           size="icon"
           variant="ghost"
         >
-          <Plus className="h-3.5 w-3.5" />
+          <Plus className="h-4 w-4" />
         </Button>
       </div>
 

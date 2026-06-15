@@ -255,7 +255,7 @@ function SectionHeaderActions({
           title="Mark all as read"
           type="button"
         >
-          <CheckCheck className="h-3.5 w-3.5" />
+          <CheckCheck className="h-4 w-4" />
         </button>
       ) : null}
       {onBrowse ? (
@@ -548,7 +548,7 @@ export function CustomChannelSection({
                     >
                       <GripVertical
                         className={cn(
-                          "h-3 w-3 shrink-0 text-sidebar-foreground/30",
+                          "h-4 w-4 shrink-0 text-sidebar-foreground/30",
                           SECTION_ACTION_VISIBILITY_CLASS,
                         )}
                         aria-hidden="true"
@@ -580,7 +580,7 @@ export function CustomChannelSection({
                         title="Mark all as read"
                         type="button"
                       >
-                        <CheckCheck className="h-3.5 w-3.5" />
+                        <CheckCheck className="h-4 w-4" />
                       </button>
                     ) : null}
                     <button
@@ -592,7 +592,7 @@ export function CustomChannelSection({
                       }}
                       type="button"
                     >
-                      <Pencil className="h-3.5 w-3.5" />
+                      <Pencil className="h-4 w-4" />
                     </button>
                     <button
                       aria-label="Delete section"
@@ -603,7 +603,7 @@ export function CustomChannelSection({
                       }}
                       type="button"
                     >
-                      <Trash2 className="h-3.5 w-3.5" />
+                      <Trash2 className="h-4 w-4" />
                     </button>
                   </div>
                 </div>

@@ -86,7 +86,7 @@ export default function DiffMessage({
                 type="button"
                 variant="ghost"
               >
-                <Maximize2 className="h-3.5 w-3.5" />
+                <Maximize2 className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
             <TooltipContent>Expand diff</TooltipContent>

@@ -279,7 +279,7 @@ jobs:
         run: gh release upload "v${VERSION}" "$DMG_PATH" --clobber
 
       - name: Upload updater archive to rolling release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
         run: |
           gh release upload buzz-desktop-latest \
             "$ARCHIVE_PATH" \
@@ -428,7 +428,7 @@ jobs:
           DMG_PATH: ${{ steps.unsigned.outputs.dmg }}
 
       - name: Upload updater archive to rolling release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
         run: |
           gh release upload buzz-desktop-latest \
             "$ARCHIVE_PATH" \
@@ -574,7 +574,7 @@ jobs:
             --clobber
 
       - name: Upload updater archive to rolling release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
         run: |
           gh release upload buzz-desktop-latest \
             "$ARCHIVE_PATH" \
@@ -700,7 +700,7 @@ jobs:
           EXE_PATH: ${{ steps.artifacts.outputs.exe }}
 
       - name: Upload updater archive to rolling release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version))
         shell: bash
         run: |
           gh release upload buzz-desktop-latest \
@@ -714,9 +714,12 @@ jobs:
 
   assemble-manifest:
     name: Assemble multi-platform latest.json
-    # Only a real tag push assembles latest.json — a branch workflow_dispatch
-    # skips the rolling-release uploads, so its archive URLs never exist.
-    if: github.event_name == 'push'
+    # Only tag-backed releases assemble latest.json. Branch workflow_dispatch
+    # runs skip rolling-release uploads, so their archive URLs never exist.
+    if: |
+      always() &&
+      needs.setup.result == 'success' &&
+      (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.ref == format('v{0}', inputs.version)))
     runs-on: ubuntu-latest
     needs: [setup, release, release-macos-x64, release-linux, release-windows]
     timeout-minutes: 10
@@ -733,27 +736,60 @@ jobs:
 
       - name: Write signature files
         env:
+          RESULT_ARM64: ${{ needs.release.result }}
+          RESULT_X64: ${{ needs.release-macos-x64.result }}
+          RESULT_LINUX: ${{ needs.release-linux.result }}
+          RESULT_WIN: ${{ needs.release-windows.result }}
           SIG_ARM64: ${{ needs.release.outputs.sig }}
           SIG_X64: ${{ needs.release-macos-x64.outputs.sig }}
           SIG_LINUX: ${{ needs.release-linux.outputs.sig }}
           SIG_WIN: ${{ needs.release-windows.outputs.sig }}
         run: |
+          set -euo pipefail
           mkdir -p /tmp/sigs
-          echo "$SIG_ARM64" > /tmp/sigs/darwin-aarch64.sig
-          echo "$SIG_X64" > /tmp/sigs/darwin-x86_64.sig
-          echo "$SIG_LINUX" > /tmp/sigs/linux-x86_64.sig
-          echo "$SIG_WIN" > /tmp/sigs/windows-x86_64.sig
+
+          write_sig() {
+            local result="$1" platform="$2" sig="$3"
+            if [[ "$result" == "success" ]]; then
+              [[ -n "$sig" ]] || { echo "::error::Missing signature for successful platform: $platform"; exit 1; }
+              printf '%s' "$sig" > "/tmp/sigs/${platform}.sig"
+            fi
+          }
+
+          write_sig "$RESULT_ARM64" darwin-aarch64 "$SIG_ARM64"
+          write_sig "$RESULT_X64" darwin-x86_64 "$SIG_X64"
+          write_sig "$RESULT_LINUX" linux-x86_64 "$SIG_LINUX"
+          write_sig "$RESULT_WIN" windows-x86_64 "$SIG_WIN"
 
       - name: Verify archive URLs are accessible
+        env:
+          RESULT_ARM64: ${{ needs.release.result }}
+          RESULT_X64: ${{ needs.release-macos-x64.result }}
+          RESULT_LINUX: ${{ needs.release-linux.result }}
+          RESULT_WIN: ${{ needs.release-windows.result }}
+          ARCHIVE_ARM64: ${{ needs.release.outputs.archive_name }}
+          ARCHIVE_X64: ${{ needs.release-macos-x64.outputs.archive_name }}
+          ARCHIVE_LINUX: ${{ needs.release-linux.outputs.archive_name }}
+          ARCHIVE_WIN: ${{ needs.release-windows.outputs.archive_name }}
         run: |
           set -euo pipefail
           BASE="https://github.com/block/buzz/releases/download/buzz-desktop-latest"
+          ARCHIVES=()
 
-          for name in \
-            "${{ needs.release.outputs.archive_name }}" \
-            "${{ needs.release-macos-x64.outputs.archive_name }}" \
-            "${{ needs.release-linux.outputs.archive_name }}" \
-            "${{ needs.release-windows.outputs.archive_name }}"; do
+          add_archive() {
+            local result="$1" platform="$2" archive="$3"
+            if [[ "$result" == "success" ]]; then
+              [[ -n "$archive" ]] || { echo "::error::Missing archive name for successful platform: $platform"; exit 1; }
+              ARCHIVES+=("$archive")
+            fi
+          }
+
+          add_archive "$RESULT_ARM64" darwin-aarch64 "$ARCHIVE_ARM64"
+          add_archive "$RESULT_X64" darwin-x86_64 "$ARCHIVE_X64"
+          add_archive "$RESULT_LINUX" linux-x86_64 "$ARCHIVE_LINUX"
+          add_archive "$RESULT_WIN" windows-x86_64 "$ARCHIVE_WIN"
+
+          for name in "${ARCHIVES[@]}"; do
             echo "Checking $BASE/$name ..."
             success=false
             for attempt in 1 2 3; do
@@ -772,15 +808,35 @@ jobs:
           echo "All archive URLs verified."
 
       - name: Generate unified latest.json
+        env:
+          RESULT_ARM64: ${{ needs.release.result }}
+          RESULT_X64: ${{ needs.release-macos-x64.result }}
+          RESULT_LINUX: ${{ needs.release-linux.result }}
+          RESULT_WIN: ${{ needs.release-windows.result }}
+          ARCHIVE_ARM64: ${{ needs.release.outputs.archive_name }}
+          ARCHIVE_X64: ${{ needs.release-macos-x64.outputs.archive_name }}
+          ARCHIVE_LINUX: ${{ needs.release-linux.outputs.archive_name }}
+          ARCHIVE_WIN: ${{ needs.release-windows.outputs.archive_name }}
         run: |
+          set -euo pipefail
           BASE="https://github.com/block/buzz/releases/download/buzz-desktop-latest"
+          TRIPLES=()
 
-          bash desktop/scripts/generate-oss-latest-json.sh "$VERSION" \
-            "darwin-aarch64:/tmp/sigs/darwin-aarch64.sig:${BASE}/${{ needs.release.outputs.archive_name }}" \
-            "darwin-x86_64:/tmp/sigs/darwin-x86_64.sig:${BASE}/${{ needs.release-macos-x64.outputs.archive_name }}" \
-            "linux-x86_64:/tmp/sigs/linux-x86_64.sig:${BASE}/${{ needs.release-linux.outputs.archive_name }}" \
-            "windows-x86_64:/tmp/sigs/windows-x86_64.sig:${BASE}/${{ needs.release-windows.outputs.archive_name }}" \
-            > latest.json
+          add_triple() {
+            local result="$1" platform="$2" archive="$3"
+            if [[ "$result" == "success" ]]; then
+              [[ -n "$archive" ]] || { echo "::error::Missing archive name for successful platform: $platform"; exit 1; }
+              TRIPLES+=("${platform}:/tmp/sigs/${platform}.sig:${BASE}/${archive}")
+            fi
+          }
+
+          add_triple "$RESULT_ARM64" darwin-aarch64 "$ARCHIVE_ARM64"
+          add_triple "$RESULT_X64" darwin-x86_64 "$ARCHIVE_X64"
+          add_triple "$RESULT_LINUX" linux-x86_64 "$ARCHIVE_LINUX"
+          add_triple "$RESULT_WIN" windows-x86_64 "$ARCHIVE_WIN"
+
+          [ "${#TRIPLES[@]}" -ge 3 ] || { echo "::error::too few platforms (${#TRIPLES[@]})"; exit 1; }
+          bash desktop/scripts/generate-oss-latest-json.sh "$VERSION" "${TRIPLES[@]}" > latest.json
           cat latest.json
 
       - name: Upload latest.json to rolling release

@@ -57,7 +57,7 @@ function IdentityRow({
           title={`Copy ${label}`}
           type="button"
         >
-          <Copy className="h-3.5 w-3.5 shrink-0" />
+          <Copy className="h-4 w-4 shrink-0" />
           Copy
         </button>
       ) : null}
@@ -97,7 +97,7 @@ function EditProfileMetadataButton({
       title={accessibleLabel}
       type="button"
     >
-      <Icon className="h-3.5 w-3.5 shrink-0" />
+      <Icon className="h-4 w-4 shrink-0" />
       {actionLabel}
     </button>
   );
@@ -577,7 +577,7 @@ export function ProfileSettingsCard({
                                 this device.
                               </p>
                             </div>
-                            <ChevronDown className="h-5 w-5 shrink-0 text-muted-foreground transition-[color,transform] duration-150 ease-out group-open:rotate-180 group-hover/identity:text-foreground group-focus-visible/identity:text-foreground" />
+                            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-[color,transform] duration-150 ease-out group-open:rotate-180 group-hover/identity:text-foreground group-focus-visible/identity:text-foreground" />
                           </summary>
                           <div
                             className="border-t border-border/55 divide-y divide-border/55"

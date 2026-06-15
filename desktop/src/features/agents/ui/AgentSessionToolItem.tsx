@@ -81,7 +81,7 @@ export function ToolItem({
             </span>
           ) : null}
           <ToolTimestamp item={item} />
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
         </summary>
 
         <ToolDetailBlocks
@@ -272,7 +272,7 @@ function BuzzToolInlineAction({
         {action.avatar}
         <span className="shrink-0">{action.label}</span>
         <span className="truncate">{action.value}</span>
-        <ArrowUpRight className="h-3 w-3 shrink-0" />
+        <ArrowUpRight className="h-4 w-4 shrink-0" />
       </button>
     );
   }

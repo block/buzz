@@ -212,13 +212,13 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
                 "hover:bg-muted hover:text-foreground",
                 "focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
                 "disabled:pointer-events-none disabled:opacity-50",
-                "[&_svg]:pointer-events-none [&_svg]:size-3.5 [&_svg]:shrink-0",
+                "[&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
                 item.active
                   ? "bg-primary text-primary-foreground"
                   : "bg-transparent text-muted-foreground",
               )}
             >
-              <item.icon className="h-3.5 w-3.5" />
+              <item.icon className="h-4 w-4" />
             </button>
           </TooltipTrigger>
           <TooltipContent>
