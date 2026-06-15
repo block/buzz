@@ -614,11 +614,9 @@
   display: inline-block;
   border-radius: 4px;
   background: hsl(var(--primary) / 0.15);
-  padding: 3px 4px 2px;
-  /* 1rem === 16px (chat base); rem so it scales with the root-font-size zoom.
-     Matches the timeline mention chip (text-base) so composer + timeline align. */
-  font-size: 1rem;
-  line-height: 1;
+  padding: 0.125rem 0.25rem;
+  font-size: inherit;
+  line-height: 1.1;
   color: hsl(var(--primary));
   font-weight: 500;
 }
