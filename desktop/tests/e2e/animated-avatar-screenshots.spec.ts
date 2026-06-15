@@ -168,8 +168,12 @@ test.describe("animated avatar screenshots", () => {
     const idleHeight = await animatedTabHeight();
 
     await page.getByTestId("profile-avatar-animated-camera-iphone").click();
+    const previewSlot = page.getByTestId(
+      "profile-avatar-animated-preview-slot",
+    );
     await expect(page.getByLabel("Starting camera")).toBeVisible();
-    await expect(page.getByTestId("profile-avatar-preview")).toBeVisible();
+    await expect(previewSlot.getByLabel("Starting camera")).toBeVisible();
+    await expect(page.getByTestId("profile-avatar-preview")).toHaveCount(0);
     await expect(
       page.getByTestId("profile-avatar-animated-record"),
     ).toHaveCount(0);
@@ -179,6 +183,9 @@ test.describe("animated avatar screenshots", () => {
     await expect(
       page.getByTestId("profile-avatar-animated-record"),
     ).toBeVisible({ timeout: 10_000 });
+    await expect(
+      previewSlot.getByTestId("profile-avatar-animated-preview"),
+    ).toBeVisible();
     const liveHeight = await animatedTabHeight();
     expect(Math.abs(liveHeight - idleHeight)).toBeLessThanOrEqual(1);
     await expect
