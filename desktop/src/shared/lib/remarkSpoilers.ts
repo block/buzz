@@ -158,7 +158,5 @@ function isBlockDelimiter(node: Node): boolean {
 }
 
 function shouldSkipNode(node: Node): boolean {
-  return (
-    node.type === "link" || node.type === "code" || node.type === "inlineCode"
-  );
+  return node.type === "code" || node.type === "inlineCode";
 }

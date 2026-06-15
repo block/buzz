@@ -72,6 +72,33 @@ test("remarkSpoilers: groups inline images between delimiters", () => {
   assert.equal(children[0].children[0].type, "image");
 });
 
+test("remarkSpoilers: parses spoiler delimiters inside link labels", () => {
+  const tree = runPlugin({
+    type: "root",
+    children: [
+      {
+        type: "paragraph",
+        children: [
+          {
+            type: "link",
+            url: "https://example.com/a||b",
+            children: [{ type: "text", value: "||secret||" }],
+          },
+        ],
+      },
+    ],
+  });
+
+  const link = tree.children[0].children[0];
+  assert.equal(link.type, "link");
+  assert.equal(link.url, "https://example.com/a||b");
+  assert.equal(link.children.length, 1);
+  assert.equal(link.children[0].type, "spoiler");
+  assert.deepEqual(link.children[0].children, [
+    { type: "text", value: "secret" },
+  ]);
+});
+
 test("remarkSpoilers: groups block nodes between delimiter paragraphs", () => {
   const tree = runPlugin({
     type: "root",
