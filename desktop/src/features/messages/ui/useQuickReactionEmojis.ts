@@ -4,6 +4,7 @@ import {
   loadActiveWorkspaceId,
   loadWorkspaces,
 } from "@/features/workspaces/workspaceStorage";
+import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
 const QUICK_REACTION_STORAGE_KEY = "buzz.quick-reaction-emojis.v1";
 const QUICK_REACTION_UPDATED_EVENT = "buzz:quick-reaction-emojis-updated";
@@ -43,8 +44,12 @@ function quickReactionStorageKey(workspaceScope: string | null) {
     : QUICK_REACTION_STORAGE_KEY;
 }
 
-function quickReactionSessionKey(limit: number, workspaceScope: string | null) {
-  return `${workspaceScope ?? "global"}:${limit}`;
+function quickReactionSessionKey(
+  limit: number,
+  workspaceScope: string | null,
+  customEmojiSignature: string,
+) {
+  return `${workspaceScope ?? "global"}:${customEmojiSignature}:${limit}`;
 }
 
 function normalizeEntry(entry: unknown): QuickReactionEntry | null {
@@ -106,14 +111,42 @@ function writeQuickReactionEntries(
   }
 }
 
-function getQuickReactionEmojis(limit: number, workspaceScope: string | null) {
+function customEmojiSignature(customEmoji: ReadonlyArray<CustomEmoji>) {
+  return customEmoji
+    .map((emoji) => emoji.shortcode.toLowerCase())
+    .sort()
+    .join(",");
+}
+
+function customEmojiShortcodesFromSignature(signature: string) {
+  return new Set(signature ? signature.split(",") : []);
+}
+
+function isCustomEmojiShortcode(emoji: string) {
+  return emoji.startsWith(":") && emoji.endsWith(":");
+}
+
+function canRenderQuickReactionEmoji(
+  emoji: string,
+  customEmojiShortcodes: ReadonlySet<string>,
+) {
+  if (!isCustomEmojiShortcode(emoji)) return true;
+  return customEmojiShortcodes.has(emoji.slice(1, -1).toLowerCase());
+}
+
+function resolveQuickReactionEmojisWithShortcodes(
+  entries: ReadonlyArray<Pick<QuickReactionEntry, "emoji">>,
+  limit: number,
+  customEmojiShortcodes: ReadonlySet<string>,
+) {
   const seen = new Set<string>();
   const next: string[] = [];
 
-  for (const entry of readQuickReactionEntries(
-    quickReactionStorageKey(workspaceScope),
-  )) {
+  for (const entry of entries) {
     if (seen.has(entry.emoji)) continue;
+    if (!canRenderQuickReactionEmoji(entry.emoji, customEmojiShortcodes)) {
+      continue;
+    }
     seen.add(entry.emoji);
     next.push(entry.emoji);
     if (next.length >= limit) return next;
@@ -129,15 +162,48 @@ function getQuickReactionEmojis(limit: number, workspaceScope: string | null) {
   return next;
 }
 
+export function resolveQuickReactionEmojis(
+  entries: ReadonlyArray<Pick<QuickReactionEntry, "emoji">>,
+  limit: number,
+  customEmoji: ReadonlyArray<CustomEmoji> = [],
+) {
+  return resolveQuickReactionEmojisWithShortcodes(
+    entries,
+    limit,
+    customEmojiShortcodesFromSignature(customEmojiSignature(customEmoji)),
+  );
+}
+
+function getQuickReactionEmojis(
+  limit: number,
+  workspaceScope: string | null,
+  customEmojiSignature: string,
+) {
+  return resolveQuickReactionEmojisWithShortcodes(
+    readQuickReactionEntries(quickReactionStorageKey(workspaceScope)),
+    limit,
+    customEmojiShortcodesFromSignature(customEmojiSignature),
+  );
+}
+
 function getSessionQuickReactionEmojis(
   limit: number,
   workspaceScope: string | null,
+  customEmojiSignature: string,
 ) {
-  const sessionKey = quickReactionSessionKey(limit, workspaceScope);
+  const sessionKey = quickReactionSessionKey(
+    limit,
+    workspaceScope,
+    customEmojiSignature,
+  );
   const cached = sessionQuickReactionEmojis.get(sessionKey);
   if (cached) return cached;
 
-  const emojis = getQuickReactionEmojis(limit, workspaceScope);
+  const emojis = getQuickReactionEmojis(
+    limit,
+    workspaceScope,
+    customEmojiSignature,
+  );
   sessionQuickReactionEmojis.set(sessionKey, emojis);
   return emojis;
 }
@@ -188,21 +254,35 @@ export function recordQuickReactionEmoji(emoji: string) {
   }
 }
 
-export function useQuickReactionEmojis(limit = 4) {
+export function useQuickReactionEmojis(
+  limit = 4,
+  customEmoji: ReadonlyArray<CustomEmoji> = [],
+) {
   const workspaceScope = getActiveWorkspaceScope();
+  const customEmojiCacheKey = customEmojiSignature(customEmoji);
   const [emojis, setEmojis] = React.useState(() =>
-    getSessionQuickReactionEmojis(limit, workspaceScope),
+    getSessionQuickReactionEmojis(limit, workspaceScope, customEmojiCacheKey),
   );
 
   React.useEffect(() => {
     if (typeof window === "undefined") return;
 
     const storageKey = quickReactionStorageKey(workspaceScope);
-    const sessionKey = quickReactionSessionKey(limit, workspaceScope);
+    const sessionKey = quickReactionSessionKey(
+      limit,
+      workspaceScope,
+      customEmojiCacheKey,
+    );
     const handleStorage = (event: StorageEvent) => {
       if (event.key === storageKey) {
         sessionQuickReactionEmojis.delete(sessionKey);
-        setEmojis(getSessionQuickReactionEmojis(limit, workspaceScope));
+        setEmojis(
+          getSessionQuickReactionEmojis(
+            limit,
+            workspaceScope,
+            customEmojiCacheKey,
+          ),
+        );
       }
     };
     const handleLocalUpdate = (event: Event) => {
@@ -210,13 +290,21 @@ export function useQuickReactionEmojis(limit = 4) {
         event instanceof CustomEvent &&
         event.detail?.workspaceScope === workspaceScope
       ) {
-        setEmojis(getSessionQuickReactionEmojis(limit, workspaceScope));
+        setEmojis(
+          getSessionQuickReactionEmojis(
+            limit,
+            workspaceScope,
+            customEmojiCacheKey,
+          ),
+        );
       }
     };
 
     window.addEventListener("storage", handleStorage);
     window.addEventListener(QUICK_REACTION_UPDATED_EVENT, handleLocalUpdate);
-    setEmojis(getSessionQuickReactionEmojis(limit, workspaceScope));
+    setEmojis(
+      getSessionQuickReactionEmojis(limit, workspaceScope, customEmojiCacheKey),
+    );
 
     return () => {
       window.removeEventListener("storage", handleStorage);
@@ -225,7 +313,7 @@ export function useQuickReactionEmojis(limit = 4) {
         handleLocalUpdate,
       );
     };
-  }, [limit, workspaceScope]);
+  }, [customEmojiCacheKey, limit, workspaceScope]);
 
   return emojis;
 }

@@ -354,7 +354,7 @@ export function MessageActionBar({
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
   const customEmoji = useCustomEmoji();
-  const quickReactionEmojis = useQuickReactionEmojis(4);
+  const quickReactionEmojis = useQuickReactionEmojis(4, customEmoji);
   const quickReactionItems = React.useMemo(
     () =>
       quickReactionEmojis
