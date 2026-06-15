@@ -115,19 +115,18 @@ export function useAnchoredScroll({
     string | null
   >(null);
 
-  // Track previous tail to distinguish "new message appended" from
-  // "history prepended" from "unrelated re-render".
+  // Track previous tail to distinguish "new message appended" from a prepend
+  // (length grew but lastId unchanged) or unrelated rerender.
   const previousLastIdRef = React.useRef<string | null>(null);
-  const previousLengthRef = React.useRef(0);
   const handledTargetRef = React.useRef<string | null>(null);
 
   // ---- reset when resetKey changes -----------------------------------------
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resetKey is the sole trigger
   React.useLayoutEffect(() => {
     anchorRef.current = { kind: "atBottom" };
     initializedRef.current = false;
     previousLastIdRef.current = null;
-    previousLengthRef.current = 0;
     handledTargetRef.current = null;
     setIsAtBottom(true);
     setNewMessageCount(0);
@@ -137,10 +136,19 @@ export function useAnchoredScroll({
   // ---- anchor walk ---------------------------------------------------------
 
   /**
-   * Recompute the anchor from the live DOM. Walks message elements bottom-up
-   * and picks the topmost one still in the viewport, recording its top offset
-   * inside the scroll container. If the user is at the bottom, switches to
+   * Recompute the anchor from the live DOM. Walks message elements top-down
+   * and picks the first one whose bottom edge has crossed the viewport top —
+   * i.e. the topmost row the reader is actually looking at. Records its
+   * `rect.top` relative to the container (which is negative when the row
+   * straddles the top edge). If the user is at the bottom, switches to
    * `{ atBottom: true }` instead.
+   *
+   * Choice of anchor matches Buzz's UX: a user scrolled up to read history
+   * has their eyes at the *top* of the viewport, so the pixel that must stay
+   * stable under reflow is `topRow.rect.top - container.rect.top`. Matrix
+   * uses the bottom-most row + `bottomOffset` because chat readers sit near
+   * the bottom; that pairing drifts in our case when content *inside* the
+   * viewport reflows (image-load between viewport top and a low anchor).
    */
   const recomputeAnchor = React.useCallback(() => {
     const container = scrollContainerRef.current;
@@ -156,29 +164,27 @@ export function useAnchoredScroll({
     }
 
     const containerTop = container.getBoundingClientRect().top;
-    const messageEls = container.querySelectorAll<HTMLElement>(
-      "[data-message-id]",
-    );
+    const messageEls =
+      container.querySelectorAll<HTMLElement>("[data-message-id]");
 
-    // Bottom-up walk: find the topmost message whose top is still visible.
-    // (Equivalently: the first message we hit walking from the bottom that
-    // is at or above the viewport top. We pick the *next* one — the first
-    // still inside the viewport.) Iterate from the end and keep updating the
-    // candidate until we find one above the viewport.
     let candidate: HTMLElement | null = null;
-    for (let i = messageEls.length - 1; i >= 0; i--) {
-      const el = messageEls[i];
+    for (const el of messageEls) {
       const rect = el.getBoundingClientRect();
-      if (rect.bottom <= containerTop) {
-        // This message is above the viewport. The previous candidate
-        // (one position later, still in viewport) is what we want.
+      // First row whose bottom edge sits below the viewport top — i.e. the
+      // topmost row crossing or below the top edge. Top-down so we pick the
+      // first crossing, not the last.
+      if (rect.bottom > containerTop) {
+        candidate = el;
         break;
       }
-      candidate = el;
     }
 
     if (!candidate) {
-      // Nothing in the viewport (e.g. mid-resize, empty list). Don't update.
+      // Every rendered message is above the viewport (atypical: would mean
+      // the user is past the last message, which the distance-from-bottom
+      // check above should already have caught). Treat as at-bottom.
+      anchorRef.current = { kind: "atBottom" };
+      setIsAtBottom((cur) => (cur ? cur : true));
       return;
     }
 
@@ -193,37 +199,20 @@ export function useAnchoredScroll({
     setIsAtBottom((cur) => (cur ? false : cur));
   }, []);
 
-  // ---- scroll handler (user-driven) ----------------------------------------
-
-  // While the user is actively scrolling, we sample the anchor on every event
-  // so the next render commit knows where to pin. This is the only place
-  // `onScroll` writes; it never touches scrollTop itself.
-  const onScroll = React.useCallback(() => {
-    recomputeAnchor();
-  }, [recomputeAnchor]);
-
   // ---- the one writer: post-commit scroll restoration ----------------------
 
-  // Detect append vs prepend vs unchanged based on the messageIds sequence.
-  const lastId = messageIds.length > 0 ? messageIds[messageIds.length - 1] : null;
-  const length = messageIds.length;
+  const lastId =
+    messageIds.length > 0 ? messageIds[messageIds.length - 1] : null;
 
   React.useLayoutEffect(() => {
     const container = scrollContainerRef.current;
-    if (!container) return;
+    if (!container || isLoading) return;
 
-    if (isLoading) {
-      // Don't touch scrollTop during initial load — skeleton is mounting.
-      return;
-    }
-
-    // First commit after load completes (or after resetKey changed): jump to
-    // bottom, unless a target message is set.
+    // First commit after load (or after resetKey change): jump to bottom
+    // unless a target message will be scrolled into view by its own effect.
     if (!initializedRef.current) {
       initializedRef.current = true;
       previousLastIdRef.current = lastId;
-      previousLengthRef.current = length;
-
       if (!targetMessageId) {
         container.scrollTop = container.scrollHeight;
         anchorRef.current = { kind: "atBottom" };
@@ -233,33 +222,23 @@ export function useAnchoredScroll({
     }
 
     const previousLastId = previousLastIdRef.current;
-    const previousLength = previousLengthRef.current;
     const hasAppended = lastId !== null && lastId !== previousLastId;
-    const lengthDelta = length - previousLength;
-
     previousLastIdRef.current = lastId;
-    previousLengthRef.current = length;
 
     const anchor = anchorRef.current;
 
     if (anchor.kind === "atBottom") {
-      // Stick to bottom: write scrollHeight - clientHeight.
       container.scrollTop = container.scrollHeight - container.clientHeight;
-      if (hasAppended) {
-        // Clear unread count — user is following live.
-        setNewMessageCount(0);
-      }
+      if (hasAppended) setNewMessageCount(0);
       return;
     }
 
-    // Anchored: find the anchor message and pin its top to topOffset.
+    // Anchored: re-pin the captured message to its captured topOffset.
     let anchorEl = container.querySelector<HTMLElement>(
-      `[data-message-id="${cssEscape(anchor.messageId)}"]`,
+      `[data-message-id="${CSS.escape(anchor.messageId)}"]`,
     );
 
     if (!anchorEl) {
-      // Anchor message disappeared (moderation delete, eviction).
-      // Fall back to nearest newer message; if none, snap to bottom.
       anchorEl = findFallbackAnchor(container, anchor.messageId, messageIds);
       if (!anchorEl) {
         container.scrollTop = container.scrollHeight - container.clientHeight;
@@ -267,11 +246,10 @@ export function useAnchoredScroll({
         setIsAtBottom(true);
         return;
       }
-      // Update anchor id but keep the same topOffset so visual position
-      // stays put on the fallback.
+      // Preserve topOffset so the visual position stays put on the fallback.
       anchorRef.current = {
         kind: "anchored",
-        messageId: anchorEl.dataset.messageId ?? anchor.messageId,
+        messageId: anchorEl.dataset.messageId as string,
         topOffset: anchor.topOffset,
       };
     }
@@ -279,15 +257,18 @@ export function useAnchoredScroll({
     const containerTop = container.getBoundingClientRect().top;
     const currentTop = anchorEl.getBoundingClientRect().top - containerTop;
     const delta = currentTop - anchor.topOffset;
-    if (delta !== 0) {
+    // Half-pixel deadband: swallow subpixel font reflow. The captured
+    // topOffset is preserved across layout-effect restorations (only
+    // re-captured on user scroll or explicit target-message), so a swallowed
+    // delta doesn't compound — the next restoration sees the same oldTop.
+    if (Math.abs(delta) > 0.5) {
       container.scrollTop += delta;
     }
 
-    if (hasAppended && lengthDelta > 0) {
-      // User is reading history and a new message arrived — bump the count.
-      setNewMessageCount((cur) => cur + Math.max(1, lengthDelta));
+    if (hasAppended) {
+      setNewMessageCount((cur) => cur + 1);
     }
-  }, [isLoading, lastId, length, messageIds, targetMessageId]);
+  }, [isLoading, lastId, messageIds, targetMessageId]);
 
   // ---- fetch-older trigger (IntersectionObserver on top sentinel) ----------
 
@@ -351,7 +332,7 @@ export function useAnchoredScroll({
     if (!container) return;
 
     const target = container.querySelector<HTMLElement>(
-      `[data-message-id="${cssEscape(targetMessageId)}"]`,
+      `[data-message-id="${CSS.escape(targetMessageId)}"]`,
     );
     if (!target) return;
 
@@ -374,9 +355,7 @@ export function useAnchoredScroll({
     onTargetReached?.(targetMessageId);
 
     const timeout = window.setTimeout(() => {
-      setHighlightedMessageId((cur) =>
-        cur === targetMessageId ? null : cur,
-      );
+      setHighlightedMessageId((cur) => (cur === targetMessageId ? null : cur));
     }, 2_000);
     return () => {
       window.clearTimeout(timeout);
@@ -385,28 +364,33 @@ export function useAnchoredScroll({
 
   // ---- imperative scrollToBottom (for jump-to-latest button) ---------------
 
-  const scrollToBottom = React.useCallback((behavior: ScrollBehavior = "smooth") => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    container.scrollTo({
-      top: container.scrollHeight - container.clientHeight,
-      behavior,
-    });
-    anchorRef.current = { kind: "atBottom" };
-    setIsAtBottom(true);
-    setNewMessageCount(0);
-  }, []);
+  const scrollToBottom = React.useCallback(
+    (behavior: ScrollBehavior = "smooth") => {
+      const container = scrollContainerRef.current;
+      if (!container) return;
+      container.scrollTo({
+        top: container.scrollHeight - container.clientHeight,
+        behavior,
+      });
+      anchorRef.current = { kind: "atBottom" };
+      setIsAtBottom(true);
+      setNewMessageCount(0);
+    },
+    [],
+  );
 
-  // ---- wire onScroll onto the container ------------------------------------
+  // ---- wire scroll listener onto the container -----------------------------
+  // `recomputeAnchor` is the sole scroll-time work. It updates `anchorRef`
+  // (and visible-state setters), and never writes scrollTop.
 
   React.useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
-    container.addEventListener("scroll", onScroll, { passive: true });
+    container.addEventListener("scroll", recomputeAnchor, { passive: true });
     return () => {
-      container.removeEventListener("scroll", onScroll);
+      container.removeEventListener("scroll", recomputeAnchor);
     };
-  }, [onScroll]);
+  }, [recomputeAnchor]);
 
   return {
     scrollToBottom,
@@ -416,14 +400,6 @@ export function useAnchoredScroll({
     topSentinelRef,
     highlightedMessageId,
   };
-}
-
-/** CSS.escape polyfill that falls back to the spec for older test runtimes. */
-function cssEscape(value: string): string {
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
-    return CSS.escape(value);
-  }
-  return value.replace(/(["\\])/g, "\\$1");
 }
 
 /**
@@ -446,7 +422,7 @@ function findFallbackAnchor(
   }
   for (let i = idx + 1; i < messageIds.length; i++) {
     const el = container.querySelector<HTMLElement>(
-      `[data-message-id="${cssEscape(messageIds[i])}"]`,
+      `[data-message-id="${CSS.escape(messageIds[i])}"]`,
     );
     if (el) return el;
   }
