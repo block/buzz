@@ -22,6 +22,8 @@ export function useChannelPaneHandlers({
   expandedThreadReplyIds,
   getFirstReplyIdForMessage,
   getReplyDescendantIdsForMessage,
+  getSubtreeMaxCreatedAt,
+  markThreadRead,
   openThreadHeadId,
   sendMessageMutation,
   setExpandedThreadReplyIds,
@@ -38,6 +40,8 @@ export function useChannelPaneHandlers({
   expandedThreadReplyIds: ReadonlySet<string>;
   getFirstReplyIdForMessage: (messageId: string) => string | null;
   getReplyDescendantIdsForMessage: (messageId: string) => string[];
+  getSubtreeMaxCreatedAt: (messageId: string) => number | null;
+  markThreadRead: (rootId: string, timestamp: number) => void;
   openThreadHeadId: string | null;
   sendMessageMutation: ReturnType<typeof useSendMessageMutation>;
   setExpandedThreadReplyIds: React.Dispatch<React.SetStateAction<Set<string>>>;
@@ -180,6 +184,17 @@ export function useChannelPaneHandlers({
         return next;
       });
 
+      // Drilling into a branch consumes its unread, persistently: advance the
+      // thread frontier to the branch's newest reply. Monotonic Math.max means
+      // this marks read everything chronologically up to it (channel-open
+      // parity). The open-time snapshot pins the session divider, so it never
+      // moves mid-session.
+      const rootId = openThreadHeadIdRef.current;
+      const subtreeMaxCreatedAt = getSubtreeMaxCreatedAt(message.id);
+      if (rootId && subtreeMaxCreatedAt !== null) {
+        markThreadRead(rootId, subtreeMaxCreatedAt);
+      }
+
       if (firstReplyId) {
         setThreadScrollTargetId(firstReplyId);
       }
@@ -187,6 +202,8 @@ export function useChannelPaneHandlers({
     [
       getFirstReplyIdForMessage,
       getReplyDescendantIdsForMessage,
+      getSubtreeMaxCreatedAt,
+      markThreadRead,
       setExpandedThreadReplyIds,
       setThreadScrollTargetId,
     ],

@@ -328,7 +328,6 @@ export function buildThreadPanelDataFromIndex(
   openThreadHeadId: string | null,
   threadReplyTargetId: string | null,
   expandedReplyIds: ReadonlySet<string>,
-  unreadReplyIds: ReadonlySet<string> = new Set(),
 ): ThreadPanelData {
   if (!openThreadHeadId) {
     return {

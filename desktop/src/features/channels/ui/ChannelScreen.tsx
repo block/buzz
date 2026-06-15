@@ -3,6 +3,10 @@ import { useAppShell } from "@/app/AppShellContext";
 import { useActiveChannelHeader } from "@/features/channels/useActiveChannelHeader";
 import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandlers";
 import {
+  directRepliesMaxCreatedAt,
+  subtreeMaxCreatedAt,
+} from "@/features/channels/lib/subtreeCreatedAt";
+import {
   useChannelMembersQuery,
   useJoinChannelMutation,
 } from "@/features/channels/hooks";
@@ -388,6 +392,26 @@ export function ChannelScreen({
     },
     [directReplyIdsByParentId],
   );
+  const createdAtByMessageId = React.useMemo(() => {
+    const map = new Map<string, number>();
+    for (const message of timelineMessages) {
+      map.set(message.id, message.createdAt);
+    }
+    return map;
+  }, [timelineMessages]);
+  // Newest createdAt across an expanded branch (the message itself plus every
+  // descendant). Drilling into a branch advances the thread frontier to this,
+  // consuming everything chronologically up to the deepest reply read. Returns
+  // null when the message is absent so the caller skips the read-state write.
+  const getSubtreeMaxCreatedAt = React.useCallback(
+    (messageId: string) =>
+      subtreeMaxCreatedAt(
+        messageId,
+        directReplyIdsByParentId,
+        createdAtByMessageId,
+      ),
+    [createdAtByMessageId, directReplyIdsByParentId],
+  );
   const threadPanelIndex = React.useMemo(
     () => buildThreadPanelIndex(timelineMessages),
     [timelineMessages],
@@ -435,17 +459,28 @@ export function ChannelScreen({
       threadOpenFrontierRef.current.delete(rootId);
     };
   }, [openThreadHeadId]);
-  // Mark thread read when the panel opens (advance frontier to latest reply).
+  // Mark thread read when the panel opens, advancing the frontier to the max
+  // createdAt over the head and its DIRECT replies — the content visible
+  // without expanding anything. This mirrors channel-open parity: opening
+  // consumes what you can see, clearing the channel-level badge for unread that
+  // lived in the visible direct replies, while deeper collapsed branches stay
+  // unread until drilled into (expand advances the frontier further from here).
   // Only persist read state for threads the user has notification interest in
   // (participated, authored, or followed) to avoid bloating the context blob.
   React.useEffect(() => {
-    if (!openThreadHeadId || threadMessages.length === 0) return;
+    if (!openThreadHeadId) return;
     if (!isNotifiedForCurrentThread) return;
-    const latestReply = threadMessages[threadMessages.length - 1].message;
-    markThreadRead(openThreadHeadId, latestReply.createdAt);
+    const openReadCeiling = directRepliesMaxCreatedAt(
+      openThreadHeadId,
+      directReplyIdsByParentId,
+      createdAtByMessageId,
+    );
+    if (openReadCeiling === null) return;
+    markThreadRead(openThreadHeadId, openReadCeiling);
   }, [
     openThreadHeadId,
-    threadMessages,
+    directReplyIdsByParentId,
+    createdAtByMessageId,
     markThreadRead,
     isNotifiedForCurrentThread,
   ]);
@@ -512,6 +547,8 @@ export function ChannelScreen({
     expandedThreadReplyIds,
     getFirstReplyIdForMessage,
     getReplyDescendantIdsForMessage,
+    getSubtreeMaxCreatedAt,
+    markThreadRead,
     openThreadHeadId,
     sendMessageMutation,
     setExpandedThreadReplyIds,
