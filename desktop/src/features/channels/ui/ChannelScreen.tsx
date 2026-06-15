@@ -98,7 +98,6 @@ export function ChannelScreen({
     getChannelReadAt,
     getThreadReadAt,
     markThreadRead,
-    readStateVersion,
     setContextParentResolver,
     openCreateChannel,
     openChannelManagement,
@@ -247,6 +246,7 @@ export function ChannelScreen({
   const {
     activeChannelTitle,
     activeDmAvatarUrl,
+    activeDmHeaderParticipants,
     activeDmPresenceStatus,
     activeChannelEphemeralDisplay,
   } = useActiveChannelHeader(activeChannel, currentPubkey);
@@ -539,15 +539,16 @@ export function ChannelScreen({
     threadOpenFrontierSeconds,
   ]);
   // Per-row subtree unread counts for the in-panel thread summary rows. Scoped
-  // to the open thread's subtree and measured against the LIVE root read marker
-  // (getThreadReadAt(rootId)) so the badge drops on the same gesture that marks
-  // the expanded branch read — expand advances that exact root marker via
-  // markThreadRead(rootId, ...). readStateVersion is the sole signal the marker
-  // moved (getThreadReadAt is a stable-identity callback); see consumer
-  // threadUnreadCounts below for the same pattern. Cross-branch chronological
-  // clear is intended (NIP-RS); the expandedSubtreeReplyIds gate still
-  // suppresses the expanded branch's own revealed-child rows.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates getThreadReadAt without changing its identity
+  // to the open thread's subtree and measured against the open-time frontier
+  // snapshot (threadOpenFrontierSeconds) — the same boundary the in-thread
+  // divider uses (above). The LIVE root marker can't be used here: on
+  // channel-open markChannelRead advances the channel marker to the newest
+  // top-level message, and effective(thread) = max(thread_own, channel_marker),
+  // so a channel marker past the nested replies would zero every badge the
+  // instant the panel opens. The snapshot reflects "what was unread on open."
+  // Expand-clears-badge is preserved independently: it's driven by the
+  // expandedSubtreeReplyIds gate inside computeThreadReplyUnreadCounts, not by
+  // the frontier.
   const threadReplyUnreadCounts = React.useMemo(
     () =>
       openThreadHeadId
@@ -561,7 +562,7 @@ export function ChannelScreen({
                 getReplyDescendantIdsForMessage(id),
               ),
             ),
-            frontierSeconds: getThreadReadAt(openThreadHeadId),
+            frontierSeconds: threadOpenFrontierSeconds,
             currentPubkey,
           })
         : new Map<string, number>(),
@@ -569,8 +570,7 @@ export function ChannelScreen({
       openThreadHeadId,
       threadMessages,
       timelineMessages,
-      getThreadReadAt,
-      readStateVersion,
+      threadOpenFrontierSeconds,
       expandedThreadReplyIds,
       getReplyDescendantIdsForMessage,
       currentPubkey,
@@ -740,11 +740,13 @@ export function ChannelScreen({
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     });
+  const hasTimelineData = messagesQuery.data !== undefined;
   const isTimelineLoading =
     activeChannel !== null &&
     activeChannel.channelType !== "forum" &&
-    (messagesQuery.isPending ||
-      (messagesQuery.isFetching && resolvedMessages.length === 0));
+    !hasTimelineData &&
+    messagesQuery.isPending;
+  const shouldShowInitialChannelLoading = isTimelineLoading;
   const resetComposerTargets = React.useCallback(
     (_channelId: string | null) => {
       setOpenThreadHeadId(null);
@@ -839,6 +841,7 @@ export function ChannelScreen({
       activeChannelTitle={activeChannelTitle}
       actionsVariant={shouldCompactHeaderActions ? "compact" : "inline"}
       activeDmAvatarUrl={activeDmAvatarUrl}
+      activeDmHeaderParticipants={activeDmHeaderParticipants}
       activeDmPresenceStatus={activeDmPresenceStatus}
       chromeWrapperRef={channelHeaderChromeRef}
       currentPubkey={currentPubkey}
@@ -860,7 +863,9 @@ export function ChannelScreen({
           ref={channelContentRef}
         >
           {activeChannel ? (
-            activeChannel.channelType === "forum" ? (
+            shouldShowInitialChannelLoading ? (
+              <ViewLoadingFallback includeHeader kind="channel" />
+            ) : activeChannel.channelType === "forum" ? (
               <>
                 {channelHeader}
                 <React.Suspense fallback={<ViewLoadingFallback kind="forum" />}>
@@ -875,7 +880,9 @@ export function ChannelScreen({
                 </React.Suspense>
               </>
             ) : (
-              <React.Suspense fallback={<ViewLoadingFallback kind="channel" />}>
+              <React.Suspense
+                fallback={<ViewLoadingFallback includeHeader kind="channel" />}
+              >
                 <ChannelPane
                   activeChannel={activeChannel}
                   agentPubkeys={agentPubkeys}

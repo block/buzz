@@ -61,6 +61,13 @@ export function useReadState(
     [],
   );
 
+  const getOwnTimestamp = React.useCallback(
+    (contextId: string): number | null => {
+      return managerRef.current?.getOwnTimestamp(contextId) ?? null;
+    },
+    [],
+  );
+
   const markContextRead = React.useCallback(
     (contextId: string, unixTimestamp: number): void => {
       managerRef.current?.markContextRead(contextId, unixTimestamp);
@@ -99,6 +106,7 @@ export function useReadState(
       drainSyncedAdvances: noopDrainAdvances,
       setContextParentResolver: noopSetResolver,
       readStateVersion: 0,
+      getOwnTimestamp: noopGetTimestamp,
     };
   }
 
@@ -110,5 +118,6 @@ export function useReadState(
     drainSyncedAdvances,
     setContextParentResolver,
     readStateVersion,
+    getOwnTimestamp,
   };
 }

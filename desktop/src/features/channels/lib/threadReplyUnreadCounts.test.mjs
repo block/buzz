@@ -144,3 +144,32 @@ test("computeThreadReplyUnreadCounts_selfAuthored_skipsOwnReplies", () => {
   assert.equal(counts.has("a"), false); // a1 is self-authored, so 0 unread
   assert.equal(counts.get("b"), 2); // b1, b2 are by "other"
 });
+
+test("computeThreadReplyUnreadCounts_openTimeSnapshot_survivesChannelMarkRead", () => {
+  // Regression (Fix 1): the in-panel badge must reflect "what was unread when
+  // the thread opened", NOT the live root marker. On channel-open
+  // markChannelRead advances the channel marker to the newest TOP-LEVEL
+  // message; effective(thread) = max(thread_own, channel_marker), so the live
+  // value can jump PAST the nested replies and zero every badge. Passing the
+  // open-time snapshot (frontier 350, captured before the advance) keeps the
+  // badges; passing the post-advance live value (650, past b2(600)) loses them.
+  const args = {
+    timelineMessages: fixture(),
+    subtreeReplyIds: ROOT_SUBTREE,
+    visibleReplyIds: ["a", "b"],
+    expandedReplyIds: new Set(),
+    expandedSubtreeReplyIds: new Set(),
+  };
+  const snapshotCounts = computeThreadReplyUnreadCounts({
+    ...args,
+    frontierSeconds: 350,
+  });
+  assert.equal(snapshotCounts.get("a"), 1);
+  assert.equal(snapshotCounts.get("b"), 2);
+
+  const liveAdvancedCounts = computeThreadReplyUnreadCounts({
+    ...args,
+    frontierSeconds: 650,
+  });
+  assert.equal(liveAdvancedCounts.size, 0);
+});

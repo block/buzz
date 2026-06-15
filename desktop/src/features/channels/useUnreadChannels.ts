@@ -245,6 +245,53 @@ function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   return true;
 }
 
+// Build channelId -> set of thread rootIds observed in that channel, derived
+// from the thread-activity log (the same items that feed latestByChannelRef).
+// Used by the sidebar unread scan to fold per-thread read markers into a
+// channel's effective frontier so opening a thread clears the channel dot.
+export function buildChannelThreadRoots(
+  items: readonly ThreadActivityItem[],
+  getRootId: (tags: string[][]) => string | null,
+): Map<string, Set<string>> {
+  const byChannel = new Map<string, Set<string>>();
+  for (const item of items) {
+    const rootId = getRootId(item.tags);
+    if (rootId === null) continue;
+    let roots = byChannel.get(item.channelId);
+    if (!roots) {
+      roots = new Set<string>();
+      byChannel.set(item.channelId, roots);
+    }
+    roots.add(rootId);
+  }
+  return byChannel;
+}
+
+// The channel's effective read frontier for sidebar-unread purposes: its own
+// channel marker folded with the highest OWN thread marker among its observed
+// thread roots. Using the thread OWN marker (not the hierarchical effective
+// value) is deliberate — the hierarchical resolver maps every thread to the
+// ACTIVE channel, so it would borrow the wrong marker for a background channel.
+// An unread reply in a thread keeps the dot until that thread is opened
+// (advancing the thread marker past the reply); a never-read thread (no own
+// marker) contributes nothing and the channel marker governs.
+export function channelUnreadFrontier(
+  channelMarker: number | null,
+  threadRoots: ReadonlySet<string> | undefined,
+  getThreadOwnMarker: (rootId: string) => number | null,
+): number | null {
+  let frontier = channelMarker;
+  if (threadRoots) {
+    for (const rootId of threadRoots) {
+      const own = getThreadOwnMarker(rootId);
+      if (own !== null && (frontier === null || own > frontier)) {
+        frontier = own;
+      }
+    }
+  }
+  return frontier;
+}
+
 export function useUnreadChannels(
   channels: Channel[],
   activeChannel: Channel | null,
@@ -266,6 +313,7 @@ export function useUnreadChannels(
     drainSyncedAdvances,
     setContextParentResolver,
     readStateVersion,
+    getOwnTimestamp,
   } = useReadState(pubkey, relayClient);
 
   // Observed "latest external trigger event" per channel (unix seconds). This
@@ -783,6 +831,16 @@ export function useUnreadChannels(
       const unread = new Set<string>();
       const highPriority = new Set<string>();
 
+      // Map each channel to the thread roots observed in it, so a channel's
+      // frontier can fold in per-thread read markers (Option A): opening a
+      // thread advances thread:<root> and must clear the channel dot even
+      // though markChannelRead only advances the channel marker to the newest
+      // TOP-LEVEL message.
+      const threadRootsByChannel = buildChannelThreadRoots(
+        threadActivityRef.current,
+        (tags) => getThreadReference(tags).rootId,
+      );
+
       for (const channel of channels) {
         if (channel.id === activeChannelId) continue;
 
@@ -795,7 +853,11 @@ export function useUnreadChannels(
         const latest = latestByChannelRef.current.get(channel.id);
         if (latest === undefined) continue;
 
-        const readAt = getEffectiveTimestamp(channel.id);
+        const readAt = channelUnreadFrontier(
+          getEffectiveTimestamp(channel.id),
+          threadRootsByChannel.get(channel.id),
+          (rootId) => getOwnTimestamp(`thread:${rootId}`),
+        );
         if (readAt !== null && latest <= readAt) continue;
 
         unread.add(channel.id);
@@ -825,6 +887,7 @@ export function useUnreadChannels(
       activeChannelId,
       channels,
       getEffectiveTimestamp,
+      getOwnTimestamp,
       isReadStateReady,
       latestVersion,
       readStateVersion,

@@ -221,6 +221,18 @@ export class ReadStateManager {
   }
 
   /**
+   * The context's OWN merged read marker, WITHOUT the hierarchical parent term.
+   * Callers that evaluate a `thread:<root>` context outside the active channel
+   * (e.g. the sidebar unread scan over background channels) must use this:
+   * getEffectiveTimestamp folds in parentResolver, which is installed by the
+   * active ChannelScreen and maps every thread to the *active* channel — using
+   * it for a background channel's thread would borrow the wrong channel marker.
+   */
+  getOwnTimestamp(contextId: string): number | null {
+    return this.effectiveState.get(contextId) ?? null;
+  }
+
+  /**
    * Inject the thread→channel parent resolver derived from the React event
    * graph (NIP-RS.md:136-139). The hierarchical max in getEffectiveTimestamp
    * is a no-op until this is set.
