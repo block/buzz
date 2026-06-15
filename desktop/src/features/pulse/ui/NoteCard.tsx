@@ -171,7 +171,7 @@ export function NoteCard({
             displayName={displayName}
           />
           {isAgent ? (
-            <Bot className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-background p-0.5 text-muted-foreground" />
+            <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
           ) : null}
         </button>
       </UserProfilePopover>

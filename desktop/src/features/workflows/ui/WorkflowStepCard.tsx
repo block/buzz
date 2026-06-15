@@ -326,7 +326,7 @@ export function WorkflowStepCard({
           type="button"
           variant="ghost"
         >
-          <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
+          <Trash2 className="h-4 w-4 text-muted-foreground" />
         </Button>
       </div>
 

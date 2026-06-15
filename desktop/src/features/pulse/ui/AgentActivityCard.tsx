@@ -66,7 +66,7 @@ export function AgentActivityCard({
             type="button"
           >
             <UserAvatar avatarUrl={avatarUrl} displayName={displayName} />
-            <Bot className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-background p-0.5 text-muted-foreground" />
+            <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
           </button>
         </UserProfilePopover>
         <div className="min-w-0 flex-1">
@@ -87,9 +87,9 @@ export function AgentActivityCard({
             type="button"
           >
             {expanded ? (
-              <ChevronDown className="h-3.5 w-3.5" />
+              <ChevronDown className="h-4 w-4" />
             ) : (
-              <ChevronRight className="h-3.5 w-3.5" />
+              <ChevronRight className="h-4 w-4" />
             )}
             {group.notes.length} updates
           </button>

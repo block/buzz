@@ -43,6 +43,10 @@ import {
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
+import {
+  SidebarLoadingContent,
+  useSidebarLoadingShape,
+} from "@/features/sidebar/ui/sidebarLoadingSkeleton";
 import { SECTION_ACTION_VISIBILITY_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
 import type {
   Channel,
@@ -56,16 +60,12 @@ import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
-  SidebarGroup,
   SidebarGroupAction,
-  SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSkeleton,
   SidebarRail,
 } from "@/shared/ui/sidebar";
 
@@ -222,7 +222,6 @@ export function AppSidebar({
   onStarChannel,
   onUnstarChannel,
 }: AppSidebarProps) {
-  const skeletonRows = ["first", "second", "third", "fourth", "fifth", "sixth"];
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
@@ -375,6 +374,14 @@ export function AppSidebar({
       fallbackDisplayName,
       profileDisplayName: profile?.displayName,
     });
+  const sidebarLoadingShape = useSidebarLoadingShape({
+    activeWorkspaceId: activeWorkspace?.id,
+    currentPubkey,
+    directMessages,
+    dmChannelLabels,
+    isLoading,
+    streamChannels,
+  });
   const shouldLoadAgentCount = useDeferredLoad({
     immediate: selectedView === "agents",
     timeoutMs: 250,
@@ -528,16 +535,7 @@ export function AppSidebar({
         ) : null}
         <SidebarContent className="pb-32" ref={scrollRef}>
           {isLoading ? (
-            <SidebarGroup>
-              <SidebarGroupLabel>Channels</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu data-testid="sidebar-loading">
-                  {skeletonRows.map((row) => (
-                    <SidebarMenuSkeleton key={row} showIcon />
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
+            <SidebarLoadingContent shape={sidebarLoadingShape} />
           ) : null}
 
           {!isLoading ? (

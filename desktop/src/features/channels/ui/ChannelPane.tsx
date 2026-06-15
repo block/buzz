@@ -4,7 +4,10 @@ import { Bot, Hash, LogIn, Plus, Sparkles, UserPlus } from "lucide-react";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
-import { MessageThreadPanel } from "@/features/messages/ui/MessageThreadPanel";
+import {
+  MessageThreadPanel,
+  MessageThreadPanelSkeleton,
+} from "@/features/messages/ui/MessageThreadPanel";
 import { MessageTimeline } from "@/features/messages/ui/MessageTimeline";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import {
@@ -750,7 +753,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 size="sm"
                 variant="default"
               >
-                <LogIn className="mr-1.5 h-3.5 w-3.5" />
+                <LogIn className="mr-1.5 h-4 w-4" />
                 {isJoining ? "Joining..." : "Join to participate"}
               </Button>
             </div>
@@ -891,27 +894,15 @@ export const ChannelPane = React.memo(function ChannelPane({
               panel
             );
           })()
-        : activeChannel && selectedAgent
+        : openThreadHeadId && activeChannel
           ? (() => {
               const panel = (
-                <AgentSessionThreadPanel
-                  agent={selectedAgent}
-                  canInterruptTurn={selectedAgent.canInterruptTurn}
-                  channel={activeChannel}
-                  isWorking={botTypingEntries.some(
-                    (entry) =>
-                      entry.pubkey.toLowerCase() ===
-                      selectedAgent.pubkey.toLowerCase(),
-                  )}
+                <MessageThreadPanelSkeleton
                   isSinglePanelView={
                     useSplitAuxiliaryPane ? false : isSinglePanelView
                   }
                   layout={useSplitAuxiliaryPane ? "split" : "standalone"}
-                  profiles={profiles}
-                  onBackToProfile={() =>
-                    onOpenProfilePanel(selectedAgent.pubkey)
-                  }
-                  onClose={onCloseAgentSession}
+                  onClose={onCloseThread}
                   widthPx={threadPanelWidthPx}
                 />
               );
@@ -920,7 +911,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   canResetWidth={canResetThreadPanelWidth}
                   onResetWidth={onResetThreadPanelWidth}
                   onResizeStart={onThreadPanelResizeStart}
-                  testId="agent-session-thread-panel"
+                  testId="message-thread-panel"
                   widthPx={threadPanelWidthPx}
                 >
                   {panel}
@@ -929,19 +920,27 @@ export const ChannelPane = React.memo(function ChannelPane({
                 panel
               );
             })()
-          : profilePanelPubkey
+          : activeChannel && selectedAgent
             ? (() => {
                 const panel = (
-                  <UserProfilePanel
-                    currentPubkey={currentPubkey}
+                  <AgentSessionThreadPanel
+                    agent={selectedAgent}
+                    canInterruptTurn={selectedAgent.canInterruptTurn}
+                    channel={activeChannel}
+                    isWorking={botTypingEntries.some(
+                      (entry) =>
+                        entry.pubkey.toLowerCase() ===
+                        selectedAgent.pubkey.toLowerCase(),
+                    )}
                     isSinglePanelView={
                       useSplitAuxiliaryPane ? false : isSinglePanelView
                     }
                     layout={useSplitAuxiliaryPane ? "split" : "standalone"}
-                    onClose={onCloseProfilePanel}
-                    onOpenDm={onOpenDm}
-                    pubkey={profilePanelPubkey}
-                    splitPaneClamp
+                    profiles={profiles}
+                    onBackToProfile={() =>
+                      onOpenProfilePanel(selectedAgent.pubkey)
+                    }
+                    onClose={onCloseAgentSession}
                     widthPx={threadPanelWidthPx}
                   />
                 );
@@ -950,7 +949,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                     canResetWidth={canResetThreadPanelWidth}
                     onResetWidth={onResetThreadPanelWidth}
                     onResizeStart={onThreadPanelResizeStart}
-                    testId="user-profile-panel"
+                    testId="agent-session-thread-panel"
                     widthPx={threadPanelWidthPx}
                   >
                     {panel}
@@ -959,7 +958,37 @@ export const ChannelPane = React.memo(function ChannelPane({
                   panel
                 );
               })()
-            : null}
+            : profilePanelPubkey
+              ? (() => {
+                  const panel = (
+                    <UserProfilePanel
+                      currentPubkey={currentPubkey}
+                      isSinglePanelView={
+                        useSplitAuxiliaryPane ? false : isSinglePanelView
+                      }
+                      layout={useSplitAuxiliaryPane ? "split" : "standalone"}
+                      onClose={onCloseProfilePanel}
+                      onOpenDm={onOpenDm}
+                      pubkey={profilePanelPubkey}
+                      splitPaneClamp
+                      widthPx={threadPanelWidthPx}
+                    />
+                  );
+                  return useSplitAuxiliaryPane ? (
+                    <RightAuxiliaryPane
+                      canResetWidth={canResetThreadPanelWidth}
+                      onResetWidth={onResetThreadPanelWidth}
+                      onResizeStart={onThreadPanelResizeStart}
+                      testId="user-profile-panel"
+                      widthPx={threadPanelWidthPx}
+                    >
+                      {panel}
+                    </RightAuxiliaryPane>
+                  ) : (
+                    panel
+                  );
+                })()
+              : null}
     </div>
   );
 });
