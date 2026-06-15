@@ -736,8 +736,7 @@ function createMarkdownComponents(
 ): Components {
   const paragraphClassName = "leading-6";
   const listItemClassName = "my-1 [&_p]:inline";
-  const listClassName =
-    "space-y-1 pl-6 marker:text-muted-foreground";
+  const listClassName = "space-y-1 pl-6 marker:text-muted-foreground";
 
   return {
     a: ({ children, href, ...props }) => {
@@ -1033,10 +1032,7 @@ function createMarkdownComponents(
       }
 
       return (
-        <span
-          data-channel-link=""
-          className={MENTION_CHIP_BASE_CLASSES}
-        >
+        <span data-channel-link="" className={MENTION_CHIP_BASE_CLASSES}>
           {children}
         </span>
       );

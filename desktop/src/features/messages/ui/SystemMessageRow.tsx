@@ -9,16 +9,12 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
-import {
-  MENTION_CHIP_BASE_CLASSES,
-  MENTION_CHIP_HOVER_CLASSES,
-} from "@/shared/ui/mentionChip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 
 type SystemMessagePayload = {
@@ -63,31 +59,18 @@ function resolveDisplayLabel(
 
 function ProfileName({
   children,
-  highlight = false,
-  isAgent = false,
   pubkey,
 }: {
   children: React.ReactNode;
-  highlight?: boolean;
-  isAgent?: boolean;
   pubkey: string | undefined;
 }) {
-  const isAgentMention = highlight && isAgent;
   const node = (
     <span
-      data-mention={highlight ? "" : undefined}
       className={cn(
         pubkey && "cursor-pointer",
-        highlight
-          ? cn(
-              MENTION_CHIP_BASE_CLASSES,
-              MENTION_CHIP_HOVER_CLASSES,
-              isAgentMention && "agent-mention-highlight",
-            )
-          : "rounded-xs transition-colors hover:text-foreground",
+        "rounded-xs transition-colors hover:text-foreground",
       )}
     >
-      {highlight && !isAgentMention ? "@" : null}
       {children}
     </span>
   );
@@ -192,14 +175,7 @@ function describeSystemEvent(
   payload: SystemMessagePayload,
   currentPubkey: string | undefined,
   profiles: UserProfileLookup | undefined,
-  personaLookup?: Map<string, string>,
-  agentPubkeys?: ReadonlySet<string>,
 ): SystemMessageDescription | null {
-  const isTargetAgent =
-    payload.target !== undefined &&
-    (agentPubkeys?.has(normalizePubkey(payload.target)) === true ||
-      profiles?.[normalizePubkey(payload.target)]?.isAgent === true ||
-      personaLookup?.has(normalizePubkey(payload.target)) === true);
   const actorLabel = resolveDisplayLabel(
     payload.actor,
     currentPubkey,
@@ -214,7 +190,7 @@ function describeSystemEvent(
     <ProfileName pubkey={payload.actor}>{actorLabel}</ProfileName>
   );
   const targetName = (
-    <ProfileName highlight isAgent={isTargetAgent} pubkey={payload.target}>
+    <ProfileName pubkey={payload.target}>
       {targetLabel}
     </ProfileName>
   );
@@ -275,17 +251,12 @@ function describeSystemEvent(
 export const SystemMessageRow = React.memo(function SystemMessageRow({
   message,
   currentPubkey,
-  agentPubkeys,
   profiles,
-  personaLookup,
   onToggleReaction,
 }: {
   message: TimelineMessage;
   currentPubkey?: string;
-  agentPubkeys?: ReadonlySet<string>;
   profiles?: UserProfileLookup;
-  /** Map from lowercase pubkey → persona display name for bot members. */
-  personaLookup?: Map<string, string>;
   onToggleReaction?: (
     message: TimelineMessage,
     emoji: string,
@@ -315,8 +286,6 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     payload,
     currentPubkey,
     profiles,
-    personaLookup,
-    agentPubkeys,
   );
   if (!description) {
     return null;
@@ -340,18 +309,20 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
           targetPubkey={payload.target}
         />
         <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <div className="truncate text-sm font-semibold leading-none tracking-tight text-foreground/90">
+          <MessageHeaderRow>
+            <MessageAuthorText as="div" className="text-foreground/90">
               {description.title}
-            </div>
+            </MessageAuthorText>
             <MessageTimestamp
               createdAt={message.createdAt}
               time={message.time}
             />
+          </MessageHeaderRow>
+          <div>
+            <p className="text-base leading-6 text-muted-foreground/70">
+              {description.action}
+            </p>
           </div>
-          <p className="mt-1 text-sm leading-snug text-muted-foreground/70">
-            {description.action}
-          </p>
           <div>
             <MessageReactions
               messageId={message.id}

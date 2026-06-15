@@ -20,6 +20,7 @@ import {
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
+import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -244,13 +245,13 @@ export const MessageRow = React.memo(
     );
 
     const authorNode = message.pubkey ? (
-      <span className="truncate text-base font-semibold leading-none tracking-tight hover:underline">
+      <MessageAuthorText hoverUnderline>
         {message.author}
-      </span>
+      </MessageAuthorText>
     ) : (
-      <h3 className="truncate text-base font-semibold leading-none tracking-tight">
+      <MessageAuthorText as="h3">
         {message.author}
-      </h3>
+      </MessageAuthorText>
     );
 
     const actionBarNode = (
@@ -400,7 +401,7 @@ export const MessageRow = React.memo(
                 <div className="flex shrink-0 items-start">{avatarNode}</div>
               )}
               <div className="-mt-1 min-w-0 flex-1 space-y-0">
-                <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0">
+                <MessageHeaderRow>
                   {message.pubkey ? (
                     <UserProfilePopover
                       pubkey={message.pubkey}
@@ -408,7 +409,7 @@ export const MessageRow = React.memo(
                       botIdenticonValue={message.author}
                     >
                       <button
-                        className="truncate rounded focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                        className="truncate rounded leading-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                         type="button"
                       >
                         {authorNode}
@@ -424,8 +425,8 @@ export const MessageRow = React.memo(
                       {message.personaDisplayName}
                     </span>
                   ) : null}
-                </div>
-                <div className="-mt-0.5">{messageBodyNode}</div>
+                </MessageHeaderRow>
+                <div>{messageBodyNode}</div>
               </div>
             </>
           ) : (
@@ -450,7 +451,7 @@ export const MessageRow = React.memo(
                 <div className="flex shrink-0 items-start">{avatarNode}</div>
               )}
               <div className="-mt-1 min-w-0 flex-1 space-y-0">
-                <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0">
+                <MessageHeaderRow>
                   {message.pubkey ? (
                     <UserProfilePopover
                       pubkey={message.pubkey}
@@ -458,7 +459,7 @@ export const MessageRow = React.memo(
                       botIdenticonValue={message.author}
                     >
                       <button
-                        className="truncate rounded focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                        className="truncate rounded leading-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                         type="button"
                       >
                         {authorNode}
@@ -474,8 +475,8 @@ export const MessageRow = React.memo(
                       {message.personaDisplayName}
                     </span>
                   ) : null}
-                </div>
-                <div className="-mt-0.5">{messageBodyNode}</div>
+                </MessageHeaderRow>
+                <div>{messageBodyNode}</div>
               </div>
             </>
           )}
