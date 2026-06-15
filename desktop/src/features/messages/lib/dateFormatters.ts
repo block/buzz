@@ -78,6 +78,23 @@ export function isSameDay(a: number, b: number): boolean {
   return isSameDayDate(new Date(a * 1_000), new Date(b * 1_000));
 }
 
+/**
+ * Stable per-day key in local time, e.g. `2026-06-15`. Use as a React `key`
+ * for day-divider sections so prepending older messages on the same calendar
+ * day reuses the existing section instead of unmounting it.
+ *
+ * (`${createdAt}` is unstable because the first message of a day changes when
+ * older history loads, which forces React to unmount the entire day group and
+ * remount every message inside — the cause of the blank-flash on scroll-up.)
+ */
+export function dayBucketKey(unixSeconds: number): string {
+  const date = new Date(unixSeconds * 1_000);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 /** Short month + ordinal day, e.g. "May 19th". */
 export function formatShortMonthDayOrdinal(unixSeconds: number): string {
   return formatMonthDayOrdinal(

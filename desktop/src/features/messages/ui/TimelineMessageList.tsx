@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import {
+  dayBucketKey,
   formatDayHeading,
   isSameDay,
 } from "@/features/messages/lib/dateFormatters";
@@ -198,7 +199,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
 
     if (!prev || !isSameDay(prev.createdAt, message.createdAt)) {
       currentDayGroup = {
-        key: `day-${message.createdAt}`,
+        key: `day-${dayBucketKey(message.createdAt)}`,
         label: formatDayHeading(message.createdAt),
         elements: [],
       };
