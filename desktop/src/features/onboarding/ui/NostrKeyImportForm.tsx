@@ -227,7 +227,7 @@ export function NostrKeyImportForm({
             <p className="font-medium text-foreground">
               This will use this Nostr identity:
             </p>
-            <p className="break-all font-mono text-[0.6875rem] text-muted-foreground">
+            <p className="break-all font-mono text-2xs text-muted-foreground">
               {shortenNpub(previewNpub)}
             </p>
           </div>

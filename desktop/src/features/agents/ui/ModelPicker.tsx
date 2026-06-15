@@ -152,7 +152,7 @@ export function ModelPicker({
         </DropdownMenuContent>
       </DropdownMenu>
       {needsRestart ? (
-        <span className="text-[0.625rem] text-warning">restart to apply</span>
+        <span className="text-2xs text-warning">restart to apply</span>
       ) : null}
     </span>
   );

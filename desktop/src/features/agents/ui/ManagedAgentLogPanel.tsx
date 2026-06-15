@@ -65,7 +65,7 @@ export function ManagedAgentLogPanel({
         </div>
       ) : (
         <div className="mt-4 overflow-hidden rounded-xl border border-border/70 bg-[#17171d] text-xs text-zinc-100">
-          <div className="flex items-center justify-between border-b border-white/10 px-4 py-2 text-[0.6875rem] uppercase tracking-[0.18em] text-zinc-400">
+          <div className="flex items-center justify-between border-b border-white/10 px-4 py-2 text-2xs uppercase tracking-[0.18em] text-zinc-400">
             <span>{selectedAgent.name}</span>
             <span>{selectedAgent.status}</span>
           </div>

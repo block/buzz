@@ -113,8 +113,8 @@ export function TypingIndicatorRow({
                     label={label}
                     className={cn(
                       isActivityVariant
-                        ? "h-[18px] w-[18px] text-[0.4375rem]"
-                        : "h-5 w-5 text-[0.5rem]",
+                        ? "h-[18px] w-[18px] text-3xs"
+                        : "h-5 w-5 text-3xs",
                     )}
                     iconClassName={
                       isActivityVariant ? "h-2.5 w-2.5" : "h-3 w-3"

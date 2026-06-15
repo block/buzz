@@ -132,7 +132,7 @@ export function WorkspaceSwitcher({
         <span
           className={
             isProfileVariant
-              ? "flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-sidebar-border/70 bg-sidebar-accent/40 text-[0.625rem] leading-none"
+              ? "flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-sidebar-border/70 bg-sidebar-accent/40 text-2xs leading-none"
               : "flex h-5 w-5 shrink-0 items-center justify-center text-xs leading-none"
           }
         >

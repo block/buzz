@@ -773,7 +773,7 @@ export function MessageComposer({
                 data-testid="edit-target"
               >
                 <div className="min-w-0">
-                  <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  <p className="text-2xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                     Editing message
                   </p>
                   <p className="truncate text-sm text-foreground/80">
@@ -796,7 +796,7 @@ export function MessageComposer({
                 data-testid="reply-target"
               >
                 <div className="min-w-0">
-                  <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                  <p className="text-2xs font-semibold uppercase tracking-[0.18em] text-muted-foreground">
                     Replying to {replyTarget.author}
                   </p>
                   <p className="truncate text-sm text-foreground/80">

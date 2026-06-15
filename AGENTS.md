@@ -426,15 +426,25 @@ px:
   text === `text-base` (16px) — chat is the app's base type size**, and the
   surrounding timeline elements (timestamps, system rows, code, reactions) are
   deliberate steps on that same stock ramp.
-- ❌ `text-[15px]`, `text-[13px]`, or CSS `font-size: 15px`. These opted out of
-  zoom and caused the message-timeline regression (PR #891).
+- ✅ The `text-2xs` (0.6875rem / 11px) and `text-3xs` (0.5rem / 8px) meta-text
+  tokens (in `desktop/tailwind.config.js` under `theme.extend.fontSize`) for the
+  sub-`text-xs` ramp — timestamps, count badges, tracking labels, tiny glyphs.
+  These replaced the dozens of arbitrary `text-[…rem]` literals that had drifted
+  apart pixel-by-pixel; keep meta text on these two tokens, not new arbitrary
+  values.
+- ❌ `text-[15px]`, `text-[13px]`, CSS `font-size: 15px` — px froze against zoom
+  and caused the message-timeline regression (PR #891).
+- ❌ Arbitrary rem literals too: `text-[0.6875rem]`, `text-[0.9rem]`, etc. They
+  zoom fine but re-fragment the scale we consolidated. Use a named token.
 
 Prefer stock tokens — they're rem and zoom-safe. Only if a design genuinely
-needs a size the stock scale can't express should you **add a rem-based token**
-(in `desktop/tailwind.config.js` under `theme.extend.fontSize`) rather than an
-arbitrary px value. A CI guard (`pnpm check:px-text`, in
-`desktop/scripts/check-px-text.mjs`) fails on new px text in the
-message-timeline / thread render path.
+needs a size the stock/`2xs`/`3xs` scale can't express should you **add a
+rem-based token** (in `desktop/tailwind.config.js` under `theme.extend.fontSize`)
+rather than an arbitrary literal. A CI guard (`pnpm check:px-text`, in
+`desktop/scripts/check-px-text.mjs`) scans all of `desktop/src` and fails on any
+new arbitrary text-size literal — px **or** rem/em. Genuinely decorative glyphs
+(e.g. the `text-[6rem]` avatar emoji) are allowlisted by `path:line` in that
+script.
 
 ### Workspace Switching
 

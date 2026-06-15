@@ -75,7 +75,7 @@ export function AgentActivityCard({
               {displayName}
             </span>
             {agentStatus ? <StatusDot status={agentStatus} /> : null}
-            <span className="shrink-0 text-[0.6875rem] text-muted-foreground">
+            <span className="shrink-0 text-2xs text-muted-foreground">
               {formatRelativeTime(group.latestAt)}
             </span>
           </div>
@@ -113,7 +113,7 @@ export function AgentActivityCard({
               </span>
               <div className="min-w-0 flex-1 text-sm">
                 <Markdown content={note.content} />
-                <p className="mt-1 text-[0.625rem] text-muted-foreground">
+                <p className="mt-1 text-2xs text-muted-foreground">
                   {formatRelativeTime(note.createdAt)}
                 </p>
               </div>

@@ -76,11 +76,11 @@ export function RecentNotesSection({
                     {displayName}
                   </span>
                   {isAgent ? (
-                    <span className="inline-flex h-3.5 items-center rounded bg-muted px-1 text-[0.5625rem] font-medium text-muted-foreground">
+                    <span className="inline-flex h-3.5 items-center rounded bg-muted px-1 text-2xs font-medium text-muted-foreground">
                       bot
                     </span>
                   ) : null}
-                  <span className="shrink-0 text-[0.625rem] text-muted-foreground">
+                  <span className="shrink-0 text-2xs text-muted-foreground">
                     {formatRelativeTime(note.createdAt)}
                   </span>
                 </div>

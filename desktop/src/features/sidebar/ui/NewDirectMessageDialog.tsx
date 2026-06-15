@@ -180,7 +180,7 @@ export function NewDirectMessageDialog({
                   >
                     <ProfileAvatar
                       avatarUrl={user.avatarUrl}
-                      className="h-5 w-5 text-[0.625rem] shadow-none"
+                      className="h-5 w-5 text-2xs shadow-none"
                       iconClassName="h-3 w-3"
                       label={formatUserName(user)}
                     />

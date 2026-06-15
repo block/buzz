@@ -112,7 +112,7 @@ function MessageItem({
       {!isAssistant ? (
         <UserAvatar
           avatarUrl={authorProfile?.avatarUrl ?? null}
-          className="mr-2 mt-1 h-5 w-5 shrink-0 text-[0.5rem]"
+          className="mr-2 mt-1 h-5 w-5 shrink-0 text-3xs"
           displayName={authorLabel}
           size="xs"
         />
@@ -198,7 +198,7 @@ function MetadataItem({
               <span className="truncate">{section.title}</span>
               <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open/section:rotate-180" />
             </summary>
-            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-3 py-2 font-mono text-[0.6875rem] leading-5 text-muted-foreground">
+            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-3 py-2 font-mono text-2xs leading-5 text-muted-foreground">
               {section.body.trim() || "No metadata."}
             </pre>
           </details>
@@ -248,7 +248,7 @@ function TranscriptTimestamp({ timestamp }: { timestamp: string }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="shrink-0 cursor-default text-[0.6875rem] text-muted-foreground/60">
+        <span className="shrink-0 cursor-default text-2xs text-muted-foreground/60">
           {formatted}
         </span>
       </TooltipTrigger>

@@ -319,7 +319,7 @@ export function InboxDetailPane({
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32">
           <div>
             {isThreadContextLoading ? (
-              <div className="px-6 pb-3 text-[0.6875rem] text-muted-foreground">
+              <div className="px-6 pb-3 text-2xs text-muted-foreground">
                 Loading context...
               </div>
             ) : null}

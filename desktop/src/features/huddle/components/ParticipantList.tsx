@@ -52,7 +52,7 @@ export function ParticipantList({
                       avatarUrl={profile.avatarUrl ?? null}
                       label={profile.displayName || pubkey.slice(0, 6)}
                       className={cn(
-                        "h-7 w-7 rounded-lg text-[0.5625rem]",
+                        "h-7 w-7 rounded-lg text-2xs",
                         isActive &&
                           "ring-2 ring-green-500 ring-offset-1 ring-offset-background",
                       )}
@@ -83,7 +83,7 @@ export function ParticipantList({
                   <TooltipTrigger asChild>
                     <span
                       aria-hidden="true"
-                      className="absolute -bottom-1 -right-1 text-[0.5625rem] leading-none"
+                      className="absolute -bottom-1 -right-1 text-2xs leading-none"
                     >
                       🤖
                     </span>
@@ -121,7 +121,7 @@ function HexAvatar({
           aria-label={ariaLabel ?? `Participant ${pubkey.slice(0, 8)}`}
           role="img"
           className={cn(
-            "flex h-7 w-7 items-center justify-center rounded-lg text-[0.5625rem] font-semibold shadow-xs",
+            "flex h-7 w-7 items-center justify-center rounded-lg text-2xs font-semibold shadow-xs",
             isActive &&
               "ring-2 ring-green-500 ring-offset-1 ring-offset-background",
           )}

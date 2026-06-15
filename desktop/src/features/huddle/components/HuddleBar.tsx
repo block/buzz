@@ -363,7 +363,7 @@ export function HuddleBar({ className }: HuddleBarProps) {
             </TooltipContent>
           </Tooltip>
           {isPttMode && (
-            <kbd className="rounded bg-muted px-1.5 py-0.5 text-[0.625rem] text-muted-foreground">
+            <kbd className="rounded bg-muted px-1.5 py-0.5 text-2xs text-muted-foreground">
               {navigator.platform?.includes("Mac") ? "⌃Space" : "Ctrl+Space"}
             </kbd>
           )}

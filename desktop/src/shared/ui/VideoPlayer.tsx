@@ -531,7 +531,7 @@ function VideoScrubber({
           style={{ left: `${hoverRatio * 100}%` }}
         >
           <div className="h-5 w-0.5 rounded-full bg-white shadow-[0_0_0_0.5px_rgba(0,0,0,0.25)]" />
-          <span className="absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap text-[0.6875rem] font-medium tabular-nums text-white/90">
+          <span className="absolute -top-6 left-1/2 -translate-x-1/2 whitespace-nowrap text-2xs font-medium tabular-nums text-white/90">
             {formatTimecode(hoverRatio * duration)} / {formatTimecode(duration)}
           </span>
         </div>
@@ -918,7 +918,7 @@ export function VideoPlayer({
                   )}
                 </button>
                 <span
-                  className="shrink-0 text-[0.625rem] font-medium tabular-nums leading-none text-white"
+                  className="shrink-0 text-2xs font-medium tabular-nums leading-none text-white"
                   data-testid="video-inline-time"
                 >
                   {formatTimecode(currentTime)}
@@ -932,7 +932,7 @@ export function VideoPlayer({
                   testIdPrefix="video-inline"
                 />
                 <span
-                  className="shrink-0 text-[0.625rem] font-medium tabular-nums leading-none text-white/70"
+                  className="shrink-0 text-2xs font-medium tabular-nums leading-none text-white/70"
                   data-testid="video-inline-duration"
                 >
                   {formatTimecode(duration)}
@@ -1716,12 +1716,12 @@ function VideoReviewDialog({
                       {formatTimecode(currentTime)}
                     </span>
                     {replyTarget ? (
-                      <span className="text-[0.6875rem] text-muted-foreground">
+                      <span className="text-2xs text-muted-foreground">
                         Replying to {replyTarget.comment.author}
                       </span>
                     ) : (
                       <label
-                        className="flex cursor-pointer select-none items-center gap-1.5 text-[0.6875rem] text-muted-foreground"
+                        className="flex cursor-pointer select-none items-center gap-1.5 text-2xs text-muted-foreground"
                         htmlFor="video-review-frame-toggle"
                       >
                         <Checkbox
@@ -1874,7 +1874,7 @@ function VideoReviewCommentBody({
     item.seconds !== null && item.timecode ? (
       <button
         aria-label={`Jump to ${item.timecode}`}
-        className="inline-flex h-5 shrink-0 items-center rounded bg-amber-400/15 px-1.5 align-middle font-mono text-[0.6875rem] font-semibold text-amber-300 outline-hidden transition-colors hover:bg-amber-400/30 focus-visible:ring-2 focus-visible:ring-white/60"
+        className="inline-flex h-5 shrink-0 items-center rounded bg-amber-400/15 px-1.5 align-middle font-mono text-2xs font-semibold text-amber-300 outline-hidden transition-colors hover:bg-amber-400/30 focus-visible:ring-2 focus-visible:ring-white/60"
         data-testid="video-review-comment-timecode"
         type="button"
         onClick={() => onSeek(item.seconds ?? 0)}
@@ -1892,7 +1892,7 @@ function VideoReviewCommentBody({
           displayName={item.comment.author}
           size="xs"
         />
-        <p className="truncate text-[0.8125rem] font-semibold text-foreground">
+        <p className="truncate text-sm font-semibold text-foreground">
           {item.comment.author}
         </p>
         <p className="shrink-0 text-xs text-muted-foreground">

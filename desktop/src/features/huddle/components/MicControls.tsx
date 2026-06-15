@@ -216,7 +216,7 @@ export function DeviceList({
         })}
       </ul>
       {showChangeHint && (
-        <p className="mt-1 text-[0.625rem] text-muted-foreground">
+        <p className="mt-1 text-2xs text-muted-foreground">
           Change takes effect on next huddle
         </p>
       )}

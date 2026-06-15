@@ -119,7 +119,7 @@ export function MembersSidebarMemberCard({
       <div className="relative shrink-0">
         <ProfileAvatar
           avatarUrl={profileAvatarUrl ?? null}
-          className="h-9 w-9 text-[0.6875rem] shadow-none"
+          className="h-9 w-9 text-2xs shadow-none"
           iconClassName="h-4 w-4"
           label={memberAvatarLabel}
         />
@@ -159,7 +159,7 @@ export function MembersSidebarMemberCard({
             </>
           ) : null}
         </div>
-        <p className="truncate font-mono text-[0.625rem] text-muted-foreground/50">
+        <p className="truncate font-mono text-2xs text-muted-foreground/50">
           {truncatePubkey(member.pubkey)}
         </p>
       </div>

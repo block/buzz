@@ -184,8 +184,8 @@ export function BotActivityComposerAction({
                 className={cn(
                   "border border-background",
                   isInline
-                    ? "!h-[18px] !w-[18px] shadow-xs ring-1 ring-primary/25 text-[0.4375rem]"
-                    : "!h-5 !w-5 text-[0.5rem]",
+                    ? "!h-[18px] !w-[18px] shadow-xs ring-1 ring-primary/25 text-3xs"
+                    : "!h-5 !w-5 text-3xs",
                 )}
                 displayName={agent.name}
                 key={agent.pubkey}
@@ -193,7 +193,7 @@ export function BotActivityComposerAction({
             ))}
           </span>
           {typingAgents.length > 2 ? (
-            <span className="text-[0.6875rem] leading-none">
+            <span className="text-2xs leading-none">
               +{typingAgents.length - 2}
             </span>
           ) : null}
@@ -240,7 +240,7 @@ export function BotActivityComposerAction({
               >
                 <UserAvatar
                   avatarUrl={agentAvatarUrl(agent)}
-                  className="!h-6 !w-6 shrink-0 text-[0.5625rem]"
+                  className="!h-6 !w-6 shrink-0 text-2xs"
                   displayName={agent.name}
                 />
                 <span className="min-w-0 flex-1 truncate">{agent.name}</span>

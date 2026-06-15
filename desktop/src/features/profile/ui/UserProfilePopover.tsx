@@ -216,7 +216,7 @@ export function UserProfilePopover({
                 </p>
               ) : null}
               {profile?.displayName ? (
-                <p className="truncate font-mono text-[0.625rem] text-muted-foreground/50">
+                <p className="truncate font-mono text-2xs text-muted-foreground/50">
                   {truncatePubkey(pubkey)}
                 </p>
               ) : null}

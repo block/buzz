@@ -264,7 +264,7 @@ export function MembersSidebar({
             <section className="space-y-2.5">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="text-sm font-semibold tracking-tight">People</h2>
-                <span className="rounded-full bg-muted px-2 py-0.5 text-[0.6875rem] font-medium text-muted-foreground">
+                <span className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-muted-foreground">
                   {people.length}
                 </span>
               </div>
@@ -284,7 +284,7 @@ export function MembersSidebar({
             <section className="space-y-2.5">
               <div className="flex items-center gap-2">
                 <h2 className="text-sm font-semibold tracking-tight">Bots</h2>
-                <span className="rounded-full bg-muted px-2 py-0.5 text-[0.6875rem] font-medium text-muted-foreground">
+                <span className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-muted-foreground">
                   {bots.length}
                 </span>
                 {hasControllableManagedBots ? (
@@ -329,7 +329,7 @@ export function MembersSidebar({
                       Archived
                     </h2>
                     <span
-                      className="rounded-full bg-muted px-2 py-0.5 text-[0.6875rem] font-medium text-muted-foreground"
+                      className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-muted-foreground"
                       data-testid="members-sidebar-archived-count"
                     >
                       {archived.length}

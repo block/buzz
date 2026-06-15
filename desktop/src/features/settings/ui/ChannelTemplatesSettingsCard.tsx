@@ -216,10 +216,7 @@ function TemplateRow({
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{template.name}</span>
           {template.isBuiltin ? (
-            <Badge
-              className="shrink-0 text-[0.625rem] uppercase"
-              variant="outline"
-            >
+            <Badge className="shrink-0 text-2xs uppercase" variant="outline">
               built-in
             </Badge>
           ) : null}
@@ -759,7 +756,7 @@ function RuntimeRow({
         ) : (
           <ProfileAvatar
             avatarUrl={avatarUrl ?? null}
-            className="h-5 w-5 shrink-0 text-[0.5rem] bg-muted text-muted-foreground ring-1 ring-border/50"
+            className="h-5 w-5 shrink-0 text-3xs bg-muted text-muted-foreground ring-1 ring-border/50"
             label={label}
           />
         )}

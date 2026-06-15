@@ -201,7 +201,7 @@ export function TopbarSearch({
           placeholder="Search everything"
           value={query}
         />
-        <kbd className="shrink-0 text-[0.625rem] text-muted-foreground/70">
+        <kbd className="shrink-0 text-2xs text-muted-foreground/70">
           &#x2318;K
         </kbd>
       </div>
@@ -212,7 +212,7 @@ export function TopbarSearch({
           data-testid="search-results"
         >
           {debouncedQuery.length < MIN_SEARCH_QUERY_LENGTH ? (
-            <div className="px-3 py-3 text-[0.6875rem] text-muted-foreground">
+            <div className="px-3 py-3 text-2xs text-muted-foreground">
               <p>Type at least two characters for live suggestions.</p>
             </div>
           ) : searchQuery.isLoading && results.length === 0 ? (
@@ -291,7 +291,7 @@ export function TopbarSearch({
                         : truncateResultText(result.hit.content)}
                     </span>
                   </span>
-                  <span className="shrink-0 text-[0.6875rem] text-muted-foreground/75">
+                  <span className="shrink-0 text-2xs text-muted-foreground/75">
                     {result.kind === "channel"
                       ? "Channel"
                       : `${describeSearchHit(result.hit)} · ${formatRelativeTime(result.hit.createdAt)}`}

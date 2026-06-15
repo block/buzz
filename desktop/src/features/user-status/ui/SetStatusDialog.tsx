@@ -120,7 +120,7 @@ export function SetStatusDialog({
                 {emoji ? (
                   <button
                     aria-label="Clear status emoji"
-                    className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-background bg-muted text-[0.625rem] leading-none text-muted-foreground hover:bg-accent hover:text-foreground"
+                    className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-background bg-muted text-2xs leading-none text-muted-foreground hover:bg-accent hover:text-foreground"
                     onClick={(event) => {
                       event.stopPropagation();
                       setEmoji("");

@@ -70,7 +70,7 @@ function DmChannelIcon({
       <span className="relative flex h-5 w-5 shrink-0 items-center justify-center">
         <ProfileAvatar
           avatarUrl={primaryParticipant.avatarUrl}
-          className="h-5 w-5 rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-[0.5625rem] text-sidebar-foreground shadow-none"
+          className="h-5 w-5 rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-2xs text-sidebar-foreground shadow-none"
           iconClassName="h-3 w-3"
           label={primaryParticipant.label}
         />
@@ -91,18 +91,18 @@ function DmChannelIcon({
     <span className="relative flex h-5 w-7 shrink-0 items-center">
       <ProfileAvatar
         avatarUrl={primaryParticipant.avatarUrl}
-        className="absolute left-0 top-0 h-[18px] w-[18px] rounded-full border-2 border-sidebar bg-sidebar-accent/80 text-[0.5rem] text-sidebar-foreground shadow-none"
+        className="absolute left-0 top-0 h-[18px] w-[18px] rounded-full border-2 border-sidebar bg-sidebar-accent/80 text-3xs text-sidebar-foreground shadow-none"
         iconClassName="h-2.5 w-2.5"
         label={primaryParticipant.label}
       />
       <ProfileAvatar
         avatarUrl={secondaryParticipant.avatarUrl}
-        className="absolute bottom-0 right-0 h-[18px] w-[18px] rounded-full border-2 border-sidebar bg-sidebar-accent/80 text-[0.5rem] text-sidebar-foreground shadow-none"
+        className="absolute bottom-0 right-0 h-[18px] w-[18px] rounded-full border-2 border-sidebar bg-sidebar-accent/80 text-3xs text-sidebar-foreground shadow-none"
         iconClassName="h-2.5 w-2.5"
         label={secondaryParticipant.label}
       />
       {participants && participants.length > 2 ? (
-        <span className="absolute -bottom-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-sidebar-primary px-1 text-[0.5rem] font-semibold text-sidebar-primary-foreground">
+        <span className="absolute -bottom-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-sidebar-primary px-1 text-3xs font-semibold text-sidebar-primary-foreground">
           {participants.length}
         </span>
       ) : null}

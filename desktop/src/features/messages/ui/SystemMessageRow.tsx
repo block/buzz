@@ -129,7 +129,7 @@ function SystemMessageAvatar({
     const avatar = (
       <UserAvatar
         avatarUrl={resolveAvatarUrl(singlePubkey, profiles)}
-        className="!h-9 !w-9 shrink-0 text-[0.625rem]"
+        className="!h-9 !w-9 shrink-0 text-2xs"
         displayName={actorLabel}
         testId="system-message-avatar"
       />
@@ -165,12 +165,12 @@ function SystemMessageAvatar({
     >
       <UserAvatar
         avatarUrl={resolveAvatarUrl(actorPubkey, profiles)}
-        className="!h-7 !w-7 border-2 border-background text-[0.5625rem]"
+        className="!h-7 !w-7 border-2 border-background text-2xs"
         displayName={actorLabel}
       />
       <UserAvatar
         avatarUrl={resolveAvatarUrl(targetPubkey, profiles)}
-        className="!absolute !bottom-0 !right-0 !h-7 !w-7 border-2 border-background text-[0.5625rem]"
+        className="!absolute !bottom-0 !right-0 !h-7 !w-7 border-2 border-background text-2xs"
         displayName={targetLabel}
       />
     </div>

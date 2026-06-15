@@ -191,7 +191,7 @@ export function NoteCard({
             </button>
           </UserProfilePopover>
           {isAgent ? (
-            <span className="inline-flex h-4 items-center rounded bg-muted px-1 text-[0.625rem] font-medium text-muted-foreground">
+            <span className="inline-flex h-4 items-center rounded bg-muted px-1 text-2xs font-medium text-muted-foreground">
               bot
             </span>
           ) : null}

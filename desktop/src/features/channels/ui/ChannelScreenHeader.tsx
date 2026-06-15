@@ -92,7 +92,7 @@ export function ChannelScreenHeader({
         activeChannel?.channelType === "dm" ? (
           <ProfileAvatar
             avatarUrl={activeDmAvatarUrl}
-            className="h-6 w-6 rounded-full text-[0.625rem]"
+            className="h-6 w-6 rounded-full text-2xs"
             iconClassName="h-3.5 w-3.5"
             label={activeChannelTitle}
             testId="chat-header-dm-avatar"

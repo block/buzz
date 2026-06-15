@@ -349,7 +349,7 @@ function StatusBlock({
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
-      <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
+      <p className="text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
         Status
       </p>
       <AgentStatusBadge
@@ -385,7 +385,7 @@ function RuntimeBlock({
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
-      <p className="text-[0.6875rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
+      <p className="text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
         Runtime
       </p>
       <p className="truncate font-mono text-xs text-foreground">

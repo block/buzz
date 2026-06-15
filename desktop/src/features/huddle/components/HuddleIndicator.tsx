@@ -321,7 +321,7 @@ export function HuddleIndicator({
             <span className="absolute inset-0 animate-pulse rounded-lg ring-2 ring-border/70" />
             {/* Participant count badge */}
             {participantCount > 0 && (
-              <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-border bg-background px-0.5 text-[0.5625rem] font-bold text-muted-foreground">
+              <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-border bg-background px-0.5 text-2xs font-bold text-muted-foreground">
                 {participantCount}
               </span>
             )}

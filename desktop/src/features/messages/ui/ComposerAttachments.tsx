@@ -136,7 +136,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                 >
                   <div className="flex h-5 max-w-[10rem] items-center gap-1 rounded border border-border/70 bg-muted px-1.5">
                     <FileText className="h-3 w-3 shrink-0 text-muted-foreground" />
-                    <span className="truncate text-[0.625rem] text-muted-foreground">
+                    <span className="truncate text-2xs text-muted-foreground">
                       {label}
                     </span>
                   </div>

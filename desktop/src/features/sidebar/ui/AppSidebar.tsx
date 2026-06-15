@@ -444,7 +444,7 @@ export function AppSidebar({
             </SidebarMenuButton>
             {homeBadgeCount > 0 ? (
               <SidebarMenuBadge
-                className="right-2 rounded-full bg-primary/15 px-1.5 text-[0.6875rem] text-primary peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
+                className="right-2 rounded-full bg-primary/15 px-1.5 text-2xs text-primary peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
                 data-testid="sidebar-home-count"
               >
                 {Math.min(homeBadgeCount, 99)}
@@ -492,7 +492,7 @@ export function AppSidebar({
             </SidebarMenuButton>
             {shouldShowAgentCount ? (
               <SidebarMenuBadge
-                className="right-2 rounded-full bg-sidebar-accent/70 px-1.5 text-[0.6875rem] text-sidebar-foreground/75 peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
+                className="right-2 rounded-full bg-sidebar-accent/70 px-1.5 text-2xs text-sidebar-foreground/75 peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
                 data-testid="sidebar-agents-count"
               >
                 {totalAgentCount}

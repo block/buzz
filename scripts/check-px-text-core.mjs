@@ -11,14 +11,22 @@ import path from "node:path";
  * (e.g. the stock `text-base`, `text-sm`, `text-xs` scale — chat === base).
  *
  * It flags:
- *   - Tailwind arbitrary px text utilities: `text-[NNpx]`
+ *   - Tailwind arbitrary text-size utilities: `text-[NNpx]`, `text-[N.NNrem]`,
+ *     `text-[N.NNem]` — any arbitrary font-size literal. Use a named token
+ *     (`text-2xs`, `text-3xs`, or the stock `text-base`/`text-sm`/`text-xs`
+ *     scale) so the size lives in `tailwind.config.js` as rem and stays
+ *     consistent. px literals freeze against zoom; arbitrary rem literals
+ *     re-fragment the scale we just consolidated.
  *   - CSS px font sizes: `font-size: NNpx`
  *
  * Decorative/chrome exceptions (avatar initials sized to a fixed avatar box,
- * etc.) live in the `overrides` allowlist supplied by each app.
+ * the `text-[6rem]` emoji glyph, etc.) live in the `overrides` allowlist
+ * supplied by each app.
  */
 
-const TEXT_PX_RE = /\btext-\[\d+(?:\.\d+)?px\]/g;
+// Any arbitrary Tailwind text-size literal — px, rem, or em. Color literals
+// like `text-[#fff]` or `text-[var(--x)]` don't match (no unit-bearing number).
+const TEXT_ARBITRARY_RE = /\btext-\[\d+(?:\.\d+)?(?:px|rem|em)\]/g;
 // Match the CSS `font-size` property, but NOT custom properties like
 // `--font-size:` (third-party widget vars) which merely contain the substring.
 const FONT_SIZE_PX_RE = /(?<!-)\bfont-size:\s*\d+(?:\.\d+)?px/g;
@@ -91,7 +99,7 @@ export async function runPxTextCheck({
         return;
       }
       const matches = [
-        ...(line.match(TEXT_PX_RE) ?? []),
+        ...(line.match(TEXT_ARBITRARY_RE) ?? []),
         ...(line.match(FONT_SIZE_PX_RE) ?? []),
       ];
       for (const match of matches) {
@@ -107,8 +115,9 @@ export async function runPxTextCheck({
     }
     console.error(
       "Use a rem-based Tailwind text token (e.g. the stock `text-base`, " +
-        "`text-sm`, `text-xs` scale) so the text scales with Cmd +/- zoom. " +
-        "If this px size is " +
+        "`text-sm`, `text-xs` scale, or the `text-2xs` / `text-3xs` meta-text " +
+        "tokens) so the text scales with Cmd +/- zoom and stays on one scale. " +
+        "If this size is " +
         "genuinely decorative/chrome (not readable message text), add a " +
         `narrowly scoped \`relativePath:lineNumber\` exception in \`${scriptPath}\`.`,
     );
