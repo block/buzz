@@ -145,6 +145,21 @@ const VideoReviewMarkdownContext = React.createContext<
   VideoReviewContext | undefined
 >(undefined);
 
+type MarkdownRuntime = {
+  agentMentionPubkeysByName?: Record<string, string>;
+  channels: Channel[];
+  imetaByUrl?: ImetaLookup;
+  mentionPubkeysByName?: Record<string, string>;
+  onOpenChannel: (channelId: string) => void;
+  onOpenMessageLink: (link: ParsedMessageLink) => void;
+};
+
+function useLatestRef<T>(value: T) {
+  const ref = React.useRef(value);
+  ref.current = value;
+  return ref;
+}
+
 function MarkdownVideoPlayer({
   alt,
   entry,
@@ -731,12 +746,7 @@ function SyntaxHighlightedCode({
 }
 function createMarkdownComponents(
   variant: MarkdownVariant,
-  channels: Channel[],
-  onOpenChannel: (channelId: string) => void,
-  onOpenMessageLink: (link: ParsedMessageLink) => void,
-  imetaByUrl?: ImetaLookup,
-  mentionPubkeysByName?: Record<string, string>,
-  agentMentionPubkeysByName?: Record<string, string>,
+  runtimeRef: React.RefObject<MarkdownRuntime>,
   interactive = true,
 ): Components {
   const paragraphClassName =
@@ -754,6 +764,7 @@ function createMarkdownComponents(
 
   return {
     a: ({ children, href, ...props }) => {
+      const { imetaByUrl, onOpenMessageLink } = runtimeRef.current;
       if (!interactive) {
         return <span className="font-medium text-current">{children}</span>;
       }
@@ -875,6 +886,7 @@ function createMarkdownComponents(
     ),
     hr: () => <hr className="border-border/80" />,
     img: ({ alt, src }) => {
+      const { imetaByUrl } = runtimeRef.current;
       const resolvedSrc = src ? rewriteRelayUrl(src) : src;
       if (!interactive) {
         const fallbackLabel = resolvedSrc?.endsWith(".mp4")
@@ -971,6 +983,8 @@ function createMarkdownComponents(
       <ul className={cn("list-disc", listClassName)}>{children}</ul>
     ),
     mention: ({ children }: { children?: React.ReactNode }) => {
+      const { agentMentionPubkeysByName, mentionPubkeysByName } =
+        runtimeRef.current;
       const mentionText = String(children ?? "");
       const mentionName = mentionText.replace(/^@/, "").trim().toLowerCase();
       const pubkey = mentionPubkeysByName?.[mentionName];
@@ -1017,6 +1031,7 @@ function createMarkdownComponents(
       return <InlineEmojiPopover alt={alt} resolvedSrc={resolvedSrc} />;
     },
     "channel-link": ({ children }: { children?: React.ReactNode }) => {
+      const { channels, onOpenChannel } = runtimeRef.current;
       const text = String(children ?? "");
       const channelName = text.startsWith("#") ? text.slice(1) : text;
       const channel = channels.find(
@@ -1051,6 +1066,7 @@ function createMarkdownComponents(
       );
     },
     "message-link": ({ children }: { children?: React.ReactNode }) => {
+      const { channels, onOpenMessageLink } = runtimeRef.current;
       const href = String(children ?? "");
       const parsed = parseMessageLink(href);
       if (!parsed.ok) {
@@ -1113,42 +1129,40 @@ function MarkdownInner({
   const { channels: rawChannels } = useChannelNavigation();
   const channels = useStableArray(rawChannels);
   const { goChannel } = useAppNavigation();
+  const onOpenChannel = React.useCallback(
+    (channelId: string) => {
+      void goChannel(channelId);
+    },
+    [goChannel],
+  );
+  const onOpenMessageLink = React.useCallback(
+    (link: ParsedMessageLink) => {
+      // Always route through `goChannel` with `messageId` set: the channel
+      // route already handles scroll-into-view + highlight via
+      // `useTimelineScrollManager` + `getEventById` backfill, and works for
+      // both stream-message replies and forum threads. Detecting "the thread
+      // root is a forum post" up front would require an event lookup we don't
+      // currently have synchronously; the brief explicitly allows skipping
+      // that detection and falling through.
+      void goChannel(link.channelId, {
+        messageId: link.messageId,
+        threadRootId: link.threadRootId,
+      });
+    },
+    [goChannel],
+  );
+  const runtimeRef = useLatestRef<MarkdownRuntime>({
+    agentMentionPubkeysByName,
+    channels,
+    imetaByUrl,
+    mentionPubkeysByName,
+    onOpenChannel,
+    onOpenMessageLink,
+  });
 
   const components = React.useMemo(
-    () =>
-      createMarkdownComponents(
-        variant,
-        channels,
-        (channelId) => {
-          void goChannel(channelId);
-        },
-        (link) => {
-          // Always route through `goChannel` with `messageId` set: the
-          // channel route already handles scroll-into-view + highlight via
-          // `useTimelineScrollManager` + `getEventById` backfill, and works
-          // for both stream-message replies and forum threads. Detecting
-          // "the thread root is a forum post" up front would require an
-          // event lookup we don't currently have synchronously; the brief
-          // explicitly allows skipping that detection and falling through.
-          void goChannel(link.channelId, {
-            messageId: link.messageId,
-            threadRootId: link.threadRootId,
-          });
-        },
-        imetaByUrl,
-        mentionPubkeysByName,
-        agentMentionPubkeysByName,
-        interactive,
-      ),
-    [
-      goChannel,
-      variant,
-      channels,
-      imetaByUrl,
-      mentionPubkeysByName,
-      agentMentionPubkeysByName,
-      interactive,
-    ],
+    () => createMarkdownComponents(variant, runtimeRef, interactive),
+    [variant, runtimeRef, interactive],
   );
 
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable

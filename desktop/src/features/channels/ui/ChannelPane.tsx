@@ -10,7 +10,11 @@ import {
 } from "@/features/messages/ui/MessageThreadPanel";
 import { MessageTimeline } from "@/features/messages/ui/MessageTimeline";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
-import { formatDmParticipantDisplayName } from "@/features/channels/lib/dmParticipantDisplay";
+import { buildDirectMessageIntro } from "@/features/channels/lib/dmParticipantDisplay";
+import {
+  buildVideoReviewCommentsByRootId,
+  buildVideoReviewContextForMessage,
+} from "@/features/messages/lib/videoReviewContext";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
@@ -37,17 +41,13 @@ import { Button } from "@/shared/ui/button";
 import type { useChannelFind } from "@/features/search/useChannelFind";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { TimelineMessage } from "@/features/messages/types";
-import {
-  resolveUserLabel,
-  type UserProfileLookup,
-} from "@/features/profile/lib/identity";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { isWelcomeChannel } from "@/features/onboarding/welcome";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import type { Channel } from "@/shared/api/types";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
-import { normalizePubkey } from "@/shared/lib/pubkey";
 
 type ChannelPaneProps = {
   activeChannel: Channel | null;
@@ -490,53 +490,15 @@ export const ChannelPane = React.memo(function ChannelPane({
   }, [botTypingEntries, openThreadHeadId]);
   const hasThreadComposerBotActivity =
     threadComposerBotTypingPubkeys.length > 0;
-  const directMessageIntro = React.useMemo(() => {
-    if (activeChannel?.channelType !== "dm") {
-      return null;
-    }
-
-    const participants = activeChannel.participantPubkeys.map(
-      (pubkey, index) => ({
-        fallbackName: activeChannel.participants[index] ?? null,
-        pubkey,
+  const directMessageIntro = React.useMemo(
+    () =>
+      buildDirectMessageIntro({
+        channel: activeChannel,
+        currentPubkey,
+        profiles,
       }),
-    );
-    const normalizedCurrentPubkey = currentPubkey
-      ? normalizePubkey(currentPubkey)
-      : null;
-    const otherParticipants = normalizedCurrentPubkey
-      ? participants.filter(
-          (participant) =>
-            normalizePubkey(participant.pubkey) !== normalizedCurrentPubkey,
-        )
-      : participants;
-    const displayParticipants =
-      otherParticipants.length > 0 ? otherParticipants : participants;
-
-    if (displayParticipants.length === 0) {
-      return null;
-    }
-
-    const introParticipants = displayParticipants.map((participant) => {
-      const profile = profiles?.[normalizePubkey(participant.pubkey)] ?? null;
-
-      return {
-        avatarUrl: profile?.avatarUrl ?? null,
-        displayName: resolveUserLabel({
-          currentPubkey,
-          fallbackName: participant.fallbackName,
-          profiles,
-          pubkey: participant.pubkey,
-        }),
-        pubkey: participant.pubkey,
-      };
-    });
-
-    return {
-      displayName: formatDmParticipantDisplayName(introParticipants),
-      participants: introParticipants,
-    };
-  }, [activeChannel, currentPubkey, profiles]);
+    [activeChannel, currentPubkey, profiles],
+  );
 
   const channelIntro = React.useMemo(() => {
     if (!activeChannel || activeChannel.channelType === "dm") {
@@ -609,6 +571,38 @@ export const ChannelPane = React.memo(function ChannelPane({
 
     return messages.filter((message) => !isWelcomeSetupSystemMessage(message));
   }, [activeChannel, messages]);
+  const videoReviewCommentsByRootId = React.useMemo(
+    () => buildVideoReviewCommentsByRootId(messages),
+    [messages],
+  );
+  const activeVideoReviewCommentSender = activeChannel?.archivedAt
+    ? undefined
+    : onSendVideoReviewComment;
+  const threadHeadVideoReviewContext = React.useMemo(() => {
+    if (!threadHeadMessage) {
+      return undefined;
+    }
+
+    return buildVideoReviewContextForMessage({
+      channelId: activeChannel?.id ?? null,
+      channelName: activeChannel?.name,
+      channelType: activeChannel?.channelType ?? null,
+      comments: videoReviewCommentsByRootId.get(threadHeadMessage.id) ?? [],
+      isSendingVideoReviewComment: isSending,
+      message: threadHeadMessage,
+      onSendVideoReviewComment: activeVideoReviewCommentSender,
+      onToggleReaction,
+      profiles,
+    });
+  }, [
+    activeChannel,
+    activeVideoReviewCommentSender,
+    isSending,
+    onToggleReaction,
+    profiles,
+    threadHeadMessage,
+    videoReviewCommentsByRootId,
+  ]);
 
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
@@ -840,6 +834,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 replyTargetMessage={threadReplyTargetMessage}
                 scrollTargetId={threadScrollTargetId}
                 threadHead={threadHeadMessage}
+                threadHeadVideoReviewContext={threadHeadVideoReviewContext}
                 widthPx={threadPanelWidthPx}
                 threadReplies={threadMessages}
                 threadTypingPubkeys={threadTypingPubkeys}

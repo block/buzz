@@ -24,6 +24,7 @@ import {
   PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
 import { Skeleton } from "@/shared/ui/skeleton";
+import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageComposer } from "./MessageComposer";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
@@ -74,6 +75,7 @@ type MessageThreadPanelProps = {
   threadHead: TimelineMessage | null;
   threadReplies: MainTimelineEntry[];
   threadTypingPubkeys: string[];
+  threadHeadVideoReviewContext?: VideoReviewContext;
   toolbarExtraActions?: React.ReactNode;
   widthPx: number;
   isFollowingThread?: boolean;
@@ -283,6 +285,7 @@ export function MessageThreadPanel({
   replyTargetMessage,
   scrollTargetId,
   threadHead,
+  threadHeadVideoReviewContext,
   threadReplies,
   threadTypingPubkeys,
   toolbarExtraActions,
@@ -376,6 +379,7 @@ export function MessageThreadPanel({
                 onUnfollowThread ? (_msg) => onUnfollowThread() : undefined
               }
               profiles={profiles}
+              videoReviewContext={threadHeadVideoReviewContext}
             />
           </div>
         </div>
