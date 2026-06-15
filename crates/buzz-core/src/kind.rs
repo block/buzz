@@ -187,6 +187,9 @@ pub const KIND_PAIRING: u32 = 24134;
 pub const KIND_TYPING_INDICATOR: u32 = 20002;
 /// Ephemeral: owner-scoped encrypted agent observer telemetry and control frame.
 pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
+/// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
+/// huddle channel with an `h` tag; never stored in the timeline.
+pub const KIND_HUDDLE_REACTION: u32 = 24810;
 /// Ephemeral: mesh status report (desktop → relay). A relay member reports its
 /// current mesh serve availability + EndpointAddr(s) so the relay can project a
 /// sanitized, relay-signed kind:30621 discovery note keyed per reporter. Tagged
@@ -395,6 +398,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_NIP29_GROUP_ROLES,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
+    KIND_HUDDLE_REACTION,
     KIND_MESH_STATUS_REPORT,
     KIND_MESH_CONNECT_REQUEST,
     KIND_MESH_CALL_ME_NOW,
