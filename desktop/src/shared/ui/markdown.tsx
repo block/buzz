@@ -78,7 +78,7 @@ const MAX_CACHE_ENTRIES = 100;
 const MAX_LOADED_LANGUAGES = 30;
 const MAX_HIGHLIGHT_LINES = 150;
 const CODE_BLOCK_CLASS =
-  "code-block-lines block min-w-full whitespace-pre font-mono text-code text-foreground";
+  "code-block-lines block min-w-full whitespace-pre font-mono text-sm text-foreground";
 const DIFF_ADD_RE = /\s*\/\/\s*\[!code\s*\+\+\]\s*$/;
 const DIFF_REMOVE_RE = /\s*\/\/\s*\[!code\s*--\]\s*$/;
 
@@ -850,7 +850,7 @@ function createMarkdownComponents(
         <code
           {...props}
           className={cn(
-            "rounded-md bg-muted px-1.5 py-0.5 font-mono text-code text-foreground",
+            "rounded-md bg-muted px-1.5 py-0.5 font-mono text-sm text-foreground",
             className,
           )}
         >
@@ -1221,7 +1221,7 @@ function MarkdownInner({
             ].join(" ")
           : compact
             ? [
-                "max-w-none break-words text-chat text-foreground/90",
+                "max-w-none break-words text-base text-foreground/90",
                 "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
                 "[&>*+*]:mt-2",
                 "[&>*+h1]:mt-3 [&>*+h2]:mt-3 [&>*+h3]:mt-3",

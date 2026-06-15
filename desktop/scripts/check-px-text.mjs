@@ -7,10 +7,10 @@ const projectRoot = path.resolve(__dirname, "..");
 
 // Scoped to the message-timeline / thread render path — the surface where the
 // rem→px zoom regression (PR #891) landed. Readable message text here MUST use
-// rem-based tokens (`text-chat`, `text-code`) so Cmd +/- zoom scales it. We
-// intentionally do NOT sweep the whole app yet (decorative chrome — avatar
-// initials, day dividers, diff-viewer labels — still uses px); widen these
-// roots when that sweep happens.
+// rem-based tokens (the stock `text-base` / `text-sm` scale, chat === base)
+// so Cmd +/- zoom scales it. We intentionally do NOT sweep the whole app yet
+// (decorative chrome — avatar initials, day dividers, diff-viewer labels —
+// still uses px); widen these roots when that sweep happens.
 const rules = [
   {
     root: "src/shared/ui",

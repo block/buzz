@@ -8,7 +8,7 @@ import path from "node:path";
  * scales. Hardcoded px text sizes (`text-[15px]`, `font-size: 15px`) freeze
  * against zoom — that's the timeline regression we fixed. This guard stops new
  * px text sizes from creeping back in. Use a rem-based Tailwind token instead
- * (e.g. `text-chat`, `text-code`, `text-sm`).
+ * (e.g. the stock `text-base`, `text-sm`, `text-xs` scale — chat === base).
  *
  * It flags:
  *   - Tailwind arbitrary px text utilities: `text-[NNpx]`
@@ -106,8 +106,9 @@ export async function runPxTextCheck({
       console.error(`- ${v.relativePath}:${v.lineNumber}: ${v.match}`);
     }
     console.error(
-      "Use a rem-based Tailwind text token (e.g. `text-chat`, `text-code`, " +
-        "`text-sm`) so the text scales with Cmd +/- zoom. If this px size is " +
+      "Use a rem-based Tailwind text token (e.g. the stock `text-base`, " +
+        "`text-sm`, `text-xs` scale) so the text scales with Cmd +/- zoom. " +
+        "If this px size is " +
         "genuinely decorative/chrome (not readable message text), add a " +
         `narrowly scoped \`relativePath:lineNumber\` exception in \`${scriptPath}\`.`,
     );

@@ -188,7 +188,7 @@ export const MessageRow = React.memo(
             <Markdown
               channelNames={channelNames}
               className={cn(
-                "max-w-full text-chat",
+                "max-w-full text-base",
                 emojiOnly &&
                   "text-4xl leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
               )}
@@ -245,11 +245,11 @@ export const MessageRow = React.memo(
     );
 
     const authorNode = message.pubkey ? (
-      <span className="truncate text-chat font-semibold leading-none tracking-tight hover:underline">
+      <span className="truncate text-base font-semibold leading-none tracking-tight hover:underline">
         {message.author}
       </span>
     ) : (
-      <h3 className="truncate text-chat font-semibold leading-none tracking-tight">
+      <h3 className="truncate text-base font-semibold leading-none tracking-tight">
         {message.author}
       </h3>
     );

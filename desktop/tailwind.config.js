@@ -2,15 +2,6 @@
 export default {
   theme: {
     extend: {
-      fontSize: {
-        // Chat body/author sizing. 15px sits between Tailwind's stock
-        // `text-sm` (14px) and `text-base` (16px), so we express it as a rem
-        // token instead of a hardcoded px value — px would not scale with the
-        // root-font-size zoom (Cmd +/-). 0.9375rem === 15px at the 16px root.
-        chat: ["0.9375rem", { lineHeight: "1.5rem" }],
-        // Inline & block code inside chat messages (13px → 0.8125rem).
-        code: ["0.8125rem", { lineHeight: "1.5rem" }],
-      },
       borderRadius: {
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
