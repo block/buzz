@@ -3,6 +3,7 @@ import * as React from "react";
 
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import type { TimelineReaction } from "@/features/messages/types";
+import { recordQuickReactionEmoji } from "@/features/messages/ui/useQuickReactionEmojis";
 import { cn } from "@/shared/lib/cn";
 import { emojiDisplayName } from "@/shared/lib/emojiName";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
@@ -329,6 +330,7 @@ function InlineReactionPicker({
             if (wouldAddReaction(value) && isPositiveEmojiParticle(value)) {
               requestBadgeBurst(value);
             }
+            recordQuickReactionEmoji(value);
             onSelect(value);
             setOpen(false);
           }}
@@ -416,6 +418,7 @@ function ReactionPill({
     ) {
       burstEmoji(reaction.emoji, event);
     }
+    recordQuickReactionEmoji(reaction.emoji);
     onSelect(reaction.emoji);
   };
 

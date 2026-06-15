@@ -16,13 +16,11 @@ const SELF_PROFILE_CACHE_KEY = `buzz-self-profile.v1:${MOCK_RELAY_URL}:${MOCK_PU
 
 async function settle(page: import("@playwright/test").Page) {
   await page.evaluate(() =>
-    // Swallow per-animation rejections: a SkeletonReveal animation cancelled
+    // Tolerate cancelled animations: a SkeletonReveal animation cancelled
     // mid-flight (skeleton → live content swap) rejects `.finished` with an
-    // AbortError. Catching per-animation lets the batch settle the animations
-    // that DO finish instead of aborting the whole wait on the first cancel.
-    Promise.all(
-      document.getAnimations().map((a) => a.finished.catch(() => {})),
-    ),
+    // AbortError. allSettled lets the animations that DO finish settle instead
+    // of aborting the whole wait on the first cancel.
+    Promise.allSettled(document.getAnimations().map((a) => a.finished)),
   );
 }
 
