@@ -5,7 +5,10 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 use crate::app_state::AppState;
-use crate::relay::relay_api_base_url_with_override;
+use crate::relay::{
+    classify_request_error, parse_json_response, relay_api_base_url_with_override,
+    relay_error_message,
+};
 
 use super::media_transcode::{is_video_file, transcode_and_extract_poster};
 
@@ -80,7 +83,7 @@ fn fd_real_path(file: &std::fs::File) -> Result<std::path::PathBuf, String> {
     use windows_sys::Win32::Storage::FileSystem::{
         GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED,
     };
-    let handle = file.as_raw_handle() as isize;
+    let handle = file.as_raw_handle() as *mut core::ffi::c_void;
     let mut buf = vec![0u16; 1024];
     let len = unsafe {
         GetFinalPathNameByHandleW(
@@ -188,6 +191,7 @@ async fn do_upload(
     body: Vec<u8>,
     mime: &str,
     state: &State<'_, AppState>,
+    progress: Option<(tauri::AppHandle, String)>,
 ) -> Result<BlobDescriptor, String> {
     let sha256 = hex::encode(Sha256::digest(&body));
 
@@ -216,21 +220,42 @@ async fn do_upload(
         .header("Content-Type", mime)
         .header("X-SHA-256", &sha256);
 
-    let resp = req
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| format!("upload failed: {e}"))?;
+    // With a progress channel, stream the body in chunks and emit a
+    // `media-upload-progress` event as each chunk is handed to the socket,
+    // so the renderer can draw a determinate progress bar.
+    let resp = if let Some((app, progress_id)) = progress {
+        use tauri::Emitter;
+        let total = body.len() as u64;
+        // Ref-counted slices of one buffer — no second copy of the payload.
+        let body = bytes::Bytes::from(body);
+        let chunk_size = 64 * 1024;
+        let chunk_count = body.len().div_ceil(chunk_size);
+        let mut sent: u64 = 0;
+        let stream = futures_util::stream::iter((0..chunk_count).map(move |i| {
+            let start = i * chunk_size;
+            let end = usize::min(start + chunk_size, body.len());
+            let chunk = body.slice(start..end);
+            sent += chunk.len() as u64;
+            let _ = app.emit(
+                "media-upload-progress",
+                serde_json::json!({ "id": progress_id, "sent": sent, "total": total }),
+            );
+            Ok::<bytes::Bytes, std::io::Error>(chunk)
+        }));
+        req.header(reqwest::header::CONTENT_LENGTH, total)
+            .body(reqwest::Body::wrap_stream(stream))
+            .send()
+            .await
+    } else {
+        req.body(body).send().await
+    }
+    .map_err(|e| classify_request_error(&e))?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("upload failed ({status}): {text}"));
+        return Err(relay_error_message(resp).await);
     }
 
-    resp.json::<BlobDescriptor>()
-        .await
-        .map_err(|e| format!("parse failed: {e}"))
+    parse_json_response::<BlobDescriptor>(resp).await
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────
@@ -267,7 +292,7 @@ pub async fn upload_media(
     }
 
     let mime = detect_and_validate_mime(&body)?;
-    do_upload(body, &mime, &state).await
+    do_upload(body, &mime, &state, None).await
 }
 
 /// Read a picked path through the TOCTOU-safe pipeline (fd pin → sniff →
@@ -316,10 +341,10 @@ async fn process_picked_path(
 
     // Upload video first, then poster (best-effort). If poster upload fails,
     // the video descriptor is returned without an image field.
-    let mut descriptor = do_upload(body, &mime, state).await?;
+    let mut descriptor = do_upload(body, &mime, state, None).await?;
 
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", state).await {
+        match do_upload(poster, "image/jpeg", state, None).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
             Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }
@@ -387,6 +412,8 @@ pub async fn pick_and_upload_media(
 pub async fn upload_media_bytes(
     data: Vec<u8>,
     filename: Option<String>,
+    progress_id: Option<String>,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<BlobDescriptor, String> {
     if data.is_empty() {
@@ -417,10 +444,11 @@ pub async fn upload_media_bytes(
     let mime = detect_and_validate_mime(&body)?;
 
     // Upload video first, then poster (best-effort).
-    let mut descriptor = do_upload(body, &mime, &state).await?;
+    let progress = progress_id.map(|id| (app, id));
+    let mut descriptor = do_upload(body, &mime, &state, progress).await?;
 
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", &state).await {
+        match do_upload(poster, "image/jpeg", &state, None).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
             Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }

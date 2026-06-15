@@ -123,8 +123,104 @@ pub fn build_nip98_auth_header_for_keys(
 
 // ── Error handling ──────────────────────────────────────────────────────────
 
+/// Classify a `send()` failure into a stable, URL-free error string.
+///
+/// The returned string always starts with `"relay unreachable:"` so the
+/// frontend connectivity classifier can detect it with a simple prefix check.
+pub(crate) fn classify_request_error(e: &reqwest::Error) -> String {
+    let display = e.to_string().to_lowercase();
+    if e.is_timeout() {
+        "relay unreachable: request timed out".to_string()
+    } else if e.is_connect() {
+        "relay unreachable: could not connect to relay".to_string()
+    } else if display.contains("dns") || display.contains("failed to lookup") {
+        "relay unreachable: relay host not found".to_string()
+    } else {
+        "relay unreachable: network error".to_string()
+    }
+}
+
+/// Detect responses that were intercepted by a captive portal or auth proxy.
+///
+/// Returns `Some(msg)` when the response clearly did not come from the relay:
+/// - Cloudflare Access redirect (final URL on `*.cloudflareaccess.com`)
+/// - Any other HTML response (proxy login page, captive portal, etc.)
+///
+/// Pure function: takes the already-extracted host and content-type strings so
+/// it can be unit-tested without constructing a real `reqwest::Response`.
+fn classify_intercepted_response(final_host: &str, content_type: &str) -> Option<String> {
+    let host = final_host.to_lowercase();
+    let ct = content_type.to_lowercase();
+
+    // Cloudflare Access intercepts requests and redirects to its own domain.
+    // Label-boundary check prevents `notcloudflareaccess.com.evil.example` from
+    // matching.
+    if host == "cloudflareaccess.com" || host.ends_with(".cloudflareaccess.com") {
+        return Some(
+            "relay unreachable: network sign-in required (Cloudflare Access / VPN) \
+             — re-authenticate and reconnect"
+                .to_string(),
+        );
+    }
+
+    // Generic HTML body from any other proxy or captive portal.
+    if ct.contains("text/html") {
+        return Some(
+            "relay unreachable: relay returned an unexpected HTML page \
+             (VPN or proxy sign-in?)"
+                .to_string(),
+        );
+    }
+
+    None
+}
+
+/// Deserialize a successful response as JSON, guarding against intercepted pages.
+///
+/// Extracts the final URL host and `Content-Type` header before consuming the
+/// response body. If the response looks like a captive-portal page, returns the
+/// appropriate `"relay unreachable:"` message instead of attempting JSON parsing.
+/// URL details are deliberately omitted from error strings so raw URLs are never
+/// surfaced in the UI.
+pub(crate) async fn parse_json_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, String> {
+    let final_host = response.url().host_str().unwrap_or("").to_string();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    if let Some(msg) = classify_intercepted_response(&final_host, &content_type) {
+        return Err(msg);
+    }
+
+    // Drop the reqwest error detail — it contains the raw URL.
+    response
+        .json::<T>()
+        .await
+        .map_err(|_| "relay unreachable: response was not valid JSON".to_string())
+}
+
 pub async fn relay_error_message(response: reqwest::Response) -> String {
     let status = response.status();
+
+    // Check for intercepted/proxy responses before reading the body.
+    let final_host = response.url().host_str().unwrap_or("").to_string();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    if let Some(msg) = classify_intercepted_response(&final_host, &content_type) {
+        return msg;
+    }
+
+    // Real relay error: extract the structured message field if available.
     let body = response.text().await.unwrap_or_default();
 
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
@@ -137,7 +233,8 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
         }
     }
 
-    format!("relay returned {status}: {body}")
+    // Non-JSON, non-HTML body: emit status only — no raw body in the UI.
+    format!("relay returned {status}")
 }
 
 // ── HTTP bridge: POST /query ────────────────────────────────────────────────
@@ -175,16 +272,13 @@ pub async fn query_relay_at(
         .body(body_bytes)
         .send()
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| classify_request_error(&e))?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
     }
 
-    response
-        .json::<Vec<nostr::Event>>()
-        .await
-        .map_err(|e| format!("failed to parse query response: {e}"))
+    parse_json_response(response).await
 }
 
 // ── Command response parsing ────────────────────────────────────────────────
@@ -281,7 +375,7 @@ pub async fn sync_managed_agent_profile(
         .body(body_bytes)
         .send()
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| classify_request_error(&e))?;
 
     if !response.status().is_success() {
         let msg = relay_error_message(response).await;
@@ -380,16 +474,59 @@ pub async fn submit_event(
         .body(body_bytes)
         .send()
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| classify_request_error(&e))?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
     }
 
-    let result: SubmitEventResponse = response
-        .json()
+    let result: SubmitEventResponse = parse_json_response(response).await?;
+
+    if !result.accepted {
+        return Err(format!("relay rejected event: {}", result.message));
+    }
+
+    Ok(result)
+}
+
+/// Sign an event with explicit keys and POST it to `/events` with NIP-98 auth.
+///
+/// Managed-agent flows use this to publish as the agent itself while still
+/// including the stored NIP-OA auth tag when the relay requires owner-backed
+/// membership.
+pub async fn submit_event_with_keys(
+    builder: nostr::EventBuilder,
+    state: &AppState,
+    keys: &Keys,
+    auth_tag: Option<&str>,
+) -> Result<SubmitEventResponse, String> {
+    let url = format!("{}/events", relay_api_base_url_with_override(state));
+    let event = builder
+        .sign_with_keys(keys)
+        .map_err(|e| format!("failed to sign event: {e}"))?;
+    let body_bytes = event.as_json().into_bytes();
+    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+
+    let mut request = state
+        .http_client
+        .post(&url)
+        .header("Authorization", auth_header)
+        .header("Content-Type", "application/json");
+    if let Some(tag) = auth_tag {
+        request = request.header("x-auth-tag", tag);
+    }
+
+    let response = request
+        .body(body_bytes)
+        .send()
         .await
-        .map_err(|e| format!("failed to parse response: {e}"))?;
+        .map_err(|e| classify_request_error(&e))?;
+
+    if !response.status().is_success() {
+        return Err(relay_error_message(response).await);
+    }
+
+    let result: SubmitEventResponse = parse_json_response(response).await?;
 
     if !result.accepted {
         return Err(format!("relay rejected event: {}", result.message));
@@ -402,8 +539,72 @@ pub async fn submit_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_profile_event, parse_command_response};
+    use super::{build_profile_event, classify_intercepted_response, parse_command_response};
     use serde::Deserialize;
+
+    // ── classify_intercepted_response ────────────────────────────────────────
+
+    #[test]
+    fn intercepted_cloudflare_host_returns_some() {
+        let result = classify_intercepted_response("sqprod.cloudflareaccess.com", "text/html");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(
+            msg.starts_with("relay unreachable:"),
+            "should have unreachable prefix"
+        );
+        assert!(msg.contains("Cloudflare"), "should mention Cloudflare");
+    }
+
+    #[test]
+    fn intercepted_cloudflare_apex_host_returns_some() {
+        // The apex domain itself should also match.
+        let result = classify_intercepted_response("cloudflareaccess.com", "application/json");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.starts_with("relay unreachable:"));
+        assert!(msg.contains("Cloudflare"));
+    }
+
+    #[test]
+    fn intercepted_non_cloudflare_html_returns_some() {
+        let result =
+            classify_intercepted_response("proxy.corporate.example", "text/html; charset=utf-8");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.starts_with("relay unreachable:"));
+    }
+
+    #[test]
+    fn normal_relay_json_returns_none() {
+        let result = classify_intercepted_response("relay.myapp.example.com", "application/json");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn content_type_case_insensitive() {
+        // Uppercase content-type must still be detected.
+        let result = classify_intercepted_response("proxy.example.com", "TEXT/HTML");
+        assert!(result.is_some());
+        assert!(result.unwrap().starts_with("relay unreachable:"));
+    }
+
+    #[test]
+    fn evil_suffix_does_not_match_cloudflare() {
+        // A host whose suffix happens to contain the Cloudflare string but is
+        // not actually a subdomain must NOT match.
+        let result = classify_intercepted_response(
+            "notcloudflareaccess.com.evil.example",
+            "application/json",
+        );
+        assert!(
+            result.is_none(),
+            "false suffix match should not trigger Cloudflare branch"
+        );
+    }
+
+    // classify_request_error requires a real reqwest::Error (not publicly
+    // constructable) — tested indirectly through integration; skipped here.
 
     // ── parse_command_response ───────────────────────────────────────────────
 

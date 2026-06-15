@@ -18,6 +18,7 @@ import {
   resolveMentionPubkeysByName,
 } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
+import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -33,6 +34,7 @@ export const MessageRow = React.memo(
     channelId = null,
     highlighted = false,
     hoverBackground = true,
+    actionBarPlacement = "floating",
     isFollowingThread,
     layoutVariant = "default",
     message,
@@ -46,11 +48,13 @@ export const MessageRow = React.memo(
     profiles,
     searchQuery,
     agentPubkeys,
+    videoReviewContext,
   }: {
     agentPubkeys?: ReadonlySet<string>;
     channelId?: string | null;
     highlighted?: boolean;
     hoverBackground?: boolean;
+    actionBarPlacement?: "floating" | "inside";
     isFollowingThread?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
@@ -67,6 +71,7 @@ export const MessageRow = React.memo(
     onUnfollowThread?: (message: TimelineMessage) => void;
     profiles?: UserProfileLookup;
     searchQuery?: string;
+    videoReviewContext?: VideoReviewContext;
   }) {
     const [expandedDiffId, setExpandedDiffId] = React.useState<string | null>(
       null,
@@ -197,6 +202,7 @@ export const MessageRow = React.memo(
               mentionPubkeysByName={mentionPubkeysByName}
               searchQuery={searchQuery}
               tight
+              videoReviewContext={videoReviewContext}
             />
           );
       }
@@ -251,7 +257,14 @@ export const MessageRow = React.memo(
     );
 
     const actionBarNode = (
-      <div className="absolute right-2 top-1 z-10">
+      <div
+        className={cn(
+          "absolute right-2 top-1 z-10",
+          actionBarPlacement === "floating"
+            ? "sm:top-0 sm:-translate-y-1/2"
+            : "sm:top-1 sm:translate-y-0",
+        )}
+      >
         <MessageActionBar
           channelId={channelId}
           isFollowingThread={isFollowingThread}
@@ -504,7 +517,8 @@ export const MessageRow = React.memo(
     prev.isFollowingThread === next.isFollowingThread &&
     prev.layoutVariant === next.layoutVariant &&
     prev.profiles === next.profiles &&
-    prev.searchQuery === next.searchQuery,
+    prev.searchQuery === next.searchQuery &&
+    prev.videoReviewContext === next.videoReviewContext,
 );
 
 MessageRow.displayName = "MessageRow";

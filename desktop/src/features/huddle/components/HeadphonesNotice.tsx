@@ -24,7 +24,7 @@ export function HeadphonesNotice({ onDismiss }: { onDismiss: () => void }) {
       data-testid="huddle-headphones-notice"
       className="flex items-center gap-1.5 rounded bg-amber-500/10 px-2 py-1 text-xs text-amber-700 dark:text-amber-300"
     >
-      <Headphones className="h-3 w-3" />
+      <Headphones className="h-4 w-4" />
       <span className="max-w-[260px] truncate">
         Headphones recommended — echo cancellation lands in the next release.
       </span>

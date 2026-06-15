@@ -635,8 +635,8 @@ mod tests {
     fn persona_record_defaults_active_when_field_is_missing() {
         let record: PersonaRecord = serde_json::from_str(
             r#"{
-                "id": "builtin:solo",
-                "display_name": "Solo",
+                "id": "builtin:fizz",
+                "display_name": "Fizz",
                 "avatar_url": null,
                 "system_prompt": "Prompt",
                 "created_at": "2026-03-19T00:00:00Z",

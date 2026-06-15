@@ -59,7 +59,7 @@ export function InboxListPane({
         <div className="px-5 py-1">
           <div className="flex min-w-0 items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-[6px]">
-              <Inbox className="h-[14px] w-[14px] shrink-0 text-muted-foreground" />
+              <Inbox className="h-4 w-4 shrink-0 text-muted-foreground" />
               <h2 className="translate-y-px truncate text-sm font-semibold leading-5 tracking-tight">
                 Inbox
               </h2>
@@ -73,7 +73,7 @@ export function InboxListPane({
                   variant="outline"
                 >
                   <span>{activeFilter?.label ?? "All"}</span>
-                  <ChevronDown className="h-3 w-3" />
+                  <ChevronDown className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-40">

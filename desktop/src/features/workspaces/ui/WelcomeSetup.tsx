@@ -14,6 +14,7 @@ import {
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
+import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 
@@ -30,6 +31,14 @@ type WelcomeSetupProps = {
 };
 
 const DEFAULT_WORKSPACE_HANDOFF_MIN_MS = 200;
+const LOCAL_DEV_RELAY_URLS = new Set([
+  "ws://localhost:3000",
+  "ws://127.0.0.1:3000",
+]);
+
+function isLocalDevRelayUrl(relayUrl: string) {
+  return LOCAL_DEV_RELAY_URLS.has(relayUrl.trim().replace(/\/$/, ""));
+}
 
 function wait(ms: number) {
   return new Promise<void>((resolve) => {
@@ -94,6 +103,12 @@ export function WelcomeSetup({
       const trimmedUrl = relayUrl.trim();
       if (!trimmedUrl) {
         setError("Please enter a workspace URL.");
+        return;
+      }
+      if (!workspaceName && isLocalDevRelayUrl(trimmedUrl)) {
+        setError("Enter your relay URL to join a workspace.");
+        setTransitionMode("forward");
+        setPage("create-workspace");
         return;
       }
 
@@ -190,6 +205,7 @@ export function WelcomeSetup({
       className="buzz-onboarding-neutral-theme buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground"
       data-system-color-scheme={systemColorScheme}
     >
+      <StartupWindowDragRegion />
       <div className="relative flex w-full max-w-[500px] flex-col items-center text-center">
         <StepProgress
           activeSegmentClassName="bg-primary"
@@ -218,20 +234,22 @@ export function WelcomeSetup({
             </p>
 
             <div className="mt-8 flex w-full flex-col gap-3">
-              <Button
-                className="h-10 w-full"
-                aria-disabled={isConnecting}
-                onClick={() => {
-                  if (isConnecting) {
-                    return;
-                  }
-                  setError(null);
-                  void handleConnect(defaultRelayUrl);
-                }}
-                type="button"
-              >
-                Continue with Block Inc. workspace
-              </Button>
+              {isLocalDevRelayUrl(defaultRelayUrl) ? null : (
+                <Button
+                  className="h-10 w-full"
+                  aria-disabled={isConnecting}
+                  onClick={() => {
+                    if (isConnecting) {
+                      return;
+                    }
+                    setError(null);
+                    void handleConnect(defaultRelayUrl);
+                  }}
+                  type="button"
+                >
+                  Continue with Block Inc. workspace
+                </Button>
+              )}
 
               <Button
                 className="h-10 w-full"

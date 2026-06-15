@@ -91,6 +91,10 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
+  createManagedAgentDelayMs?: number;
+  channelsReadError?: string;
+  feedReadError?: string;
+  canvasReadError?: string;
   profileReadDelayMs?: number;
   profileReadError?: string;
   profileUpdateError?: string;
@@ -134,6 +138,11 @@ type MockBridgeOptions = {
     size: number;
     type: string;
     uploaded: number;
+    dim?: string;
+    blurhash?: string;
+    thumb?: string;
+    duration?: number;
+    image?: string;
     filename?: string;
   }[];
 };
@@ -155,6 +164,8 @@ type BridgeOptions = {
   user?: keyof typeof TEST_IDENTITIES;
 };
 
+const WELCOME_CHANNEL_ENSURED_STORAGE_KEY_PREFIX =
+  "buzz-welcome-channel-ensured.v2:";
 const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX = "buzz-onboarding-complete.v1:";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const DEFAULT_RELAY_WS_URL = "ws://localhost:3000";
@@ -268,18 +279,31 @@ A retired launch checklist used to live at [[mem/archive/deleted-launch-checklis
   };
 }
 
-async function seedOnboardingCompletionForKnownIdentities(page: Page) {
+async function seedOnboardingCompletionForKnownIdentities(
+  page: Page,
+  relayWsUrl?: string,
+) {
   const pubkeys = [
     DEFAULT_MOCK_PUBKEY,
     ...Object.values(TEST_IDENTITIES).map(({ pubkey }) => pubkey),
   ];
   await page.addInitScript(
-    ({ prefix, pubkeys: pubkeysToSeed }) => {
+    ({ onboardingPrefix, pubkeys: pubkeysToSeed, relayUrl, welcomePrefix }) => {
+      const welcomeScope = encodeURIComponent(relayUrl);
       for (const pubkey of pubkeysToSeed) {
-        window.localStorage.setItem(`${prefix}${pubkey}`, "true");
+        window.localStorage.setItem(`${onboardingPrefix}${pubkey}`, "true");
+        window.localStorage.setItem(
+          `${welcomePrefix}${welcomeScope}:${pubkey}`,
+          "true",
+        );
       }
     },
-    { prefix: ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX, pubkeys },
+    {
+      onboardingPrefix: ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX,
+      pubkeys,
+      relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL,
+      welcomePrefix: WELCOME_CHANNEL_ENSURED_STORAGE_KEY_PREFIX,
+    },
   );
 }
 
@@ -326,7 +350,7 @@ export async function installBridge(page: Page, options: BridgeOptions) {
     await seedDefaultWorkspace(page, options.relayWsUrl);
   }
   if (!options.skipOnboardingSeed) {
-    await seedOnboardingCompletionForKnownIdentities(page);
+    await seedOnboardingCompletionForKnownIdentities(page, options.relayWsUrl);
   }
   // Default to opting every preview feature in. Specs that exercise the
   // Experiments toggle UI itself pass `seedPreviewFeatures: false`.
@@ -422,6 +446,7 @@ export async function installMockBridge(
   page: Page,
   mock?: MockBridgeOptions,
   options?: {
+    relayWsUrl?: string;
     skipOnboardingSeed?: boolean;
     skipWorkspaceSeed?: boolean;
     seedPreviewFeatures?: boolean;
@@ -430,6 +455,7 @@ export async function installMockBridge(
   await installBridge(page, {
     mode: "mock",
     mock,
+    relayWsUrl: options?.relayWsUrl,
     skipOnboardingSeed: options?.skipOnboardingSeed,
     skipWorkspaceSeed: options?.skipWorkspaceSeed,
     seedPreviewFeatures: options?.seedPreviewFeatures,

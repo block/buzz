@@ -349,7 +349,7 @@ export function PulseView({ currentPubkey }: PulseViewProps) {
                       className="absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full bg-foreground/10 text-foreground transition-colors hover:bg-foreground/15 dark:bg-white/85 dark:text-black dark:hover:bg-white"
                       type="button"
                     >
-                      <Search className="h-3.5 w-3.5" />
+                      <Search className="h-4 w-4" />
                     </button>
                   </div>
                 </div>

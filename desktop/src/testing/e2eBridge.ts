@@ -4,7 +4,10 @@ import { decode } from "nostr-tools/nip19";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { parse as yamlParse } from "yaml";
 
+import { relayClient } from "@/shared/api/relayClient";
+import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
+import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import {
   CUSTOM_EMOJI_SET_D_TAG,
   KIND_EMOJI_SET,
@@ -63,6 +66,10 @@ type E2eConfig = {
     };
     managedAgents?: MockManagedAgentSeed[];
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
+    createManagedAgentDelayMs?: number;
+    channelsReadError?: string;
+    feedReadError?: string;
+    canvasReadError?: string;
     profileReadDelayMs?: number;
     profileReadError?: string;
     profileUpdateError?: string;
@@ -97,6 +104,11 @@ type RawBlobDescriptor = {
   size: number;
   type: string;
   uploaded: number;
+  dim?: string;
+  blurhash?: string;
+  thumb?: string;
+  duration?: number;
+  image?: string;
   filename?: string;
 };
 
@@ -153,6 +165,7 @@ type RawChannel = {
   topic: string | null;
   purpose: string | null;
   member_count: number;
+  member_pubkeys: string[];
   last_message_at: string | null;
   archived_at: string | null;
   participants: string[];
@@ -199,7 +212,7 @@ type RawAddChannelMembersResponse = {
   }>;
 };
 
-type MockChannel = RawChannelDetail & {
+type MockChannel = Omit<RawChannelDetail, "member_pubkeys"> & {
   members: RawChannelMember[];
 };
 
@@ -582,11 +595,17 @@ declare global {
       kind: number;
       tags: string[][];
     }>;
+    __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: ConnectionState) => void;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
       denyReason?: string;
+    }) => void;
+    __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
+      agentPubkey: string;
+      channelId: string;
+      turnId: string;
     }) => void;
     __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
       clientId: string;
@@ -691,6 +710,7 @@ function toRawChannel(
     topic: channel.topic,
     purpose: channel.purpose,
     member_count: channel.member_count,
+    member_pubkeys: channel.members.map((member) => member.pubkey),
     last_message_at: channel.last_message_at,
     archived_at: channel.archived_at,
     participants: [...channel.participants],
@@ -1000,32 +1020,12 @@ function resetMockPersonas(config?: E2eConfig) {
   const activePersonaIds = new Set(config?.mock?.activePersonaIds ?? []);
   mockPersonas = [
     {
-      id: "builtin:solo",
-      display_name: "Solo",
+      id: "builtin:fizz",
+      display_name: "Fizz",
       avatar_url: null,
-      system_prompt: "You are Solo.",
+      system_prompt: "You are Fizz.",
       is_builtin: true,
-      is_active: activePersonaIds.has("builtin:solo"),
-      created_at: now,
-      updated_at: now,
-    },
-    {
-      id: "builtin:kit",
-      display_name: "Kit",
-      avatar_url: null,
-      system_prompt: "You are Kit.",
-      is_builtin: true,
-      is_active: activePersonaIds.has("builtin:kit"),
-      created_at: now,
-      updated_at: now,
-    },
-    {
-      id: "builtin:scout",
-      display_name: "Scout",
-      avatar_url: null,
-      system_prompt: "You are Scout.",
-      is_builtin: true,
-      is_active: activePersonaIds.has("builtin:scout"),
+      is_active: activePersonaIds.has("builtin:fizz"),
       created_at: now,
       updated_at: now,
     },
@@ -1039,9 +1039,7 @@ function resetMockTeams() {
       id: "team-engineering-001",
       name: "Engineering",
       description: "Core engineering personas",
-      // Scout is intentionally excluded so the clean deselect flow has a
-      // built-in persona that is not pre-referenced by any default team.
-      persona_ids: ["builtin:solo", "builtin:kit"],
+      persona_ids: [],
       is_builtin: false,
       source_dir: null,
       is_symlink: false,
@@ -1054,7 +1052,7 @@ function resetMockTeams() {
       id: "team-research-002",
       name: "Research Agents",
       description: "Directory-backed research team",
-      persona_ids: ["builtin:solo", "builtin:kit"],
+      persona_ids: [],
       is_builtin: false,
       source_dir: "/Users/dev/agents/research",
       is_symlink: false,
@@ -1067,7 +1065,7 @@ function resetMockTeams() {
       id: "team-platform-003",
       name: "Platform Tools",
       description: "Symlinked platform team",
-      persona_ids: ["builtin:kit"],
+      persona_ids: [],
       is_builtin: false,
       source_dir: "/Users/dev/agents/platform",
       is_symlink: true,
@@ -2171,7 +2169,24 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
               sig: "mocksig".repeat(20).slice(0, 128),
             },
           ]
-        : [];
+        : channelId === "94a444a4-c0a3-5966-ab05-530c6ddc2301"
+          ? [
+              // Charlie is a `bot` member of #agents (see channel seed), so this
+              // message renders with role="bot" — the surface whose avatar opens
+              // a managed-agent profile panel / hover popover with active-turn
+              // badges. #agents has no message-row index assertions, so seeding
+              // here is safe for existing specs.
+              {
+                id: "mock-agents-charlie",
+                pubkey: CHARLIE_PUBKEY,
+                created_at: Math.floor(Date.now() / 1000) - 90,
+                kind: 9,
+                tags: [["h", channelId]],
+                content: "Indexing the channel catalog now.",
+                sig: "mocksig".repeat(20).slice(0, 128),
+              },
+            ]
+          : [];
 
   mockMessages.set(channelId, seeded);
   return seeded;
@@ -2727,6 +2742,11 @@ async function submitSignedEvent(
 }
 
 async function handleGetChannels(config: E2eConfig | undefined) {
+  const channelsReadError = config?.mock?.channelsReadError;
+  if (channelsReadError) {
+    throw new Error(channelsReadError);
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     return listMockChannels(config);
@@ -3031,6 +3051,25 @@ async function handleGetUsersBatch(
               Array.isArray(tag) && tag[0] === "auth" && tag.length === 4,
           )
         : false,
+    };
+  }
+  for (const pubkey of args.pubkeys) {
+    const normalizedPubkey = pubkey.toLowerCase();
+    if (found.has(normalizedPubkey)) {
+      continue;
+    }
+
+    const profile = getMockProfileByPubkey(normalizedPubkey);
+    if (!profile) {
+      continue;
+    }
+
+    found.add(normalizedPubkey);
+    profiles[normalizedPubkey] = {
+      display_name: profile.display_name,
+      avatar_url: profile.avatar_url,
+      nip05_handle: profile.nip05_handle,
+      is_agent: profile.is_agent ?? false,
     };
   }
   const missing = args.pubkeys.filter((p) => !found.has(p.toLowerCase()));
@@ -3813,6 +3852,11 @@ async function handleGetFeed(
   },
   config: E2eConfig | undefined,
 ): Promise<RawHomeFeedResponse> {
+  const feedReadError = config?.mock?.feedReadError;
+  if (feedReadError) {
+    throw new Error(feedReadError);
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     const now = Math.floor(Date.now() / 1000);
@@ -4634,35 +4678,49 @@ async function handleExportPersonaToJson(args: {
   return true; // Simulate successful save
 }
 
-async function handleCreateManagedAgent(args: {
-  input: {
-    name: string;
-    personaId?: string;
-    relayUrl?: string;
-    acpCommand?: string;
-    agentCommand?: string;
-    agentArgs?: string[];
-    mcpCommand?: string;
-    turnTimeoutSeconds?: number;
-    idleTimeoutSeconds?: number;
-    maxTurnDurationSeconds?: number;
-    parallelism?: number;
-    systemPrompt?: string;
-    avatarUrl?: string;
-    model?: string;
-    envVars?: Record<string, string>;
-    spawnAfterCreate?: boolean;
-    startOnAppLaunch?: boolean;
-    backend?:
-      | { type: "local" }
-      | { type: "provider"; id: string; config: Record<string, unknown> };
-    respondTo?: "owner-only" | "allowlist" | "anyone";
-    respondToAllowlist?: string[];
-  };
-}): Promise<RawCreateManagedAgentResponse> {
+async function handleCreateManagedAgent(
+  args: {
+    input: {
+      name: string;
+      personaId?: string;
+      relayUrl?: string;
+      acpCommand?: string;
+      agentCommand?: string;
+      agentArgs?: string[];
+      mcpCommand?: string;
+      turnTimeoutSeconds?: number;
+      idleTimeoutSeconds?: number;
+      maxTurnDurationSeconds?: number;
+      parallelism?: number;
+      systemPrompt?: string;
+      avatarUrl?: string;
+      model?: string;
+      envVars?: Record<string, string>;
+      spawnAfterCreate?: boolean;
+      startOnAppLaunch?: boolean;
+      backend?:
+        | { type: "local" }
+        | { type: "provider"; id: string; config: Record<string, unknown> };
+      respondTo?: "owner-only" | "allowlist" | "anyone";
+      respondToAllowlist?: string[];
+    };
+  },
+  config: E2eConfig | undefined,
+): Promise<RawCreateManagedAgentResponse> {
+  const delayMs = config?.mock?.createManagedAgentDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
   if (args.input.personaId) {
     ensureMockPersonaIsActive(args.input.personaId);
   }
+  const personaAvatarUrl =
+    args.input.personaId === undefined
+      ? null
+      : (mockPersonas.find((persona) => persona.id === args.input.personaId)
+          ?.avatar_url ?? null);
+  const avatarUrl = args.input.avatarUrl?.trim() || personaAvatarUrl;
   const name = args.input.name.trim();
   const now = new Date().toISOString();
   const pubkey = crypto
@@ -4721,7 +4779,7 @@ async function handleCreateManagedAgent(args: {
   mockProfiles.set(pubkey, {
     pubkey,
     display_name: name,
-    avatar_url: args.input.avatarUrl?.trim() || null,
+    avatar_url: avatarUrl,
     about: args.input.systemPrompt?.trim() || null,
     nip05_handle: null,
     is_agent: true,
@@ -4960,6 +5018,23 @@ async function handleSearchMessages(
         score: 5.2,
       },
     ];
+    for (const [channelId, events] of mockMessages) {
+      const channel = mockChannels.find(
+        (candidate) => candidate.id === channelId,
+      );
+      for (const event of events) {
+        mockHits.push({
+          event_id: event.id,
+          content: event.content,
+          kind: event.kind,
+          pubkey: event.pubkey,
+          channel_id: channelId,
+          channel_name: channel?.name ?? null,
+          created_at: event.created_at,
+          score: 1,
+        });
+      }
+    }
 
     const hits = mockHits
       .filter((hit) => {
@@ -5166,6 +5241,54 @@ async function handleSendChannelMessage(
     root_event_id: args.parentEventId ?? null,
     depth: args.parentEventId ? 1 : 0,
     created_at: Math.floor(Date.now() / 1000),
+  };
+}
+
+async function handleSendManagedAgentChannelMessage(
+  args: {
+    agentPubkey: string;
+    channelId: string;
+    content: string;
+    marker?: string | null;
+  },
+  _config: E2eConfig | undefined,
+): Promise<RawSendChannelMessageResponse> {
+  const agent = getMockManagedAgent(args.agentPubkey);
+  const marker = args.marker?.trim();
+  if (marker) {
+    const existing = getMockMessageStore(args.channelId).find(
+      (event) =>
+        event.pubkey === agent.pubkey &&
+        event.tags.some((tag) => tag[0] === "client" && tag[1] === marker),
+    );
+    if (existing) {
+      return {
+        event_id: existing.id,
+        parent_event_id: null,
+        root_event_id: null,
+        depth: 0,
+        created_at: existing.created_at,
+      };
+    }
+  }
+
+  const createdAt = Math.floor(Date.now() / 1000);
+  const event = createMockEvent(
+    9,
+    args.content.trim(),
+    [["h", args.channelId], ...(marker ? [["client", marker]] : [])],
+    agent.pubkey,
+    createdAt,
+  );
+  recordMockMessage(args.channelId, event);
+  emitMockLiveEvent(args.channelId, event);
+
+  return {
+    event_id: event.id,
+    parent_event_id: null,
+    root_event_id: null,
+    depth: 0,
+    created_at: createdAt,
   };
 }
 
@@ -5769,6 +5892,19 @@ export function maybeInstallE2eTauriMocks() {
     emitMockLiveEvent(GLOBAL_MOCK_SUBSCRIPTION, event);
     return event;
   };
+  window.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ = (state) => {
+    // Directly emit a connection state change on the relay client singleton,
+    // for tests that need to drive ConnectionBanner without waiting for the
+    // real auth-timeout + reconnect-debounce cycle (~10 s). Reaches the
+    // TS-private emitter via a cast so the production class carries no
+    // test-only seam.
+    (
+      relayClient as unknown as {
+        connectionStateEmitter: { set: (s: ConnectionState) => void };
+      }
+    ).connectionStateEmitter.set(state);
+  };
+
   window.__BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__ = (stall) => {
     const config = getConfig();
     if (!config?.mock) return;
@@ -5783,6 +5919,26 @@ export function maybeInstallE2eTauriMocks() {
     if (mesh.models !== undefined) mockMeshState.models = mesh.models;
     if (mesh.denyReason !== undefined)
       mockMeshState.denyReason = mesh.denyReason;
+  };
+  let seedTurnSeq = Date.now();
+  window.__BUZZ_E2E_SEED_ACTIVE_TURNS__ = ({
+    agentPubkey,
+    channelId,
+    turnId,
+  }) => {
+    seedTurnSeq += 1;
+    syncAgentTurnsFromEvents(agentPubkey, [
+      {
+        seq: seedTurnSeq,
+        timestamp: new Date().toISOString(),
+        kind: "turn_started",
+        agentIndex: 0,
+        channelId,
+        sessionId: null,
+        turnId,
+        payload: null,
+      },
+    ]);
   };
   const meshNodeStatus = (
     state: "off" | "running",
@@ -6010,6 +6166,12 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":
         return getRelayWsUrl(activeConfig);
+      case "get_legacy_workspace_storage":
+        return {
+          workspaces: null,
+          activeWorkspaceId: null,
+          onboardingCompletions: [],
+        };
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
       case "discover_acp_providers":
@@ -6099,6 +6261,7 @@ export function maybeInstallE2eTauriMocks() {
       case "create_managed_agent":
         return handleCreateManagedAgent(
           payload as Parameters<typeof handleCreateManagedAgent>[0],
+          activeConfig,
         );
       case "start_managed_agent":
         return handleStartManagedAgent(
@@ -6227,6 +6390,11 @@ export function maybeInstallE2eTauriMocks() {
       case "send_channel_message":
         return handleSendChannelMessage(
           payload as Parameters<typeof handleSendChannelMessage>[0],
+          activeConfig,
+        );
+      case "send_managed_agent_channel_message":
+        return handleSendManagedAgentChannelMessage(
+          payload as Parameters<typeof handleSendManagedAgentChannelMessage>[0],
           activeConfig,
         );
       case "edit_message":
@@ -6403,6 +6571,14 @@ export function maybeInstallE2eTauriMocks() {
         // The spec only verifies UI state, not the submitted request shape;
         // returning null mirrors the Rust submit_event success path.
         return null;
+      case "get_canvas": {
+        const canvasReadError = activeConfig?.mock?.canvasReadError;
+        if (canvasReadError) {
+          throw new Error(canvasReadError);
+        }
+        // Return the no-canvas success shape — content null means no canvas set.
+        return { content: null, updated_at: null, author: null };
+      }
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }

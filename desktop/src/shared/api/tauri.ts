@@ -774,8 +774,14 @@ export async function pickAndUploadMedia(): Promise<BlobDescriptor[]> {
 export async function uploadMediaBytes(
   data: number[],
   filename?: string,
+  /** Correlation id for `media-upload-progress` events from the Rust side. */
+  progressId?: string,
 ): Promise<BlobDescriptor> {
-  return invokeTauri<BlobDescriptor>("upload_media_bytes", { data, filename });
+  return invokeTauri<BlobDescriptor>("upload_media_bytes", {
+    data,
+    filename,
+    progressId,
+  });
 }
 
 export async function editMessage(

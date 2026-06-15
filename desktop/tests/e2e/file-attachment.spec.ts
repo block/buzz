@@ -59,6 +59,33 @@ test("upload a file and see a FileCard in the timeline", async ({ page }) => {
     .toContain("download_file");
 });
 
+test("dropping a file on the channel column attaches it to the composer", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const dataTransfer = await page.evaluateHandle(() => {
+    const transfer = new DataTransfer();
+    transfer.items.add(
+      new File(["quarterly report"], "quarterly-report.pdf", {
+        type: "application/pdf",
+      }),
+    );
+    return transfer;
+  });
+
+  const dropZone = page.getByTestId("channel-drop-zone");
+  await dropZone.dispatchEvent("dragenter", { dataTransfer });
+  await expect(dropZone.getByText("Drop files to upload")).toBeVisible();
+
+  await dropZone.dispatchEvent("drop", { dataTransfer });
+  await expect(page.getByTestId("message-composer")).toContainText(
+    "quarterly-report.pdf",
+  );
+});
+
 test("forum posts emit a FileCard for generic attachments, not a broken image", async ({
   page,
 }) => {

@@ -8,6 +8,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import { Shimmer } from "@/shared/ui/Shimmer";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name">;
@@ -196,15 +197,11 @@ export function BotActivityComposerAction({
               +{typingAgents.length - 2}
             </span>
           ) : null}
-          <span
-            className={cn(
-              isInline ? "agent-activity-shimmer max-w-40 truncate" : "sr-only",
-            )}
-          >
-            {isInline ? visibleStatusLabel : "working"}
+          <span className={cn(isInline ? "max-w-40 truncate" : "sr-only")}>
+            {isInline ? <Shimmer>{visibleStatusLabel}</Shimmer> : "working"}
           </span>
           {isInline ? null : (
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin opacity-70" />
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin opacity-70" />
           )}
         </button>
       </PopoverTrigger>
@@ -247,7 +244,7 @@ export function BotActivityComposerAction({
                   displayName={agent.name}
                 />
                 <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground/70" />
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground/70" />
               </button>
             );
           })}

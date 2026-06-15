@@ -69,21 +69,26 @@ List<CustomEmoji> customEmojiFromTags(List<List<String>> tags) {
 
 /// Union every member's kind:30030 set into the workspace palette, collapsed to
 /// one entry per shortcode. When members disagree on a shortcode's URL, the
-/// lexicographically-smallest URL wins — deterministic and stable across
-/// reloads. Output is sorted by shortcode.
+/// most recently published set wins (`created_at` is signed event data, so the
+/// result stays deterministic and fetch-order-independent); equal timestamps
+/// tie-break to the lexicographically-smallest URL. Output is sorted by
+/// shortcode.
 List<CustomEmoji> unionCustomEmoji(Iterable<NostrEvent> events) {
-  final urlByShortcode = <String, String>{};
+  final byShortcode = <String, ({String url, int createdAt})>{};
   for (final event in events) {
     for (final e in customEmojiFromTags(event.tags)) {
-      final existing = urlByShortcode[e.shortcode];
-      if (existing == null || e.url.compareTo(existing) < 0) {
-        urlByShortcode[e.shortcode] = e.url;
+      final winner = byShortcode[e.shortcode];
+      if (winner == null ||
+          event.createdAt > winner.createdAt ||
+          (event.createdAt == winner.createdAt &&
+              e.url.compareTo(winner.url) < 0)) {
+        byShortcode[e.shortcode] = (url: e.url, createdAt: event.createdAt);
       }
     }
   }
   final result =
-      urlByShortcode.entries
-          .map((e) => CustomEmoji(shortcode: e.key, url: e.value))
+      byShortcode.entries
+          .map((e) => CustomEmoji(shortcode: e.key, url: e.value.url))
           .toList()
         ..sort((a, b) => a.shortcode.compareTo(b.shortcode));
   return result;

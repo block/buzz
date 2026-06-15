@@ -115,7 +115,10 @@ function appendAgentEvent(agentPubkey: string, event: ObserverEvent) {
   notifyListeners();
 }
 
-function compareObserverEvents(left: ObserverEvent, right: ObserverEvent) {
+export function compareObserverEvents(
+  left: ObserverEvent,
+  right: ObserverEvent,
+) {
   const leftTime = Date.parse(left.timestamp);
   const rightTime = Date.parse(right.timestamp);
   if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {

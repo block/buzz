@@ -19,8 +19,10 @@ type ChannelScreenHeaderProps = {
   activeDmPresenceStatus: PresenceStatus | null;
   chromeWrapperRef?: React.Ref<HTMLDivElement>;
   currentPubkey?: string;
+  isAddBotOpen?: boolean;
   isJoining?: boolean;
   showHeaderContent?: boolean;
+  onAddBotOpenChange?: (open: boolean) => void;
   onJoinChannel?: () => Promise<void>;
   onManageChannel: () => void;
   onToggleMembers: () => void;
@@ -35,7 +37,9 @@ export function ChannelScreenHeader({
   activeDmPresenceStatus,
   chromeWrapperRef,
   currentPubkey,
+  isAddBotOpen,
   isJoining = false,
+  onAddBotOpenChange,
   showHeaderContent = true,
   onJoinChannel,
   onManageChannel,
@@ -56,13 +60,15 @@ export function ChannelScreenHeader({
         size="sm"
         variant="default"
       >
-        <LogIn className="mr-1.5 h-3.5 w-3.5" />
+        <LogIn className="mr-1.5 h-4 w-4" />
         {isJoining ? "Joining…" : "Join"}
       </Button>
     ) : (
       <ChannelMembersBar
         channel={activeChannel}
         currentPubkey={currentPubkey}
+        isAddBotOpen={isAddBotOpen}
+        onAddBotOpenChange={onAddBotOpenChange}
         onManageChannel={onManageChannel}
         onToggleMembers={onToggleMembers}
         variant={actionsVariant}

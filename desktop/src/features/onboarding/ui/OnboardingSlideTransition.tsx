@@ -4,6 +4,7 @@ import { cn } from "@/shared/lib/cn";
 
 type OnboardingSlideTransitionProps = React.HTMLAttributes<HTMLDivElement> & {
   children: React.ReactNode;
+  containerClassName?: string;
   direction?: OnboardingTransitionDirection;
   effect?: OnboardingTransitionEffect;
   transitionKey: string;
@@ -18,13 +19,18 @@ export type OnboardingTransitionEffect =
 export function OnboardingSlideTransition({
   children,
   className,
+  containerClassName,
   direction = "forward",
   effect = "line-slide",
   transitionKey,
   ...props
 }: OnboardingSlideTransitionProps) {
   return (
-    <div className="w-full" key={transitionKey} {...props}>
+    <div
+      className={cn("w-full", containerClassName)}
+      key={transitionKey}
+      {...props}
+    >
       <TransitionLine
         contentClassName={className}
         direction={direction}

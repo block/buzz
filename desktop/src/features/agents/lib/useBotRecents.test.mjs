@@ -20,8 +20,7 @@ function createPersona(id, displayName) {
 
 test("pickQuickBotPersonas prefers recents before defaults", () => {
   const personas = [
-    createPersona("builtin:solo", "Solo"),
-    createPersona("builtin:kit", "Kit"),
+    createPersona("builtin:fizz", "Fizz"),
     createPersona("builtin:reviewer", "Reviewer"),
   ];
 
@@ -29,7 +28,7 @@ test("pickQuickBotPersonas prefers recents before defaults", () => {
     pickQuickBotPersonas(personas, ["builtin:reviewer"]).map(
       (persona) => persona.id,
     ),
-    ["builtin:reviewer", "builtin:solo", "builtin:kit"],
+    ["builtin:reviewer", "builtin:fizz"],
   );
 });
 
@@ -48,18 +47,17 @@ test("pickQuickBotPersonas falls back to any active personas when defaults are m
 
 test("pickQuickBotPersonas skips duplicate and missing recents", () => {
   const personas = [
-    createPersona("builtin:solo", "Solo"),
-    createPersona("builtin:kit", "Kit"),
-    createPersona("builtin:scout", "Scout"),
+    createPersona("builtin:fizz", "Fizz"),
+    createPersona("custom:honey", "Honey"),
   ];
 
   assert.deepEqual(
     pickQuickBotPersonas(personas, [
-      "builtin:solo",
+      "builtin:fizz",
       "missing",
-      "builtin:solo",
-      "builtin:kit",
+      "builtin:fizz",
+      "custom:honey",
     ]).map((persona) => persona.id),
-    ["builtin:solo", "builtin:kit", "builtin:scout"],
+    ["builtin:fizz", "custom:honey"],
   );
 });

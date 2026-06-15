@@ -97,11 +97,7 @@ export function buildImetaTags(
     ...(d.thumb ? [`thumb ${d.thumb}`] : []),
     ...(d.duration != null ? [`duration ${d.duration}`] : []),
     ...(d.image ? [`image ${d.image}`] : []),
-    ...(!d.type.startsWith("image/") &&
-    !d.type.startsWith("video/") &&
-    d.filename
-      ? [`filename ${d.filename}`]
-      : []),
+    ...(d.filename ? [`filename ${d.filename}`] : []),
   ]);
 }
 

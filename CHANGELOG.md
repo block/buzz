@@ -1,5 +1,70 @@
 # Changelog
 
+## v0.3.23
+
+9b410325 fix(release): publish manifest from successful platforms (#1039)
+
+
+## v0.3.22
+
+fix(release): publish rolling updater manifest for automated release tags
+
+
+## v0.3.21
+
+4d19a590 fix(release): use signed NSIS installer for updates (#1036)
+fa1cade3 handoff: pass full session history to summarizer (#1033)
+6e4c8680 feat(emoji): latest-set-wins union for custom emoji across desktop, mobile, and CLI (#989)
+5f8ab33b Fix relay NIP-11 software URL (#1030)
+5c2f46e6 fix(desktop): make Windows release compile cleanly (#1029)
+6caa359d Add production Docker Compose bundle (#985)
+a32681fd feat(profile): show active turn badges on agent profile panel and popover (#1026)
+
+
+## v0.3.20
+
+c7dd4295b fix(release): resolve Windows sidecar path and Linux AppImage updater format (#1024)
+
+
+## v0.3.19
+
+faf00724f fix(release): ignore prerelease tags in changelog generation (#1021)
+b8c0556e7 fix: repair main build after cross-PR merge skew (#1020)
+87e45c65b feat(agents): show per-turn duration and prune dead turns within ~25s of host crash (#1017)
+2fef8d664 fix(release): replace hermit with native tool setup on Windows job (#1018)
+6db90514b feat(acp): surface error-class outcomes to the activity feed only, never the channel (#1010)
+563f68434 fix(desktop): migrate Sprout workspace storage (#1016)
+5a8cc79c6 feat(auth): force token refresh on rejected token (401/403), never the browser (#1015)
+59a7e5da8 fix(release): mark prerelease versions so they do not become latest (#1013)
+f08588245 feat(acp): implement systemPrompt with protocol version gating (#981)
+d07c8216c fix(release): update repository name check from block/sprout to block/buzz (#1012)
+de641fce5 feat(release): all-OS desktop builds + universal auto-update manifest (#1011)
+8c9211ffc Add relay disconnect UX: friendly errors, reconnect, cached identity (#1004)
+7983bf675 feat(agents): add active turn indicators to Agents Menu (#1005)
+39d9aa826 ci: add fork guards to docker, release, and auto-tag workflows (#1007)
+43d1ce353 docs(nip-rs): add optional thread read context scheme (#1006)
+12433077a fix(huddle): Pocket TTS quality overhaul — reference parity + cross-message pipelining (#997)
+00dc4915d Add manual ACP session rotation command (#932)
+df8896f13 fix(desktop): heal stale persona_team_dir paths in release builds (#1003)
+1fa63bada ci(docker): publish public ghcr.io/block/buzz image (native multi-arch) (#986)
+84f499cb6 fix(buzz-agent): cap tool-result text at 50 KiB with middle elision (#952)
+2846a96ed feat(huddle): sentence-at-a-time voice-mode guidelines for lower TTS latency (#996)
+a1c28f487 Shard desktop Playwright CI jobs (#992)
+
+
+## v0.3.18
+
+05fc69b8408 Video Player Improvements  (#993)
+d9ce0943edb Improve first-run welcome setup (#970)
+50986406ffa fix(release): use legacy updater key secret (#991)
+ea5a0a9b405 Replace built-in personas with Fizz (#987)
+6541765416b docs(buzz-acp): rewrite Communication Patterns for mention accuracy and threading clarity (#982)
+a101fd6ad38 chore(justfile): build git-credential-nostr in dev and staging recipes (#980)
+824c55114ef Fix Buzz command migration for saved agents (#979)
+63738139bac fix(desktop): resolve effective model and prompt from persona in display path (#972)
+1bb8b8d547a docs: clean up remaining Buzz references (#977)
+
+
 ## v0.3.17
 
 79bcee55cb7 docs: finish Buzz rename cleanup (#974)

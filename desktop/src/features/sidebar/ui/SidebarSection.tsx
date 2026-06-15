@@ -202,7 +202,7 @@ export function ChannelMenuButton({
       {isMuted ? (
         <BellOff
           className={cn(
-            "ml-auto h-3 w-3 shrink-0",
+            "ml-auto h-4 w-4 shrink-0",
             isActive
               ? "text-sidebar-active-foreground/60"
               : "text-sidebar-foreground/40",

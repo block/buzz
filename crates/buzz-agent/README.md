@@ -153,6 +153,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `BUZZ_AGENT_MAX_SESSIONS` | unlimited | Max concurrent ACP sessions. Sessions are cheap; default has no cap. |
 | `BUZZ_AGENT_MAX_LINE_BYTES` | `4194304` | 4 MiB. Hard cap on inbound JSON-RPC frames. |
 | `BUZZ_AGENT_MAX_HISTORY_BYTES` | `1048576` | 1 MiB. Old turns are evicted past this. |
+| `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES` | `51200` | 50 KiB. Per-result cap on tool-output text; oversize is middle-elided (head + tail kept) with an inline marker. Images are exempt. |
 
 
 ## Providers
@@ -234,7 +235,8 @@ The trust boundary is **the operator who launched the agent**. The harness, MCP 
 | History window | 1 MiB | `BUZZ_AGENT_MAX_HISTORY_BYTES` |
 | LLM response body | 16 MiB | `MAX_LLM_RESPONSE_BYTES` |
 | LLM error body | 4 KiB | `MAX_LLM_ERROR_BODY_BYTES` |
-| Tool result body | 256 KiB | `MAX_TOOL_RESULT_BYTES` |
+| Tool result body (total, incl. images) | 8 MiB | `MAX_TOOL_RESULT_BYTES` |
+| Tool result text | 50 KiB | `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES` |
 | MCP servers / session | 16 | `MAX_MCP_SERVERS` |
 | Tools / session | 128 | `MAX_TOOLS_PER_SESSION` |
 | Tool description bytes | 1 KiB | `MAX_DESCRIPTION_BYTES` |

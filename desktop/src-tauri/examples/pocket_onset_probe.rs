@@ -72,7 +72,7 @@ fn main() {
         let cfg = GenerationConfig {
             speed: 1.05,
             num_steps: 1,
-            silence_scale: 0.0,
+            silence_scale: 1.0, // production setting (huddle::pocket::SYNTH_SILENCE_SCALE)
             reference_audio: Some(voice_samples.clone()),
             reference_sample_rate: voice_sr,
             ..Default::default()
@@ -100,7 +100,7 @@ fn main() {
         let cfg = GenerationConfig {
             speed: 1.05,
             num_steps: 1,
-            silence_scale: 0.0,
+            silence_scale: 1.0, // production setting (huddle::pocket::SYNTH_SILENCE_SCALE)
             reference_audio: Some(voice_samples.clone()),
             reference_sample_rate: voice_sr,
             ..Default::default()

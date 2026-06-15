@@ -147,7 +147,7 @@ test("built-in personas are chosen from the dialog and can be selected", async (
   await expect(page.getByTestId("agents-library-personas")).toBeVisible();
   await openPersonaCatalog(page);
   await expect(page.getByTestId("persona-catalog-dialog")).toContainText(
-    "Scout",
+    "Fizz",
   );
   await expect(page.getByTestId("persona-catalog-dialog-header")).toBeVisible();
   await expect(
@@ -169,29 +169,29 @@ test("built-in personas are chosen from the dialog and can be selected", async (
   await expect(page.getByRole("tooltip")).toHaveCount(0);
   const initialCatalogOrder = await getCatalogOrder(page);
 
-  await page.getByTestId("persona-catalog-card-target-builtin:scout").click();
+  await page.getByTestId("persona-catalog-card-target-builtin:fizz").click();
   await expect(
     page
       .locator("[data-sonner-toast]")
-      .filter({ hasText: "Selected Scout for My Agents." }),
+      .filter({ hasText: "Selected Fizz for My Agents." }),
   ).toBeVisible();
 
   await expect(page.getByTestId("agents-library-personas")).toContainText(
-    "Scout",
+    "Fizz",
   );
   await expect(
-    page.getByTestId("persona-catalog-card-target-builtin:scout"),
+    page.getByTestId("persona-catalog-card-target-builtin:fizz"),
   ).toHaveAttribute("aria-pressed", "true");
   await expect.poll(() => getCatalogOrder(page)).toEqual(initialCatalogOrder);
 
-  await page.getByTestId("persona-catalog-card-target-builtin:scout").click();
+  await page.getByTestId("persona-catalog-card-target-builtin:fizz").click();
   await expect(
     page
       .locator("[data-sonner-toast]")
-      .filter({ hasText: "Deselected Scout from My Agents." }),
+      .filter({ hasText: "Deselected Fizz from My Agents." }),
   ).toBeVisible();
   await expect(
-    page.getByTestId("persona-catalog-card-target-builtin:scout"),
+    page.getByTestId("persona-catalog-card-target-builtin:fizz"),
   ).toHaveAttribute("aria-pressed", "false");
   await expect.poll(() => getCatalogOrder(page)).toEqual(initialCatalogOrder);
 });
@@ -203,9 +203,9 @@ test("persona catalog can reopen from the populated library header", async ({
   await page.getByTestId("open-agents-view").click();
   await openPersonaCatalog(page);
 
-  await page.getByTestId("persona-catalog-card-target-builtin:scout").click();
+  await page.getByTestId("persona-catalog-card-target-builtin:fizz").click();
   await expect(page.getByTestId("agents-library-personas")).toContainText(
-    "Scout",
+    "Fizz",
   );
 
   await page.getByTestId("persona-catalog-dialog-done").click();
@@ -213,7 +213,7 @@ test("persona catalog can reopen from the populated library header", async ({
 
   await expect(page.getByTestId("persona-catalog-dialog")).toBeVisible();
   await expect(
-    page.getByTestId("persona-catalog-card-target-builtin:scout"),
+    page.getByTestId("persona-catalog-card-target-builtin:fizz"),
   ).toHaveAttribute("aria-pressed", "true");
 });
 
@@ -226,11 +226,11 @@ test("persona catalog chooser order stays stable when selection changes", async 
 
   const before = await getCatalogOrder(page);
 
-  await page.getByTestId("persona-catalog-card-target-builtin:solo").click();
+  await page.getByTestId("persona-catalog-card-target-builtin:fizz").click();
   await expect(
     page
       .locator("[data-sonner-toast]")
-      .filter({ hasText: "Selected Solo for My Agents." }),
+      .filter({ hasText: "Selected Fizz for My Agents." }),
   ).toBeVisible();
 
   expect(await getCatalogOrder(page)).toEqual(before);
@@ -243,23 +243,23 @@ test("catalog details sheet shows the full persona details", async ({
   await page.getByTestId("open-agents-view").click();
   await openPersonaCatalog(page);
 
-  await page.getByTestId("persona-catalog-details-builtin:scout").click();
+  await page.getByTestId("persona-catalog-details-builtin:fizz").click();
   const detailSelectionTarget = page.getByTestId(
-    "persona-catalog-detail-selection-target-builtin:scout",
+    "persona-catalog-detail-selection-target-builtin:fizz",
   );
 
   await expect(page.getByTestId("persona-catalog-details-sheet")).toContainText(
-    "Scout",
+    "Fizz",
   );
   await expect(page.getByTestId("persona-catalog-details-sheet")).toContainText(
-    "You are Scout.",
+    "You are Fizz.",
   );
   await expect(
     page.getByTestId("persona-catalog-detail-selection-title"),
   ).toHaveText("Available in Persona Catalog");
   await expect(detailSelectionTarget).toHaveAttribute(
     "aria-label",
-    "Select Scout in My Agents",
+    "Select Fizz in My Agents",
   );
   await expect(detailSelectionTarget).toHaveAttribute("aria-pressed", "false");
 
@@ -269,11 +269,11 @@ test("catalog details sheet shows the full persona details", async ({
   ).toHaveText("Selected for My Agents");
   await expect(detailSelectionTarget).toHaveAttribute(
     "aria-label",
-    "Deselect Scout in My Agents",
+    "Deselect Fizz in My Agents",
   );
   await expect(detailSelectionTarget).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByTestId("agents-library-personas")).toContainText(
-    "Scout",
+    "Fizz",
   );
 });
 
@@ -282,13 +282,13 @@ test("inactive built-ins cannot be used to create teams", async ({ page }) => {
 
   const error = await invokeTauriExpectError(page, "create_team", {
     input: {
-      name: "Scouts",
-      personaIds: ["builtin:scout"],
+      name: "Fizzes",
+      personaIds: ["builtin:fizz"],
     },
   });
 
   expect(error).toBe(
-    "Scout is not in My Agents. Choose it from Persona Catalog first.",
+    "Fizz is not in My Agents. Choose it from Persona Catalog first.",
   );
 });
 
@@ -299,21 +299,21 @@ test("built-in deselection failures show up in Persona Catalog", async ({
 
   await page.getByTestId("open-agents-view").click();
   await openPersonaCatalog(page);
-  await page.getByTestId("persona-catalog-card-target-builtin:scout").click();
+  await page.getByTestId("persona-catalog-card-target-builtin:fizz").click();
 
   await invokeTauri(page, "create_team", {
     input: {
-      name: "Scouts",
-      personaIds: ["builtin:scout"],
+      name: "Fizzes",
+      personaIds: ["builtin:fizz"],
     },
   });
 
-  await page.getByTestId("persona-catalog-card-target-builtin:scout").click();
+  await page.getByTestId("persona-catalog-card-target-builtin:fizz").click();
 
   await expect(
     page
       .locator("[data-sonner-toast]")
-      .filter({ hasText: "Scout is still referenced by a team." }),
+      .filter({ hasText: "Fizz is still referenced by a team." }),
   ).toBeVisible();
 });
 

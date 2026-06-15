@@ -23,6 +23,7 @@ import {
   PANEL_OVERLAY_CLASS,
   PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
+import { Skeleton } from "@/shared/ui/skeleton";
 import { MessageComposer } from "./MessageComposer";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
@@ -80,6 +81,13 @@ type MessageThreadPanelProps = {
   onUnfollowThread?: () => void;
 };
 
+type MessageThreadPanelSkeletonProps = {
+  isSinglePanelView?: boolean;
+  layout?: "standalone" | "split";
+  onClose: () => void;
+  widthPx: number;
+};
+
 function canManageMessage(
   message: TimelineMessage,
   currentPubkey: string | undefined,
@@ -88,6 +96,159 @@ function canManageMessage(
     currentPubkey &&
       message.pubkey &&
       currentPubkey.toLowerCase() === message.pubkey.toLowerCase(),
+  );
+}
+
+function ThreadMessageSkeleton({ isHead = false }: { isHead?: boolean }) {
+  return (
+    <article className="relative flex items-start gap-2.5 rounded-2xl px-3 py-2">
+      <Skeleton className="h-9 w-9 shrink-0 rounded-full" />
+      <div className="-mt-1 min-w-0 flex-1">
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0">
+          <Skeleton className="h-[15px] w-28" />
+          <Skeleton className="h-3 w-16" />
+        </div>
+        <div className="mt-1 space-y-1.5 pb-2">
+          <Skeleton className="h-4 w-full" />
+          <Skeleton className={isHead ? "h-4 w-4/5" : "h-4 w-2/3"} />
+        </div>
+        <div className="flex items-center gap-4">
+          <Skeleton className="h-4 w-8 rounded-full" />
+          <Skeleton className="h-4 w-8 rounded-full" />
+          <Skeleton className="h-4 w-8 rounded-full" />
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function ThreadComposerSkeleton() {
+  return (
+    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
+      <div className="pointer-events-auto">
+        <div className="relative z-10 shrink-0 bg-transparent px-4 pb-2 pt-0">
+          <div className="relative isolate rounded-2xl border border-border/50 bg-background/80 px-3 pb-2 pt-3 shadow-none backdrop-blur-md sm:px-4">
+            <Skeleton className="h-5 w-48 max-w-full" />
+            <div className="mt-4 flex items-center gap-2">
+              <Skeleton className="h-8 w-8 rounded-lg" />
+              <Skeleton className="h-8 w-8 rounded-lg" />
+              <Skeleton className="ml-auto h-8 w-20 rounded-full" />
+            </div>
+          </div>
+        </div>
+        <div className="-mt-1 h-7 bg-background px-4 pb-1 pt-0 sm:px-6" />
+      </div>
+    </div>
+  );
+}
+
+export function MessageThreadPanelSkeleton({
+  isSinglePanelView = false,
+  layout = "standalone",
+  onClose,
+  widthPx,
+}: MessageThreadPanelSkeletonProps) {
+  const isOverlay = useIsThreadPanelOverlay();
+  const isFloatingOverlay = isOverlay && !isSinglePanelView;
+  const isSplitLayout = layout === "split";
+  useEscapeKey(onClose, isOverlay || isSinglePanelView);
+
+  const threadHeaderContent = (
+    <>
+      <AuxiliaryPanelHeaderGroup>
+        {isSinglePanelView ? (
+          <Button
+            aria-label="Back to conversation"
+            className="shrink-0"
+            onClick={onClose}
+            size="icon"
+            type="button"
+            variant="outline"
+          >
+            <ArrowLeft />
+          </Button>
+        ) : null}
+        <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
+      </AuxiliaryPanelHeaderGroup>
+      <Button
+        aria-label="Close thread"
+        className="ml-auto"
+        onClick={onClose}
+        size="icon"
+        type="button"
+        variant="ghost"
+      >
+        <X />
+      </Button>
+    </>
+  );
+
+  const threadBody = (
+    <div
+      className={cn(
+        "min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-24 [overflow-anchor:none]",
+        isSplitLayout && auxiliaryPanelContentPaddingClass,
+        !isSplitLayout && !isFloatingOverlay && "pt-[4.75rem]",
+      )}
+      data-testid="message-thread-loading"
+    >
+      <div className="px-3 pb-1 pt-0" data-testid="message-thread-head-loading">
+        <ThreadMessageSkeleton isHead />
+      </div>
+      <div className="space-y-2.5 px-3 pb-3 pt-1">
+        <ThreadMessageSkeleton />
+        <ThreadMessageSkeleton />
+        <div className="ml-[58px] flex items-center gap-1.5 pt-0.5">
+          <Skeleton className="h-7 w-7 rounded-full" />
+          <Skeleton className="h-7 w-7 rounded-full" />
+          <Skeleton className="h-4 w-28 rounded-full" />
+        </div>
+      </div>
+    </div>
+  );
+
+  if (isSplitLayout) {
+    return (
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
+        {threadBody}
+        <ThreadComposerSkeleton />
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {isFloatingOverlay && <OverlayPanelBackdrop onClose={onClose} />}
+      <aside
+        className={cn(
+          PANEL_BASE_CLASS,
+          isSinglePanelView && "border-l-0",
+          isFloatingOverlay && PANEL_OVERLAY_CLASS,
+        )}
+        data-testid="message-thread-panel"
+        style={{
+          width: isSinglePanelView
+            ? "100%"
+            : `min(${widthPx}px, calc(100% - ${THREAD_PANEL_MIN_WIDTH_PX}px))`,
+        }}
+      >
+        <div
+          className={cn(
+            "flex cursor-default select-none items-center",
+            isSinglePanelView
+              ? `relative ${PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS} -mb-[4.75rem] min-h-[4.75rem] shrink-0 gap-2.5 bg-background/80 pb-[0.1875rem] pl-4 pr-2 pt-[2.6875rem] backdrop-blur-md supports-[backdrop-filter]:bg-background/70 sm:pr-3 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55`
+              : "relative z-50 min-h-11 shrink-0 gap-3 bg-background/80 px-3 py-1.5 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-[backdrop-filter]:bg-background/55",
+          )}
+          data-tauri-drag-region
+        >
+          {threadHeaderContent}
+        </div>
+
+        {threadBody}
+        <ThreadComposerSkeleton />
+      </aside>
+    </>
   );
 }
 
@@ -190,6 +351,7 @@ export function MessageThreadPanel({
         <div className="px-3 pb-1 pt-0" data-testid="message-thread-head">
           <div className="rounded-2xl">
             <MessageRow
+              actionBarPlacement="inside"
               agentPubkeys={agentPubkeys}
               channelId={channelId}
               isFollowingThread={isFollowingThread}

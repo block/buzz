@@ -4,7 +4,6 @@ import { AnimatePresence, motion } from "motion/react";
 import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
-import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
 import { FormattingToolbar } from "./FormattingToolbar";
@@ -178,7 +177,7 @@ export const MessageComposerToolbar = React.memo(
                       type="button"
                       variant="ghost"
                     >
-                      {isUploading ? <Spinner /> : <Paperclip />}
+                      <Paperclip />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Attach image</TooltipContent>

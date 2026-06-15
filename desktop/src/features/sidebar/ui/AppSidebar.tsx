@@ -9,6 +9,11 @@ import {
   PenSquare,
   Zap,
 } from "lucide-react";
+import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
+import {
+  isRelayUnreachableError,
+  RELAY_UNREACHABLE_SHORT,
+} from "@/shared/lib/relayError";
 import * as React from "react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
@@ -38,6 +43,10 @@ import {
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
+import {
+  SidebarLoadingContent,
+  useSidebarLoadingShape,
+} from "@/features/sidebar/ui/sidebarLoadingSkeleton";
 import { SECTION_ACTION_VISIBILITY_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
 import type {
   Channel,
@@ -51,16 +60,12 @@ import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
-  SidebarGroup,
   SidebarGroupAction,
-  SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSkeleton,
   SidebarRail,
 } from "@/shared/ui/sidebar";
 
@@ -217,7 +222,6 @@ export function AppSidebar({
   onStarChannel,
   onUnstarChannel,
 }: AppSidebarProps) {
-  const skeletonRows = ["first", "second", "third", "fourth", "fifth", "sixth"];
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
@@ -277,6 +281,8 @@ export function AppSidebar({
     assignChannel,
     unassignChannel,
   } = useChannelSections(currentPubkey);
+
+  const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
 
   const [createSectionState, setCreateSectionState] = React.useState<{
     open: boolean;
@@ -368,6 +374,14 @@ export function AppSidebar({
       fallbackDisplayName,
       profileDisplayName: profile?.displayName,
     });
+  const sidebarLoadingShape = useSidebarLoadingShape({
+    activeWorkspaceId: activeWorkspace?.id,
+    currentPubkey,
+    directMessages,
+    dmChannelLabels,
+    isLoading,
+    streamChannels,
+  });
   const shouldLoadAgentCount = useDeferredLoad({
     immediate: selectedView === "agents",
     timeoutMs: 250,
@@ -521,16 +535,7 @@ export function AppSidebar({
         ) : null}
         <SidebarContent className="pb-32" ref={scrollRef}>
           {isLoading ? (
-            <SidebarGroup>
-              <SidebarGroupLabel>Channels</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu data-testid="sidebar-loading">
-                  {skeletonRows.map((row) => (
-                    <SidebarMenuSkeleton key={row} showIcon />
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
+            <SidebarLoadingContent shape={sidebarLoadingShape} />
           ) : null}
 
           {!isLoading ? (
@@ -720,9 +725,29 @@ export function AppSidebar({
           ) : null}
 
           {errorMessage ? (
-            <div className="px-3 py-2 text-sm text-destructive">
-              {errorMessage}
-            </div>
+            isRelayUnreachableError(errorMessage) ? (
+              <div
+                className="px-3 py-2 text-sm"
+                data-testid="sidebar-relay-unreachable"
+              >
+                <span className="text-muted-foreground">
+                  {RELAY_UNREACHABLE_SHORT}{" "}
+                </span>
+                <button
+                  className="text-primary hover:underline disabled:opacity-50"
+                  data-testid="sidebar-reconnect"
+                  disabled={isReconnectPending}
+                  onClick={() => void reconnect()}
+                  type="button"
+                >
+                  {isReconnectPending ? "Reconnecting…" : "Reconnect"}
+                </button>
+              </div>
+            ) : (
+              <div className="px-3 py-2 text-sm text-destructive">
+                {errorMessage}
+              </div>
+            )
           ) : null}
         </SidebarContent>
 

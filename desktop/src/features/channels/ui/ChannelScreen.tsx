@@ -79,6 +79,7 @@ export function ChannelScreen({
   const {
     markChannelRead,
     markChannelUnread,
+    openCreateChannel,
     openChannelManagement,
     followThread,
     unfollowThread,
@@ -96,6 +97,7 @@ export function ChannelScreen({
     widthPx: threadPanelWidthPx,
   } = useThreadPanelWidth();
   const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
+  const [isAddBotOpen, setIsAddBotOpen] = React.useState(false);
   const [channelContentRef, channelContentWidthPx] =
     useElementWidth<HTMLDivElement>();
   const [openThreadHeadId, setOpenThreadHeadId] = React.useState<string | null>(
@@ -375,6 +377,27 @@ export function ChannelScreen({
         : undefined,
     [activeChannel, handleToggleReaction],
   );
+  const handleSendVideoReviewComment = React.useCallback(
+    async (
+      message: { id: string },
+      content: string,
+      mentionPubkeys: string[],
+      mediaTags?: string[][],
+      parentEventId?: string,
+    ) => {
+      await sendMessageMutation.mutateAsync({
+        content,
+        mediaTags,
+        mentionPubkeys,
+        parentEventId: parentEventId ?? message.id,
+      });
+    },
+    [sendMessageMutation],
+  );
+  const effectiveSendVideoReviewComment =
+    activeChannel && !activeChannel.archivedAt && activeChannel.isMember
+      ? handleSendVideoReviewComment
+      : undefined;
   const handleMarkUnread = React.useCallback(() => {
     if (!activeChannelId) return;
     markChannelUnread(activeChannelId);
@@ -406,11 +429,13 @@ export function ChannelScreen({
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     });
+  const hasTimelineData = messagesQuery.data !== undefined;
   const isTimelineLoading =
     activeChannel !== null &&
     activeChannel.channelType !== "forum" &&
-    (messagesQuery.isPending ||
-      (messagesQuery.isFetching && resolvedMessages.length === 0));
+    !hasTimelineData &&
+    messagesQuery.isPending;
+  const shouldShowInitialChannelLoading = isTimelineLoading;
   const resetComposerTargets = React.useCallback(
     (_channelId: string | null) => {
       setOpenThreadHeadId(null);
@@ -508,7 +533,9 @@ export function ChannelScreen({
       activeDmPresenceStatus={activeDmPresenceStatus}
       chromeWrapperRef={channelHeaderChromeRef}
       currentPubkey={currentPubkey}
+      isAddBotOpen={isAddBotOpen}
       isJoining={joinChannelMutation.isPending}
+      onAddBotOpenChange={setIsAddBotOpen}
       onJoinChannel={joinChannelMutation.mutateAsync}
       onManageChannel={openChannelManagement}
       onToggleMembers={() => setIsMembersSidebarOpen((prev) => !prev)}
@@ -524,7 +551,9 @@ export function ChannelScreen({
           ref={channelContentRef}
         >
           {activeChannel ? (
-            activeChannel.channelType === "forum" ? (
+            shouldShowInitialChannelLoading ? (
+              <ViewLoadingFallback includeHeader kind="channel" />
+            ) : activeChannel.channelType === "forum" ? (
               <>
                 {channelHeader}
                 <React.Suspense fallback={<ViewLoadingFallback kind="forum" />}>
@@ -539,7 +568,9 @@ export function ChannelScreen({
                 </React.Suspense>
               </>
             ) : (
-              <React.Suspense fallback={<ViewLoadingFallback kind="channel" />}>
+              <React.Suspense
+                fallback={<ViewLoadingFallback includeHeader kind="channel" />}
+              >
                 <ChannelPane
                   activeChannel={activeChannel}
                   agentPubkeys={agentPubkeys}
@@ -551,6 +582,9 @@ export function ChannelScreen({
                   fetchOlder={fetchOlder}
                   header={channelHeader}
                   hasOlderMessages={hasOlderMessages}
+                  onAddAgent={() => setIsAddBotOpen(true)}
+                  onCreateChannel={openCreateChannel}
+                  onOpenMembers={() => setIsMembersSidebarOpen(true)}
                   isFetchingOlder={isFetchingOlder}
                   editTarget={
                     editTargetMessage
@@ -603,6 +637,7 @@ export function ChannelScreen({
                   onOpenThread={handleOpenThreadAndCloseAgentSession}
                   onSelectThreadReplyTarget={handleSelectThreadReplyTarget}
                   onSendMessage={handleSendMessage}
+                  onSendVideoReviewComment={effectiveSendVideoReviewComment}
                   onSendThreadReply={handleSendThreadReply}
                   onThreadScrollTargetResolved={
                     handleThreadScrollTargetResolved
