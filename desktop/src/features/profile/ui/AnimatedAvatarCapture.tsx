@@ -581,7 +581,6 @@ export function AnimatedAvatarCapture({
   // composed preview render inside the page's main avatar preview (via a
   // portal) so edits show exactly where the avatar will live.
   const usePortal = previewContainer !== null;
-  const isPreviewActive = usePortal;
   const reviewWarning =
     phase === "review" && recording && !recording.backgroundRemoved
       ? "Background removal model couldn't be loaded, so the background was kept. Retake while online to remove it."
@@ -609,23 +608,16 @@ export function AnimatedAvatarCapture({
       ? null
       : captureHelpText;
   const showCaptureCard = !usePortal && phase !== "review";
-  const showCameraPicker =
-    phase === "idle" || phase === "starting" || phase === "live";
+  const showCameraPicker = ["idle", "starting", "live"].includes(phase);
 
   React.useEffect(() => {
-    onPreviewActiveChange?.(isPreviewActive);
-  }, [isPreviewActive, onPreviewActiveChange]);
-
-  React.useEffect(() => {
+    onPreviewActiveChange?.(usePortal);
     return () => onPreviewActiveChange?.(false);
-  }, [onPreviewActiveChange]);
+  }, [onPreviewActiveChange, usePortal]);
 
   React.useLayoutEffect(() => {
     onApplyPendingChange?.(isSaving);
-
-    return () => {
-      onApplyPendingChange?.(false);
-    };
+    return () => onApplyPendingChange?.(false);
   }, [isSaving, onApplyPendingChange]);
 
   React.useEffect(() => {
