@@ -12,8 +12,7 @@ import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { TimelineSkeleton } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
-import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
-import { useTimelineScrollManager } from "./useTimelineScrollManager";
+import { useAnchoredScroll } from "./useAnchoredScroll";
 
 type MessageTimelineProps = {
   agentPubkeys?: ReadonlySet<string>;
@@ -124,30 +123,46 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   targetMessageId = null,
   onTargetReached,
 }: MessageTimelineProps) {
-  const internalScrollRef = React.useRef<HTMLDivElement>(null);
-  const scrollContainerRef = externalScrollRef ?? internalScrollRef;
-  const topSentinelRef = React.useRef<HTMLDivElement>(null);
+  const topSentinelRefInternal = React.useRef<HTMLDivElement>(null);
   const scrollRestorationId = targetMessageId
     ? `message-timeline:${channelId ?? "none"}:target:${targetMessageId}`
     : `message-timeline:${channelId ?? "none"}`;
 
+  const messageIds = React.useMemo(
+    () => messages.map((m) => m.id),
+    [messages],
+  );
+
   const {
-    bottomAnchorRef,
-    contentRef,
     highlightedMessageId,
     isAtBottom,
     newMessageCount,
-    restoreScrollPosition,
+    scrollContainerRef: internalScrollRef,
     scrollToBottom,
-    syncScrollState,
-  } = useTimelineScrollManager({
-    channelId,
+    topSentinelRef: anchorSentinelRef,
+  } = useAnchoredScroll({
+    resetKey: channelId ?? null,
+    messageIds,
+    fetchOlder,
+    hasOlderMessages,
     isLoading,
-    messages,
-    onTargetReached,
-    scrollContainerRef,
     targetMessageId,
+    onTargetReached,
   });
+
+  // Mirror the internal scroll ref into the externally-supplied one (if any),
+  // so parent components can still observe scroll position. This preserves
+  // the previous public contract of MessageTimeline.
+  React.useEffect(() => {
+    if (!externalScrollRef) return;
+    externalScrollRef.current = internalScrollRef.current;
+    return () => {
+      if (externalScrollRef) externalScrollRef.current = null;
+    };
+  }, [externalScrollRef, internalScrollRef]);
+
+  const scrollContainerRef = internalScrollRef;
+  const topSentinelRef = anchorSentinelRef ?? topSentinelRefInternal;
 
   // Scroll to the active search match when it changes.
   const prevSearchActiveRef = React.useRef<string | null>(null);
@@ -173,15 +188,6 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     }
   }, [searchActiveMessageId]);
 
-  useLoadOlderOnScroll({
-    fetchOlder,
-    hasOlderMessages,
-    isLoading,
-    restoreScrollPosition,
-    scrollContainerRef,
-    sentinelRef: topSentinelRef,
-  });
-
   const showDirectMessageIntro = !isLoading && directMessageIntro !== null;
   const showChannelIntro =
     !isLoading && channelIntro !== null && directMessageIntro === null;
@@ -198,12 +204,11 @@ export const MessageTimeline = React.memo(function MessageTimeline({
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <div
           className={cn(
-            "absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pt-1 [overflow-anchor:none] sm:px-6",
+            "absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pt-1 sm:px-6",
             hasComposerOverlay ? "pb-24" : "pb-4",
           )}
           data-scroll-restoration-id={scrollRestorationId}
           data-testid="message-timeline"
-          onScroll={syncScrollState}
           ref={scrollContainerRef}
         >
           <div
@@ -212,7 +217,6 @@ export const MessageTimeline = React.memo(function MessageTimeline({
               channelChrome.contentPadding,
               (showIntro || showGenericEmpty) && "min-h-full",
             )}
-            ref={contentRef}
           >
             <div ref={topSentinelRef} aria-hidden className="h-px" />
 
@@ -388,7 +392,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
               </div>
             ) : null}
 
-            <div aria-hidden className="h-px" ref={bottomAnchorRef} />
+            <div aria-hidden className="h-px" />
           </div>
         </div>
 

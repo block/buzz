@@ -20,6 +20,7 @@ export default defineConfig({
       name: "smoke",
       testMatch: [
         "**/smoke.spec.ts",
+        "**/scroll-history.spec.ts",
         "**/channels.spec.ts",
         "**/badge.spec.ts",
         "**/channel-browser.spec.ts",
