@@ -108,6 +108,12 @@ function sealOpenMessages(d: TranscriptDraft) {
   }
 }
 
+type TranscriptItemContext = {
+  channelId: string | null;
+  turnId: string | null;
+  sessionId: string | null;
+};
+
 function upsertMessage(
   d: TranscriptDraft,
   id: string,
@@ -115,7 +121,7 @@ function upsertMessage(
   title: string,
   text: string,
   timestamp: string,
-  channelId: string | null,
+  ctx: TranscriptItemContext,
   authorPubkey: string | null = null,
   acpSource?: string,
 ) {
@@ -127,7 +133,9 @@ function upsertMessage(
       replaceItem(d, currentKey, {
         ...existing,
         text: existing.text + text,
-        channelId,
+        channelId: ctx.channelId,
+        turnId: ctx.turnId ?? existing.turnId,
+        sessionId: ctx.sessionId ?? existing.sessionId,
         authorPubkey: authorPubkey ?? existing.authorPubkey,
         acpSource: acpSource ?? existing.acpSource,
       });
@@ -144,7 +152,9 @@ function upsertMessage(
     title,
     text,
     timestamp,
-    channelId,
+    channelId: ctx.channelId,
+    turnId: ctx.turnId,
+    sessionId: ctx.sessionId,
     authorPubkey,
     acpSource,
   });
@@ -159,7 +169,7 @@ function upsertTextItem(
   title: string,
   text: string,
   timestamp: string,
-  channelId: string | null,
+  ctx: TranscriptItemContext,
   acpSource?: string,
 ) {
   const existing = d.itemsById.get(id);
@@ -167,13 +177,25 @@ function upsertTextItem(
     replaceItem(d, id, {
       ...existing,
       text: existing.text + text,
-      channelId,
+      channelId: ctx.channelId,
+      turnId: ctx.turnId ?? existing.turnId,
+      sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
     });
     return;
   }
   sealOpenMessages(d);
-  pushItem(d, { id, type, title, text, timestamp, channelId, acpSource });
+  pushItem(d, {
+    id,
+    type,
+    title,
+    text,
+    timestamp,
+    channelId: ctx.channelId,
+    turnId: ctx.turnId,
+    sessionId: ctx.sessionId,
+    acpSource,
+  });
 }
 
 function upsertMetadata(
@@ -182,7 +204,7 @@ function upsertMetadata(
   title: string,
   sections: PromptSection[],
   timestamp: string,
-  channelId: string | null,
+  ctx: TranscriptItemContext,
   acpSource?: string,
 ) {
   const existing = d.itemsById.get(id);
@@ -190,7 +212,9 @@ function upsertMetadata(
     replaceItem(d, id, {
       ...existing,
       sections,
-      channelId,
+      channelId: ctx.channelId,
+      turnId: ctx.turnId ?? existing.turnId,
+      sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
     });
     return;
@@ -202,7 +226,9 @@ function upsertMetadata(
     title,
     sections,
     timestamp,
-    channelId,
+    channelId: ctx.channelId,
+    turnId: ctx.turnId,
+    sessionId: ctx.sessionId,
     acpSource,
   });
 }
@@ -218,7 +244,7 @@ function upsertTool(
   result: string,
   isError: boolean,
   timestamp: string,
-  channelId: string | null,
+  ctx: TranscriptItemContext,
   acpSource?: string,
 ) {
   const existing = d.itemsById.get(id);
@@ -248,7 +274,9 @@ function upsertTool(
         existing.completedAt == null
           ? timestamp
           : existing.completedAt,
-      channelId,
+      channelId: ctx.channelId,
+      turnId: ctx.turnId ?? existing.turnId,
+      sessionId: ctx.sessionId ?? existing.sessionId,
       acpSource: acpSource ?? existing.acpSource,
     });
     return;
@@ -267,7 +295,9 @@ function upsertTool(
     timestamp,
     startedAt: timestamp,
     completedAt: null,
-    channelId,
+    channelId: ctx.channelId,
+    turnId: ctx.turnId,
+    sessionId: ctx.sessionId,
     acpSource,
   });
 }
@@ -284,6 +314,11 @@ export function processTranscriptEvent(
 
   const channelId = event.channelId ?? null;
   const ch = channelId ?? "global";
+  const ctx: TranscriptItemContext = {
+    channelId,
+    turnId: event.turnId,
+    sessionId: event.sessionId ?? d.latestSessionId,
+  };
 
   if (event.kind === "turn_started") {
     upsertTextItem(
@@ -293,7 +328,7 @@ export function processTranscriptEvent(
       "Turn started",
       describeTurnStarted(event.payload),
       event.timestamp,
-      channelId,
+      ctx,
       event.kind,
     );
   } else if (event.kind === "session_resolved") {
@@ -304,7 +339,7 @@ export function processTranscriptEvent(
       "Session ready",
       describeSessionResolved(event.payload),
       event.timestamp,
-      channelId,
+      ctx,
       event.kind,
     );
   } else if (event.kind === "acp_parse_error") {
@@ -315,7 +350,7 @@ export function processTranscriptEvent(
       "Wire parse error",
       extractBlockText(event.payload),
       event.timestamp,
-      channelId,
+      ctx,
       event.kind,
     );
   } else if (event.kind === "turn_error" || event.kind === "agent_panic") {
@@ -331,7 +366,7 @@ export function processTranscriptEvent(
       title,
       `${outcome}: ${error}`,
       event.timestamp,
-      channelId,
+      ctx,
       event.kind,
     );
   } else if (event.kind === "acp_read" || event.kind === "acp_write") {
@@ -350,7 +385,7 @@ export function processTranscriptEvent(
             parsedPrompt.userTitle,
             parsedPrompt.userText,
             event.timestamp,
-            channelId,
+            ctx,
             parsedPrompt.userPubkey,
             "session/prompt:user",
           );
@@ -362,7 +397,7 @@ export function processTranscriptEvent(
             "Prompt context",
             parsedPrompt.sections,
             event.timestamp,
-            channelId,
+            ctx,
             "session/prompt:context",
           );
         }
@@ -382,7 +417,7 @@ export function processTranscriptEvent(
           "Assistant",
           extractContentText(update.content),
           event.timestamp,
-          channelId,
+          ctx,
           null,
           updateType,
         );
@@ -394,7 +429,7 @@ export function processTranscriptEvent(
           "User",
           extractContentText(update.content),
           event.timestamp,
-          channelId,
+          ctx,
           null,
           updateType,
         );
@@ -406,7 +441,7 @@ export function processTranscriptEvent(
           "Thinking",
           extractContentText(update.content),
           event.timestamp,
-          channelId,
+          ctx,
           updateType,
         );
       } else if (updateType === "tool_call") {
@@ -423,7 +458,7 @@ export function processTranscriptEvent(
           extractToolResult(update),
           false,
           event.timestamp,
-          channelId,
+          ctx,
           updateType,
         );
       } else if (updateType === "tool_call_update") {
@@ -443,7 +478,7 @@ export function processTranscriptEvent(
           extractToolResult(update),
           status === "failed",
           event.timestamp,
-          channelId,
+          ctx,
           updateType,
         );
       } else if (updateType === "plan") {
@@ -454,7 +489,7 @@ export function processTranscriptEvent(
           "Plan",
           extractContentText(update.content) || JSON.stringify(update, null, 2),
           event.timestamp,
-          channelId,
+          ctx,
           updateType,
         );
       }

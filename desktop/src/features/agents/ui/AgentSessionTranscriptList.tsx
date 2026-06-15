@@ -3,6 +3,7 @@ import {
   AlertCircle,
   Bot,
   Brain,
+  CheckCheck,
   ChevronDown,
   CircleDot,
   Loader2,
@@ -19,9 +20,18 @@ import { cn } from "@/shared/lib/cn";
 import { Badge } from "@/shared/ui/badge";
 import { Markdown } from "@/shared/ui/markdown";
 import { Shimmer } from "@/shared/ui/Shimmer";
+import { Toggle } from "@/shared/ui/toggle";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import type { TranscriptItem } from "./agentSessionTypes";
+import type { PromptSection, TranscriptItem } from "./agentSessionTypes";
 import { ToolItem } from "./AgentSessionToolItem";
+import {
+  buildTranscriptDisplayBlocks,
+  formatTurnSetupLabel,
+  turnSetupDetail,
+  turnSetupTimestamp,
+  type TranscriptDisplayBlock,
+  type TranscriptTurnSegment,
+} from "./agentSessionTranscriptGrouping";
 import { buildTranscriptPresentation } from "./agentSessionTranscriptPresentation";
 import { formatTranscriptTime } from "./agentSessionUtils";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -49,6 +59,10 @@ export function AgentSessionTranscriptList({
   const presentation = React.useMemo(
     () => buildTranscriptPresentation(items, isWorking),
     [items, isWorking],
+  );
+  const displayBlocks = React.useMemo(
+    () => buildTranscriptDisplayBlocks(items),
+    [items],
   );
 
   if (items.length === 0) {
@@ -81,26 +95,15 @@ export function AgentSessionTranscriptList({
         className={cn("w-full", compact ? "py-0.5" : "py-1")}
         role="log"
       >
-        {items.map((item) => (
-          <div
-            className={cn(
-              "first:mt-0",
-              compact ? "mt-2.5" : "mt-4",
-              getItemSpacingClass(item),
-            )}
-            key={item.id}
-          >
-            {SHOW_TRANSCRIPT_ACP_SOURCE && item.acpSource ? (
-              <TranscriptAcpSourceBadge source={item.acpSource} />
-            ) : null}
-            <TranscriptItemView
-              agentName={agentName}
-              compact={compact}
-              isActive={presentation.activeItemIds.has(item.id)}
-              item={item}
-              profiles={profiles}
-            />
-          </div>
+        {displayBlocks.map((block) => (
+          <TranscriptDisplayBlockView
+            activeItemIds={presentation.activeItemIds}
+            agentName={agentName}
+            block={block}
+            compact={compact}
+            key={getDisplayBlockKey(block)}
+            profiles={profiles}
+          />
         ))}
       </div>
     </div>
@@ -315,6 +318,351 @@ function getStateLabel(
   }
 }
 
+function getDisplayBlockKey(block: TranscriptDisplayBlock) {
+  if (block.kind === "single") {
+    return block.item.id;
+  }
+  return `turn:${block.turnId}`;
+}
+
+function TranscriptDisplayBlockView({
+  activeItemIds,
+  agentName,
+  block,
+  compact,
+  profiles,
+}: {
+  activeItemIds: ReadonlySet<string>;
+  agentName: string;
+  block: TranscriptDisplayBlock;
+  compact: boolean;
+  profiles?: UserProfileLookup;
+}) {
+  if (block.kind === "single") {
+    return (
+      <TranscriptItemRow
+        activeItemIds={activeItemIds}
+        agentName={agentName}
+        compact={compact}
+        item={block.item}
+        profiles={profiles}
+      />
+    );
+  }
+
+  return (
+    <div
+      className={cn("first:mt-0", compact ? "mt-2.5" : "mt-4")}
+      data-testid="transcript-turn-group"
+      data-turn-id={block.turnId}
+    >
+      {block.segments.map((segment) => (
+        <TranscriptTurnSegmentView
+          activeItemIds={activeItemIds}
+          agentName={agentName}
+          compact={compact}
+          key={getTurnSegmentKey(block.turnId, segment)}
+          profiles={profiles}
+          segment={segment}
+        />
+      ))}
+    </div>
+  );
+}
+
+function getTurnSegmentKey(turnId: string, segment: TranscriptTurnSegment) {
+  if (segment.kind === "setup") {
+    return `turn:${turnId}:setup`;
+  }
+  if (segment.kind === "prompt") {
+    return `turn:${turnId}:prompt`;
+  }
+  return segment.item.id;
+}
+
+function TranscriptTurnSegmentView({
+  activeItemIds,
+  agentName,
+  compact,
+  profiles,
+  segment,
+}: {
+  activeItemIds: ReadonlySet<string>;
+  agentName: string;
+  compact: boolean;
+  profiles?: UserProfileLookup;
+  segment: TranscriptTurnSegment;
+}) {
+  if (segment.kind === "prompt") {
+    return (
+      <TurnPromptBlock
+        compact={compact}
+        context={segment.context}
+        profiles={profiles}
+        setup={segment.setup}
+        user={segment.user}
+      />
+    );
+  }
+
+  if (segment.kind === "setup") {
+    return <TurnSetupStatus compact={compact} items={segment.items} />;
+  }
+
+  return (
+    <TranscriptItemRow
+      activeItemIds={activeItemIds}
+      agentName={agentName}
+      compact={compact}
+      item={segment.item}
+      profiles={profiles}
+    />
+  );
+}
+
+function TurnPromptBlock({
+  compact,
+  context,
+  profiles,
+  setup,
+  user,
+}: {
+  compact: boolean;
+  context: Extract<TranscriptItem, { type: "metadata" }> | null;
+  profiles?: UserProfileLookup;
+  setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
+  user: Extract<TranscriptItem, { type: "message" }>;
+}) {
+  return (
+    <div
+      className={cn("first:mt-0", compact ? "mt-2.5" : "mt-4")}
+      data-testid="transcript-prompt-bundle"
+    >
+      {SHOW_TRANSCRIPT_ACP_SOURCE ? (
+        <div className="mb-1 flex flex-wrap gap-1">
+          <TranscriptAcpSourceBadge source="session/prompt:user" />
+          {context ? (
+            <TranscriptAcpSourceBadge source="session/prompt:context" />
+          ) : null}
+        </div>
+      ) : null}
+      <PromptUserMessage
+        compact={compact}
+        context={context}
+        item={user}
+        profiles={profiles}
+        setup={setup}
+      />
+    </div>
+  );
+}
+
+function PromptUserMessage({
+  compact,
+  context = null,
+  item,
+  profiles,
+  setup = [],
+}: {
+  compact: boolean;
+  context?: Extract<TranscriptItem, { type: "metadata" }> | null;
+  item: Extract<TranscriptItem, { type: "message" }>;
+  profiles?: UserProfileLookup;
+  setup?: Extract<TranscriptItem, { type: "lifecycle" }>[];
+}) {
+  const [contextOpen, setContextOpen] = React.useState(false);
+  const text = item.text.trim();
+  const authorProfile = item.authorPubkey
+    ? profiles?.[item.authorPubkey.toLowerCase()]
+    : null;
+  const authorLabel = item.authorPubkey
+    ? resolveUserLabel({
+        pubkey: item.authorPubkey,
+        fallbackName: item.title,
+        profiles,
+      })
+    : item.title || "User";
+
+  return (
+    <div
+      className="flex flex-row"
+      data-role="user-message"
+      data-testid="transcript-user-message"
+    >
+      <UserAvatar
+        avatarUrl={authorProfile?.avatarUrl ?? null}
+        className="mr-2 mt-1 h-5 w-5 shrink-0 text-[8px]"
+        displayName={authorLabel}
+        size="xs"
+      />
+      <div className="group relative min-w-0 max-w-[85%] flex flex-col items-start gap-1">
+        <div
+          className={cn(
+            "w-full min-w-0 rounded-2xl bg-muted p-3 text-sm leading-relaxed text-foreground",
+            compact && "p-2.5",
+          )}
+        >
+          <p className="whitespace-pre-wrap break-words">{text}</p>
+          {contextOpen && context ? (
+            <PromptContextSections sections={context.sections} />
+          ) : null}
+        </div>
+        <TurnSetupFooter
+          context={context}
+          contextOpen={contextOpen}
+          items={setup}
+          onContextOpenChange={setContextOpen}
+          timestamp={item.timestamp}
+        />
+      </div>
+    </div>
+  );
+}
+
+function PromptContextSections({ sections }: { sections: PromptSection[] }) {
+  return (
+    <div
+      className="mt-2 space-y-2 border-t border-border/40 pt-2"
+      data-testid="transcript-prompt-context-sections"
+    >
+      {sections.map((section) => (
+        <details
+          className="group/section"
+          key={`${section.title}:${section.body.slice(0, 48)}`}
+        >
+          <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-1.5 text-xs font-medium text-foreground/80">
+            <span className="truncate">{section.title}</span>
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-open/section:rotate-180" />
+          </summary>
+          <pre className="mt-1.5 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-background/40 px-2 py-1.5 font-mono text-[11px] leading-5 text-muted-foreground">
+            {section.body.trim() || "No metadata."}
+          </pre>
+        </details>
+      ))}
+    </div>
+  );
+}
+
+function TurnSetupFooter({
+  context = null,
+  contextOpen = false,
+  items,
+  onContextOpenChange,
+  timestamp,
+}: {
+  context?: Extract<TranscriptItem, { type: "metadata" }> | null;
+  contextOpen?: boolean;
+  items: Extract<TranscriptItem, { type: "lifecycle" }>[];
+  onContextOpenChange?: (open: boolean) => void;
+  timestamp: string;
+}) {
+  const label = formatTurnSetupLabel(items);
+  const detail = turnSetupDetail(items);
+  const tooltipText = [label, detail].filter(Boolean).join(" · ");
+  const showSetup = items.length > 0;
+  const showContext = context != null && context.sections.length > 0;
+
+  if (!showSetup && !showContext) {
+    return <TranscriptTimestamp timestamp={timestamp} />;
+  }
+
+  return (
+    <div
+      className="flex items-center gap-1.5 text-muted-foreground/80"
+      data-testid="transcript-turn-setup"
+    >
+      {showSetup ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              className="inline-flex shrink-0 items-center justify-center rounded-sm text-muted-foreground/70 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              type="button"
+            >
+              <CheckCheck className="h-3.5 w-3.5" />
+              <span className="sr-only">{tooltipText}</span>
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            <p>{tooltipText}</p>
+          </TooltipContent>
+        </Tooltip>
+      ) : null}
+      {showContext ? (
+        <Toggle
+          aria-label={`${contextOpen ? "Hide" : "Show"} prompt context`}
+          className="h-5 min-h-0 min-w-0 gap-1 rounded-md px-1.5 text-[10px] font-medium data-[state=on]:bg-muted data-[state=on]:text-foreground"
+          data-testid="transcript-prompt-context-toggle"
+          onPressedChange={onContextOpenChange}
+          pressed={contextOpen}
+          size="sm"
+          variant="outline"
+        >
+          Context
+          <span className="text-muted-foreground/70">
+            {context.sections.length}
+          </span>
+        </Toggle>
+      ) : null}
+      <TranscriptTimestamp timestamp={timestamp} />
+    </div>
+  );
+}
+
+function TranscriptItemRow({
+  activeItemIds,
+  agentName,
+  compact,
+  item,
+  profiles,
+}: {
+  activeItemIds: ReadonlySet<string>;
+  agentName: string;
+  compact: boolean;
+  item: TranscriptItem;
+  profiles?: UserProfileLookup;
+}) {
+  return (
+    <div
+      className={cn(
+        "first:mt-0",
+        compact ? "mt-2.5" : "mt-4",
+        getItemSpacingClass(item),
+      )}
+      key={item.id}
+    >
+      {SHOW_TRANSCRIPT_ACP_SOURCE && item.acpSource ? (
+        <TranscriptAcpSourceBadge source={item.acpSource} />
+      ) : null}
+      <TranscriptItemView
+        agentName={agentName}
+        compact={compact}
+        isActive={activeItemIds.has(item.id)}
+        item={item}
+        profiles={profiles}
+      />
+    </div>
+  );
+}
+
+function TurnSetupStatus({
+  compact,
+  items,
+}: {
+  compact: boolean;
+  items: Extract<TranscriptItem, { type: "lifecycle" }>[];
+}) {
+  const timestamp = turnSetupTimestamp(items);
+  if (items.length === 0 || !timestamp) {
+    return null;
+  }
+
+  return (
+    <div className={cn("rounded-md px-2 py-1.5", compact ? "mt-2" : "mt-2.5")}>
+      <TurnSetupFooter items={items} timestamp={timestamp} />
+    </div>
+  );
+}
+
 function getItemSpacingClass(item: TranscriptItem) {
   if (item.type === "lifecycle") {
     return "mt-2 first:mt-0";
@@ -495,16 +843,25 @@ function ThoughtItem({
 
 function MetadataItem({
   compact,
+  embedded = false,
   item,
 }: {
   compact: boolean;
+  embedded?: boolean;
   item: Extract<TranscriptItem, { type: "metadata" }>;
 }) {
   return (
     <details
       className={cn(
-        "group not-prose w-full rounded-md border border-border/50 bg-muted/20",
-        compact ? "px-2 py-1" : "px-2 py-1.5",
+        "group not-prose w-full",
+        embedded
+          ? compact
+            ? "px-2 py-1"
+            : "px-2.5 py-1.5"
+          : cn(
+              "rounded-md border border-border/50 bg-muted/20",
+              compact ? "px-2 py-1" : "px-2 py-1.5",
+            ),
       )}
       data-testid="transcript-metadata-item"
     >
