@@ -14,6 +14,7 @@ import {
 
 import { cn } from "@/shared/lib/cn";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { getEditorSpoilerRangeState } from "@/features/messages/lib/spoilerFormatting";
 import { SPOILER_MARK_NAME } from "@/features/messages/lib/spoilerMark";
 
 type FormattingToolbarProps = {
@@ -70,30 +71,6 @@ function documentRangeForEmptySelection(editor: Editor): {
   return from < to ? { from, to } : null;
 }
 
-function isRangeFullySpoiled(
-  editor: Editor,
-  from: number,
-  to: number,
-): boolean {
-  const spoilerMark = editor.schema.marks[SPOILER_MARK_NAME];
-  if (!spoilerMark) return false;
-
-  let hasInlineContent = false;
-  let isFullySpoiled = true;
-
-  editor.state.doc.nodesBetween(from, to, (node) => {
-    if (!node.isText || node.textContent.length === 0) return;
-
-    hasInlineContent = true;
-    if (!spoilerMark.isInSet(node.marks)) {
-      isFullySpoiled = false;
-      return false;
-    }
-  });
-
-  return hasInlineContent && isFullySpoiled;
-}
-
 export function toggleSpoilerFormatting(editor: Editor): SpoilerToggleState {
   const emptySelection = editor.state.selection.empty;
   const range = documentRangeForEmptySelection(editor);
@@ -104,7 +81,17 @@ export function toggleSpoilerFormatting(editor: Editor): SpoilerToggleState {
 
   const cursorPosition = editor.state.selection.from;
   const chain = editor.chain().focus().setTextSelection(range);
-  const nextSpoilered = !isRangeFullySpoiled(editor, range.from, range.to);
+  const rangeSpoilerState = getEditorSpoilerRangeState(
+    editor,
+    range.from,
+    range.to,
+  );
+  if (rangeSpoilerState === "no-markable-content") {
+    chain.setTextSelection(cursorPosition).run();
+    return { emptySelection };
+  }
+
+  const nextSpoilered = rangeSpoilerState !== "fully-spoiled";
   if (nextSpoilered) {
     chain.setMark(SPOILER_MARK_NAME).setTextSelection(cursorPosition).run();
   } else {
