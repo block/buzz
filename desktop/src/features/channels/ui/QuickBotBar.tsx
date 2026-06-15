@@ -81,7 +81,7 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
                   )}
                   {isThisPending ? (
                     <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-background/70">
-                      <Spinner className="h-3.5 w-3.5 text-primary" />
+                      <Spinner className="h-4 w-4 border-2 text-primary" />
                     </div>
                   ) : null}
                 </button>

@@ -258,7 +258,7 @@ export function RepoBlobPage() {
       <BackLink repoId={repoId} />
 
       <div className="mt-4 flex flex-wrap items-center gap-3">
-        <FileText className="h-5 w-5 text-muted-foreground" />
+        <FileText className="h-4 w-4 text-muted-foreground" />
         <h1 className="min-w-0 truncate font-mono text-sm">{filepath}</h1>
         <div className="ml-auto flex items-center gap-2">
           {view &&

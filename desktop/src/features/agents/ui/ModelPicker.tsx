@@ -93,7 +93,7 @@ export function ModelPicker({
             variant="ghost"
           >
             <span className="truncate">{displayLabel}</span>
-            <ChevronDown className="h-3 w-3 text-muted-foreground" />
+            <ChevronDown className="h-4 w-4 text-muted-foreground" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent
@@ -103,7 +103,7 @@ export function ModelPicker({
         >
           {loading ? (
             <div className="flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground">
-              <Spinner className="h-3.5 w-3.5" />
+              <Spinner className="h-4 w-4 border-2" />
               Loading models...
             </div>
           ) : error ? (

@@ -54,7 +54,7 @@ function SelectionChipButton({
               ? "bg-primary/20 text-primary ring-1 ring-primary/20"
               : "bg-background/80 text-muted-foreground ring-1 ring-border/70",
           )}
-          iconClassName="h-3.5 w-3.5"
+          iconClassName="h-4 w-4"
           label={label}
         />
       ) : null}
@@ -193,7 +193,7 @@ export function AddChannelBotPersonasSection({
                         <ProfileAvatar
                           avatarUrl={persona.avatarUrl}
                           className="h-7 w-7 text-[10px] bg-primary-foreground/20 text-primary-foreground"
-                          iconClassName="h-3.5 w-3.5"
+                          iconClassName="h-4 w-4"
                           label={persona.displayName}
                         />
                         <p className="font-medium">{persona.displayName}</p>

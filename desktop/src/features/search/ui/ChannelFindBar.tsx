@@ -62,6 +62,8 @@ export function ChannelFindBar({
       <div className="relative flex min-w-0 flex-1 items-center">
         <input
           ref={inputRef}
+          autoCapitalize="none"
+          autoCorrect="off"
           className={cn(
             "h-7 w-full rounded-md border border-input bg-transparent px-2 pr-20 text-sm",
             "placeholder:text-muted-foreground",
@@ -70,6 +72,7 @@ export function ChannelFindBar({
           onChange={(event) => onQueryChange(event.target.value)}
           onKeyDown={handleKeyDown}
           placeholder="Find in channel"
+          spellCheck={false}
           type="text"
           value={query}
         />

@@ -117,7 +117,7 @@ export function TypingIndicatorRow({
                         : "h-5 w-5 text-[8px]",
                     )}
                     iconClassName={
-                      isActivityVariant ? "h-2.5 w-2.5" : "h-3 w-3"
+                      isActivityVariant ? "h-2.5 w-2.5" : "h-4 w-4"
                     }
                   />
                 </div>
