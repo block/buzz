@@ -35,7 +35,12 @@ import {
   WELCOME_PERSONA_ROTATION_MS,
   type WelcomeComposerBannerState,
 } from "@/features/channels/ui/WelcomeComposerBanner";
-import { isEphemeralChannel } from "@/features/channels/lib/ephemeralChannel";
+import {
+  getChannelIntroDescription,
+  getChannelIntroKind,
+  isWelcomeSetupSystemMessage,
+  mentionsKnownAgent,
+} from "@/features/channels/ui/ChannelPane.helpers";
 import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
 import { Button } from "@/shared/ui/button";
 import type { useChannelFind } from "@/features/search/useChannelFind";
@@ -151,55 +156,6 @@ type ChannelPaneProps = {
   unfollowThreadById?: (rootId: string) => void;
   isFollowingThreadById?: (rootId: string) => boolean;
 };
-
-function getChannelIntroKind(channel: Channel): string {
-  const isPrivate = channel.visibility === "private";
-  const isEphemeral = isEphemeralChannel(channel);
-
-  if (isPrivate && isEphemeral) {
-    return "private ephemeral channel";
-  }
-  if (isPrivate) {
-    return "private channel";
-  }
-  if (isEphemeral) {
-    return "ephemeral channel";
-  }
-  return "regular channel";
-}
-
-function getChannelIntroDescription(channel: Channel): string | null {
-  return (
-    channel.topic?.trim() ||
-    channel.purpose?.trim() ||
-    channel.description.trim() ||
-    null
-  );
-}
-
-function isWelcomeSetupSystemMessage(message: TimelineMessage) {
-  if (message.kind !== KIND_SYSTEM_MESSAGE) {
-    return false;
-  }
-
-  try {
-    const payload = JSON.parse(message.body) as { type?: string };
-    return (
-      payload.type === "channel_created" || payload.type === "member_joined"
-    );
-  } catch {
-    return false;
-  }
-}
-
-function mentionsKnownAgent(
-  mentionPubkeys: string[],
-  knownAgentPubkeys: ReadonlySet<string>,
-) {
-  return mentionPubkeys.some((pubkey) =>
-    knownAgentPubkeys.has(pubkey.toLowerCase()),
-  );
-}
 
 export const ChannelPane = React.memo(function ChannelPane({
   activeChannel,

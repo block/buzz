@@ -52,3 +52,51 @@ export function directRepliesMaxCreatedAt(
   }
   return maxCreatedAt;
 }
+
+/** Minimal timeline shape the adjacency/createdAt builders read. */
+interface ReplyGraphMessage {
+  id: string;
+  parentId?: string | null;
+  createdAt: number;
+}
+
+/** Maps each parent message id to its direct-reply ids in timeline order. */
+export function buildDirectReplyIdsByParentId(
+  messages: readonly ReplyGraphMessage[],
+): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const message of messages) {
+    if (!message.parentId) continue;
+    const currentReplies = map.get(message.parentId) ?? [];
+    currentReplies.push(message.id);
+    map.set(message.parentId, currentReplies);
+  }
+  return map;
+}
+
+/** Maps each message id to its `createdAt`. */
+export function buildCreatedAtByMessageId(
+  messages: readonly ReplyGraphMessage[],
+): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const message of messages) {
+    map.set(message.id, message.createdAt);
+  }
+  return map;
+}
+
+/** Every descendant reply id under a message, walked breadth-first. */
+export function collectReplyDescendantIds(
+  messageId: string,
+  directReplyIdsByParentId: ReadonlyMap<string, string[]>,
+): string[] {
+  const descendantIds: string[] = [];
+  const pendingIds = [...(directReplyIdsByParentId.get(messageId) ?? [])];
+  while (pendingIds.length > 0) {
+    const currentId = pendingIds.pop();
+    if (!currentId) continue;
+    descendantIds.push(currentId);
+    pendingIds.push(...(directReplyIdsByParentId.get(currentId) ?? []));
+  }
+  return descendantIds;
+}

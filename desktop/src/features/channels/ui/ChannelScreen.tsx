@@ -3,6 +3,9 @@ import { useAppShell } from "@/app/AppShellContext";
 import { useActiveChannelHeader } from "@/features/channels/useActiveChannelHeader";
 import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandlers";
 import {
+  buildCreatedAtByMessageId,
+  buildDirectReplyIdsByParentId,
+  collectReplyDescendantIds,
   directRepliesMaxCreatedAt,
   subtreeMaxCreatedAt,
 } from "@/features/channels/lib/subtreeCreatedAt";
@@ -416,41 +419,23 @@ export function ChannelScreen({
       timelineMessages,
     ],
   );
-  const directReplyIdsByParentId = React.useMemo(() => {
-    const map = new Map<string, string[]>();
-    for (const message of timelineMessages) {
-      if (!message.parentId) continue;
-      const currentReplies = map.get(message.parentId) ?? [];
-      currentReplies.push(message.id);
-      map.set(message.parentId, currentReplies);
-    }
-    return map;
-  }, [timelineMessages]);
+  const directReplyIdsByParentId = React.useMemo(
+    () => buildDirectReplyIdsByParentId(timelineMessages),
+    [timelineMessages],
+  );
   const getFirstReplyIdForMessage = React.useCallback(
     (messageId: string) => directReplyIdsByParentId.get(messageId)?.[0] ?? null,
     [directReplyIdsByParentId],
   );
   const getReplyDescendantIdsForMessage = React.useCallback(
-    (messageId: string) => {
-      const descendantIds: string[] = [];
-      const pendingIds = [...(directReplyIdsByParentId.get(messageId) ?? [])];
-      while (pendingIds.length > 0) {
-        const currentId = pendingIds.pop();
-        if (!currentId) continue;
-        descendantIds.push(currentId);
-        pendingIds.push(...(directReplyIdsByParentId.get(currentId) ?? []));
-      }
-      return descendantIds;
-    },
+    (messageId: string) =>
+      collectReplyDescendantIds(messageId, directReplyIdsByParentId),
     [directReplyIdsByParentId],
   );
-  const createdAtByMessageId = React.useMemo(() => {
-    const map = new Map<string, number>();
-    for (const message of timelineMessages) {
-      map.set(message.id, message.createdAt);
-    }
-    return map;
-  }, [timelineMessages]);
+  const createdAtByMessageId = React.useMemo(
+    () => buildCreatedAtByMessageId(timelineMessages),
+    [timelineMessages],
+  );
   // Newest createdAt across an expanded branch (the message itself plus every
   // descendant). Drilling into a branch advances the thread frontier to this,
   // consuming everything chronologically up to the deepest reply read. Returns
