@@ -46,6 +46,7 @@ type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
   personaId?: string | null;
+  model?: string | null;
   status?: "running" | "stopped" | "deployed" | "not_deployed";
   channelNames?: string[];
   channelIds?: string[];
@@ -99,6 +100,7 @@ type MockBridgeOptions = {
   profileReadError?: string;
   profileUpdateError?: string;
   searchProfiles?: MockSearchProfileSeed[];
+  meshModels?: Array<{ id: string; name: string | null }>;
   updateChannelDelayMs?: number;
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;

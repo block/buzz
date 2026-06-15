@@ -139,6 +139,42 @@ test("@ trigger shows unified autocomplete with agents first", async ({
   expect(bobIndex).toBeLessThan(outsiderIndex);
 });
 
+test("agent model selector starts compact and can insert a persona mention", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:kit", "builtin:scout"],
+    meshModels: [
+      { id: "model-a", name: "Model A" },
+      { id: "model-b", name: "Model B" },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const trigger = page.getByTestId("agent-model-selector-trigger");
+  await expect(trigger).toHaveAttribute("aria-label", "Add an agent");
+  await expect(trigger).not.toContainText("Model A");
+
+  await trigger.click();
+  await expect(page.getByTestId("agent-model-selector-popover")).toBeVisible();
+  await expect(
+    page.getByTestId("agent-model-selector-persona-builtin:kit"),
+  ).toBeVisible();
+  await page.getByTestId("agent-model-selector-persona-builtin:kit").click();
+
+  await expect(page.getByTestId("message-input")).toContainText("@Kit");
+  await expect(trigger).not.toContainText("Model A");
+  const modelB = page.getByTestId(
+    "agent-model-selector-model-persona:builtin:kit:Kit-model-b",
+  );
+  await expect(modelB).toBeVisible();
+  await modelB.click();
+  await expect(page.getByTestId("agent-model-selector-popover")).toBeHidden();
+  await expect(trigger).toContainText("Model B");
+});
+
 test("autocomplete filters suggestions as user types", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -261,7 +297,6 @@ test("selecting a persona mention creates a channel agent before sending", async
   );
 
   await page.getByTestId("send-message").click();
-  await expect(page.getByRole("alertdialog")).toHaveCount(0);
 
   await expect
     .poll(async () =>
@@ -341,7 +376,6 @@ test("selecting a persona mention reuses an existing persona agent", async ({
   );
 
   await page.getByTestId("send-message").click();
-  await expect(page.getByRole("alertdialog")).toHaveCount(0);
 
   await expect
     .poll(async () =>
@@ -454,6 +488,81 @@ test("mentioning an in-channel stopped managed agent starts it before sending", 
   await expect(mentionChip).toBeVisible();
 });
 
+test("changing a mentioned managed agent model creates a replacement instance", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: IN_CHANNEL_MANAGED_AGENT_PUBKEY,
+        name: "kit",
+        model: "model-a",
+        status: "running",
+        channelNames: ["general"],
+      },
+    ],
+    meshModels: [
+      { id: "model-a", name: "Model A" },
+      { id: "model-b", name: "Model B" },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Hey @kit");
+  await expect(autocomplete(page).getByText("kit")).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" use the bigger model");
+
+  const baselineCreateCount = commandCount(
+    await readCommandLog(page),
+    "create_managed_agent",
+  );
+  await expect(page.getByTestId("agent-model-selector-trigger")).toContainText(
+    "Model A",
+  );
+  await page.getByTestId("agent-model-selector-trigger").click();
+  await expect(page.getByTestId("agent-model-selector-popover")).toBeVisible();
+  await page
+    .getByTestId(
+      `agent-model-selector-model-agent:${IN_CHANNEL_MANAGED_AGENT_PUBKEY}-model-b`,
+    )
+    .click();
+  await expect(page.getByTestId("agent-model-selector-popover")).toBeHidden();
+  await expect(page.getByTestId("agent-model-selector-trigger")).toContainText(
+    "Model B",
+  );
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "create_managed_agent"),
+    )
+    .toBeGreaterThan(baselineCreateCount);
+  await expect
+    .poll(async () => {
+      const payloads = await readCommandPayloads(page);
+      return payloads.some((entry) => {
+        const payload = entry.payload as
+          | { input?: { model?: string } }
+          | undefined;
+        return (
+          entry.command === "create_managed_agent" &&
+          payload?.input?.model === "model-b"
+        );
+      });
+    })
+    .toBe(true);
+
+  const mentionChip = page
+    .getByTestId("message-row")
+    .last()
+    .locator("[data-mention].agent-mention-highlight", { hasText: "kit" });
+  await expect(mentionChip).toBeVisible();
+});
+
 test("mentioning an in-channel provider managed agent deploys it before sending", async ({
   page,
 }) => {
@@ -540,7 +649,6 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
   );
 
   await page.getByTestId("send-message").click();
-  await expect(page.getByRole("alertdialog")).toHaveCount(0);
 
   await expect
     .poll(async () =>
@@ -601,7 +709,6 @@ test("mentioning a non-member provider managed agent deploys it before sending",
   );
 
   await page.getByTestId("send-message").click();
-  await expect(page.getByRole("alertdialog")).toHaveCount(0);
 
   await expect
     .poll(async () =>

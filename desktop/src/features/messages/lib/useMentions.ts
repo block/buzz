@@ -669,6 +669,46 @@ export function useMentions(
     [],
   );
 
+  const registerMentionPersona = React.useCallback(
+    (displayName: string, personaId: string) => {
+      const trimmedName = displayName.trim();
+      const trimmedPersonaId = personaId.trim();
+      if (!trimmedName || !trimmedPersonaId) {
+        return;
+      }
+
+      personaMentionMapRef.current.set(trimmedName, trimmedPersonaId);
+      mentionMapRef.current.delete(trimmedName);
+      trimMapToSize(personaMentionMapRef.current, 200);
+
+      setSelectedMentionNames((current) => {
+        if (
+          current.some(
+            (name) => name.toLowerCase() === trimmedName.toLowerCase(),
+          )
+        ) {
+          return current;
+        }
+
+        return [...current, trimmedName];
+      });
+      setSelectedAgentMentionNames((current) => {
+        if (
+          current.some(
+            (name) => name.toLowerCase() === trimmedName.toLowerCase(),
+          )
+        ) {
+          return current;
+        }
+
+        return [...current, trimmedName];
+      });
+      setMentionQuery(null);
+      setMentionSelectedIndex(0);
+    },
+    [],
+  );
+
   const getMentionDisplayName = React.useCallback(
     (pubkey: string): string | null => {
       const normalizedPubkey = normalizePubkey(pubkey);
@@ -871,6 +911,7 @@ export function useMentions(
     knownNames: highlightNames,
     memberPubkeys,
     mentionSelectedIndex,
+    registerMentionPersona,
     registerMentionPubkey,
     suggestions,
     updateMentionQuery,

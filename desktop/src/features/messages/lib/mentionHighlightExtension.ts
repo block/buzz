@@ -1,8 +1,18 @@
 import { Extension } from "@tiptap/core";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Plugin, PluginKey, type Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
 export const mentionHighlightKey = new PluginKey("mentionHighlight");
+
+export type MentionDeleteRange = { from: number; to: number };
+
+type MentionDeleteDecorationSpec = {
+  mentionDelete?: {
+    fromOffset: number;
+    toOffset: number;
+  };
+};
 
 /**
  * TipTap extension that applies inline `mention-highlight` decorations
@@ -150,6 +160,62 @@ export function findHighlightMatches(
 }
 
 /**
+ * Returns the full @mention range touched by Backspace at `cursor`, if any.
+ *
+ * The stored offsets are relative to each decoration's current mapped
+ * position, so they stay valid when ProseMirror maps decorations after edits
+ * elsewhere in the document.
+ */
+export function findMentionDeleteRangeBeforeCursor(
+  decorations: DecorationSet,
+  cursor: number,
+): MentionDeleteRange | null {
+  if (cursor <= 0) return null;
+
+  const touchedDecorations = decorations.find(
+    cursor - 1,
+    cursor,
+    hasMentionDeleteSpec,
+  );
+
+  for (const decoration of touchedDecorations) {
+    const range = getMentionDeleteRange(decoration);
+    if (range && range.from < cursor && cursor <= range.to) {
+      return range;
+    }
+  }
+
+  return null;
+}
+
+export function findMentionBackspaceDeleteRange(
+  doc: ProseMirrorNode,
+  decorations: DecorationSet,
+  cursor: number,
+): MentionDeleteRange | null {
+  const directRange = findMentionDeleteRangeBeforeCursor(decorations, cursor);
+  if (directRange) return directRange;
+
+  if (cursor <= 1) return null;
+
+  // Autocomplete inserts a separator space after @mentions. When the caret is
+  // in that natural post-insert position, make one Backspace remove the tag
+  // and its separator instead of requiring a first press just to eat the space.
+  const previousChar = doc.textBetween(cursor - 1, cursor, "\n", "\0");
+  if (previousChar !== " ") return null;
+
+  const beforeSpaceRange = findMentionDeleteRangeBeforeCursor(
+    decorations,
+    cursor - 1,
+  );
+  if (!beforeSpaceRange || beforeSpaceRange.to !== cursor - 1) {
+    return null;
+  }
+
+  return { from: beforeSpaceRange.from, to: cursor };
+}
+
+/**
  * Returns true if the transaction's changed ranges touch text that contains
  * `@` or `#` — meaning a mention/channel-link boundary may have been
  * created, modified, or destroyed and we need a full decoration rebuild.
@@ -265,6 +331,7 @@ function buildDecorations(
       pos,
       mentionPatterns,
       "mention-highlight",
+      { deleteAsMention: true },
     );
     addMatchesForPatterns(
       decorations,
@@ -272,7 +339,7 @@ function buildDecorations(
       pos,
       agentMentionPatterns,
       "mention-highlight agent-mention-highlight",
-      { hideMentionPrefix: true },
+      { deleteAsMention: true, hideMentionPrefix: true },
     );
     addMatchesForPatterns(
       decorations,
@@ -292,7 +359,7 @@ function addMatchesForPatterns(
   position: number,
   patterns: RegExp[],
   className: string,
-  options?: { hideMentionPrefix?: boolean },
+  options?: { deleteAsMention?: boolean; hideMentionPrefix?: boolean },
 ) {
   for (const pattern of patterns) {
     pattern.lastIndex = 0;
@@ -300,17 +367,86 @@ function addMatchesForPatterns(
     while (match !== null) {
       const from = position + match.index;
       const to = from + match[0].length;
+      const deleteRangeLength = to - from;
       if (options?.hideMentionPrefix && match[0].startsWith("@")) {
         decorations.push(
-          Decoration.inline(from, from + 1, {
-            class: "agent-mention-at-hidden",
-          }),
+          Decoration.inline(
+            from,
+            from + 1,
+            {
+              class: "agent-mention-at-hidden",
+            },
+            options.deleteAsMention
+              ? mentionDeleteSpec(0, deleteRangeLength - 1)
+              : undefined,
+          ),
         );
-        decorations.push(Decoration.inline(from + 1, to, { class: className }));
+        decorations.push(
+          Decoration.inline(
+            from + 1,
+            to,
+            { class: className },
+            options.deleteAsMention ? mentionDeleteSpec(-1, 0) : undefined,
+          ),
+        );
       } else {
-        decorations.push(Decoration.inline(from, to, { class: className }));
+        decorations.push(
+          Decoration.inline(
+            from,
+            to,
+            { class: className },
+            options?.deleteAsMention ? mentionDeleteSpec(0, 0) : undefined,
+          ),
+        );
       }
       match = pattern.exec(text);
     }
   }
+}
+
+function mentionDeleteSpec(
+  fromOffset: number,
+  toOffset: number,
+): MentionDeleteDecorationSpec {
+  return {
+    mentionDelete: {
+      fromOffset,
+      toOffset,
+    },
+  };
+}
+
+function hasMentionDeleteSpec(spec: unknown): boolean {
+  return getMentionDeleteOffsets(spec) !== null;
+}
+
+function getMentionDeleteRange(
+  decoration: Decoration,
+): MentionDeleteRange | null {
+  const offsets = getMentionDeleteOffsets(decoration.spec);
+  if (!offsets) return null;
+
+  const from = decoration.from + offsets.fromOffset;
+  const to = decoration.to + offsets.toOffset;
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from >= to) {
+    return null;
+  }
+
+  return { from, to };
+}
+
+function getMentionDeleteOffsets(
+  spec: unknown,
+): MentionDeleteDecorationSpec["mentionDelete"] | null {
+  if (!spec || typeof spec !== "object") return null;
+
+  const mentionDelete = (spec as MentionDeleteDecorationSpec).mentionDelete;
+  if (!mentionDelete || typeof mentionDelete !== "object") return null;
+
+  const { fromOffset, toOffset } = mentionDelete;
+  if (!Number.isInteger(fromOffset) || !Number.isInteger(toOffset)) {
+    return null;
+  }
+
+  return mentionDelete;
 }

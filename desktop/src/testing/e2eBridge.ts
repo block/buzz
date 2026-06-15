@@ -39,6 +39,7 @@ type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
   personaId?: string | null;
+  model?: string | null;
   status?: RawManagedAgent["status"];
   channelNames?: string[];
   channelIds?: string[];
@@ -74,6 +75,7 @@ type E2eConfig = {
     profileReadError?: string;
     profileUpdateError?: string;
     searchProfiles?: MockSearchProfileSeed[];
+    meshModels?: Array<{ id: string; name: string | null }>;
     updateChannelDelayMs?: number;
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
@@ -960,7 +962,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     max_turn_duration_seconds: null,
     parallelism: 1,
     system_prompt: null,
-    model: null,
+    model: seed.model ?? null,
     env_vars: {},
     status,
     pid: status === "running" ? 42000 + mockManagedAgents.length : null,
@@ -1481,10 +1483,13 @@ const mockMeshState: {
   nodeMode: null,
 };
 
-function resetMockMesh() {
+function resetMockMesh(config?: E2eConfig) {
   mockMeshState.admitted = true;
-  mockMeshState.models = [
-    { id: "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M", name: "SmolLM2 135M" },
+  mockMeshState.models = config?.mock?.meshModels ?? [
+    {
+      id: "hf://demo/SmolLM2-135M-Instruct-GGUF:Q4_K_M",
+      name: "SmolLM2 135M",
+    },
   ];
   mockMeshState.denyReason = "not a relay member";
   mockMeshState.nodeState = "off";
@@ -5807,7 +5812,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockTeams();
   seedMockSearchProfiles(config);
   resetMockWorkflows();
-  resetMockMesh();
+  resetMockMesh(config);
   resetMockUserStatuses();
   mockWebsocketSendMutexWedged = false;
   mockWindows("main");
@@ -6285,15 +6290,23 @@ export function maybeInstallE2eTauriMocks() {
         return handleGetManagedAgentLog(
           payload as Parameters<typeof handleGetManagedAgentLog>[0],
         );
-      case "get_agent_models":
+      case "get_agent_models": {
+        const agent = getMockManagedAgent(
+          (payload as { pubkey: string }).pubkey,
+        );
         return {
-          agentName: "mock-agent",
+          agentName: agent.name,
           agentVersion: "0.0.0",
-          models: [],
-          agentDefaultModel: null,
-          selectedModel: null,
-          supportsSwitching: false,
+          models: mockMeshState.models.map((model) => ({
+            id: model.id,
+            name: model.name,
+            description: null,
+          })),
+          agentDefaultModel: mockMeshState.models[0]?.id ?? null,
+          selectedModel: agent.model,
+          supportsSwitching: mockMeshState.models.length > 0,
         };
+      }
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],

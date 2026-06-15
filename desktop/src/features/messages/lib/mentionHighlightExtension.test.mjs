@@ -1,10 +1,39 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { Schema } from "@tiptap/pm/model";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
+
 import {
   buildHighlightPatterns,
+  findMentionBackspaceDeleteRange,
+  findMentionDeleteRangeBeforeCursor,
   findHighlightMatches,
 } from "./mentionHighlightExtension.ts";
+
+const schema = new Schema({
+  nodes: {
+    doc: { content: "paragraph+" },
+    paragraph: {
+      content: "text*",
+      group: "block",
+      parseDOM: [{ tag: "p" }],
+      toDOM: () => ["p", 0],
+    },
+    text: { group: "inline" },
+  },
+  marks: {},
+});
+
+function textDoc(text) {
+  return schema.node("doc", null, [
+    schema.node("paragraph", null, text ? [schema.text(text)] : undefined),
+  ]);
+}
+
+function mentionDeleteSpec(fromOffset, toOffset) {
+  return { mentionDelete: { fromOffset, toOffset } };
+}
 
 // ── buildHighlightPatterns ────────────────────────────────────────────
 
@@ -151,4 +180,113 @@ test("#general should NOT match inside #generally (trailing word boundary)", () 
   const patterns = buildHighlightPatterns([], ["general"]);
   const matches = findHighlightMatches("#generally", patterns);
   assert.equal(matches.length, 0);
+});
+
+// ── findMentionDeleteRangeBeforeCursor ────────────────────────────────
+
+test("finds a mention delete range when cursor is at the end of a mention", () => {
+  const doc = textDoc("Hey @alice ");
+  const from = 5;
+  const to = 11;
+  const decorations = DecorationSet.create(doc, [
+    Decoration.inline(
+      from,
+      to,
+      { class: "mention-highlight" },
+      mentionDeleteSpec(0, 0),
+    ),
+  ]);
+
+  assert.deepEqual(findMentionDeleteRangeBeforeCursor(decorations, to), {
+    from,
+    to,
+  });
+});
+
+test("finds a mention delete range when cursor is inside a mention", () => {
+  const doc = textDoc("Hey @alice ");
+  const from = 5;
+  const to = 11;
+  const decorations = DecorationSet.create(doc, [
+    Decoration.inline(
+      from,
+      to,
+      { class: "mention-highlight" },
+      mentionDeleteSpec(0, 0),
+    ),
+  ]);
+
+  assert.deepEqual(findMentionDeleteRangeBeforeCursor(decorations, 8), {
+    from,
+    to,
+  });
+});
+
+test("does not delete a mention when cursor is before it or after its trailing space", () => {
+  const doc = textDoc("Hey @alice ");
+  const from = 5;
+  const to = 11;
+  const decorations = DecorationSet.create(doc, [
+    Decoration.inline(
+      from,
+      to,
+      { class: "mention-highlight" },
+      mentionDeleteSpec(0, 0),
+    ),
+  ]);
+
+  assert.equal(findMentionDeleteRangeBeforeCursor(decorations, from), null);
+  assert.equal(findMentionDeleteRangeBeforeCursor(decorations, to + 1), null);
+});
+
+test("backspace range includes the separator space after a mention", () => {
+  const doc = textDoc("Hey @alice ");
+  const from = 5;
+  const to = 11;
+  const cursorAfterSpace = 12;
+  const decorations = DecorationSet.create(doc, [
+    Decoration.inline(
+      from,
+      to,
+      { class: "mention-highlight" },
+      mentionDeleteSpec(0, 0),
+    ),
+  ]);
+
+  assert.deepEqual(
+    findMentionBackspaceDeleteRange(doc, decorations, cursorAfterSpace),
+    {
+      from,
+      to: cursorAfterSpace,
+    },
+  );
+});
+
+test("finds the full agent mention range from either split decoration", () => {
+  const doc = textDoc("Ask @kit");
+  const from = 5;
+  const to = 9;
+  const decorations = DecorationSet.create(doc, [
+    Decoration.inline(
+      from,
+      from + 1,
+      { class: "agent-mention-at-hidden" },
+      mentionDeleteSpec(0, to - (from + 1)),
+    ),
+    Decoration.inline(
+      from + 1,
+      to,
+      { class: "mention-highlight agent-mention-highlight" },
+      mentionDeleteSpec(-1, 0),
+    ),
+  ]);
+
+  assert.deepEqual(findMentionDeleteRangeBeforeCursor(decorations, from + 1), {
+    from,
+    to,
+  });
+  assert.deepEqual(findMentionDeleteRangeBeforeCursor(decorations, to), {
+    from,
+    to,
+  });
 });
