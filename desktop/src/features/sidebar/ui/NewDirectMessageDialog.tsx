@@ -181,7 +181,7 @@ export function NewDirectMessageDialog({
                     <ProfileAvatar
                       avatarUrl={user.avatarUrl}
                       className="h-5 w-5 text-[10px] shadow-none"
-                      iconClassName="h-3 w-3"
+                      iconClassName="h-4 w-4"
                       label={formatUserName(user)}
                     />
                     <span className="font-medium">{formatUserName(user)}</span>
@@ -198,7 +198,7 @@ export function NewDirectMessageDialog({
                       }}
                       type="button"
                     >
-                      <X className="h-3.5 w-3.5" />
+                      <X className="h-4 w-4" />
                     </button>
                   </div>
                 ))}

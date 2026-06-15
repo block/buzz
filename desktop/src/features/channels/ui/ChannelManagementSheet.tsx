@@ -79,7 +79,7 @@ function MetadataPill({
 }) {
   return (
     <div className="inline-flex items-center gap-2 rounded-full border border-border/80 bg-muted/40 px-3 py-1 text-xs font-medium text-muted-foreground">
-      <Icon className="h-3.5 w-3.5" />
+      <Icon className="h-4 w-4" />
       <span>{label}</span>
     </div>
   );

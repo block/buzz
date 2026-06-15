@@ -9,8 +9,9 @@ import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
+import { SkeletonReveal } from "@/shared/ui/skeleton";
 import { TooltipProvider } from "@/shared/ui/tooltip";
-import { TimelineSkeleton } from "./TimelineSkeleton";
+import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
 import { useTimelineScrollManager } from "./useTimelineScrollManager";
@@ -192,6 +193,11 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     directMessageIntro === null &&
     channelIntro === null;
   const showMessageList = !isLoading && messages.length > 0;
+  const timelineSkeletonRows = useTimelineSkeletonRows({
+    channelId,
+    isLoading,
+    messages,
+  });
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -218,175 +224,187 @@ export const MessageTimeline = React.memo(function MessageTimeline({
 
             {isFetchingOlder ? (
               <div className="flex justify-center py-2">
-                <Spinner className="h-4 w-4 text-muted-foreground" />
+                <Spinner className="h-4 w-4 border-2 text-muted-foreground" />
               </div>
             ) : null}
 
-            {isLoading ? <TimelineSkeleton /> : null}
-
-            {showDirectMessageIntro ? (
-              <div
-                className="mb-0.5 mt-auto flex w-full flex-col items-start px-3 py-2 text-left"
-                data-testid="message-dm-intro"
-              >
-                <ProfileAvatar
-                  avatarUrl={directMessageIntro.avatarUrl}
-                  className="h-[60px] w-[60px] text-base"
-                  iconClassName="h-6 w-6"
-                  label={directMessageIntro.displayName}
-                  testId="message-dm-intro-avatar"
-                />
-                <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
-                  {directMessageIntro.displayName}
-                </p>
-                <p className="mt-1 max-w-full truncate whitespace-nowrap text-sm leading-5 text-muted-foreground">
-                  This is the beginning of your direct message with{" "}
-                  <span className="font-medium text-foreground">
-                    {directMessageIntro.displayName}
-                  </span>
-                  .
-                </p>
-              </div>
-            ) : null}
-
-            {showChannelIntro ? (
-              <div
-                className="mb-0.5 mt-auto flex w-full max-w-2xl flex-col items-start px-3 py-2 text-left"
-                data-testid="message-channel-intro"
-              >
+            <SkeletonReveal
+              className={cn(
+                "min-h-[18rem]",
+                (showIntro || showGenericEmpty) && "min-h-full",
+                showMessageList && !showIntro && "mt-auto",
+              )}
+              contentClassName={cn(
+                "flex flex-col gap-2",
+                (showIntro || showGenericEmpty) && "min-h-full",
+              )}
+              loading={isLoading}
+              skeleton={<TimelineSkeleton rows={timelineSkeletonRows} />}
+            >
+              {showDirectMessageIntro ? (
                 <div
-                  className="flex h-[60px] w-[60px] items-center justify-center rounded-2xl border border-border/70 bg-muted/40 text-muted-foreground"
-                  data-testid="message-channel-intro-icon"
+                  className="mb-0.5 mt-auto flex w-full flex-col items-start px-3 py-2 text-left"
+                  data-testid="message-dm-intro"
                 >
-                  {channelIntro.icon ?? (
-                    <Hash aria-hidden className="h-7 w-7" />
-                  )}
-                </div>
-                <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
-                  #{channelIntro.channelName}
-                </p>
-                <p className="mt-1 max-w-full text-sm leading-5 text-muted-foreground">
-                  This is the beginning of the{" "}
-                  <span className="font-medium text-foreground">
-                    {channelIntro.channelKindLabel}
-                  </span>
-                  .
-                </p>
-                {channelIntro.description ? (
-                  <p className="mt-2 max-w-xl text-sm leading-5 text-muted-foreground">
-                    {channelIntro.description}
+                  <ProfileAvatar
+                    avatarUrl={directMessageIntro.avatarUrl}
+                    className="h-[60px] w-[60px] text-base"
+                    iconClassName="h-6 w-6"
+                    label={directMessageIntro.displayName}
+                    testId="message-dm-intro-avatar"
+                  />
+                  <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
+                    {directMessageIntro.displayName}
                   </p>
-                ) : null}
-                {channelIntro.actions?.length ? (
-                  <div className="mt-4 flex max-w-full flex-nowrap gap-3 overflow-x-auto pb-1">
-                    {channelIntro.actions.map((action) => {
-                      const hasDescription = Boolean(action.description);
+                  <p className="mt-1 max-w-full truncate whitespace-nowrap text-sm leading-5 text-muted-foreground">
+                    This is the beginning of your direct message with{" "}
+                    <span className="font-medium text-foreground">
+                      {directMessageIntro.displayName}
+                    </span>
+                    .
+                  </p>
+                </div>
+              ) : null}
 
-                      return (
-                        <button
-                          className={cn(
-                            "flex shrink-0 border border-border/70 bg-background/70 text-left transition-colors hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                            hasDescription
-                              ? "h-56 w-[13.75rem] flex-col rounded-2xl p-4"
-                              : "h-28 w-64 flex-col rounded-xl p-4",
-                          )}
-                          data-testid={action.testId}
-                          key={action.label}
-                          onClick={action.onClick}
-                          type="button"
-                        >
-                          <span
+              {showChannelIntro ? (
+                <div
+                  className="mb-0.5 mt-auto flex w-full max-w-2xl flex-col items-start px-3 py-2 text-left"
+                  data-testid="message-channel-intro"
+                >
+                  <div
+                    className="flex h-[60px] w-[60px] items-center justify-center rounded-2xl border border-border/70 bg-muted/40 text-muted-foreground"
+                    data-testid="message-channel-intro-icon"
+                  >
+                    {channelIntro.icon ?? (
+                      <Hash aria-hidden className="h-7 w-7" />
+                    )}
+                  </div>
+                  <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
+                    #{channelIntro.channelName}
+                  </p>
+                  <p className="mt-1 max-w-full text-sm leading-5 text-muted-foreground">
+                    This is the beginning of the{" "}
+                    <span className="font-medium text-foreground">
+                      {channelIntro.channelKindLabel}
+                    </span>
+                    .
+                  </p>
+                  {channelIntro.description ? (
+                    <p className="mt-2 max-w-xl text-sm leading-5 text-muted-foreground">
+                      {channelIntro.description}
+                    </p>
+                  ) : null}
+                  {channelIntro.actions?.length ? (
+                    <div className="mt-4 flex max-w-full flex-nowrap gap-3 overflow-x-auto pb-1">
+                      {channelIntro.actions.map((action) => {
+                        const hasDescription = Boolean(action.description);
+
+                        return (
+                          <button
                             className={cn(
-                              "flex shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground",
+                              "flex shrink-0 border border-border/70 bg-background/70 text-left transition-colors hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
                               hasDescription
-                                ? "h-12 w-12 [&_svg]:h-6 [&_svg]:w-6"
-                                : "h-10 w-10 [&_svg]:h-5 [&_svg]:w-5",
+                                ? "h-56 w-[13.75rem] flex-col rounded-2xl p-4"
+                                : "h-28 w-64 flex-col rounded-xl p-4",
                             )}
-                            data-testid={
-                              action.testId
-                                ? `${action.testId}-icon`
-                                : undefined
-                            }
+                            data-testid={action.testId}
+                            key={action.label}
+                            onClick={action.onClick}
+                            type="button"
                           >
-                            {action.icon}
-                          </span>
-                          <span className="mt-auto min-w-0">
                             <span
-                              className="block whitespace-normal break-words text-base font-medium leading-6 text-foreground"
+                              className={cn(
+                                "flex shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground",
+                                hasDescription
+                                  ? "h-12 w-12 [&_svg]:h-6 [&_svg]:w-6"
+                                  : "h-10 w-10 [&_svg]:h-5 [&_svg]:w-5",
+                              )}
                               data-testid={
                                 action.testId
-                                  ? `${action.testId}-title`
+                                  ? `${action.testId}-icon`
                                   : undefined
                               }
                             >
-                              {action.label}
+                              {action.icon}
                             </span>
-                            {action.description ? (
+                            <span className="mt-auto min-w-0">
                               <span
-                                className="mt-1 block whitespace-normal break-words text-sm leading-5 text-muted-foreground"
+                                className="block whitespace-normal break-words text-base font-medium leading-6 text-foreground"
                                 data-testid={
                                   action.testId
-                                    ? `${action.testId}-description`
+                                    ? `${action.testId}-title`
                                     : undefined
                                 }
                               >
-                                {action.description}
+                                {action.label}
                               </span>
-                            ) : null}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
+                              {action.description ? (
+                                <span
+                                  className="mt-1 block whitespace-normal break-words text-sm leading-5 text-muted-foreground"
+                                  data-testid={
+                                    action.testId
+                                      ? `${action.testId}-description`
+                                      : undefined
+                                  }
+                                >
+                                  {action.description}
+                                </span>
+                              ) : null}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
 
-            {showGenericEmpty ? (
-              <div
-                className="mt-auto rounded-3xl border border-dashed border-border/80 bg-card/70 px-6 py-10 text-center shadow-xs"
-                data-testid="message-empty"
-              >
-                <p className="text-base font-semibold tracking-tight">
-                  {emptyTitle}
-                </p>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  {emptyDescription}
-                </p>
-              </div>
-            ) : null}
+              {showGenericEmpty ? (
+                <div
+                  className="mt-auto rounded-3xl border border-dashed border-border/80 bg-card/70 px-6 py-10 text-center shadow-xs"
+                  data-testid="message-empty"
+                >
+                  <p className="text-base font-semibold tracking-tight">
+                    {emptyTitle}
+                  </p>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    {emptyDescription}
+                  </p>
+                </div>
+              ) : null}
 
-            {showMessageList ? (
-              <div
-                className={cn("flex flex-col gap-2", !showIntro && "mt-auto")}
-              >
-                <TimelineMessageList
-                  agentPubkeys={agentPubkeys}
-                  channelId={channelId}
-                  channelName={channelName}
-                  channelType={channelType}
-                  currentPubkey={currentPubkey}
-                  followThreadById={followThreadById}
-                  highlightedMessageId={highlightedMessageId}
-                  isFollowingThreadById={isFollowingThreadById}
-                  messageFooters={messageFooters}
-                  messages={messages}
-                  onDelete={onDelete}
-                  onEdit={onEdit}
-                  onMarkUnread={onMarkUnread}
-                  onReply={onReply}
-                  isSendingVideoReviewComment={isSendingVideoReviewComment}
-                  onSendVideoReviewComment={onSendVideoReviewComment}
-                  onToggleReaction={onToggleReaction}
-                  personaLookup={personaLookup}
-                  profiles={profiles}
-                  searchActiveMessageId={searchActiveMessageId}
-                  searchMatchingMessageIds={searchMatchingMessageIds}
-                  searchQuery={searchQuery}
-                  unfollowThreadById={unfollowThreadById}
-                />
-              </div>
-            ) : null}
+              {showMessageList ? (
+                <div
+                  className={cn("flex flex-col gap-2", !showIntro && "mt-auto")}
+                >
+                  <TimelineMessageList
+                    agentPubkeys={agentPubkeys}
+                    channelId={channelId}
+                    channelName={channelName}
+                    channelType={channelType}
+                    currentPubkey={currentPubkey}
+                    followThreadById={followThreadById}
+                    highlightedMessageId={highlightedMessageId}
+                    isFollowingThreadById={isFollowingThreadById}
+                    messageFooters={messageFooters}
+                    messages={messages}
+                    onDelete={onDelete}
+                    onEdit={onEdit}
+                    onMarkUnread={onMarkUnread}
+                    onReply={onReply}
+                    isSendingVideoReviewComment={isSendingVideoReviewComment}
+                    onSendVideoReviewComment={onSendVideoReviewComment}
+                    onToggleReaction={onToggleReaction}
+                    personaLookup={personaLookup}
+                    profiles={profiles}
+                    searchActiveMessageId={searchActiveMessageId}
+                    searchMatchingMessageIds={searchMatchingMessageIds}
+                    searchQuery={searchQuery}
+                    unfollowThreadById={unfollowThreadById}
+                  />
+                </div>
+              ) : null}
+            </SkeletonReveal>
 
             <div aria-hidden className="h-px" ref={bottomAnchorRef} />
           </div>
@@ -400,7 +418,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
             )}
           >
             <Button
-              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-[11px] font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-3.5"
+              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-[11px] font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
               data-testid="message-scroll-to-latest"
               onClick={() => {
                 scrollToBottom("smooth");

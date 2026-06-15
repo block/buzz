@@ -89,7 +89,7 @@ export function MembershipDenied({
           <Badge variant="warning">Membership required</Badge>
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-destructive/10">
-              <ShieldX className="h-5 w-5 text-destructive" />
+              <ShieldX className="h-4 w-4 text-destructive" />
             </div>
             <h1 className="text-2xl font-semibold tracking-tight text-foreground">
               Not a member yet
@@ -172,7 +172,7 @@ export function MembershipDenied({
                   className="flex items-start gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs"
                   data-testid="membership-denied-npub-preview"
                 >
-                  <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                  <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
                   <div className="min-w-0 space-y-0.5">
                     <p className="font-medium text-foreground">
                       This will use this Nostr identity:
@@ -197,7 +197,10 @@ export function MembershipDenied({
                 type="submit"
               >
                 {isImportingKey ? (
-                  <Spinner aria-label="Importing key" className="h-4 w-4" />
+                  <Spinner
+                    aria-label="Importing key"
+                    className="h-4 w-4 border-2"
+                  />
                 ) : (
                   "Import key"
                 )}
@@ -236,7 +239,7 @@ export function MembershipDenied({
                   }}
                   type="button"
                 >
-                  <KeyRound className="h-3 w-3" />
+                  <KeyRound className="h-4 w-4" />
                   Use a different key
                 </button>
               ) : null}

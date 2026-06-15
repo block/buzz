@@ -373,7 +373,7 @@ export function SpeakerControls({
             size="icon"
             variant="secondary"
           >
-            <ChevronUp className="h-3 w-3" />
+            <ChevronUp className="h-4 w-4" />
           </Button>
         </PopoverTrigger>
       </div>
@@ -428,7 +428,7 @@ export function DeviceList({
             type="button"
           >
             <Check
-              className={cn("h-3 w-3 shrink-0", selectedId && "invisible")}
+              className={cn("h-4 w-4 shrink-0", selectedId && "invisible")}
             />
             System default
           </button>
@@ -443,7 +443,7 @@ export function DeviceList({
                 type="button"
               >
                 <Check
-                  className={cn("h-3 w-3 shrink-0", !isSelected && "invisible")}
+                  className={cn("h-4 w-4 shrink-0", !isSelected && "invisible")}
                 />
                 <span className="truncate">{d.label}</span>
               </button>

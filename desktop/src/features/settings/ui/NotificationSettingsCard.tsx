@@ -227,7 +227,7 @@ export function NotificationSettingsCard({
                   >
                     {showComingSoon ? (
                       <>
-                        <ChevronUp className="h-3.5 w-3.5" />
+                        <ChevronUp className="h-4 w-4" />
                         Show less
                       </>
                     ) : (

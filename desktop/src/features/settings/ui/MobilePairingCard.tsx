@@ -225,7 +225,7 @@ function PairingDialog({
                     type="button"
                   >
                     <code className="min-w-0 flex-1 break-all">{qrUri}</code>
-                    <Copy className="h-3.5 w-3.5 shrink-0" />
+                    <Copy className="h-4 w-4 shrink-0" />
                   </button>
                 </div>
 
@@ -332,7 +332,7 @@ export function MobilePairingCard({
 
       <SettingsOptionGroup>
         <SettingsOptionRow className="gap-3">
-          <Smartphone className="h-5 w-5 shrink-0 text-muted-foreground" />
+          <Smartphone className="h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 flex-1">
             <p className="text-sm font-medium">Pair Mobile Device</p>
             <p className="text-sm font-normal text-muted-foreground">
