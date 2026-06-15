@@ -35,8 +35,8 @@ use crate::acp::{
 use crate::config::{DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
-    prepend_base_prompt, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
-    PromptProfile, PromptProfileLookup,
+    ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo, PromptProfile,
+    PromptProfileLookup,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -52,9 +52,9 @@ pub struct TaskMeta {
     pub channel_id: Option<Uuid>,
     /// Clone of batch for Queue mode panic recovery.
     pub recoverable_batch: Option<FlushBatch>,
-    /// Cancel signal for the in-flight prompt task.
-    /// `None` for heartbeat tasks (not cancellable) and after signal is consumed.
-    pub cancel_tx: Option<tokio::sync::oneshot::Sender<CancelMode>>,
+    /// Control signal for the in-flight prompt task.
+    /// `None` for heartbeat tasks (not controllable) and after signal is consumed.
+    pub control_tx: Option<tokio::sync::oneshot::Sender<ControlSignal>>,
 }
 
 /// Agent-level model capabilities. Populated on first session creation.
@@ -117,6 +117,13 @@ impl SessionState {
         self.heartbeat_turn_count = 0;
         self.core_sections.clear();
     }
+
+    #[cfg(test)]
+    fn has_channel_state(&self, channel_id: &Uuid) -> bool {
+        self.sessions.contains_key(channel_id)
+            || self.turn_counts.contains_key(channel_id)
+            || self.core_sections.contains_key(channel_id)
+    }
 }
 
 /// An agent with its session state, owned by the pool or a running task.
@@ -128,6 +135,9 @@ pub struct OwnedAgent {
     pub model_capabilities: Option<AgentModelCapabilities>,
     /// Desired model ID (from `Config.model`). Applied after every `session_new_full()`.
     pub desired_model: Option<String>,
+    /// Protocol version reported by the agent in its initialize response.
+    /// Agents declaring >= 2 support `systemPrompt` in session/new.
+    pub protocol_version: u32,
 }
 
 /// Pool of agents with take-and-return ownership semantics.
@@ -159,13 +169,30 @@ pub enum PromptSource {
     Heartbeat,
 }
 
-/// How an in-flight channel turn should be cancelled.
+/// Apply state effects for Race 1, where a control signal arrives just after the
+/// prompt completed naturally. The prompt result has already been consumed by
+/// `select!`, so the harness must synthesize a successful result while still
+/// honoring any load-bearing control signal semantics.
+fn apply_completed_before_control_signal(
+    state: &mut SessionState,
+    source: &PromptSource,
+    control_signal: ControlSignal,
+) {
+    if control_signal == ControlSignal::Rotate {
+        state.invalidate(source);
+    }
+}
+
+/// Control signal for an in-flight channel turn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CancelMode {
+pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch.
-    Stop,
+    Cancel,
     /// Stop the current turn and requeue its triggering batch for a merged re-prompt.
     Interrupt,
+    /// Stop the current turn and drop its triggering batch. The session is
+    /// invalidated just like cancel; the next turn creates a fresh session.
+    Rotate,
 }
 
 /// Outcome of a prompt task.
@@ -189,6 +216,10 @@ pub struct PromptContext {
     pub initial_message: Option<String>,
     pub idle_timeout: Duration,
     pub max_turn_duration: Duration,
+    /// Interval between per-turn `turn_liveness` observer pings. `Duration::ZERO`
+    /// disables emission. This is the desktop crash-backstop signal — distinct
+    /// from `heartbeat_prompt` (agent self-prompting).
+    pub turn_liveness_interval: Duration,
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
     pub heartbeat_prompt: Option<String>,
@@ -400,9 +431,27 @@ async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
 ) -> Result<String, AcpError> {
+    // Combine base_prompt + system_prompt into a single systemPrompt value
+    // for the session/new request. Only sent when the agent declares protocol
+    // version >= 2 (supports systemPrompt); legacy agents ignore it.
+    let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
+        match (ctx.base_prompt, ctx.system_prompt.as_deref()) {
+            (Some(bp), Some(sp)) => Some(format!("{}\n\n{sp}", bp.trim_end())),
+            (Some(bp), None) => Some(bp.trim_end().to_string()),
+            (None, Some(sp)) => Some(sp.to_string()),
+            (None, None) => None,
+        }
+    } else {
+        None
+    };
+
     let resp = agent
         .acp
-        .session_new_full(&ctx.cwd, ctx.mcp_servers.clone())
+        .session_new_full(
+            &ctx.cwd,
+            ctx.mcp_servers.clone(),
+            combined_system_prompt.as_deref(),
+        )
         .await?;
 
     // Populate model capabilities on first session creation.
@@ -591,6 +640,26 @@ async fn apply_permission_mode(
     Ok(())
 }
 
+/// Prepend the `[Base]` section to a user-message body for legacy agents.
+///
+/// Legacy agents (`protocol_version < 2`) don't receive `base_prompt` via the
+/// system role in `session/new`, so it must ride along in the user message.
+/// Agents with `protocol_version >= 2`, or any agent without a `base_prompt`,
+/// get `body` unchanged. The gate lives here so the heartbeat and
+/// initial-message dispatch paths can't drift apart again.
+pub(crate) fn prepend_base_for_legacy(
+    protocol_version: u32,
+    base_prompt: Option<&str>,
+    body: &str,
+) -> String {
+    match base_prompt {
+        Some(bp) if protocol_version < 2 => {
+            format!("{}\n\n{body}", crate::queue::base_section(bp))
+        }
+        _ => body.to_string(),
+    }
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -609,7 +678,7 @@ pub async fn run_prompt_task(
     prompt_text: Option<String>,
     ctx: Arc<PromptContext>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
-    cancel_rx: Option<tokio::sync::oneshot::Receiver<CancelMode>>,
+    control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
 ) {
     // ── Determine source and resolve/create session ───────────────────────
 
@@ -652,6 +721,16 @@ pub async fn run_prompt_task(
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
+
+    // ── Turn completion guard ─────────────────────────────────────────────
+    // Emits `turn_completed` on any exit path. Captures observer handle and
+    // metadata now, before the agent is moved into PromptResult.
+    let _turn_guard = TurnCompletionGuard::new(
+        agent.acp.observer_handle(),
+        agent.acp.observer_agent_index(),
+        observer_channel_id,
+        turn_id.clone(),
+    );
 
     let (session_id, is_new_session) = match &source {
         PromptSource::Channel(cid) => {
@@ -811,11 +890,11 @@ pub async fn run_prompt_task(
                 target: "pool::session",
                 "sending initial_message to session {session_id} for channel {cid}"
             );
-            // Prepend base prompt to initial_message for platform orientation.
-            let init_msg = match ctx.base_prompt {
-                Some(bp) => prepend_base_prompt(bp, initial_msg),
-                None => initial_msg.to_string(),
-            };
+            // For agents with systemPrompt support (protocol_version >= 2),
+            // base_prompt is delivered via the system role in session/new.
+            // Legacy agents receive it via [Base] in the user message instead.
+            let init_msg =
+                prepend_base_for_legacy(agent.protocol_version, ctx.base_prompt, initial_msg);
             let init_result = agent
                 .acp
                 .session_prompt_with_idle_timeout(
@@ -967,12 +1046,13 @@ pub async fn run_prompt_task(
         crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
-                base_prompt: ctx.base_prompt,
-                system_prompt: ctx.system_prompt.as_deref(),
                 agent_core: agent_core_section.as_deref(),
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
                 profile_lookup: profile_lookup.as_ref(),
+                has_system_prompt_support: agent.protocol_version >= 2,
+                base_prompt: ctx.base_prompt,
+                system_prompt: ctx.system_prompt.as_deref(),
             },
         )
     } else {
@@ -1008,22 +1088,40 @@ pub async fn run_prompt_task(
         None => vec![prompt_text.as_str()],
     };
 
-    // ── Cancel-aware prompt dispatch ──────────────────────────────────────
-    // When cancel_rx is Some (channel tasks), wrap the prompt in select! so
-    // the main loop can interrupt it. Heartbeats (cancel_rx=None) take the
-    // simple await path — they are not cancellable.
-    let prompt_result = match cancel_rx {
+    // ── Control-aware prompt dispatch ─────────────────────────────────────
+    // When control_rx is Some (channel tasks), wrap the prompt in select! so
+    // the main loop can cancel, interrupt, or rotate it. Heartbeats
+    // (control_rx=None) take the simple await path — they are not controllable.
+    //
+    // The liveness future emits `turn_liveness` pings on an interval and never
+    // resolves; it rides every prompt-await path as a non-winning select arm so
+    // a turn stays alive on the desktop while it runs. Built from a captured
+    // observer handle (not `&agent.acp`) because the prompt holds `&mut agent.acp`.
+    let liveness = run_turn_liveness(
+        agent.acp.observer_handle(),
+        agent.acp.observer_agent_index(),
+        observer::context_for(
+            observer_channel_id,
+            Some(session_id.clone()),
+            Some(turn_id.clone()),
+        ),
+        ctx.turn_liveness_interval,
+    );
+    tokio::pin!(liveness);
+
+    let prompt_result = match control_rx {
         None => {
             // Heartbeat / non-cancellable path.
-            agent
-                .acp
-                .session_prompt_blocks_with_idle_timeout(
+            tokio::select! {
+                biased;
+                result = agent.acp.session_prompt_blocks_with_idle_timeout(
                     &session_id,
                     &prompt_blocks,
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
-                )
-                .await
+                ) => result,
+                _ = &mut liveness => unreachable!("liveness future never resolves"),
+            }
         }
         Some(rx) => {
             tokio::select! {
@@ -1034,9 +1132,10 @@ pub async fn run_prompt_task(
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
+                _ = &mut liveness => unreachable!("liveness future never resolves"),
                 mode = rx => {
-                    let cancel_mode = mode.unwrap_or(CancelMode::Stop);
-                    // Cancel signal received. Guard against Race 1: the turn may
+                    let control_signal = mode.unwrap_or(ControlSignal::Cancel);
+                    // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
                     if agent.acp.has_in_flight_prompt() {
                         // Prompt is genuinely in-flight — cancel it.
@@ -1051,9 +1150,9 @@ pub async fn run_prompt_task(
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
                                 agent.state.invalidate(&source);
-                                let retry_batch = match cancel_mode {
-                                    CancelMode::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    CancelMode::Stop => None,
+                                let retry_batch = match control_signal {
+                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
+                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
                                 };
                                 let _ = result_tx.send(PromptResult {
                                     agent,
@@ -1065,9 +1164,9 @@ pub async fn run_prompt_task(
                             }
                             Err(AcpError::AgentExited) => {
                                 agent.state.invalidate_all();
-                                let retry_batch = match cancel_mode {
-                                    CancelMode::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    CancelMode::Stop => None,
+                                let retry_batch = match control_signal {
+                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
+                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
                                 };
                                 let _ = result_tx.send(PromptResult {
                                     agent,
@@ -1080,9 +1179,9 @@ pub async fn run_prompt_task(
                             Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout) => {
                                 // Cancel drain timed out — agent state uncertain.
                                 agent.state.invalidate(&source);
-                                let retry_batch = match cancel_mode {
-                                    CancelMode::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    CancelMode::Stop => None,
+                                let retry_batch = match control_signal {
+                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
+                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
                                 };
                                 let _ = result_tx.send(PromptResult {
                                     agent,
@@ -1094,9 +1193,9 @@ pub async fn run_prompt_task(
                             }
                             Err(e) => {
                                 agent.state.invalidate(&source);
-                                let retry_batch = match cancel_mode {
-                                    CancelMode::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    CancelMode::Stop => None,
+                                let retry_batch = match control_signal {
+                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
+                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
                                 };
                                 let _ = result_tx.send(PromptResult {
                                     agent,
@@ -1122,9 +1221,21 @@ pub async fn run_prompt_task(
                         // and last_prompt_id was cleared by the success path.
                         //
                         // MUST send a PromptResult or the main loop deadlocks.
-                        tracing::debug!(
-                            target: "pool::prompt",
-                            "cancel signal arrived but turn already completed — treating as success"
+                        if control_signal == ControlSignal::Rotate {
+                            tracing::debug!(
+                                target: "pool::prompt",
+                                "rotate signal arrived but turn already completed — invalidating session"
+                            );
+                        } else {
+                            tracing::debug!(
+                                target: "pool::prompt",
+                                "control signal arrived but turn already completed — treating as success"
+                            );
+                        }
+                        apply_completed_before_control_signal(
+                            &mut agent.state,
+                            &source,
+                            control_signal,
                         );
                         let _ = result_tx.send(PromptResult {
                             agent,
@@ -1929,6 +2040,92 @@ impl Drop for ReactionGuard {
     }
 }
 
+// ── Turn liveness emission ───────────────────────────────────────────────────
+// Periodically emits a `turn_liveness` observer event while a turn is in-flight,
+// so the desktop can prune turns whose host died without unwinding (kill -9 /
+// crash) far sooner than the no-activity backstop. Runs as a non-resolving
+// `select!` arm in `run_prompt_task`: it lives and dies with the prompt future,
+// so emission stops on every exit path (complete / cancel / error / panic) with
+// no separate teardown to forget.
+//
+// Takes a captured `ObserverHandle` rather than `&agent.acp` because the prompt
+// future holds `&mut agent.acp` for its whole duration — a second borrow would
+// not compile.
+//
+// This future never resolves; callers must race it against the prompt and rely
+// on drop for teardown. When `interval` is zero, liveness is disabled and the
+// future parks forever without emitting.
+async fn run_turn_liveness(
+    observer: Option<observer::ObserverHandle>,
+    agent_index: Option<usize>,
+    context: observer::ObserverContext,
+    interval: Duration,
+) {
+    let Some(observer) = observer else {
+        return std::future::pending::<()>().await;
+    };
+    if interval.is_zero() {
+        return std::future::pending::<()>().await;
+    }
+    let mut ticker = tokio::time::interval(interval);
+    // The first tick completes immediately; skip it so the first liveness ping
+    // fires one interval after the turn starts, not at t=0 (turn_started already
+    // marks t=0).
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        observer.emit(
+            "turn_liveness",
+            agent_index,
+            &context,
+            serde_json::json!({}),
+        );
+    }
+}
+
+// ── Turn completion scope guard ──────────────────────────────────────────────
+// Emits a `turn_completed` observer event on drop, covering ALL exit paths
+// (success, error, timeout, cancel, panic) from `run_prompt_task`. Captures
+// observer handle and metadata at creation time so it remains valid even after
+// the agent is moved into `PromptResult`.
+
+struct TurnCompletionGuard {
+    observer: Option<observer::ObserverHandle>,
+    agent_index: Option<usize>,
+    channel_id: Option<uuid::Uuid>,
+    turn_id: String,
+}
+
+impl TurnCompletionGuard {
+    fn new(
+        observer: Option<observer::ObserverHandle>,
+        agent_index: Option<usize>,
+        channel_id: Option<uuid::Uuid>,
+        turn_id: String,
+    ) -> Self {
+        Self {
+            observer,
+            agent_index,
+            channel_id,
+            turn_id,
+        }
+    }
+}
+
+impl Drop for TurnCompletionGuard {
+    fn drop(&mut self) {
+        if let Some(observer) = self.observer.take() {
+            let context = observer::context_for(self.channel_id, None, Some(self.turn_id.clone()));
+            observer.emit(
+                "turn_completed",
+                self.agent_index,
+                &context,
+                serde_json::json!({}),
+            );
+        }
+    }
+}
+
 const REACTION_SEEN: &str = "👀";
 const REACTION_WORKING: &str = "💬";
 
@@ -2109,6 +2306,35 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use serde_json::json;
+
+    // ── prepend_base_for_legacy regression tests ─────────────────────────────
+    // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
+    // a legacy agent WITH a base_prompt must get [Base] prepended to the user
+    // message. This is the exact regression that shipped in the round-2 bug.
+
+    #[test]
+    fn test_initial_message_legacy_agent_gets_base_prepended() {
+        // protocol_version 1 + Some(base_prompt): [Base] rides along in the
+        // user message, composed as `[Base]\n{bp}\n\n{initial_msg}`.
+        let composed = prepend_base_for_legacy(1, Some("you are a helpful agent"), "hello channel");
+        assert_eq!(composed, "[Base]\nyou are a helpful agent\n\nhello channel");
+        assert!(composed.starts_with("[Base]\nyou are a helpful agent\n\n"));
+    }
+
+    #[test]
+    fn test_initial_message_modern_agent_omits_base() {
+        // protocol_version 2 receives base_prompt via session/new, so the user
+        // message is left untouched even when a base_prompt is present.
+        let composed = prepend_base_for_legacy(2, Some("you are a helpful agent"), "hello channel");
+        assert_eq!(composed, "hello channel");
+    }
+
+    #[test]
+    fn test_initial_message_legacy_agent_without_base_is_unchanged() {
+        // No base_prompt configured: nothing to prepend regardless of version.
+        let composed = prepend_base_for_legacy(1, None, "hello channel");
+        assert_eq!(composed, "hello channel");
+    }
 
     // ── parse_thread_response tests ──────────────────────────────────────────
 
@@ -2473,9 +2699,48 @@ mod tests {
         s.sessions.insert(ch_b, "sess-b".into());
         s.turn_counts.insert(ch_a, 5);
         s.turn_counts.insert(ch_b, 3);
+        s.core_sections.insert(ch_a, "core-a".into());
+        s.core_sections.insert(ch_b, "core-b".into());
         s.heartbeat_session = Some("sess-hb".into());
         s.heartbeat_turn_count = 7;
         (s, ch_a, ch_b)
+    }
+
+    #[test]
+    fn test_rotate_after_natural_completion_invalidates_channel_state() {
+        let (mut s, ch_a, ch_b) = make_state();
+
+        apply_completed_before_control_signal(
+            &mut s,
+            &PromptSource::Channel(ch_a),
+            ControlSignal::Rotate,
+        );
+
+        assert!(!s.sessions.contains_key(&ch_a));
+        assert!(!s.turn_counts.contains_key(&ch_a));
+        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.has_channel_state(&ch_a));
+        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
+        assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
+        assert_eq!(s.heartbeat_turn_count, 7);
+    }
+
+    #[test]
+    fn test_cancel_after_natural_completion_preserves_channel_state() {
+        let (mut s, ch_a, ch_b) = make_state();
+
+        apply_completed_before_control_signal(
+            &mut s,
+            &PromptSource::Channel(ch_a),
+            ControlSignal::Cancel,
+        );
+
+        assert_eq!(s.sessions.get(&ch_a).unwrap(), "sess-a");
+        assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
+        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
+        assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
     }
 
     #[test]
@@ -2485,9 +2750,12 @@ mod tests {
 
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
+        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
         // heartbeat untouched
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
         assert_eq!(s.heartbeat_turn_count, 7);
@@ -2504,6 +2772,8 @@ mod tests {
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
+        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
     }
 
     #[test]
@@ -2513,6 +2783,7 @@ mod tests {
 
         assert!(s.sessions.is_empty());
         assert!(s.turn_counts.is_empty());
+        assert!(s.core_sections.is_empty());
         assert!(s.heartbeat_session.is_none());
         assert_eq!(s.heartbeat_turn_count, 0);
     }
@@ -2528,6 +2799,8 @@ mod tests {
         assert_eq!(s.turn_counts.len(), 2);
         assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
+        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
     }
 
     #[test]
@@ -2536,6 +2809,7 @@ mod tests {
         s.invalidate_all(); // should not panic
         assert!(s.sessions.is_empty());
         assert!(s.turn_counts.is_empty());
+        assert!(s.core_sections.is_empty());
     }
 
     #[test]
@@ -2544,9 +2818,12 @@ mod tests {
         assert!(s.invalidate_channel(&ch_a));
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
+        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
         // heartbeat untouched
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
         assert_eq!(s.heartbeat_turn_count, 7);
@@ -2573,7 +2850,91 @@ mod tests {
         }
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
+        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.has_channel_state(&ch_a));
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
+        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+    }
+
+    // ── turn liveness emission ───────────────────────────────────────────────
+    // `run_turn_liveness` is raced against a "prompt" future the same way
+    // `run_prompt_task` does it: the prompt wins the select and the liveness
+    // future is dropped. We assert what the observer saw.
+
+    fn liveness_count(handle: &observer::ObserverHandle) -> usize {
+        handle
+            .snapshot()
+            .iter()
+            .filter(|e| e.kind == "turn_liveness")
+            .count()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_liveness_fires_while_prompt_pends_then_stops() {
+        let observer = observer::ObserverHandle::in_process();
+        let context = observer::context_for(None, None, Some("t-1".into()));
+        let liveness = run_turn_liveness(
+            Some(observer.clone()),
+            Some(0),
+            context,
+            Duration::from_secs(10),
+        );
+        tokio::pin!(liveness);
+
+        // Prompt pends for 25s, then completes — first liveness tick at 10s,
+        // second at 20s, so the observer must see exactly two pings.
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep(Duration::from_secs(25)) => {}
+            _ = &mut liveness => unreachable!("liveness future never resolves"),
+        }
+
+        assert_eq!(liveness_count(&observer), 2);
+
+        // The turn carried the live turn_id on each ping.
+        let pings: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.kind == "turn_liveness")
+            .collect();
+        assert!(pings.iter().all(|e| e.turn_id.as_deref() == Some("t-1")));
+
+        // After the prompt wins the select, the liveness future is dropped —
+        // advancing the clock further produces no new pings.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(liveness_count(&observer), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_liveness_disabled_when_interval_zero_emits_nothing() {
+        let observer = observer::ObserverHandle::in_process();
+        let context = observer::context_for(None, None, Some("t-1".into()));
+        let liveness = run_turn_liveness(Some(observer.clone()), Some(0), context, Duration::ZERO);
+        tokio::pin!(liveness);
+
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep(Duration::from_secs(120)) => {}
+            _ = &mut liveness => unreachable!("disabled liveness future never resolves"),
+        }
+
+        assert_eq!(liveness_count(&observer), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_liveness_without_observer_emits_nothing() {
+        // A turn that never started has no observer handle — the future must
+        // park without emitting or panicking.
+        let context = observer::context_for(None, None, Some("t-1".into()));
+        let liveness = run_turn_liveness(None, None, context, Duration::from_secs(10));
+        tokio::pin!(liveness);
+
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep(Duration::from_secs(120)) => {}
+            _ = &mut liveness => unreachable!("handle-less liveness future never resolves"),
+        }
+        // No observer to assert against — reaching here without panic is the test.
     }
 }

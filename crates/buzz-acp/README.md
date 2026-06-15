@@ -139,7 +139,17 @@ Controls which authors' events the harness forwards to the agent. Events from di
 | `anyone` | Forward all events (no author filtering). |
 | `nobody` | Drop all inbound events. Agent only acts on heartbeat prompts. |
 
-The gate applies to **all** inbound events — @mentions, DMs, thread replies, and any event delivered by the relay. The `!shutdown` command is checked **before** the gate, so the owner can always shut down the agent regardless of mode.
+The gate applies to **all** inbound events — @mentions, DMs, thread replies, and any event delivered by the relay. Owner control commands are checked **before** the gate, so the owner can still manage the harness regardless of mode:
+
+| Command | Effect |
+|---------|--------|
+| `!shutdown` | Gracefully exits the harness. |
+| `!cancel` | Cancels the current in-flight turn for that channel, if any. |
+| `!rotate` | Rotates the ACP session for that channel. If a turn is in-flight, it is cancelled and the channel session is invalidated when the task returns; otherwise the cached idle session is invalidated immediately. The next queued/received event starts a fresh session. |
+
+Use `!cancel` to stop only the current turn; it is a no-op when the channel is idle. Use `!rotate` when you want the next turn in the channel to start from a fresh ACP session, even if the channel is currently idle.
+
+Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent.
 
 > **Note:** The default mode is `owner-only`. Agents without a registered `agent_owner_pubkey` will not respond to any events until the owner is resolved. Set `--respond-to anyone` to disable the gate entirely.
 

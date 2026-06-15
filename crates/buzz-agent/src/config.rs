@@ -1,18 +1,24 @@
 use std::time::Duration;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
+pub const MAX_SYSTEM_PROMPT_BYTES: usize = 512 * 1024;
+/// Total per-result byte ceiling (text + images). Sized for image-bearing
+/// results — view_image can legitimately return multi-MiB base64 payloads.
+/// Text is governed by the much smaller `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES`.
 pub const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
+/// Default cap on the *text* portion of a single tool result. Oversized text
+/// is middle-elided before it enters history; without this, one fat `cat`
+/// burns the context window and forces a lossy handoff. 50 KiB matches the
+/// shell-output caps in sprout-dev-mcp, goose, and pi; codex defaults to
+/// 10 KB. Tunable via `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES`.
+pub const DEFAULT_TOOL_RESULT_TEXT_BYTES: usize = 50 * 1024;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 64;
 
 pub const HANDOFF_MAX_OUTPUT_TOKENS: u32 = 8192;
 
-pub const HANDOFF_TAIL_ITEMS: usize = 5;
-
 pub const HANDOFF_ORIGINAL_TASK_MAX_BYTES: usize = 16 * 1024;
-
-pub const HANDOFF_PROMPT_MAX_BYTES: usize = 32 * 1024;
 
 pub const HANDOFF_MAX_TOOL_NAMES: usize = 20;
 
@@ -56,6 +62,11 @@ pub struct Config {
     pub max_sessions: usize,
     pub max_line_bytes: usize,
     pub max_history_bytes: usize,
+    /// Per-tool-result cap on text content. Oversized text is middle-elided
+    /// (head + tail kept) before entering history. Images are exempt — they
+    /// are bounded by [`MAX_TOOL_RESULT_BYTES`] and accounted separately.
+    /// Set via `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES`.
+    pub max_tool_result_text_bytes: usize,
     /// Provider context window in tokens used to gate handoff. The handoff
     /// fires when the previous request's (cache-summed) input tokens cross the
     /// handoff threshold for this budget, before the next request can exceed
@@ -163,6 +174,10 @@ impl Config {
             max_sessions: parse_env("BUZZ_AGENT_MAX_SESSIONS", usize::MAX)?,
             max_line_bytes: parse_env("BUZZ_AGENT_MAX_LINE_BYTES", 4 * 1024 * 1024)?,
             max_history_bytes: parse_env("BUZZ_AGENT_MAX_HISTORY_BYTES", 16 * 1024 * 1024)?,
+            max_tool_result_text_bytes: parse_env(
+                "BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES",
+                DEFAULT_TOOL_RESULT_TEXT_BYTES,
+            )?,
             max_context_tokens: parse_env("BUZZ_AGENT_MAX_CONTEXT_TOKENS", 200_000u64)?,
             max_handoffs: parse_env("BUZZ_AGENT_MAX_HANDOFFS", 10)?,
             max_parallel_tools: parse_env("BUZZ_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
@@ -178,6 +193,7 @@ impl Config {
     fn validate(&self) -> Result<(), String> {
         const MIN_HISTORY_BYTES: usize = 4096;
         const MIN_LINE_BYTES: usize = 1024;
+        const MIN_TOOL_RESULT_TEXT_BYTES: usize = 1024;
         const MIN_TIMEOUT: Duration = Duration::from_secs(1);
 
         if self.max_output_tokens < 1 {
@@ -203,6 +219,13 @@ impl Config {
         if self.max_line_bytes < MIN_LINE_BYTES {
             return Err(format!(
                 "config: BUZZ_AGENT_MAX_LINE_BYTES must be >= {MIN_LINE_BYTES}"
+            ));
+        }
+        if self.max_tool_result_text_bytes < MIN_TOOL_RESULT_TEXT_BYTES
+            || self.max_tool_result_text_bytes > MAX_TOOL_RESULT_BYTES
+        {
+            return Err(format!(
+                "config: BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES must be in {MIN_TOOL_RESULT_TEXT_BYTES}..={MAX_TOOL_RESULT_BYTES}"
             ));
         }
         if self.llm_timeout < MIN_TIMEOUT {

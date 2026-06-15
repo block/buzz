@@ -1009,31 +1009,41 @@ fn format_conversation_context(
 /// Arguments for [`format_prompt`] beyond the required [`FlushBatch`].
 #[derive(Default)]
 pub struct FormatPromptArgs<'a> {
-    pub base_prompt: Option<&'a str>,
-    pub system_prompt: Option<&'a str>,
     pub agent_core: Option<&'a str>,
     pub channel_info: Option<&'a PromptChannelInfo>,
     pub conversation_context: Option<&'a ConversationContext>,
     pub profile_lookup: Option<&'a PromptProfileLookup>,
+    /// When true, base_prompt and system_prompt are delivered via the system
+    /// role (session/new) and omitted from the user message. When false
+    /// (legacy agents), they are injected as `[Base]` and `[System]` sections.
+    pub has_system_prompt_support: bool,
+    /// Base prompt content for legacy agents (protocol_version < 2).
+    pub base_prompt: Option<&'a str>,
+    /// System prompt content for legacy agents (protocol_version < 2).
+    pub system_prompt: Option<&'a str>,
 }
 
-/// Prepend the `[Base]` platform-context section to a prompt body.
+/// Format the `[Base]` section for the base prompt.
 ///
-/// Used by the heartbeat and initial-message paths so the `[Base]` format
-/// is defined in exactly one place. (`format_prompt` uses a sections-vec
-/// approach instead, but the resulting `[Base]\n{content}` format is identical.)
-pub fn prepend_base_prompt(base: &str, body: &str) -> String {
-    format!("[Base]\n{}\n\n{body}", base.trim_end())
+/// Single source of truth for the `[Base]` framing so the format is defined in
+/// exactly one place across all dispatch paths (batch flush, heartbeat,
+/// initial message).
+pub(crate) fn base_section(base_prompt: &str) -> String {
+    format!("[Base]\n{}", base_prompt.trim_end())
 }
 
 /// Format a [`FlushBatch`] into a prompt string for the agent.
 ///
 /// Produces a stable prompt with these sections (in order):
-/// 0. `[Base]\n{base_prompt}` — platform orientation (if configured)
-/// 1. `[System]\n{system_prompt}` — if system prompt is set
-/// 2. `[Context]` — scope, channel name, and contextual hints for the agent
-/// 3. `[Thread Context]` or `[Conversation Context]` — if fetched
-/// 4. `[Event]` / `[Buzz events]` — the triggering event(s)
+/// 0. `[Base]` — base prompt (only for legacy agents without systemPrompt support)
+/// 1. `[System]` — system prompt (only for legacy agents without systemPrompt support)
+/// 2. `[Agent Memory — core]` — if agent core memory is set
+/// 3. `[Context]` — scope, channel name, and contextual hints for the agent
+/// 4. `[Thread Context]` or `[Conversation Context]` — if fetched
+/// 5. `[Event]` / `[Buzz events]` — the triggering event(s)
+///
+/// For agents with `protocol_version >= 2`, base_prompt and system_prompt are
+/// delivered via the system role in `session/new` and omitted from this message.
 pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> String {
     // Scope is always derived from the LAST event in the batch — that's the
     // one the agent is responding to. Thread/DM context is supplementary info
@@ -1054,17 +1064,22 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> String 
 
     let mut sections: Vec<String> = Vec::with_capacity(7);
 
-    // 0. Base prompt (platform-level, always first).
-    if let Some(bp) = args.base_prompt {
-        sections.push(format!("[Base]\n{}", bp.trim_end()));
+    // For legacy agents (protocol_version < 2), inject base_prompt and
+    // system_prompt as user-message sections. Modern agents receive these
+    // via the system role in session/new.
+    if !args.has_system_prompt_support {
+        if let Some(bp) = args.base_prompt {
+            sections.push(base_section(bp));
+        }
+        if let Some(sp) = args.system_prompt {
+            sections.push(format!("[System]\n{sp}"));
+        }
     }
 
-    // 1. System prompt.
-    if let Some(sp) = args.system_prompt {
-        sections.push(format!("[System]\n{sp}"));
-    }
-
-    // 1b. NIP-AE agent core memory (rendered by `engram_fetch::build_core_section`).
+    // NIP-AE agent core memory (rendered by `engram_fetch::build_core_section`).
+    // agent_core is always in user messages because it is resolved per-channel
+    // after session creation. A future session/update mechanism could move it
+    // to the system role.
     if let Some(core) = args.agent_core {
         sections.push(core.to_string());
     }
@@ -1198,6 +1213,16 @@ mod tests {
 
     fn any_in_flight(q: &EventQueue) -> bool {
         !q.in_flight_channels.is_empty()
+    }
+
+    #[test]
+    fn test_base_section_prepends_header_and_trims_trailing_whitespace() {
+        // Trailing whitespace/newlines are stripped; the [Base] header is
+        // prepended exactly once with a single newline separator.
+        assert_eq!(base_section("hello  \n\n"), "[Base]\nhello");
+        assert_eq!(base_section("hello"), "[Base]\nhello");
+        // Internal newlines and leading whitespace are preserved verbatim.
+        assert_eq!(base_section("  line1\nline2 "), "[Base]\n  line1\nline2");
     }
 
     // ── Test 1: push + flush_next basic ──────────────────────────────────────
@@ -1474,10 +1499,10 @@ mod tests {
         assert!(prompt.contains("Content: third message"));
     }
 
-    // ── Test 11: system prompt prepended ─────────────────────────────────────
+    // ── Test 11: system prompt NOT in user message (delivered via system role) ──
 
     #[test]
-    fn test_format_prompt_with_system_prompt() {
+    fn test_format_prompt_no_system_prompt_in_user_message() {
         let ch = Uuid::new_v4();
         let event = make_event("hello");
 
@@ -1491,17 +1516,15 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(
-            &batch,
-            &FormatPromptArgs {
-                system_prompt: Some("You are a triage bot."),
-                ..Default::default()
-            },
-        );
-        assert!(prompt.starts_with("[System]\nYou are a triage bot.\n\n[Context]"));
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        // system_prompt and base_prompt are delivered via session/new system role,
+        // so they must NOT appear in the user message.
+        assert!(!prompt.contains("[System]"));
+        assert!(!prompt.contains("[Base]"));
+        assert!(prompt.starts_with("[Context]"));
     }
 
-    // ── Test 11b: agent_core section is injected after [System] ──────────────
+    // ── Test 11b: agent_core section is first in user message ──────────────
 
     #[test]
     fn test_format_prompt_with_agent_core() {
@@ -1520,14 +1543,13 @@ mod tests {
         let prompt = format_prompt(
             &batch,
             &FormatPromptArgs {
-                system_prompt: Some("sys"),
                 agent_core: Some(core),
                 ..Default::default()
             },
         );
         assert!(
-            prompt.contains("[System]\nsys\n\n[Agent Memory — core]\nbe helpful"),
-            "expected core block after [System]; got: {prompt}"
+            prompt.starts_with("[Agent Memory — core]\nbe helpful\n\n[Context]"),
+            "expected core block first, then [Context]; got: {prompt}"
         );
     }
 
@@ -1555,10 +1577,10 @@ mod tests {
         assert!(prompt.starts_with("[Agent Memory — core]\nbe helpful\n\n[Context]"));
     }
 
-    // ── Test 11c: base prompt prepended before system prompt ─────────────────
+    // ── Test 11c: base_prompt and system_prompt NOT in user message ────────────
 
     #[test]
-    fn test_format_prompt_with_base_prompt() {
+    fn test_format_prompt_no_base_or_system_sections() {
         let ch = Uuid::new_v4();
         let event = make_event("hello");
 
@@ -1572,35 +1594,111 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        // Both base_prompt and system_prompt: [Base] comes first, then [System].
-        let prompt = format_prompt(
-            &batch,
-            &FormatPromptArgs {
-                base_prompt: Some("Platform base."),
-                system_prompt: Some("Role prompt."),
-                ..Default::default()
-            },
-        );
-        assert!(prompt.starts_with("[Base]\nPlatform base.\n\n[System]\nRole prompt."));
-
-        // Only base_prompt (no system_prompt): [Base] comes first, then [Context].
-        let prompt = format_prompt(
-            &batch,
-            &FormatPromptArgs {
-                base_prompt: Some("Platform base."),
-                ..Default::default()
-            },
-        );
-        assert!(prompt.starts_with("[Base]\nPlatform base.\n\n[Context]"));
-
-        // No base_prompt: no [Base] section emitted.
+        // format_prompt no longer accepts or emits base_prompt/system_prompt.
+        // They are delivered via session/new system role instead.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default());
         assert!(!prompt.contains("[Base]"));
+        assert!(!prompt.contains("[System]"));
+        assert!(prompt.starts_with("[Context]"));
+    }
+
+    // ── Test 11d: legacy agents receive [Base]/[System] in user message ───────
+
+    #[test]
+    fn test_format_prompt_legacy_agent_emits_base_and_system() {
+        let ch = Uuid::new_v4();
+        let event = make_event("hello");
+
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+        };
+
+        let core = "[Agent Memory — core]\nremember this";
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                has_system_prompt_support: false,
+                base_prompt: Some("test base prompt"),
+                system_prompt: Some("test system prompt"),
+                agent_core: Some(core),
+                ..Default::default()
+            },
+        );
+
+        // Both sections must be present
+        assert!(
+            prompt.contains("[Base]\ntest base prompt"),
+            "missing [Base] section"
+        );
+        assert!(
+            prompt.contains("[System]\ntest system prompt"),
+            "missing [System] section"
+        );
+
+        // [Base] and [System] must appear BEFORE [Agent Memory] and [Context]
+        let base_pos = prompt.find("[Base]").unwrap();
+        let system_pos = prompt.find("[System]").unwrap();
+        let core_pos = prompt.find("[Agent Memory").unwrap();
+        let context_pos = prompt.find("[Context]").unwrap();
+
+        assert!(base_pos < system_pos, "[Base] should come before [System]");
+        assert!(
+            system_pos < core_pos,
+            "[System] should come before [Agent Memory]"
+        );
+        assert!(
+            core_pos < context_pos,
+            "[Agent Memory] should come before [Context]"
+        );
+    }
+
+    // ── Test 11e: modern agents suppress [Base]/[System] from user message ────
+
+    #[test]
+    fn test_format_prompt_modern_agent_suppresses_base_and_system() {
+        let ch = Uuid::new_v4();
+        let event = make_event("hello");
+
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                has_system_prompt_support: true,
+                base_prompt: Some("test base prompt"),
+                system_prompt: Some("test system prompt"),
+                ..Default::default()
+            },
+        );
+
+        // Neither section should appear — they are delivered via session/new
+        assert!(
+            !prompt.contains("[Base]"),
+            "[Base] should be suppressed for modern agents"
+        );
+        assert!(
+            !prompt.contains("[System]"),
+            "[System] should be suppressed for modern agents"
+        );
         assert!(prompt.starts_with("[Context]"));
     }
 
     #[test]
-    fn test_format_prompt_base_prompt_ordering_with_full_context() {
+    fn test_format_prompt_ordering_with_full_context() {
         let ch = Uuid::new_v4();
         let event = make_event("hello");
         let batch = FlushBatch {
@@ -1623,34 +1721,38 @@ mod tests {
             truncated: false,
         };
 
+        let core = "[Agent Memory — core]\nbe helpful";
         let prompt = format_prompt(
             &batch,
             &FormatPromptArgs {
-                base_prompt: Some("Platform base."),
-                system_prompt: Some("Role prompt."),
+                agent_core: Some(core),
                 conversation_context: Some(&ctx),
                 ..Default::default()
             },
         );
 
-        // Verify section ordering: [Base] < [System] < [Context] < [Thread Context]
-        let base_pos = prompt.find("[Base]").expect("[Base] missing");
-        let system_pos = prompt.find("[System]").expect("[System] missing");
+        // Verify section ordering: [Agent Memory] < [Context] < [Thread Context]
+        let core_pos = prompt
+            .find("[Agent Memory")
+            .expect("[Agent Memory] missing");
         let context_pos = prompt.find("[Context]").expect("[Context] missing");
         let thread_pos = prompt
             .find("[Thread Context")
             .expect("[Thread Context] missing");
 
-        assert!(base_pos < system_pos, "[Base] must come before [System]");
         assert!(
-            system_pos < context_pos,
-            "[System] must come before [Context]"
+            core_pos < context_pos,
+            "[Agent Memory] must come before [Context]"
         );
         assert!(
             context_pos < thread_pos,
             "[Context] must come before [Thread Context]"
         );
+        // No [Base] or [System] in user message
+        assert!(!prompt.contains("[Base]"));
+        assert!(!prompt.contains("[System]"));
     }
+
     // ── Test 12: drop mode discards in-flight channel events ─────────────────
 
     #[test]

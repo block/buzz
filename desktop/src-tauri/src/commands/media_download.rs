@@ -3,7 +3,7 @@ use tauri::State;
 
 use crate::app_state::AppState;
 use crate::commands::export_util::save_bytes_with_dialog;
-use crate::relay::relay_api_base_url_with_override;
+use crate::relay::{classify_request_error, relay_api_base_url_with_override, relay_error_message};
 
 use super::media::{detect_and_validate_mime, sanitize_filename};
 
@@ -140,12 +140,10 @@ async fn fetch_blob_bytes(url: &str, state: &State<'_, AppState>) -> Result<Vec<
         .timeout(DOWNLOAD_TIMEOUT)
         .send()
         .await
-        .map_err(|e| format!("download failed: {e}"))?;
+        .map_err(|e| classify_request_error(&e))?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("download failed ({status}): {text}"));
+        return Err(relay_error_message(resp).await);
     }
 
     // Check Content-Length header upfront if present.
@@ -164,7 +162,7 @@ async fn fetch_blob_bytes(url: &str, state: &State<'_, AppState>) -> Result<Vec<
     let mut bytes = Vec::new();
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| format!("download stream error: {e}"))?;
+        let chunk = chunk.map_err(|e| classify_request_error(&e))?;
         if bytes.len() as u64 + chunk.len() as u64 > MAX_DOWNLOAD_BYTES {
             return Err(format!(
                 "file too large (max {} MiB)",

@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { App } from "@/app/App";
 import "@/shared/styles/globals.css";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
+import { migrateLegacyWorkspaceStorageBeforeRender } from "@/features/workspaces/legacyWorkspaceStorage";
 import { WorkspacesProvider } from "@/features/workspaces/useWorkspaces";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
@@ -78,6 +79,7 @@ async function installE2eBridgeIfConfigured() {
 async function bootstrap() {
   configureDevE2eBridgeFromUrl();
   await installE2eBridgeIfConfigured();
+  await migrateLegacyWorkspaceStorageBeforeRender();
   renderApp();
 }
 

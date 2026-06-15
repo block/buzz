@@ -2,12 +2,14 @@ import * as React from "react";
 
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
+import { useSelfProfileCache } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { ProfilePopover } from "@/features/profile/ui/ProfilePopover";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { Workspace } from "@/features/workspaces/types";
 import { WorkspaceSwitcher } from "@/features/workspaces/ui/WorkspaceSwitcher";
 import type { PresenceStatus, Profile, UserStatus } from "@/shared/api/types";
+import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { cn } from "@/shared/lib/cn";
 
 type SidebarProfileCardProps = {
@@ -48,6 +50,11 @@ export function SidebarProfileCard({
   selfUserStatus,
   workspaces,
 }: SidebarProfileCardProps) {
+  // Called locally rather than threading props from AppShell — both hooks are
+  // workspace-provider and QueryClient safe at this level.
+  const selfProfileCache = useSelfProfileCache();
+  const { isPending, reconnect } = useReconnectRelay();
+
   const [profilePopoverOpen, setProfilePopoverOpen] = React.useState(false);
   const profileCardRef = React.useRef<HTMLDivElement | null>(null);
   const toggleProfilePopover = React.useCallback(
@@ -98,6 +105,7 @@ export function SidebarProfileCard({
           type="button"
         >
           <ProfileAvatar
+            avatarDataUrl={selfProfileCache?.avatarDataUrl ?? null}
             avatarUrl={profile?.avatarUrl ?? null}
             className="h-8 w-8 text-xs"
             iconClassName="h-4 w-4"
@@ -118,17 +126,20 @@ export function SidebarProfileCard({
           <ProfilePopover
             open={profilePopoverOpen}
             onOpenChange={setProfilePopoverOpen}
-            displayName={resolvedDisplayName}
+            avatarDataUrl={selfProfileCache?.avatarDataUrl ?? null}
             avatarUrl={profile?.avatarUrl ?? null}
             currentStatus={selfPresenceStatus}
+            displayName={resolvedDisplayName}
+            isReconnectPending={isPending}
             isStatusPending={isPresencePending}
-            userStatusText={selfUserStatus?.text}
-            userStatusEmoji={selfUserStatus?.emoji}
-            onSetStatus={onSetPresenceStatus ?? (() => {})}
-            onSetUserStatus={onSetUserStatus}
             onClearUserStatus={onClearUserStatus}
             onOpenSettings={onOpenSettings}
+            onReconnect={() => void reconnect()}
+            onSetStatus={onSetPresenceStatus ?? (() => {})}
+            onSetUserStatus={onSetUserStatus}
             triggerContainerRef={profileCardRef}
+            userStatusEmoji={selfUserStatus?.emoji}
+            userStatusText={selfUserStatus?.text}
             workspaceSwitcherSlot={
               <WorkspaceSwitcher
                 activeWorkspace={activeWorkspace}

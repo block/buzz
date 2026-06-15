@@ -13,6 +13,7 @@ import {
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
+import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsStore";
 import type {
   Channel,
   CreateManagedAgentResponse,
@@ -64,6 +65,7 @@ export function useManagedAgentActions() {
     [managedAgentsQuery.data],
   );
   useManagedAgentObserverBridge(managedAgents);
+  useActiveAgentTurnsBridge(managedAgents);
 
   const managedPubkeys = React.useMemo(
     () => new Set(managedAgents.map((agent) => agent.pubkey)),
@@ -78,11 +80,18 @@ export function useManagedAgentActions() {
   const managedPresenceQuery = usePresenceQuery(managedPubkeyList);
 
   const channelsByPubkey = React.useMemo(() => {
-    const map: Record<string, string[]> = {};
+    const map: Record<string, { id: string; name: string }[]> = {};
     // Seed from relay agent profiles (kind:10100 events).
     for (const ra of relayAgentsQuery.data ?? []) {
       if (ra.channels.length > 0) {
-        map[normalizePubkey(ra.pubkey)] = ra.channels;
+        // Skip entries missing a channel id rather than falling back to the
+        // name as id — a misaligned channels/channelIds pairing would otherwise
+        // produce a pill that silently navigates to a channel name as if it
+        // were an id.
+        map[normalizePubkey(ra.pubkey)] = ra.channels.flatMap((name, i) => {
+          const id = ra.channelIds[i];
+          return id ? [{ id, name }] : [];
+        });
       }
     }
     // Fill in from channel member lists (kind:39002) for any managed agents
@@ -95,13 +104,21 @@ export function useManagedAgentActions() {
         const key = normalizePubkey(pk);
         if (!normalizedManaged.has(key)) continue;
         if (!map[key]) map[key] = [];
-        if (!map[key].includes(ch.name)) {
-          map[key].push(ch.name);
+        if (!map[key].some((entry) => entry.id === ch.id)) {
+          map[key].push({ id: ch.id, name: ch.name });
         }
       }
     }
     return map;
   }, [relayAgentsQuery.data, channelsQuery.data, managedAgents]);
+
+  const channelIdToName = React.useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const ch of channelsQuery.data ?? []) {
+      map[ch.id] = ch.name;
+    }
+    return map;
+  }, [channelsQuery.data]);
 
   // Clear log selection if the agent was removed
   React.useEffect(() => {
@@ -323,6 +340,7 @@ export function useManagedAgentActions() {
     // Derived state
     managedAgents,
     managedPubkeys,
+    channelIdToName,
     channelsByPubkey,
     isPending,
     // UI state

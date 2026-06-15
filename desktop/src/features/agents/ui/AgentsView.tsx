@@ -49,6 +49,7 @@ export function AgentsView() {
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}
+              channelIdToName={agents.channelIdToName}
               channelsByPubkey={agents.channelsByPubkey}
               agentsError={
                 agents.managedAgentsQuery.error instanceof Error

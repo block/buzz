@@ -582,7 +582,11 @@ test("first-run default workspace handoff gives immediate stepper feedback", asy
     {
       profileReadDelayMs: 2_000,
     },
-    { skipOnboardingSeed: true, skipWorkspaceSeed: true },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+      skipWorkspaceSeed: true,
+    },
   );
   await page.goto("/");
 
@@ -621,6 +625,7 @@ test("first-run default workspace handoff gives immediate stepper feedback", asy
 
 test("welcome can continue using an existing Nostr key", async ({ page }) => {
   await installMockBridge(page, undefined, {
+    relayWsUrl: "wss://default.example.com",
     skipOnboardingSeed: true,
     skipWorkspaceSeed: true,
   });
@@ -662,6 +667,9 @@ test("welcome presents custom workspace setup as joining a workspace", async ({
   });
   await page.goto("/");
 
+  await expect(
+    page.getByRole("button", { name: "Continue with Block Inc. workspace" }),
+  ).toHaveCount(0);
   await page.getByRole("button", { name: "Join a workspace" }).click();
 
   await expect(

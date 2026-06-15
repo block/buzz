@@ -1,33 +1,5 @@
+use super::test_support::*;
 use super::*;
-use std::path::Path;
-
-fn write_agents_json(dir: &Path, records: &serde_json::Value) {
-    std::fs::create_dir_all(dir.join("agents")).unwrap();
-    std::fs::write(
-        dir.join("agents/managed-agents.json"),
-        serde_json::to_vec_pretty(records).unwrap(),
-    )
-    .unwrap();
-}
-
-fn read_agents_json(dir: &Path) -> Vec<serde_json::Value> {
-    let content = std::fs::read_to_string(dir.join("agents/managed-agents.json")).unwrap();
-    serde_json::from_str(&content).unwrap()
-}
-
-fn write_personas_json(dir: &Path, records: &serde_json::Value) {
-    std::fs::create_dir_all(dir.join("agents")).unwrap();
-    std::fs::write(
-        dir.join("agents/personas.json"),
-        serde_json::to_vec_pretty(records).unwrap(),
-    )
-    .unwrap();
-}
-
-fn read_personas_json(dir: &Path) -> Vec<serde_json::Value> {
-    let content = std::fs::read_to_string(dir.join("agents/personas.json")).unwrap();
-    serde_json::from_str(&content).unwrap()
-}
 
 #[test]
 fn reconcile_legacy_command_names_rewrites_renamed_sidecars() {

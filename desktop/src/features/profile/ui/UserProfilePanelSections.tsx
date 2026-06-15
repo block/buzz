@@ -23,6 +23,9 @@ import { toast } from "sonner";
 
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
+import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import type {
@@ -36,6 +39,8 @@ import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
 import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { useNow } from "@/shared/lib/useNow";
+import { Badge } from "@/shared/ui/badge";
 
 const RUNTIME_LABELS: Record<string, string> = {
   goose: "Goose",
@@ -59,6 +64,7 @@ export type ProfileSummaryViewProps = {
   canEditAgent: boolean;
   canViewActivity: boolean;
   channelCount: number;
+  channelIdToName: Record<string, string>;
   channelsLoading: boolean;
   displayName: string;
   followMutation: ReturnType<typeof useFollowMutation>;
@@ -90,6 +96,7 @@ export function ProfileSummaryView({
   canEditAgent,
   canViewActivity,
   channelCount,
+  channelIdToName,
   channelsLoading,
   displayName,
   followMutation,
@@ -116,6 +123,9 @@ export function ProfileSummaryView({
   unfollowMutation,
   userStatus,
 }: ProfileSummaryViewProps) {
+  const { goChannel } = useAppNavigation();
+  const activeTurns = useActiveAgentTurns(isBot ? pubkey : null);
+
   const metadataFields = [
     ...buildPublicFields({
       pubkey,
@@ -159,6 +169,20 @@ export function ProfileSummaryView({
           pubkey={pubkey}
           unfollowMutation={unfollowMutation}
         />
+      ) : null}
+
+      {activeTurns.length > 0 ? (
+        <div className="flex flex-wrap justify-center gap-1.5">
+          {activeTurns.map(({ channelId, observedAt }) => (
+            <ProfileWorkingBadge
+              key={channelId}
+              channelId={channelId}
+              name={channelIdToName[channelId] ?? channelId}
+              observedAt={observedAt}
+              onNavigate={goChannel}
+            />
+          ))}
+        </div>
       ) : null}
 
       {showMemoriesIngress || showChannelsIngress || canViewActivity ? (
@@ -208,6 +232,30 @@ export function ProfileSummaryView({
         <ProfileFieldGroup fields={metadataFields} />
       ) : null}
     </div>
+  );
+}
+
+function ProfileWorkingBadge({
+  channelId,
+  name,
+  observedAt,
+  onNavigate,
+}: {
+  channelId: string;
+  name: string;
+  observedAt: number;
+  onNavigate: (channelId: string) => void;
+}) {
+  const now = useNow(1000);
+
+  return (
+    <Badge
+      className="cursor-pointer motion-safe:animate-pulse normal-case tracking-normal hover:opacity-80"
+      variant="default"
+      onClick={() => onNavigate(channelId)}
+    >
+      Working in #{name} · {formatElapsed(now - observedAt)}
+    </Badge>
   );
 }
 

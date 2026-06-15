@@ -2,7 +2,7 @@
 
 [package]
 name = "buzz-desktop"
-version = "0.3.18"
+version = "0.3.23"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -79,6 +79,7 @@ png = "0.18"
 zip = "8"
 sherpa-onnx = "1.12"
 regex = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
 axum = "0.8"
 rodio = "0.22"
 earshot = "1.0"

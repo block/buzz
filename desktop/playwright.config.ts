@@ -31,6 +31,8 @@ export default defineConfig({
         "**/channel-star-screenshots.spec.ts",
         "**/channel-controls-screenshots.spec.ts",
         "**/team-management-screenshots.spec.ts",
+        "**/active-turn-screenshots.spec.ts",
+        "**/profile-active-turn-screenshots.spec.ts",
         "**/file-attachment.spec.ts",
         "**/video-attachment.spec.ts",
         "**/mentions.spec.ts",
@@ -38,6 +40,7 @@ export default defineConfig({
         "**/workflows.spec.ts",
         "**/identity-archive.spec.ts",
         "**/identity-archive-hide.spec.ts",
+        "**/relay-connectivity-screenshots.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

@@ -1,7 +1,6 @@
 use crate::agent::RunCtx;
 use crate::config::{
     HANDOFF_MAX_OUTPUT_TOKENS, HANDOFF_MAX_TOOL_NAMES, HANDOFF_ORIGINAL_TASK_MAX_BYTES,
-    HANDOFF_PROMPT_MAX_BYTES, HANDOFF_TAIL_ITEMS,
 };
 use crate::types::HistoryItem;
 
@@ -15,8 +14,6 @@ const HANDOFF_SYSTEM_PROMPT: &str = "You are generating a context handoff summar
 turn of an autonomous agent. Be concise but thorough. Cover: what the original task was, what \
 you accomplished, key decisions made, what remains, and one concrete next step. Output plain \
 text only — no tool calls, no JSON. Stay under 8192 tokens.";
-
-const HANDOFF_SNIPPET_BYTES: usize = 2048;
 
 impl RunCtx<'_> {
     pub(crate) async fn maybe_handoff(&mut self) -> HandoffOutcome {
@@ -160,32 +157,46 @@ impl RunCtx<'_> {
              Produce a context handoff summary covering: (1) original task, \
              (2) what was accomplished, (3) key decisions, (4) what remains, \
              (5) one concrete next step. Be concise but thorough. Plain text.\n";
-        let history_header = "\n# Recent History (most recent last)\n";
+        let history_header = "\n# Session History (oldest first)\n";
+        let prompt_budget = handoff_prompt_budget_bytes(
+            self.cfg.max_context_tokens,
+            HANDOFF_MAX_OUTPUT_TOKENS,
+            head.len() + history_header.len() + tail.len(),
+        );
 
-        let start = self.history.len().saturating_sub(HANDOFF_TAIL_ITEMS);
-        let mut snippets: Vec<String> = self.history[start..]
-            .iter()
-            .map(|item| {
-                let mut s = String::new();
-                push_history_snippet(&mut s, item);
-                s
-            })
-            .collect();
-
-        let fixed = head.len() + history_header.len() + tail.len();
-        let mut snippets_bytes: usize = snippets.iter().map(String::len).sum();
+        let mut snippets: Vec<String> = Vec::new();
+        let mut snippets_bytes = 0usize;
         let mut dropped = 0usize;
-        while fixed + snippets_bytes > HANDOFF_PROMPT_MAX_BYTES && !snippets.is_empty() {
-            let removed = snippets.remove(0);
-            snippets_bytes -= removed.len();
-            dropped += 1;
+        for item in self.history.iter().rev() {
+            let mut snippet = String::new();
+            push_history_snippet(&mut snippet, item);
+            let snippet_bytes = snippet.len();
+            if snippets_bytes.saturating_add(snippet_bytes) > prompt_budget {
+                if snippets.is_empty() {
+                    snippets.push(clamp_bytes(&snippet, prompt_budget));
+                    snippets_bytes = prompt_budget;
+                }
+                dropped += 1;
+                continue;
+            }
+            snippets_bytes += snippet_bytes;
+            snippets.push(snippet);
         }
+        snippets.reverse();
         if dropped > 0 {
-            tracing::info!("handoff prompt cap, dropped {dropped} oldest snippets");
+            tracing::info!(
+                "handoff prompt budget, dropped {dropped} oldest snippets; kept {} bytes",
+                snippets_bytes
+            );
         }
 
-        let mut out =
-            String::with_capacity(fixed + snippets_bytes + if dropped > 0 { 32 } else { 0 });
+        let mut out = String::with_capacity(
+            head.len()
+                + history_header.len()
+                + tail.len()
+                + snippets_bytes
+                + if dropped > 0 { 32 } else { 0 },
+        );
         out.push_str(&head);
         out.push_str(history_header);
         if dropped > 0 {
@@ -211,13 +222,13 @@ fn push_history_snippet(out: &mut String, item: &HistoryItem) {
     match item {
         HistoryItem::User(s) => {
             out.push_str("[user] ");
-            out.push_str(&clamp_for_snippet(s));
+            out.push_str(s);
             out.push('\n');
         }
         HistoryItem::Assistant { text, tool_calls } => {
             out.push_str("[assistant] ");
             if !text.is_empty() {
-                out.push_str(&clamp_for_snippet(text));
+                out.push_str(text);
             }
             for c in tool_calls {
                 out.push_str(&format!(" tool:{}", c.name));
@@ -226,14 +237,30 @@ fn push_history_snippet(out: &mut String, item: &HistoryItem) {
         }
         HistoryItem::ToolResult(r) => {
             out.push_str(if r.is_error { "[tool_err] " } else { "[tool] " });
-            out.push_str(&clamp_for_snippet(&r.text()));
+            out.push_str(&r.text());
             out.push('\n');
         }
     }
 }
 
-fn clamp_for_snippet(s: &str) -> String {
-    clamp_bytes(s, HANDOFF_SNIPPET_BYTES)
+/// Byte budget for session-history text inside the handoff prompt. The
+/// summarizer uses the same provider/model config as normal completion, so
+/// derive the input budget from the model context window instead of applying a
+/// separate fixed prompt cap. We keep the same 1 byte/token upper-bound
+/// estimate used by the handoff gate, which is conservative: it may drop old
+/// history early for unusually large sessions, but it should not build a prompt
+/// that exceeds the configured context window.
+fn handoff_prompt_budget_bytes(
+    max_context_tokens: u64,
+    max_output_tokens: u32,
+    fixed_prompt_bytes: usize,
+) -> usize {
+    max_context_tokens
+        .saturating_sub(u64::from(max_output_tokens))
+        .saturating_mul(CONSERVATIVE_BYTES_PER_TOKEN)
+        .saturating_sub(u64::try_from(fixed_prompt_bytes).unwrap_or(u64::MAX))
+        .try_into()
+        .unwrap_or(usize::MAX)
 }
 
 pub(crate) fn clamp_bytes(s: &str, max_bytes: usize) -> String {
@@ -299,7 +326,20 @@ fn byte_fallback_threshold(
 
 #[cfg(test)]
 mod tests {
-    use super::{byte_fallback_threshold, estimate_tokens_from_bytes, token_threshold};
+    use super::{
+        byte_fallback_threshold, estimate_tokens_from_bytes, handoff_prompt_budget_bytes,
+        token_threshold,
+    };
+
+    #[test]
+    fn handoff_prompt_budget_reserves_summary_output_and_fixed_prompt() {
+        assert_eq!(handoff_prompt_budget_bytes(25_000, 8_192, 1_000), 15_808);
+    }
+
+    #[test]
+    fn handoff_prompt_budget_saturates_when_fixed_prompt_exceeds_window() {
+        assert_eq!(handoff_prompt_budget_bytes(1_000, 2_000, 10_000), 0);
+    }
 
     #[test]
     fn token_threshold_uses_fraction_when_output_is_small() {

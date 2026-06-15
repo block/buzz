@@ -28,10 +28,10 @@ use filter::SubscriptionRule;
 use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
 use pool::{
-    AgentPool, CancelMode, OwnedAgent, PromptContext, PromptOutcome, PromptResult, PromptSource,
+    AgentPool, ControlSignal, OwnedAgent, PromptContext, PromptOutcome, PromptResult, PromptSource,
     SessionState,
 };
-use queue::{prepend_base_prompt, EventQueue, QueuedEvent, ThreadTags};
+use queue::{EventQueue, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
@@ -540,7 +540,7 @@ fn handle_relay_observer_control_event(
         return;
     };
 
-    let fired = cancel_in_flight_task(pool, channel_id, CancelMode::Stop);
+    let fired = signal_in_flight_task(pool, channel_id, ControlSignal::Cancel);
     let status = if fired { "sent" } else { "no_active_turn" };
     if let Some(observer) = observer {
         observer.emit(
@@ -695,7 +695,7 @@ fn any_respawn_in_flight(crash_history: &[SlotCircuit]) -> bool {
 /// Result of a background respawn task.
 struct RespawnResult {
     index: usize,
-    result: Result<AcpClient>,
+    result: Result<(AcpClient, u32)>,
 }
 
 /// RAII guard that ensures a `RespawnResult` is sent even if the task panics.
@@ -719,7 +719,7 @@ impl RespawnGuard {
     /// Send the result and disarm the guard. Uses `try_send` (sync) so there
     /// is no await boundary between marking `sent` and actually enqueueing —
     /// cancellation cannot slip between the two.
-    fn send(mut self, result: Result<AcpClient>) {
+    fn send(mut self, result: Result<(AcpClient, u32)>) {
         // Invariant: try_send succeeds because the channel capacity equals the
         // slot count, and respawn_in_flight guarantees at most one outstanding
         // result per slot. If this ever fails, the channel sizing or the
@@ -839,6 +839,8 @@ async fn tokio_main() -> Result<()> {
                 match tokio::time::timeout(Duration::from_secs(60), acp.initialize()).await {
                     Ok(Ok(init_result)) => {
                         tracing::info!(agent = i, "agent initialized: {init_result}");
+                        let protocol_version =
+                            init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
                         acp.observe(
                             "agent_initialized",
                             serde_json::json!({
@@ -852,6 +854,7 @@ async fn tokio_main() -> Result<()> {
                             state: SessionState::default(),
                             model_capabilities: None,
                             desired_model: config.model.clone(),
+                            protocol_version,
                         }));
                     }
                     Ok(Err(e)) => {
@@ -1075,6 +1078,7 @@ async fn tokio_main() -> Result<()> {
         initial_message: config.initial_message.clone(),
         idle_timeout: Duration::from_secs(config.idle_timeout_secs),
         max_turn_duration: Duration::from_secs(config.max_turn_duration_secs),
+        turn_liveness_interval: Duration::from_secs(config.turn_liveness_secs),
         dedup_mode: config.dedup_mode,
         system_prompt: config.system_prompt.clone(),
         base_prompt: if config.no_base_prompt {
@@ -1279,13 +1283,14 @@ async fn tokio_main() -> Result<()> {
         while let Ok(rr) = respawn_rx.try_recv() {
             crash_history[rr.index].respawn_in_flight = false;
             match rr.result {
-                Ok(acp) => {
+                Ok((acp, protocol_version)) => {
                     let agent = OwnedAgent {
                         index: rr.index,
                         acp,
                         state: SessionState::default(),
                         model_capabilities: None,
                         desired_model: config.model.clone(),
+                        protocol_version,
                     };
                     pool.return_agent(agent);
                     tracing::info!(agent = rr.index, "respawn complete");
@@ -1471,12 +1476,12 @@ async fn tokio_main() -> Result<()> {
 
                             // ── Shutdown command handling ─────────────────────
                             // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
-                            let is_shutdown = kind_u32 == KIND_STREAM_MESSAGE
-                                && buzz_event.event.content.trim() == "!shutdown"
-                                && buzz_event.event.tags.iter().any(|t| {
-                                    t.as_slice().first().map(|s| s.as_str()) == Some("p")
-                                        && t.as_slice().get(1).map(|s| s.as_str()) == Some(pubkey_hex.as_str())
-                                });
+                            let is_shutdown = is_owner_control_command(
+                                &buzz_event.event,
+                                kind_u32,
+                                "!shutdown",
+                                &pubkey_hex,
+                            );
                             if is_shutdown {
                                 let owner = owner_cache.get();
                                 if let Some(owner) = owner {
@@ -1504,16 +1509,20 @@ async fn tokio_main() -> Result<()> {
                             // Mode-independent: !cancel fires regardless of
                             // --multiple-event-handling. It is explicit user
                             // intent, not an automatic policy decision.
-                            let is_cancel = kind_u32 == KIND_STREAM_MESSAGE
-                                && buzz_event.event.content.trim() == "!cancel"
-                                && buzz_event.event.tags.iter().any(|t| {
-                                    t.as_slice().first().map(|s| s.as_str()) == Some("p")
-                                        && t.as_slice().get(1).map(|s| s.as_str()) == Some(pubkey_hex.as_str())
-                                });
+                            let is_cancel = is_owner_control_command(
+                                &buzz_event.event,
+                                kind_u32,
+                                "!cancel",
+                                &pubkey_hex,
+                            );
                             if is_cancel {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
-                                        let fired = cancel_in_flight_task(&mut pool, buzz_event.channel_id, CancelMode::Stop);
+                                        let fired = signal_in_flight_task(
+                                            &mut pool,
+                                            buzz_event.channel_id,
+                                            ControlSignal::Cancel,
+                                        );
                                         if !fired {
                                             tracing::warn!(
                                                 channel_id = %buzz_event.channel_id,
@@ -1526,6 +1535,53 @@ async fn tokio_main() -> Result<()> {
                                 // Not from owner — fall through to normal prompt handling.
                             }
                             // ── End cancel command handling ───────────────────
+
+                            // ── Rotate command handling ─────────────────────
+                            // Mirrors !shutdown / !cancel: kind:9, content
+                            // "!rotate", from owner, mentions THIS agent.
+                            //
+                            // Rotation is explicit owner intent to start the
+                            // next turn in this channel with a fresh ACP
+                            // session. It is consumed by the harness and never
+                            // forwarded to the agent. If a turn is in-flight,
+                            // cancel it, drop its triggering batch, and
+                            // invalidate the channel session when the task
+                            // returns. If idle, invalidate the cached channel
+                            // session immediately. Queued future events remain
+                            // queued and will create a fresh session on dispatch.
+                            let is_rotate = is_owner_control_command(
+                                &buzz_event.event,
+                                kind_u32,
+                                "!rotate",
+                                &pubkey_hex,
+                            );
+                            if is_rotate {
+                                if let Some(owner) = owner_cache.get() {
+                                    if buzz_event.event.pubkey.to_hex() == *owner {
+                                        let fired = signal_in_flight_task(
+                                            &mut pool,
+                                            buzz_event.channel_id,
+                                            ControlSignal::Rotate,
+                                        );
+                                        if fired {
+                                            tracing::info!(
+                                                channel_id = %buzz_event.channel_id,
+                                                "!rotate received — cancelling in-flight turn and rotating session"
+                                            );
+                                        } else {
+                                            let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
+                                            tracing::info!(
+                                                channel_id = %buzz_event.channel_id,
+                                                invalidated,
+                                                "!rotate received — invalidated idle channel session(s)"
+                                            );
+                                        }
+                                        continue; // consume event — do NOT push to queue
+                                    }
+                                }
+                                // Not from owner — fall through to normal prompt handling.
+                            }
+                            // ── End rotate command handling ──────────────────
 
                             // ── Inbound author gate ──────────────────────────
                             // Coarse security policy: drop events from disallowed
@@ -1608,7 +1664,11 @@ async fn tokio_main() -> Result<()> {
                                     }
                                 };
                                 if should_cancel {
-                                    cancel_in_flight_task(&mut pool, buzz_event.channel_id, CancelMode::Interrupt);
+                                    signal_in_flight_task(
+                                        &mut pool,
+                                        buzz_event.channel_id,
+                                        ControlSignal::Interrupt,
+                                    );
                                 }
                             }
                             // ── End mode gate ────────────────────────────────
@@ -1717,7 +1777,6 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
-                    &relay,
                 ) == LoopAction::Exit
                 {
                     break;
@@ -1832,7 +1891,7 @@ async fn tokio_main() -> Result<()> {
     // Drain any respawn results that completed before the abort. Explicitly
     // shut down returned agents instead of relying on AcpClient::Drop.
     while let Ok(rr) = respawn_rx.try_recv() {
-        if let Ok(mut acp) = rr.result {
+        if let Ok((mut acp, _)) = rr.result {
             acp.shutdown().await;
             tracing::debug!(agent = rr.index, "reaped respawned agent on shutdown");
         }
@@ -1877,20 +1936,44 @@ enum LoopAction {
     Exit,
 }
 
-// ── cancel_in_flight_task ─────────────────────────────────────────────────────
+// ── Owner control commands ───────────────────────────────────────────────────
 
-/// Send a cancel signal to the in-flight task for `channel_id`.
+fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
+    event.tags.iter().any(|t| {
+        t.as_slice().first().map(|s| s.as_str()) == Some("p")
+            && t.as_slice().get(1).map(|s| s.as_str()) == Some(agent_pubkey_hex)
+    })
+}
+
+fn is_owner_control_command(
+    event: &nostr::Event,
+    kind_u32: u32,
+    command: &str,
+    agent_pubkey_hex: &str,
+) -> bool {
+    kind_u32 == KIND_STREAM_MESSAGE
+        && event.content.trim() == command
+        && event_mentions_agent(event, agent_pubkey_hex)
+}
+
+// ── signal_in_flight_task ─────────────────────────────────────────────────────
+
+/// Send a control signal to the in-flight task for `channel_id`.
 /// Returns `true` if a signal was sent, `false` if no in-flight task was found.
-fn cancel_in_flight_task(pool: &mut AgentPool, channel_id: uuid::Uuid, mode: CancelMode) -> bool {
+fn signal_in_flight_task(
+    pool: &mut AgentPool,
+    channel_id: uuid::Uuid,
+    mode: ControlSignal,
+) -> bool {
     let entry = pool
         .task_map_mut()
         .values_mut()
         .find(|m| m.channel_id == Some(channel_id));
 
     if let Some(meta) = entry {
-        if let Some(tx) = meta.cancel_tx.take() {
+        if let Some(tx) = meta.control_tx.take() {
             let _ = tx.send(mode);
-            tracing::info!(channel = %channel_id, "cancel signal sent to in-flight task");
+            tracing::info!(channel = %channel_id, ?mode, "control signal sent to in-flight task");
             return true;
         }
     }
@@ -1941,7 +2024,7 @@ fn dispatch_pending(
 
         // Prompt text is now built inside run_prompt_task (needs async for
         // context fetching). Pass None for prompt_text; batch carries the data.
-        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<CancelMode>();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
 
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
@@ -1950,7 +2033,7 @@ fn dispatch_pending(
                 None,
                 ctx_clone,
                 result_tx,
-                Some(cancel_rx),
+                Some(control_rx),
             )
             .await;
         });
@@ -1961,7 +2044,7 @@ fn dispatch_pending(
                 agent_index,
                 channel_id: Some(channel_id),
                 recoverable_batch,
-                cancel_tx: Some(cancel_tx),
+                control_tx: Some(control_tx),
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
@@ -1988,22 +2071,12 @@ fn handle_prompt_result(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
-    relay: &HarnessRelay,
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
     pool.task_map_mut()
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
-
-    // Extract thread root from the batch before it's consumed by requeue.
-    // Used by death notices to thread the message into the original conversation.
-    let thread_root: Option<String> = result
-        .batch
-        .as_ref()
-        .and_then(|b| b.events.first())
-        .map(|e| queue::parse_thread_tags(&e.event))
-        .and_then(|tags| tags.root_event_id);
 
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
@@ -2093,11 +2166,6 @@ fn handle_prompt_result(
             };
             emit_turn_error(death_message);
 
-            // Post a visible death notice to the channel so humans know why
-            // the agent went silent.
-            if let Some(ch) = channel_id {
-                relay.publish_death_notice(ch, death_message, thread_root.as_deref());
-            }
             let index = result.agent.index;
             let slot_history = &mut crash_history[index];
             if !spawn_respawn_task(
@@ -2154,15 +2222,6 @@ fn handle_prompt_result(
                     "transport/protocol error — respawning agent"
                 );
                 emit_turn_error(&e.to_string());
-
-                // Post a visible death notice for transport errors too.
-                if let Some(ch) = channel_id {
-                    relay.publish_death_notice(
-                        ch,
-                        "Agent connection lost (transport error)",
-                        thread_root.as_deref(),
-                    );
-                }
 
                 let index = result.agent.index;
                 let slot_history = &mut crash_history[index];
@@ -2350,10 +2409,10 @@ fn dispatch_heartbeat(
         .heartbeat_prompt
         .clone()
         .unwrap_or_else(default_heartbeat_prompt);
-    let prompt_text = match ctx.base_prompt {
-        Some(bp) => prepend_base_prompt(bp, &prompt_text),
-        None => prompt_text,
-    };
+    // For legacy agents (protocol_version < 2), prepend base_prompt to the
+    // heartbeat user message since they don't receive it via session/new.
+    let prompt_text =
+        pool::prepend_base_for_legacy(agent.protocol_version, ctx.base_prompt, &prompt_text);
     let result_tx = pool.result_tx();
     let ctx_clone = Arc::clone(ctx);
     let agent_index = agent.index;
@@ -2368,7 +2427,7 @@ fn dispatch_heartbeat(
             agent_index,
             channel_id: None,
             recoverable_batch: None,
-            cancel_tx: None,
+            control_tx: None,
         },
     );
     *heartbeat_in_flight = true;
@@ -2467,7 +2526,7 @@ async fn spawn_and_init(
     extra_env: &[(String, String)],
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
-) -> Result<AcpClient> {
+) -> Result<(AcpClient, u32)> {
     let mut acp = AcpClient::spawn(command, args, extra_env)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
@@ -2476,6 +2535,7 @@ async fn spawn_and_init(
     match acp.initialize().await {
         Ok(init_result) => {
             tracing::info!("agent initialized: {init_result}");
+            let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
             acp.observe(
                 "agent_initialized",
                 serde_json::json!({
@@ -2483,7 +2543,7 @@ async fn spawn_and_init(
                     "initializeResult": init_result,
                 }),
             );
-            Ok(acp)
+            Ok((acp, protocol_version))
         }
         Err(e) => {
             // Explicitly shut down the spawned child to prevent zombie/leak.
@@ -2526,7 +2586,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     // so shutdown() runs on all paths (success, error, timeout).
     let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
         let init = client.initialize().await?;
-        let session = client.session_new_full(&cwd, vec![]).await?;
+        let session = client.session_new_full(&cwd, vec![], None).await?;
         Ok::<_, acp::AcpError>((init, session))
     })
     .await;
@@ -2686,6 +2746,124 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+mod heartbeat_base_prompt_tests {
+    use super::*;
+
+    // Pins the heartbeat dispatch path (dispatch_heartbeat, ~line 2359): a
+    // legacy agent WITH a base_prompt must get [Base] prepended to the
+    // heartbeat user message, composed as `[Base]\n{bp}\n\n{prompt}`. This is
+    // the second half of the round-2 regression (the first being initial_message).
+
+    #[test]
+    fn test_heartbeat_legacy_agent_gets_base_prepended() {
+        // protocol_version 1 + Some(base_prompt): heartbeat prompt is prefixed
+        // with the [Base] section exactly as the legacy session/new path would.
+        let prompt = "[System: Heartbeat]\nrun feed get";
+        let composed = pool::prepend_base_for_legacy(1, Some("you are a helpful agent"), prompt);
+        assert_eq!(
+            composed,
+            "[Base]\nyou are a helpful agent\n\n[System: Heartbeat]\nrun feed get"
+        );
+        assert!(composed.starts_with("[Base]\nyou are a helpful agent\n\n"));
+    }
+
+    #[test]
+    fn test_heartbeat_modern_agent_omits_base() {
+        // protocol_version 2 gets base_prompt via session/new; the heartbeat
+        // prompt is sent verbatim.
+        let prompt = "[System: Heartbeat]\nrun feed get";
+        let composed = pool::prepend_base_for_legacy(2, Some("you are a helpful agent"), prompt);
+        assert_eq!(composed, prompt);
+    }
+}
+
+#[cfg(test)]
+mod owner_control_command_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn make_event(kind: u32, content: &str, p_hex: Option<&str>) -> nostr::Event {
+        let keys = Keys::generate();
+        let tags = match p_hex {
+            Some(hex) => vec![Tag::parse(["p", hex]).expect("p tag")],
+            None => vec![],
+        };
+        EventBuilder::new(Kind::Custom(kind as u16), content)
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    #[test]
+    fn owner_control_command_requires_kind_content_and_agent_mention() {
+        let agent = "ab".repeat(32);
+
+        let event = make_event(KIND_STREAM_MESSAGE, " !rotate ", Some(&agent));
+        assert!(is_owner_control_command(
+            &event,
+            KIND_STREAM_MESSAGE,
+            "!rotate",
+            &agent
+        ));
+
+        let wrong_kind = make_event(1, "!rotate", Some(&agent));
+        assert!(!is_owner_control_command(&wrong_kind, 1, "!rotate", &agent));
+
+        let wrong_content = make_event(KIND_STREAM_MESSAGE, "!cancel", Some(&agent));
+        assert!(!is_owner_control_command(
+            &wrong_content,
+            KIND_STREAM_MESSAGE,
+            "!rotate",
+            &agent
+        ));
+
+        let no_mention = make_event(KIND_STREAM_MESSAGE, "!rotate", None);
+        assert!(!is_owner_control_command(
+            &no_mention,
+            KIND_STREAM_MESSAGE,
+            "!rotate",
+            &agent
+        ));
+    }
+
+    #[tokio::test]
+    async fn signal_in_flight_task_sends_rotate_once() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let other_channel_id = Uuid::new_v4();
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+
+        let abort_handle = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                recoverable_batch: None,
+                control_tx: Some(control_tx),
+            },
+        );
+
+        assert!(!signal_in_flight_task(
+            &mut pool,
+            other_channel_id,
+            ControlSignal::Rotate
+        ));
+        assert!(signal_in_flight_task(
+            &mut pool,
+            channel_id,
+            ControlSignal::Rotate
+        ));
+        assert_eq!(control_rx.await.unwrap(), ControlSignal::Rotate);
+        assert!(!signal_in_flight_task(
+            &mut pool,
+            channel_id,
+            ControlSignal::Rotate
+        ));
+    }
+}
+
+#[cfg(test)]
 mod owner_cache_tests {
     use super::*;
 
@@ -2823,6 +3001,7 @@ mod build_mcp_servers_tests {
             max_turn_duration_secs: 3600,
             agents: 1,
             heartbeat_interval_secs: 0,
+            turn_liveness_secs: 10,
             heartbeat_prompt: None,
             system_prompt: None,
             initial_message: None,
@@ -2942,5 +3121,171 @@ mod build_mcp_servers_tests {
             servers[0].name, "mcp",
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
+    }
+}
+
+#[cfg(test)]
+mod error_outcome_emission_tests {
+    //! Pins the policy that error-class outcomes surface to the activity feed
+    //! and never to the channel:
+    //!
+    //! - Channel silence is enforced *structurally* — `handle_prompt_result`
+    //!   takes no relay handle, so it has no way to post a channel message. A
+    //!   future re-introduction of channel notices would have to add the relay
+    //!   parameter back, which these tests' construction would then refuse to
+    //!   compile against.
+    //! - Feed coverage is the regression-prone half and is asserted at runtime:
+    //!   each error outcome must emit exactly one `turn_error` observer event.
+    //!   If any branch drops its `emit_turn_error` call, the matching test goes
+    //!   red.
+
+    use super::*;
+    use crate::acp::{AcpClient, AcpError};
+    use crate::observer::ObserverHandle;
+    use crate::pool::{AgentPool, OwnedAgent, PromptOutcome, PromptResult, PromptSource};
+    use std::collections::HashSet;
+
+    fn test_config() -> Config {
+        Config {
+            keys: nostr::Keys::generate(),
+            relay_url: "ws://localhost:3000".into(),
+            // `true` exits cleanly, so the async respawn fails fast and
+            // harmlessly off the JoinSet — irrelevant to the synchronous
+            // feed emission under test.
+            agent_command: "true".into(),
+            agent_args: vec![],
+            mcp_command: "test-mcp-server".into(),
+            idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
+            max_turn_duration_secs: 3600,
+            agents: 1,
+            heartbeat_interval_secs: 0,
+            turn_liveness_secs: 10,
+            heartbeat_prompt: None,
+            system_prompt: None,
+            initial_message: None,
+            subscribe_mode: config::SubscribeMode::All,
+            dedup_mode: config::DedupMode::Queue,
+            multiple_event_handling: config::MultipleEventHandling::Queue,
+            ignore_self: true,
+            kinds_override: None,
+            channels_override: None,
+            no_mention_filter: false,
+            config_path: std::path::PathBuf::from("./buzz-acp.toml"),
+            context_message_limit: 12,
+            max_turns_per_session: 0,
+            presence_enabled: true,
+            typing_enabled: true,
+            memory_enabled: false,
+            model: None,
+            permission_mode: config::PermissionMode::BypassPermissions,
+            respond_to: config::RespondTo::Anyone,
+            respond_to_allowlist: HashSet::new(),
+            persona_env_vars: vec![],
+            relay_observer: false,
+            agent_owner: None,
+            no_base_prompt: false,
+            base_prompt_content: None,
+        }
+    }
+
+    /// Spawn a real but inert agent subprocess (`cat`) so the error paths have
+    /// an `OwnedAgent` to move into respawn or return to the pool. The error
+    /// branches never talk to the subprocess.
+    async fn dummy_agent(index: usize) -> OwnedAgent {
+        OwnedAgent {
+            index,
+            acp: AcpClient::spawn("cat", &[], &[])
+                .await
+                .expect("spawn cat as inert agent"),
+            state: Default::default(),
+            model_capabilities: None,
+            desired_model: None,
+            // Error branches under test never read this; 1 is the legacy
+            // non-systemPrompt path, the simplest valid value.
+            protocol_version: 1,
+        }
+    }
+
+    /// Drive one error outcome through `handle_prompt_result` and return how
+    /// many `turn_error` events it emitted to the observer feed.
+    async fn turn_errors_emitted_for(outcome: PromptOutcome) -> usize {
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+
+        // `handle_prompt_result` asserts it removes exactly one in-flight task
+        // for the completing agent (the slot was checked out, not idle). Mirror
+        // the real dispatch path by registering a TaskMeta keyed on a genuine
+        // `task::Id` — only obtainable from inside a spawned task.
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                recoverable_batch: None,
+                control_tx: None,
+            },
+        );
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(Uuid::new_v4()),
+            outcome,
+            batch: None,
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+        );
+
+        observer
+            .snapshot()
+            .iter()
+            .filter(|e| e.kind == "turn_error")
+            .count()
+    }
+
+    #[tokio::test]
+    async fn agent_exited_emits_exactly_one_feed_event() {
+        assert_eq!(turn_errors_emitted_for(PromptOutcome::AgentExited).await, 1);
+    }
+
+    #[tokio::test]
+    async fn timeout_emits_exactly_one_feed_event() {
+        assert_eq!(turn_errors_emitted_for(PromptOutcome::Timeout).await, 1);
+    }
+
+    #[tokio::test]
+    async fn transport_error_emits_exactly_one_feed_event() {
+        let io = AcpError::Io(std::io::Error::other("pipe broke"));
+        assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(io)).await, 1);
+    }
+
+    #[tokio::test]
+    async fn application_error_emits_exactly_one_feed_event() {
+        let app = AcpError::IdleTimeout(std::time::Duration::from_secs(1));
+        assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
     }
 }

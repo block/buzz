@@ -208,6 +208,143 @@ async fn refreshed_token_is_persisted_to_disk() {
     assert!(on_disk["expires_at"].is_u64());
 }
 
+#[tokio::test]
+async fn refresh_now_runs_grant_on_unexpired_rejected_token() {
+    let tmp = TempDir::new().unwrap();
+
+    let (base, refresh_counter) = spawn_oidc().await;
+    let cfg = PkceOAuthConfig {
+        discovery_url: format!("{base}/.well-known/oauth-authorization-server"),
+        client_id: "test-client".into(),
+        scopes: vec!["a".into()],
+        cache_namespace: "databricks".into(),
+        cache_dir_override: Some(tmp.path().to_path_buf()),
+    };
+
+    // The exact 401 case this whole change exists to fix: a token that is
+    // still locally *unexpired* but the server rejected it (skew, revocation,
+    // a node that never saw it). is_expired() says "keep it", so a clock-based
+    // gate would no-op and the agent would die. refresh_now() must instead key
+    // off identity — the cached token equals the rejected one — and run the
+    // grant anyway. The stub never serves a browser flow, so a fresh token
+    // here proves the refresh-token grant ran, not the interactive path.
+    let future = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let path = cache_path_for(tmp.path(), &cfg);
+    seed_cache(
+        &path,
+        json!({
+            "access_token": "rejected",
+            "refresh_token": "valid-refresh",
+            "expires_at": future,
+        }),
+    );
+
+    let src = PkceOAuthTokenSource::new(cfg).unwrap();
+    let bearer = src.refresh_now("rejected").await.unwrap();
+    assert_eq!(bearer, "fresh-token-1", "grant ran despite local freshness");
+    assert_eq!(refresh_counter.load(Ordering::SeqCst), 1, "grant ran once");
+
+    // The refresh token was preserved (rotated, not discarded): the saved
+    // token still carries one, so a future 401 can refresh again instead of
+    // falling to the browser flow. This is the property defect #1 broke.
+    let on_disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(on_disk["access_token"], "fresh-token-1");
+    assert_eq!(on_disk["refresh_token"], "rotated-refresh");
+}
+
+#[tokio::test]
+async fn refresh_now_coalesces_when_another_caller_already_refreshed() {
+    let tmp = TempDir::new().unwrap();
+
+    let (base, refresh_counter) = spawn_oidc().await;
+    let cfg = PkceOAuthConfig {
+        discovery_url: format!("{base}/.well-known/oauth-authorization-server"),
+        client_id: "test-client".into(),
+        scopes: vec!["a".into()],
+        cache_namespace: "databricks".into(),
+        cache_dir_override: Some(tmp.path().to_path_buf()),
+    };
+
+    // A concurrent caller already replaced the rejected token: the cached
+    // token differs from the one we hold. Coalesce by identity — return the
+    // new token without burning a second grant, so N concurrent 401s on the
+    // same stale token collapse onto one refresh. Note the cached token is
+    // *unexpired* here too, so this proves coalescing keys off identity, not
+    // the clock (which agrees with both the old and new token).
+    let future = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let path = cache_path_for(tmp.path(), &cfg);
+    seed_cache(
+        &path,
+        json!({
+            "access_token": "already-refreshed",
+            "refresh_token": "rt",
+            "expires_at": future,
+        }),
+    );
+
+    let src = PkceOAuthTokenSource::new(cfg).unwrap();
+    let bearer = src.refresh_now("the-rejected-one").await.unwrap();
+    assert_eq!(bearer, "already-refreshed");
+    assert_eq!(
+        refresh_counter.load(Ordering::SeqCst),
+        0,
+        "no grant when a sibling already refreshed the rejected token"
+    );
+}
+
+#[tokio::test]
+async fn refresh_now_without_refresh_token_is_terminal() {
+    let tmp = TempDir::new().unwrap();
+
+    let (base, refresh_counter) = spawn_oidc().await;
+    let cfg = PkceOAuthConfig {
+        discovery_url: format!("{base}/.well-known/oauth-authorization-server"),
+        client_id: "test-client".into(),
+        scopes: vec!["a".into()],
+        cache_namespace: "databricks".into(),
+        cache_dir_override: Some(tmp.path().to_path_buf()),
+    };
+
+    // The rejected token is still the cached one and there's no refresh token
+    // to fall back on. refresh_now() must fail terminally (LlmAuth) rather
+    // than open a browser — the headless hang this whole change exists to
+    // prevent.
+    let path = cache_path_for(tmp.path(), &cfg);
+    seed_cache(
+        &path,
+        json!({
+            "access_token": "rejected",
+            "refresh_token": serde_json::Value::Null,
+            "expires_at": 1u64,
+        }),
+    );
+
+    let src = PkceOAuthTokenSource::new(cfg).unwrap();
+    let err = src.refresh_now("rejected").await.unwrap_err();
+    // `types::AgentError` isn't a public path; match on its Display, which
+    // prefixes `LlmAuth` variants with "llm auth:". A terminal LlmAuth (not
+    // a browser hang) is the whole point of this path.
+    let msg = err.to_string();
+    assert!(
+        msg.starts_with("llm auth:"),
+        "expected terminal LlmAuth, got: {msg}"
+    );
+    assert_eq!(
+        refresh_counter.load(Ordering::SeqCst),
+        0,
+        "no grant attempted"
+    );
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // ACP-level envelope regression test.
 //

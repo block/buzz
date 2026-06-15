@@ -36,7 +36,8 @@ type UnifiedAgentsSectionProps = {
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
-  channelsByPubkey: Record<string, string[]>;
+  channelIdToName: Record<string, string>;
+  channelsByPubkey: Record<string, { id: string; name: string }[]>;
   agentsError: Error | null;
   isActionPending: boolean;
   isAgentsLoading: boolean;
@@ -108,6 +109,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     actionErrorMessage,
     actionNoticeMessage,
     agents,
+    channelIdToName,
     channelsByPubkey,
     agentsError,
     isActionPending,
@@ -176,6 +178,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   const isLoading = isAgentsLoading || isPersonasLoading;
 
   const rowProps = {
+    channelIdToName,
     channelsByPubkey,
     isActionPending,
     logContent,

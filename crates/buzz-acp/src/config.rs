@@ -250,6 +250,11 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_HEARTBEAT_INTERVAL", default_value_t = 0)]
     pub heartbeat_interval: u64,
 
+    /// Seconds between per-turn liveness pings (the crash backstop signal —
+    /// distinct from heartbeat self-prompting). 0 = disabled.
+    #[arg(long, env = "BUZZ_ACP_TURN_LIVENESS_SECS", default_value_t = 10)]
+    pub turn_liveness_secs: u64,
+
     /// Heartbeat prompt text. Conflicts with --heartbeat-prompt-file.
     #[arg(
         long,
@@ -435,6 +440,10 @@ pub struct Config {
     pub max_turn_duration_secs: u64,
     pub agents: u32,
     pub heartbeat_interval_secs: u64,
+    /// Seconds between per-turn liveness pings. 0 = disabled. Distinct from
+    /// `heartbeat_interval_secs` (agent self-prompting) — this is the desktop
+    /// crash-backstop signal.
+    pub turn_liveness_secs: u64,
     pub heartbeat_prompt: Option<String>,
     pub system_prompt: Option<String>,
     pub initial_message: Option<String>,
@@ -599,6 +608,12 @@ impl Config {
             ));
         }
 
+        if args.turn_liveness_secs > 0 && args.turn_liveness_secs < 5 {
+            return Err(ConfigError::ConfigFile(
+                "turn liveness interval must be 0 (disabled) or ≥5 seconds".into(),
+            ));
+        }
+
         let heartbeat_prompt = if let Some(text) = args.heartbeat_prompt {
             Some(text)
         } else if let Some(ref path) = args.heartbeat_prompt_file {
@@ -667,6 +682,17 @@ impl Config {
             86400u64
         } else {
             args.heartbeat_interval
+        };
+
+        // Cap turn-liveness interval at 86400s (24h) — same bound as heartbeat.
+        let turn_liveness_secs = if args.turn_liveness_secs > 86400 {
+            tracing::warn!(
+                interval = args.turn_liveness_secs,
+                "turn liveness interval exceeds 24h — capping at 86400s"
+            );
+            86400u64
+        } else {
+            args.turn_liveness_secs
         };
 
         // Resolve idle_timeout_secs with deprecation handling.
@@ -808,6 +834,7 @@ impl Config {
             max_turn_duration_secs,
             agents: args.agents,
             heartbeat_interval_secs: heartbeat_interval,
+            turn_liveness_secs,
             heartbeat_prompt,
             system_prompt,
             initial_message: args.initial_message,
@@ -1173,6 +1200,7 @@ mod tests {
             max_turn_duration_secs: 3600,
             agents: 1,
             heartbeat_interval_secs: 0,
+            turn_liveness_secs: 10,
             heartbeat_prompt: None,
             system_prompt: None,
             initial_message: None,
@@ -1740,6 +1768,44 @@ channels = "ALL"
     fn test_heartbeat_interval_nine_rejected() {
         let err = validate_heartbeat_interval(9).unwrap_err();
         assert!(err.to_string().contains("heartbeat interval must be 0"));
+    }
+
+    // ── turn-liveness validation ─────────────────────────────────────────────
+
+    fn validate_turn_liveness(secs: u64) -> Result<(), ConfigError> {
+        if secs > 0 && secs < 5 {
+            return Err(ConfigError::ConfigFile(
+                "turn liveness interval must be 0 (disabled) or ≥5 seconds".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_turn_liveness_zero_ok() {
+        assert!(validate_turn_liveness(0).is_ok());
+    }
+
+    #[test]
+    fn test_turn_liveness_five_ok() {
+        assert!(validate_turn_liveness(5).is_ok());
+    }
+
+    #[test]
+    fn test_turn_liveness_ten_ok() {
+        assert!(validate_turn_liveness(10).is_ok());
+    }
+
+    #[test]
+    fn test_turn_liveness_four_rejected() {
+        let err = validate_turn_liveness(4).unwrap_err();
+        assert!(err.to_string().contains("turn liveness interval must be 0"));
+    }
+
+    #[test]
+    fn test_turn_liveness_one_rejected() {
+        let err = validate_turn_liveness(1).unwrap_err();
+        assert!(err.to_string().contains("turn liveness interval must be 0"));
     }
 
     // ── summary includes agents and heartbeat ────────────────────────────────

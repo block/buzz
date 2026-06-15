@@ -72,7 +72,7 @@ If the automated flow isn't suitable (e.g., building from a non-main ref):
 
 After the OSS release ships, trigger an internal build via the
 [sprout-releases Buildkite pipeline](https://buildkite.com/runway/sprout-releases).
-See the [sprout-releases README](https://github.com/squareup/sprout-releases#cutting-a-release)
+See the [buzz-releases README](https://github.com/squareup/buzz-releases#cutting-a-release)
 for the full step-by-step instructions and input field reference.
 
 ---
@@ -102,7 +102,7 @@ the same `v<version>` release. Intel users download the `_x64.dmg`.
 
 ## Prerequisites
 
-- **Write access** to the `block/sprout` GitHub repository
+- **Write access** to the `block/buzz` GitHub repository
 - **`gh` CLI** authenticated (`gh auth status`)
 - The following **GitHub Actions secrets** must be configured:
 

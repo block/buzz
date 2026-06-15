@@ -74,6 +74,7 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::mem::ManuallyDrop;
+#[cfg(unix)]
 use std::os::unix::io::FromRawFd;
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -338,12 +339,20 @@ impl StatusWriter {
                         eprintln!("warning: --status-fd={fd} is not a valid open fd, using stderr");
                         return Ok(Self { file: None });
                     }
+                    // SAFETY EXCEPTION: Required for Unix fd operations; no safe Rust API
+                    // exists for from_raw_fd. The fd is >= 1 (validated by parse_status_fd),
+                    // confirmed open by fcntl above, and git owns its lifetime. We use
+                    // ManuallyDrop to prevent Rust from closing the inherited fd on drop.
+                    Some(ManuallyDrop::new(unsafe { fs::File::from_raw_fd(fd) }))
                 }
-                // SAFETY EXCEPTION: Required for Unix fd operations; no safe Rust API
-                // exists for from_raw_fd. The fd is >= 1 (validated by parse_status_fd),
-                // confirmed open by fcntl above, and git owns its lifetime. We use
-                // ManuallyDrop to prevent Rust from closing the inherited fd on drop.
-                Some(ManuallyDrop::new(unsafe { fs::File::from_raw_fd(fd) }))
+                // git's --status-fd passes an inherited numeric fd, which has no
+                // equivalent on Windows. Fall back to stderr; write_line already
+                // handles the None case.
+                #[cfg(not(unix))]
+                {
+                    let _ = (fd, strict);
+                    None
+                }
             }
         };
         Ok(Self { file })

@@ -7,10 +7,12 @@ import type { ManagedAgent, PresenceStatus } from "@/shared/api/types";
 const PRESENCE_GRACE_MS = 15_000;
 
 export function AgentStatusBadge({
+  isWorking,
   presenceLoaded,
   presenceStatus,
   status,
 }: {
+  isWorking?: boolean;
   presenceLoaded: boolean;
   presenceStatus: PresenceStatus | undefined;
   status: ManagedAgent["status"];
@@ -29,11 +31,26 @@ export function AgentStatusBadge({
     status === "running" &&
     (!presenceStatus || presenceStatus === "offline");
 
-  const variant = isStarting ? "warning" : isActive ? "default" : "secondary";
+  const variant: "default" | "warning" | "secondary" = isWorking
+    ? "default"
+    : isStarting
+      ? "warning"
+      : isActive
+        ? "default"
+        : "secondary";
+
+  const label = isWorking
+    ? "Working"
+    : isStarting
+      ? "Starting\u2026"
+      : status.replace(/_/g, " ");
 
   return (
-    <Badge variant={variant}>
-      {isStarting ? "Starting\u2026" : status.replace(/_/g, " ")}
+    <Badge
+      className={isWorking ? "motion-safe:animate-pulse" : undefined}
+      variant={variant}
+    >
+      {label}
     </Badge>
   );
 }

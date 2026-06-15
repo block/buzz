@@ -4,7 +4,10 @@ import { decode } from "nostr-tools/nip19";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { parse as yamlParse } from "yaml";
 
+import { relayClient } from "@/shared/api/relayClient";
+import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
+import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import {
   CUSTOM_EMOJI_SET_D_TAG,
   KIND_EMOJI_SET,
@@ -64,6 +67,9 @@ type E2eConfig = {
     managedAgents?: MockManagedAgentSeed[];
     agentMemory?: RawAgentMemoryListing | Record<string, RawAgentMemoryListing>;
     createManagedAgentDelayMs?: number;
+    channelsReadError?: string;
+    feedReadError?: string;
+    canvasReadError?: string;
     profileReadDelayMs?: number;
     profileReadError?: string;
     profileUpdateError?: string;
@@ -589,11 +595,17 @@ declare global {
       kind: number;
       tags: string[][];
     }>;
+    __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: ConnectionState) => void;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
       denyReason?: string;
+    }) => void;
+    __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
+      agentPubkey: string;
+      channelId: string;
+      turnId: string;
     }) => void;
     __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
       clientId: string;
@@ -2157,7 +2169,24 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
               sig: "mocksig".repeat(20).slice(0, 128),
             },
           ]
-        : [];
+        : channelId === "94a444a4-c0a3-5966-ab05-530c6ddc2301"
+          ? [
+              // Charlie is a `bot` member of #agents (see channel seed), so this
+              // message renders with role="bot" — the surface whose avatar opens
+              // a managed-agent profile panel / hover popover with active-turn
+              // badges. #agents has no message-row index assertions, so seeding
+              // here is safe for existing specs.
+              {
+                id: "mock-agents-charlie",
+                pubkey: CHARLIE_PUBKEY,
+                created_at: Math.floor(Date.now() / 1000) - 90,
+                kind: 9,
+                tags: [["h", channelId]],
+                content: "Indexing the channel catalog now.",
+                sig: "mocksig".repeat(20).slice(0, 128),
+              },
+            ]
+          : [];
 
   mockMessages.set(channelId, seeded);
   return seeded;
@@ -2713,6 +2742,11 @@ async function submitSignedEvent(
 }
 
 async function handleGetChannels(config: E2eConfig | undefined) {
+  const channelsReadError = config?.mock?.channelsReadError;
+  if (channelsReadError) {
+    throw new Error(channelsReadError);
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     return listMockChannels(config);
@@ -3818,6 +3852,11 @@ async function handleGetFeed(
   },
   config: E2eConfig | undefined,
 ): Promise<RawHomeFeedResponse> {
+  const feedReadError = config?.mock?.feedReadError;
+  if (feedReadError) {
+    throw new Error(feedReadError);
+  }
+
   const identity = getIdentity(config);
   if (!identity) {
     const now = Math.floor(Date.now() / 1000);
@@ -5853,6 +5892,19 @@ export function maybeInstallE2eTauriMocks() {
     emitMockLiveEvent(GLOBAL_MOCK_SUBSCRIPTION, event);
     return event;
   };
+  window.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ = (state) => {
+    // Directly emit a connection state change on the relay client singleton,
+    // for tests that need to drive ConnectionBanner without waiting for the
+    // real auth-timeout + reconnect-debounce cycle (~10 s). Reaches the
+    // TS-private emitter via a cast so the production class carries no
+    // test-only seam.
+    (
+      relayClient as unknown as {
+        connectionStateEmitter: { set: (s: ConnectionState) => void };
+      }
+    ).connectionStateEmitter.set(state);
+  };
+
   window.__BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__ = (stall) => {
     const config = getConfig();
     if (!config?.mock) return;
@@ -5867,6 +5919,26 @@ export function maybeInstallE2eTauriMocks() {
     if (mesh.models !== undefined) mockMeshState.models = mesh.models;
     if (mesh.denyReason !== undefined)
       mockMeshState.denyReason = mesh.denyReason;
+  };
+  let seedTurnSeq = Date.now();
+  window.__BUZZ_E2E_SEED_ACTIVE_TURNS__ = ({
+    agentPubkey,
+    channelId,
+    turnId,
+  }) => {
+    seedTurnSeq += 1;
+    syncAgentTurnsFromEvents(agentPubkey, [
+      {
+        seq: seedTurnSeq,
+        timestamp: new Date().toISOString(),
+        kind: "turn_started",
+        agentIndex: 0,
+        channelId,
+        sessionId: null,
+        turnId,
+        payload: null,
+      },
+    ]);
   };
   const meshNodeStatus = (
     state: "off" | "running",
@@ -6094,6 +6166,12 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":
         return getRelayWsUrl(activeConfig);
+      case "get_legacy_workspace_storage":
+        return {
+          workspaces: null,
+          activeWorkspaceId: null,
+          onboardingCompletions: [],
+        };
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
       case "discover_acp_providers":
@@ -6493,6 +6571,14 @@ export function maybeInstallE2eTauriMocks() {
         // The spec only verifies UI state, not the submitted request shape;
         // returning null mirrors the Rust submit_event success path.
         return null;
+      case "get_canvas": {
+        const canvasReadError = activeConfig?.mock?.canvasReadError;
+        if (canvasReadError) {
+          throw new Error(canvasReadError);
+        }
+        // Return the no-canvas success shape — content null means no canvas set.
+        return { content: null, updated_at: null, author: null };
+      }
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }
