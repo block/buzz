@@ -129,6 +129,10 @@ export function MessageThreadPanel({
 }: MessageThreadPanelProps) {
   const threadBodyRef = React.useRef<HTMLDivElement>(null);
   const threadComposerWrapperRef = React.useRef<HTMLDivElement>(null);
+  // Mirrored from useAnchoredScroll below; consumed by useComposerHeightPadding
+  // so the at-bottom decision is single-sourced from the hook (24px), not
+  // duplicated with a local 32px threshold.
+  const threadAtBottomRef = React.useRef(true);
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
   const isSplitLayout = layout === "split";
@@ -137,6 +141,7 @@ export function MessageThreadPanel({
     threadBodyRef,
     threadComposerWrapperRef,
     isSinglePanelView,
+    threadAtBottomRef,
   );
 
   const threadHeadId = threadHead?.id ?? null;
@@ -172,6 +177,7 @@ export function MessageThreadPanel({
     isLoading: false,
     targetMessageId: scrollTargetId,
     onTargetReached: onScrollTargetResolved,
+    atBottomRef: threadAtBottomRef,
   });
 
   // Mirror the anchored hook's internal ref into `threadBodyRef` so existing

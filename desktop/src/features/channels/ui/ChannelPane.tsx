@@ -254,6 +254,10 @@ export const ChannelPane = React.memo(function ChannelPane({
 }: ChannelPaneProps) {
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
+  // Mirrored from MessageTimeline's anchored-scroll hook. Lets the
+  // composer-padding effect gate its "stick to bottom" snap on the same
+  // 24px at-bottom truth the hook uses (instead of its own 32px threshold).
+  const timelineAtBottomRef = React.useRef(true);
   const completedWelcomeBannerChannelIdsRef = React.useRef(new Set<string>());
   const welcomeComposerDismissTimerRef = React.useRef<number | null>(null);
   const welcomeComposerHideTimerRef = React.useRef<number | null>(null);
@@ -273,6 +277,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     timelineScrollRef,
     composerWrapperRef,
     `${isSinglePanelView}:${hasMainComposerOverlay}`,
+    timelineAtBottomRef,
   );
 
   const clearWelcomeComposerDismissTimer = React.useCallback(() => {
@@ -651,6 +656,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             channelIntro={channelIntro}
             directMessageIntro={directMessageIntro}
             scrollContainerRef={timelineScrollRef}
+            atBottomRef={timelineAtBottomRef}
             currentPubkey={currentPubkey}
             fetchOlder={fetchOlder}
             followThreadById={followThreadById}

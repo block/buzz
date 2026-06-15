@@ -124,9 +124,10 @@ test.describe("anchored scroll", () => {
     });
 
     // Scroll up until we're close to the IntersectionObserver root margin
-    // (400px) but still *outside* it. We want to capture the anchor before
-    // the IO fires and the loading spinner mounts, because the spinner adds
-    // ~40px of height that would change the row's apparent topOffset.
+    // (400px) but still *outside* it. We'll then nudge into the margin, let
+    // the spinner mount, and capture the anchor AFTER the spinner adds its
+    // ~40px of height — i.e., the hook and the test read the SAME post-
+    // spinner DOM state, so the comparison isn't polluted by spinner height.
     const box = await timeline.boundingBox();
     expect(box).not.toBeNull();
     await page.mouse.move(

@@ -67,6 +67,14 @@ type UseAnchoredScrollOptions = {
    */
   targetMessageId?: string | null;
   onTargetReached?: (messageId: string) => void;
+  /**
+   * Optional mutable ref mirrored from this hook's `isAtBottom` state on
+   * every change. Lets sibling DOM-writing effects (e.g. composer padding)
+   * gate their behaviour on the SAME at-bottom truth the hook computes,
+   * instead of duplicating thresholds. Single decision-maker, single
+   * `AT_BOTTOM_THRESHOLD_PX`.
+   */
+  atBottomRef?: React.MutableRefObject<boolean>;
 };
 
 /** How close to the bottom counts as "at the bottom". Avoids subpixel misses. */
@@ -98,6 +106,7 @@ export function useAnchoredScroll({
   isLoading = false,
   targetMessageId = null,
   onTargetReached,
+  atBottomRef,
 }: UseAnchoredScrollOptions): AnchoredScrollHandle {
   const scrollContainerRef = React.useRef<HTMLDivElement | null>(null);
   const topSentinelRef = React.useRef<HTMLDivElement | null>(null);
@@ -114,6 +123,13 @@ export function useAnchoredScroll({
   const [highlightedMessageId, setHighlightedMessageId] = React.useState<
     string | null
   >(null);
+
+  // Mirror at-bottom into an optional external ref so sibling DOM effects
+  // (composer padding) can read the same truth without duplicating the
+  // threshold.
+  React.useEffect(() => {
+    if (atBottomRef) atBottomRef.current = isAtBottom;
+  }, [atBottomRef, isAtBottom]);
 
   // Track previous tail to distinguish "new message appended" from a prepend
   // (length grew but lastId unchanged) or unrelated rerender.
@@ -261,6 +277,12 @@ export function useAnchoredScroll({
     // topOffset is preserved across layout-effect restorations (only
     // re-captured on user scroll or explicit target-message), so a swallowed
     // delta doesn't compound — the next restoration sees the same oldTop.
+    // We write `scrollTop += delta` rather than `scrollBy(0, delta)` because
+    // both are programmatic (neither composes with overflow-anchor — the
+    // browser only auto-adjusts in response to DOM mutations, not script
+    // writes). Direct assignment avoids the smooth-scroll behaviour
+    // `scrollBy` can pick up from CSS `scroll-behavior` and reads more
+    // obviously as "additive nudge to restore captured anchor."
     if (Math.abs(delta) > 0.5) {
       container.scrollTop += delta;
     }
@@ -360,7 +382,7 @@ export function useAnchoredScroll({
     return () => {
       window.clearTimeout(timeout);
     };
-  }, [isLoading, onTargetReached, targetMessageId]);
+  }, [isLoading, onTargetReached, targetMessageId, messageIds]);
 
   // ---- imperative scrollToBottom (for jump-to-latest button) ---------------
 

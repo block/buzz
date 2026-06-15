@@ -34,6 +34,10 @@ type MessageTimelineProps = {
   /** Optional external ref to the scroll container — used by the parent to
    *  observe scroll position or adjust padding dynamically. */
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
+  /** Optional ref mirrored from the internal `useAnchoredScroll.isAtBottom`.
+   *  Lets the parent's composer-padding effect read the same at-bottom
+   *  truth the hook computes, instead of duplicating thresholds. */
+  atBottomRef?: React.MutableRefObject<boolean>;
   /** True when the timeline has the composer overlay below it. */
   hasComposerOverlay?: boolean;
   isFetchingOlder?: boolean;
@@ -117,6 +121,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   onToggleReaction,
   unfollowThreadById,
   scrollContainerRef: externalScrollRef,
+  atBottomRef,
   searchActiveMessageId = null,
   searchMatchingMessageIds,
   searchQuery,
@@ -145,6 +150,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     isLoading,
     targetMessageId,
     onTargetReached,
+    atBottomRef,
   });
 
   // Mirror the internal scroll ref into the externally-supplied one (if any),

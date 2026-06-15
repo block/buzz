@@ -7,13 +7,20 @@ import { observeElementBlockSize } from "@/shared/layout/observeElementBlockSize
  * container's `paddingBottom` to match, so content is never hidden
  * behind the absolutely-positioned composer.
  *
- * If the user is already scrolled to the bottom when padding increases,
- * auto-scrolls to keep them at the bottom (no visible gap).
+ * If the user is pinned to the bottom (per the anchored-scroll hook's
+ * truth, NOT a local threshold) when padding increases, auto-scrolls
+ * to keep them at the bottom (no visible gap).
+ *
+ * @param atBottomRef Optional ref written by `useAnchoredScroll`; when
+ *   provided, the at-bottom decision uses the hook's `AT_BOTTOM_THRESHOLD_PX`
+ *   (currently 24) as the single source of truth. When absent, the
+ *   composer falls back to its own 32px near-bottom check.
  */
 export function useComposerHeightPadding(
   scrollContainerRef: React.RefObject<HTMLElement | null>,
   composerRef: React.RefObject<HTMLElement | null>,
   resetKey?: unknown,
+  atBottomRef?: React.RefObject<boolean>,
 ) {
   React.useEffect(() => {
     void resetKey;
@@ -24,7 +31,9 @@ export function useComposerHeightPadding(
       return;
     }
 
-    const isNearBottom = (): boolean => {
+    const isAtBottom = (): boolean => {
+      if (atBottomRef) return atBottomRef.current === true;
+      // Fallback for callers that haven't wired the ref yet.
       const threshold = 32;
       return (
         scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight <
@@ -41,7 +50,7 @@ export function useComposerHeightPadding(
       }
 
       const previousPadding = lastPadding;
-      const wasAtBottom = isNearBottom();
+      const wasAtBottom = isAtBottom();
 
       scrollEl.style.paddingBottom = `${padding}px`;
       lastPadding = padding;
@@ -60,5 +69,5 @@ export function useComposerHeightPadding(
       disconnect();
       scrollEl.style.paddingBottom = "";
     };
-  }, [scrollContainerRef, composerRef, resetKey]);
+  }, [scrollContainerRef, composerRef, resetKey, atBottomRef]);
 }
