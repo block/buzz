@@ -39,7 +39,10 @@ fn run_hook(config: &ReconnectHookConfig) {
         if step.is_empty() {
             continue;
         }
-        match std::process::Command::new(&step[0]).args(&step[1..]).output() {
+        match std::process::Command::new(&step[0])
+            .args(&step[1..])
+            .output()
+        {
             Ok(o) if !o.status.success() => {
                 eprintln!("[relay_reconnect_hook] step {:?} exited {}", step, o.status);
             }

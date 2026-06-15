@@ -31,8 +31,9 @@ fn main() {
     if let Ok(val) = std::env::var("BUZZ_BUILD_RELAY_RECONNECT_CMD") {
         let parsed: serde_json::Value = serde_json::from_str(&val)
             .unwrap_or_else(|e| panic!("BUZZ_BUILD_RELAY_RECONNECT_CMD is not valid JSON: {e}"));
-        serde_json::from_value::<ReconnectHookConfig>(parsed)
-            .unwrap_or_else(|e| panic!("BUZZ_BUILD_RELAY_RECONNECT_CMD doesn't match ReconnectHookConfig: {e}"));
+        serde_json::from_value::<ReconnectHookConfig>(parsed).unwrap_or_else(|e| {
+            panic!("BUZZ_BUILD_RELAY_RECONNECT_CMD doesn't match ReconnectHookConfig: {e}")
+        });
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_RELAY_RECONNECT_CMD={val}");
     }
 
