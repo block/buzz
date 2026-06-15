@@ -143,6 +143,12 @@ test("video upload previews use poster frames and inline videos open review mode
     const messageId = row?.getAttribute("data-message-id") ?? "";
     return Boolean(messageId) && !messageId.startsWith("optimistic");
   });
+  const videoMessageId = await reviewButton.evaluate((button) =>
+    button.closest("[data-message-id]")?.getAttribute("data-message-id"),
+  );
+  if (!videoMessageId) {
+    throw new Error("Expected uploaded video row to have a message id.");
+  }
 
   const inlinePlayer = page.getByTestId("video-player").last();
   const inlineVideo = inlinePlayer.locator("video");
@@ -526,4 +532,28 @@ test("video upload previews use poster frames and inline videos open review mode
     .getByTestId("video-review-backdrop")
     .click({ position: { x: 4, y: 4 } });
   await expect(page.getByTestId("video-review-dialog")).toHaveCount(0);
+
+  const videoSummaryRow = page.locator(
+    `[data-thread-head-id="${videoMessageId}"]`,
+  );
+  await expect(videoSummaryRow).toBeVisible();
+  await videoSummaryRow.click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  const threadHead = threadPanel.getByTestId("message-thread-head");
+  await expect(threadHead.getByTestId("video-player")).toBeVisible();
+
+  await threadHead.getByRole("button", { name: "Open video review" }).click();
+  const threadReviewDialog = page.getByTestId("video-review-dialog");
+  await expect(threadReviewDialog).toBeVisible();
+  await expect(
+    threadReviewDialog.getByTestId("video-review-comments-panel"),
+  ).toBeVisible();
+  await expect(
+    threadReviewDialog.getByTestId("message-composer"),
+  ).toBeVisible();
+  await expect(
+    threadReviewDialog.getByTestId("video-review-comments"),
+  ).toContainText("Color pass looks right");
 });

@@ -33,7 +33,10 @@ import {
   collectMessageMentionPubkeys,
   formatTimelineMessages,
 } from "@/features/messages/lib/formatTimelineMessages";
-import { buildThreadPanelData } from "@/features/messages/lib/threadPanel";
+import {
+  buildThreadPanelDataFromIndex,
+  buildThreadPanelIndex,
+} from "@/features/messages/lib/threadPanel";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
@@ -317,10 +320,14 @@ export function ChannelScreen({
     },
     [directReplyIdsByParentId],
   );
+  const threadPanelIndex = React.useMemo(
+    () => buildThreadPanelIndex(timelineMessages),
+    [timelineMessages],
+  );
   const threadPanelData = React.useMemo(
     () =>
-      buildThreadPanelData(
-        timelineMessages,
+      buildThreadPanelDataFromIndex(
+        threadPanelIndex,
         openThreadHeadId,
         threadReplyTargetId,
         expandedThreadReplyIds,
@@ -329,7 +336,7 @@ export function ChannelScreen({
       expandedThreadReplyIds,
       openThreadHeadId,
       threadReplyTargetId,
-      timelineMessages,
+      threadPanelIndex,
     ],
   );
   const openThreadHeadMessage = threadPanelData.threadHead;

@@ -7,6 +7,10 @@ import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
 import { MessageThreadPanel } from "@/features/messages/ui/MessageThreadPanel";
 import { MessageTimeline } from "@/features/messages/ui/MessageTimeline";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import {
+  buildVideoReviewCommentsByRootId,
+  buildVideoReviewContextForMessage,
+} from "@/features/messages/lib/videoReviewContext";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
@@ -594,6 +598,38 @@ export const ChannelPane = React.memo(function ChannelPane({
 
     return messages.filter((message) => !isWelcomeSetupSystemMessage(message));
   }, [activeChannel, messages]);
+  const videoReviewCommentsByRootId = React.useMemo(
+    () => buildVideoReviewCommentsByRootId(messages),
+    [messages],
+  );
+  const activeVideoReviewCommentSender = activeChannel?.archivedAt
+    ? undefined
+    : onSendVideoReviewComment;
+  const threadHeadVideoReviewContext = React.useMemo(() => {
+    if (!threadHeadMessage) {
+      return undefined;
+    }
+
+    return buildVideoReviewContextForMessage({
+      channelId: activeChannel?.id ?? null,
+      channelName: activeChannel?.name,
+      channelType: activeChannel?.channelType ?? null,
+      comments: videoReviewCommentsByRootId.get(threadHeadMessage.id) ?? [],
+      isSendingVideoReviewComment: isSending,
+      message: threadHeadMessage,
+      onSendVideoReviewComment: activeVideoReviewCommentSender,
+      onToggleReaction,
+      profiles,
+    });
+  }, [
+    activeChannel,
+    activeVideoReviewCommentSender,
+    isSending,
+    onToggleReaction,
+    profiles,
+    threadHeadMessage,
+    videoReviewCommentsByRootId,
+  ]);
 
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
@@ -822,6 +858,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 replyTargetMessage={threadReplyTargetMessage}
                 scrollTargetId={threadScrollTargetId}
                 threadHead={threadHeadMessage}
+                threadHeadVideoReviewContext={threadHeadVideoReviewContext}
                 widthPx={threadPanelWidthPx}
                 threadReplies={threadMessages}
                 threadTypingPubkeys={threadTypingPubkeys}

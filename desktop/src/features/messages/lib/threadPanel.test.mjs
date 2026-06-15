@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   buildMainTimelineEntries,
   buildThreadPanelData,
+  buildThreadPanelDataFromIndex,
+  buildThreadPanelIndex,
 } from "./threadPanel.ts";
 
 function message(overrides) {
@@ -99,4 +101,43 @@ test("buildThreadPanelData keeps direct comments unindented", () => {
       { id: "nested-reply", depth: 1 },
     ],
   );
+});
+
+test("buildThreadPanelDataFromIndex matches direct panel data", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const directComment = message({
+    id: "direct-comment",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    tags: [["e", "root", "", "reply"]],
+  });
+  const nestedReply = message({
+    id: "nested-reply",
+    createdAt: 3,
+    parentId: "direct-comment",
+    rootId: "root",
+    depth: 2,
+    tags: [
+      ["e", "root", "", "root"],
+      ["e", "direct-comment", "", "reply"],
+    ],
+  });
+  const messages = [root, directComment, nestedReply];
+
+  const direct = buildThreadPanelData(
+    messages,
+    "root",
+    "direct-comment",
+    new Set(["direct-comment"]),
+  );
+  const indexed = buildThreadPanelDataFromIndex(
+    buildThreadPanelIndex(messages),
+    "root",
+    "direct-comment",
+    new Set(["direct-comment"]),
+  );
+
+  assert.deepEqual(indexed, direct);
 });
