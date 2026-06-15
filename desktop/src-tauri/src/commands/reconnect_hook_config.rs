@@ -21,6 +21,7 @@ pub struct ReconnectHookConfig {
     /// substrings in the probe output (e.g. `warp-cli -j status` JSON, where
     /// "Connected" can collide with "Connecting"/"Disconnected").
     pub ready_match: String,
-    /// Maximum milliseconds to poll before giving up (non-fatal timeout).
+    /// Per-process wall-clock cap (ms) for each step and the readiness probe
+    /// phase; non-fatal on expiry — the generic relay reconnect still fires.
     pub timeout_ms: u64,
 }
