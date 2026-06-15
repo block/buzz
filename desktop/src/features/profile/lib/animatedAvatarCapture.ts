@@ -132,9 +132,9 @@ export async function listAvatarCameras(): Promise<AvatarCameraDevice[]> {
   const devices = await navigator.mediaDevices.enumerateDevices();
   return devices
     .filter((device) => device.kind === "videoinput" && device.deviceId)
-    .map((device, index) => ({
+    .map((device) => ({
       deviceId: device.deviceId,
-      label: device.label || `Camera ${index + 1}`,
+      label: device.label,
     }));
 }
 
