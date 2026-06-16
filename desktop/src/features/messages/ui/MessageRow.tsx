@@ -193,7 +193,7 @@ export const MessageRow = React.memo(
             <Markdown
               channelNames={channelNames}
               className={cn(
-                "max-w-full text-base",
+                "max-w-full text-sm",
                 emojiOnly &&
                   "text-4xl leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
               )}

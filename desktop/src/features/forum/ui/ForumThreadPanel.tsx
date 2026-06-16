@@ -107,6 +107,7 @@ function ReplyRow({
       <div className="mt-1.5 pl-8">
         <Markdown
           channelNames={channelNames}
+          className="text-sm"
           content={reply.content}
           imetaByUrl={parseImetaTags(reply.tags)}
           mentionNames={replyMentionNames}
@@ -246,6 +247,7 @@ export function ForumThreadPanel({
           <div className="mt-3">
             <Markdown
               channelNames={channelNames}
+              className="text-sm"
               content={post.content}
               imetaByUrl={parseImetaTags(post.tags)}
               mentionNames={postMentionNames}

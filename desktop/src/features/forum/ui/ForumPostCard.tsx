@@ -116,6 +116,7 @@ export function ForumPostCard({
 
       <div className="mt-2">
         <Markdown
+          className="text-sm"
           content={previewContent}
           imetaByUrl={imetaByUrl}
           mentionNames={mentionNames}

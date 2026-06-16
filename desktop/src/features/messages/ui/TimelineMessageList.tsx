@@ -77,7 +77,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   isSendingVideoReviewComment = false,
   onSendVideoReviewComment,
   onToggleReaction,
-  personaLookup,
   profiles,
   searchActiveMessageId = null,
   searchMatchingMessageIds,
