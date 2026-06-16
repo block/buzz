@@ -5,6 +5,8 @@
 //!   expiration ordering
 //! - Read-path filtering: author-only enforcement on REQ, COUNT, and the
 //!   HTTP bridge (/query, /count)
+//! - Scheduler delivery: the due-reminder poll pushes a reminder to the
+//!   author's live subscription when `not_before` passes
 //!
 //! # Running
 //!
@@ -17,7 +19,7 @@
 use std::time::Duration;
 
 use buzz_test_client::{BuzzTestClient, RelayMessage};
-use nostr::{EventBuilder, Filter, Keys, Kind, Tag};
+use nostr::{EventBuilder, Filter, Keys, Kind, Tag, Timestamp};
 use reqwest::Client;
 use serde_json::Value;
 
@@ -64,6 +66,30 @@ fn build_reminder(keys: &Keys, d_tag: &str, extra_tags: Vec<Tag>) -> nostr::Even
     .unwrap()
 }
 
+/// Build a reminder with an explicit `created_at`, so replacement-ordering
+/// tests are deterministic instead of racing the whole-second timestamp the
+/// default builder stamps.
+fn build_reminder_at(
+    keys: &Keys,
+    d_tag: &str,
+    created_at: Timestamp,
+    extra_tags: Vec<Tag>,
+) -> nostr::Event {
+    let mut tags = vec![
+        Tag::parse(["d", d_tag]).unwrap(),
+        Tag::parse(["alt", "Encrypted reminder"]).unwrap(),
+    ];
+    tags.extend(extra_tags);
+    EventBuilder::new(
+        Kind::Custom(KIND_EVENT_REMINDER),
+        "nip44-ciphertext-placeholder",
+    )
+    .tags(tags)
+    .custom_created_at(created_at)
+    .sign_with_keys(keys)
+    .unwrap()
+}
+
 /// Submit an event via the HTTP bridge and return (accepted, message).
 async fn submit_event_http(client: &Client, keys: &Keys, event: &nostr::Event) -> (bool, String) {
     let pubkey_hex = keys.public_key().to_hex();
@@ -75,10 +101,19 @@ async fn submit_event_http(client: &Client, keys: &Keys, event: &nostr::Event) -
         .send()
         .await
         .expect("submit event");
+    let status = resp.status().as_u16();
     let body: Value = resp.json().await.expect("parse response");
-    let accepted = body["accepted"].as_bool().unwrap_or(false);
-    let message = body["message"].as_str().unwrap_or("").to_string();
-    (accepted, message)
+    if status == 200 {
+        let accepted = body["accepted"].as_bool().unwrap_or(false);
+        let message = body["message"].as_str().unwrap_or("").to_string();
+        (accepted, message)
+    } else {
+        // Rejections come back as `api_error` → `{"error": msg}` with no
+        // `accepted`/`message` fields (see relay api/mod.rs). Mirror the
+        // sibling `count_events_http`, which reads `error` on non-200.
+        let message = body["error"].as_str().unwrap_or("").to_string();
+        (false, message)
+    }
 }
 
 /// Query events via the HTTP bridge. Returns the JSON array of events.
@@ -756,18 +791,28 @@ async fn test_reminder_not_before_zero_accepted() {
 
 #[tokio::test]
 #[ignore]
-async fn test_reminder_not_before_max_safe_integer_accepted() {
+async fn test_reminder_not_before_max_safe_integer_rejected_too_far_in_future() {
     let client = http_client();
     let keys = Keys::generate();
     let d_tag = uuid::Uuid::new_v4().to_string();
 
+    // MAX_SAFE_INTEGER is structurally valid (NIP-ER.md:60, range 0..=2^53-1),
+    // but ~285M years out exceeds the relay's default max_not_before horizon
+    // (NIP-ER.md:130), so the relay correctly rejects it.
     let event = build_reminder(
         &keys,
         &d_tag,
         vec![Tag::parse(["not_before", "9007199254740991"]).unwrap()],
     );
     let (accepted, msg) = submit_event_http(&client, &keys, &event).await;
-    assert!(accepted, "MAX_SAFE_INTEGER should be valid: {msg}");
+    assert!(
+        !accepted,
+        "MAX_SAFE_INTEGER exceeds horizon, should reject: {msg}"
+    );
+    assert!(
+        msg.contains("too far in future"),
+        "unexpected message: {msg}"
+    );
 }
 
 #[tokio::test]
@@ -779,22 +824,27 @@ async fn test_reminder_replacement_semantics() {
     let pubkey_hex = keys.public_key().to_hex();
     let d_tag = uuid::Uuid::new_v4().to_string();
 
-    // First version
-    let event1 = build_reminder(
+    // First version. Explicit distinct created_at makes replacement ordering
+    // deterministic: the default builder stamps whole-second timestamps, so v1
+    // and v2 landing in the same second would let the stale-write tiebreak
+    // (created_at == existing && incoming_id >= existing_id) keep v1 and fail
+    // the assert. v2 two seconds later can never collide.
+    let v1_ts = Timestamp::now();
+    let v2_ts = v1_ts + 2u64;
+    let event1 = build_reminder_at(
         &keys,
         &d_tag,
+        v1_ts,
         vec![Tag::parse(["not_before", "1717000000"]).unwrap()],
     );
     let (accepted, msg) = submit_event_http(&client, &keys, &event1).await;
     assert!(accepted, "first version rejected: {msg}");
 
-    // Small delay to ensure created_at differs
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     // Second version (snooze — later not_before)
-    let event2 = build_reminder(
+    let event2 = build_reminder_at(
         &keys,
         &d_tag,
+        v2_ts,
         vec![Tag::parse(["not_before", "1718000000"]).unwrap()],
     );
     let (accepted, msg) = submit_event_http(&client, &keys, &event2).await;
@@ -851,8 +901,16 @@ async fn test_fanout_isolation_other_user_does_not_receive_reminder() {
         .await
         .expect("connect other");
     let sid = sub_id("fanout-isolation");
-    // Subscribe to all kinds (wildcard) — no kind filter, no channel filter.
-    let filter = Filter::new();
+    // Subscribe with a mixed-kind filter authored by B itself. This passes both
+    // the p-gate (neither kind:9 nor 30300 is p-gated) and the author-only
+    // pre-filter (authors=[self=B]), so the subscription registers for fan-out.
+    // Reminder isolation is then proven by the per-event `is_author_only_event`
+    // omission: A's reminder is silently dropped from B's live delivery rather
+    // than rejected up front. A kindless wildcard would instead trip the
+    // anti-harvest p-gate guard (CLOSED), proving the wrong mechanism.
+    let filter = Filter::new()
+        .kinds(vec![Kind::Custom(9), Kind::Custom(KIND_EVENT_REMINDER)])
+        .author(other_keys.public_key());
     ws_other
         .subscribe(&sid, vec![filter])
         .await
@@ -1035,4 +1093,100 @@ async fn test_reminder_rejected_not_before_too_far_in_future() {
         msg.contains("not_before too far in future"),
         "unexpected message: {msg}"
     );
+}
+
+// ── Scheduler delivery test ──────────────────────────────────────────────────
+
+/// True if the event carries a `d` tag equal to `d_tag`.
+fn has_d_tag(event: &nostr::Event, d_tag: &str) -> bool {
+    event.tags.iter().any(|t| {
+        let parts = t.as_slice();
+        parts.len() >= 2 && parts[0] == "d" && parts[1] == d_tag
+    })
+}
+
+/// Wait for a live `EVENT` on `sub_id` whose `d` tag is `d_tag`, draining the
+/// initial EOSE and any historical matches first. The post-EOSE delivery is the
+/// scheduler's push — with the scheduler disabled, no such frame ever arrives
+/// and this returns `Timeout`.
+async fn await_scheduler_push(
+    ws: &mut BuzzTestClient,
+    sub_id: &str,
+    d_tag: &str,
+    timeout_dur: Duration,
+) -> Result<(), String> {
+    // Drain the stored-events phase up to EOSE; the reminder may appear here as
+    // history, which proves storage but not the scheduler.
+    ws.collect_until_eose(sub_id, Duration::from_secs(5))
+        .await
+        .map_err(|e| format!("EOSE phase failed: {e:?}"))?;
+
+    let deadline = tokio::time::Instant::now() + timeout_dur;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            return Err("no live scheduler push received before timeout".to_string());
+        }
+        match ws.recv_event(remaining).await {
+            Ok(RelayMessage::Event {
+                subscription_id,
+                event,
+            }) if subscription_id == sub_id && has_d_tag(&event, d_tag) => return Ok(()),
+            Ok(_) => {}
+            Err(e) => return Err(format!("recv failed: {e:?}")),
+        }
+    }
+}
+
+/// The scheduler tick delivers a due reminder to the author's live subscription.
+///
+/// Submits a reminder whose `not_before` is a few seconds out *before* any
+/// WebSocket is connected, so the ingest-time fan-out has no subscriber to
+/// deliver to. The author then subscribes and drains the historical EOSE while
+/// the reminder is still not due — so the scheduler cannot have fired yet. Once
+/// `not_before` passes, the only path that reaches the live subscription is the
+/// scheduler polling `query_due_reminders` and publishing the event for
+/// fan-out.
+///
+/// Requires a low scheduler interval; run the relay with
+/// `SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS=1`.
+#[tokio::test]
+#[ignore]
+async fn test_scheduler_delivers_due_reminder_to_author_subscription() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let d_tag = uuid::Uuid::new_v4().to_string();
+
+    // Submit a reminder due a few seconds out, with no WebSocket connected — the
+    // ingest fan-out therefore has zero live recipients, and the reminder is not
+    // yet due so the scheduler will not have claimed it before we subscribe.
+    let due_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3;
+    let client = http_client();
+    let event = build_reminder(
+        &keys,
+        &d_tag,
+        vec![Tag::parse(["not_before", &due_at.to_string()]).unwrap()],
+    );
+    let (accepted, msg) = submit_event_http(&client, &keys, &event).await;
+    assert!(accepted, "setup failed: {msg}");
+
+    // Now subscribe as the author and wait for the scheduler to push the due
+    // reminder live (after the historical EOSE).
+    let mut ws = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let sid = sub_id("scheduler-delivery");
+    let filter = Filter::new()
+        .kind(Kind::Custom(KIND_EVENT_REMINDER))
+        .author(keys.public_key());
+    ws.subscribe(&sid, vec![filter]).await.expect("subscribe");
+
+    let result = await_scheduler_push(&mut ws, &sid, &d_tag, Duration::from_secs(15)).await;
+
+    ws.disconnect().await.expect("disconnect");
+    result.expect("scheduler should deliver the due reminder to the author");
 }
