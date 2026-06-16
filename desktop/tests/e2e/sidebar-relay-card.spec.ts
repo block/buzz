@@ -1,0 +1,64 @@
+import { expect, test } from "@playwright/test";
+
+import { installMockBridge } from "../helpers/bridge";
+
+const BLOCK_RELAY_URL = "wss://sprout-oss.stage.blox.sqprod.co";
+const CUSTOM_RELAY_URL = "wss://relay.example.com";
+const CONNECT_ERROR = "relay unreachable: could not connect to relay";
+const PROXY_ERROR =
+  "relay unreachable: relay returned an unexpected HTML page (VPN or proxy sign-in?)";
+
+test("Block workspace sidebar generic relay failures offer the VPN card", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { channelsReadError: CONNECT_ERROR },
+    { relayWsUrl: BLOCK_RELAY_URL },
+  );
+
+  await page.goto("/");
+
+  const card = page.getByTestId("sidebar-vpn-off");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Turn on VPN");
+  await expect(page.getByTestId("sidebar-connect-vpn")).toBeVisible();
+  await expect(page.getByTestId("sidebar-relay-unreachable")).toHaveCount(0);
+});
+
+test("Block workspace sidebar proxy failures offer access refresh", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { channelsReadError: PROXY_ERROR },
+    { relayWsUrl: BLOCK_RELAY_URL },
+  );
+
+  await page.goto("/");
+
+  const card = page.getByTestId("sidebar-vpn-access-refresh");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Refresh VPN access");
+  await expect(page.getByTestId("sidebar-refresh-vpn-access")).toBeVisible();
+  await expect(page.getByTestId("sidebar-relay-unreachable")).toHaveCount(0);
+});
+
+test("custom workspace sidebar proxy failures stay generic", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { channelsReadError: PROXY_ERROR },
+    { relayWsUrl: CUSTOM_RELAY_URL },
+  );
+
+  await page.goto("/");
+
+  const card = page.getByTestId("sidebar-relay-unreachable");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Can't reach the relay");
+  await expect(page.getByTestId("sidebar-reconnect")).toBeVisible();
+  await expect(page.getByTestId("sidebar-vpn-access-refresh")).toHaveCount(0);
+  await expect(page.getByTestId("sidebar-vpn-off")).toHaveCount(0);
+});

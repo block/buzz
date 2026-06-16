@@ -8,10 +8,8 @@ import {
 } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { cn } from "@/shared/lib/cn";
-import {
-  isRelayUnreachableError,
-  relayErrorDetail,
-} from "@/shared/lib/relayError";
+import { resolveRelayConnectivityCardVariant } from "@/shared/lib/relayConnectivityCard";
+import { isRelayUnreachableError } from "@/shared/lib/relayError";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import {
@@ -40,64 +38,11 @@ type OnboardingRelayCardVariant =
 
 const ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 2_500;
 
-function isBlockRelayUrl(relayUrl: string | null | undefined) {
-  if (!relayUrl) {
-    return false;
-  }
-
-  try {
-    const url = new URL(
-      relayUrl.replace("ws://", "http://").replace("wss://", "https://"),
-    );
-    const host = url.hostname.toLowerCase();
-    return (
-      host === "block.xyz" ||
-      host.endsWith(".block.xyz") ||
-      host === "sqprod.co" ||
-      host.endsWith(".sqprod.co") ||
-      host === "squareup.com" ||
-      host.endsWith(".squareup.com")
-    );
-  } catch {
-    return false;
-  }
-}
-
-function shouldRefreshVpnAccess(
-  errorMessage: string,
-  relayUrl: string | null | undefined,
-) {
-  const detail = relayErrorDetail(errorMessage).toLowerCase();
-  if (detail.includes("cloudflare")) {
-    return true;
-  }
-
-  if (!isBlockRelayUrl(relayUrl)) {
-    return false;
-  }
-
-  return (
-    detail.includes("access") ||
-    detail.includes("sign-in") ||
-    detail.includes("re-authenticate") ||
-    detail.includes("reauth") ||
-    detail.includes("proxy")
-  );
-}
-
 function resolveOnboardingRelayCardVariant(
   errorMessage: string,
   relayUrl: string | null | undefined,
 ): OnboardingRelayCardVariant {
-  if (shouldRefreshVpnAccess(errorMessage, relayUrl)) {
-    return "refresh-access";
-  }
-
-  if (isBlockRelayUrl(relayUrl)) {
-    return "connect-vpn";
-  }
-
-  return "reconnect-relay";
+  return resolveRelayConnectivityCardVariant(errorMessage, relayUrl);
 }
 
 function OnboardingRelayConnectionErrorCard({

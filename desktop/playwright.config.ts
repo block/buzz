@@ -60,6 +60,7 @@ export default defineConfig({
         "**/integration.spec.ts",
         "**/profile.spec.ts",
         "**/sidebar.spec.ts",
+        "**/sidebar-relay-card.spec.ts",
         "**/tokens.spec.ts",
         "**/persona-env-vars.spec.ts",
         "**/mesh-compute.spec.ts",

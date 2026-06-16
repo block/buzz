@@ -5,15 +5,23 @@ import {
   useRelayConnection,
 } from "@/shared/api/useRelayConnection";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
+import { resolveRelayConnectivityCardVariant } from "@/shared/lib/relayConnectivityCard";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
 
 const SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 2_500;
 
-export function useSidebarRelayConnectionCard(errorMessage?: string) {
+export function useSidebarRelayConnectionCard(
+  errorMessage?: string,
+  relayUrl?: string | null,
+) {
   const relayConnectionState = useRelayConnection();
   const hasRelayUnreachableError = errorMessage
     ? isRelayUnreachableError(errorMessage)
     : false;
+  const cardVariant = resolveRelayConnectivityCardVariant(
+    errorMessage,
+    relayUrl,
+  );
   const isRelayConnectionActuallyDegraded =
     hasRelayUnreachableError || isRelayConnectionDegraded(relayConnectionState);
   const isRelayConnectionConnected = relayConnectionState === "connected";
@@ -122,6 +130,7 @@ export function useSidebarRelayConnectionCard(errorMessage?: string) {
   }, [reconnect, startConnectivityAction]);
 
   return {
+    cardVariant,
     hasRelayUnreachableError,
     isRelayConnectionSuccess: hasSuccess,
     isRelayReconnectPending,
