@@ -103,6 +103,9 @@ test("Block workspace sidebar VPN action shows connected before hiding", async (
 
   await expect(card).toContainText("Connected");
   await expect(card).not.toContainText("Click to connect");
+
+  await page.waitForTimeout(3_000);
+  await expect(card).toContainText("Connected");
   await expect(card).toBeHidden({ timeout: 5_000 });
 });
 

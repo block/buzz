@@ -8,7 +8,11 @@ import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { resolveRelayConnectivityCardVariant } from "@/shared/lib/relayConnectivityCard";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
 
-const SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 2_500;
+const SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 6_000;
+
+function isDocumentActive() {
+  return document.visibilityState === "visible" && document.hasFocus();
+}
 
 export function useSidebarRelayConnectionCard(
   errorMessage?: string,
@@ -29,6 +33,7 @@ export function useSidebarRelayConnectionCard(
   const isRelayConnectionConnected = relayConnectionState === "connected";
   const [isDismissed, setIsDismissed] = React.useState(false);
   const [hasSuccess, setHasSuccess] = React.useState(false);
+  const [isWindowActive, setIsWindowActive] = React.useState(isDocumentActive);
   const canShow = isRelayConnectionActuallyDegraded || hasSuccess;
   const show = canShow && !isDismissed;
   const wasProblemCardVisibleRef = React.useRef(false);
@@ -77,13 +82,31 @@ export function useSidebarRelayConnectionCard(
       return;
     }
 
+    if (!isWindowActive) {
+      return;
+    }
+
     const timeout = window.setTimeout(() => {
       setHasSuccess(false);
       setIsDismissed(true);
     }, SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS);
 
     return () => window.clearTimeout(timeout);
-  }, [hasSuccess]);
+  }, [hasSuccess, isWindowActive]);
+
+  React.useEffect(() => {
+    const updateWindowActive = () => setIsWindowActive(isDocumentActive());
+
+    window.addEventListener("focus", updateWindowActive);
+    window.addEventListener("blur", updateWindowActive);
+    document.addEventListener("visibilitychange", updateWindowActive);
+
+    return () => {
+      window.removeEventListener("focus", updateWindowActive);
+      window.removeEventListener("blur", updateWindowActive);
+      document.removeEventListener("visibilitychange", updateWindowActive);
+    };
+  }, []);
 
   React.useEffect(() => {
     return () => {
