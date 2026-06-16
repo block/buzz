@@ -9,6 +9,44 @@ import { resolveRelayConnectivityCardVariant } from "@/shared/lib/relayConnectiv
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
 
 const SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 6_000;
+const DEFAULT_RELAY_SUCCESS_KEY = "__default-relay__";
+
+let relayConnectivitySuccessKey: string | null = null;
+const relayConnectivitySuccessListeners = new Set<() => void>();
+
+function relaySuccessKey(relayUrl: string | null | undefined) {
+  return relayUrl ?? DEFAULT_RELAY_SUCCESS_KEY;
+}
+
+function subscribeRelayConnectivitySuccess(listener: () => void) {
+  relayConnectivitySuccessListeners.add(listener);
+  return () => relayConnectivitySuccessListeners.delete(listener);
+}
+
+function getRelayConnectivitySuccessSnapshot(
+  relayUrl: string | null | undefined,
+) {
+  return relayConnectivitySuccessKey === relaySuccessKey(relayUrl);
+}
+
+function setRelayConnectivitySuccess(
+  relayUrl: string | null | undefined,
+  next: boolean,
+) {
+  const nextKey = next ? relaySuccessKey(relayUrl) : null;
+  if (relayConnectivitySuccessKey === nextKey) {
+    return;
+  }
+
+  if (!next && relayConnectivitySuccessKey !== relaySuccessKey(relayUrl)) {
+    return;
+  }
+
+  relayConnectivitySuccessKey = nextKey;
+  for (const listener of relayConnectivitySuccessListeners) {
+    listener();
+  }
+}
 
 function isDocumentActive() {
   return document.visibilityState === "visible" && document.hasFocus();
@@ -32,7 +70,11 @@ export function useSidebarRelayConnectionCard(
     hasRelayUnreachableError || isRelayConnectionStateDegraded;
   const isRelayConnectionConnected = relayConnectionState === "connected";
   const [isDismissed, setIsDismissed] = React.useState(false);
-  const [hasSuccess, setHasSuccess] = React.useState(false);
+  const hasSuccess = React.useSyncExternalStore(
+    subscribeRelayConnectivitySuccess,
+    () => getRelayConnectivitySuccessSnapshot(relayUrl),
+    () => false,
+  );
   const [isWindowActive, setIsWindowActive] = React.useState(isDocumentActive);
   const canShow = isRelayConnectionActuallyDegraded || hasSuccess;
   const show = canShow && !isDismissed;
@@ -55,10 +97,10 @@ export function useSidebarRelayConnectionCard(
 
   React.useEffect(() => {
     if (isRelayConnectionStateDegraded) {
-      setHasSuccess(false);
+      setRelayConnectivitySuccess(relayUrl, false);
       setIsDismissed(false);
     }
-  }, [isRelayConnectionStateDegraded]);
+  }, [isRelayConnectionStateDegraded, relayUrl]);
 
   React.useEffect(() => {
     if (isRelayConnectionActuallyDegraded) {
@@ -68,10 +110,11 @@ export function useSidebarRelayConnectionCard(
 
     if (wasProblemCardVisibleRef.current && isRelayConnectionConnected) {
       wasProblemCardVisibleRef.current = false;
-      setHasSuccess(true);
+      setRelayConnectivitySuccess(relayUrl, true);
     }
   }, [
     hasSuccess,
+    relayUrl,
     show,
     isRelayConnectionActuallyDegraded,
     isRelayConnectionConnected,
@@ -87,12 +130,12 @@ export function useSidebarRelayConnectionCard(
     }
 
     const timeout = window.setTimeout(() => {
-      setHasSuccess(false);
+      setRelayConnectivitySuccess(relayUrl, false);
       setIsDismissed(true);
     }, SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS);
 
     return () => window.clearTimeout(timeout);
-  }, [hasSuccess, isWindowActive]);
+  }, [hasSuccess, isWindowActive, relayUrl]);
 
   React.useEffect(() => {
     const updateWindowActive = () => setIsWindowActive(isDocumentActive());
@@ -149,22 +192,25 @@ export function useSidebarRelayConnectionCard(
 
   const handleReconnectRelay = React.useCallback(() => {
     startConnectivityAction(async () => {
-      setHasSuccess(false);
+      setRelayConnectivitySuccess(relayUrl, false);
       const didReconnect = await reconnect();
       if (didReconnect) {
         wasProblemCardVisibleRef.current = false;
         setIsDismissed(false);
-        setHasSuccess(true);
+        setRelayConnectivitySuccess(relayUrl, true);
       }
     });
-  }, [reconnect, startConnectivityAction]);
+  }, [reconnect, relayUrl, startConnectivityAction]);
 
   return {
     cardVariant,
     hasRelayUnreachableError,
     isRelayConnectionSuccess: hasSuccess,
     isRelayReconnectPending,
-    onDismissRelayConnectionCard: () => setIsDismissed(true),
+    onDismissRelayConnectionCard: () => {
+      setRelayConnectivitySuccess(relayUrl, false);
+      setIsDismissed(true);
+    },
     onReconnectRelay: handleReconnectRelay,
     showSidebarRelayConnectionCard: show,
   };

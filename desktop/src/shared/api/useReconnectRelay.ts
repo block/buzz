@@ -41,7 +41,16 @@ export function useReconnectRelay(): {
       }
 
       await relayClient.preconnect();
-      await queryClient.invalidateQueries();
+      // Let callers render the recovered/connected state before refetching the
+      // sidebar data. The refetch can briefly swap the sidebar into loading UI.
+      window.setTimeout(() => {
+        void queryClient.invalidateQueries().catch((error) => {
+          console.error(
+            "[useReconnectRelay] failed to refresh queries after reconnect:",
+            error,
+          );
+        });
+      }, 0);
       // No success toast — the banner auto-hides once the connection state
       // transitions back to "connected", which is the user-visible confirmation.
       return true;
