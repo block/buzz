@@ -925,7 +925,11 @@ async fn test_nip10_thread_reply_not_in_top_level() {
         .send_event(broadcast_reply)
         .await
         .expect("send broadcast reply");
-    assert!(ok.accepted, "relay rejected broadcast reply: {}", ok.message);
+    assert!(
+        ok.accepted,
+        "relay rejected broadcast reply: {}",
+        ok.message
+    );
 
     client.disconnect().await.expect("disconnect");
 
@@ -938,10 +942,12 @@ async fn test_nip10_thread_reply_not_in_top_level() {
             .find(|e| e["content"].as_str() == Some(content))
             .cloned()
     };
-    let excluded = find(&excluded_content)
-        .unwrap_or_else(|| panic!("excluded reply must be recorded under root. got: {under_root:?}"));
-    let broadcast = find(&broadcast_content)
-        .unwrap_or_else(|| panic!("broadcast reply must be recorded under root. got: {under_root:?}"));
+    let excluded = find(&excluded_content).unwrap_or_else(|| {
+        panic!("excluded reply must be recorded under root. got: {under_root:?}")
+    });
+    let broadcast = find(&broadcast_content).unwrap_or_else(|| {
+        panic!("broadcast reply must be recorded under root. got: {under_root:?}")
+    });
 
     // Negative direction: depth >= 1 AND broadcast = false → EXCLUDED.
     // (Recorded under root + no `["broadcast","1"]` tag are exactly the two
