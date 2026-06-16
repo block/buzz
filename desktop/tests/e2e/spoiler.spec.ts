@@ -170,6 +170,46 @@ test("hidden spoiler links reveal without opening on the first click", async ({
   await expect(spoiler).toHaveAttribute("data-revealed", "true");
 });
 
+test("hidden spoilers stay masked on hover and focus until reveal", async ({
+  page,
+}) => {
+  await installSpoilerBridge(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type("||secret hover focus note||");
+  await page.getByTestId("send-message").click();
+
+  const lastMessage = page.getByTestId("message-row").last();
+  const spoiler = lastMessage.locator(".buzz-spoiler").first();
+  const content = spoiler.locator(".buzz-spoiler__content");
+  const particles = spoiler.locator(".buzz-spoiler__particles");
+
+  await expect(spoiler).toHaveAttribute("data-revealed", "false");
+  await expect(content).toHaveCSS("opacity", "0");
+  await expect(particles).toHaveCSS("opacity", "1");
+
+  await spoiler.hover();
+  await expect(spoiler).toHaveAttribute("data-revealed", "false");
+  await expect(content).toHaveCSS("opacity", "0");
+  await expect(particles).toHaveCSS("opacity", "1");
+
+  await page.mouse.move(0, 0);
+  await spoiler.focus();
+  await expect(spoiler).toBeFocused();
+  await expect(spoiler).toHaveAttribute("data-revealed", "false");
+  await expect(content).toHaveCSS("opacity", "0");
+  await expect(particles).toHaveCSS("opacity", "1");
+
+  await page.keyboard.press("Enter");
+  await expect(spoiler).toHaveAttribute("data-revealed", "true");
+  await expect(content).toHaveCSS("opacity", "1");
+  await expect(particles).toHaveCSS("opacity", "0");
+});
+
 test("non-interactive inbox preview spoilers let row clicks pass through", async ({
   page,
 }) => {
