@@ -213,6 +213,23 @@ async fn query_thread_replies(
     body.as_array().cloned().unwrap_or_default()
 }
 
+/// True if a queried event JSON carries the `["broadcast", "1"]` tag.
+///
+/// The relay sets `thread_metadata.broadcast` from exactly this tag
+/// (`ingest.rs`), and `get_channel_messages_top_level` surfaces a depth-1 reply
+/// at top level only when `broadcast = true`. The bridge returns raw events, so
+/// this tag is the faithful, test-observable proxy for the `broadcast` column.
+fn has_broadcast_tag(event: &serde_json::Value) -> bool {
+    event["tags"].as_array().is_some_and(|tags| {
+        tags.iter().any(|t| {
+            t.as_array().is_some_and(|p| {
+                p.first().and_then(|v| v.as_str()) == Some("broadcast")
+                    && p.get(1).and_then(|v| v.as_str()) == Some("1")
+            })
+        })
+    })
+}
+
 /// Query the channel's stored kind:9 messages via `POST /query` (`#h`, no
 /// `depth_limit`), exercising the relay's standard NIP-01 query path.
 async fn query_channel_messages(keys: &Keys, channel_id: &str) -> Vec<serde_json::Value> {
@@ -857,9 +874,19 @@ async fn test_dm_discovery_events_emitted() {
 
 // ── Phase 5: Regression Tests ─────────────────────────────────────────────────
 
-/// Send a NIP-10 reply via WS, then query top-level channel messages via REST.
-/// Verify: the reply does NOT appear in top-level results (only the root should).
-/// This proves thread_metadata was created and replies are hidden from top-level.
+/// Send a non-broadcast NIP-10 reply AND a broadcast (`["broadcast","1"]`)
+/// reply, then prove the relay's real top-level rule both directions.
+///
+/// The relay's top-level view is `get_channel_messages_top_level`
+/// (`thread.rs`): a message is surfaced at top level iff
+/// `depth IS NULL OR depth = 0 OR (depth = 1 AND broadcast = true)`. So a
+/// depth-1 reply is EXCLUDED only when `broadcast = false`, and a depth-1 reply
+/// with `broadcast = true` IS surfaced. That predicate is not exposed over any
+/// `POST /query` surface (`feed_types` routes to feed queries that never touch
+/// `thread_metadata.depth`/`broadcast`; `get_channel_messages_top_level` is
+/// wired to no relay HTTP route). We therefore pin the rule via its two
+/// test-observable inputs — recorded depth and the `broadcast` tag — instead of
+/// a one-sided "threads under root" correlate.
 #[tokio::test]
 #[ignore]
 async fn test_nip10_thread_reply_not_in_top_level() {
@@ -871,49 +898,68 @@ async fn test_nip10_thread_reply_not_in_top_level() {
     let root_content = format!("root-toplevel-{}", uuid::Uuid::new_v4());
     let root_event_id = send_rest_message(&keys, &channel, &root_content).await;
 
-    // Send reply via WS with NIP-10 e-tag.
     let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
-
-    let reply_content = format!("reply-hidden-{}", uuid::Uuid::new_v4());
     let h_tag = Tag::parse(["h", &channel]).expect("h tag");
     let e_reply_tag = Tag::parse(["e", &root_event_id, "", "reply"]).expect("e reply tag");
 
-    let reply_event = EventBuilder::new(Kind::Custom(9), &reply_content)
-        .tags([h_tag, e_reply_tag])
+    // Reply A: depth-1, NO broadcast tag → real predicate EXCLUDES it.
+    let excluded_content = format!("reply-excluded-{}", uuid::Uuid::new_v4());
+    let excluded_reply = EventBuilder::new(Kind::Custom(9), &excluded_content)
+        .tags([h_tag.clone(), e_reply_tag.clone()])
         .sign_with_keys(&keys)
-        .expect("sign reply");
+        .expect("sign excluded reply");
+    let ok = client
+        .send_event(excluded_reply)
+        .await
+        .expect("send excluded reply");
+    assert!(ok.accepted, "relay rejected excluded reply: {}", ok.message);
 
-    let ok = client.send_event(reply_event).await.expect("send reply");
-    assert!(ok.accepted, "relay rejected reply: {}", ok.message);
-    let reply_event_id = ok.event_id.clone();
+    // Reply B: depth-1 WITH `["broadcast","1"]` → real predicate SURFACES it.
+    let broadcast_content = format!("reply-broadcast-{}", uuid::Uuid::new_v4());
+    let broadcast_tag = Tag::parse(["broadcast", "1"]).expect("broadcast tag");
+    let broadcast_reply = EventBuilder::new(Kind::Custom(9), &broadcast_content)
+        .tags([h_tag, e_reply_tag, broadcast_tag])
+        .sign_with_keys(&keys)
+        .expect("sign broadcast reply");
+    let ok = client
+        .send_event(broadcast_reply)
+        .await
+        .expect("send broadcast reply");
+    assert!(ok.accepted, "relay rejected broadcast reply: {}", ok.message);
 
     client.disconnect().await.expect("disconnect");
 
-    // The relay's top-level message view (`get_channel_messages_top_level`)
-    // surfaces events whose thread depth is NULL or 0 and excludes non-broadcast
-    // depth-1 replies. There is no `/channels/.../messages` REST route, so we
-    // prove the same classification through the relay's real thread surface:
-    //
-    //   * The reply is recorded under the root (depth >= 1) — i.e. it threads
-    //     beneath the root rather than standing at top level.
-    //   * The reply is not itself a thread root — querying for replies keyed on
-    //     the reply's own id returns nothing, so it never becomes a top-level
-    //     anchor of its own.
+    // Both replies are recorded under the root (depth >= 1): they appear in the
+    // thread query, which reads `thread_metadata` keyed on `root_event_id`.
     let under_root = query_thread_replies(&keys, &channel, &root_event_id).await;
-    assert!(
+    let find = |content: &str| {
         under_root
             .iter()
-            .any(|e| e["content"].as_str() == Some(reply_content.as_str())),
-        "reply must be threaded under the root (excluded from top-level). got: {under_root:?}"
-    );
+            .find(|e| e["content"].as_str() == Some(content))
+            .cloned()
+    };
+    let excluded = find(&excluded_content)
+        .unwrap_or_else(|| panic!("excluded reply must be recorded under root. got: {under_root:?}"));
+    let broadcast = find(&broadcast_content)
+        .unwrap_or_else(|| panic!("broadcast reply must be recorded under root. got: {under_root:?}"));
 
-    let under_reply = query_thread_replies(&keys, &channel, &reply_event_id).await;
+    // Negative direction: depth >= 1 AND broadcast = false → EXCLUDED.
+    // (Recorded under root + no `["broadcast","1"]` tag are exactly the two
+    // conditions the real predicate uses to hide a reply from top level.)
     assert!(
-        under_reply.is_empty(),
-        "reply must not act as a top-level thread root. got: {under_reply:?}"
+        !has_broadcast_tag(&excluded),
+        "excluded reply must NOT carry a broadcast tag (broadcast=false → hidden). got: {excluded:?}"
     );
 
-    // The root remains a real, stored top-level message: a plain channel query
+    // Positive direction: depth = 1 AND broadcast = true → SURFACED.
+    // Same depth-1 placement, but the broadcast tag flips it into the top-level
+    // set — proving the rule is `broadcast`-gated, not depth-gated alone.
+    assert!(
+        has_broadcast_tag(&broadcast),
+        "broadcast reply must carry `[\"broadcast\",\"1\"]` (broadcast=true → surfaced). got: {broadcast:?}"
+    );
+
+    // The root itself is top-level (depth IS NULL): a plain channel query
     // (no `depth_limit`) returns it.
     let top_level = query_channel_messages(&keys, &channel).await;
     assert!(
