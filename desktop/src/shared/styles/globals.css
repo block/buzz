@@ -512,9 +512,9 @@
 /* ── Tiptap rich-text composer ──────────────────────────────────────── */
 .rich-text-composer .tiptap {
   outline: none;
-  min-height: 1.5rem; /* single line height */
-  font-size: 1rem;
-  line-height: 1.5rem;
+  min-height: 1.4375rem; /* one line at text-sm + leading-relaxed */
+  font-size: 0.875rem;
+  line-height: 1.625;
 }
 
 .rich-text-composer .tiptap p {
@@ -560,7 +560,7 @@
   background: hsl(var(--muted));
   padding: 0.125rem 0.375rem;
   font-family: ui-monospace, monospace;
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
 }
 
 .rich-text-composer .tiptap pre {
@@ -576,8 +576,8 @@
   background: none;
   padding: 0;
   border-radius: 0;
-  font-size: 0.8125rem;
-  line-height: 1.5rem;
+  font-size: 0.875rem;
+  line-height: 1.625;
 }
 
 .rich-text-composer .tiptap blockquote {
