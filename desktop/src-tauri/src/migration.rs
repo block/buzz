@@ -36,6 +36,21 @@ const SHARED_AGENT_FILES: &[&str] = &[
 /// dev data directory. Each entry becomes a single directory symlink.
 const SHARED_AGENT_DIRS: &[&str] = &["agents/teams"];
 
+/// Create a symlink at `dst` pointing to `src`.
+///
+/// Worktree sync is a dev-only feature (`BUZZ_SHARE_IDENTITY=1`); on Windows
+/// this is a no-op so the rest of `sync_shared_agent_data` keeps compiling and
+/// running harmlessly.
+#[cfg(unix)]
+fn symlink(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(src, dst)
+}
+
+#[cfg(not(unix))]
+fn symlink(_src: &Path, _dst: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
 fn canonical_dev_data_dir(current: &Path) -> Option<PathBuf> {
     current.parent().map(|p| p.join(CANONICAL_DEV_IDENTIFIER))
 }
@@ -244,7 +259,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
             let _ = std::fs::remove_file(&dst);
         }
 
-        match std::os::unix::fs::symlink(&src, &dst) {
+        match symlink(&src, &dst) {
             Ok(_) => synced += 1,
             Err(e) => {
                 eprintln!("buzz-desktop: shared-agent-sync: failed to symlink {rel}: {e}");
@@ -284,7 +299,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
                             }
                             // Replace the sibling's dir with a symlink to canonical.
                             let _ = std::fs::remove_dir_all(&sibling_dir);
-                            let _ = std::os::unix::fs::symlink(&canonical_target, &sibling_dir);
+                            let _ = symlink(&canonical_target, &sibling_dir);
                             eprintln!(
                                 "buzz-desktop: shared-agent-sync: migrated {rel} from {}",
                                 sibling.display()
@@ -329,7 +344,7 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
             let _ = std::fs::remove_dir_all(&dst);
         }
 
-        match std::os::unix::fs::symlink(&src, &dst) {
+        match symlink(&src, &dst) {
             Ok(_) => synced += 1,
             Err(e) => {
                 eprintln!("buzz-desktop: shared-agent-sync: failed to symlink {rel}: {e}");

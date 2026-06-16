@@ -16,6 +16,15 @@ use buzz_relay::router::{build_health_router, build_router};
 use buzz_relay::state::AppState;
 use buzz_workflow::WorkflowEngine;
 
+fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
+    value.map(str::trim).is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        )
+    })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // JSON-only structured logs — simple, machine-parseable, CAKE-compatible.
@@ -54,6 +63,18 @@ async fn main() -> anyhow::Result<()> {
         anyhow::anyhow!("DB connection failed: {e}")
     })?;
     info!("Postgres connected");
+
+    let auto_migrate =
+        buzz_auto_migrate_enabled(std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref());
+    if auto_migrate {
+        db.migrate().await.map_err(|e| {
+            error!("Failed to run database migrations: {e}");
+            anyhow::anyhow!("Database migration failed: {e}")
+        })?;
+        info!("Database migrations complete");
+    } else {
+        info!("Skipping database migrations because BUZZ_AUTO_MIGRATE is not enabled");
+    }
 
     if let Err(e) = db.ensure_future_partitions(3).await {
         error!("Failed to ensure partitions: {e}");
@@ -602,5 +623,24 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         tokio::signal::ctrl_c().await.ok();
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::buzz_auto_migrate_enabled;
+
+    #[test]
+    fn buzz_auto_migrate_is_opt_in() {
+        assert!(!buzz_auto_migrate_enabled(None));
+        assert!(!buzz_auto_migrate_enabled(Some("")));
+        assert!(!buzz_auto_migrate_enabled(Some("false")));
+        assert!(!buzz_auto_migrate_enabled(Some("0")));
+        assert!(!buzz_auto_migrate_enabled(Some("no")));
+
+        assert!(buzz_auto_migrate_enabled(Some("true")));
+        assert!(buzz_auto_migrate_enabled(Some("TRUE")));
+        assert!(buzz_auto_migrate_enabled(Some(" 1 ")));
+        assert!(buzz_auto_migrate_enabled(Some("yes")));
+        assert!(buzz_auto_migrate_enabled(Some("on")));
     }
 }

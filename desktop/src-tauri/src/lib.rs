@@ -690,6 +690,7 @@ pub fn run() {
             search_users,
             get_presence,
             get_default_relay_url,
+            get_legacy_workspace_storage,
             is_shared_identity,
             get_relay_ws_url,
             get_relay_http_url,
@@ -835,10 +836,9 @@ pub fn run() {
             cancel_pairing,
             apply_workspace,
             get_active_workspace,
-            connect_warp_vpn,
-            refresh_warp_access,
             set_prevent_sleep_active,
             get_agent_memory,
+            relay_reconnect_hook,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

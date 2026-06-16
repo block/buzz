@@ -38,6 +38,7 @@ import remarkCustomEmoji, {
   type CustomEmoji,
 } from "@/shared/lib/remarkCustomEmoji";
 import remarkMentions from "@/shared/lib/remarkMentions";
+import remarkSpoilers from "@/shared/lib/remarkSpoilers";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import { Button } from "@/shared/ui/button";
 import {
@@ -45,6 +46,7 @@ import {
   MENTION_CHIP_HOVER_CLASSES,
 } from "@/shared/ui/mentionChip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import { SpoilerParticles } from "@/shared/ui/SpoilerParticles";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 import {
@@ -133,6 +135,13 @@ function aspectRatioFromDim(dim?: string): number | undefined {
   return width / height;
 }
 
+function isInsideHiddenSpoiler(element: Element): boolean {
+  return (
+    element.closest('.buzz-spoiler[data-spoiler][data-revealed="false"]') !==
+    null
+  );
+}
+
 /**
  * Video review context flows through React context instead of
  * `createMarkdownComponents` arguments. The component map must keep a stable
@@ -144,6 +153,21 @@ function aspectRatioFromDim(dim?: string): number | undefined {
 const VideoReviewMarkdownContext = React.createContext<
   VideoReviewContext | undefined
 >(undefined);
+
+type MarkdownRuntime = {
+  agentMentionPubkeysByName?: Record<string, string>;
+  channels: Channel[];
+  imetaByUrl?: ImetaLookup;
+  mentionPubkeysByName?: Record<string, string>;
+  onOpenChannel: (channelId: string) => void;
+  onOpenMessageLink: (link: ParsedMessageLink) => void;
+};
+
+function useLatestRef<T>(value: T) {
+  const ref = React.useRef(value);
+  ref.current = value;
+  return ref;
+}
 
 function MarkdownVideoPlayer({
   alt,
@@ -240,6 +264,49 @@ function ImageBlock({
 }) {
   const [lightboxOpen, setLightboxOpen] = React.useState(false);
   const [menu, setMenu] = React.useState<{ x: number; y: number } | null>(null);
+  const [spoilerMediaSize, setSpoilerMediaSize] = React.useState<{
+    height: number;
+    src: string;
+    width: number;
+  } | null>(null);
+
+  const updateSpoilerMediaSize = React.useCallback(
+    (image: HTMLImageElement) => {
+      const { naturalHeight, naturalWidth } = image;
+      if (naturalHeight <= 0 || naturalWidth <= 0) return;
+
+      const maxWidth = 384;
+      const maxHeight = 256;
+      const scale = Math.min(
+        1,
+        maxWidth / naturalWidth,
+        maxHeight / naturalHeight,
+      );
+      setSpoilerMediaSize({
+        height: Math.max(1, Math.round(naturalHeight * scale)),
+        src: resolvedSrc ?? image.currentSrc,
+        width: Math.max(1, Math.round(naturalWidth * scale)),
+      });
+    },
+    [resolvedSrc],
+  );
+
+  const imageRef = React.useCallback(
+    (image: HTMLImageElement | null) => {
+      if (image?.complete) updateSpoilerMediaSize(image);
+    },
+    [updateSpoilerMediaSize],
+  );
+
+  const currentSpoilerMediaSize =
+    spoilerMediaSize?.src === resolvedSrc ? spoilerMediaSize : null;
+
+  const spoilerMediaStyle = currentSpoilerMediaSize
+    ? ({
+        "--buzz-spoiler-media-height": `${currentSpoilerMediaSize.height}px`,
+        "--buzz-spoiler-media-width": `${currentSpoilerMediaSize.width}px`,
+      } as React.CSSProperties)
+    : undefined;
 
   React.useEffect(() => {
     if (!menu) return;
@@ -270,9 +337,17 @@ function ImageBlock({
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
+    if (isInsideHiddenSpoiler(e.currentTarget)) return;
     e.stopPropagation();
     e.nativeEvent.stopImmediatePropagation();
     setMenu({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleImageClick = (event: React.MouseEvent<HTMLImageElement>) => {
+    if (isInsideHiddenSpoiler(event.currentTarget)) {
+      return;
+    }
+    setLightboxOpen(true);
   };
 
   const handleDownload = () => {
@@ -290,9 +365,13 @@ function ImageBlock({
       <img
         alt={alt}
         className="mt-1 block max-h-64 max-w-sm cursor-pointer rounded-xl object-contain"
+        data-spoiler-media-size={currentSpoilerMediaSize ? "" : undefined}
+        ref={imageRef}
         src={resolvedSrc}
-        onClick={() => setLightboxOpen(true)}
+        style={spoilerMediaStyle}
+        onClick={handleImageClick}
         onContextMenuCapture={handleContextMenu}
+        onLoad={(event) => updateSpoilerMediaSize(event.currentTarget)}
       />
       {menu && src ? (
         <div
@@ -520,7 +599,7 @@ function MarkdownCodeBlock({
             type="button"
             variant="ghost"
           >
-            <Copy className="h-3.5 w-3.5" />
+            <Copy className="h-4 w-4" />
             <span className="sr-only">Copy code block</span>
           </Button>
         </TooltipTrigger>
@@ -579,7 +658,7 @@ function FileCard({
       className="my-1 inline-flex max-w-sm items-center gap-3 rounded-xl border border-border/70 bg-muted/40 px-3 py-2 text-left no-underline transition-colors hover:bg-muted/70"
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-background text-muted-foreground">
-        <FileText className="h-5 w-5" />
+        <FileText className="h-4 w-4" />
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium text-foreground">
@@ -729,14 +808,138 @@ function SyntaxHighlightedCode({
     </code>
   );
 }
+
+function SpoilerInline({
+  block = false,
+  children,
+  interactive = true,
+}: {
+  block?: boolean;
+  children?: React.ReactNode;
+  interactive?: boolean;
+}) {
+  const [revealed, setRevealed] = React.useState(false);
+  const contentRef = React.useRef<HTMLElement | null>(null);
+  const isBlock = block || hasBlockMedia(React.Children.toArray(children));
+
+  const setContentElement = React.useCallback((node: HTMLElement | null) => {
+    contentRef.current = node;
+  }, []);
+
+  const toggleRevealed = React.useCallback(() => {
+    setRevealed((value) => !value);
+  }, []);
+
+  const handlePointerDownCapture = React.useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      if (revealed) return;
+      event.stopPropagation();
+    },
+    [revealed],
+  );
+
+  const handleClickCapture = React.useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      if (revealed) return;
+      event.preventDefault();
+      event.stopPropagation();
+      toggleRevealed();
+    },
+    [revealed, toggleRevealed],
+  );
+
+  const handleClick = React.useCallback(
+    (event: React.MouseEvent<HTMLElement>) => {
+      if (revealed && isBlock && event.target !== event.currentTarget) return;
+      toggleRevealed();
+    },
+    [isBlock, revealed, toggleRevealed],
+  );
+
+  const handleKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLElement>) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggleRevealed();
+    },
+    [toggleRevealed],
+  );
+
+  const revealProps = {
+    "aria-label": revealed ? "Hide spoiler" : "Reveal spoiler",
+    "aria-pressed": revealed,
+    onClick: handleClick,
+    onClickCapture: handleClickCapture,
+    onKeyDown: handleKeyDown,
+    onPointerDownCapture: handlePointerDownCapture,
+    role: "button",
+    tabIndex: 0,
+  } as const;
+
+  if (!interactive) {
+    if (isBlock) {
+      return (
+        <div
+          className="buzz-spoiler buzz-spoiler--block buzz-spoiler--inert"
+          data-revealed="false"
+          data-spoiler=""
+        >
+          <SpoilerParticles active contentRef={contentRef} />
+          <div className="buzz-spoiler__content" ref={setContentElement}>
+            {children}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <span
+        className="buzz-spoiler buzz-spoiler--inert"
+        data-revealed="false"
+        data-spoiler=""
+      >
+        <SpoilerParticles active contentRef={contentRef} />
+        <span className="buzz-spoiler__content" ref={setContentElement}>
+          {children}
+        </span>
+      </span>
+    );
+  }
+
+  if (isBlock) {
+    return (
+      <div
+        {...revealProps}
+        className="buzz-spoiler buzz-spoiler--block"
+        data-revealed={revealed ? "true" : "false"}
+        data-spoiler=""
+      >
+        <SpoilerParticles active={!revealed} contentRef={contentRef} />
+        <div className="buzz-spoiler__content" ref={setContentElement}>
+          {children}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <span
+      {...revealProps}
+      className="buzz-spoiler"
+      data-revealed={revealed ? "true" : "false"}
+      data-spoiler=""
+    >
+      <SpoilerParticles active={!revealed} contentRef={contentRef} />
+      <span className="buzz-spoiler__content" ref={setContentElement}>
+        {children}
+      </span>
+    </span>
+  );
+}
+
 function createMarkdownComponents(
   variant: MarkdownVariant,
-  channels: Channel[],
-  onOpenChannel: (channelId: string) => void,
-  onOpenMessageLink: (link: ParsedMessageLink) => void,
-  imetaByUrl?: ImetaLookup,
-  mentionPubkeysByName?: Record<string, string>,
-  agentMentionPubkeysByName?: Record<string, string>,
+  runtimeRef: React.RefObject<MarkdownRuntime>,
   interactive = true,
 ): Components {
   const paragraphClassName =
@@ -753,7 +956,22 @@ function createMarkdownComponents(
       : "space-y-1 pl-6 marker:text-muted-foreground";
 
   return {
+    spoiler: ({
+      children,
+      ...props
+    }: {
+      "data-block-spoiler"?: string;
+      children?: React.ReactNode;
+    }) => (
+      <SpoilerInline
+        block={props["data-block-spoiler"] != null}
+        interactive={interactive}
+      >
+        {children}
+      </SpoilerInline>
+    ),
     a: ({ children, href, ...props }) => {
+      const { imetaByUrl, onOpenMessageLink } = runtimeRef.current;
       if (!interactive) {
         return <span className="font-medium text-current">{children}</span>;
       }
@@ -875,6 +1093,7 @@ function createMarkdownComponents(
     ),
     hr: () => <hr className="border-border/80" />,
     img: ({ alt, src }) => {
+      const { imetaByUrl } = runtimeRef.current;
       const resolvedSrc = src ? rewriteRelayUrl(src) : src;
       if (!interactive) {
         const fallbackLabel = resolvedSrc?.endsWith(".mp4")
@@ -971,6 +1190,8 @@ function createMarkdownComponents(
       <ul className={cn("list-disc", listClassName)}>{children}</ul>
     ),
     mention: ({ children }: { children?: React.ReactNode }) => {
+      const { agentMentionPubkeysByName, mentionPubkeysByName } =
+        runtimeRef.current;
       const mentionText = String(children ?? "");
       const mentionName = mentionText.replace(/^@/, "").trim().toLowerCase();
       const pubkey = mentionPubkeysByName?.[mentionName];
@@ -1017,6 +1238,7 @@ function createMarkdownComponents(
       return <InlineEmojiPopover alt={alt} resolvedSrc={resolvedSrc} />;
     },
     "channel-link": ({ children }: { children?: React.ReactNode }) => {
+      const { channels, onOpenChannel } = runtimeRef.current;
       const text = String(children ?? "");
       const channelName = text.startsWith("#") ? text.slice(1) : text;
       const channel = channels.find(
@@ -1051,6 +1273,7 @@ function createMarkdownComponents(
       );
     },
     "message-link": ({ children }: { children?: React.ReactNode }) => {
+      const { channels, onOpenMessageLink } = runtimeRef.current;
       const href = String(children ?? "");
       const parsed = parseMessageLink(href);
       if (!parsed.ok) {
@@ -1113,42 +1336,40 @@ function MarkdownInner({
   const { channels: rawChannels } = useChannelNavigation();
   const channels = useStableArray(rawChannels);
   const { goChannel } = useAppNavigation();
+  const onOpenChannel = React.useCallback(
+    (channelId: string) => {
+      void goChannel(channelId);
+    },
+    [goChannel],
+  );
+  const onOpenMessageLink = React.useCallback(
+    (link: ParsedMessageLink) => {
+      // Always route through `goChannel` with `messageId` set: the channel
+      // route already handles scroll-into-view + highlight via
+      // `useTimelineScrollManager` + `getEventById` backfill, and works for
+      // both stream-message replies and forum threads. Detecting "the thread
+      // root is a forum post" up front would require an event lookup we don't
+      // currently have synchronously; the brief explicitly allows skipping
+      // that detection and falling through.
+      void goChannel(link.channelId, {
+        messageId: link.messageId,
+        threadRootId: link.threadRootId,
+      });
+    },
+    [goChannel],
+  );
+  const runtimeRef = useLatestRef<MarkdownRuntime>({
+    agentMentionPubkeysByName,
+    channels,
+    imetaByUrl,
+    mentionPubkeysByName,
+    onOpenChannel,
+    onOpenMessageLink,
+  });
 
   const components = React.useMemo(
-    () =>
-      createMarkdownComponents(
-        variant,
-        channels,
-        (channelId) => {
-          void goChannel(channelId);
-        },
-        (link) => {
-          // Always route through `goChannel` with `messageId` set: the
-          // channel route already handles scroll-into-view + highlight via
-          // `useTimelineScrollManager` + `getEventById` backfill, and works
-          // for both stream-message replies and forum threads. Detecting
-          // "the thread root is a forum post" up front would require an
-          // event lookup we don't currently have synchronously; the brief
-          // explicitly allows skipping that detection and falling through.
-          void goChannel(link.channelId, {
-            messageId: link.messageId,
-            threadRootId: link.threadRootId,
-          });
-        },
-        imetaByUrl,
-        mentionPubkeysByName,
-        agentMentionPubkeysByName,
-        interactive,
-      ),
-    [
-      goChannel,
-      variant,
-      channels,
-      imetaByUrl,
-      mentionPubkeysByName,
-      agentMentionPubkeysByName,
-      interactive,
-    ],
+    () => createMarkdownComponents(variant, runtimeRef, interactive),
+    [variant, runtimeRef, interactive],
   );
 
   // biome-ignore lint/suspicious/noExplicitAny: PluggableList type not directly importable
@@ -1156,6 +1377,7 @@ function MarkdownInner({
     () => [
       remarkGfm,
       remarkBreaks,
+      remarkSpoilers,
       remarkMessageLinks,
       [remarkMentions, { mentionNames }],
       [remarkChannelLinks, { channelNames }],

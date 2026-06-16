@@ -56,9 +56,9 @@ function InstallActions({
           variant="outline"
         >
           {isInstalling ? (
-            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            <RefreshCw className="h-4 w-4 animate-spin" />
           ) : (
-            <Download className="h-3.5 w-3.5" />
+            <Download className="h-4 w-4" />
           )}
           {isInstalling ? "Installing..." : "Install"}
         </Button>
@@ -68,7 +68,7 @@ function InstallActions({
         onClick={() => void openUrl(runtime.installInstructionsUrl)}
         type="button"
       >
-        <ExternalLink className="h-3 w-3" />
+        <ExternalLink className="h-4 w-4" />
         View instructions
       </button>
     </div>

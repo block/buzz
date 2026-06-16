@@ -11,6 +11,7 @@
 
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 
 import { relayClient } from "@/shared/api/relayClient";
@@ -31,6 +32,14 @@ export function useReconnectRelay(): {
     inFlightRef.current = true;
     setIsPending(true);
     try {
+      // Run transport-layer reconnect hook (e.g. WARP VPN re-auth for internal builds).
+      // No-op in OSS builds. Non-fatal — transport failure shouldn't block relay reconnect.
+      try {
+        await invoke("relay_reconnect_hook");
+      } catch (err) {
+        console.warn("[useReconnectRelay] reconnect hook failed:", err);
+      }
+
       await relayClient.preconnect();
       await queryClient.invalidateQueries();
       // No success toast — the banner auto-hides once the connection state

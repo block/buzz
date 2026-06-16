@@ -1132,6 +1132,132 @@ async fn hook_post_compact_injects_after_handoff() {
     h.shutdown().await;
 }
 
+/// The handoff summary prompt should include all session history when that
+/// history fits the summarizer context budget. This protects against regressing
+/// to the old fixed tail of five tiny snippets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_summary_prompt_includes_full_history_within_context_budget() {
+    let llm = spawn_capturing_llm(vec![
+        openai_text_with_usage("ack-0", 9500),
+        openai_text("handoff summary text"),
+        openai_text_with_usage("done", 10),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "10000"),
+            ("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "1000"),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "3"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"early-history-marker"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p0)).await;
+
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"late-history-marker"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p1)).await;
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(captured.len(), 3, "expected prompt, handoff, prompt");
+    let handoff_messages = captured[1]["messages"].as_array().unwrap();
+    let handoff_prompt = handoff_messages[1]["content"].as_str().unwrap();
+    assert!(
+        handoff_prompt.contains("# Session History (oldest first)"),
+        "handoff prompt should describe full session history: {handoff_prompt}"
+    );
+    assert!(
+        handoff_prompt.contains("early-history-marker"),
+        "oldest prompt was omitted despite fitting budget: {handoff_prompt}"
+    );
+    assert!(
+        handoff_prompt.contains("ack-0"),
+        "assistant response was omitted despite fitting budget: {handoff_prompt}"
+    );
+    assert!(
+        handoff_prompt.contains("late-history-marker"),
+        "latest prompt was omitted despite fitting budget: {handoff_prompt}"
+    );
+    assert!(
+        !handoff_prompt.contains("older items omitted"),
+        "handoff should not report truncation when full history fits: {handoff_prompt}"
+    );
+    h.shutdown().await;
+}
+
+/// If one item is larger than the derived summarizer budget, keep a truncated
+/// form of the most recent item instead of sending an empty history block.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handoff_summary_prompt_keeps_latest_item_when_one_item_exceeds_budget() {
+    let llm = spawn_capturing_llm(vec![
+        openai_text_with_usage("ack-0", 9500),
+        openai_text("handoff summary text"),
+        openai_text_with_usage("done", 10),
+    ])
+    .await;
+    let mut h = Harness::spawn_with_env(
+        &llm.url,
+        &[
+            ("BUZZ_AGENT_MAX_CONTEXT_TOKENS", "10000"),
+            ("BUZZ_AGENT_MAX_OUTPUT_TOKENS", "1000"),
+            ("BUZZ_AGENT_MAX_HANDOFFS", "3"),
+            (
+                "BUZZ_AGENT_MAX_HISTORY_BYTES",
+                &(16 * 1024 * 1024).to_string(),
+            ),
+        ],
+    )
+    .await;
+    let sid = init_session(&mut h, json!([])).await;
+
+    let huge = format!("oversize-latest-marker {}", "x".repeat(12000));
+    let p0 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text":"early-history-marker"}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p0)).await;
+
+    let p1 = h
+        .send(
+            "session/prompt",
+            json!({"sessionId": sid, "prompt": [{"type":"text","text": huge}]}),
+        )
+        .await;
+    let _ = h.recv_until(|v| v["id"] == json!(p1)).await;
+
+    let captured = llm.captured.lock().await;
+    assert_eq!(captured.len(), 3, "expected prompt, handoff, prompt");
+    let handoff_messages = captured[1]["messages"].as_array().unwrap();
+    let handoff_prompt = handoff_messages[1]["content"].as_str().unwrap();
+    assert!(
+        handoff_prompt.contains("oversize-latest-marker"),
+        "latest oversized item should be kept in truncated form: {handoff_prompt}"
+    );
+    assert!(
+        handoff_prompt.contains("older items omitted"),
+        "handoff should report truncation when history exceeds budget: {handoff_prompt}"
+    );
+    h.shutdown().await;
+}
+
 /// Regression for the original bug: context fills, the provider 400s on the
 /// next request, and the handoff never fires because the old gate measured
 /// BYTES (16 MiB threshold) while the limit is in TOKENS. The fix gates on

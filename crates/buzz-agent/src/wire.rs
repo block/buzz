@@ -49,6 +49,8 @@ pub struct SessionNewParams {
     pub cwd: String,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerStdio>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,5 +178,61 @@ pub async fn writer_task(mut rx: mpsc::Receiver<WireMsg>) {
             return;
         }
         let _ = stdout.flush().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_new_params_deserializes_system_prompt() {
+        let json = serde_json::json!({
+            "cwd": "/tmp/test",
+            "mcpServers": [],
+            "systemPrompt": "You are a helpful agent."
+        });
+        let params: SessionNewParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.cwd, "/tmp/test");
+        assert_eq!(
+            params.system_prompt.as_deref(),
+            Some("You are a helpful agent.")
+        );
+    }
+
+    #[test]
+    fn session_new_params_system_prompt_defaults_to_none() {
+        let json = serde_json::json!({
+            "cwd": "/tmp/test",
+            "mcpServers": []
+        });
+        let params: SessionNewParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.cwd, "/tmp/test");
+        assert!(params.system_prompt.is_none());
+    }
+
+    #[test]
+    fn session_new_params_ignores_unknown_fields() {
+        // Backward compat: old agents with new harness — unknown fields are ignored.
+        let json = serde_json::json!({
+            "cwd": "/tmp/test",
+            "mcpServers": [],
+            "unknownField": "should be ignored"
+        });
+        let params: SessionNewParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.cwd, "/tmp/test");
+        assert!(params.system_prompt.is_none());
+    }
+
+    #[test]
+    fn session_new_params_empty_string_system_prompt() {
+        // An explicit empty string is distinct from absent — deserializes to Some("").
+        let json = serde_json::json!({
+            "cwd": "/tmp/test",
+            "mcpServers": [],
+            "systemPrompt": ""
+        });
+        let params: SessionNewParams = serde_json::from_value(json).unwrap();
+        assert_eq!(params.system_prompt, Some(String::new()));
     }
 }

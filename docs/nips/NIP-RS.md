@@ -158,9 +158,10 @@ A thread is unread iff `latestReplyAt > effective(thread:<root>)`, where
 `latestReplyAt` is the `created_at` of the thread's most recent reply. Because
 this rule is a `max()` over the same grow-only registers defined in the Merge
 Rule, it remains a monotone state-based CvRDT — no change to the merge rule is
-required. Marking a channel read therefore clears unread state on all of its
-threads for free, since each thread's effective frontier inherits the channel
-term.
+required. Marking a channel read clears unread state on any thread whose most
+recent reply predates the channel frontier, since each thread's effective
+frontier inherits the channel term; threads with replies newer than the channel
+frontier remain unread until the thread itself is read.
 
 If the thread root event (and therefore its parent channel) cannot be resolved
 from the event graph, `effective(thread:<root>)` degrades to
@@ -172,11 +173,11 @@ Marking a thread read MUST advance only its own `thread:<root>` context. It MUST
 NOT advance the parent channel context. Otherwise, reading a single thread would
 silently mark later top-level channel messages as read. Marking a channel read
 advances only the channel context (which the hierarchical rule then propagates
-to threads at read time). Because the channel frontier is the parent term for
-every thread, marking a channel read SHOULD advance the channel context to the
-maximum `created_at` across all messages in the channel, including thread
-replies — otherwise threads whose `latestReplyAt` exceeds the newest top-level
-message remain unread and the channel read does not clear them.
+to threads at read time). The channel context SHOULD advance to the maximum
+`created_at` across the channel's top-level messages only, NOT including thread
+replies. This keeps a thread unread when its `latestReplyAt` exceeds the newest
+top-level message: opening a channel clears the channel timeline but leaves its
+threads' unread state intact until each thread is read.
 
 ##### Eviction
 

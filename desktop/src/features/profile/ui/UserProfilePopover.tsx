@@ -6,16 +6,21 @@ import {
   useRelayAgentsQuery,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
+import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
+import { useChannelsQuery } from "@/features/channels/hooks";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { PresenceBadge } from "@/features/presence/ui/PresenceBadge";
+import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 
 import { Popover, PopoverAnchor, PopoverContent } from "@/shared/ui/popover";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
+import { useNow } from "@/shared/lib/useNow";
 
 type UserProfilePopoverProps = {
   children: React.ReactNode;
@@ -90,6 +95,15 @@ export function UserProfilePopover({
   const profile = profileQuery.data;
   const presenceStatus = presenceQuery.data?.[pubkey.toLowerCase()];
   const userStatus = userStatusQuery.data?.[pubkey.toLowerCase()];
+  const activeTurns = useActiveAgentTurns(role === "bot" ? pubkey : null);
+  const channelsQuery = useChannelsQuery();
+  const channelIdToName = React.useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const channel of channelsQuery.data ?? []) {
+      map[channel.id] = channel.name;
+    }
+    return map;
+  }, [channelsQuery.data]);
 
   const clearHoverTimer = React.useCallback(() => {
     if (hoverTimerRef.current !== null) {
@@ -174,7 +188,12 @@ export function UserProfilePopover({
                 alt={profile.displayName ?? "User avatar"}
                 className="h-10 w-10 shrink-0 rounded-lg object-cover shadow-xs"
                 referrerPolicy="no-referrer"
-                src={rewriteRelayUrl(profile.avatarUrl)}
+                // The popover only shows while hovering, so animated avatars
+                // play their animation here instead of the static poster frame.
+                src={rewriteRelayUrl(
+                  parseAnimatedAvatarUrl(profile.avatarUrl)?.animationUrl ??
+                    profile.avatarUrl,
+                )}
               />
             ) : (
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-secondary text-xs font-semibold text-secondary-foreground shadow-xs">
@@ -243,6 +262,18 @@ export function UserProfilePopover({
             </div>
           ) : null}
 
+          {activeTurns.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {activeTurns.map(({ channelId, observedAt }) => (
+                <PopoverWorkingBadge
+                  key={channelId}
+                  name={channelIdToName[channelId] ?? channelId}
+                  observedAt={observedAt}
+                />
+              ))}
+            </div>
+          ) : null}
+
           {profile?.about ? (
             <p className="text-xs leading-relaxed text-muted-foreground">
               {profile.about}
@@ -259,12 +290,28 @@ export function UserProfilePopover({
               }}
               type="button"
             >
-              <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+              <Activity className="h-4 w-4 text-muted-foreground" />
               View activity log
             </button>
           ) : null}
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+function PopoverWorkingBadge({
+  name,
+  observedAt,
+}: {
+  name: string;
+  observedAt: number;
+}) {
+  const now = useNow(1000);
+
+  return (
+    <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary motion-safe:animate-pulse">
+      Working in #{name} · {formatElapsed(now - observedAt)}
+    </span>
   );
 }

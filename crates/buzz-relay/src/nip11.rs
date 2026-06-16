@@ -119,7 +119,7 @@ impl RelayInfo {
             pubkey: None,
             contact: None,
             supported_nips,
-            software: "https://github.com/block/sprout".to_string(),
+            software: "https://github.com/block/buzz".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             limitation: Some(relay_limitation()),
             relay_self: relay_self.map(|s| s.to_string()),
@@ -178,6 +178,12 @@ mod tests {
             SUPPORTED_NIPS.contains(&38),
             "NIP-38 (user statuses) must be advertised"
         );
+    }
+
+    #[test]
+    fn build_advertises_buzz_repository_url() {
+        let info = RelayInfo::build(None, false);
+        assert_eq!(info.software, "https://github.com/block/buzz");
     }
 
     #[test]

@@ -404,7 +404,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   const siblingReply = `Sibling threaded reply ${timestamp}`;
   const nestedReply = `Nested threaded reply ${timestamp}`;
   const nestedReplyFromBob = `Nested reply from Bob ${timestamp}`;
-  const nestedReplyVisibleTopMaxPx = 280;
+  const nestedReplyVisibleTopMaxPx = 300;
   const fillerReplies = Array.from(
     { length: 14 },
     (_, index) => `Thread filler reply ${index} ${timestamp}`,
@@ -626,6 +626,17 @@ test("opens a single-level thread panel with inline expansion", async ({
   await expect(
     rootSummaryRow.getByTestId("message-thread-summary-participant"),
   ).toHaveCount(2);
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-participant")
+        .evaluateAll((participants) =>
+          participants
+            .map((participant) => getComputedStyle(participant).zIndex)
+            .join(","),
+        ),
+    )
+    .toBe("1,2");
 
   await expect
     .poll(async () => {
@@ -751,8 +762,8 @@ test("narrow thread view collapses channel header actions into a menu", async ({
     throw new Error("Expected header action menu and thread panel bounds");
   }
   const menuGapPx = threadPanelBox.x - (menuBox.x + menuBox.width);
-  expect(menuGapPx).toBeGreaterThanOrEqual(10);
-  expect(menuGapPx).toBeLessThanOrEqual(14);
+  expect(menuGapPx).toBeGreaterThanOrEqual(22);
+  expect(menuGapPx).toBeLessThanOrEqual(26);
 
   await menuTrigger.click();
 

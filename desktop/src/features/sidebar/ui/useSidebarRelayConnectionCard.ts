@@ -117,10 +117,7 @@ export function useSidebarRelayConnectionCard(errorMessage?: string) {
   const handleReconnectRelay = React.useCallback(() => {
     startConnectivityAction(async () => {
       setHasSuccess(false);
-      const didReconnect = await reconnect();
-      if (didReconnect) {
-        setHasSuccess(true);
-      }
+      await reconnect();
     });
   }, [reconnect, startConnectivityAction]);
 

@@ -37,7 +37,7 @@ test.describe("NIP-IA hide archived from discovery", () => {
     // Folded Archived section is visible with count = 1.
     await expect(page.getByTestId("members-sidebar-archived")).toBeVisible();
     await expect(page.getByTestId("members-sidebar-archived-count")).toHaveText(
-      "1",
+      "(1)",
     );
 
     // Expanding it reveals Alice.
@@ -133,14 +133,12 @@ test.describe("NIP-IA hide archived from discovery", () => {
     await page.getByTestId("channel-members-trigger").click();
     await expect(page.getByTestId("members-sidebar")).toBeVisible();
 
-    // Self appears in active People list — NOT folded into Archived. The
-    // members sidebar renders the current user as "You" + a pubkey-prefix.
-    await expect(page.getByTestId("members-sidebar-people")).toContainText(
-      "You",
-    );
-    await expect(page.getByTestId("members-sidebar-people")).toContainText(
-      "deadbeef",
-    );
+    // Self appears in active People list — NOT folded into Archived.
+    const peopleList = page.getByTestId("members-sidebar-people");
+    await expect(peopleList).toContainText("You");
+    await expect(
+      peopleList.getByTestId(`sidebar-member-${SELF_PUBKEY}`),
+    ).toBeVisible();
     // No Archived section at all when self is the only archived pubkey in
     // the channel (self-exemption makes archived.length === 0).
     await expect(page.getByTestId("members-sidebar-archived")).toHaveCount(0);

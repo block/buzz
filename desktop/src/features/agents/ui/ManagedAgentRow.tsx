@@ -20,6 +20,8 @@ import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { Badge } from "@/shared/ui/badge";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import { useNow } from "@/shared/lib/useNow";
 import type {
   ManagedAgent,
   PresenceLookup,
@@ -84,13 +86,17 @@ export function ManagedAgentRow({
     ? (personaLabelsById[agent.personaId] ?? null)
     : null;
   const presenceStatus = presenceLookup[agent.pubkey.trim().toLowerCase()];
-  const activeChannelIds = useActiveAgentTurns(agent.pubkey);
+  const activeTurns = useActiveAgentTurns(agent.pubkey);
   const activeWorkingChannels = React.useMemo(
     () =>
-      [...activeChannelIds]
-        .map((id) => ({ id, name: channelIdToName[id] ?? id }))
+      activeTurns
+        .map(({ channelId, observedAt }) => ({
+          id: channelId,
+          name: channelIdToName[channelId] ?? channelId,
+          observedAt,
+        }))
         .slice(0, 3),
-    [activeChannelIds, channelIdToName],
+    [activeTurns, channelIdToName],
   );
   const isWorking = activeWorkingChannels.length > 0;
   const processDetail =
@@ -216,7 +222,7 @@ function AgentSummary({
   personaLabel,
   presenceStatus,
 }: {
-  activeWorkingChannels: { id: string; name: string }[];
+  activeWorkingChannels: { id: string; name: string; observedAt: number }[];
   agent: ManagedAgent;
   channelNames: { id: string; name: string }[];
   isExpandable: boolean;
@@ -281,23 +287,48 @@ function AgentSummary({
           {activeWorkingChannels.length > 0 ? (
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
               {activeWorkingChannels.map((channel) => (
-                <Badge
-                  className="cursor-pointer motion-safe:animate-pulse normal-case tracking-normal hover:opacity-80"
+                <WorkingBadge
                   key={`working-${channel.id}`}
-                  variant="default"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void goChannel(channel.id);
-                  }}
-                >
-                  Working in #{channel.name}
-                </Badge>
+                  channelId={channel.id}
+                  name={channel.name}
+                  observedAt={channel.observedAt}
+                  onNavigate={goChannel}
+                />
               ))}
             </div>
           ) : null}
         </div>
       </div>
     </div>
+  );
+}
+
+function WorkingBadge({
+  channelId,
+  name,
+  observedAt,
+  onNavigate,
+}: {
+  channelId: string;
+  name: string;
+  observedAt: number;
+  onNavigate: (channelId: string) => void;
+}) {
+  // The 1s tick lives here, at the leaf, so only visible working badges
+  // re-render each second — idle rows never mount this hook.
+  const now = useNow(1000);
+
+  return (
+    <Badge
+      className="cursor-pointer motion-safe:animate-pulse normal-case tracking-normal hover:opacity-80"
+      variant="default"
+      onClick={(e) => {
+        e.stopPropagation();
+        onNavigate(channelId);
+      }}
+    >
+      Working in #{name} · {formatElapsed(now - observedAt)}
+    </Badge>
   );
 }
 

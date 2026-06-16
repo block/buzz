@@ -280,8 +280,10 @@ impl AcpClient {
     /// Must be called exactly once, before any other ACP method.
     /// The caller may inspect `agentCapabilities` in the returned value.
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
+        // Requesting version 2 is an intentional temporary pin — we are squatting
+        // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
         let params = serde_json::json!({
-            "protocolVersion": 1,
+            "protocolVersion": 2,
             "clientCapabilities": {},
             "clientInfo": {
                 "name": "buzz-acp",
@@ -296,17 +298,23 @@ impl AcpClient {
     /// Send `session/new` and return the full response alongside the session ID.
     ///
     /// `cwd` must be an absolute path. `mcp_servers` may be empty.
+    /// `system_prompt` is included in the request when `Some` — agents that
+    /// support the field will use it; others ignore unknown fields per JSON-RPC.
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
     pub async fn session_new_full(
         &mut self,
         cwd: &str,
         mcp_servers: Vec<McpServer>,
+        system_prompt: Option<&str>,
     ) -> Result<SessionNewResponse, AcpError> {
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "cwd": cwd,
             "mcpServers": mcp_servers,
         });
+        if let Some(sp) = system_prompt {
+            params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+        }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
             .as_str()
@@ -327,8 +335,12 @@ impl AcpClient {
         &mut self,
         cwd: &str,
         mcp_servers: Vec<McpServer>,
+        system_prompt: Option<&str>,
     ) -> Result<String, AcpError> {
-        Ok(self.session_new_full(cwd, mcp_servers).await?.session_id)
+        Ok(self
+            .session_new_full(cwd, mcp_servers, system_prompt)
+            .await?
+            .session_id)
     }
 
     /// Send `session/set_config_option` (stable ACP path).
@@ -1401,7 +1413,7 @@ mod tests {
             "id": 0u64,
             "method": "initialize",
             "params": {
-                "protocolVersion": 1,
+                "protocolVersion": 2,
                 "clientCapabilities": {},
                 "clientInfo": {
                     "name": "buzz-acp",
@@ -1409,7 +1421,7 @@ mod tests {
                 }
             }
         });
-        assert_eq!(msg["params"]["protocolVersion"].as_u64(), Some(1));
+        assert_eq!(msg["params"]["protocolVersion"].as_u64(), Some(2));
         assert_eq!(
             msg["params"]["clientInfo"]["name"].as_str(),
             Some("buzz-acp")
@@ -2029,6 +2041,67 @@ mod tests {
         assert!(
             matches!(result, Err(AcpError::IdleTimeout(_))),
             "expected IdleTimeout after silence, got {result:?}"
+        );
+    }
+
+    // ── session_new_full systemPrompt serialization ──────────────────────
+
+    #[tokio::test]
+    async fn session_new_full_includes_system_prompt_when_some() {
+        // Script: respond to initialize, then echo back the session/new request.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full("/tmp", vec![], Some("Custom system prompt"))
+            .await
+            .expect("session_new_full should succeed");
+
+        assert_eq!(resp.session_id, "ses_test");
+        let received = &resp.raw["_receivedRequest"];
+        assert_eq!(
+            received["params"]["systemPrompt"].as_str(),
+            Some("Custom system prompt"),
+            "systemPrompt should be included in params when Some"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_full_omits_system_prompt_when_none() {
+        // When system_prompt is None, the field should not appear in params.
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_test","_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+
+        let resp = client
+            .session_new_full("/tmp", vec![], None)
+            .await
+            .expect("session_new_full should succeed");
+
+        assert_eq!(resp.session_id, "ses_test");
+        let received = &resp.raw["_receivedRequest"];
+        assert!(
+            received["params"]["systemPrompt"].is_null(),
+            "systemPrompt should NOT be in params when value is None"
         );
     }
 }

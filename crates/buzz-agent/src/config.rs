@@ -1,8 +1,9 @@
 use std::time::Duration;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
+pub const MAX_SYSTEM_PROMPT_BYTES: usize = 512 * 1024;
 /// Total per-result byte ceiling (text + images). Sized for image-bearing
 /// results — view_image can legitimately return multi-MiB base64 payloads.
 /// Text is governed by the much smaller `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES`.
@@ -17,11 +18,7 @@ pub const MAX_TOOL_CALLS_PER_TURN: usize = 64;
 
 pub const HANDOFF_MAX_OUTPUT_TOKENS: u32 = 8192;
 
-pub const HANDOFF_TAIL_ITEMS: usize = 5;
-
 pub const HANDOFF_ORIGINAL_TASK_MAX_BYTES: usize = 16 * 1024;
-
-pub const HANDOFF_PROMPT_MAX_BYTES: usize = 32 * 1024;
 
 pub const HANDOFF_MAX_TOOL_NAMES: usize = 20;
 

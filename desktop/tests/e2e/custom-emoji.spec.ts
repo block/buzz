@@ -151,7 +151,12 @@ test("reacting with a custom emoji renders via the localhost media proxy", async
   // The reaction pill renders the custom emoji as an <img alt=":react:">. Its
   // src must be the localhost proxy URL — proving rewriteRelayUrl() ran. A raw
   // relay URL here is the bug.
-  const reactionImg = row.locator(`img[alt=':${REACTION_SHORTCODE}:']`);
+  const reactionPill = row.getByLabel(
+    `Toggle :${REACTION_SHORTCODE}: reaction`,
+  );
+  const reactionImg = reactionPill.locator(
+    `img[alt=':${REACTION_SHORTCODE}:']`,
+  );
   await expect(reactionImg).toBeVisible();
   await expect(reactionImg).toHaveAttribute(
     "src",
@@ -199,7 +204,7 @@ test("reacting with a custom emoji renders via the localhost media proxy", async
   // disappear. Guards the mock-bridge deletion path: the reaction event needs a
   // 64-hex id, because the timeline only honors deletions whose `e` tag is
   // 64-hex (getDeletionTargets). A 32-hex reaction id leaves a stale pill here.
-  await row.getByLabel(`Toggle :${REACTION_SHORTCODE}: reaction`).click();
+  await reactionPill.click();
   await expect(reactionImg).toHaveCount(0);
 });
 
@@ -324,6 +329,8 @@ test("a system message accepts a custom-emoji reaction", async ({ page }) => {
     .first()
     .click();
 
-  const reactionImg = row.locator(`img[alt=':${REACTION_SHORTCODE}:']`);
+  const reactionImg = row
+    .getByLabel(`Toggle :${REACTION_SHORTCODE}: reaction`)
+    .locator(`img[alt=':${REACTION_SHORTCODE}:']`);
   await expect(reactionImg).toBeVisible();
 });

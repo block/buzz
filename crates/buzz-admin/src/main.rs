@@ -34,6 +34,8 @@ enum Command {
     ListMembers,
     /// Generate a new Nostr keypair (for bootstrapping).
     GenerateKey,
+    /// Run pending database migrations.
+    Migrate,
     /// Emit kind:39000/39002 events for channels missing them.
     ///
     /// Channels created via direct SQL (seed scripts, pre-migration data) won't
@@ -58,6 +60,11 @@ async fn main() -> Result<()> {
             println!("Public key:  {}", keys.public_key().to_hex());
             println!("Secret key:  {}", keys.secret_key().display_secret());
             println!("\nSet BUZZ_PRIVATE_KEY to the secret key to use this identity.");
+        }
+        Command::Migrate => {
+            let db = connect_db().await?;
+            db.migrate().await?;
+            println!("Database migrations complete.");
         }
         Command::AddMember { pubkey, role } => {
             let db = connect_db().await?;

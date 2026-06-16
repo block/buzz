@@ -181,11 +181,11 @@ async fn handshake(h: &mut Harness) -> String {
     let init_id = h
         .send(
             "initialize",
-            json!({ "protocolVersion": 1, "clientCapabilities": {} }),
+            json!({ "protocolVersion": 2, "clientCapabilities": {} }),
         )
         .await;
     let init = h.recv_for_id(init_id).await;
-    assert_eq!(init["result"]["protocolVersion"], 1);
+    assert_eq!(init["result"]["protocolVersion"], 2);
     assert_eq!(init["result"]["agentInfo"]["name"], "buzz-agent");
     assert_eq!(
         init["result"]["agentCapabilities"]["promptCapabilities"]["image"],
@@ -296,7 +296,7 @@ async fn test_initialize_version_check() {
         )
         .await;
     let resp = h.recv_for_id(id).await;
-    assert_eq!(resp["result"]["protocolVersion"], 1);
+    assert_eq!(resp["result"]["protocolVersion"], 2);
 
     let id2 = h
         .send(

@@ -101,7 +101,11 @@ export function buildImetaTags(
   ]);
 }
 
-const MEDIA_LINE_RE = /^!\[(?:image|video)\]\(([^)\s]+)\)\s*$/;
+const MEDIA_LINE_RE =
+  /^(?:\|\|)?!\[(?:image|video)\]\(([^)\s]+)\)(?:\|\|)?\s*$/;
+const SPOILERED_MEDIA_LINE_RE =
+  /^\|\|!\[(?:image|video)\]\(([^)\s]+)\)\|\|\s*$/;
+const BLOCK_SPOILER_DELIMITER_RE = /^\s*\|\|\s*$/;
 /**
  * Matches a generic file-attachment line `[label](url)` (no leading `!`, so it's
  * a link not an image). The label can contain spaces and backslash-escaped
@@ -109,6 +113,35 @@ const MEDIA_LINE_RE = /^!\[(?:image|video)\]\(([^)\s]+)\)\s*$/;
  * file attachments from the body in edit mode.
  */
 const FILE_LINE_RE = /^\[(?:\\.|[^\]\\])*\]\(([^)\s]+)\)\s*$/;
+
+function findTrailingBlockSpoilerMediaStart(
+  lines: string[],
+  closingDelimiterIndex: number,
+  urls: ReadonlySet<string>,
+): number | null {
+  let index = closingDelimiterIndex - 1;
+  let hasMatchingMedia = false;
+
+  while (index >= 0) {
+    const line = lines[index];
+    if (line.trim() === "") {
+      index -= 1;
+      continue;
+    }
+
+    if (BLOCK_SPOILER_DELIMITER_RE.test(line)) {
+      return hasMatchingMedia ? index : null;
+    }
+
+    const match = line.match(MEDIA_LINE_RE);
+    if (!match || !urls.has(match[1])) return null;
+
+    hasMatchingMedia = true;
+    index -= 1;
+  }
+
+  return null;
+}
 
 /**
  * Remove trailing `![image|video](url)` lines whose URL matches an entry in
@@ -132,6 +165,13 @@ export function stripImetaMediaLines(
       end -= 1;
       continue;
     }
+    if (BLOCK_SPOILER_DELIMITER_RE.test(line)) {
+      const start = findTrailingBlockSpoilerMediaStart(lines, end - 1, urls);
+      if (start != null) {
+        end = start;
+        continue;
+      }
+    }
     const match = line.match(MEDIA_LINE_RE) ?? line.match(FILE_LINE_RE);
     if (match && urls.has(match[1])) {
       end -= 1;
@@ -143,6 +183,52 @@ export function stripImetaMediaLines(
   return lines.slice(0, end).join("\n").replace(/\s+$/, "");
 }
 
+export function findSpoileredImetaMediaUrls(
+  body: string,
+  imetaMedia: ReadonlyArray<ImetaMedia>,
+): Set<string> {
+  if (imetaMedia.length === 0) return new Set();
+
+  const urls = new Set(imetaMedia.map((m) => m.url));
+  const spoileredUrls = new Set<string>();
+  const lines = body.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const match = line.match(SPOILERED_MEDIA_LINE_RE);
+    if (match && urls.has(match[1])) {
+      spoileredUrls.add(match[1]);
+      continue;
+    }
+
+    if (!BLOCK_SPOILER_DELIMITER_RE.test(line)) continue;
+
+    const blockSpoileredUrls = new Set<string>();
+    let closingDelimiterIndex = -1;
+    for (
+      let blockIndex = index + 1;
+      blockIndex < lines.length;
+      blockIndex += 1
+    ) {
+      const blockLine = lines[blockIndex];
+      if (BLOCK_SPOILER_DELIMITER_RE.test(blockLine)) {
+        closingDelimiterIndex = blockIndex;
+        break;
+      }
+
+      const blockMatch = blockLine.match(MEDIA_LINE_RE);
+      if (blockMatch && urls.has(blockMatch[1])) {
+        blockSpoileredUrls.add(blockMatch[1]);
+      }
+    }
+
+    if (closingDelimiterIndex !== -1) {
+      for (const url of blockSpoileredUrls) spoileredUrls.add(url);
+      index = closingDelimiterIndex;
+    }
+  }
+  return spoileredUrls;
+}
+
 /**
  * Format a single imeta entry as a leading-newline markdown line.
  *
@@ -151,13 +237,18 @@ export function stripImetaMediaLines(
  * href as a local media blob with a non-media MIME and upgrades it to a file
  * card. Mime-driven so the form is correct regardless of URL suffix.
  */
-export function formatImetaMediaLine({
-  url,
-  type,
-  filename,
-}: ImetaMedia): string {
-  if (type.startsWith("video/")) return `\n![video](${url})`;
-  if (type.startsWith("image/")) return `\n![image](${url})`;
+export function formatImetaMediaLine(
+  { url, type, filename }: ImetaMedia,
+  options: { spoiler?: boolean } = {},
+): string {
+  if (type.startsWith("video/")) {
+    const line = `![video](${url})`;
+    return options.spoiler ? `\n||${line}||` : `\n${line}`;
+  }
+  if (type.startsWith("image/")) {
+    const line = `![image](${url})`;
+    return options.spoiler ? `\n||${line}||` : `\n${line}`;
+  }
   // Generic file: plain link, label is the original filename (fallback to url tail).
   const label = filename || url.split("/").pop() || "file";
   // Escape markdown link-label metacharacters so filenames containing `[`, `]`,
@@ -181,9 +272,14 @@ export function formatImetaMediaLine({
 export function buildOutgoingMessage(
   body: string,
   pendingImeta: ReadonlyArray<ImetaMedia>,
+  spoileredMediaUrls: ReadonlySet<string> = new Set(),
 ): { content: string; mediaTags: string[][] | undefined } {
   let content = body;
-  for (const d of pendingImeta) content += formatImetaMediaLine(d);
+  for (const d of pendingImeta) {
+    content += formatImetaMediaLine(d, {
+      spoiler: spoileredMediaUrls.has(d.url),
+    });
+  }
   const mediaTags =
     pendingImeta.length > 0 ? buildImetaTags(pendingImeta) : undefined;
   return { content, mediaTags };

@@ -6,7 +6,6 @@ import {
   SidebarBlockVpnOffCompactCard,
   SidebarRelayConnectionCompactCard,
 } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
-import { connectWarpVpn, refreshWarpAccess } from "@/shared/api/warp";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -197,10 +196,7 @@ function OnboardingRelayConnectionErrorCard({
   );
 
   const handleConnectWarpVpn = React.useCallback(() => {
-    runConnectivityAction("connect-vpn", async () => {
-      await connectWarpVpn();
-      return reconnect();
-    });
+    runConnectivityAction("connect-vpn", reconnect);
   }, [reconnect, runConnectivityAction]);
 
   const handleReconnectRelay = React.useCallback(() => {
@@ -208,10 +204,7 @@ function OnboardingRelayConnectionErrorCard({
   }, [reconnect, runConnectivityAction]);
 
   const handleRefreshWarpAccess = React.useCallback(() => {
-    runConnectivityAction("refresh-access", async () => {
-      await refreshWarpAccess();
-      return reconnect();
-    });
+    runConnectivityAction("refresh-access", reconnect);
   }, [reconnect, runConnectivityAction]);
 
   if (dismissedErrorMessage === message) {
@@ -355,6 +348,7 @@ export function ProfileStep({
           ) : null}
           <input
             aria-label="Name"
+            autoCapitalize="none"
             autoComplete="off"
             autoCorrect="off"
             className={cn(
@@ -395,7 +389,7 @@ export function ProfileStep({
           type="button"
         >
           {isSaving ? (
-            <Spinner aria-label="Saving profile" className="h-4 w-4" />
+            <Spinner aria-label="Saving profile" className="h-4 w-4 border-2" />
           ) : (
             "Next"
           )}

@@ -6,7 +6,7 @@ import {
   Bot,
   FolderGit2,
   Home,
-  PenSquare,
+  MessageCirclePlus,
   Zap,
 } from "lucide-react";
 import * as React from "react";
@@ -40,7 +40,11 @@ import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDi
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
 import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
-import { SECTION_ACTION_VISIBILITY_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
+import {
+  SidebarLoadingContent,
+  useSidebarLoadingShape,
+} from "@/features/sidebar/ui/sidebarLoadingSkeleton";
+import { SECTION_ICON_BUTTON_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
 import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
 import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
 import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCardVisibility";
@@ -56,16 +60,11 @@ import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
-  SidebarGroup,
-  SidebarGroupAction,
-  SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarMenuSkeleton,
   SidebarRail,
 } from "@/shared/ui/sidebar";
 
@@ -245,7 +244,6 @@ export function AppSidebar({
       : sidebarFooterCardCount >= 1
         ? "bottom-44"
         : "bottom-28";
-  const skeletonRows = ["first", "second", "third", "fourth", "fifth", "sixth"];
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
@@ -402,6 +400,14 @@ export function AppSidebar({
       fallbackDisplayName,
       profileDisplayName: profile?.displayName,
     });
+  const sidebarLoadingShape = useSidebarLoadingShape({
+    activeWorkspaceId: activeWorkspace?.id,
+    currentPubkey,
+    directMessages,
+    dmChannelLabels,
+    isLoading,
+    streamChannels,
+  });
   const shouldLoadAgentCount = useDeferredLoad({
     immediate: selectedView === "agents",
     timeoutMs: 250,
@@ -519,10 +525,10 @@ export function AppSidebar({
             </SidebarMenuButton>
             {shouldShowAgentCount ? (
               <SidebarMenuBadge
-                className="right-2 rounded-full bg-sidebar-accent/70 px-1.5 text-[11px] text-sidebar-foreground/75 peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
+                className="right-2 rounded-full bg-sidebar-accent/70 px-1.5 text-[11px] leading-none text-sidebar-foreground/75 peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
                 data-testid="sidebar-agents-count"
               >
-                {totalAgentCount}
+                <span className="leading-none">{totalAgentCount}</span>
               </SidebarMenuBadge>
             ) : null}
           </SidebarMenuItem>
@@ -558,16 +564,7 @@ export function AppSidebar({
           ref={scrollRef}
         >
           {isLoading ? (
-            <SidebarGroup>
-              <SidebarGroupLabel>Channels</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu data-testid="sidebar-loading">
-                  {skeletonRows.map((row) => (
-                    <SidebarMenuSkeleton key={row} showIcon />
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
+            <SidebarLoadingContent shape={sidebarLoadingShape} />
           ) : null}
 
           {!isLoading ? (
@@ -718,21 +715,21 @@ export function AppSidebar({
               </FeatureGate>
               <SidebarSection
                 action={
-                  <SidebarGroupAction
-                    aria-expanded={isNewDmOpen}
-                    aria-label="Start a direct message"
-                    className={cn(
-                      "top-1/2 -translate-y-1/2 text-sidebar-foreground/50 hover:bg-sidebar-border/35 hover:text-sidebar-foreground",
-                      SECTION_ACTION_VISIBILITY_CLASS,
-                    )}
-                    data-testid="new-dm-trigger"
-                    onClick={() => {
-                      setIsNewDmOpen(true);
-                    }}
-                    type="button"
-                  >
-                    <PenSquare className="transition-transform" />
-                  </SidebarGroupAction>
+                  <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
+                    <button
+                      aria-expanded={isNewDmOpen}
+                      aria-label="Compose new message"
+                      className={SECTION_ICON_BUTTON_CLASS}
+                      data-testid="new-dm-trigger"
+                      onClick={() => {
+                        setIsNewDmOpen(true);
+                      }}
+                      title="Compose new message"
+                      type="button"
+                    >
+                      <MessageCirclePlus className="h-4 w-4" />
+                    </button>
+                  </div>
                 }
                 dmParticipantsByChannelId={dmParticipantsByChannelId}
                 isCollapsed={collapsedGroups.directMessages}

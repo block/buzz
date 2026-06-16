@@ -25,10 +25,6 @@ const FIRST_RUN_ALICE = {
   ...TEST_IDENTITIES.alice,
   username: "",
 };
-const FIRST_RUN_KENNY = {
-  ...TEST_IDENTITIES.tyler,
-  username: "Kenny QA",
-};
 
 type TestIdentity = {
   privateKey: string;
@@ -513,27 +509,6 @@ async function expectWelcomeGuideIntro(
   }
 }
 
-async function getMockProfile(page: Page) {
-  return page.evaluate(async () => {
-    const invoke = (
-      window as Window & {
-        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
-          command: string,
-          payload?: Record<string, unknown>,
-        ) => Promise<unknown>;
-      }
-    ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
-    if (!invoke) {
-      throw new Error("Mock invoke bridge is unavailable.");
-    }
-
-    return (await invoke("get_profile")) as {
-      avatar_url: string | null;
-      display_name: string | null;
-    };
-  });
-}
-
 async function expectIncompleteOnboarding(page: Page) {
   await expect(page.getByTestId("onboarding-gate")).toBeVisible();
   await expectShellHidden(page);
@@ -582,7 +557,11 @@ test("first-run default workspace handoff gives immediate stepper feedback", asy
     {
       profileReadDelayMs: 2_000,
     },
-    { skipOnboardingSeed: true, skipWorkspaceSeed: true },
+    {
+      relayWsUrl: "wss://default.example.com",
+      skipOnboardingSeed: true,
+      skipWorkspaceSeed: true,
+    },
   );
   await page.goto("/");
 
@@ -621,6 +600,7 @@ test("first-run default workspace handoff gives immediate stepper feedback", asy
 
 test("welcome can continue using an existing Nostr key", async ({ page }) => {
   await installMockBridge(page, undefined, {
+    relayWsUrl: "wss://default.example.com",
     skipOnboardingSeed: true,
     skipWorkspaceSeed: true,
   });
@@ -662,6 +642,9 @@ test("welcome presents custom workspace setup as joining a workspace", async ({
   });
   await page.goto("/");
 
+  await expect(
+    page.getByRole("button", { name: "Continue with Block Inc. workspace" }),
+  ).toHaveCount(0);
   await page.getByRole("button", { name: "Join a workspace" }).click();
 
   await expect(
@@ -923,7 +906,10 @@ test("avatar upload accepts a file whose server-detected MIME is an image", asyn
     buffer: Buffer.from("png bytes"),
   });
 
-  await expect(page.getByTestId("onboarding-avatar-url")).toHaveValue(url);
+  await expect(page.getByTestId("onboarding-avatar-url")).toHaveValue("");
+  await expect(
+    page.getByTestId("onboarding-avatar-preview-fallback"),
+  ).toHaveText("MQ");
   await expect(page.getByTestId("onboarding-avatar-error")).toHaveCount(0);
 });
 
