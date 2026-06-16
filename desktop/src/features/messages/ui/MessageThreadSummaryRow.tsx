@@ -124,11 +124,8 @@ export function MessageThreadSummaryRow({
               {summary.replyCount} {replyLabel}
             </span>
             {unreadCount != null && unreadCount > 0 ? (
-              <span
-                className="ml-1.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none text-primary-foreground"
-                data-testid="thread-unread-badge"
-              >
-                {unreadCount}
+              <span className="ml-1" data-testid="thread-unread-badge">
+                ({unreadCount} new)
               </span>
             ) : null}
             {summary.lastReplyAt ? (
