@@ -264,11 +264,11 @@ export function UserProfilePopover({
 
           {activeTurns.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
-              {activeTurns.map(({ channelId, observedAt }) => (
+              {activeTurns.map(({ channelId, anchorAt }) => (
                 <PopoverWorkingBadge
                   key={channelId}
                   name={channelIdToName[channelId] ?? channelId}
-                  observedAt={observedAt}
+                  anchorAt={anchorAt}
                 />
               ))}
             </div>
@@ -302,16 +302,16 @@ export function UserProfilePopover({
 
 function PopoverWorkingBadge({
   name,
-  observedAt,
+  anchorAt,
 }: {
   name: string;
-  observedAt: number;
+  anchorAt: number;
 }) {
   const now = useNow(1000);
 
   return (
     <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary motion-safe:animate-pulse">
-      Working in #{name} · {formatElapsed(now - observedAt)}
+      Working in #{name} · {formatElapsed(now - anchorAt)}
     </span>
   );
 }
