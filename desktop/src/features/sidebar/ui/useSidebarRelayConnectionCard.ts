@@ -22,8 +22,10 @@ export function useSidebarRelayConnectionCard(
     errorMessage,
     relayUrl,
   );
+  const isRelayConnectionStateDegraded =
+    isRelayConnectionDegraded(relayConnectionState);
   const isRelayConnectionActuallyDegraded =
-    hasRelayUnreachableError || isRelayConnectionDegraded(relayConnectionState);
+    hasRelayUnreachableError || isRelayConnectionStateDegraded;
   const isRelayConnectionConnected = relayConnectionState === "connected";
   const [isDismissed, setIsDismissed] = React.useState(false);
   const [hasSuccess, setHasSuccess] = React.useState(false);
@@ -47,11 +49,11 @@ export function useSidebarRelayConnectionCard(
   }, [hasSuccess, isRelayConnectionActuallyDegraded]);
 
   React.useEffect(() => {
-    if (isRelayConnectionActuallyDegraded) {
+    if (isRelayConnectionStateDegraded) {
       setHasSuccess(false);
       setIsDismissed(false);
     }
-  }, [isRelayConnectionActuallyDegraded]);
+  }, [isRelayConnectionStateDegraded]);
 
   React.useEffect(() => {
     if (isRelayConnectionActuallyDegraded) {
@@ -125,7 +127,12 @@ export function useSidebarRelayConnectionCard(
   const handleReconnectRelay = React.useCallback(() => {
     startConnectivityAction(async () => {
       setHasSuccess(false);
-      await reconnect();
+      const didReconnect = await reconnect();
+      if (didReconnect) {
+        wasProblemCardVisibleRef.current = false;
+        setIsDismissed(false);
+        setHasSuccess(true);
+      }
     });
   }, [reconnect, startConnectivityAction]);
 

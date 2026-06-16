@@ -84,6 +84,28 @@ test("Block workspace sidebar Cloudflare Access redirects offer the VPN card", a
   await expect(page.getByTestId("sidebar-vpn-access-refresh")).toHaveCount(0);
 });
 
+test("Block workspace sidebar VPN action shows connected before hiding", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { channelsReadError: CONNECT_ERROR },
+    { relayWsUrl: BLOCK_RELAY_URL },
+  );
+
+  await page.goto("/");
+
+  const card = page.getByTestId("sidebar-vpn-off");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Turn on VPN");
+
+  await page.getByTestId("sidebar-connect-vpn").click();
+
+  await expect(card).toContainText("Connected");
+  await expect(card).not.toContainText("Click to connect");
+  await expect(card).toBeHidden({ timeout: 5_000 });
+});
+
 test("custom workspace sidebar proxy failures stay generic", async ({
   page,
 }) => {
