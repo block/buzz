@@ -33,6 +33,22 @@ async function driveConnectionState(
   }, state);
 }
 
+async function scrollSidebarToBottom(page: import("@playwright/test").Page) {
+  // The relay block anchors at the bottom of the sidebar's scroll region and is
+  // painted UNDER the absolute, z-30 profile footer (it sits within the footer's
+  // 68px band when unscrolled — toBeVisible passes since it's in-DOM, but a human
+  // can't see it). The scroll region is specifically [data-sidebar="content"];
+  // scrolling it fully down lifts the block ~96px clear of the footer. Targeting
+  // any old overflowing descendant matches the wrong element (e.g. a menu button),
+  // so the selector must be exact.
+  await page
+    .getByTestId("app-sidebar")
+    .locator('[data-sidebar="content"]')
+    .evaluate((scroller) => {
+      scroller.scrollTop = scroller.scrollHeight;
+    });
+}
+
 async function openProfilePopover(page: import("@playwright/test").Page) {
   await page.getByTestId("sidebar-profile-avatar-button").click();
   // Anchor on a stable popover child so the screenshot captures the open menu.
@@ -94,9 +110,18 @@ test.describe("relay reconnect affordance screenshots", () => {
 
     await expect(page.getByTestId("channel-general")).toBeVisible();
     await expect(page.getByTestId("sidebar-relay-unreachable")).toHaveCount(0);
+    // The relay block renders at the BOTTOM of the scrollable sidebar content,
+    // below the fold at this viewport. Scroll to the bottom so 03 frames the
+    // same region where 04 will show the block — making the absence legible.
+    await scrollSidebarToBottom(page);
     await settle(page);
 
-    await page.screenshot({ path: `${SHOTS}/03-sidebar-healthy.png` });
+    // Frame the left sidebar directly — the relay-unreachable block lives there,
+    // and a full-window shot makes its presence/absence illegible against the
+    // unrelated top connection banner.
+    await page.getByTestId("app-sidebar").screenshot({
+      path: `${SHOTS}/03-sidebar-healthy.png`,
+    });
   });
 
   test("04 — sidebar reconnect prompt shown when degraded, channels visible", async ({
@@ -113,8 +138,12 @@ test.describe("relay reconnect affordance screenshots", () => {
     await expect(page.getByTestId("sidebar-reconnect")).toBeVisible();
     // The cached channel list stays visible alongside the prompt.
     await expect(page.getByTestId("channel-general")).toBeVisible();
+    // Scroll the block clear of the occluding footer (symmetric with 03).
+    await scrollSidebarToBottom(page);
     await settle(page);
 
-    await page.screenshot({ path: `${SHOTS}/04-sidebar-degraded.png` });
+    await page.getByTestId("app-sidebar").screenshot({
+      path: `${SHOTS}/04-sidebar-degraded.png`,
+    });
   });
 });
