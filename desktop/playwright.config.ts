@@ -37,6 +37,7 @@ export default defineConfig({
         "**/video-attachment.spec.ts",
         "**/mentions.spec.ts",
         "**/relay-reconnect.spec.ts",
+        "**/relay-reconnect-screenshots.spec.ts",
         "**/workflows.spec.ts",
         "**/identity-archive.spec.ts",
         "**/identity-archive-hide.spec.ts",
