@@ -51,6 +51,7 @@ import {
   classifyChildren,
   hasBlockMedia,
   isImageOnlyParagraph,
+  reservedImageSize,
   shallowArrayEqual,
 } from "./markdownUtils";
 import { resolveFileCard } from "./markdownFileCard";
@@ -246,10 +247,12 @@ type MarkdownVariant = "default" | "compact" | "tight";
  */
 function ImageBlock({
   alt,
+  dim,
   resolvedSrc,
   src,
 }: {
   alt: string | undefined;
+  dim?: string;
   resolvedSrc: string | undefined;
   src: string | undefined;
 }) {
@@ -299,13 +302,22 @@ function ImageBlock({
     });
   };
 
+  const reserved = reservedImageSize(dim);
+
   return (
     <>
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: image opens lightbox on click; keyboard equivalent handled by lightbox close button */}
       <img
         alt={alt}
-        className="mt-1 block max-h-64 max-w-sm cursor-pointer rounded-xl object-contain"
+        className="mt-1 block h-auto max-h-64 max-w-sm cursor-pointer rounded-xl object-contain"
+        // Reserve the rendered box from imeta `dim` so the row's height is
+        // stable BEFORE the image loads — no zero-then-grow reflow thrashing the
+        // virtualized list. width/height stay within the max-h-64/max-w-sm caps
+        // (reservedImageSize pre-scales to them), so the caps never shrink it
+        // further. Falls back to natural load when `dim` is absent.
+        height={reserved?.height}
         src={resolvedSrc}
+        width={reserved?.width}
         onClick={() => setLightboxOpen(true)}
         onContextMenuCapture={handleContextMenu}
       />
@@ -911,7 +923,12 @@ function createMarkdownComponents(
       }
       return (
         <span data-block-media="" className="block">
-          <ImageBlock alt={alt} resolvedSrc={resolvedSrc} src={src} />
+          <ImageBlock
+            alt={alt}
+            dim={src ? imetaByUrl?.get(src)?.dim : undefined}
+            resolvedSrc={resolvedSrc}
+            src={src}
+          />
         </span>
       );
     },

@@ -65,3 +65,46 @@ export function shallowArrayEqual(a?: string[], b?: string[]): boolean {
   }
   return true;
 }
+
+// Display caps for inline message images — must mirror the `max-h-64 max-w-sm`
+// (256×384px) Tailwind classes on the rendered <img>.
+export const INLINE_IMAGE_MAX_WIDTH = 384;
+export const INLINE_IMAGE_MAX_HEIGHT = 256;
+
+/**
+ * Compute the exact rendered box for an inline image from its imeta `dim`
+ * ("WIDTHxHEIGHT"), scaled to fit the display caps (same fit as `object-contain`
+ * within `max-w-sm`/`max-h-64`). Used to reserve the row's height via the <img>
+ * width/height attributes BEFORE the bytes load — without it, image rows paint
+ * at height 0 then grow when the image arrives, thrashing the virtualized list
+ * (every late image re-measures and shifts its neighbors).
+ *
+ * Returns undefined when `dim` is missing/malformed/non-positive — we can't
+ * reserve what we don't know, so the natural load is the correct fallback.
+ */
+export function reservedImageSize(
+  dim: string | undefined,
+): { width: number; height: number } | undefined {
+  if (!dim) return undefined;
+  const match = dim.match(/^(\d+)x(\d+)$/i);
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return undefined;
+  }
+  const scale = Math.min(
+    1,
+    INLINE_IMAGE_MAX_WIDTH / width,
+    INLINE_IMAGE_MAX_HEIGHT / height,
+  );
+  return {
+    width: Math.round(width * scale),
+    height: Math.round(height * scale),
+  };
+}
