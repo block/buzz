@@ -48,6 +48,17 @@ function setRelayConnectivitySuccess(
   }
 }
 
+export function resetSidebarRelayConnectionCardState() {
+  if (relayConnectivitySuccessKey === null) {
+    return;
+  }
+
+  relayConnectivitySuccessKey = null;
+  for (const listener of relayConnectivitySuccessListeners) {
+    listener();
+  }
+}
+
 function isDocumentVisible() {
   return document.visibilityState === "visible";
 }

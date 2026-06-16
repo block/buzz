@@ -11,6 +11,7 @@ const CLOUDFLARE_ACCESS_ERROR =
   "relay unreachable: 403 Forbidden from Cloudflare Access";
 const CLOUDFLARE_ACCESS_REDIRECT_ERROR =
   "relay unreachable: network sign-in required (Cloudflare Access / VPN) - re-authenticate and reconnect";
+const RELAY_AUTH_ERROR = "Relay authentication rejected.";
 
 test("Block workspace sidebar generic relay failures offer the VPN card", async ({
   page,
@@ -82,6 +83,23 @@ test("Block workspace sidebar Cloudflare Access redirects offer the VPN card", a
   await expect(card).toContainText("Turn on VPN");
   await expect(page.getByTestId("sidebar-connect-vpn")).toBeVisible();
   await expect(page.getByTestId("sidebar-vpn-access-refresh")).toHaveCount(0);
+});
+
+test("Block workspace sidebar application auth failures stay on the error path", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { channelsReadError: RELAY_AUTH_ERROR },
+    { relayWsUrl: BLOCK_RELAY_URL },
+  );
+
+  await page.goto("/");
+
+  await expect(page.getByText(RELAY_AUTH_ERROR)).toBeVisible();
+  await expect(page.getByTestId("sidebar-relay-unreachable")).toHaveCount(0);
+  await expect(page.getByTestId("sidebar-vpn-access-refresh")).toHaveCount(0);
+  await expect(page.getByTestId("sidebar-vpn-off")).toHaveCount(0);
 });
 
 test("Block workspace sidebar VPN action shows connected before hiding", async ({

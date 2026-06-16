@@ -1,4 +1,7 @@
-import { relayErrorDetail } from "@/shared/lib/relayError";
+import {
+  isRelayUnreachableError,
+  relayErrorDetail,
+} from "@/shared/lib/relayError";
 
 export type RelayConnectivityCardVariant =
   | "connect-vpn"
@@ -28,18 +31,48 @@ export function isBlockRelayUrl(relayUrl: string | null | undefined) {
   }
 }
 
-function shouldRefreshBlockVpnAccess(errorMessage: string | null | undefined) {
+function normalizedRelayErrorDetail(errorMessage: string | null | undefined) {
+  if (!errorMessage) {
+    return "";
+  }
+
+  return (
+    isRelayUnreachableError(errorMessage)
+      ? relayErrorDetail(errorMessage)
+      : errorMessage
+  ).toLowerCase();
+}
+
+function isBlockConnectivityFailure(errorMessage: string | null | undefined) {
   if (!errorMessage) {
     return false;
   }
 
-  const detail = relayErrorDetail(errorMessage).toLowerCase();
+  if (isRelayUnreachableError(errorMessage)) {
+    return true;
+  }
+
+  const detail = normalizedRelayErrorDetail(errorMessage);
   return (
-    detail.includes("expired") ||
-    detail.includes("unauthorized") ||
-    detail.includes("forbidden") ||
-    detail.includes("401") ||
-    detail.includes("403")
+    detail.includes("cloudflare access") ||
+    detail.includes("network sign-in") ||
+    detail.includes("sign-in required") ||
+    detail.includes("vpn") ||
+    detail.includes("proxy sign-in") ||
+    detail.includes("http error: 302") ||
+    detail.includes("302 found")
+  );
+}
+
+function shouldRefreshBlockVpnAccess(errorMessage: string | null | undefined) {
+  const detail = normalizedRelayErrorDetail(errorMessage);
+  return (
+    isBlockConnectivityFailure(errorMessage) &&
+    (detail.includes("expired") ||
+      detail.includes("unauthorized") ||
+      detail.includes("forbidden") ||
+      detail.includes("401") ||
+      detail.includes("403"))
   );
 }
 
@@ -51,7 +84,11 @@ export function resolveRelayConnectivityCardVariant(
     return "reconnect-relay";
   }
 
-  return shouldRefreshBlockVpnAccess(errorMessage)
-    ? "refresh-access"
-    : "connect-vpn";
+  if (shouldRefreshBlockVpnAccess(errorMessage)) {
+    return "refresh-access";
+  }
+
+  return isBlockConnectivityFailure(errorMessage)
+    ? "connect-vpn"
+    : "reconnect-relay";
 }

@@ -87,3 +87,21 @@ test("resolveRelayConnectivityCardVariant offers access refresh for auth failure
     "refresh-access",
   );
 });
+
+test("resolveRelayConnectivityCardVariant keeps Block application auth failures generic", () => {
+  assert.equal(
+    resolveRelayConnectivityCardVariant(
+      "Relay authentication rejected.",
+      "wss://sprout-oss.stage.blox.sqprod.co",
+    ),
+    "reconnect-relay",
+  );
+
+  assert.equal(
+    resolveRelayConnectivityCardVariant(
+      "not authorized to access this workspace",
+      "wss://sprout-oss.stage.blox.sqprod.co",
+    ),
+    "reconnect-relay",
+  );
+});
