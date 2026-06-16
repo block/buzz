@@ -250,6 +250,8 @@ test.describe("relay connectivity screenshots", () => {
 
     await expect(relayCard).toContainText("Connected");
     await expect(relayCard).not.toContainText("Click to connect");
+    await page.waitForTimeout(3_000);
+    await expect(relayCard).toContainText("Connected");
     await expect(relayCard).toBeHidden({
       timeout: 5_000,
     });
