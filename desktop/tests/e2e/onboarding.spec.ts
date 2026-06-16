@@ -216,6 +216,7 @@ async function expectWelcomeView(page: Page) {
   await expect(page.getByTestId("chat-title")).toContainText("Welcome");
   await expect(page.getByTestId("channel-ephemeral-Welcome")).toHaveCount(0);
   await expect(page.getByTestId("chat-ephemeral-badge")).toHaveCount(0);
+  await expect(page.getByTestId("message-unread-pill")).toHaveCount(0);
   await expect(page.getByTestId("message-channel-intro")).toBeVisible();
   await expect(page.getByTestId("message-channel-intro")).toContainText(
     "This is the beginning of the private welcome channel.",

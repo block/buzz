@@ -70,6 +70,7 @@ type E2eConfig = {
     channelsReadError?: string;
     feedReadError?: string;
     canvasReadError?: string;
+    openDmDelayMs?: number;
     profileReadDelayMs?: number;
     profileReadError?: string;
     profileUpdateError?: string;
@@ -3332,6 +3333,11 @@ async function handleOpenDm(
   },
   config: E2eConfig | undefined,
 ) {
+  const delayMs = config?.mock?.openDmDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
   const normalizedPubkeys = normalizeParticipantPubkeys(args.pubkeys);
   if (normalizedPubkeys.length === 0) {
     throw new Error("Select at least one person to start a DM.");

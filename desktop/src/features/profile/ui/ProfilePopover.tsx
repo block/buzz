@@ -46,7 +46,7 @@ interface ProfilePopoverProps {
 // ---------------------------------------------------------------------------
 
 const MENU_ITEM_CLASS =
-  "flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-popover-foreground hover:bg-accent focus-visible:bg-accent cursor-pointer transition-colors outline-hidden focus:outline-none focus-visible:outline-none";
+  "flex min-h-9 w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-popover-foreground outline-hidden transition-colors hover:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none";
 
 const ALL_STATUSES: PresenceStatus[] = ["online", "away", "offline"];
 
@@ -131,7 +131,7 @@ export function ProfilePopover({
           side="top"
           align="start"
           sideOffset={-32}
-          className="w-[280px] rounded-xl border border-border bg-popover p-0 shadow-lg"
+          className="w-[280px] p-1"
           data-testid="profile-popover"
           onInteractOutside={(event) => {
             const target = event.target as Node | null;
@@ -145,7 +145,7 @@ export function ProfilePopover({
         >
           <div aria-label="Profile menu" role="menu">
             {/* ── Identity block ─────────────────────────────────── */}
-            <div className="flex items-center gap-2 px-4 pt-3 pb-2">
+            <div className="flex items-center gap-2 px-3 pt-2 pb-2">
               <div className="relative shrink-0">
                 <ProfileAvatar
                   avatarDataUrl={avatarDataUrl}
@@ -170,9 +170,9 @@ export function ProfilePopover({
             </div>
 
             {/* ── Status input (Slack-style) ──────────────────────── */}
-            <div className="px-3 pt-0 pb-1">
+            <div className="px-2 pt-0 pb-1">
               <button
-                className="flex w-full items-center gap-2 rounded-lg border border-input bg-popover px-3 py-2 text-left text-sm outline-hidden transition-colors hover:bg-accent focus:outline-none focus-visible:bg-accent focus-visible:outline-none"
+                className="flex w-full items-center gap-2 rounded-lg border border-border/60 bg-transparent px-3 py-2 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none"
                 data-testid="profile-popover-set-status"
                 onClick={() => {
                   closePopover();
@@ -229,7 +229,7 @@ export function ProfilePopover({
               </PopoverTrigger>
               <PopoverContent
                 align="start"
-                className="w-44 rounded-xl border border-border bg-popover p-1 shadow-lg"
+                className="w-60 p-1"
                 onMouseEnter={() => schedulePresenceMenu(true)}
                 onMouseLeave={() => schedulePresenceMenu(false)}
                 side="right"
@@ -305,8 +305,6 @@ export function ProfilePopover({
                 </div>
               </>
             ) : null}
-
-            <div className="h-1" />
           </div>
         </PopoverContent>
       </Popover>

@@ -6,6 +6,7 @@ import { X } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { useTheme } from "@/shared/theme/ThemeProvider";
+import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 
 const Dialog = DialogPrimitive.Root;
 const DialogTrigger = DialogPrimitive.Trigger;
@@ -22,6 +23,7 @@ const DialogOverlay = React.forwardRef<
     <DialogPrimitive.Overlay
       className={cn(
         "fixed inset-0 z-50 transition-none duration-200 ease-out data-[state=closed]:duration-150 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 motion-reduce:animate-none",
+        MODAL_BACKDROP_BLUR_CLASS,
         isDark ? "bg-black/60" : "bg-black/10",
         className,
       )}

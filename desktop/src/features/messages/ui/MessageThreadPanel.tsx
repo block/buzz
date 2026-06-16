@@ -445,7 +445,7 @@ export function MessageThreadPanel({
                     className={cn(
                       "flex flex-col gap-1",
                       entry.summary &&
-                        "group/message -mx-1 rounded-2xl px-1 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+                        "group/message mx-1 rounded-2xl px-0 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
                     )}
                     key={entry.message.renderKey ?? entry.message.id}
                   >

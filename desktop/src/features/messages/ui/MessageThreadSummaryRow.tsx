@@ -7,7 +7,7 @@ import { formatThreadSummaryLastReplyTime } from "@/features/messages/lib/dateFo
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const MESSAGE_TEXT_OFFSET_PX = 54;
-const MESSAGE_BODY_OFFSET_PX = MESSAGE_TEXT_OFFSET_PX + 4;
+const MESSAGE_BODY_OFFSET_PX = MESSAGE_TEXT_OFFSET_PX;
 const NESTED_REPLY_OFFSET_PX = 28;
 
 function ParticipantAvatar({

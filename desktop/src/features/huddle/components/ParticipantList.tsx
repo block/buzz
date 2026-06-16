@@ -62,7 +62,7 @@ export function HuddleParticipantsControl({
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className="buzz-huddle-drawer buzz-huddle-popover w-72 border-white/10 p-3 text-foreground"
+        className="buzz-huddle-drawer buzz-huddle-popover w-72 p-3 text-foreground"
         side="top"
         sideOffset={10}
       >

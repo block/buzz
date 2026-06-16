@@ -135,6 +135,7 @@ export const MessageRow = React.memo(
       () => isEmojiOnlyMessage(message.body, customEmoji),
       [message.body, customEmoji],
     );
+    const bodyOffsetClass = emojiOnly ? "mt-1" : "-mt-0.5";
 
     const { channels } = useChannelNavigation();
     const channelNames = React.useMemo(
@@ -194,7 +195,7 @@ export const MessageRow = React.memo(
               className={cn(
                 "max-w-full text-[15px] leading-6",
                 emojiOnly &&
-                  "text-4xl leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
+                  "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
               )}
               content={message.body}
               customEmoji={customEmoji}
@@ -380,8 +381,10 @@ export const MessageRow = React.memo(
 
         <article
           className={cn(
-            "group/message relative rounded-2xl px-3 py-2 transition-colors",
-            hoverBackground && "hover:bg-muted/50 focus-within:bg-muted/50",
+            "group/message relative rounded-2xl py-2 transition-colors",
+            hoverBackground
+              ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
+              : "px-2",
             "flex items-start gap-2.5",
             highlighted
               ? "-mx-4 rounded-none px-6 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-8"
@@ -437,7 +440,7 @@ export const MessageRow = React.memo(
                     </span>
                   ) : null}
                 </div>
-                <div className="-mt-0.5">{messageBodyNode}</div>
+                <div className={bodyOffsetClass}>{messageBodyNode}</div>
               </div>
             </>
           ) : (
@@ -487,7 +490,7 @@ export const MessageRow = React.memo(
                     </span>
                   ) : null}
                 </div>
-                <div className="-mt-0.5">{messageBodyNode}</div>
+                <div className={bodyOffsetClass}>{messageBodyNode}</div>
               </div>
             </>
           )}

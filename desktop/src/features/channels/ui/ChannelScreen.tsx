@@ -77,6 +77,7 @@ import {
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
+import { useWelcomeInitialUnreadSuppression } from "./useWelcomeInitialUnreadSuppression";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760;
@@ -196,6 +197,8 @@ export function ChannelScreen({
   const [, forceUnreadRender] = React.useReducer((n: number) => n + 1, 0);
   const isActiveChannelForcedUnread =
     !!activeChannelId && forcedUnreadRef.current.has(activeChannelId);
+  const isActiveWelcomeInitialUnreadSuppressed =
+    useWelcomeInitialUnreadSuppression(activeChannelId, forceUnreadRender);
   // Drop the forced-unread flag when the user leaves a channel, so reopening
   // it recomputes a normal marker rather than staying suppressed forever.
   React.useEffect(() => {
@@ -400,21 +403,20 @@ export function ChannelScreen({
     channelId: activeChannelId,
     messages: timelineMessages,
   });
-  // Oldest-unread top-level message + count, derived from the open-time
-  // frontier snapshot above. Drives the "N new messages" pill and the "New"
-  // divider; both stay put even after the open marks the channel read because
-  // openFrontierSeconds is keyed per channel, not on the live marker.
+  // Oldest unread top-level message + count from the open-time frontier.
+  // Keyed per channel so the pill/divider survive the mark-read effect.
   const { firstUnreadMessageId, unreadCount } = React.useMemo(
     () =>
       computeChannelUnreadMarker(
         timelineMessages,
         openFrontierSeconds,
-        isActiveChannelForcedUnread,
+        isActiveChannelForcedUnread || isActiveWelcomeInitialUnreadSuppressed,
         currentPubkey,
       ),
     [
       currentPubkey,
       isActiveChannelForcedUnread,
+      isActiveWelcomeInitialUnreadSuppressed,
       openFrontierSeconds,
       timelineMessages,
     ],

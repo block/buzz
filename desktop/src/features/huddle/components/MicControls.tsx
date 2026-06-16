@@ -15,11 +15,6 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 type VoiceInputMode = "push_to_talk" | "voice_activity";
-type MicFrequencyBands = {
-  low: number;
-  mid: number;
-  high: number;
-};
 
 type MicControlsProps = {
   isMuted: boolean;
@@ -27,7 +22,7 @@ type MicControlsProps = {
   isPttMode: boolean;
   pttActive: boolean;
   micConnected: boolean;
-  micBands: MicFrequencyBands;
+  micLevel: number;
   onSelectVoiceInputMode: (mode: VoiceInputMode) => void | Promise<void>;
   audioDevices: MediaDeviceInfo[];
   selectedDeviceId: string;
@@ -46,12 +41,30 @@ type MicMeterBarStyle = CSSProperties & {
   "--buzz-huddle-meter-height": string;
 };
 
-function micMeterBarStyle(height: number): MicMeterBarStyle {
-  return { "--buzz-huddle-meter-height": `${height}px` };
+const MIC_METER_IDLE_HEIGHT_REM = 0.25;
+const MIC_METER_IDLE_HEIGHTS: [number, number, number] = [
+  MIC_METER_IDLE_HEIGHT_REM,
+  MIC_METER_IDLE_HEIGHT_REM,
+  MIC_METER_IDLE_HEIGHT_REM,
+];
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
 }
 
-function micMeterHeights(bands: MicFrequencyBands): [number, number, number] {
-  return [4 + bands.low * 10, 4 + bands.mid * 14, 4 + bands.high * 11];
+function micMeterBarStyle(heightRem: number): MicMeterBarStyle {
+  return { "--buzz-huddle-meter-height": `${heightRem}rem` };
+}
+
+function micMeterHeights(level: number): [number, number, number] {
+  const normalized = clamp01(level);
+  if (normalized <= 0.01) return MIC_METER_IDLE_HEIGHTS;
+
+  return [
+    MIC_METER_IDLE_HEIGHT_REM + normalized * 0.5,
+    MIC_METER_IDLE_HEIGHT_REM + normalized * 0.875,
+    MIC_METER_IDLE_HEIGHT_REM + normalized * 0.625,
+  ];
 }
 
 function usePrefersReducedMotion(): boolean {
@@ -78,7 +91,7 @@ export function MicControls({
   isPttMode,
   pttActive,
   micConnected,
-  micBands,
+  micLevel,
   onSelectVoiceInputMode,
   audioDevices,
   selectedDeviceId,
@@ -92,8 +105,8 @@ export function MicControls({
   const prefersReducedMotion = usePrefersReducedMotion();
   const pushToTalkShortcut = isMac ? "⌃Space" : "Ctrl+Space";
   const barHeights: [number, number, number] = prefersReducedMotion
-    ? [4, 4, 4]
-    : micMeterHeights(micBands);
+    ? MIC_METER_IDLE_HEIGHTS
+    : micMeterHeights(showMicMeter ? micLevel : 0);
   const [leftBarHeight, centerBarHeight, rightBarHeight] = barHeights;
 
   const micButtonLabel = micUnavailable
@@ -182,7 +195,7 @@ export function MicControls({
       </div>
       <PopoverContent
         side="top"
-        className="buzz-huddle-drawer buzz-huddle-popover w-64 border-white/10 text-foreground"
+        className="buzz-huddle-drawer buzz-huddle-popover w-64 text-foreground"
       >
         <div className="flex flex-col gap-3">
           <div>
@@ -192,7 +205,7 @@ export function MicControls({
                 isPttMode ? "Turn off Push to Talk" : "Turn on Push to Talk"
               }
               aria-pressed={isPttMode}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent"
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent"
               onClick={() =>
                 void onSelectVoiceInputMode(
                   isPttMode ? "voice_activity" : "push_to_talk",
@@ -319,7 +332,7 @@ export function SpeakerControls({
           <PopoverContent
             align="center"
             aria-label="Headphones recommended"
-            className="buzz-huddle-drawer buzz-huddle-popover buzz-huddle-headphones-hint w-64 border-white/10 p-3 text-foreground"
+            className="buzz-huddle-drawer buzz-huddle-popover buzz-huddle-headphones-hint w-64 p-3 text-foreground"
             onCloseAutoFocus={(event) => event.preventDefault()}
             onOpenAutoFocus={(event) => event.preventDefault()}
             side="top"
@@ -379,7 +392,7 @@ export function SpeakerControls({
       </div>
       <PopoverContent
         side="top"
-        className="buzz-huddle-drawer buzz-huddle-popover w-64 border-white/10 text-foreground"
+        className="buzz-huddle-drawer buzz-huddle-popover w-64 text-foreground"
       >
         <DeviceList
           label="Speaker"
@@ -423,7 +436,7 @@ export function DeviceList({
       <ul className="flex flex-col">
         <li>
           <button
-            className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent"
+            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent"
             onClick={() => onSelect("")}
             type="button"
           >
@@ -438,7 +451,7 @@ export function DeviceList({
           return (
             <li key={d.key}>
               <button
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent"
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors hover:bg-accent"
                 onClick={() => onSelect(d.id)}
                 type="button"
               >

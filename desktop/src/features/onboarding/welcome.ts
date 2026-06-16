@@ -13,6 +13,8 @@ export const WELCOME_CHANNEL_READY_EVENT =
 
 const PENDING_WELCOME_CHANNEL_STORAGE_KEY =
   "buzz:onboarding-welcome-channel.v1";
+const WELCOME_INITIAL_UNREAD_SUPPRESSION_STORAGE_KEY =
+  "buzz:onboarding-welcome-initial-unread-suppression.v1";
 const PENDING_WELCOME_CHANNEL_MAX_AGE_MS = 5 * 60 * 1000;
 const WELCOME_CHANNEL_ENSURED_STORAGE_KEY = "buzz-welcome-channel-ensured.v2";
 
@@ -205,14 +207,20 @@ export function markWelcomeChannelEnsured(
 }
 
 function readPendingWelcomeChannel(): PendingWelcomeChannel | null {
+  return readPendingWelcomeChannelFromStorage(
+    PENDING_WELCOME_CHANNEL_STORAGE_KEY,
+  );
+}
+
+function readPendingWelcomeChannelFromStorage(
+  storageKey: string,
+): PendingWelcomeChannel | null {
   if (typeof window === "undefined") {
     return null;
   }
 
   try {
-    const raw = window.sessionStorage.getItem(
-      PENDING_WELCOME_CHANNEL_STORAGE_KEY,
-    );
+    const raw = window.sessionStorage.getItem(storageKey);
     if (!raw) {
       return null;
     }
@@ -236,12 +244,16 @@ function readPendingWelcomeChannel(): PendingWelcomeChannel | null {
 }
 
 function clearPendingWelcomeChannel() {
+  clearPendingWelcomeChannelFromStorage(PENDING_WELCOME_CHANNEL_STORAGE_KEY);
+}
+
+function clearPendingWelcomeChannelFromStorage(storageKey: string) {
   if (typeof window === "undefined") {
     return;
   }
 
   try {
-    window.sessionStorage.removeItem(PENDING_WELCOME_CHANNEL_STORAGE_KEY);
+    window.sessionStorage.removeItem(storageKey);
   } catch {
     // Best-effort. A stale pending channel expires automatically.
   }
@@ -257,9 +269,41 @@ export function rememberPendingWelcomeChannel(channelId: string) {
       PENDING_WELCOME_CHANNEL_STORAGE_KEY,
       JSON.stringify({ channelId, createdAt: Date.now() }),
     );
+    window.sessionStorage.setItem(
+      WELCOME_INITIAL_UNREAD_SUPPRESSION_STORAGE_KEY,
+      JSON.stringify({ channelId, createdAt: Date.now() }),
+    );
   } catch {
     // Best-effort. The user can still select the channel from the sidebar.
   }
+}
+
+export function hasPendingWelcomeInitialUnreadSuppression(channelId: string) {
+  const pending = readPendingWelcomeChannelFromStorage(
+    WELCOME_INITIAL_UNREAD_SUPPRESSION_STORAGE_KEY,
+  );
+  if (!pending) {
+    return false;
+  }
+
+  if (Date.now() - pending.createdAt > PENDING_WELCOME_CHANNEL_MAX_AGE_MS) {
+    return false;
+  }
+
+  return pending.channelId === channelId;
+}
+
+export function consumePendingWelcomeInitialUnreadSuppression(
+  channelId: string,
+) {
+  if (!hasPendingWelcomeInitialUnreadSuppression(channelId)) {
+    return false;
+  }
+
+  clearPendingWelcomeChannelFromStorage(
+    WELCOME_INITIAL_UNREAD_SUPPRESSION_STORAGE_KEY,
+  );
+  return true;
 }
 
 export function notifyWelcomeChannelReady(channelId: string) {

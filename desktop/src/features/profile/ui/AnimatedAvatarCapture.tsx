@@ -957,7 +957,7 @@ export function AnimatedAvatarCapture({
           {isSaving ? (
             <Spinner
               aria-label="Uploading animated avatar"
-              className="h-4 w-4"
+              className="h-4 w-4 border-2"
             />
           ) : (
             "Use as avatar"

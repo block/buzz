@@ -128,6 +128,23 @@ function OnboardingLoadingGate() {
 function WorkspaceQueryProvider({ children }: { children: ReactNode }) {
   const [queryClient] = useState(createBuzzQueryClient);
 
+  useEffect(() => {
+    const e2eWindow = window as Window & {
+      __BUZZ_E2E__?: unknown;
+      __BUZZ_E2E_QUERY_CLIENT__?: typeof queryClient;
+    };
+    if (!e2eWindow.__BUZZ_E2E__) {
+      return;
+    }
+
+    e2eWindow.__BUZZ_E2E_QUERY_CLIENT__ = queryClient;
+    return () => {
+      if (e2eWindow.__BUZZ_E2E_QUERY_CLIENT__ === queryClient) {
+        delete e2eWindow.__BUZZ_E2E_QUERY_CLIENT__;
+      }
+    };
+  }, [queryClient]);
+
   return (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );

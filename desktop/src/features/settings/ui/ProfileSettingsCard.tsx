@@ -615,7 +615,7 @@ export function ProfileSettingsCard({
                           {isAvatarEditorSaving && !isAvatarEditorOpen ? (
                             <Spinner
                               aria-label="Saving avatar"
-                              className="h-4 w-4"
+                              className="h-4 w-4 border-2"
                             />
                           ) : (
                             <Pencil className="h-4 w-4" />

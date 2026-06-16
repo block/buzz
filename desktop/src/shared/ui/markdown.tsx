@@ -45,7 +45,13 @@ import {
   MENTION_CHIP_BASE_CLASSES,
   MENTION_CHIP_HOVER_CLASSES,
 } from "@/shared/ui/mentionChip";
+import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import {
+  POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+  POPOVER_SHADOW_STYLE,
+  POPOVER_SURFACE_CLASS,
+} from "@/shared/ui/popoverSurface";
 import { SpoilerParticles } from "@/shared/ui/SpoilerParticles";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -375,12 +381,16 @@ function ImageBlock({
       />
       {menu && src ? (
         <div
-          className="fixed z-[100] min-w-[160px] rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
-          style={{ left: menu.x, top: menu.y }}
+          className={cn(
+            "fixed z-[100] min-w-60 origin-top-left rounded-xl p-1 slide-in-from-top-1",
+            POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+            POPOVER_SURFACE_CLASS,
+          )}
+          style={{ ...POPOVER_SHADOW_STYLE, left: menu.x, top: menu.y }}
         >
           <button
             type="button"
-            className="flex w-full cursor-default select-none items-center rounded-xs px-2 py-1.5 text-sm outline-hidden hover:bg-accent hover:text-accent-foreground"
+            className="flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground"
             onClick={handleDownload}
           >
             Download image
@@ -389,7 +399,12 @@ function ImageBlock({
       ) : null}
       <DialogPrimitive.Root open={lightboxOpen} onOpenChange={setLightboxOpen}>
         <DialogPrimitive.Portal>
-          <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+          <DialogPrimitive.Overlay
+            className={cn(
+              "fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+              MODAL_BACKDROP_BLUR_CLASS,
+            )}
+          />
           <DialogPrimitive.Content
             className="fixed inset-0 z-50 flex items-center justify-center p-8"
             onPointerDownOutside={(e) => e.preventDefault()}
