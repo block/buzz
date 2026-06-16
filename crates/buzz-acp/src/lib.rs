@@ -10,6 +10,7 @@ mod pool;
 mod queue;
 mod relay;
 
+use leader::LeaderCheck;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -489,6 +490,8 @@ fn handle_relay_observer_control_event(
     pool: &mut AgentPool,
     observer: Option<&observer::ObserverHandle>,
     owner_pubkey_hex: &str,
+    leader: &std::sync::Arc<leader::FileLeaderCheck>,
+    agent_pubkey_hex: &str,
 ) {
     // Defense-in-depth: verify signature even though the relay already checked.
     if let Err(e) = buzz_core::verify_event(&event) {
@@ -527,36 +530,75 @@ fn handle_relay_observer_control_event(
     };
 
     let command_type = payload.get("type").and_then(|value| value.as_str());
-    if command_type != Some("cancel_turn") {
+    if command_type == Some("cancel_turn") {
+        let Some(channel_id) = payload
+            .get("channelId")
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.parse::<Uuid>().ok())
+        else {
+            tracing::warn!("observer cancel_turn control frame missing valid channelId");
+            return;
+        };
+
+        let fired = signal_in_flight_task(pool, channel_id, ControlSignal::Cancel);
+        let status = if fired { "sent" } else { "no_active_turn" };
+        if let Some(observer) = observer {
+            observer.emit(
+                "control_result",
+                None,
+                &observer::ObserverContext {
+                    channel_id: Some(channel_id.to_string()),
+                    session_id: None,
+                    turn_id: None,
+                },
+                serde_json::json!({
+                    "type": "cancel_turn",
+                    "status": status,
+                }),
+            );
+        }
+    } else if command_type == Some("claim_leadership") {
+        let target_id = payload.get("targetInstanceId").and_then(|v| v.as_str());
+        let self_id = leader.instance_id();
+
+        match (target_id, self_id) {
+            (Some(target), Some(self_instance)) if target == self_instance => {
+                // We are the target — attempt to acquire.
+                let acquired = leader.acquire(agent_pubkey_hex);
+                if acquired {
+                    if let Some(obs) = observer {
+                        obs.emit(
+                            "control_result",
+                            None,
+                            &observer::ObserverContext {
+                                channel_id: None,
+                                session_id: None,
+                                turn_id: None,
+                            },
+                            serde_json::json!({
+                                "type": "claim_leadership",
+                                "status": "claimed",
+                            }),
+                        );
+                    }
+                }
+                // If !acquired: do nothing. Next 5s tick will succeed
+                // (old leader standing down). leadership_status stream
+                // is the desktop's source of truth.
+            }
+            (Some(_target), Some(_self_instance)) => {
+                // We are NOT the target — if we're leader, stand down + release.
+                if leader.is_leader(agent_pubkey_hex) {
+                    leader.stand_down();
+                    leader.release(agent_pubkey_hex);
+                }
+            }
+            _ => {
+                tracing::warn!("claim_leadership frame missing targetInstanceId or no self id");
+            }
+        }
+    } else {
         tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
-        return;
-    }
-
-    let Some(channel_id) = payload
-        .get("channelId")
-        .and_then(|value| value.as_str())
-        .and_then(|value| value.parse::<Uuid>().ok())
-    else {
-        tracing::warn!("observer cancel_turn control frame missing valid channelId");
-        return;
-    };
-
-    let fired = signal_in_flight_task(pool, channel_id, ControlSignal::Cancel);
-    let status = if fired { "sent" } else { "no_active_turn" };
-    if let Some(observer) = observer {
-        observer.emit(
-            "control_result",
-            None,
-            &observer::ObserverContext {
-                channel_id: Some(channel_id.to_string()),
-                session_id: None,
-                turn_id: None,
-            },
-            serde_json::json!({
-                "type": "cancel_turn",
-                "status": status,
-            }),
-        );
     }
 }
 
@@ -1364,7 +1406,7 @@ async fn tokio_main() -> Result<()> {
                     match control_event {
                         Some(event) => {
                             if let Some(ref owner_hex) = owner_cache.pubkey {
-                                handle_relay_observer_control_event(&config.keys, event, &mut pool, observer.as_ref(), owner_hex);
+                                handle_relay_observer_control_event(&config.keys, event, &mut pool, observer.as_ref(), owner_hex, &leader, &agent_pubkey_hex);
                             } else {
                                 tracing::warn!("observer control frame received but no owner resolved — dropping");
                             }
@@ -1791,6 +1833,20 @@ async fn tokio_main() -> Result<()> {
                     // a restart.
                     leader.acquire(&agent_pubkey_hex);
                     ctx.leader.refresh();
+                    // Emit leadership_status so the desktop can track which
+                    // instances are alive and who currently leads.
+                    if let (Some(obs), Some(instance_id)) = (observer.as_ref(), leader.instance_id()) {
+                        obs.emit(
+                            "leadership_status",
+                            None,
+                            &observer::ObserverContext { channel_id: None, session_id: None, turn_id: None },
+                            serde_json::json!({
+                                "type": "leadership_status",
+                                "instanceId": instance_id,
+                                "isLeader": ctx.leader.is_leader(&agent_pubkey_hex),
+                            }),
+                        );
+                    }
                     None
                 }
                 _ = shutdown_rx.changed() => {
