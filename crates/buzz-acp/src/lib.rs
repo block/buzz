@@ -3397,4 +3397,55 @@ mod error_outcome_emission_tests {
         assert!(!pool.any_idle(), "leader must claim the idle agent");
         assert!(heartbeat_in_flight, "leader heartbeat must fire");
     }
+
+    /// Seed `queue` with one pending event so `dispatch_pending` has work to
+    /// promote when the leader gate allows it.
+    fn queue_one_pending(queue: &mut EventQueue) {
+        use nostr::{EventBuilder, Keys, Kind};
+        let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "@agent hello")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        queue.push(QueuedEvent {
+            channel_id: Uuid::new_v4(),
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "@mention".into(),
+        });
+    }
+
+    /// Pins the primary suppression surface: a non-leader must never promote a
+    /// queued event to a prompt, even with an idle agent and pending work.
+    /// Without this gate, N instances sharing one key would each dispatch the
+    /// same mention — the duplicate-actor bug leader election exists to prevent.
+    #[tokio::test]
+    async fn test_non_leader_dispatch_pending_promotes_nothing() {
+        let ctx = prompt_context_with_leader(nostr::Keys::generate(), false);
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(0).await)]);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue_one_pending(&mut queue);
+
+        let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx);
+
+        assert!(
+            dispatched.is_empty(),
+            "non-leader must not promote queued events"
+        );
+        assert!(pool.any_idle(), "non-leader must not claim the idle agent");
+    }
+
+    /// Companion to the gate test: the same idle agent + pending event, but as
+    /// the leader, DOES promote — proving the gate test catches the gate, not a
+    /// broken dispatch path.
+    #[tokio::test]
+    async fn test_leader_dispatch_pending_promotes_queued_event() {
+        let ctx = prompt_context_with_leader(nostr::Keys::generate(), true);
+        let mut pool = AgentPool::from_slots(vec![Some(dummy_agent(0).await)]);
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        queue_one_pending(&mut queue);
+
+        let dispatched = dispatch_pending(&mut pool, &mut queue, &ctx);
+
+        assert_eq!(dispatched.len(), 1, "leader must promote the queued event");
+        assert!(!pool.any_idle(), "leader must claim the idle agent");
+    }
 }

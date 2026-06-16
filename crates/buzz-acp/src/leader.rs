@@ -15,8 +15,9 @@
 //!
 //! - Lock dir: `~/.buzz/leader-locks/`, one file per agent pubkey:
 //!   `<pubkey-hex>.lock`, JSON `{"instance_id","pid","claimed_at"}`.
-//! - **Absent** lock file → this process is leader. Single-instance dev is
-//!   thereby unaffected: no lock, no suppression.
+//! - **Absent or unreadable** lock file → this process is leader. Single-instance
+//!   dev is thereby unaffected: no lock, no suppression. Any IO error reading the
+//!   lock (permission, mid-write truncation) fails safe to leader for the same reason.
 //! - **Present** → leader iff the lock's `instance_id` equals this process's
 //!   own election id ([`ELECTION_ID_ENV`]).
 //! - **No instance id** (env unset, e.g. solo CLI use or pre-Phase-2 where
@@ -119,13 +120,18 @@ impl FileLeaderCheck {
 
 impl LeaderCheck for FileLeaderCheck {
     fn is_leader(&self, agent_pubkey_hex: &str) -> bool {
-        if let Some(&cached) = self.cache.lock().unwrap().get(agent_pubkey_hex) {
+        if let Some(&cached) = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(agent_pubkey_hex)
+        {
             return cached;
         }
         let status = self.read_status(agent_pubkey_hex);
         self.cache
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(agent_pubkey_hex.to_string(), status);
         status
     }
@@ -133,10 +139,19 @@ impl LeaderCheck for FileLeaderCheck {
     fn refresh(&self) {
         // Re-read only keys we've already been asked about — those are the
         // agent pubkeys this process actually dispatches for.
-        let keys: Vec<String> = self.cache.lock().unwrap().keys().cloned().collect();
+        let keys: Vec<String> = self
+            .cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect();
         for key in keys {
             let status = self.read_status(&key);
-            self.cache.lock().unwrap().insert(key, status);
+            self.cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, status);
         }
     }
 }

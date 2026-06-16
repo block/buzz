@@ -85,9 +85,24 @@ The lock file contains a JSON object with the following shape
 - `pid`: the operating-system process id of the leading window.
 - `claimed_at`: when the current leader claimed the lock.
 
+Only `instance_id` is significant to the read side; `pid` and `claimed_at` are
+informational, written by the Phase-2 acquire path and ignored when deciding
+leadership.
+
 An instance is the leader for an agent identity iff a lock file exists and its
 `instance_id` equals that instance's own election identity. A malformed or
 unparseable lock file MUST fail safe to leader, preserving solo-dev behavior.
+An absent or unreadable lock file (permission error, or a partial read while
+another instance is mid-rewrite) likewise fails safe to leader. Because the read
+side is unguarded (acquire/steal `flock` is Phase 2), a concurrent rewrite read as
+malformed can briefly produce a duplicate responder; this self-heals on the next
+refresh (≤5s, see below) and is the intended trade — a transient duplicate beats
+silencing the only responder.
+
+Leadership changes (claim, release, failover) take effect within a bounded refresh
+interval of 5 seconds: each instance re-reads its leader lock(s) every 5s, so a
+stale-cache window after a leadership change is capped at that interval. Phase 2
+MUST NOT regress this bound.
 
 Acquire and steal MUST be `flock`-guarded to close the read-check-write TOCTOU
 window between two instances racing to claim or steal the same lock.
