@@ -626,8 +626,8 @@
   border-radius: calc(var(--radius) - 4px);
   background: hsl(var(--primary) / 0.15);
   padding: 0 0.25rem;
-  font-size: 1rem;
-  line-height: 1.25rem;
+  font-size: inherit;
+  line-height: inherit;
   color: hsl(var(--primary));
   font-weight: 500;
 }
