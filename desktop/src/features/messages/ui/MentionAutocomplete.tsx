@@ -63,6 +63,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             : "origin-bottom slide-in-from-bottom-1",
           POPOVER_SURFACE_CLASS,
         )}
+        data-testid="mention-autocomplete"
         ref={listRef}
         style={POPOVER_SHADOW_STYLE}
       >

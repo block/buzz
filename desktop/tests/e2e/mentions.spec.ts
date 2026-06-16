@@ -24,7 +24,7 @@ const SYSTEM_MESSAGE_KIND = 40099;
 function autocomplete(page: import("@playwright/test").Page) {
   return page
     .getByTestId("message-composer")
-    .locator(".rounded-xl.border.bg-popover");
+    .getByTestId("mention-autocomplete");
 }
 
 async function readCommandLog(page: import("@playwright/test").Page) {
