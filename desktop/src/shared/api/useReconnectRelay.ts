@@ -16,6 +16,28 @@ import { toast } from "sonner";
 
 import { relayClient } from "@/shared/api/relayClient";
 
+const RECONNECT_HOOK_TIMEOUT_MS = 20_000;
+const RELAY_PRECONNECT_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timeoutId: number | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+  });
+}
+
 export function useReconnectRelay(): {
   reconnect: () => Promise<boolean>;
   isPending: boolean;
@@ -35,12 +57,20 @@ export function useReconnectRelay(): {
       // Run transport-layer reconnect hook (e.g. WARP VPN re-auth for internal builds).
       // No-op in OSS builds. Non-fatal — transport failure shouldn't block relay reconnect.
       try {
-        await invoke("relay_reconnect_hook");
+        await withTimeout(
+          invoke("relay_reconnect_hook"),
+          RECONNECT_HOOK_TIMEOUT_MS,
+          "reconnect hook",
+        );
       } catch (err) {
         console.warn("[useReconnectRelay] reconnect hook failed:", err);
       }
 
-      await relayClient.preconnect();
+      await withTimeout(
+        relayClient.preconnect(),
+        RELAY_PRECONNECT_TIMEOUT_MS,
+        "relay preconnect",
+      );
       // Let callers render the recovered/connected state before refetching the
       // sidebar data. The refetch can briefly swap the sidebar into loading UI.
       window.setTimeout(() => {
