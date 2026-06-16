@@ -51,8 +51,14 @@ surface at template time regardless of which manifest helm renders first.
 {{- end -}}
 
 {{/* Typesense source must exist somewhere */}}
-{{- if not (or .Values.typesense.url .Values.secrets.existingSecret) -}}
-  {{- fail "Typesense source missing: set typesense.url + typesense.apiKey, or provide secrets.existingSecret with keys TYPESENSE_URL + TYPESENSE_API_KEY." -}}
+{{- if not (or .Values.typesense.enabled .Values.typesense.url .Values.secrets.existingSecret) -}}
+  {{- fail "Typesense source missing: enable typesense.enabled=true (quickstart in-cluster), set typesense.url + typesense.apiKey, or provide secrets.existingSecret with keys TYPESENSE_URL + TYPESENSE_API_KEY." -}}
+{{- end -}}
+
+{{/* S3 / object-storage source must exist somewhere (relay hard-fails its
+     startup conformance probe without a reachable bucket). */}}
+{{- if not (or .Values.minio.enabled .Values.s3.endpoint .Values.secrets.existingSecret) -}}
+  {{- fail "S3/object-storage source missing: enable minio.enabled=true (quickstart in-cluster), set s3.endpoint + s3.bucket + credentials, or provide secrets.existingSecret with keys BUZZ_S3_ACCESS_KEY + BUZZ_S3_SECRET_KEY. The relay runs a startup S3 conformance probe and exits if storage is unreachable." -}}
 {{- end -}}
 
 {{- end -}}

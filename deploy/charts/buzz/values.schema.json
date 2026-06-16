@@ -166,8 +166,18 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "enabled": { "type": "boolean" },
         "url": { "type": "string", "pattern": "^(https?://.+)?$" },
-        "apiKey": { "type": "string" }
+        "apiKey": { "type": "string" },
+        "image": { "type": "string", "minLength": 1 },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$" }
+          }
+        }
       }
     },
     "s3": {
@@ -178,6 +188,23 @@
         "bucket": { "type": "string", "minLength": 1 },
         "accessKey": { "type": "string" },
         "secretKey": { "type": "string" }
+      }
+    },
+    "minio": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string", "minLength": 1 },
+        "mcImage": { "type": "string", "minLength": 1 },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$" }
+          }
+        }
       }
     },
     "git": {

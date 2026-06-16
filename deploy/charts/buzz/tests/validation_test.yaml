@@ -92,3 +92,14 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "Typesense source missing"
+
+  - it: fails when S3/object-storage source is missing
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+    asserts:
+      - failedTemplate:
+          errorPattern: "S3/object-storage source missing"

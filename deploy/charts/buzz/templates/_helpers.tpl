@@ -36,6 +36,14 @@ app.kubernetes.io/name: {{ include "buzz.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/* Relay-specific selector: scopes the relay Deployment + Service so they do
+     not also match the quickstart MinIO/Typesense pods, which share the base
+     selectorLabels but carry their own component label. */}}
+{{- define "buzz.relaySelectorLabels" -}}
+{{ include "buzz.selectorLabels" . }}
+app.kubernetes.io/component: relay
+{{- end -}}
+
 {{- define "buzz.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}
 {{- default (include "buzz.fullname" .) .Values.serviceAccount.name -}}
@@ -82,5 +90,37 @@ secrets.existingSecret, use that. Otherwise use the chart-managed one.
 {{- .Values.mediaBaseUrl -}}
 {{- else -}}
 {{- printf "https://%s/media" (include "buzz.relayHost" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Quickstart-only in-cluster service hostnames (eval profile). */}}
+{{- define "buzz.minioFullname" -}}
+{{- printf "%s-minio" (include "buzz.fullname" .) -}}
+{{- end -}}
+
+{{- define "buzz.typesenseFullname" -}}
+{{- printf "%s-typesense" (include "buzz.fullname" .) -}}
+{{- end -}}
+
+{{/* In-cluster MinIO endpoint, used when minio.enabled and s3.endpoint unset. */}}
+{{- define "buzz.minioEndpoint" -}}
+{{- printf "http://%s.%s.svc.cluster.local:9000" (include "buzz.minioFullname" .) .Release.Namespace -}}
+{{- end -}}
+
+{{/* Effective S3 endpoint: explicit s3.endpoint wins, else bundled MinIO. */}}
+{{- define "buzz.s3Endpoint" -}}
+{{- if .Values.s3.endpoint -}}
+{{- .Values.s3.endpoint -}}
+{{- else if .Values.minio.enabled -}}
+{{- include "buzz.minioEndpoint" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/* In-cluster Typesense URL, used when typesense.enabled and url unset. */}}
+{{- define "buzz.typesenseUrl" -}}
+{{- if .Values.typesense.url -}}
+{{- .Values.typesense.url -}}
+{{- else if .Values.typesense.enabled -}}
+{{- printf "http://%s.%s.svc.cluster.local:8108" (include "buzz.typesenseFullname" .) .Release.Namespace -}}
 {{- end -}}
 {{- end -}}

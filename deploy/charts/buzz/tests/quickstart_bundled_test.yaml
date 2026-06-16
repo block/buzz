@@ -1,0 +1,112 @@
+suite: quickstart bundled services
+# The dev quickstart must stand up MinIO + Typesense in-cluster so the relay's
+# startup S3 conformance probe passes with zero external dependencies.
+templates:
+  - templates/quickstart-minio.yaml
+  - templates/quickstart-minio-init.yaml
+  - templates/quickstart-typesense.yaml
+  - templates/deployment.yaml
+  - templates/secret-chart.yaml
+  - templates/service.yaml
+tests:
+  - it: renders the in-cluster MinIO Deployment when minio.enabled
+    release:
+      name: rel
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      postgresql.enabled: true
+      redis.enabled: true
+      typesense.enabled: true
+      minio.enabled: true
+    asserts:
+      - containsDocument:
+          kind: Deployment
+          apiVersion: apps/v1
+          name: rel-buzz-minio
+        template: templates/quickstart-minio.yaml
+        documentIndex: 0
+      - containsDocument:
+          kind: Job
+          apiVersion: batch/v1
+          name: rel-buzz-minio-init
+        template: templates/quickstart-minio-init.yaml
+
+  - it: renders the in-cluster Typesense Deployment when typesense.enabled
+    release:
+      name: rel
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      postgresql.enabled: true
+      redis.enabled: true
+      typesense.enabled: true
+      minio.enabled: true
+    asserts:
+      - containsDocument:
+          kind: Deployment
+          apiVersion: apps/v1
+          name: rel-buzz-typesense
+        template: templates/quickstart-typesense.yaml
+        documentIndex: 0
+
+  - it: relay S3 endpoint resolves to the bundled MinIO Service
+    release:
+      name: rel
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      postgresql.enabled: true
+      redis.enabled: true
+      typesense.enabled: true
+      minio.enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_S3_ENDPOINT
+            value: "http://rel-buzz-minio.NAMESPACE.svc.cluster.local:9000"
+        template: templates/deployment.yaml
+
+  - it: chart Secret composes TYPESENSE_URL at the bundled Typesense Service
+    release:
+      name: rel
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      postgresql.enabled: true
+      redis.enabled: true
+      typesense.enabled: true
+      minio.enabled: true
+    asserts:
+      - matchRegex:
+          path: data.TYPESENSE_URL
+          decodeBase64: true
+          pattern: "^http://rel-buzz-typesense\\..+:8108$"
+        template: templates/secret-chart.yaml
+        documentIndex: 0
+      # MinIO creds the relay reads must exist for the conformance probe.
+      - isNotNullOrEmpty:
+          path: data.BUZZ_S3_ACCESS_KEY
+        template: templates/secret-chart.yaml
+        documentIndex: 0
+      - isNotNullOrEmpty:
+          path: data.BUZZ_S3_SECRET_KEY
+        template: templates/secret-chart.yaml
+        documentIndex: 0
+
+  - it: relay Service selector is scoped to component=relay (must NOT match bundled MinIO/Typesense pods)
+    release:
+      name: rel
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      postgresql.enabled: true
+      redis.enabled: true
+      typesense.enabled: true
+      minio.enabled: true
+    asserts:
+      - equal:
+          path: spec.selector["app.kubernetes.io/component"]
+          value: relay
+        template: templates/service.yaml

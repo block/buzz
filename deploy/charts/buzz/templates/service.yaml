@@ -12,7 +12,7 @@ metadata:
 spec:
   type: {{ .Values.service.type }}
   selector:
-    {{- include "buzz.selectorLabels" . | nindent 4 }}
+    {{- include "buzz.relaySelectorLabels" . | nindent 4 }}
   ports:
     - { name: app,     port: {{ .Values.service.port }},        targetPort: app,     protocol: TCP }
     - { name: health,  port: {{ .Values.service.healthPort }},  targetPort: health,  protocol: TCP }

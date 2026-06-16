@@ -9,7 +9,7 @@ metadata:
 spec:
   selector:
     matchLabels:
-      {{- include "buzz.selectorLabels" . | nindent 6 }}
+      {{- include "buzz.relaySelectorLabels" . | nindent 6 }}
   {{- if .Values.podDisruptionBudget.minAvailable }}
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
   {{- else if .Values.podDisruptionBudget.maxUnavailable }}

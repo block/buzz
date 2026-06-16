@@ -1,0 +1,96 @@
+{{- /*
+Eval-only in-cluster Typesense for the quickstart profile. NOT for production —
+single replica, no TLS, API key from the chart-managed Secret. Production
+deploys leave typesense.enabled=false and point typesense.url/apiKey (or
+secrets.existingSecret) at a managed Typesense service.
+*/ -}}
+{{- if .Values.typesense.enabled -}}
+{{- if .Values.secrets.existingSecret -}}
+{{- fail "typesense.enabled=true (quickstart) is incompatible with secrets.existingSecret. Quickstart autogenerates the Typesense key in the chart-managed Secret; for external Typesense set typesense.enabled=false and provide TYPESENSE_URL/TYPESENSE_API_KEY." -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "buzz.typesenseFullname" . }}
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: typesense
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "buzz.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: typesense
+  template:
+    metadata:
+      labels:
+        {{- include "buzz.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: typesense
+    spec:
+      containers:
+        - name: typesense
+          image: {{ .Values.typesense.image | quote }}
+          args:
+            - "--data-dir=/data"
+            - "--api-key=$(TYPESENSE_API_KEY)"
+            - "--enable-cors"
+          env:
+            - name: TYPESENSE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.chartSecretName" . }}
+                  key: TYPESENSE_API_KEY
+          ports:
+            - { name: http, containerPort: 8108 }
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          {{- if .Values.typesense.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "buzz.typesenseFullname" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "buzz.typesenseFullname" . }}
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: typesense
+spec:
+  selector:
+    {{- include "buzz.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: typesense
+  ports:
+    - { name: http, port: 8108, targetPort: http }
+{{- if .Values.typesense.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "buzz.typesenseFullname" . }}
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: typesense
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.typesense.persistence.size | quote }}
+{{- end }}
+{{- end -}}

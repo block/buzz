@@ -14,11 +14,11 @@ spec:
       maxUnavailable: 0
   selector:
     matchLabels:
-      {{- include "buzz.selectorLabels" . | nindent 6 }}
+      {{- include "buzz.relaySelectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "buzz.selectorLabels" . | nindent 8 }}
+        {{- include "buzz.relaySelectorLabels" . | nindent 8 }}
         {{- with .Values.relay.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -100,8 +100,9 @@ spec:
             - { name: BUZZ_GIT_MAX_CONCURRENT_OPS, value: {{ .Values.git.maxConcurrentOps | quote }} }
 
             # ── S3 (non-secret) ──────────────────────────────────────
-            {{- if .Values.s3.endpoint }}
-            - { name: BUZZ_S3_ENDPOINT, value: {{ .Values.s3.endpoint | quote }} }
+            {{- $s3Endpoint := include "buzz.s3Endpoint" . }}
+            {{- if $s3Endpoint }}
+            - { name: BUZZ_S3_ENDPOINT, value: {{ $s3Endpoint | quote }} }
             {{- end }}
             - { name: BUZZ_S3_BUCKET, value: {{ .Values.s3.bucket | quote }} }
 
