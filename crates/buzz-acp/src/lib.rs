@@ -358,8 +358,8 @@ struct ObserverChunkKey {
 /// Flush coalesced chunks before they exceed the NIP-44 plaintext limit (65,535 bytes).
 /// Leave headroom for the JSON envelope wrapping the text. This is a SOFT pre-flush
 /// of raw text below the hard cap; `fit_observer_event_to_budget` (the final ceiling,
-/// keyed to `OBSERVER_MAX_PLAINTEXT_LEN` in buzz-core/observer.rs:25) is what actually
-/// guarantees the serialized frame fits. Edit one of these two and review the other.
+/// keyed to `OBSERVER_MAX_PLAINTEXT_LEN`) is what actually guarantees the serialized
+/// frame fits. Edit one of these two and review the other.
 const OBSERVER_CHUNK_MAX_TEXT_BYTES: usize = 60_000;
 
 impl ObserverChunkCoalescer {
@@ -453,43 +453,22 @@ const OBSERVER_LEAF_RETAIN_BYTES: usize = 3_000;
 /// Trim an oversized observer telemetry frame so its SERIALIZED form fits under
 /// `OBSERVER_MAX_PLAINTEXT_LEN`, instead of dropping the whole frame (silent
 /// telemetry loss). The common case — a frame already under budget — is left
-/// byte-identical.
-///
-/// The cap is measured in SERIALIZED bytes (JSON escaping makes serialized
-/// length differ from raw), so the stop condition is always a full reserialize
-/// of the whole frame: that counts the envelope, the variable `Option<String>`
-/// IDs, and any elision markers exactly. No separate margin constant is needed.
-///
-/// Termination is provable: each iteration elides the largest string leaf that
-/// would STRICTLY shrink the serialized frame, then reserializes. Shrinkability
-/// is re-evaluated against each leaf's CURRENT value, so a leaf already at its
-/// retained floor can never be re-elided — the loop strictly decreases the
-/// serialized length each pass and is bounded by the leaf count. When no leaf
-/// can shrink the frame and it still overflows, the payload is replaced with a
-/// tiny stub, which trivially fits. Monotone decrease, bounded below by the stub.
-///
-/// **Signature choice (`&mut`, double-serialize accepted):** on the common
-/// under-budget path this serializes the frame once to decide it fits, then
-/// `encrypt_observer_payload` serializes it again — one extra `to_string` of an
-/// already-small frame. Reusing that string would mean changing buzz-core's
-/// `encrypt_observer_payload` signature or adding a parallel encrypt path; both
-/// are out of this change's scope (buzz-core stays untouched). The clean `&mut`
-/// signature with one cheap redundant serialize is the deliberate tradeoff.
+/// byte-identical. The cap is measured in serialized bytes (JSON escaping differs
+/// from raw length), so every check fully reserializes the frame.
 fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) {
     if serialized_len(event) <= OBSERVER_MAX_PLAINTEXT_LEN {
         return;
     }
 
-    // Raw size of the payload we are about to trim, captured before mutation so
-    // the stub's `originalBytes` reports source bytes discarded, not serialized
-    // overflow — consistent with the per-leaf marker's raw byte count.
-    let original_payload_bytes = serde_json::to_string(&event.payload)
+    // Serialized JSON size of the payload before trimming, reported in the stub
+    // so the renderer can see how much was discarded.
+    let original_serialized_bytes = serde_json::to_string(&event.payload)
         .map(|s| s.len())
         .unwrap_or(0);
 
-    // Elide the largest shrinkable leaf, reserialize, repeat. Each successful
-    // elision strictly shrinks the serialized frame, and a floored leaf can
-    // never be re-elided, so the loop is bounded by the leaf count.
+    // Bounded: each pass elides the largest shrinkable leaf, strictly reducing
+    // serialized length. A floored leaf can never be re-elided, so the loop
+    // terminates in at most leaf-count iterations.
     while let Some(leaf) = largest_shrinkable_leaf(&mut event.payload) {
         elide_leaf(leaf);
         if serialized_len(event) <= OBSERVER_MAX_PLAINTEXT_LEN {
@@ -501,7 +480,7 @@ fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) {
     // whole payload with a stub that is trivially under-cap.
     event.payload = serde_json::json!({
         "elided": format!("{} payload too large", event.kind),
-        "originalBytes": original_payload_bytes,
+        "serializedBytes": original_serialized_bytes,
     });
 }
 
@@ -559,9 +538,20 @@ fn leaf_shrinks(s: &str) -> bool {
     let (head_end, tail_start) = elision_boundaries(s);
     tail_start > head_end && {
         let removed = tail_start - head_end;
-        let marker = elision_marker(removed);
-        head_end + marker.len() + (s.len() - tail_start) < s.len()
+        head_end + elision_marker_len(removed) + (s.len() - tail_start) < s.len()
     }
+}
+
+/// Byte length of the elision marker without allocating. The marker is
+/// `"…[elided N bytes]…"` — each `…` is 3 UTF-8 bytes, so the fixed portion
+/// is 3 + 8 + 7 + 3 = 21 bytes plus the decimal digit count of `removed_bytes`.
+fn elision_marker_len(removed_bytes: usize) -> usize {
+    let digits = if removed_bytes == 0 {
+        1
+    } else {
+        removed_bytes.ilog10() as usize + 1
+    };
+    21 + digits
 }
 
 /// Replace the middle of a string leaf with `…[elided N bytes]…`, keeping a head
@@ -3554,6 +3544,42 @@ mod observer_payload_trim_tests {
     }
 
     #[test]
+    fn test_multi_leaf_both_elided_when_largest_alone_insufficient() {
+        // first=90K, second=60K — total ~150K, over the cap.
+        // Eliding the larger (90K → ~6K) leaves ~66K + envelope, still over 65535.
+        // The loop must continue and elide the second leaf too.
+        let mut event = event_with_payload(
+            "acp_write",
+            serde_json::json!({
+                "first": "a".repeat(90_000),
+                "second": "b".repeat(60_000),
+            }),
+        );
+        assert!(
+            serialized(&event).len() > OBSERVER_MAX_PLAINTEXT_LEN,
+            "precondition: frame is over the cap"
+        );
+
+        fit_observer_event_to_budget(&mut event);
+
+        assert!(serialized(&event).len() <= OBSERVER_MAX_PLAINTEXT_LEN);
+        assert!(
+            event.payload["first"]
+                .as_str()
+                .unwrap()
+                .contains("…[elided"),
+            "first leaf was elided"
+        );
+        assert!(
+            event.payload["second"]
+                .as_str()
+                .unwrap()
+                .contains("…[elided"),
+            "second leaf was also elided (first alone was not enough)"
+        );
+    }
+
+    #[test]
     fn test_coalesced_chunk_nested_leaf_is_reached_by_recursive_walk() {
         // The coalesced-chunk big leaf lives at params.update.content.text,
         // not a top-level field — the walk must recurse to reach it.
@@ -3579,11 +3605,12 @@ mod observer_payload_trim_tests {
     }
 
     #[test]
-    fn test_many_medium_leaves_terminate_via_stub() {
-        // Many leaves each too small to shrink on their own (below 2x retain),
-        // collectively over the cap. No leaf can strictly shrink, so the trimmer
-        // must terminate via the stub rather than loop forever.
-        let leaf = "m".repeat(OBSERVER_LEAF_RETAIN_BYTES); // shorter than head+tail → cannot shrink
+    fn test_unshrinkable_leaves_fall_through_to_stub() {
+        // Many leaves each too small to shrink (at the retain floor, so head+tail
+        // would equal the whole string). leaf_shrinks rejects all of them immediately,
+        // so the while loop body never runs — the trimmer falls straight through to the
+        // stub. Covers the "no shrinkable leaves at all" → stub path.
+        let leaf = "m".repeat(OBSERVER_LEAF_RETAIN_BYTES); // == head; cannot strictly shrink
         let items: Vec<serde_json::Value> = (0..40)
             .map(|_| serde_json::Value::String(leaf.clone()))
             .collect();
@@ -3601,7 +3628,7 @@ mod observer_payload_trim_tests {
             "acp_read payload too large",
             "fell back to the stub"
         );
-        assert!(event.payload.get("originalBytes").is_some());
+        assert!(event.payload.get("serializedBytes").is_some());
     }
 
     #[test]
