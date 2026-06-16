@@ -75,6 +75,7 @@ export function useSidebarRelayConnectionCard(
     errorMessage,
     relayUrl,
   );
+  const lastProblemCardVariantRef = React.useRef(cardVariant);
   const isRelayConnectionStateDegraded =
     isRelayConnectionDegraded(relayConnectionState);
   const isRelayConnectionActuallyDegraded =
@@ -88,7 +89,9 @@ export function useSidebarRelayConnectionCard(
   );
   const [isWindowVisible, setIsWindowVisible] =
     React.useState(isDocumentVisible);
-  const canShow = isRelayConnectionActuallyDegraded || hasSuccess;
+  const isRelayConnectionSuccess =
+    hasSuccess && !isRelayConnectionActuallyDegraded;
+  const canShow = isRelayConnectionActuallyDegraded || isRelayConnectionSuccess;
   const show = canShow && !isDismissed;
   const wasProblemCardVisibleRef = React.useRef(false);
   const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
@@ -102,10 +105,16 @@ export function useSidebarRelayConnectionCard(
     isReconnectPending || connectivityAction === "relay-connection";
 
   React.useEffect(() => {
-    if (!isRelayConnectionActuallyDegraded && !hasSuccess) {
+    if (!isRelayConnectionActuallyDegraded && !isRelayConnectionSuccess) {
       setIsDismissed(false);
     }
-  }, [hasSuccess, isRelayConnectionActuallyDegraded]);
+  }, [isRelayConnectionSuccess, isRelayConnectionActuallyDegraded]);
+
+  React.useEffect(() => {
+    if (isRelayConnectionActuallyDegraded) {
+      lastProblemCardVariantRef.current = cardVariant;
+    }
+  }, [cardVariant, isRelayConnectionActuallyDegraded]);
 
   React.useEffect(() => {
     if (isRelayConnectionStateDegraded) {
@@ -116,7 +125,7 @@ export function useSidebarRelayConnectionCard(
 
   React.useEffect(() => {
     if (isRelayConnectionActuallyDegraded) {
-      wasProblemCardVisibleRef.current = show && !hasSuccess;
+      wasProblemCardVisibleRef.current = show && !isRelayConnectionSuccess;
       return;
     }
 
@@ -125,7 +134,7 @@ export function useSidebarRelayConnectionCard(
       setRelayConnectivitySuccess(relayUrl, true);
     }
   }, [
-    hasSuccess,
+    isRelayConnectionSuccess,
     relayUrl,
     show,
     isRelayConnectionActuallyDegraded,
@@ -133,7 +142,7 @@ export function useSidebarRelayConnectionCard(
   ]);
 
   React.useEffect(() => {
-    if (!hasSuccess) {
+    if (!isRelayConnectionSuccess) {
       return;
     }
 
@@ -147,7 +156,7 @@ export function useSidebarRelayConnectionCard(
     }, SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS);
 
     return () => window.clearTimeout(timeout);
-  }, [hasSuccess, isWindowVisible, relayUrl]);
+  }, [isRelayConnectionSuccess, isWindowVisible, relayUrl]);
 
   React.useEffect(() => {
     const updateWindowVisible = () => setIsWindowVisible(isDocumentVisible());
@@ -211,9 +220,11 @@ export function useSidebarRelayConnectionCard(
   }, [reconnect, relayUrl, startConnectivityAction]);
 
   return {
-    cardVariant,
+    cardVariant: isRelayConnectionSuccess
+      ? lastProblemCardVariantRef.current
+      : cardVariant,
     hasRelayUnreachableError,
-    isRelayConnectionSuccess: hasSuccess,
+    isRelayConnectionSuccess,
     isRelayReconnectPending,
     onDismissRelayConnectionCard: () => {
       setRelayConnectivitySuccess(relayUrl, false);
