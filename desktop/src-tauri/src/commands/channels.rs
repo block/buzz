@@ -8,6 +8,140 @@ use crate::{
     relay::{query_relay, submit_event},
 };
 
+// ── Serverless membership (read-modify-write of kind:39002) ──────────────────
+//
+// On a generic relay there's no server to process the membership command kinds
+// (9021 join, 9022 leave, 9000 add-member, 9001 remove-member). Instead the
+// client mutates the replaceable kind:39002 member-list event directly: read
+// the current list, add/remove the pubkey, and re-publish the whole event.
+// See docs/SPROUT_LITE_MODE.md.
+
+/// Resolve an addressable/replaceable event to its single authoritative copy.
+///
+/// kind:39002 (membership) and kind:39000 (metadata) are NIP-01 addressable
+/// events: exactly one *logical* event exists per `(kind, author, d-tag)`, and
+/// re-publishing supersedes the prior version. In a multi-relay world, however,
+/// relays can disagree — a write may land on relays A and B but be dropped
+/// (rate-limited, offline) by relay C, leaving C with a **stale** older copy.
+/// A query that fans out and merges then sees *both* versions.
+///
+/// The correct resolution per NIP-01 is "latest wins": pick the event with the
+/// greatest `created_at` (tie-break deterministically by event id). Picking an
+/// arbitrary event (e.g. `first()` after a `limit: 1` merge) is a bug — it makes
+/// the member list non-deterministic and, worse, makes read-modify-write
+/// membership updates clobber members that only exist in the newer copy.
+///
+/// Returns `None` for an empty slice.
+fn latest_event(events: &[nostr::Event]) -> Option<&nostr::Event> {
+    events.iter().max_by(|a, b| {
+        a.created_at
+            .as_secs()
+            .cmp(&b.created_at.as_secs())
+            // Deterministic tie-break when two copies share a timestamp.
+            .then_with(|| a.id.to_hex().cmp(&b.id.to_hex()))
+    })
+}
+
+/// Group a batch of addressable events by `d`-tag and keep only the latest copy
+/// of each (see [`latest_event`] for why "latest" not "arbitrary"). Events
+/// without a `d` tag are skipped.
+fn latest_by_d_tag(events: &[nostr::Event]) -> std::collections::HashMap<String, &nostr::Event> {
+    let mut by_d: std::collections::HashMap<String, &nostr::Event> =
+        std::collections::HashMap::new();
+    for ev in events {
+        let Some(d) = ev.tags.iter().find_map(|t| {
+            let s = t.as_slice();
+            (s.len() >= 2 && s[0] == "d").then(|| s[1].clone())
+        }) else {
+            continue;
+        };
+        by_d.entry(d)
+            .and_modify(|cur| {
+                let newer = ev.created_at.as_secs() > cur.created_at.as_secs()
+                    || (ev.created_at.as_secs() == cur.created_at.as_secs()
+                        && ev.id.to_hex() > cur.id.to_hex());
+                if newer {
+                    *cur = ev;
+                }
+            })
+            .or_insert(ev);
+    }
+    by_d
+}
+
+/// Fetch the current members `(pubkey, role)` for a serverless channel from its
+/// kind:39002 event. Role is the 4th element of the `p` tag (NIP-29), defaulting
+/// to `member`. Returns an empty list if no members event exists yet.
+async fn serverless_current_members(
+    state: &AppState,
+    channel_id: &str,
+) -> Result<Vec<(String, String)>, String> {
+    // No `limit: 1`: relays can hold divergent copies of this replaceable
+    // event (a write dropped by one relay leaves it stale). Fetch all copies
+    // and resolve to the latest by `created_at` — otherwise a read-modify-write
+    // membership update can be based on a stale list and silently drop members.
+    let events = query_relay(
+        state,
+        &[serde_json::json!({
+            "kinds": [39002],
+            "#d": [channel_id],
+        })],
+    )
+    .await?;
+
+    let Some(ev) = latest_event(&events) else {
+        return Ok(Vec::new());
+    };
+    let members = ev
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let parts = t.as_slice();
+            if parts.first().map(String::as_str) == Some("p") {
+                let pk = parts.get(1)?.to_ascii_lowercase();
+                let role = parts
+                    .get(3)
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| "member".to_string());
+                Some((pk, role))
+            } else {
+                None
+            }
+        })
+        .collect();
+    Ok(members)
+}
+
+/// Re-publish the kind:39002 member list for a serverless channel after adding
+/// or removing the given pubkeys. Existing members keep their roles; newly
+/// added pubkeys get the `add_role` (default `member`).
+async fn serverless_set_members(
+    state: &AppState,
+    channel_id: &str,
+    add: &[String],
+    remove: &[String],
+    add_role: &str,
+) -> Result<(), String> {
+    let mut members = serverless_current_members(state, channel_id).await?;
+    for pk in remove {
+        let pk = pk.to_ascii_lowercase();
+        members.retain(|(m, _)| m != &pk);
+    }
+    for pk in add {
+        let pk = pk.to_ascii_lowercase();
+        if !members.iter().any(|(m, _)| m == &pk) {
+            members.push((pk, add_role.to_string()));
+        }
+    }
+    members.sort();
+    members.dedup_by(|a, b| a.0 == b.0);
+
+    let builder = events::build_channel_members_serverless_with_roles(channel_id, &members)?;
+    submit_event(builder, state).await?;
+    Ok(())
+}
+
 // ── Reads (pure-nostr via /query) ────────────────────────────────────────────
 
 #[tauri::command]
@@ -57,35 +191,50 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
     channel_ids.dedup();
 
     // Step 2: fetch channel metadata events (kind:39000) for member channels.
-    // kind:39000 is addressable: exactly one event per `d` tag, so a limit
-    // equal to the number of ids is both necessary and sufficient. Without
-    // an explicit limit, multi-value `#d` filters fall through to the relay's
-    // default LIMIT and can drop results when there are many channels.
-    let meta_events = if !channel_ids.is_empty() {
+    // kind:39000 is addressable: one logical event per `d` tag. We do NOT cap
+    // the limit at `channel_ids.len()`: across multiple relays each channel can
+    // return several copies (fresh + stale), so a tight limit can truncate and
+    // drop the fresh copy of one channel while keeping a stale copy of another.
+    // Over-fetch, then resolve to the latest copy per `d` tag below.
+    let meta_events_raw = if !channel_ids.is_empty() {
         query_relay(
             &state,
             &[serde_json::json!({
                 "kinds": [39000],
                 "#d": channel_ids,
-                "limit": channel_ids.len(),
             })],
         )
         .await?
     } else {
         Vec::new()
     };
+    // Deduplicate to the latest copy per channel (relays may disagree).
+    let meta_events: Vec<nostr::Event> = latest_by_d_tag(&meta_events_raw)
+        .into_values()
+        .cloned()
+        .collect();
 
-    // Step 3: fetch ALL open channel metadata so the channel browser can show
+    // Step 3: fetch open channel metadata so the channel browser can show
     // discoverable channels the user hasn't joined yet. The relay's access
     // control allows reading kind:39000 for open channels regardless of membership.
-    let open_meta_events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [39000],
-            "limit": 5000,
-        })],
-    )
-    .await?;
+    //
+    // SERVERLESS: skip this. A generic public relay has no Sprout-specific
+    // notion of "our" channels — an unfiltered kind:39000 query returns the
+    // ENTIRE network's channels (hundreds of unrelated test channels from
+    // damus/nos.lol), which is slow and floods the sidebar with junk. In
+    // serverless mode you only see channels you're a member of (Step 1/2).
+    let open_meta_events = if state.is_serverless() {
+        Vec::new()
+    } else {
+        query_relay(
+            &state,
+            &[serde_json::json!({
+                "kinds": [39000],
+                "limit": 5000,
+            })],
+        )
+        .await?
+    };
 
     // Merge: member channels (marked as member) + open channels (not yet joined).
     let member_d_tags: std::collections::HashSet<String> = meta_events
@@ -251,15 +400,13 @@ struct ChannelMembership {
 fn collect_members_by_channel(
     events: &[nostr::Event],
 ) -> std::collections::HashMap<String, ChannelMembership> {
+    // Resolve each channel's `d`-tag to its latest 39002 across relays first;
+    // a naive per-event insert would let a stale copy overwrite the fresh one
+    // depending on iteration order.
+    let latest = latest_by_d_tag(events);
     let mut map: std::collections::HashMap<String, ChannelMembership> =
-        std::collections::HashMap::with_capacity(events.len());
-    for ev in events {
-        let Some(d) = ev.tags.iter().find_map(|t| {
-            let s = t.as_slice();
-            (s.len() >= 2 && s[0] == "d").then(|| s[1].clone())
-        }) else {
-            continue;
-        };
+        std::collections::HashMap::with_capacity(latest.len());
+    for (d, ev) in latest {
         let Ok(resp) = nostr_convert::channel_members_from_event(ev) else {
             continue;
         };
@@ -280,18 +427,17 @@ pub async fn get_channel_details(
     channel_id: String,
     state: State<'_, AppState>,
 ) -> Result<ChannelDetailInfo, String> {
+    // Resolve the latest copy across relays (kind:39000 is replaceable too).
     let events = query_relay(
         &state,
         &[serde_json::json!({
             "kinds": [39000],
             "#d": [channel_id],
-            "limit": 1
         })],
     )
     .await?;
 
-    events
-        .first()
+    latest_event(&events)
         .map(nostr_convert::channel_detail_from_event)
         .transpose()?
         .ok_or_else(|| "channel not found".to_string())
@@ -302,18 +448,19 @@ pub async fn get_channel_members(
     channel_id: String,
     state: State<'_, AppState>,
 ) -> Result<ChannelMembersResponse, String> {
+    // Fetch all copies and resolve the latest (relays may disagree); see
+    // `latest_event`. A stale `limit: 1` pick would hide members added by a
+    // write that one relay dropped.
     let events = query_relay(
         &state,
         &[serde_json::json!({
             "kinds": [39002],
             "#d": [channel_id],
-            "limit": 1
         })],
     )
     .await?;
 
-    let mut response = events
-        .first()
+    let mut response = latest_event(&events)
         .map(nostr_convert::channel_members_from_event)
         .transpose()?
         .ok_or_else(|| "channel members not found".to_string())?;
@@ -390,18 +537,53 @@ pub async fn create_channel(
         other => return Err(format!("invalid channel_type: {other}")),
     };
 
-    let builder = events::build_create_channel(
-        channel_uuid,
-        &name,
-        vis,
-        ct,
-        description.as_deref(),
-        ttl_seconds,
-    )?;
-    submit_event(builder, &state).await?;
+    let channel_uuid_string = channel_uuid.to_string();
+
+    if state.is_serverless() {
+        // No relay to process a kind:9007 command — publish the kind:39000
+        // metadata and a kind:39002 membership (self) directly so the channel
+        // is discoverable via get_channels. Build ChannelInfo from the locally
+        // signed metadata event rather than re-querying the relay, which can
+        // race against propagation/indexing lag (the "nothing happened" bug).
+        let (my_pubkey, keys) = {
+            let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            (keys.public_key().to_hex(), keys.clone())
+        };
+        let meta = events::build_channel_metadata_serverless(
+            &channel_uuid_string,
+            &name,
+            vis,
+            ct,
+            description.as_deref(),
+            &[],
+        )?;
+        let meta_event = meta
+            .clone()
+            .sign_with_keys(&keys)
+            .map_err(|e| format!("failed to sign channel metadata: {e}"))?;
+        submit_event(meta, &state).await?;
+        // The creator is the channel owner.
+        let members = events::build_channel_members_serverless_with_roles(
+            &channel_uuid_string,
+            &[(my_pubkey, "owner".to_string())],
+        )?;
+        submit_event(members, &state).await?;
+        // Return ChannelInfo derived from the event we just published (member,
+        // since we created it). No relay round-trip required.
+        return nostr_convert::channel_info_from_event(&meta_event, None, Some(true));
+    } else {
+        let builder = events::build_create_channel(
+            channel_uuid,
+            &name,
+            vis,
+            ct,
+            description.as_deref(),
+            ttl_seconds,
+        )?;
+        submit_event(builder, &state).await?;
+    }
 
     // Re-fetch the canonical metadata event to return ChannelInfo.
-    let channel_uuid_string = channel_uuid.to_string();
     let events = query_relay(
         &state,
         &[serde_json::json!({
@@ -512,6 +694,19 @@ pub async fn unarchive_channel(
 #[tauri::command]
 pub async fn delete_channel(channel_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let uuid = parse_channel_uuid(&channel_id)?;
+    if state.is_serverless() {
+        // No relay to process the kind:9008 delete command. Publish a NIP-09
+        // (kind 5) deletion targeting the channel's addressable 39000/39002
+        // coordinates so relays drop them. Only the owner (signer of those
+        // events) can effectively delete.
+        let my_pubkey = {
+            let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            keys.public_key().to_hex()
+        };
+        let builder = events::build_delete_channel_serverless(&uuid.to_string(), &my_pubkey)?;
+        submit_event(builder, &state).await?;
+        return Ok(());
+    }
     let builder = events::build_delete_channel(uuid)?;
     submit_event(builder, &state).await?;
     Ok(())
@@ -532,6 +727,24 @@ pub async fn add_channel_members(
         Some("member") | None => None,
         Some(other) => return Err(format!("invalid role: {other}")),
     };
+
+    if state.is_serverless() {
+        // Validate pubkeys, then add them all to the kind:39002 member list.
+        let valid: Vec<String> = pubkeys
+            .iter()
+            .filter(|p| p.len() == 64 && p.chars().all(|c| c.is_ascii_hexdigit()))
+            .map(|p| p.to_ascii_lowercase())
+            .collect();
+        serverless_set_members(
+            &state,
+            &uuid.to_string(),
+            &valid,
+            &[],
+            role_str.unwrap_or("member"),
+        )
+        .await?;
+        return Ok(serde_json::json!({ "added": valid, "errors": [] }));
+    }
 
     let mut added = Vec::new();
     let mut errors = Vec::<serde_json::Value>::new();
@@ -560,6 +773,9 @@ pub async fn remove_channel_member(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let uuid = parse_channel_uuid(&channel_id)?;
+    if state.is_serverless() {
+        return serverless_set_members(&state, &uuid.to_string(), &[], &[pubkey], "member").await;
+    }
     let builder = events::build_remove_member(uuid, &pubkey)?;
     submit_event(builder, &state).await?;
     Ok(())
@@ -580,6 +796,13 @@ pub async fn change_channel_member_role(
         "owner" => return Err("cannot assign owner role — use transfer ownership".into()),
         other => return Err(format!("invalid role: {other}")),
     };
+    if state.is_serverless() {
+        // Re-add with the requested role: remove then re-add (set_members
+        // processes removals before additions), so the new role takes effect.
+        let targets = [pubkey];
+        return serverless_set_members(&state, &uuid.to_string(), &targets, &targets, role_str)
+            .await;
+    }
     let builder = events::build_add_member(uuid, &pubkey, Some(role_str))?;
     submit_event(builder, &state).await?;
     Ok(())
@@ -588,6 +811,13 @@ pub async fn change_channel_member_role(
 #[tauri::command]
 pub async fn join_channel(channel_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let uuid = parse_channel_uuid(&channel_id)?;
+    if state.is_serverless() {
+        let me = {
+            let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            keys.public_key().to_hex()
+        };
+        return serverless_set_members(&state, &uuid.to_string(), &[me], &[], "member").await;
+    }
     let builder = events::build_join(uuid)?;
     submit_event(builder, &state).await?;
     Ok(())
@@ -596,8 +826,110 @@ pub async fn join_channel(channel_id: String, state: State<'_, AppState>) -> Res
 #[tauri::command]
 pub async fn leave_channel(channel_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let uuid = parse_channel_uuid(&channel_id)?;
+    if state.is_serverless() {
+        let me = {
+            let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            keys.public_key().to_hex()
+        };
+        return serverless_set_members(&state, &uuid.to_string(), &[], &[me], "member").await;
+    }
     let builder = events::build_leave(uuid)?;
     submit_event(builder, &state).await?;
+    Ok(())
+}
+
+/// Fetch channel message history over the multi-relay pool (serverless).
+///
+/// The live-WS read path (`relayClient`) connects to a single relay, which
+/// split-brains against the multi-relay *write* path (a message published to
+/// nos.lol is invisible to a read subscription on damus). This command queries
+/// the same relay set used for writes and merges/dedups results, so reads and
+/// writes converge. Returns events as JSON (the same shape the live WS yields).
+#[tauri::command]
+pub async fn query_channel_messages(
+    channel_id: String,
+    kinds: Vec<u16>,
+    limit: usize,
+    until: Option<u64>,
+    state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut filter = serde_json::json!({
+        "kinds": kinds,
+        "#h": [channel_id],
+        "limit": limit,
+    });
+    if let Some(u) = until {
+        filter["until"] = serde_json::json!(u);
+    }
+    let events = query_relay(&state, &[filter]).await?;
+    Ok(events
+        .iter()
+        .map(|ev| serde_json::to_value(ev).unwrap_or(serde_json::Value::Null))
+        .filter(|v| !v.is_null())
+        .collect())
+}
+
+/// Open a persistent live subscription for a channel across ALL relays
+/// (serverless). Each new matching event is emitted to the frontend as a
+/// `serverless-event:<channel_id>` Tauri event. Returns the subscription id;
+/// pass it to `unsubscribe_channel_messages` to tear down.
+///
+/// This gives standard Nostr realtime in serverless mode: we subscribe to every
+/// relay at once and merge, so a message that landed on relay B (because relay A
+/// rate-limited the write) still streams back live — no polling, no split-brain.
+#[tauri::command]
+pub async fn subscribe_channel_messages(
+    channel_id: String,
+    kinds: Vec<u16>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    use tauri::Emitter;
+
+    let relay_urls = crate::relay::relay_ws_urls_with_override(&state);
+    let keys = {
+        let guard = state.keys.lock().map_err(|e| e.to_string())?;
+        guard.clone()
+    };
+    let filter = serde_json::json!({
+        "kinds": kinds,
+        "#h": [channel_id],
+        "since": chrono::Utc::now().timestamp(),
+        "limit": 0,
+    });
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<nostr::Event>();
+    let sub_id = state
+        .relay_pool
+        .subscribe(&relay_urls, &keys, filter, tx)
+        .await;
+
+    // Forward events to the frontend, deduping by id (the same event arrives
+    // from multiple relays). The task ends when the sender is dropped on
+    // unsubscribe / pool clear.
+    let event_name = format!("serverless-event:{channel_id}");
+    tokio::spawn(async move {
+        let mut seen = std::collections::HashSet::new();
+        while let Some(ev) = rx.recv().await {
+            if !seen.insert(ev.id.to_hex()) {
+                continue;
+            }
+            if let Ok(v) = serde_json::to_value(&ev) {
+                let _ = app.emit(&event_name, v);
+            }
+        }
+    });
+
+    Ok(sub_id)
+}
+
+/// Tear down a live subscription opened by `subscribe_channel_messages`.
+#[tauri::command]
+pub async fn unsubscribe_channel_messages(
+    sub_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.relay_pool.unsubscribe(&sub_id).await;
     Ok(())
 }
 

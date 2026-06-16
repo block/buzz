@@ -48,7 +48,14 @@ pub fn is_shared_identity() -> bool {
 
 #[tauri::command]
 pub fn get_relay_ws_url(state: State<'_, AppState>) -> String {
+    // Serverless workspaces may carry a comma-separated relay list for
+    // redundancy. The live WebSocket connects to the first (primary) relay;
+    // one-shot reads/writes fan out to all of them (see ws_relay).
     relay_ws_url_with_override(&state)
+        .split(',')
+        .next()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }
 
 #[tauri::command]

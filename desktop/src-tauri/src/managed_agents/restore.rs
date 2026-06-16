@@ -28,6 +28,32 @@ pub async fn restore_managed_agents_on_launch(
 
     let state = app.state::<AppState>();
 
+    // Wait (bounded) for the frontend to apply the active workspace before
+    // launching agents. Agent records freeze a relay URL at creation time; in
+    // serverless mode we must instead use the CURRENT workspace relays (see
+    // `spawn_agent_child`), which are only known after `apply_workspace` runs.
+    // Launching first would spawn agents pointed at stale/removed relays (e.g.
+    // paid relays that 403) with no healthy relay to fail over to. Poll up to
+    // ~15s; if the frontend never applies a workspace (headless/CI), proceed
+    // anyway so server-mode setups still restore.
+    {
+        use std::sync::atomic::Ordering as O;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !state.workspace_applied.load(O::Relaxed) {
+            if shutdown_started.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                eprintln!(
+                    "sprout-desktop: workspace not applied after 15s; \
+                     restoring agents with record defaults"
+                );
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
+
     // ── Phase A (under lock): housekeeping + collect agents to restore ──
     let agents_to_start: Vec<super::ManagedAgentRecord>;
     {

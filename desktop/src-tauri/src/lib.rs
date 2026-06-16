@@ -1,5 +1,6 @@
 mod app_state;
 mod commands;
+mod encrypted;
 mod events;
 mod huddle;
 mod managed_agents;
@@ -13,6 +14,8 @@ mod prevent_sleep;
 mod relay;
 mod templates;
 mod util;
+mod ws_pool;
+mod ws_relay;
 
 #[cfg(not(feature = "mesh-llm"))]
 mod mesh_llm_stubs {
@@ -705,6 +708,9 @@ pub fn run() {
             nip44_encrypt_to_self,
             nip44_decrypt_from_self,
             get_channels,
+            query_channel_messages,
+            subscribe_channel_messages,
+            unsubscribe_channel_messages,
             create_channel,
             open_dm,
             hide_dm,
@@ -726,6 +732,7 @@ pub fn run() {
             get_feed,
             search_messages,
             send_channel_message,
+            decrypt_gift_wrap,
             send_managed_agent_channel_message,
             get_forum_posts,
             get_forum_thread,

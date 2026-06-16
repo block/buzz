@@ -123,6 +123,14 @@ fn sign_nip98(
 pub struct BuzzClient {
     http: reqwest::Client,
     relay_url: String, // base URL, no trailing slash, e.g. "https://relay.buzz.place"
+    /// WebSocket URLs (ws/wss). Used only in serverless mode. In serverless we
+    /// fan out across all relays — publish succeeds if ANY relay accepts, and
+    /// queries merge+dedup results — matching the desktop relay pool and the
+    /// standard Nostr client model (relays don't gossip; clients talk to many).
+    ws_urls: Vec<String>,
+    /// Serverless mode: talk to a generic relay over plain WebSocket instead
+    /// of the Buzz HTTP bridge.
+    serverless: bool,
     keys: Keys,
     /// Optional NIP-OA auth tag injected into every signed event.
     auth_tag: Option<Tag>,
@@ -133,10 +141,23 @@ pub struct BuzzClient {
 impl BuzzClient {
     pub fn new(
         relay_url: String,
+        ws_url: String,
+        serverless: bool,
         keys: Keys,
         auth_tag: Option<Tag>,
         auth_tag_json: Option<String>,
     ) -> Result<Self, CliError> {
+        // `ws_url` may be a comma-separated list of relays in serverless mode.
+        let ws_urls: Vec<String> = ws_url
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let ws_urls = if ws_urls.is_empty() {
+            vec![ws_url]
+        } else {
+            ws_urls
+        };
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .connect_timeout(Duration::from_secs(5))
@@ -145,6 +166,8 @@ impl BuzzClient {
         Ok(Self {
             http,
             relay_url,
+            ws_urls,
+            serverless,
             keys,
             auth_tag,
             auth_tag_json,
@@ -160,6 +183,11 @@ impl BuzzClient {
     #[allow(dead_code)]
     pub fn relay_url(&self) -> &str {
         &self.relay_url
+    }
+
+    /// Whether this client is in serverless mode (generic relay, plain WS).
+    pub fn is_serverless(&self) -> bool {
+        self.serverless
     }
 
     /// Return the owner pubkey carried by the NIP-OA auth tag, if any.
@@ -227,6 +255,9 @@ impl BuzzClient {
     /// Execute a one-shot query with multiple filters via the HTTP bridge.
     /// Each filter is ORed by the relay (standard Nostr REQ behavior).
     pub async fn query_multi(&self, filters: &[serde_json::Value]) -> Result<String, CliError> {
+        if self.serverless {
+            return self.query_ws(filters).await;
+        }
         let url = format!("{}/query", self.relay_url);
         let body_bytes = serde_json::to_vec(filters)
             .map_err(|e| CliError::Other(format!("filter serialization failed: {e}")))?;
@@ -267,6 +298,9 @@ impl BuzzClient {
 
     /// Submit a signed Nostr event via POST /events.
     pub async fn submit_event(&self, event: nostr::Event) -> Result<String, CliError> {
+        if self.serverless {
+            return self.submit_event_ws(&event).await;
+        }
         let url = format!("{}/events", self.relay_url);
         let body_bytes = serde_json::to_vec(&event)
             .map_err(|e| CliError::Other(format!("event serialization failed: {e}")))?;
@@ -281,6 +315,241 @@ impl BuzzClient {
         let resp = self.with_auth_tag(req).send().await?;
 
         self.handle_response(resp).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Serverless WS transport (generic relays, no HTTP bridge)
+    // -----------------------------------------------------------------------
+
+    /// Query events over a plain WebSocket: REQ → collect EVENTs until EOSE →
+    /// CLOSE. Answers a NIP-42 AUTH challenge if the relay sends one. Returns a
+    /// JSON-array string of event objects (same shape as the HTTP `/query`
+    /// bridge response, so downstream parsing is unchanged).
+    async fn query_ws(&self, filters: &[serde_json::Value]) -> Result<String, CliError> {
+        // Fan out across all relays, merge results, dedup by event id. Relays
+        // don't gossip — a given event may live on only one relay, so a
+        // complete read must union every relay (the standard Nostr client
+        // model; see damus RelayPool / nostr-tools SimplePool).
+        let mut by_id: std::collections::HashMap<String, serde_json::Value> =
+            std::collections::HashMap::new();
+        let mut last_err: Option<CliError> = None;
+        let mut any_ok = false;
+        for relay in &self.ws_urls {
+            match self.query_ws_one(relay, filters).await {
+                Ok(events) => {
+                    any_ok = true;
+                    for ev in events {
+                        if let Some(id) = ev.get("id").and_then(|v| v.as_str()) {
+                            by_id.entry(id.to_string()).or_insert(ev);
+                        }
+                    }
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if !any_ok {
+            if let Some(e) = last_err {
+                return Err(e);
+            }
+        }
+        let merged: Vec<serde_json::Value> = by_id.into_values().collect();
+        Ok(serde_json::Value::Array(merged).to_string())
+    }
+
+    /// Query a single relay over plain WS: REQ → collect EVENTs until EOSE →
+    /// CLOSE. Answers a NIP-42 AUTH challenge if the relay sends one.
+    async fn query_ws_one(
+        &self,
+        relay: &str,
+        filters: &[serde_json::Value],
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+        let (ws, _) = connect_async(relay)
+            .await
+            .map_err(|e| CliError::NetworkMsg(format!("relay connect failed: {e}")))?;
+        let (mut write, mut read) = ws.split();
+
+        let sub_id = format!("cli-q-{}", uuid::Uuid::new_v4());
+        let mut req = vec![
+            serde_json::Value::String("REQ".into()),
+            serde_json::Value::String(sub_id.clone()),
+        ];
+        req.extend(filters.iter().cloned());
+        write
+            .send(Message::Text(
+                serde_json::Value::Array(req).to_string().into(),
+            ))
+            .await
+            .map_err(|e| CliError::NetworkMsg(format!("send REQ failed: {e}")))?;
+
+        let mut events: Vec<serde_json::Value> = Vec::new();
+        let collect = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let msg = match read.next().await {
+                    Some(Ok(m)) => m,
+                    Some(Err(e)) => return Err(format!("WS read error: {e}")),
+                    None => return Err("relay closed during query".to_string()),
+                };
+                let Message::Text(text) = msg else { continue };
+                let Ok(arr) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+                let Some(arr) = arr.as_array() else { continue };
+                let Some(tag) = arr.first().and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let sub_matches = arr.get(1).and_then(|v| v.as_str()) == Some(sub_id.as_str());
+                match tag {
+                    "EVENT" if sub_matches => {
+                        if let Some(ev) = arr.get(2) {
+                            events.push(ev.clone());
+                        }
+                    }
+                    "EOSE" if sub_matches => return Ok(()),
+                    "CLOSED" if sub_matches => return Ok(()),
+                    "AUTH" => {
+                        if let Some(challenge) = arr.get(1).and_then(|v| v.as_str()) {
+                            if let Ok(json) = self.ws_auth_message(relay, challenge) {
+                                let _ = write.send(Message::Text(json.into())).await;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        let _ = write
+            .send(Message::Text(
+                serde_json::json!(["CLOSE", sub_id]).to_string().into(),
+            ))
+            .await;
+        let _ = write.close().await;
+
+        match collect {
+            Ok(Ok(())) | Err(_) => Ok(events),
+            Ok(Err(e)) => {
+                if events.is_empty() {
+                    Err(CliError::NetworkMsg(e))
+                } else {
+                    Ok(events)
+                }
+            }
+        }
+    }
+
+    /// Publish a signed event over a plain WebSocket and wait for `OK`. Answers
+    /// a NIP-42 AUTH challenge if sent. Returns the relay response as a JSON
+    /// string (`{event_id, accepted, message}`) matching the HTTP bridge shape.
+    async fn submit_event_ws(&self, event: &nostr::Event) -> Result<String, CliError> {
+        // Fan out to every relay; succeed if ANY accepts. This is what makes
+        // serverless writes resilient to a single relay rate-limiting
+        // ("noting too much") or being down — the desktop relay pool does the
+        // same. We try relays in order and return on the first acceptance.
+        let event_id = event.id.to_hex();
+        let mut last_err: Option<CliError> = None;
+        for relay in &self.ws_urls {
+            match self.submit_event_ws_one(relay, event).await {
+                Ok(msg) => return Ok(msg),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err
+            .unwrap_or_else(|| CliError::Other(format!("no relay accepted event {event_id}"))))
+    }
+
+    /// Publish a signed event to a single relay over plain WS and wait for OK.
+    async fn submit_event_ws_one(
+        &self,
+        relay: &str,
+        event: &nostr::Event,
+    ) -> Result<String, CliError> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+        let (ws, _) = connect_async(relay)
+            .await
+            .map_err(|e| CliError::NetworkMsg(format!("relay connect failed: {e}")))?;
+        let (mut write, mut read) = ws.split();
+
+        let event_id = event.id.to_hex();
+        let event_msg = serde_json::json!(["EVENT", event]).to_string();
+        write
+            .send(Message::Text(event_msg.clone().into()))
+            .await
+            .map_err(|e| CliError::NetworkMsg(format!("send EVENT failed: {e}")))?;
+
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let msg = match read.next().await {
+                    Some(Ok(m)) => m,
+                    Some(Err(e)) => return Err(format!("WS read error: {e}")),
+                    None => return Err("relay closed during publish".to_string()),
+                };
+                let Message::Text(text) = msg else { continue };
+                let Ok(arr) = serde_json::from_str::<serde_json::Value>(&text) else {
+                    continue;
+                };
+                let Some(arr) = arr.as_array() else { continue };
+                let Some(tag) = arr.first().and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                match tag {
+                    "OK" if arr.get(1).and_then(|v| v.as_str()) == Some(event_id.as_str()) => {
+                        let accepted = arr.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
+                        let message = arr
+                            .get(3)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        return Ok((accepted, message));
+                    }
+                    "AUTH" => {
+                        if let Some(challenge) = arr.get(1).and_then(|v| v.as_str()) {
+                            if let Ok(json) = self.ws_auth_message(relay, challenge) {
+                                let _ = write.send(Message::Text(json.into())).await;
+                                let _ = write.send(Message::Text(event_msg.clone().into())).await;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        let _ = write.close().await;
+
+        let (accepted, message) = match result {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(CliError::NetworkMsg(e)),
+            // Best-effort: many relays accept silently or are slow to OK.
+            Err(_) => (true, "published (no OK before timeout)".to_string()),
+        };
+
+        if !accepted {
+            return Err(CliError::Other(format!("relay rejected event: {message}")));
+        }
+
+        Ok(serde_json::json!({
+            "event_id": event_id,
+            "accepted": accepted,
+            "message": message,
+        })
+        .to_string())
+    }
+
+    /// Build a NIP-42 `["AUTH", <event>]` message string for serverless writes.
+    fn ws_auth_message(&self, relay: &str, challenge: &str) -> Result<String, CliError> {
+        let url = nostr::RelayUrl::parse(relay)
+            .map_err(|e| CliError::Other(format!("invalid relay URL: {e}")))?;
+        let event = EventBuilder::auth(challenge.to_string(), url)
+            .sign_with_keys(&self.keys)
+            .map_err(|e| CliError::Other(format!("auth sign failed: {e}")))?;
+        Ok(serde_json::json!(["AUTH", event]).to_string())
     }
 
     // -----------------------------------------------------------------------
@@ -471,11 +740,19 @@ pub fn normalize_relay_url(url: &str) -> String {
         .to_string()
 }
 
-/// Convert an HTTP(S) relay base URL back to a WebSocket URL for NIP-01 connections.
-fn to_ws_url(http_url: &str) -> String {
-    http_url
-        .replace("https://", "wss://")
-        .replace("http://", "ws://")
+/// Normalize a relay URL to its WebSocket form: http:// → ws://,
+/// https:// → wss://, strip trailing slash. Used in serverless mode where the
+/// transport is a plain WebSocket rather than the HTTP bridge, and by
+/// `publish_ephemeral_event` for the NIP-01 WebSocket publish path.
+pub fn to_ws_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if let Some(rest) = trimmed.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 // ---------------------------------------------------------------------------

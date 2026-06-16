@@ -23,6 +23,7 @@ buzz-persona = { path = "../buzz-persona" }
 
 # Nostr
 nostr = { workspace = true }
+nostr-relay-pool = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
@@ -78,3 +79,9 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+nostr = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true, features = ["v5"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

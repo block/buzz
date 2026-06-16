@@ -31,6 +31,7 @@ pub fn get_active_workspace(state: State<'_, AppState>) -> Result<ActiveWorkspac
 pub fn apply_workspace(
     relay_url: String,
     nsec: Option<String>,
+    serverless: Option<bool>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
@@ -47,6 +48,21 @@ pub fn apply_workspace(
         let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
         *override_guard = Some(relay_url);
     }
+
+    state.serverless.store(
+        serverless.unwrap_or(false),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    // Signal launch-time agent restore that the workspace config is now live,
+    // so serverless agents spawn with the current relay list/mode (not a stale
+    // value frozen in their record).
+    state
+        .workspace_applied
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // Drop any pooled relay connections from the previous workspace so we don't
+    // reuse a socket authed to a different relay/identity.
+    state.relay_pool.clear();
 
     if let Some(keys) = parsed_keys {
         let mut keys_guard = state.keys.lock().map_err(|e| e.to_string())?;

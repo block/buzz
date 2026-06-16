@@ -327,6 +327,29 @@ pub async fn cmd_create_channel(
         "forum" => buzz_sdk::ChannelKind::Forum,
         _ => unreachable!(),
     };
+    if client.is_serverless() {
+        // No relay to process kind:9007 — publish 39000 metadata + 39002
+        // membership (self) directly so the channel is discoverable.
+        let cid = channel_uuid.to_string();
+        let meta = buzz_sdk::build_channel_metadata_serverless(
+            &cid,
+            name,
+            visibility,
+            channel_type,
+            description,
+            &[],
+        )
+        .map_err(|e| CliError::Other(format!("build metadata failed: {e}")))?;
+        client.submit_event(client.sign_event(meta)?).await?;
+
+        let me = client.keys().public_key().to_hex();
+        let members = buzz_sdk::build_channel_members_serverless(&cid, &[me])
+            .map_err(|e| CliError::Other(format!("build members failed: {e}")))?;
+        let resp = client.submit_event(client.sign_event(members)?).await?;
+        print_create_response(&resp, "channel_id", &cid);
+        return Ok(());
+    }
+
     let builder =
         buzz_sdk::build_create_channel(channel_uuid, name, Some(vis), Some(ct), description)
             .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
@@ -334,6 +357,70 @@ pub async fn cmd_create_channel(
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
     print_create_response(&resp, "channel_id", &channel_uuid.to_string());
+    Ok(())
+}
+
+/// Read current member pubkeys (hex, lowercased) from a channel's kind:39002
+/// event in serverless mode. Empty if none exists yet.
+async fn serverless_members(
+    client: &BuzzClient,
+    channel_id: &str,
+) -> Result<Vec<String>, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [39002],
+        "#d": [channel_id],
+        "limit": 1
+    });
+    let raw = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+    let Some(ev) = events.first() else {
+        return Ok(Vec::new());
+    };
+    let members = ev
+        .get("tags")
+        .and_then(|t| t.as_array())
+        .map(|tags| {
+            tags.iter()
+                .filter_map(|t| {
+                    let arr = t.as_array()?;
+                    if arr.first().and_then(|v| v.as_str()) == Some("p") {
+                        arr.get(1)
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_ascii_lowercase())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(members)
+}
+
+/// Add/remove pubkeys on a channel's kind:39002 member list and re-publish
+/// (serverless mode read-modify-write).
+async fn serverless_set_members(
+    client: &BuzzClient,
+    channel_id: &str,
+    add: &[String],
+    remove: &[String],
+) -> Result<(), CliError> {
+    let mut members = serverless_members(client, channel_id).await?;
+    for pk in remove {
+        let pk = pk.to_ascii_lowercase();
+        members.retain(|m| m != &pk);
+    }
+    for pk in add {
+        let pk = pk.to_ascii_lowercase();
+        if !members.contains(&pk) {
+            members.push(pk);
+        }
+    }
+    members.sort();
+    members.dedup();
+    let builder = buzz_sdk::build_channel_members_serverless(channel_id, &members)
+        .map_err(|e| CliError::Other(format!("build members failed: {e}")))?;
+    client.submit_event(client.sign_event(builder)?).await?;
     Ok(())
 }
 
@@ -394,6 +481,13 @@ pub async fn cmd_set_channel_purpose(
 pub async fn cmd_join_channel(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
     let channel_uuid = parse_uuid(channel_id)?;
 
+    if client.is_serverless() {
+        let me = client.keys().public_key().to_hex();
+        serverless_set_members(client, &channel_uuid.to_string(), &[me], &[]).await?;
+        println!("{}", normalize_write_response("{\"accepted\":true}"));
+        return Ok(());
+    }
+
     let builder = buzz_sdk::build_join(channel_uuid)
         .map_err(|e| CliError::Other(format!("build_join failed: {e}")))?;
 
@@ -405,6 +499,13 @@ pub async fn cmd_join_channel(client: &BuzzClient, channel_id: &str) -> Result<(
 
 pub async fn cmd_leave_channel(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
     let channel_uuid = parse_uuid(channel_id)?;
+
+    if client.is_serverless() {
+        let me = client.keys().public_key().to_hex();
+        serverless_set_members(client, &channel_uuid.to_string(), &[], &[me]).await?;
+        println!("{}", normalize_write_response("{\"accepted\":true}"));
+        return Ok(());
+    }
 
     let builder = buzz_sdk::build_leave(channel_uuid)
         .map_err(|e| CliError::Other(format!("build_leave failed: {e}")))?;
@@ -473,6 +574,18 @@ pub async fn cmd_add_channel_member(
             )))
         }
     };
+    if client.is_serverless() {
+        serverless_set_members(
+            client,
+            &channel_uuid.to_string(),
+            &[pubkey.to_string()],
+            &[],
+        )
+        .await?;
+        println!("{}", normalize_write_response("{\"accepted\":true}"));
+        return Ok(());
+    }
+
     let builder = buzz_sdk::build_add_member(channel_uuid, pubkey, typed_role)
         .map_err(|e| CliError::Other(format!("build_add_member failed: {e}")))?;
 
@@ -489,6 +602,18 @@ pub async fn cmd_remove_channel_member(
 ) -> Result<(), CliError> {
     validate_hex64(pubkey)?;
     let channel_uuid = parse_uuid(channel_id)?;
+
+    if client.is_serverless() {
+        serverless_set_members(
+            client,
+            &channel_uuid.to_string(),
+            &[],
+            &[pubkey.to_string()],
+        )
+        .await?;
+        println!("{}", normalize_write_response("{\"accepted\":true}"));
+        return Ok(());
+    }
 
     let builder = buzz_sdk::build_remove_member(channel_uuid, pubkey)
         .map_err(|e| CliError::Other(format!("build_remove_member failed: {e}")))?;

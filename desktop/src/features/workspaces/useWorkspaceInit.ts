@@ -12,7 +12,7 @@ import { clearAllDrafts } from "@/features/messages/lib/useDrafts";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
-import { initFirstWorkspace } from "./workspaceStorage";
+import { initFirstWorkspace, isServerlessWorkspace } from "./workspaceStorage";
 import type { Workspace } from "./types";
 
 /**
@@ -29,6 +29,11 @@ function resetWorkspaceState(): void {
   resetVideoPlayerState();
   clearSearchHitEventCache();
   clearAllDrafts();
+  // NOTE: the React Query cache is intentionally NOT cleared here.
+  // `useWorkspaceInit` runs ABOVE the QueryClientProvider, so it has no query
+  // client. The cache is made per-workspace by `WorkspaceQueryProvider` /
+  // `AppReady` being keyed on `workspaceKey` in App.tsx — switching workspaces
+  // remounts them with a brand-new QueryClient, so no cross-workspace bleed.
 }
 
 type WorkspaceInitResult =
@@ -127,11 +132,19 @@ export function useWorkspaceInit(
       // and re-applied it on every reload, which silently overwrote any
       // imported key. `loadWorkspaces()` strips lingering `nsec` fields from
       // legacy entries; this site refuses to apply one even if present.
+      const serverless = isServerlessWorkspace(activeWorkspace);
+
+      // Tell the relay client singleton which transport to use *before*
+      // AppShell mounts and calls preconnect(). In serverless mode the connect
+      // handshake skips the NIP-42 AUTH wait.
+      relayClient.setServerless(serverless);
+
       try {
         await applyWorkspace(
           activeWorkspace.relayUrl,
           undefined,
           activeWorkspace.token,
+          serverless,
         );
       } catch (error) {
         console.error("Failed to apply workspace to backend:", error);

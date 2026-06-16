@@ -60,7 +60,7 @@ neteq = { version = "0.8", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-nostr = { version = "0.44", features = ["nip44"] }
+nostr = { version = "0.44", features = ["nip44", "nip59"] }
 zeroize = "1"
 reqwest = { version = "0.13", features = ["json", "query", "stream"] }
 url = "2"
@@ -76,7 +76,7 @@ bzip2 = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2.3.3"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 png = "0.18"
 zip = "8"
 sherpa-onnx = "1.12"
@@ -91,3 +91,6 @@ tempfile = "3"
 strip-ansi-escapes = "0.2"
 
 [dev-dependencies]
+# Network integration tests (serverless WS roundtrip) need an explicit rustls
+# CryptoProvider — the app installs one via tauri/wry at startup, tests don't.
+rustls = { version = "0.23", features = ["aws_lc_rs"] }

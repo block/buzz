@@ -1,4 +1,22 @@
-import type { Workspace } from "./types";
+import type { Workspace, WorkspaceMode } from "./types";
+
+/**
+ * Resolve a workspace's transport mode, defaulting legacy entries (which have
+ * no `mode` field) to `"sprout"`. Use this everywhere instead of reading
+ * `workspace.mode` directly.
+ */
+export function workspaceMode(
+  workspace: Pick<Workspace, "mode"> | null | undefined,
+): WorkspaceMode {
+  return workspace?.mode === "serverless" ? "serverless" : "sprout";
+}
+
+/** True when the workspace talks to a generic relay with no Buzz server. */
+export function isServerlessWorkspace(
+  workspace: Pick<Workspace, "mode"> | null | undefined,
+): boolean {
+  return workspaceMode(workspace) === "serverless";
+}
 
 const WORKSPACES_KEY = "buzz-workspaces";
 const ACTIVE_WORKSPACE_KEY = "buzz-active-workspace-id";
@@ -54,6 +72,13 @@ export function saveActiveWorkspaceId(id: string): void {
   localStorage.setItem(ACTIVE_WORKSPACE_KEY, id);
 }
 
+/** Whether the currently-active workspace is in serverless mode. */
+export function isActiveWorkspaceServerless(): boolean {
+  const id = loadActiveWorkspaceId();
+  const active = loadWorkspaces().find((w) => w.id === id);
+  return isServerlessWorkspace(active);
+}
+
 export function normalizeRelayUrl(url: string): string {
   if (!url.startsWith("ws://") && !url.startsWith("wss://")) {
     return `wss://${url}`;
@@ -89,6 +114,7 @@ export function initFirstWorkspace(
   relayUrl: string,
   pubkey: string,
   name?: string,
+  mode: WorkspaceMode = "sprout",
 ): Workspace {
   const normalizedUrl = normalizeRelayUrl(relayUrl);
   const trimmedName = name?.trim();
@@ -97,6 +123,7 @@ export function initFirstWorkspace(
     name: trimmedName || deriveWorkspaceName(normalizedUrl),
     relayUrl: normalizedUrl,
     pubkey,
+    mode,
     addedAt: new Date().toISOString(),
   };
   saveWorkspaces([workspace]);

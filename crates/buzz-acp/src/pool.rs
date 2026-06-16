@@ -2130,7 +2130,11 @@ const REACTION_SEEN: &str = "👀";
 const REACTION_WORKING: &str = "💬";
 
 /// Best-effort timeout for a single reaction REST call.
-const REACTION_TIMEOUT: Duration = Duration::from_millis(500);
+// Reactions ("👀"/"💬" working cues) are best-effort. 500ms was tuned for the
+// local HTTP bridge; the serverless pool does a real WebSocket publish + OK
+// round-trip across public relays, which needs more headroom or the cue never
+// lands. 4s covers a flaky-relay round-trip while staying well under a turn.
+const REACTION_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Percent-encode a string for use in a URL path segment (used in tests only).
 #[cfg(test)]

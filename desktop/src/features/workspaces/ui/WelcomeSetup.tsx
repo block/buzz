@@ -18,7 +18,14 @@ import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { StepProgress } from "@/shared/ui/step-progress";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 
-import type { Workspace } from "../types";
+import {
+  DEFAULT_PUBLIC_RELAYS,
+  DEFAULT_SERVERLESS_RELAY,
+  normalizeRelayList,
+  relayListIncludes,
+  toggleRelayInList,
+} from "../defaultRelays";
+import type { Workspace, WorkspaceMode } from "../types";
 import { initFirstWorkspace } from "../workspaceStorage";
 
 type WelcomeSetupPage = "welcome" | "create-workspace" | "nostr-key";
@@ -94,12 +101,18 @@ export function WelcomeSetup({
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
   const [customWorkspaceName, setCustomWorkspaceName] = React.useState("");
   const [customRelayUrl, setCustomRelayUrl] = React.useState("");
+  const [customServerless, setCustomServerless] = React.useState(false);
   const [isConnecting, setIsConnecting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const systemColorScheme = useSystemColorScheme();
 
   const handleConnect = React.useCallback(
-    async (relayUrl: string, workspaceName?: string, pubkey?: string) => {
+    async (
+      relayUrl: string,
+      workspaceName?: string,
+      pubkey?: string,
+      mode: WorkspaceMode = "sprout",
+    ) => {
       const trimmedUrl = relayUrl.trim();
       if (!trimmedUrl) {
         setError("Please enter a workspace URL.");
@@ -123,10 +136,13 @@ export function WelcomeSetup({
         // labels, etc.). The private key lives on disk in `identity.key` and
         // is the single source of truth — never copied into localStorage.
         const identityPubkey = pubkey ?? (await getIdentity()).pubkey;
+        const normalizedRelayUrl =
+          mode === "serverless" ? normalizeRelayList(trimmedUrl) : trimmedUrl;
         const workspace = initFirstWorkspace(
-          trimmedUrl,
+          normalizedRelayUrl,
           identityPubkey,
           workspaceName,
+          mode,
         );
 
         if (!workspaceName) {
@@ -170,9 +186,30 @@ export function WelcomeSetup({
         setError("Please enter a workspace URL.");
         return;
       }
-      void handleConnect(trimmedUrl, trimmedName);
+      void handleConnect(
+        trimmedUrl,
+        trimmedName,
+        undefined,
+        customServerless ? "serverless" : "sprout",
+      );
     },
-    [customRelayUrl, customWorkspaceName, handleConnect],
+    [customRelayUrl, customServerless, customWorkspaceName, handleConnect],
+  );
+
+  const handleCustomServerlessChange = React.useCallback(
+    (checked: boolean) => {
+      setCustomServerless(checked);
+      setError(null);
+      if (checked && customRelayUrl.trim() === "") {
+        setCustomRelayUrl(DEFAULT_SERVERLESS_RELAY);
+      } else if (
+        !checked &&
+        customRelayUrl.trim() === DEFAULT_SERVERLESS_RELAY
+      ) {
+        setCustomRelayUrl("");
+      }
+    },
+    [customRelayUrl],
   );
 
   const showCreateWorkspacePage = React.useCallback(() => {
@@ -330,12 +367,32 @@ export function WelcomeSetup({
                 />
               </div>
 
+              <label className="flex items-start gap-2.5 rounded-md border border-border/70 bg-muted/40 p-3 text-left">
+                <input
+                  checked={customServerless}
+                  className="mt-0.5 h-4 w-4 accent-primary"
+                  onChange={(event) =>
+                    handleCustomServerlessChange(event.target.checked)
+                  }
+                  type="checkbox"
+                />
+                <span className="flex flex-col gap-0.5">
+                  <span className="text-sm font-medium text-foreground">
+                    Serverless mode
+                  </span>
+                  <span className="text-xs leading-5 text-muted-foreground">
+                    Use generic public Nostr relays - no Buzz server. Channels,
+                    DMs, and agents only.
+                  </span>
+                </span>
+              </label>
+
               <div className="space-y-1.5 text-left">
                 <label
                   className="text-sm font-medium text-foreground"
                   htmlFor="workspace-url"
                 >
-                  Workspace URL
+                  {customServerless ? "Relay URLs" : "Workspace URL"}
                 </label>
                 <Input
                   className="h-10 bg-background"
@@ -344,10 +401,49 @@ export function WelcomeSetup({
                     setCustomRelayUrl(event.target.value);
                     setError(null);
                   }}
-                  placeholder="wss://relay.example.com"
+                  placeholder={
+                    customServerless
+                      ? DEFAULT_SERVERLESS_RELAY
+                      : "wss://relay.example.com"
+                  }
                   type="text"
                   value={customRelayUrl}
                 />
+                {customServerless ? (
+                  <>
+                    <p className="text-xs text-muted-foreground">
+                      Connects to all listed relays for redundancy. Tap to
+                      add/remove.
+                    </p>
+                    <div className="flex flex-wrap gap-1.5 pt-0.5">
+                      {DEFAULT_PUBLIC_RELAYS.map((relay) => {
+                        const selected = relayListIncludes(
+                          customRelayUrl,
+                          relay,
+                        );
+                        return (
+                          <button
+                            className={`rounded-full border px-2 py-0.5 text-xs transition-colors ${
+                              selected
+                                ? "border-primary bg-primary/15 text-foreground"
+                                : "border-border bg-muted/40 text-muted-foreground hover:border-primary/60 hover:text-foreground"
+                            }`}
+                            key={relay}
+                            onClick={() => {
+                              setCustomRelayUrl(
+                                toggleRelayInList(customRelayUrl, relay),
+                              );
+                              setError(null);
+                            }}
+                            type="button"
+                          >
+                            {relay.replace("wss://", "")}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                ) : null}
               </div>
 
               <div className="flex w-full flex-col gap-3 pt-1">

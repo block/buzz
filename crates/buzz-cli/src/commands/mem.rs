@@ -790,7 +790,15 @@ mod tests {
     // common quick-check inputs.
 
     fn test_client(keys: nostr::Keys) -> BuzzClient {
-        BuzzClient::new("http://127.0.0.1:9".into(), keys, None, None).unwrap()
+        BuzzClient::new(
+            "http://127.0.0.1:9".into(),
+            "ws://127.0.0.1:9".into(),
+            false,
+            keys,
+            None,
+            None,
+        )
+        .unwrap()
     }
 
     #[test]

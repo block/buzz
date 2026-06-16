@@ -2,6 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 
 import {
   createAuthEvent,
+  decryptGiftWrap,
   getRelayWsUrl,
   signRelayEvent,
 } from "@/shared/api/tauri";
@@ -41,9 +42,14 @@ const RECONNECT_BASE_DELAY_MS = 1_000,
 const STALL_CHECK_INTERVAL_MS = 10_000;
 const STALL_IDLE_TIMEOUT_MS = 60_000;
 
+/** NIP-59 gift wrap kind — encrypted message envelope on the relay. */
+const GIFT_WRAP_KIND = 1059;
+
 export class RelayClient {
   private wsId: number | null = null;
   private relayUrl: string | null = null;
+  /** Our identity pubkey (hex), cached for encrypted gift-wrap filters. */
+  private cachedPubkey: string | null = null;
   private connectPromise: Promise<void> | null = null;
   private reconnectTimeout: number | null = null;
   private reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
@@ -76,6 +82,15 @@ export class RelayClient {
    */
   private terminal = false;
 
+  /**
+   * Serverless mode. When true, the relay is a generic public Nostr relay
+   * with no NIP-42 AUTH requirement and no Sprout server features. The
+   * connect handshake resolves as soon as the socket is open instead of
+   * waiting for an AUTH challenge. Set via {@link setServerless} on workspace
+   * apply. See docs/SPROUT_LITE_MODE.md.
+   */
+  private serverless = false;
+
   private connectionStateEmitter = new RelayConnectionStateEmitter("idle");
   private stallWatchdog = new RelayStallWatchdog({
     intervalMs: STALL_CHECK_INTERVAL_MS,
@@ -102,6 +117,7 @@ export class RelayClient {
     this.connectionGeneration++;
     this.keepAliveRequested = false;
     this.relayUrl = null;
+    this.cachedPubkey = null;
     this.hasConnectedOnce = false;
     this.notifyReconnectListeners = false;
     this.terminal = false;
@@ -147,8 +163,45 @@ export class RelayClient {
     this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
   }
 
-  async fetchChannelHistory(channelId: string, limit = 50) {
+  async fetchChannelHistory(channelId: string, limit = 50, encrypted = false) {
+    if (encrypted) {
+      return this.fetchEncryptedHistory(channelId, limit);
+    }
     return this.fetchHistory(this.buildChannelFilter(channelId, limit));
+  }
+
+  /**
+   * Encrypted (serverless private/DM) channel history. The relay stores only
+   * NIP-17 gift wraps (kind 1059) addressed to us by `#p`; it has no `#h` index
+   * for them. So we fetch all our gift wraps, decrypt each in the Rust backend,
+   * and keep the inner kind-9 rumors whose `h` tag matches this channel.
+   */
+  private async fetchEncryptedHistory(channelId: string, limit: number) {
+    const wraps = await this.fetchHistory({
+      kinds: [GIFT_WRAP_KIND],
+      "#p": [await this.myPubkey()],
+      limit: Math.max(limit * 4, 200),
+    });
+    const out: RelayEvent[] = [];
+    for (const wrap of wraps) {
+      try {
+        const inner = await decryptGiftWrap(JSON.stringify(wrap));
+        if (inner.channelId === channelId) {
+          out.push(inner);
+        }
+      } catch {
+        // Not addressed to us / undecryptable — skip.
+      }
+    }
+    return out;
+  }
+
+  private async myPubkey(): Promise<string> {
+    if (!this.cachedPubkey) {
+      const { getIdentity } = await import("@/shared/api/tauri");
+      this.cachedPubkey = (await getIdentity()).pubkey;
+    }
+    return this.cachedPubkey;
   }
 
   async fetchChannelHistoryBefore(
@@ -265,7 +318,27 @@ export class RelayClient {
   async subscribeToChannel(
     channelId: string,
     onEvent: (event: RelayEvent) => void,
+    encrypted = false,
   ) {
+    if (encrypted) {
+      // Subscribe to our gift wraps; decrypt each and dispatch only those whose
+      // inner rumor belongs to this channel.
+      return this.subscribe(
+        { kinds: [GIFT_WRAP_KIND], "#p": [await this.myPubkey()], limit: 50 },
+        (wrap) => {
+          void (async () => {
+            try {
+              const inner = await decryptGiftWrap(JSON.stringify(wrap));
+              if (inner.channelId === channelId) {
+                onEvent(inner);
+              }
+            } catch {
+              // Not ours / undecryptable — skip.
+            }
+          })();
+        },
+      );
+    }
     return this.subscribe(this.buildChannelFilter(channelId, 50), onEvent);
   }
 
@@ -375,6 +448,15 @@ export class RelayClient {
     );
   }
 
+  /**
+   * Toggle serverless mode. Must be called before {@link preconnect} /
+   * connect (i.e. on workspace apply, while disconnected). In serverless mode
+   * the connect handshake does not wait for a NIP-42 AUTH challenge.
+   */
+  setServerless(serverless: boolean) {
+    this.serverless = serverless;
+  }
+
   async preconnect() {
     // Explicit re-engagement. If the session went terminal (auth rejection)
     // the caller is asking us to try again, so clear the latch.
@@ -449,33 +531,57 @@ export class RelayClient {
       this.relayUrl = await getRelayWsUrl();
     }
 
+    console.info(
+      `[relay] connecting live WS to ${this.relayUrl} (serverless=${this.serverless})`,
+    );
+
     const generation = ++this.connectionGeneration;
     this.onMessageChannel = new Channel<unknown>((message) => {
       void this.handleWsMessage(message, generation);
     });
 
-    this.wsId = await invoke<number>("plugin:websocket|connect", {
-      url: this.relayUrl,
-      onMessage: this.onMessageChannel,
-      config: {},
-    });
+    try {
+      this.wsId = await invoke<number>("plugin:websocket|connect", {
+        url: this.relayUrl,
+        onMessage: this.onMessageChannel,
+        config: {},
+      });
+      console.info(
+        `[relay] live WS connected to ${this.relayUrl} (id=${this.wsId})`,
+      );
+    } catch (error) {
+      console.error(
+        `[relay] live WS connect FAILED to ${this.relayUrl}:`,
+        error,
+      );
+      throw error;
+    }
 
-    await new Promise<void>((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        this.authRequest = null;
-        this.resetConnection(
-          new Error("Timed out while waiting for relay authentication."),
-        );
-        reject(new Error("Timed out while waiting for relay authentication."));
-      }, 8_000);
+    if (this.serverless) {
+      // Generic public relays don't require (or send) a NIP-42 AUTH challenge.
+      // Treat the socket as ready as soon as it's open. If a challenge does
+      // arrive later, handleAuthChallenge still signs and answers it.
+      this.authRequest = null;
+    } else {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = window.setTimeout(() => {
+          this.authRequest = null;
+          this.resetConnection(
+            new Error("Timed out while waiting for relay authentication."),
+          );
+          reject(
+            new Error("Timed out while waiting for relay authentication."),
+          );
+        }, 8_000);
 
-      this.authRequest = {
-        pendingEventId: "",
-        resolve,
-        reject,
-        timeout,
-      };
-    });
+        this.authRequest = {
+          pendingEventId: "",
+          resolve,
+          reject,
+          timeout,
+        };
+      });
+    }
 
     this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
     await this.replayLiveSubscriptions();
@@ -575,9 +681,15 @@ export class RelayClient {
 
   private async sendRaw(payload: unknown[]) {
     if (this.wsId === null) {
+      console.error(
+        `[relay] sendRaw FAILED — socket not connected; payload=${payload[0]}`,
+      );
       throw new Error("Relay socket is not connected.");
     }
 
+    console.debug(
+      `[relay] → ${payload[0]} ${JSON.stringify(payload).slice(0, 160)}`,
+    );
     await invoke("plugin:websocket|send", {
       id: this.wsId,
       message: {
@@ -637,9 +749,15 @@ export class RelayClient {
     timeoutMessage: string,
     sendErrorMessage: string,
   ) {
+    console.info(
+      `[relay] publishEvent kind=${event.kind} id=${event.id.slice(0, 8)} → ${this.relayUrl}`,
+    );
     return new Promise<RelayEvent>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         this.pendingEvents.delete(event.id);
+        console.warn(
+          `[relay] publishEvent TIMEOUT id=${event.id.slice(0, 8)} (no OK in 8s) — ${timeoutMessage}`,
+        );
         reject(new Error(timeoutMessage));
       }, 8_000);
 
@@ -755,7 +873,18 @@ export class RelayClient {
       relayUrl: this.relayUrl,
     });
 
-    if (generation !== this.connectionGeneration || !this.authRequest) {
+    if (generation !== this.connectionGeneration) {
+      return;
+    }
+
+    // Serverless mode doesn't block the connect handshake on AUTH (so
+    // `authRequest` is null), but a generic relay may still challenge and
+    // require auth for writes. Answer the challenge anyway — best effort, no
+    // pending handshake to resolve.
+    if (!this.authRequest) {
+      if (this.serverless) {
+        await this.sendRaw(["AUTH", event]);
+      }
       return;
     }
 
@@ -766,8 +895,14 @@ export class RelayClient {
   private handleEvent(subId: string, event: RelayEvent) {
     const subscription = this.subscriptions.get(subId);
     if (!subscription) {
+      console.debug(
+        `[relay] ← EVENT for UNKNOWN sub ${subId} (kind ${event.kind})`,
+      );
       return;
     }
+    console.debug(
+      `[relay] ← EVENT sub=${subId.slice(0, 12)} kind=${event.kind} (${subscription.mode})`,
+    );
 
     if (subscription.mode === "history") {
       subscription.events.push(event);
@@ -819,6 +954,9 @@ export class RelayClient {
   }
 
   private handleOk(eventId: string, success: boolean, message: string) {
+    console.info(
+      `[relay] OK id=${eventId.slice(0, 8)} accepted=${success} msg=${JSON.stringify(message)}`,
+    );
     if (this.authRequest && this.authRequest.pendingEventId === eventId) {
       window.clearTimeout(this.authRequest.timeout);
       const authRequest = this.authRequest;

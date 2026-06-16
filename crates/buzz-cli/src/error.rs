@@ -14,6 +14,11 @@ pub enum CliError {
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
 
+    /// Network-level failure described by a string (e.g. WebSocket transport
+    /// errors in serverless mode, which don't originate from `reqwest`).
+    #[error("network error: {0}")]
+    NetworkMsg(String),
+
     /// Auth missing or rejected (401/403)
     #[error("auth error: {0}")]
     Auth(String),
@@ -50,7 +55,7 @@ pub fn exit_code(e: &CliError) -> i32 {
                 2
             }
         }
-        CliError::Network(_) => 2,
+        CliError::Network(_) | CliError::NetworkMsg(_) => 2,
         CliError::Auth(_) => 3,
         CliError::Key(_) => 3,
         CliError::Conflict(_) => 5,
@@ -71,7 +76,7 @@ pub fn print_error(e: &CliError) {
                 "relay_error"
             }
         }
-        CliError::Network(_) => "network_error",
+        CliError::Network(_) | CliError::NetworkMsg(_) => "network_error",
         CliError::Auth(_) => "auth_error",
         CliError::Key(_) => "key_error",
         CliError::Conflict(_) => "conflict",

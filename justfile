@@ -118,7 +118,22 @@ _ensure-sidecar-stubs:
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
-    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+    # buzz-acp and buzz are REAL sidecars: serverless agents launch the ACP
+    # harness (buzz-acp) which shells out to the buzz CLI to post replies.
+    # A 0-byte stub here makes managed agents silently fail to launch/reply in
+    # `just dev`. Build them for real (only if missing or empty so we don't
+    # rebuild every dev start); the rest are genuine stubs (server-only paths).
+    for bin in buzz-acp buzz; do
+        f="desktop/src-tauri/binaries/${bin}-${TARGET}"
+        if [[ ! -s "$f" ]]; then
+            crate=$([[ "$bin" == "buzz" ]] && echo buzz-cli || echo "$bin")
+            echo "building real sidecar: $bin (crate $crate)"
+            cargo build -p "$crate"
+            cp "target/debug/${bin}" "$f"
+            chmod +x "$f"
+        fi
+    done
+    for bin in buzz-agent buzz-dev-mcp git-credential-nostr; do
         touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
 

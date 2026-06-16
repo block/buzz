@@ -24,6 +24,7 @@ import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import type { Workspace } from "@/features/workspaces/types";
+import { useIsServerless } from "@/features/workspaces/ServerlessContext";
 import { AddWorkspaceDialog } from "@/features/workspaces/ui/AddWorkspaceDialog";
 import { useDeferredLoad } from "@/shared/hooks/useDeferredStartup";
 import {
@@ -224,6 +225,9 @@ export function AppSidebar({
   onStarChannel,
   onUnstarChannel,
 }: AppSidebarProps) {
+  // Pulse, Projects (git hosting), and Workflows are Buzz-server features
+  // with no generic-relay equivalent. Hide them in serverless mode.
+  const serverless = useIsServerless();
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
@@ -472,34 +476,38 @@ export function AppSidebar({
               </SidebarMenuBadge>
             ) : null}
           </SidebarMenuItem>
-          <FeatureGate feature="pulse">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-pulse-view"
-                isActive={selectedView === "pulse"}
-                onClick={onSelectPulse}
-                tooltip="Pulse"
-                type="button"
-              >
-                <Activity className="h-4 w-4" />
-                <span>Pulse</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </FeatureGate>
-          <FeatureGate feature="projects">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-projects-view"
-                isActive={selectedView === "projects"}
-                onClick={onSelectProjects}
-                tooltip="Projects"
-                type="button"
-              >
-                <FolderGit2 className="h-4 w-4" />
-                <span>Projects</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </FeatureGate>
+          {!serverless && (
+            <FeatureGate feature="pulse">
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-testid="open-pulse-view"
+                  isActive={selectedView === "pulse"}
+                  onClick={onSelectPulse}
+                  tooltip="Pulse"
+                  type="button"
+                >
+                  <Activity className="h-4 w-4" />
+                  <span>Pulse</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </FeatureGate>
+          )}
+          {!serverless && (
+            <FeatureGate feature="projects">
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-testid="open-projects-view"
+                  isActive={selectedView === "projects"}
+                  onClick={onSelectProjects}
+                  tooltip="Projects"
+                  type="button"
+                >
+                  <FolderGit2 className="h-4 w-4" />
+                  <span>Projects</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </FeatureGate>
+          )}
           <SidebarMenuItem>
             <SidebarMenuButton
               data-testid="open-agents-view"
@@ -520,20 +528,22 @@ export function AppSidebar({
               </SidebarMenuBadge>
             ) : null}
           </SidebarMenuItem>
-          <FeatureGate feature="workflows">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-workflows-view"
-                isActive={selectedView === "workflows"}
-                onClick={onSelectWorkflows}
-                tooltip="Workflows"
-                type="button"
-              >
-                <Zap className="h-4 w-4" />
-                <span>Workflows</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </FeatureGate>
+          {!serverless && (
+            <FeatureGate feature="workflows">
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-testid="open-workflows-view"
+                  isActive={selectedView === "workflows"}
+                  onClick={onSelectWorkflows}
+                  tooltip="Workflows"
+                  type="button"
+                >
+                  <Zap className="h-4 w-4" />
+                  <span>Workflows</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            </FeatureGate>
+          )}
         </SidebarMenu>
       </SidebarHeader>
 

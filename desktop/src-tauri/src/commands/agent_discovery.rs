@@ -316,6 +316,16 @@ pub fn discover_managed_agent_prereqs(
 
 #[tauri::command]
 pub async fn list_relay_agents(state: State<'_, AppState>) -> Result<Vec<RelayAgentInfo>, String> {
+    // Relay-side agent discovery (kind:10100 registry) is a Sprout-server
+    // concept. In serverless mode, managed agents are purely local desktop
+    // subprocesses — there is no server registry to discover, and querying a
+    // generic public relay for kind:10100 returns foreign/malformed events
+    // (the "agent parse failed: missing field `name`" bug). The real agent
+    // list comes from `list_managed_agents`; this overlay is simply empty.
+    if state.is_serverless() {
+        return Ok(Vec::new());
+    }
+
     // Query kind:10100 agent profile events from the relay.
     let events = query_relay(
         &state,

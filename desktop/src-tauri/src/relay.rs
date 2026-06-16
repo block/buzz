@@ -40,6 +40,23 @@ pub fn relay_ws_url_with_override(state: &AppState) -> String {
     workspace_relay_override(state).unwrap_or_else(relay_ws_url)
 }
 
+/// Serverless mode: the relay override may be a comma-separated list of relays
+/// for redundancy (publish-to-all, read-from-all-deduped). Returns the parsed
+/// list, falling back to the single resolved URL.
+pub fn relay_ws_urls_with_override(state: &AppState) -> Vec<String> {
+    let raw = relay_ws_url_with_override(state);
+    let list: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if list.is_empty() {
+        vec![raw]
+    } else {
+        list
+    }
+}
+
 /// Returns the relay HTTP API base URL, checking the workspace override first.
 /// Precedence: workspace override > env vars > build-time vars > default.
 pub fn relay_api_base_url_with_override(state: &AppState) -> String {
@@ -248,6 +265,26 @@ pub async fn query_relay(
     state: &AppState,
     filters: &[serde_json::Value],
 ) -> Result<Vec<nostr::Event>, String> {
+    // Serverless mode: no HTTP bridge. Query the generic relay over WS.
+    if state.is_serverless() {
+        let relay_urls = relay_ws_urls_with_override(state);
+        eprintln!(
+            "buzz-desktop: [serverless] query -> {relay_urls:?} filters={}",
+            serde_json::to_string(filters).unwrap_or_default()
+        );
+        let r = crate::ws_relay::query_relay_ws(state, &relay_urls, filters).await;
+        match &r {
+            Ok(events) => {
+                eprintln!(
+                    "buzz-desktop: [serverless] query OK {} event(s)",
+                    events.len()
+                )
+            }
+            Err(e) => eprintln!("buzz-desktop: [serverless] query ERR: {e}"),
+        }
+        return r;
+    }
+
     query_relay_at(state, &relay_api_base_url_with_override(state), filters).await
 }
 
@@ -357,6 +394,22 @@ pub async fn sync_managed_agent_profile(
 ) -> Result<(), String> {
     // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
     let event = build_profile_event(agent_keys, display_name, avatar_url, auth_tag)?;
+
+    // Serverless mode: publish the agent's profile over plain WS (no HTTP
+    // bridge, no NIP-98). Signed by the agent's keys.
+    if state.is_serverless() {
+        let relay_urls: Vec<String> = relay_url
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        return crate::ws_relay::publish_signed_event_ws(state, &event, agent_keys, &relay_urls)
+            .await
+            .map_err(|e| {
+                format!("Created the agent, but could not sync its profile metadata: {e}")
+            });
+    }
+
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
 
@@ -453,6 +506,21 @@ pub async fn submit_event(
     builder: nostr::EventBuilder,
     state: &AppState,
 ) -> Result<SubmitEventResponse, String> {
+    // Serverless mode: no HTTP bridge. Publish to the generic relay over WS.
+    if state.is_serverless() {
+        let relay_urls = relay_ws_urls_with_override(state);
+        eprintln!("sprout-desktop: [serverless] submit_event → {relay_urls:?}");
+        let r = crate::ws_relay::submit_event_ws(builder, state, &relay_urls).await;
+        match &r {
+            Ok(resp) => eprintln!(
+                "sprout-desktop: [serverless] submit_event OK accepted={} msg={:?}",
+                resp.accepted, resp.message
+            ),
+            Err(e) => eprintln!("sprout-desktop: [serverless] submit_event ERR: {e}"),
+        }
+        return r;
+    }
+
     // All synchronous work (signing) must complete before any .await
     // so the MutexGuard is dropped and the future remains Send.
     let url = format!("{}/events", relay_api_base_url_with_override(state));

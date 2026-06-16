@@ -8,6 +8,7 @@ mod observer;
 mod pool;
 mod queue;
 mod relay;
+mod serverless_relay;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -78,6 +79,55 @@ async fn publish_presence(
         .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
     publisher.publish_event(event).await?;
     Ok(())
+}
+
+/// Publish the agent's NIP-01 kind:0 profile metadata so clients render a name
+/// and avatar instead of the raw hex pubkey.
+///
+/// Without this, an agent only ever announces presence (kind:20001) and never
+/// tells the network who it is, so every client shows it as `2b5f20…`. We
+/// publish on startup (and it is replaceable, so re-publishing on each launch
+/// keeps name/avatar current). `name` is required; `about`/`picture` are
+/// included only when present.
+async fn publish_profile(
+    publisher: &relay::RelayEventPublisher,
+    keys: &nostr::Keys,
+    name: &str,
+    about: Option<&str>,
+    picture: Option<&str>,
+) -> Result<(), relay::RelayError> {
+    use nostr::{EventBuilder, Kind};
+
+    let content = build_profile_metadata_json(name, about, picture);
+    let event = EventBuilder::new(Kind::Metadata, content)
+        .tags([])
+        .sign_with_keys(keys)
+        .map_err(|e| relay::RelayError::Http(format!("profile sign error: {e}")))?;
+    publisher.publish_event(event).await?;
+    Ok(())
+}
+
+/// Build the NIP-01 kind:0 metadata JSON content for an agent profile.
+///
+/// Sets both `name` and `display_name` (clients read either), and includes
+/// `about`/`picture` only when non-empty.
+fn build_profile_metadata_json(name: &str, about: Option<&str>, picture: Option<&str>) -> String {
+    let mut meta = serde_json::Map::new();
+    meta.insert("name".into(), serde_json::Value::String(name.to_string()));
+    meta.insert(
+        "display_name".into(),
+        serde_json::Value::String(name.to_string()),
+    );
+    if let Some(about) = about.filter(|s| !s.trim().is_empty()) {
+        meta.insert("about".into(), serde_json::Value::String(about.to_string()));
+    }
+    if let Some(picture) = picture.filter(|s| !s.trim().is_empty()) {
+        meta.insert(
+            "picture".into(),
+            serde_json::Value::String(picture.to_string()),
+        );
+    }
+    serde_json::Value::Object(meta).to_string()
 }
 
 // ── Owner resolution ──────────────────────────────────────────────────────────
@@ -913,10 +963,15 @@ async fn tokio_main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
 
-    let mut relay =
-        HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
-            .await
-            .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
+    let mut relay = HarnessRelay::connect_with_mode(
+        &config.relay_url,
+        &config.keys,
+        &pubkey_hex,
+        relay_auth_tag,
+        config.serverless,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
 
     // Finding #22: tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
@@ -943,6 +998,26 @@ async fn tokio_main() -> Result<()> {
             Ok(_) => tracing::info!("presence set to online"),
             Err(e) => tracing::warn!("failed to set initial presence: {e}"),
         }
+    }
+
+    // ── Step 2c.2: Publish agent profile (kind:0) ─────────────────────────────
+    // So clients show the agent's name/avatar instead of a raw hex pubkey.
+    // Only when a persona supplied a name (no persona → no profile to publish).
+    if let Some(name) = config.profile_name.as_deref() {
+        match publish_profile(
+            &presence_publisher,
+            &presence_keys,
+            name,
+            config.profile_about.as_deref(),
+            config.profile_picture.as_deref(),
+        )
+        .await
+        {
+            Ok(_) => tracing::info!("published agent profile (name={name})"),
+            Err(e) => tracing::warn!("failed to publish agent profile: {e}"),
+        }
+    } else {
+        tracing::debug!("no persona display name; skipping kind:0 profile publish");
     }
 
     // ── Step 2d: Resolve agent owner ────────────────────────────────────────
@@ -1155,6 +1230,18 @@ async fn tokio_main() -> Result<()> {
     let maintenance_interval = Duration::from_secs(30);
     let mut last_maintenance = std::time::Instant::now();
 
+    // Serverless channel re-discovery. A generic public relay does NOT emit the
+    // kind:44100 "member added" notification that the agent normally relies on
+    // to learn it was added to a new channel (that's a Sprout-relay side
+    // effect). So in serverless mode we periodically re-run discovery and
+    // subscribe to any newly-joined channels. Without this, a channel created /
+    // joined after the agent started is never watched and the agent appears
+    // dead there.
+    let serverless_rediscover_interval = Duration::from_secs(20);
+    let mut last_rediscover = std::time::Instant::now();
+    let mut subscribed_channels: std::collections::HashSet<Uuid> =
+        channel_ids.iter().copied().collect();
+
     // Channel for background respawn tasks to return completed agents.
     // Bounded to agent count — at most one respawn per slot in flight.
     let (respawn_tx, mut respawn_rx) = mpsc::channel::<RespawnResult>(config.agents as usize);
@@ -1238,6 +1325,37 @@ async fn tokio_main() -> Result<()> {
     }
 
     loop {
+        // ── Serverless: periodic channel re-discovery (no 44100 push) ────────
+        if config.serverless && last_rediscover.elapsed() >= serverless_rediscover_interval {
+            last_rediscover = std::time::Instant::now();
+            match relay.discover_channels().await {
+                Ok(found) => {
+                    for ch in found.keys() {
+                        if subscribed_channels.contains(ch) {
+                            continue;
+                        }
+                        if let Some(filter) =
+                            config::resolve_dynamic_channel_filter(&config, *ch, &rules)
+                        {
+                            match relay.subscribe_channel(*ch, filter).await {
+                                Ok(()) => {
+                                    tracing::info!(channel_id = %ch, "serverless re-discovery: subscribed to new channel");
+                                    subscribed_channels.insert(*ch);
+                                }
+                                Err(e) => tracing::warn!(
+                                    "serverless re-discovery: failed to subscribe {ch}: {e}"
+                                ),
+                            }
+                        } else {
+                            // No matching rule, but track it so we don't retry every tick.
+                            subscribed_channels.insert(*ch);
+                        }
+                    }
+                }
+                Err(e) => tracing::debug!("serverless re-discovery failed: {e}"),
+            }
+        }
+
         // ── Maintenance (runs at loop top — cannot be starved by biased select) ──
         if last_maintenance.elapsed() >= maintenance_interval {
             last_maintenance = std::time::Instant::now();
@@ -2887,6 +3005,43 @@ mod owner_cache_tests {
 }
 
 #[cfg(test)]
+mod profile_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn includes_name_and_display_name() {
+        let json = build_profile_metadata_json("Goose", None, None);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(v["name"], "Goose");
+        assert_eq!(v["display_name"], "Goose");
+        // about/picture omitted when not supplied.
+        assert!(v.get("about").is_none());
+        assert!(v.get("picture").is_none());
+    }
+
+    #[test]
+    fn includes_about_and_picture_when_present() {
+        let json = build_profile_metadata_json(
+            "Sami",
+            Some("A helpful agent"),
+            Some("https://example.com/a.png"),
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(v["name"], "Sami");
+        assert_eq!(v["about"], "A helpful agent");
+        assert_eq!(v["picture"], "https://example.com/a.png");
+    }
+
+    #[test]
+    fn omits_blank_about_and_picture() {
+        let json = build_profile_metadata_json("Goose", Some("   "), Some(""));
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert!(v.get("about").is_none(), "blank about must be omitted");
+        assert!(v.get("picture").is_none(), "blank picture must be omitted");
+    }
+}
+
+#[cfg(test)]
 mod observer_chunk_coalescer_tests {
     use super::*;
 
@@ -2994,6 +3149,7 @@ mod build_mcp_servers_tests {
         Config {
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
+            serverless: false,
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
@@ -3023,6 +3179,9 @@ mod build_mcp_servers_tests {
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
             persona_env_vars: vec![],
+            profile_name: None,
+            profile_about: None,
+            profile_picture: None,
             relay_observer: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -3149,6 +3308,7 @@ mod error_outcome_emission_tests {
         Config {
             keys: nostr::Keys::generate(),
             relay_url: "ws://localhost:3000".into(),
+            serverless: false,
             // `true` exits cleanly, so the async respawn fails fast and
             // harmlessly off the JoinSet — irrelevant to the synchronous
             // feed emission under test.
@@ -3181,6 +3341,9 @@ mod error_outcome_emission_tests {
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             persona_env_vars: vec![],
+            profile_name: None,
+            profile_about: None,
+            profile_picture: None,
             relay_observer: false,
             agent_owner: None,
             no_base_prompt: false,

@@ -23,7 +23,15 @@ clap = { version = "4", features = ["derive", "env"] }
 reqwest = { workspace = true, features = ["json"] }
 
 # Async runtime — tokio macros + multi-thread for reqwest
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+# WebSocket transport for serverless mode (generic relays, no HTTP bridge)
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+# rustls provider install for the serverless WS transport. The CLI links
+# aws-lc-rs (via reqwest's rustls); install that provider at startup so
+# tokio-tungstenite's direct TLS config has a process-level provider.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 
 # Serialization — JSON body building and response passthrough
 serde = { workspace = true }

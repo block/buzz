@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
+import { useIsServerless } from "@/features/workspaces/ServerlessContext";
 import type { Channel, SearchHit } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -134,6 +135,9 @@ export function AppTopChrome({
   searchFocusRequest,
   searchLoading = false,
 }: AppTopChromeProps) {
+  // Search is Typesense-backed on the Buzz relay; a generic relay can't
+  // serve it. Hide the search bar in serverless mode.
+  const serverless = useIsServerless();
   return (
     <>
       <div
@@ -167,7 +171,7 @@ export function AppTopChrome({
           <ChevronRight />
         </Button>
       </div>
-      {searchHidden ? null : (
+      {serverless || searchHidden ? null : (
         <CenterColumnTopbarSearch
           channels={channels}
           currentPubkey={currentPubkey}

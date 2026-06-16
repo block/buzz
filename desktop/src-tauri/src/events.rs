@@ -410,6 +410,22 @@ pub fn build_message_edit(
     Ok(EventBuilder::new(Kind::Custom(40003), content).tags(tags))
 }
 
+/// Kind 5 — NIP-09 deletion of a serverless channel. Targets the addressable
+/// `a` coordinates of the channel's kind:39000 metadata and kind:39002 member
+/// list (both signed by `owner_pubkey_hex`), which generic relays honor.
+pub fn build_delete_channel_serverless(
+    channel_id: &str,
+    owner_pubkey_hex: &str,
+) -> Result<EventBuilder, String> {
+    let meta_coord = format!("39000:{owner_pubkey_hex}:{channel_id}");
+    let members_coord = format!("39002:{owner_pubkey_hex}:{channel_id}");
+    let tags = vec![
+        tag(vec!["a", &meta_coord])?,
+        tag(vec!["a", &members_coord])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
+}
+
 /// Kind 5 — NIP-09 deletion. The `h` tag is non-standard for NIP-09 but is
 /// required so channel-scoped subscriptions observe the delete.
 pub fn build_delete_compat(
@@ -827,6 +843,103 @@ pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuild
     Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
 }
 
+// ── Serverless mode: direct addressable-event builders ──────────────────────
+//
+// In serverless mode there is no Sprout relay to process command events
+// (kind 9007 create-channel, 41010 dm-open) and materialize the resulting
+// addressable metadata. The client builds those addressable events itself and
+// publishes them straight to the generic relay. The shapes here must match
+// what `nostr_convert::channel_info_from_event` expects to parse back.
+//
+// - kind 39000 — channel metadata: `d`=channel_id, `name`, `about`, `t`=type,
+//   `public`/`private`/`hidden`, and `p`=participants for DMs.
+// - kind 39002 — channel membership: `d`=channel_id, one `p` per member.
+//   `get_channels` finds a user's channels via {kinds:[39002], #p:[me]}.
+
+/// Kind 39000 — channel metadata, published directly (serverless mode).
+pub fn build_channel_metadata_serverless(
+    channel_id: &str,
+    name: &str,
+    visibility: &str,
+    channel_type: &str,
+    about: Option<&str>,
+    participants: &[String],
+) -> Result<EventBuilder, String> {
+    let mut tags = vec![
+        tag(vec!["d", channel_id])?,
+        tag(vec!["name", name])?,
+        tag(vec!["t", channel_type])?,
+    ];
+
+    match visibility {
+        "open" => tags.push(tag(vec!["public"])?),
+        "private" => tags.push(tag(vec!["private"])?),
+        other => return Err(format!("invalid visibility: {other}")),
+    }
+
+    if channel_type == "dm" {
+        tags.push(tag(vec!["hidden"])?);
+    }
+
+    if let Some(a) = about {
+        if !a.is_empty() {
+            tags.push(tag(vec!["about", a])?);
+        }
+    }
+
+    for pk in participants {
+        check_pubkey(pk)?;
+        tags.push(tag(vec!["p", &pk.to_ascii_lowercase()])?);
+    }
+
+    // `.allow_self_tagging()`: DM-to-self / self-participant channels p-tag the
+    // signer; nostr 0.44 would otherwise strip it. See
+    // build_channel_members_serverless for the full rationale.
+    Ok(EventBuilder::new(Kind::Custom(39000), "")
+        .tags(tags)
+        .allow_self_tagging())
+}
+
+/// Kind 39002 — channel membership, published directly (serverless mode).
+///
+/// One addressable event per channel (`d`=channel_id) listing all members as
+/// `p` tags. Replaceable: re-publishing supersedes the previous member list.
+pub fn build_channel_members_serverless(
+    channel_id: &str,
+    member_pubkeys: &[String],
+) -> Result<EventBuilder, String> {
+    // Default role for plain pubkey input. Callers that need explicit roles
+    // (e.g. marking the creator as owner) should use
+    // `build_channel_members_serverless_with_roles`.
+    let with_roles: Vec<(String, String)> = member_pubkeys
+        .iter()
+        .map(|pk| (pk.clone(), "member".to_string()))
+        .collect();
+    build_channel_members_serverless_with_roles(channel_id, &with_roles)
+}
+
+/// Build a kind:39002 channel-members event preserving each member's role.
+/// Roles are stored as the 4th element of the `p` tag (`["p", pubkey, "",
+/// role]`), the NIP-29 convention that `channel_members_from_event` reads.
+pub fn build_channel_members_serverless_with_roles(
+    channel_id: &str,
+    members: &[(String, String)],
+) -> Result<EventBuilder, String> {
+    let mut tags = vec![tag(vec!["d", channel_id])?];
+    for (pk, role) in members {
+        check_pubkey(pk)?;
+        // ["p", pubkey, <relay-hint = "">, role] — relay hint left blank.
+        tags.push(tag(vec!["p", &pk.to_ascii_lowercase(), "", role])?);
+    }
+    // `.allow_self_tagging()` is REQUIRED: when a user creates/joins a channel
+    // they p-tag themselves (the signer). nostr 0.44 strips self-`p` tags by
+    // default, which would publish an empty member list and break the
+    // get_channels `#p:[me]` membership query → "join to participate" forever.
+    Ok(EventBuilder::new(Kind::Custom(39002), "")
+        .tags(tags)
+        .allow_self_tagging())
+}
+
 // ── Transport ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -907,5 +1020,171 @@ mod tests {
         assert_eq!(tags[2], vec!["reason", "returned"]);
         assert_eq!(tags.len(), 3, "self unarchive must not carry auth tag");
         assert_eq!(event.pubkey.to_hex(), TARGET_HEX);
+    }
+
+    // ── Serverless builders ──────────────────────────────────────────────────
+
+    const PK_A: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+    const PK_B: &str = "4d2e3f4a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60";
+
+    fn sign(builder: EventBuilder) -> nostr::Event {
+        builder.sign_with_keys(&Keys::generate()).unwrap()
+    }
+
+    #[test]
+    fn serverless_channel_metadata_open_stream() {
+        let event = sign(
+            build_channel_metadata_serverless(
+                "chan-1",
+                "general",
+                "open",
+                "stream",
+                Some("the main channel"),
+                &[],
+            )
+            .unwrap(),
+        );
+        assert_eq!(event.kind, Kind::Custom(39000));
+        let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert!(tags.contains(&vec!["d".into(), "chan-1".into()]));
+        assert!(tags.contains(&vec!["name".into(), "general".into()]));
+        assert!(tags.contains(&vec!["t".into(), "stream".into()]));
+        assert!(tags.contains(&vec!["public".into()]));
+        assert!(tags.contains(&vec!["about".into(), "the main channel".into()]));
+        // Not a DM: must not be hidden.
+        assert!(!tags
+            .iter()
+            .any(|t| t.first().map(String::as_str) == Some("hidden")));
+    }
+
+    #[test]
+    fn serverless_channel_metadata_dm_is_hidden_and_private() {
+        let event = sign(
+            build_channel_metadata_serverless(
+                "dm-1",
+                "Direct message",
+                "private",
+                "dm",
+                None,
+                &[PK_A.to_string()],
+            )
+            .unwrap(),
+        );
+        let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert!(tags.contains(&vec!["t".into(), "dm".into()]));
+        assert!(tags.contains(&vec!["private".into()]));
+        assert!(tags.contains(&vec!["hidden".into()]));
+        assert!(tags.contains(&vec!["p".into(), PK_A.to_string()]));
+    }
+
+    #[test]
+    fn serverless_channel_metadata_rejects_bad_visibility() {
+        let result = build_channel_metadata_serverless("c", "n", "weird", "stream", None, &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn serverless_members_lists_all_pubkeys() {
+        let event = sign(
+            build_channel_members_serverless("chan-1", &[PK_A.to_string(), PK_B.to_string()])
+                .unwrap(),
+        );
+        assert_eq!(event.kind, Kind::Custom(39002));
+        let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert_eq!(tags[0], vec!["d".to_string(), "chan-1".to_string()]);
+        // p tags now carry a role at index 3: ["p", pubkey, "", role].
+        assert!(tags
+            .iter()
+            .any(|t| t.first().map(String::as_str) == Some("p")
+                && t.get(1) == Some(&PK_A.to_string())));
+        assert!(tags
+            .iter()
+            .any(|t| t.first().map(String::as_str) == Some("p")
+                && t.get(1) == Some(&PK_B.to_string())));
+    }
+
+    #[test]
+    fn serverless_members_keeps_self_p_tag() {
+        // Regression: when a user joins/creates a channel they p-tag THEMSELVES
+        // (the signer). nostr 0.44 strips self-`p` tags unless
+        // `.allow_self_tagging()` is set — which previously published an empty
+        // member list and broke the get_channels `#p:[me]` query, leaving the
+        // UI stuck on "join to participate". This guards that fix.
+        let keys = Keys::generate();
+        let me = keys.public_key().to_hex();
+        let event = build_channel_members_serverless("chan-self", std::slice::from_ref(&me))
+            .unwrap()
+            .sign_with_keys(&keys)
+            .unwrap();
+        let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert!(
+            tags.iter()
+                .any(|t| t.first().map(String::as_str) == Some("p") && t.get(1) == Some(&me)),
+            "self p-tag was stripped — .allow_self_tagging() missing; tags={tags:?}"
+        );
+    }
+
+    #[test]
+    fn serverless_delete_channel_targets_addressable_coords() {
+        // Deletion must reference both the 39000 metadata and 39002 members
+        // addressable coordinates so a generic relay drops them.
+        let event = sign(build_delete_channel_serverless("chan-del", PK_A).unwrap());
+        assert_eq!(event.kind, Kind::Custom(5));
+        let coords: Vec<String> = event
+            .tags
+            .iter()
+            .filter_map(|t| {
+                let s = t.as_slice();
+                (s.first().map(String::as_str) == Some("a"))
+                    .then(|| s.get(1).cloned())
+                    .flatten()
+            })
+            .collect();
+        assert!(coords.contains(&format!("39000:{PK_A}:chan-del")));
+        assert!(coords.contains(&format!("39002:{PK_A}:chan-del")));
+    }
+
+    #[test]
+    fn serverless_members_with_roles_records_owner() {
+        // The creator must be recorded as `owner` (4th element of the p tag) so
+        // the members UI shows them as a manager and the invite card appears.
+        let event = sign(
+            build_channel_members_serverless_with_roles(
+                "chan-r",
+                &[(PK_A.to_string(), "owner".to_string())],
+            )
+            .unwrap(),
+        );
+        let p = event
+            .tags
+            .iter()
+            .map(|t| t.as_slice().to_vec())
+            .find(|t| t.first().map(String::as_str) == Some("p"))
+            .expect("a p tag");
+        assert_eq!(p.get(1), Some(&PK_A.to_string()));
+        assert_eq!(p.get(3), Some(&"owner".to_string()), "role must be owner");
+    }
+
+    #[test]
+    fn serverless_metadata_keeps_self_p_tag() {
+        // Same self-tagging hazard for DM/self-participant 39000 metadata.
+        let keys = Keys::generate();
+        let me = keys.public_key().to_hex();
+        let event = build_channel_metadata_serverless(
+            "dm-self",
+            "DM",
+            "private",
+            "dm",
+            None,
+            std::slice::from_ref(&me),
+        )
+        .unwrap()
+        .sign_with_keys(&keys)
+        .unwrap();
+        let tags: Vec<Vec<String>> = event.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert!(
+            tags.contains(&vec!["p".into(), me.clone()]),
+            "self p-tag stripped from 39000 metadata; tags={tags:?}"
+        );
     }
 }

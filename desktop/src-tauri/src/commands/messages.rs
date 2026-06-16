@@ -1,5 +1,6 @@
 use nostr::{Event, EventId, Keys, PublicKey};
 use tauri::{AppHandle, State};
+use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
@@ -13,6 +14,151 @@ use crate::{
     nostr_convert,
     relay::{query_relay, submit_event, submit_event_with_keys},
 };
+
+// ── Encrypted channel routing (serverless private channels + DMs) ────────────
+//
+// In serverless mode a "private" channel or DM is made private by encryption,
+// not server access control. When a channel is encrypted, outbound messages
+// are NIP-17 gift-wrapped to every member (see crate::encrypted) instead of
+// published as plaintext kind:9 events.
+
+/// Whether the given channel must be encrypted: serverless mode AND the channel
+/// is a DM or has `private` visibility. Returns the member pubkeys (hex) to
+/// encrypt to (always including the sender) when encrypted, else `None`.
+async fn encrypted_recipients(
+    state: &AppState,
+    channel_id: &str,
+) -> Result<Option<Vec<String>>, String> {
+    if !state.is_serverless() {
+        return Ok(None);
+    }
+
+    let meta = query_relay(
+        state,
+        &[serde_json::json!({"kinds":[39000],"#d":[channel_id],"limit":1})],
+    )
+    .await?;
+    let Some(meta) = meta.first() else {
+        return Ok(None);
+    };
+    let info = nostr_convert::channel_info_from_event(meta, None, None)?;
+    let encrypted = info.channel_type == "dm" || info.visibility == "private";
+    if !encrypted {
+        return Ok(None);
+    }
+
+    // Members come from the kind:39002 list. 39002 is ADDRESSABLE: different
+    // relays may hold different versions (and a multi-relay merge returns them
+    // all), so pick the NEWEST by created_at — never an arbitrary `.first()`,
+    // which could be a stale/empty copy and silently drop real members.
+    // (No `limit:1`: we want every relay's copy so the merge can pick the
+    // latest; capping at 1 per relay is fine but selection must be by recency.)
+    let member_events = query_relay(
+        state,
+        &[serde_json::json!({"kinds":[39002],"#d":[channel_id]})],
+    )
+    .await?;
+    let newest = member_events
+        .iter()
+        .max_by_key(|ev| ev.created_at.as_secs());
+    let mut members: Vec<String> = newest
+        .map(|ev| {
+            ev.tags
+                .iter()
+                .filter_map(|t| {
+                    let s = t.as_slice();
+                    if s.len() >= 2 && s[0] == "p" {
+                        Some(s[1].to_ascii_lowercase())
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let me = {
+        let keys = state.keys.lock().map_err(|e| e.to_string())?;
+        keys.public_key().to_hex()
+    };
+
+    // Fail LOUDLY rather than silently encrypting to only ourselves. An
+    // encrypted channel with no other members means the 39002 lookup came back
+    // empty (relay hiccup / propagation lag) — encrypting to just `me` would
+    // make the message undeliverable to everyone else (e.g. the agent) with no
+    // visible error. Surface it so the caller can retry instead of dropping it.
+    let others: Vec<&String> = members.iter().filter(|p| *p != &me).collect();
+    if others.is_empty() {
+        return Err(format!(
+            "could not resolve members for encrypted channel {channel_id} \
+             (kind:39002 lookup returned no other participants — relay may be \
+             lagging; try again)"
+        ));
+    }
+
+    if !members.contains(&me) {
+        members.push(me);
+    }
+    members.sort();
+    members.dedup();
+    Ok(Some(members))
+}
+
+/// Build a kind:9 message rumor, gift-wrap it to every member, and publish all
+/// wraps. Returns the inner rumor's event id (stable across recipients) so the
+/// UI can reference the logical message.
+async fn send_encrypted_message(
+    state: &AppState,
+    channel_id: Uuid,
+    content: &str,
+    thread_ref: Option<&events::ThreadRef>,
+    mention_refs: &[&str],
+    media: &[Vec<String>],
+    members_hex: &[String],
+) -> Result<String, String> {
+    let keys = {
+        let guard = state.keys.lock().map_err(|e| e.to_string())?;
+        guard.clone()
+    };
+
+    // The rumor is a normal kind:9 channel message (with the `h` tag and any
+    // NIP-10 thread tags), so once unwrapped it renders through the standard
+    // message pipeline — including threaded replies.
+    let builder = events::build_message(
+        channel_id,
+        content,
+        thread_ref,
+        mention_refs,
+        media,
+        &[],
+        &[],
+    )?;
+    let rumor = builder.build(keys.public_key());
+    let rumor_id = rumor.id.map(|id| id.to_hex()).unwrap_or_default();
+
+    let mut recipients = Vec::with_capacity(members_hex.len());
+    for hex in members_hex {
+        let pk = nostr::PublicKey::from_hex(hex)
+            .map_err(|e| format!("invalid member pubkey {hex}: {e}"))?;
+        recipients.push(pk);
+    }
+
+    let wraps = crate::encrypted::build_gift_wraps(&keys, rumor, &recipients).await?;
+
+    let relay_urls = crate::relay::relay_ws_urls_with_override(state);
+    let mut published = 0;
+    let mut last_err = None;
+    for wrap in &wraps {
+        match crate::ws_relay::publish_signed_event_ws(state, wrap, &keys, &relay_urls).await {
+            Ok(()) => published += 1,
+            Err(e) => last_err = Some(e),
+        }
+    }
+    if published == 0 {
+        return Err(last_err.unwrap_or_else(|| "failed to publish any gift wrap".to_string()));
+    }
+    Ok(rumor_id)
+}
 
 // ── Reads (pure-nostr) ──────────────────────────────────────────────────────
 
@@ -265,8 +411,10 @@ async fn resolve_thread_ref(
     })
 }
 
-#[tauri::command]
+// Tauri commands take flat args (each maps to a JS object field), so a high
+// arg count is idiomatic here rather than a struct.
 #[allow(clippy::too_many_arguments)]
+#[tauri::command]
 pub async fn send_channel_message(
     channel_id: String,
     content: String,
@@ -276,6 +424,11 @@ pub async fn send_channel_message(
     mention_tags: Option<Vec<Vec<String>>>,
     mention_pubkeys: Option<Vec<String>>,
     kind: Option<u32>,
+    // Thread root for encrypted replies. In an encrypted channel the parent is
+    // a gift-wrapped rumor not queryable in plaintext, so the caller resolves
+    // the root locally (from decrypted messages) and passes it here. Ignored on
+    // the plaintext path (which resolves the root via `resolve_thread_ref`).
+    root_event_id: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
@@ -286,6 +439,63 @@ pub async fn send_channel_message(
     let emoji = emoji_tags.unwrap_or_default();
     let mention_refs_only = mention_tags.unwrap_or_default();
     let kind_num = kind.unwrap_or(buzz_core_pkg::kind::KIND_STREAM_MESSAGE);
+
+    // Encrypted serverless channels (DM / private): gift-wrap to all members.
+    // Only plain messages (kind 9) are encrypted; forum posts/comments fall
+    // through to the plaintext path (private forums aren't a serverless model).
+    // Replies ARE encrypted too: the NIP-10 thread tags live INSIDE the rumor
+    // (the encrypted inner event), so threading is preserved without leaking
+    // the reply as plaintext to the relays.
+    if kind_num == buzz_core_pkg::kind::KIND_STREAM_MESSAGE {
+        let recip = encrypted_recipients(&state, &channel_id).await?;
+        eprintln!(
+            "sprout-desktop: [serverless] send to {channel_id}: encrypted_recipients = {:?}",
+            recip.as_ref().map(|m| m.len())
+        );
+        if let Some(members) = recip {
+            // Build the in-rumor thread ref from caller-supplied ids (no relay
+            // lookup — the parent rumor isn't stored plaintext on the relay).
+            let thread_ref = match &parent_event_id {
+                Some(parent) => {
+                    let parent_eid = EventId::from_hex(parent)
+                        .map_err(|e| format!("invalid parent event ID: {e}"))?;
+                    let root_eid = match &root_event_id {
+                        Some(root) if root != parent => EventId::from_hex(root)
+                            .map_err(|e| format!("invalid root event ID: {e}"))?,
+                        _ => parent_eid,
+                    };
+                    Some(events::ThreadRef {
+                        root_event_id: root_eid,
+                        parent_event_id: parent_eid,
+                    })
+                }
+                None => None,
+            };
+            let depth = match (&parent_event_id, &root_event_id) {
+                (None, _) => 0,
+                (Some(p), Some(r)) if p == r => 1,
+                (Some(_), Some(_)) => 2,
+                (Some(_), None) => 1,
+            };
+            let rumor_id = send_encrypted_message(
+                &state,
+                channel_uuid,
+                content.trim(),
+                thread_ref.as_ref(),
+                &mention_refs,
+                &media,
+                &members,
+            )
+            .await?;
+            return Ok(SendChannelMessageResponse {
+                event_id: rumor_id,
+                root_event_id: thread_ref.as_ref().map(|t| t.root_event_id.to_hex()),
+                parent_event_id: parent_event_id.clone(),
+                depth,
+                created_at: chrono::Utc::now().timestamp(),
+            });
+        }
+    }
 
     let mut resolved_root: Option<String> = None;
 

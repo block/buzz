@@ -59,6 +59,9 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout for the TCP + WebSocket handshake in `do_connect`.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Timeout for a one-shot serverless WS query/publish (REQ→EOSE / EVENT→OK).
+const QUERY_WS_TIMEOUT: Duration = Duration::from_secs(10);
+
 use std::time::Instant;
 
 use buzz_core::kind::{
@@ -99,6 +102,22 @@ pub struct RestClient {
     pub keys: Keys,
     /// Optional NIP-OA auth tag JSON for `x-auth-tag` header (relay membership delegation).
     pub auth_tag_json: Option<String>,
+    /// Serverless mode: talk to a generic public Nostr relay over plain
+    /// WebSocket instead of the Sprout HTTP bridge (`/query`, `/events`).
+    /// When true, `base_url` is ignored and `ws_url` is used. See
+    /// docs/SPROUT_LITE_MODE.md.
+    pub serverless: bool,
+    /// WebSocket URLs of the relays (used only in serverless mode). In
+    /// serverless we fan out across ALL relays: queries merge+dedup results
+    /// and publishes succeed if ANY relay accepts. Relays don't gossip, so a
+    /// read must union every relay and a write must tolerate one relay being
+    /// down or rate-limiting — the standard Nostr client model (damus
+    /// `RelayPool`, nostr-tools `SimplePool`).
+    pub ws_urls: Vec<String>,
+    /// Shared serverless relay pool. When `Some`, `query`/`submit_event` use the
+    /// pool (auto-reconnect, multi-relay merge/dedup) instead of the hand-rolled
+    /// `query_ws`/`submit_event_ws`. `None` in server mode.
+    pub pool: Option<nostr_relay_pool::RelayPool>,
 }
 
 /// Whether an HTTP status code is retriable (transient server/rate-limit errors).
@@ -266,6 +285,22 @@ impl RestClient {
     /// Accepts a slice of `nostr::Filter` (serialized as JSON array).
     /// Returns the events as a `serde_json::Value` (JSON array of event objects).
     pub async fn query(&self, filters: &[nostr::Filter]) -> Result<Value, RelayError> {
+        if let Some(pool) = &self.pool {
+            let events = pool
+                .fetch_events(
+                    filters.to_vec(),
+                    std::time::Duration::from_secs(8),
+                    nostr_relay_pool::relay::ReqExitPolicy::ExitOnEOSE,
+                )
+                .await
+                .map_err(|e| RelayError::Http(format!("fetch failed: {e}")))?;
+            let events: Vec<Event> = events.into_iter().collect();
+            return serde_json::to_value(events)
+                .map_err(|e| RelayError::Http(format!("event serialize error: {e}")));
+        }
+        if self.serverless {
+            return self.query_ws(filters).await;
+        }
         let body_bytes = serde_json::to_vec(filters)
             .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
         let resp = self.bridge_post("/query", &body_bytes).await?;
@@ -278,6 +313,16 @@ impl RestClient {
     ///
     /// The event must already be signed. Returns the relay response JSON.
     pub async fn submit_event(&self, event: &Event) -> Result<Value, RelayError> {
+        if let Some(pool) = &self.pool {
+            let output = pool
+                .send_event(event)
+                .await
+                .map_err(|e| RelayError::Http(format!("publish failed: {e}")))?;
+            return Ok(serde_json::json!({"accepted": !output.success.is_empty()}));
+        }
+        if self.serverless {
+            return self.submit_event_ws(event).await;
+        }
         let body_bytes = serde_json::to_vec(event)
             .map_err(|e| RelayError::Http(format!("event serialize error: {e}")))?;
         let resp = self.bridge_post("/events", &body_bytes).await?;
@@ -289,6 +334,311 @@ impl RestClient {
             return Ok(Value::Null);
         }
         serde_json::from_str(&text).map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    // ── Serverless WS transport ──────────────────────────────────────────
+
+    /// Query events over a plain WebSocket (serverless mode): open a socket,
+    /// send `REQ`, collect `EVENT`s until `EOSE`, then `CLOSE`. Answers a
+    /// NIP-42 AUTH challenge if the relay sends one. Returns a JSON array of
+    /// event objects (same shape as the HTTP `/query` bridge).
+    async fn query_ws(&self, filters: &[nostr::Filter]) -> Result<Value, RelayError> {
+        // Fan out across all relays, merge results, dedup by event id. Relays
+        // don't gossip — a complete read must union every relay. A single
+        // relay failing (503, connect error) does NOT fail the whole query as
+        // long as at least one relay answered.
+        let mut by_id: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        let mut last_err: Option<RelayError> = None;
+        let mut any_ok = false;
+        for relay in &self.ws_urls {
+            match self.query_ws_one(relay, filters).await {
+                Ok(events) => {
+                    any_ok = true;
+                    for ev in events {
+                        if let Some(id) = ev.get("id").and_then(|v| v.as_str()) {
+                            by_id.entry(id.to_string()).or_insert(ev);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("query relay failed (continuing): {e}");
+                    last_err = Some(e);
+                }
+            }
+        }
+        if !any_ok {
+            return Err(last_err.unwrap_or(RelayError::ConnectionClosed));
+        }
+        Ok(Value::Array(by_id.into_values().collect()))
+    }
+
+    /// Query a single relay over plain WS (serverless mode): REQ → collect
+    /// EVENTs until EOSE → CLOSE. Answers a NIP-42 AUTH challenge if sent.
+    async fn query_ws_one(
+        &self,
+        relay: &str,
+        filters: &[nostr::Filter],
+    ) -> Result<Vec<Value>, RelayError> {
+        use futures_util::{SinkExt, StreamExt};
+
+        let parsed = relay
+            .parse::<url::Url>()
+            .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
+        let (ws, _) = timeout(CONNECT_TIMEOUT, connect_async(parsed.as_str()))
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)?
+            .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
+        let (mut write, mut read) = ws.split();
+
+        let sub_id = format!("acp-q-{}", uuid::Uuid::new_v4());
+        let mut req = vec![Value::String("REQ".into()), Value::String(sub_id.clone())];
+        for f in filters {
+            req.push(serde_json::to_value(f).map_err(|e| RelayError::Http(e.to_string()))?);
+        }
+        write
+            .send(Message::Text(Value::Array(req).to_string().into()))
+            .await
+            .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
+
+        let mut events: Vec<Value> = Vec::new();
+        let collect = timeout(QUERY_WS_TIMEOUT, async {
+            loop {
+                let raw = match read.next().await {
+                    Some(Ok(m)) => m,
+                    Some(Err(e)) => return Err(RelayError::WebSocket(Box::new(e))),
+                    None => return Err(RelayError::ConnectionClosed),
+                };
+                let Message::Text(text) = raw else { continue };
+                let Ok(arr) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
+                let Some(arr) = arr.as_array() else { continue };
+                let Some(tag) = arr.first().and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let sub_matches = arr.get(1).and_then(|v| v.as_str()) == Some(sub_id.as_str());
+                match tag {
+                    "EVENT" if sub_matches => {
+                        if let Some(ev) = arr.get(2) {
+                            events.push(ev.clone());
+                        }
+                    }
+                    "EOSE" if sub_matches => return Ok(()),
+                    "CLOSED" if sub_matches => return Ok(()),
+                    "AUTH" => {
+                        if let Some(challenge) = arr.get(1).and_then(|v| v.as_str()) {
+                            if let Ok(json) = self.ws_auth_message(relay, challenge) {
+                                let _ = write.send(Message::Text(json.into())).await;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        let _ = write
+            .send(Message::Text(
+                Value::Array(vec!["CLOSE".into(), sub_id.into()])
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        let _ = write.close().await;
+
+        // Timeout or early close → return whatever arrived (public relays are
+        // often slow to EOSE; partial results beat a hard failure).
+        match collect {
+            Ok(Ok(())) | Err(_) => Ok(events),
+            Ok(Err(e)) => {
+                if events.is_empty() {
+                    Err(e)
+                } else {
+                    Ok(events)
+                }
+            }
+        }
+    }
+
+    /// Publish a signed event over a plain WebSocket (serverless mode) and wait
+    /// for the relay's `OK`. Answers a NIP-42 AUTH challenge if sent.
+    async fn submit_event_ws(&self, event: &Event) -> Result<Value, RelayError> {
+        // Fan out to every relay; succeed if ANY accepts. This makes the
+        // agent's replies resilient to a single relay rate-limiting ("noting
+        // too much") or being down — exactly what the desktop relay pool does.
+        //
+        // Rate-limits are transient: if a full fan-out pass fails ONLY because
+        // every healthy relay rate-limited us (no hard rejection, no success),
+        // we back off and retry the whole pass. The agent's reply is the one
+        // write that must not silently vanish — dropping it makes the agent
+        // look dead even though everything upstream worked. Hard rejections
+        // (bad event, restricted) are NOT retried; they won't change.
+        let event_id = event.id.to_hex();
+        // Backoffs between full fan-out passes. `None` is the final pass with no
+        // further retry, so the loop runs `RETRY_BACKOFFS_MS.len() + 1` times.
+        const RETRY_BACKOFFS_MS: [u64; 3] = [800, 2000, 4000];
+        let backoffs: Vec<Option<u64>> = RETRY_BACKOFFS_MS
+            .iter()
+            .map(|ms| Some(*ms))
+            .chain(std::iter::once(None))
+            .collect();
+
+        for next_backoff in backoffs {
+            let mut last_err: Option<RelayError> = None;
+            let mut all_rate_limited = true;
+            let mut tried_any = false;
+
+            for relay in &self.ws_urls {
+                match self.submit_event_ws_one(relay, event).await {
+                    Ok(v) => {
+                        let accepted = v.get("accepted").and_then(|b| b.as_bool()).unwrap_or(false);
+                        if accepted {
+                            return Ok(v);
+                        }
+                        let msg = v
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        tried_any = true;
+                        if !msg.contains("rate-limit") {
+                            // A hard rejection (restricted/invalid) won't change
+                            // on retry — don't keep hammering for it.
+                            all_rate_limited = false;
+                        }
+                        tracing::warn!("relay {relay} rejected event (trying next): {msg}");
+                        last_err = Some(RelayError::Http(format!("relay rejected: {msg}")));
+                    }
+                    Err(e) => {
+                        // Connect/IO errors (dead/paid relay) are not rate-limits;
+                        // retrying the whole pass won't revive them, so don't loop
+                        // forever on a list of dead relays.
+                        all_rate_limited = false;
+                        tracing::warn!("relay {relay} publish failed (trying next): {e}");
+                        last_err = Some(e);
+                    }
+                }
+            }
+
+            // Retry only when the sole reason for failure was rate-limiting and
+            // we actually got a rate-limit response from at least one relay, and
+            // there is another pass left.
+            if tried_any && all_rate_limited {
+                if let Some(backoff) = next_backoff {
+                    tracing::warn!(
+                        "all relays rate-limited event {event_id}; retrying in {backoff}ms"
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                    continue;
+                }
+            }
+
+            return Err(last_err.unwrap_or_else(|| {
+                RelayError::Http(format!("no relay accepted event {event_id}"))
+            }));
+        }
+
+        Err(RelayError::Http(format!(
+            "no relay accepted event {event_id} after retries"
+        )))
+    }
+
+    /// Publish a signed event to a single relay over plain WS (serverless mode)
+    /// and wait for the relay's `OK`. Answers a NIP-42 AUTH challenge if sent.
+    async fn submit_event_ws_one(&self, relay: &str, event: &Event) -> Result<Value, RelayError> {
+        use futures_util::{SinkExt, StreamExt};
+
+        let parsed = relay
+            .parse::<url::Url>()
+            .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
+        let (ws, _) = timeout(CONNECT_TIMEOUT, connect_async(parsed.as_str()))
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)?
+            .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
+        let (mut write, mut read) = ws.split();
+
+        let event_id = event.id.to_hex();
+        let event_msg = Value::Array(vec![
+            "EVENT".into(),
+            serde_json::to_value(event).map_err(|e| RelayError::Http(e.to_string()))?,
+        ])
+        .to_string();
+
+        write
+            .send(Message::Text(event_msg.clone().into()))
+            .await
+            .map_err(|e| RelayError::WebSocket(Box::new(e)))?;
+
+        let result = timeout(QUERY_WS_TIMEOUT, async {
+            loop {
+                let raw = match read.next().await {
+                    Some(Ok(m)) => m,
+                    Some(Err(e)) => return Err(RelayError::WebSocket(Box::new(e))),
+                    None => return Err(RelayError::ConnectionClosed),
+                };
+                let Message::Text(text) = raw else { continue };
+                let Ok(arr) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
+                let Some(arr) = arr.as_array() else { continue };
+                let Some(tag) = arr.first().and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                match tag {
+                    "OK" if arr.get(1).and_then(|v| v.as_str()) == Some(event_id.as_str()) => {
+                        let accepted = arr.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
+                        let message = arr
+                            .get(3)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        return Ok((accepted, message));
+                    }
+                    "AUTH" => {
+                        if let Some(challenge) = arr.get(1).and_then(|v| v.as_str()) {
+                            if let Ok(json) = self.ws_auth_message(relay, challenge) {
+                                let _ = write.send(Message::Text(json.into())).await;
+                                let _ = write.send(Message::Text(event_msg.clone().into())).await;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await;
+
+        let _ = write.close().await;
+
+        match result {
+            Ok(Ok((accepted, message))) => Ok(serde_json::json!({
+                "event_id": event_id,
+                "accepted": accepted,
+                "message": message,
+            })),
+            Ok(Err(e)) => Err(e),
+            // Best-effort: many relays accept silently or are slow to OK.
+            Err(_) => Ok(serde_json::json!({
+                "event_id": event_id,
+                "accepted": true,
+                "message": "published (no OK before timeout)",
+            })),
+        }
+    }
+
+    /// Build a NIP-42 `["AUTH", <event>]` message string for serverless writes.
+    fn ws_auth_message(&self, relay: &str, challenge: &str) -> Result<String, RelayError> {
+        let url = nostr::RelayUrl::parse(relay)
+            .map_err(|e| RelayError::Http(format!("invalid relay URL: {e}")))?;
+        let event = EventBuilder::auth(challenge.to_string(), url)
+            .sign_with_keys(&self.keys)
+            .map_err(|e| RelayError::Http(format!("auth sign error: {e}")))?;
+        Ok(Value::Array(vec![
+            "AUTH".into(),
+            serde_json::to_value(&event).map_err(|e| RelayError::Http(e.to_string()))?,
+        ])
+        .to_string())
     }
 }
 
@@ -367,11 +717,18 @@ enum RelayMessage {
 // ── Commands sent from HarnessRelay to the background task ───────────────────
 
 /// Subscription ID for the global membership notification subscription.
-const MEMBERSHIP_NOTIF_SUB_ID: &str = "membership-notif";
+pub(crate) const MEMBERSHIP_NOTIF_SUB_ID: &str = "membership-notif";
 /// Subscription ID for encrypted owner-to-agent observer control frames.
-const OBSERVER_CONTROL_SUB_ID: &str = "agent-observer-control";
+pub(crate) const OBSERVER_CONTROL_SUB_ID: &str = "agent-observer-control";
+/// Subscription ID for the agent's NIP-17 gift-wrap inbox (encrypted serverless
+/// private channels / DMs). The relay only stores `kind 1059` blobs addressed
+/// by `#p`; the agent unwraps each and routes the inner message by its `h` tag.
+pub(crate) const GIFT_WRAP_SUB_ID: &str = "agent-gift-wrap-inbox";
+/// NIP-59 gift wrap kind.
+const KIND_GIFT_WRAP: u16 = 1059;
 
 /// Commands sent from `HarnessRelay` to the background WebSocket task.
+#[derive(Clone)]
 enum RelayCommand {
     /// Subscribe to a channel (sends a NIP-01 REQ) with the given filter.
     Subscribe {
@@ -419,27 +776,52 @@ pub struct HarnessRelay {
     cmd_tx: mpsc::Sender<RelayCommand>,
     /// HTTP client for HTTP bridge calls.
     http: reqwest::Client,
-    /// WebSocket URL of the relay.
+    /// Primary relay URL (first in the list). Used for HTTP-bridge (server)
+    /// mode and as a display label.
     relay_url: String,
+    /// Full relay list (serverless mode). Reads/writes fan out across all of
+    /// these — see `RestClient` for the merge/first-accepts semantics.
+    relay_urls: Vec<String>,
     /// Keys used for NIP-42 signing and NIP-98 HTTP auth.
     keys: Keys,
     /// Optional NIP-OA auth tag for relay membership delegation.
     auth_tag: Option<nostr::Tag>,
-    /// Handle to the background task (for clean shutdown).
-    /// Wrapped in `Option` so `shutdown()` can take ownership without conflicting
-    /// with `Drop` (which only has `&mut self`).
-    bg_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Serverless mode: generic relay, plain-WS reads/writes, AUTH optional.
+    serverless: bool,
+    /// Recently-seen event ids for cross-relay dedup. The same event arrives
+    /// from every relay it's stored on (standard Nostr — relays don't gossip,
+    /// so clients publish-to-many + read-from-many + dedup, like damus's
+    /// `RelayPool.seenEvents`). Bounded ring buffer.
+    seen_event_ids: std::collections::VecDeque<nostr::EventId>,
+    /// Handles to all background tasks (one per relay + the command fan-out),
+    /// for clean shutdown.
+    bg_handles: Vec<tokio::task::JoinHandle<()>>,
+    /// Serverless backend (nostr-relay-pool). When `Some`, all subscribe /
+    /// query / publish / next_event calls dispatch here instead of the
+    /// hand-rolled background-task path above. Built only in serverless mode;
+    /// server mode leaves this `None` and uses the original code unchanged.
+    serverless_backend: Option<crate::serverless_relay::ServerlessRelay>,
 }
 
-/// Cloneable publisher handle for signed events on the relay background socket.
+/// Cloneable publisher handle for signed events. In server mode it sends to the
+/// relay background task via `cmd_tx`; in serverless it publishes through the
+/// shared `RelayPool` (clone-cheap, Arc inside).
 #[derive(Clone)]
 pub struct RelayEventPublisher {
     cmd_tx: mpsc::Sender<RelayCommand>,
+    pool: Option<nostr_relay_pool::RelayPool>,
 }
 
 impl RelayEventPublisher {
-    /// Publish a signed event through the relay background task.
+    /// Publish a signed event through the relay background task (server) or the
+    /// pool (serverless).
     pub async fn publish_event(&self, event: Event) -> Result<(), RelayError> {
+        if let Some(pool) = &self.pool {
+            pool.send_event(&event)
+                .await
+                .map_err(|e| RelayError::Http(format!("publish failed: {e}")))?;
+            return Ok(());
+        }
         self.cmd_tx
             .send(RelayCommand::PublishEvent {
                 event: Box::new(event),
@@ -452,45 +834,169 @@ impl RelayEventPublisher {
 impl HarnessRelay {
     // ── Public API ────────────────────────────────────────────────────────────
 
-    /// Connect to relay and authenticate via NIP-42.
+    /// Connect to the relay, optionally in serverless mode (generic relay, AUTH
+    /// optional, plain-WS reads/writes). In server mode (`serverless = false`)
+    /// the NIP-42 AUTH handshake is performed; in serverless mode it is skipped.
     ///
     /// `auth_tag` is an optional NIP-OA owner attestation included in the AUTH
     /// event for relay membership delegation.
-    pub async fn connect(
+    pub async fn connect_with_mode(
         relay_url: &str,
         keys: &Keys,
         agent_pubkey_hex: &str,
         auth_tag: Option<nostr::Tag>,
+        serverless: bool,
     ) -> Result<Self, RelayError> {
-        // Perform the initial connection and auth handshake.
-        // Finding #8: capture the handshake buffer and pass it to the background
-        // task so buffered messages aren't silently discarded.
-        let (ws, handshake_buffer) = do_connect(relay_url, keys, auth_tag.as_ref()).await?;
+        // Serverless: delegate the entire relay layer to nostr-relay-pool
+        // (persistent multi-relay REQ + auto-reconnect + auto-resubscribe +
+        // merge/dedup). The hand-rolled background-task path below is used ONLY
+        // for server mode (NIP-42 AUTH against the Sprout relay).
+        if serverless {
+            let backend = crate::serverless_relay::ServerlessRelay::connect(
+                relay_url,
+                keys,
+                agent_pubkey_hex,
+            )
+            .await?;
+            let relay_urls = backend.relay_urls().to_vec();
+            let primary = relay_urls
+                .first()
+                .cloned()
+                .unwrap_or_else(|| relay_url.to_string());
+            // Unused channels/clients in serverless mode — the backend owns the
+            // real streams. We keep the struct shape uniform.
+            let (_dead_event_tx, event_rx) = mpsc::channel::<Option<BuzzEvent>>(1);
+            let (cmd_tx, _dead_cmd_rx) = mpsc::channel::<RelayCommand>(1);
+            return Ok(Self {
+                event_rx,
+                observer_control_rx: None,
+                cmd_tx,
+                http: reqwest::Client::new(),
+                relay_url: primary,
+                relay_urls,
+                keys: keys.clone(),
+                auth_tag,
+                serverless,
+                seen_event_ids: std::collections::VecDeque::new(),
+                bg_handles: Vec::new(),
+                serverless_backend: Some(backend),
+            });
+        }
+
+        // Serverless workspaces pass a comma-separated relay LIST
+        // (`wss://a,wss://b,...`). Connect to ALL of them and merge — this is
+        // the standard Nostr client pattern (damus `RelayPool`, nostr-tools
+        // `SimplePool`): relays don't gossip, so a client must subscribe to
+        // every relay and dedup, otherwise a message stored on relay B is
+        // invisible to a subscriber on relay A. Server mode passes a single URL.
+        let relay_urls: Vec<String> = relay_url
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let primary = relay_urls
+            .first()
+            .cloned()
+            .unwrap_or_else(|| relay_url.to_string());
 
         let (event_tx, event_rx) = mpsc::channel::<Option<BuzzEvent>>(event_channel_capacity());
         let (observer_control_tx, observer_control_rx) =
             mpsc::channel::<Event>(event_channel_capacity());
-        let (cmd_tx, cmd_rx) = mpsc::channel::<RelayCommand>(CMD_CHANNEL_CAPACITY);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<RelayCommand>(CMD_CHANNEL_CAPACITY);
 
-        let bg_keys = keys.clone();
-        let bg_relay_url = relay_url.to_string();
-        let bg_agent_pubkey_hex = agent_pubkey_hex.to_string();
-        let bg_auth_tag = auth_tag.clone();
+        // Connect to each relay; spawn one background task per relay sharing the
+        // same `event_tx` (events merge into one stream). Each task gets its own
+        // command channel; a fan-out task clones every command to all relays.
+        let mut per_relay_cmd_tx: Vec<mpsc::Sender<RelayCommand>> = Vec::new();
+        let mut bg_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        let mut connected_any = false;
+        let mut last_err: Option<RelayError> = None;
+        // Only the relays we actually connected to are usable for reads/writes.
+        // A relay that refuses the WebSocket handshake (403 Forbidden / paid /
+        // unreachable) will never serve this session — keeping it in the
+        // working set just makes discovery and publish waste time on it and,
+        // worse, can leave the agent's reply with no healthy relay to fail over
+        // to. Prune them up front.
+        let mut connected_urls: Vec<String> = Vec::new();
 
-        let bg_handle = tokio::spawn(async move {
-            run_background_task(
-                ws,
-                handshake_buffer,
-                event_tx,
-                observer_control_tx,
-                cmd_rx,
-                bg_keys,
-                bg_relay_url,
-                bg_agent_pubkey_hex,
-                bg_auth_tag,
-            )
-            .await;
+        for url in &relay_urls {
+            let (ws, handshake_buffer) =
+                match do_connect(url, keys, auth_tag.as_ref(), serverless).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("relay {url}: connect failed: {e}");
+                        last_err = Some(e);
+                        continue;
+                    }
+                };
+            connected_any = true;
+            connected_urls.push(url.clone());
+
+            let (task_cmd_tx, task_cmd_rx) = mpsc::channel::<RelayCommand>(CMD_CHANNEL_CAPACITY);
+            per_relay_cmd_tx.push(task_cmd_tx);
+
+            // Only the primary relay forwards observer-control frames (they're
+            // addressed to the agent and identical across relays; dedup keeps
+            // one). Secondary relays use a throwaway sender.
+            let obs_tx = observer_control_tx.clone();
+            let bg_keys = keys.clone();
+            let bg_relay_url = url.clone();
+            let bg_agent_pubkey_hex = agent_pubkey_hex.to_string();
+            let bg_auth_tag = auth_tag.clone();
+            let bg_event_tx = event_tx.clone();
+
+            let handle = tokio::spawn(async move {
+                run_background_task(
+                    ws,
+                    handshake_buffer,
+                    bg_event_tx,
+                    obs_tx,
+                    task_cmd_rx,
+                    bg_keys,
+                    bg_relay_url,
+                    bg_agent_pubkey_hex,
+                    bg_auth_tag,
+                    serverless,
+                )
+                .await;
+            });
+            bg_handles.push(handle);
+        }
+
+        if !connected_any {
+            return Err(last_err.unwrap_or(RelayError::ConnectionClosed));
+        }
+
+        // Reads/writes fan out only over relays that actually connected.
+        let working_urls = if connected_urls.is_empty() {
+            relay_urls.clone()
+        } else {
+            connected_urls
+        };
+        // Prefer a connected relay as the primary/display label.
+        let primary = working_urls.first().cloned().unwrap_or(primary);
+        if working_urls.len() < relay_urls.len() {
+            tracing::info!(
+                "serverless: using {}/{} relays that connected: {}",
+                working_urls.len(),
+                relay_urls.len(),
+                working_urls.join(", ")
+            );
+        }
+
+        // Command fan-out: clone each command to every relay's task.
+        let fanout_handle = tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                let is_shutdown = matches!(cmd, RelayCommand::Shutdown);
+                for tx in &per_relay_cmd_tx {
+                    let _ = tx.send(cmd.clone()).await;
+                }
+                if is_shutdown {
+                    break;
+                }
+            }
         });
+        bg_handles.push(fanout_handle);
 
         Ok(Self {
             event_rx,
@@ -501,10 +1007,14 @@ impl HarnessRelay {
                 .connect_timeout(std::time::Duration::from_secs(5))
                 .build()
                 .map_err(|e| RelayError::Http(format!("failed to build HTTP client: {e}")))?,
-            relay_url: relay_url.to_string(),
+            relay_url: primary,
+            relay_urls: working_urls,
             keys: keys.clone(),
             auth_tag,
-            bg_handle: Some(bg_handle),
+            serverless,
+            seen_event_ids: std::collections::VecDeque::new(),
+            bg_handles,
+            serverless_backend: None,
         })
     }
 
@@ -631,6 +1141,13 @@ impl HarnessRelay {
                 .auth_tag
                 .as_ref()
                 .and_then(|t| serde_json::to_string(t.as_slice()).ok()),
+            serverless: self.serverless,
+            ws_urls: if self.relay_urls.is_empty() {
+                vec![self.relay_url.clone()]
+            } else {
+                self.relay_urls.clone()
+            },
+            pool: self.serverless_backend.as_ref().map(|b| b.pool()),
         }
     }
 
@@ -658,6 +1175,9 @@ impl HarnessRelay {
         filter: ChannelFilter,
         replay_since: Option<u64>,
     ) -> Result<(), RelayError> {
+        if let Some(backend) = &self.serverless_backend {
+            return backend.subscribe_channel(channel_id, filter).await;
+        }
         self.cmd_tx
             .send(RelayCommand::Subscribe {
                 channel_id,
@@ -672,6 +1192,13 @@ impl HarnessRelay {
 
     /// Subscribe to membership notifications for this agent.
     pub async fn subscribe_membership_notifications(&mut self) -> Result<(), RelayError> {
+        if let Some(backend) = &self.serverless_backend {
+            // Generic relays don't emit Sprout's kind:44100 membership push
+            // (that's a server side effect). In serverless the harness relies
+            // on the periodic re-discovery loop instead — nothing to subscribe.
+            // Still subscribe the gift-wrap inbox so encrypted DMs/privates work.
+            return backend.subscribe_gift_wrap().await;
+        }
         self.cmd_tx
             .send(RelayCommand::SubscribeMembership)
             .await
@@ -681,6 +1208,10 @@ impl HarnessRelay {
 
     /// Subscribe to encrypted observer control frames addressed to this agent.
     pub async fn subscribe_observer_controls(&mut self) -> Result<(), RelayError> {
+        if self.serverless_backend.is_some() {
+            // Observer controls are a Sprout-relay feature; no-op in serverless.
+            return Ok(());
+        }
         self.cmd_tx
             .send(RelayCommand::SubscribeObserverControls)
             .await
@@ -697,11 +1228,16 @@ impl HarnessRelay {
     pub fn event_publisher(&self) -> RelayEventPublisher {
         RelayEventPublisher {
             cmd_tx: self.cmd_tx.clone(),
+            pool: self.serverless_backend.as_ref().map(|b| b.pool()),
         }
     }
 
     /// Unsubscribe from a channel.
     pub async fn unsubscribe_channel(&mut self, channel_id: Uuid) -> Result<(), RelayError> {
+        if let Some(backend) = &self.serverless_backend {
+            backend.unsubscribe_channel(channel_id).await;
+            return Ok(());
+        }
         self.cmd_tx
             .send(RelayCommand::Unsubscribe { channel_id })
             .await
@@ -715,8 +1251,26 @@ impl HarnessRelay {
     /// Reads from the background task's event channel. Returns `None` on
     /// connection loss — the caller should call [`reconnect`](Self::reconnect).
     pub async fn next_event(&mut self) -> Option<BuzzEvent> {
-        // The background task sends `None` to signal connection loss.
-        self.event_rx.recv().await.flatten()
+        if let Some(backend) = &mut self.serverless_backend {
+            // The pool already dedups across relays — no local ring needed.
+            return backend.next_event().await;
+        }
+        // The background tasks send `None` to signal connection loss. With
+        // multiple relays the same event arrives from each relay it's stored on,
+        // so dedup by event id (bounded ring, like damus's `seenEvents`).
+        const SEEN_CAP: usize = 4096;
+        loop {
+            let ev = self.event_rx.recv().await.flatten()?;
+            let id = ev.event.id;
+            if self.seen_event_ids.contains(&id) {
+                continue; // duplicate from another relay — skip
+            }
+            self.seen_event_ids.push_back(id);
+            if self.seen_event_ids.len() > SEEN_CAP {
+                self.seen_event_ids.pop_front();
+            }
+            return Some(ev);
+        }
     }
 
     /// Publish a signed event to the relay via the background WebSocket task.
@@ -725,6 +1279,9 @@ impl HarnessRelay {
     /// (typing indicators) prefer [`try_publish_event`] which never blocks.
     #[allow(dead_code)] // Public API — callers outside the harness may use this
     pub async fn publish_event(&self, event: Event) -> Result<(), RelayError> {
+        if let Some(backend) = &self.serverless_backend {
+            return backend.publish(&event).await;
+        }
         self.cmd_tx
             .send(RelayCommand::PublishEvent {
                 event: Box::new(event),
@@ -738,6 +1295,17 @@ impl HarnessRelay {
     /// Suitable for ephemeral commands like typing indicators where dropping
     /// the event on a full command channel is acceptable.
     pub fn try_publish_event(&self, event: Event) -> Result<(), RelayError> {
+        if let Some(backend) = &self.serverless_backend {
+            // Ephemeral (typing): fire-and-forget on the pool. Spawn so we don't
+            // block; dropping on error is acceptable for typing indicators.
+            let pool = backend.pool();
+            tokio::spawn(async move {
+                if let Err(e) = pool.send_event(&event).await {
+                    tracing::debug!("serverless ephemeral publish failed: {e}");
+                }
+            });
+            return Ok(());
+        }
         self.cmd_tx
             .try_send(RelayCommand::PublishEvent {
                 event: Box::new(event),
@@ -791,6 +1359,10 @@ impl HarnessRelay {
     /// Reconnect after connection loss. Instructs the background task to
     /// re-authenticate and resubscribe to all previously active channels.
     pub async fn reconnect(&mut self) -> Result<(), RelayError> {
+        if self.serverless_backend.is_some() {
+            // The pool auto-reconnects + auto-resubscribes; nothing to do.
+            return Ok(());
+        }
         warn!("relay connection lost — reconnecting…");
         self.cmd_tx
             .send(RelayCommand::Reconnect)
@@ -805,8 +1377,13 @@ impl HarnessRelay {
     /// the background task to finish. Use this from async contexts instead of
     /// relying on `Drop` (which aborts immediately).
     pub async fn shutdown(mut self) {
+        if let Some(backend) = &self.serverless_backend {
+            backend.shutdown().await;
+            return;
+        }
         let _ = self.cmd_tx.send(RelayCommand::Shutdown).await;
-        if let Some(handle) = self.bg_handle.take() {
+        let handles = std::mem::take(&mut self.bg_handles);
+        for handle in handles {
             let abort_handle = handle.abort_handle();
             if tokio::time::timeout(Duration::from_secs(5), handle)
                 .await
@@ -823,7 +1400,7 @@ impl Drop for HarnessRelay {
     fn drop(&mut self) {
         // Best-effort shutdown signal; ignore errors (task may already be done).
         let _ = self.cmd_tx.try_send(RelayCommand::Shutdown);
-        if let Some(handle) = self.bg_handle.take() {
+        for handle in self.bg_handles.drain(..) {
             handle.abort();
         }
     }
@@ -922,10 +1499,20 @@ struct BgState {
     /// Startup-era channels use the startup watermark; dynamic channels use
     /// the membership notification timestamp that caused the subscription.
     subscribe_since: HashMap<Uuid, u64>,
+    /// Serverless mode: generic relay, no NIP-42 handshake on (re)connect.
+    /// Threaded into `do_connect` from the reconnect paths.
+    serverless: bool,
 }
 
 impl BgState {
+    /// Server-mode constructor. Test-only; the runtime path uses
+    /// [`BgState::with_serverless`].
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_serverless(false)
+    }
+
+    fn with_serverless(serverless: bool) -> Self {
         Self {
             active_subscriptions: HashMap::new(),
             last_seen: HashMap::new(),
@@ -939,6 +1526,7 @@ impl BgState {
             proactive_resubscribe_needed: false,
             startup_watermark: None,
             subscribe_since: HashMap::new(),
+            serverless,
         }
     }
 
@@ -1126,6 +1714,10 @@ async fn execute_connected_command(
         RelayCommand::SubscribeMembership => {
             let since = state.membership_last_seen.or(state.startup_watermark);
             let sent = send_membership_subscribe(ws, agent_pubkey_hex, since).await;
+            // Also bring up the NIP-17 gift-wrap inbox so the agent can receive
+            // encrypted messages in serverless private channels / DMs. Tied to
+            // membership so it's active whenever the agent is listening.
+            let _ = send_gift_wrap_subscribe(ws, agent_pubkey_hex).await;
             if sent {
                 state.membership_sub_active = true;
                 if state.membership_last_seen.is_none() {
@@ -1198,8 +1790,9 @@ async fn run_background_task(
     relay_url: String,
     agent_pubkey_hex: String,
     auth_tag: Option<nostr::Tag>,
+    serverless: bool,
 ) {
-    let mut state = BgState::new();
+    let mut state = BgState::with_serverless(serverless);
 
     // Finding #8: process any messages buffered during the initial auth handshake.
     // If a buffered message signals connection drop, trigger reconnect immediately.
@@ -1614,7 +2207,45 @@ async fn handle_ws_message(
                     subscription_id,
                     event,
                 } => {
-                    if subscription_id == OBSERVER_CONTROL_SUB_ID {
+                    if subscription_id == GIFT_WRAP_SUB_ID {
+                        // NIP-17 encrypted message in a serverless private channel
+                        // or DM. Unwrap to recover the inner kind-9 rumor (which
+                        // carries the channel `h` tag), then forward it as a normal
+                        // BuzzEvent so the respond-to gate + rule matching run
+                        // unchanged.
+                        let wrap_id = event.id.to_hex();
+                        if !state.seen_ids.insert(wrap_id.clone()) {
+                            return true; // duplicate wrapper
+                        }
+                        match nostr::nips::nip59::UnwrappedGift::from_gift_wrap(keys, &event).await
+                        {
+                            Ok(unwrapped) => {
+                                if let Some(inner) =
+                                    rumor_to_event(&unwrapped.rumor, unwrapped.sender)
+                                {
+                                    if let Some(channel_uuid) = extract_h_tag_uuid(&inner) {
+                                        let buzz_event = BuzzEvent {
+                                            channel_id: channel_uuid,
+                                            event: inner,
+                                        };
+                                        match event_tx.try_send(Some(buzz_event)) {
+                                            Ok(()) => {}
+                                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                                state.seen_ids.remove(&wrap_id);
+                                                warn!("encrypted event dropped (backpressure)");
+                                            }
+                                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                                return false
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                debug!("gift wrap not for us / undecryptable: {e}");
+                            }
+                        }
+                    } else if subscription_id == OBSERVER_CONTROL_SUB_ID {
                         match observer_control_tx.try_send(*event) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -1763,7 +2394,31 @@ async fn handle_ws_message(
                     );
 
                     if is_auth_error {
-                        // Auth errors require a full reconnect (re-handshake).
+                        // Serverless: a generic/paid public relay (e.g. nostr.land,
+                        // nostr.wine) may permanently require auth or payment to
+                        // read. Re-handshaking won't help — reconnecting just hits
+                        // the same auth-required CLOSED forever (a reconnect storm
+                        // that churns ALL relays and starves message processing).
+                        // Drop this subscription on THIS relay and keep the
+                        // connection alive; the OTHER relays still serve the agent.
+                        if state.serverless {
+                            warn!(
+                                "serverless: relay {relay_url} rejected subscription {subscription_id} ({message}) — \
+                                 dropping it on this relay (other relays still serve the agent), not reconnecting"
+                            );
+                            // Return true (keep the connection alive, NO reconnect)
+                            // and stop tracking this sub on this relay so we don't
+                            // resubscribe it into an infinite auth-required storm.
+                            if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
+                                state.active_subscriptions.remove(&channel_id);
+                            } else if subscription_id == OBSERVER_CONTROL_SUB_ID {
+                                state.observer_control_sub_active = false;
+                            } else if subscription_id == MEMBERSHIP_NOTIF_SUB_ID {
+                                state.membership_sub_active = false;
+                            }
+                            return true;
+                        }
+                        // Server mode: auth errors require a full reconnect (re-handshake).
                         return false;
                     }
 
@@ -2013,6 +2668,11 @@ async fn resubscribe_after_reconnect(
             warn!("failed to resubscribe membership after reconnect");
             all_ok = false;
         }
+        // Restore the gift-wrap inbox alongside membership.
+        if !send_gift_wrap_subscribe(ws, agent_pubkey_hex).await {
+            warn!("failed to resubscribe gift-wrap inbox after reconnect");
+            all_ok = false;
+        }
     }
 
     if state.observer_control_sub_active
@@ -2125,7 +2785,7 @@ async fn try_autonomous_reconnect(
             attempt + 1,
             backoffs.len()
         );
-        match do_connect(relay_url, keys, auth_tag).await {
+        match do_connect(relay_url, keys, auth_tag, state.serverless).await {
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
                 info!("autonomous reconnect succeeded (attempt {})", attempt + 1);
@@ -2240,7 +2900,7 @@ async fn wait_for_reconnect(
     let mut delay = Duration::from_secs(1);
     loop {
         info!("attempting relay reconnect to {relay_url}…");
-        match do_connect(relay_url, keys, auth_tag).await {
+        match do_connect(relay_url, keys, auth_tag, state.serverless).await {
             Ok((new_ws, handshake_buffer)) => {
                 *ws = new_ws;
                 info!("relay reconnected to {relay_url}");
@@ -2428,6 +3088,45 @@ async fn send_membership_subscribe(
 }
 
 /// Send a NIP-01 REQ for owner-to-agent observer control frames.
+/// Subscribe to the agent's NIP-17 gift-wrap inbox (kind 1059, `#p` = agent).
+/// Gift wraps have randomized timestamps (up to ~2 days in the past per NIP-59),
+/// so we don't apply a tight `since` — a small look-back avoids replaying the
+/// entire history while still catching freshly-wrapped messages.
+async fn send_gift_wrap_subscribe(ws: &mut WsStream, agent_pubkey_hex: &str) -> bool {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(2 * 24 * 60 * 60); // NIP-59 timestamp tweak window
+    let req = json!([
+        "REQ",
+        GIFT_WRAP_SUB_ID,
+        {
+            "kinds": [KIND_GIFT_WRAP],
+            "#p": [agent_pubkey_hex],
+            "since": since,
+        }
+    ]);
+    match serde_json::to_string(&req) {
+        Ok(text) => {
+            match ws_send_timeout(ws, Message::Text(text.into()), WS_SEND_TIMEOUT_SECS).await {
+                Ok(()) => {
+                    debug!("subscribed to gift-wrap inbox");
+                    true
+                }
+                Err(e) => {
+                    warn!("failed to send gift-wrap REQ: {e}");
+                    false
+                }
+            }
+        }
+        Err(e) => {
+            warn!("failed to serialize gift-wrap REQ: {e}");
+            false
+        }
+    }
+}
+
 async fn send_observer_control_subscribe(ws: &mut WsStream, agent_pubkey_hex: &str) -> bool {
     let req = json!([
         "REQ",
@@ -2491,7 +3190,32 @@ fn jittered_duration(base: Duration) -> Duration {
 }
 
 /// Extract a channel UUID from the h tag of a Nostr event.
-fn extract_h_tag_uuid(event: &nostr::Event) -> Option<Uuid> {
+/// Convert an unwrapped NIP-17 rumor (`UnsignedEvent`, no signature) into a
+/// concrete `Event` for the harness pipeline. The gift-wrap seal already
+/// cryptographically verified `sender`, so we trust the rumor's author; the
+/// downstream pipeline reads only id/pubkey/kind/created_at/tags/content (never
+/// `.sig`). We materialize an `Event` via JSON with an empty signature.
+pub(crate) fn rumor_to_event(
+    rumor: &nostr::UnsignedEvent,
+    sender: nostr::PublicKey,
+) -> Option<nostr::Event> {
+    let id = rumor.id?;
+    // Rumors carry no signature (NIP-17). The seal already verified `sender`,
+    // and the downstream pipeline never inspects `.sig`, so we attach an
+    // all-zero placeholder signature. `Event::new` does not verify.
+    let sig = nostr::secp256k1::schnorr::Signature::from_slice(&[0u8; 64]).ok()?;
+    Some(nostr::Event::new(
+        id,
+        sender,
+        rumor.created_at,
+        rumor.kind,
+        rumor.tags.iter().cloned(),
+        rumor.content.clone(),
+        sig,
+    ))
+}
+
+pub(crate) fn extract_h_tag_uuid(event: &nostr::Event) -> Option<Uuid> {
     event.tags.iter().find_map(|tag| {
         let tag_vec = tag.as_slice();
         if tag_vec.len() >= 2 && tag_vec[0] == "h" {
@@ -2668,6 +3392,7 @@ async fn do_connect(
     relay_url: &str,
     keys: &Keys,
     auth_tag: Option<&nostr::Tag>,
+    serverless: bool,
 ) -> Result<(WsStream, VecDeque<RelayMessage>), RelayError> {
     let parsed = relay_url
         .parse::<url::Url>()
@@ -2681,6 +3406,14 @@ async fn do_connect(
 
     let mut ws = ws;
     let mut buffer: VecDeque<RelayMessage> = VecDeque::new();
+
+    // ── Serverless: generic relays don't require a NIP-42 handshake. ──────
+    // If a relay later sends an AUTH challenge it's answered by the
+    // background task / per-request WS helpers. Don't block here.
+    if serverless {
+        debug!("serverless mode: skipping NIP-42 handshake for {relay_url}");
+        return Ok((ws, buffer));
+    }
 
     // ── Step 1: Wait for AUTH challenge ───────────────────────────────────
     let challenge = wait_for_auth_challenge(&mut ws, &mut buffer, AUTH_TIMEOUT).await?;
@@ -3476,6 +4209,220 @@ mod tests {
         assert!(
             state.seen_ids.insert(event_id_hex),
             "after backpressure removal, replay must be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn gift_wrap_unwraps_to_usable_channel_event() {
+        // End-to-end of the agent's inbound encrypted path: a sender gift-wraps
+        // a kind-9 message (with an h tag) to the agent; the agent unwraps it,
+        // converts the rumor to an Event, and recovers the channel + content.
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let sender = Keys::generate();
+        let agent = Keys::generate();
+        let channel = uuid::Uuid::new_v4();
+
+        let rumor = EventBuilder::new(Kind::Custom(9), "hello agent")
+            .tags([Tag::parse(vec!["h", &channel.to_string()]).unwrap()])
+            .build(sender.public_key());
+
+        let wrap = EventBuilder::gift_wrap(&sender, &agent.public_key(), rumor, [])
+            .await
+            .expect("wrap");
+
+        // Agent unwraps with its own key.
+        let unwrapped = nostr::nips::nip59::UnwrappedGift::from_gift_wrap(&agent, &wrap)
+            .await
+            .expect("unwrap");
+        let event = rumor_to_event(&unwrapped.rumor, unwrapped.sender).expect("rumor -> event");
+
+        // The recovered event is usable by the harness pipeline.
+        assert_eq!(event.kind, Kind::Custom(9));
+        assert_eq!(event.content, "hello agent");
+        assert_eq!(
+            event.pubkey,
+            sender.public_key(),
+            "verified sender preserved"
+        );
+        assert_eq!(extract_h_tag_uuid(&event), Some(channel));
+    }
+
+    /// Live end-to-end test of the agent's serverless encrypted-receive path
+    /// against a real public relay (default `wss://relay.damus.io`, override
+    /// with `RELAY_URL`). Proves that a `HarnessRelay` running in serverless
+    /// mode — exactly as a managed agent does — receives a NIP-17 gift-wrapped
+    /// message addressed to it, unwraps it, and surfaces the inner channel
+    /// message via `next_event()`.
+    ///
+    /// `#[ignore]` because it hits the network. Run with:
+    ///   cargo test -p sprout-acp --lib agent_serverless_encrypted_receive -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "network: hits a live public relay (RELAY_URL, default damus)"]
+    async fn agent_serverless_encrypted_receive_live() {
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        // Pass a COMMA-SEPARATED relay list (as serverless workspaces do) to
+        // regress the DNS-crash bug where the harness connected to the raw
+        // comma string. connect_with_mode must split to the first relay.
+        let relay_url = std::env::var("RELAY_URL")
+            .unwrap_or_else(|_| "wss://relay.damus.io,wss://nos.lol".to_string());
+
+        // The "agent" identity — connects in serverless mode like a managed agent.
+        let agent = Keys::generate();
+        let agent_pubkey_hex = agent.public_key().to_hex();
+        // The "sender" — a member who DMs / posts in a private channel.
+        let sender = Keys::generate();
+        let channel = uuid::Uuid::new_v4();
+        let secret = format!("live-encrypted-{}", &channel.to_string()[..8]);
+
+        // 1. Agent connects serverless (no AUTH) and brings up its inbox.
+        //    subscribe_membership_notifications() also subscribes the gift-wrap
+        //    inbox (kind 1059, #p = agent) — see RelayCommand::SubscribeMembership.
+        let mut relay = HarnessRelay::connect_with_mode(
+            &relay_url,
+            &agent,
+            &agent_pubkey_hex,
+            None,
+            true, // serverless
+        )
+        .await
+        .expect("agent connect (serverless)");
+        relay
+            .subscribe_membership_notifications()
+            .await
+            .expect("subscribe membership + gift-wrap inbox");
+
+        // Give the REQ time to register on the relay before publishing.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // 2. Sender gift-wraps a kind-9 channel message addressed to the agent
+        //    and publishes it over a plain WS (independent of the harness).
+        let rumor = EventBuilder::new(Kind::Custom(9), secret.clone())
+            .tags([Tag::parse(vec!["h", &channel.to_string()]).unwrap()])
+            .build(sender.public_key());
+        let wrap = EventBuilder::gift_wrap(&sender, &agent.public_key(), rumor, [])
+            .await
+            .expect("gift wrap");
+
+        {
+            use futures_util::SinkExt;
+            use tokio_tungstenite::{connect_async, tungstenite::Message};
+            // Sender publishes to the same first relay the agent connects to.
+            let sender_relay = relay_url.split(',').next().unwrap_or(&relay_url).trim();
+            let (ws, _) = connect_async(sender_relay).await.expect("sender connect");
+            let (mut write, _read) = ws.split();
+            let ev = serde_json::json!(["EVENT", wrap]).to_string();
+            write
+                .send(Message::Text(ev.into()))
+                .await
+                .expect("publish gift wrap");
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let _ = write.close().await;
+        }
+
+        // 3. The agent's harness must surface the DECRYPTED inner message as a
+        //    normal BuzzEvent on the right channel.
+        let deadline = std::time::Duration::from_secs(20);
+        let got = tokio::time::timeout(deadline, async {
+            loop {
+                match relay.next_event().await {
+                    Some(ev) if ev.event.content == secret => return Some(ev),
+                    Some(_) => continue, // unrelated event — keep waiting
+                    None => return None, // connection lost
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for decrypted message");
+
+        let got = got.expect("connection lost before message arrived");
+        assert_eq!(got.channel_id, channel, "routed to the right channel");
+        assert_eq!(got.event.content, secret);
+        assert_eq!(
+            got.event.pubkey,
+            sender.public_key(),
+            "verified sender preserved through unwrap"
+        );
+        eprintln!("✅ agent received + decrypted encrypted message over {relay_url}");
+    }
+
+    /// The split-brain fix: agent subscribes to MULTIPLE relays; a plaintext
+    /// kind-9 message published to a SECONDARY relay (not the primary) must
+    /// still reach the agent, because it subscribes to all relays and dedups —
+    /// exactly like damus's RelayPool. Without multi-relay subscribe, a message
+    /// that landed on nos.lol (because damus rate-limited the write) is invisible
+    /// to a damus-only agent.
+    #[tokio::test]
+    #[ignore = "network: hits live public relays"]
+    async fn agent_multi_relay_subscribe_no_split_brain() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        // Primary = damus, secondary = nos.lol. We publish ONLY to nos.lol.
+        let primary = "wss://relay.damus.io";
+        let secondary = "wss://nos.lol";
+        let relay_list = format!("{primary},{secondary}");
+
+        let agent_keys = Keys::generate();
+        let sender = Keys::generate();
+        let channel = uuid::Uuid::new_v4();
+        let secret = format!("split-brain-{}", &channel.to_string()[..8]);
+
+        let mut relay = HarnessRelay::connect_with_mode(
+            &relay_list,
+            &agent_keys,
+            &agent_keys.public_key().to_hex(),
+            None,
+            true,
+        )
+        .await
+        .expect("agent connect to all relays");
+
+        let filter = crate::config::ChannelFilter {
+            kinds: Some(vec![9]),
+            require_mention: false,
+        };
+        relay
+            .subscribe_channel(channel, filter)
+            .await
+            .expect("subscribe");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Publish a kind-9 message ONLY to the secondary relay.
+        let event = EventBuilder::new(Kind::Custom(9), secret.clone())
+            .tags(vec![nostr::Tag::parse(["h", &channel.to_string()]).unwrap()])
+            .sign_with_keys(&sender)
+            .expect("sign");
+        {
+            use futures_util::SinkExt;
+            use tokio_tungstenite::{connect_async, tungstenite::Message};
+            let (ws, _) = connect_async(secondary).await.expect("sender connect");
+            let (mut write, _read) = ws.split();
+            let msg = serde_json::json!(["EVENT", event]).to_string();
+            write.send(Message::Text(msg.into())).await.expect("send");
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let _ = write.close().await;
+        }
+        eprintln!("published kind-9 to SECONDARY relay only ({secondary})");
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                match relay.next_event().await {
+                    Some(ev) if ev.event.content == secret => return Some(ev),
+                    Some(_) => continue,
+                    None => return None,
+                }
+            }
+        })
+        .await
+        .expect("timed out — agent did not receive message from secondary relay (split-brain)");
+
+        let got = got.expect("connection lost");
+        assert_eq!(got.channel_id, channel);
+        assert_eq!(got.event.content, secret);
+        eprintln!(
+            "✅ agent received message published to SECONDARY relay — multi-relay subscribe works, no split-brain"
         );
     }
 }

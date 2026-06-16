@@ -16,6 +16,7 @@ import {
 } from "@/features/messages/lib/threading";
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { relayClient } from "@/shared/api/relayClient";
+import { listen } from "@tauri-apps/api/event";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
@@ -23,17 +24,77 @@ import {
   addReaction,
   deleteMessage,
   editMessage,
+  queryChannelMessages,
   removeReaction,
   sendChannelMessage,
+  subscribeChannelMessages,
+  unsubscribeChannelMessages,
 } from "@/shared/api/tauri";
 import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
+
+import { isActiveWorkspaceServerless } from "@/features/workspaces/workspaceStorage";
+
+/**
+ * Encrypted channels in serverless mode: DMs and private channels are made
+ * private by NIP-17 gift-wrap encryption (no server to enforce access). On a
+ * Buzz-server workspace, privacy is server-enforced and messages stay
+ * plaintext, so this is always false.
+ */
+function isEncryptedChannel(channel: Channel | null): boolean {
+  if (!channel || !isActiveWorkspaceServerless()) {
+    return false;
+  }
+  return channel.channelType === "dm" || channel.visibility === "private";
+}
 // Same .mjs the renderer uses, so the cache-update projection can't drift
 // from the on-render overlay.
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
 import {
+  CHANNEL_EVENT_KINDS,
   KIND_STREAM_MESSAGE,
   KIND_SYSTEM_MESSAGE,
+  KIND_TYPING_INDICATOR,
 } from "@/shared/constants/kinds";
+
+/**
+ * Fetch channel history. In serverless mode, non-encrypted channels go through
+ * the Rust multi-relay pool (`queryChannelMessages`) so reads hit the same
+ * relay set as writes — the live-WS path is single-relay and split-brains.
+ * Encrypted channels and server mode keep the existing live-WS path.
+ */
+// Public relays are slow/flaky on cold start: pooled connections are still
+// being established, so the first query often returns 0 even though the
+// messages exist. Retry a few times with short backoff until events arrive
+// (an empty channel is also valid). Kills the "blank for a minute" feeling.
+async function queryServerlessHistoryWithRetry(
+  channelId: string,
+  limit: number,
+): Promise<RelayEvent[]> {
+  const kinds = [...CHANNEL_EVENT_KINDS];
+  let events = await queryChannelMessages(channelId, kinds, limit);
+  for (const wait of [400, 800, 1500]) {
+    if (events.length > 0) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, wait));
+    events = await queryChannelMessages(channelId, kinds, limit);
+  }
+  return events;
+}
+
+async function fetchHistoryForChannel(
+  channel: Channel,
+  limit: number,
+): Promise<RelayEvent[]> {
+  if (isActiveWorkspaceServerless() && !isEncryptedChannel(channel)) {
+    return queryServerlessHistoryWithRetry(channel.id, limit);
+  }
+  return relayClient.fetchChannelHistory(
+    channel.id,
+    limit,
+    isEncryptedChannel(channel),
+  );
+}
 
 type MessageQueryContext = {
   optimisticId: string;
@@ -174,8 +235,8 @@ export function useChannelMessagesQuery(channel: Channel | null) {
         throw new Error("No channel selected.");
       }
 
-      const history = await relayClient.fetchChannelHistory(
-        channel.id,
+      const history = await fetchHistoryForChannel(
+        channel,
         CHANNEL_HISTORY_LIMIT,
       );
       const currentMessages =
@@ -196,18 +257,19 @@ export function useChannelSubscription(channel: Channel | null) {
   const queryClient = useQueryClient();
   const channelId = channel?.id ?? null;
   const channelType = channel?.channelType ?? null;
+  const encrypted = isEncryptedChannel(channel);
   const syncLatestHistory = useEffectEvent(async () => {
-    if (!channelId) {
+    if (!channel) {
       return;
     }
 
-    const history = await relayClient.fetchChannelHistory(
-      channelId,
+    const history = await fetchHistoryForChannel(
+      channel,
       CHANNEL_HISTORY_LIMIT,
     );
 
     queryClient.setQueryData<RelayEvent[]>(
-      channelMessagesKey(channelId),
+      channelMessagesKey(channel.id),
       (current = []) => {
         const mergedHistory = normalizeTimelineMessages([
           ...current,
@@ -221,6 +283,14 @@ export function useChannelSubscription(channel: Channel | null) {
 
   const appendMessage = useEffectEvent((event: RelayEvent) => {
     if (!channelId) {
+      return;
+    }
+
+    // Typing indicators (kind 20002) are ephemeral — they ride the same
+    // serverless-event channel as messages so the agent's "is typing…" signal
+    // reaches the client, but they must never land in the message timeline.
+    // useChannelTyping consumes them separately.
+    if (event.kind === KIND_TYPING_INDICATOR) {
       return;
     }
 
@@ -258,6 +328,50 @@ export function useChannelSubscription(channel: Channel | null) {
 
     let isDisposed = false;
     let cleanup: (() => Promise<void>) | undefined;
+
+    // Serverless (non-encrypted): subscribe across ALL relays via the Rust
+    // pool, listening for `serverless-event:<channelId>` Tauri events. This is
+    // standard Nostr realtime without the single-relay split-brain of the live
+    // WS. Encrypted channels keep the live-WS gift-wrap path.
+    if (isActiveWorkspaceServerless() && !encrypted) {
+      let unlisten: (() => void) | undefined;
+      let subId: string | undefined;
+      void (async () => {
+        unlisten = await listen<RelayEvent>(
+          `serverless-event:${channelId}`,
+          (event) => {
+            if (!isDisposed) {
+              appendMessage(event.payload);
+            }
+          },
+        );
+        if (isDisposed) {
+          unlisten();
+          return;
+        }
+        subId = await subscribeChannelMessages(channelId, [
+          ...CHANNEL_EVENT_KINDS,
+          // Ephemeral typing indicators so the agent's "is typing…" signal
+          // streams through in serverless mode (consumed by useChannelTyping).
+          KIND_TYPING_INDICATOR,
+        ]);
+        // Initial backfill so existing messages show immediately.
+        void syncLatestHistory().catch(() => {});
+      })().catch((error) => {
+        console.error(
+          "Failed serverless channel subscription",
+          channelId,
+          error,
+        );
+      });
+
+      return () => {
+        isDisposed = true;
+        if (unlisten) unlisten();
+        if (subId) void unsubscribeChannelMessages(subId);
+      };
+    }
+
     const disposeReconnectListener = relayClient.subscribeToReconnects(() => {
       void syncLatestHistory().catch((error) => {
         if (!isDisposed) {
@@ -271,11 +385,15 @@ export function useChannelSubscription(channel: Channel | null) {
     });
 
     relayClient
-      .subscribeToChannel(channelId, (event) => {
-        if (!isDisposed) {
-          appendMessage(event);
-        }
-      })
+      .subscribeToChannel(
+        channelId,
+        (event) => {
+          if (!isDisposed) {
+            appendMessage(event);
+          }
+        },
+        encrypted,
+      )
       .then((dispose) => {
         if (isDisposed) {
           void dispose();
@@ -305,7 +423,7 @@ export function useChannelSubscription(channel: Channel | null) {
         void cleanup();
       }
     };
-  }, [channelId, channelType]);
+  }, [channelId, channelType, encrypted]);
 }
 
 export function useSendMessageMutation(
@@ -357,6 +475,12 @@ export function useSendMessageMutation(
           queryClient.getQueryData<RelayEvent[]>(
             channelMessagesKey(channel.id),
           ) ?? [];
+        // Resolve the thread root locally (works for both plaintext and
+        // encrypted channels — in encrypted channels the parent rumor isn't
+        // queryable in plaintext, so the backend relies on this).
+        const resolvedRoot = parentEventId
+          ? resolveReplyRootId(parentEventId, cachedMessages)
+          : null;
         const result = await sendChannelMessage(
           channel.id,
           content,
@@ -366,6 +490,7 @@ export function useSendMessageMutation(
           undefined,
           emojiTags,
           mentionTags,
+          resolvedRoot,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -404,6 +529,36 @@ export function useSendMessageMutation(
             ...imetaTags,
             ...emojiTags,
             ...mentionTags,
+          ],
+          content: content.trim(),
+          sig: "",
+        };
+      }
+
+      // Serverless: route through the Rust command, which publishes over the
+      // multi-relay connection pool (publish-to-all, succeed-if-any-accepts).
+      // The live-WS path (relayClient.sendMessage) uses a single relay with no
+      // pool/fallback, so it trips public-relay rate limits with no recovery.
+      if (isActiveWorkspaceServerless()) {
+        const result = await sendChannelMessage(
+          channel.id,
+          content,
+          null,
+          undefined,
+          mentionPubkeys,
+        );
+        return {
+          id: result.eventId,
+          pubkey: identity.pubkey,
+          created_at: result.createdAt,
+          kind: KIND_STREAM_MESSAGE,
+          tags: [
+            ["h", channel.id],
+            ["p", identity.pubkey],
+            ...normalizeMentionPubkeys(
+              mentionPubkeys ?? [],
+              identity.pubkey,
+            ).map((pk) => ["p", pk]),
           ],
           content: content.trim(),
           sig: "",

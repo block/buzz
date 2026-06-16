@@ -71,6 +71,12 @@ struct Cli {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "http://localhost:3000")]
     relay: String,
 
+    /// Serverless mode: the relay is a generic public Nostr relay with no
+    /// Buzz server. Reads/writes use plain WebSocket (REQ/EVENT) instead of
+    /// the HTTP bridge, and NIP-42 AUTH is optional.
+    #[arg(long, env = "BUZZ_SERVERLESS", default_value_t = false)]
+    serverless: bool,
+
     /// Nostr private key (hex or nsec). This is the CLI's identity.
     #[arg(long, env = "BUZZ_PRIVATE_KEY")]
     private_key: Option<String>,
@@ -1143,7 +1149,42 @@ pub enum PackCmd {
 // ---------------------------------------------------------------------------
 
 async fn run(cli: Cli) -> Result<(), CliError> {
-    let relay_url = client::normalize_relay_url(&cli.relay);
+    // Install the process-level rustls CryptoProvider. The serverless WS
+    // transport (tokio-tungstenite → tokio-rustls) constructs a TLS config
+    // directly and, unlike reqwest, does NOT auto-install a provider — without
+    // this, the first `wss://` connection panics ("Could not automatically
+    // determine the process-level CryptoProvider"). The CLI links aws-lc-rs
+    // (via reqwest's rustls), so install that. Idempotent; ignore the result
+    // if something already installed one.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // Serverless workspaces inject BUZZ_RELAY_URL as a comma-separated LIST
+    // (`wss://a,wss://b,...`). Detect serverless from that (a multi-relay URL is
+    // only ever produced by a serverless workspace) so the agent's reply via
+    // `buzz messages send` works even when BUZZ_SERVERLESS wasn't set.
+    let serverless = cli.serverless || cli.relay.contains(',');
+    let first_relay = cli
+        .relay
+        .split(',')
+        .next()
+        .map(str::trim)
+        .unwrap_or(cli.relay.as_str());
+    let relay_url = client::normalize_relay_url(first_relay);
+    // In serverless mode pass the FULL relay list as a comma-separated set of
+    // ws/wss URLs — `BuzzClient` fans out reads/writes across all of them
+    // (relays don't gossip; a write must tolerate one relay rate-limiting and a
+    // read must union every relay). In server mode only `relay_url` is used.
+    let ws_url: String = if serverless {
+        cli.relay
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(client::to_ws_url)
+            .collect::<Vec<_>>()
+            .join(",")
+    } else {
+        client::to_ws_url(first_relay)
+    };
 
     // Pack commands are local-only — no relay connection needed.
     if let Cmd::Pack(ref sub) = cli.command {
@@ -1177,7 +1218,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         _ => (None, None),
     };
 
-    let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
+    let client = BuzzClient::new(relay_url, ws_url, serverless, keys, auth_tag, auth_tag_json)?;
 
     match cli.command {
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,

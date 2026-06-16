@@ -1,9 +1,11 @@
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import {
   getChannelIdFromTags,
   getThreadReference,
 } from "@/features/messages/lib/threading";
+import { isActiveWorkspaceServerless } from "@/features/workspaces/workspaceStorage";
 import { relayClient } from "@/shared/api/relayClient";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 import {
@@ -182,6 +184,39 @@ export function useChannelTyping(
 
     let isDisposed = false;
     let cleanup: (() => Promise<void>) | undefined;
+
+    // Serverless: typing indicators (kind 20002) arrive over the Rust pool's
+    // `serverless-event:<channel>` Tauri channel (the messages hook subscribes
+    // to that kind). Route them to registerTyping; ignore non-typing events
+    // (those are handled by the messages timeline).
+    if (isActiveWorkspaceServerless()) {
+      void listen<RelayEvent>(`serverless-event:${channelId}`, (event) => {
+        if (!isDisposed && event.payload.kind === KIND_TYPING_INDICATOR) {
+          registerTyping(event.payload);
+        }
+      })
+        .then((unlisten) => {
+          if (isDisposed) {
+            unlisten();
+            return;
+          }
+          cleanup = async () => unlisten();
+        })
+        .catch((error) => {
+          console.error(
+            "Failed to subscribe to serverless typing indicators",
+            channelId,
+            error,
+          );
+        });
+
+      return () => {
+        isDisposed = true;
+        if (cleanup) {
+          void cleanup();
+        }
+      };
+    }
 
     relayClient
       .subscribeToTypingIndicators(channelId, (event) => {

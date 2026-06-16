@@ -56,7 +56,11 @@ redis        = { version = "1.0", features = ["tokio-comp", "connection-manager"
 deadpool-redis = { version = "0.23", features = ["rt_tokio_1"] }
 
 # Nostr
-nostr = { version = "0.44", features = ["nip44", "nip98"] }
+nostr = { version = "0.44", features = ["nip44", "nip59", "nip98"] }
+# High-level relay pool: persistent multi-relay subscriptions with built-in
+# auto-reconnect + auto-resubscribe (relays replay stored events on REQ). Used
+# for the serverless agent path instead of hand-rolling reconnect/resubscribe.
+nostr-relay-pool = { version = "0.44", default-features = false }
 
 # Serialization
 serde       = { version = "1", features = ["derive"] }

@@ -709,6 +709,45 @@ export async function getEventById(eventId: string): Promise<RelayEvent> {
   return JSON.parse(eventJson) as RelayEvent;
 }
 
+/**
+ * Fetch channel message history over the multi-relay pool (serverless mode).
+ * Reads from the same relay set used for writes so reads/writes converge
+ * (the live-WS path is single-relay and split-brains in serverless mode).
+ */
+export async function queryChannelMessages(
+  channelId: string,
+  kinds: number[],
+  limit: number,
+  until?: number,
+): Promise<RelayEvent[]> {
+  return invokeTauri<RelayEvent[]>("query_channel_messages", {
+    channelId,
+    kinds,
+    limit,
+    until: until ?? null,
+  });
+}
+
+/**
+ * Open a persistent live subscription for a channel across ALL relays
+ * (serverless). New events are emitted as `serverless-event:<channelId>` Tauri
+ * events. Returns the subscription id for teardown. Standard Nostr realtime —
+ * subscribe to every relay at once and merge.
+ */
+export async function subscribeChannelMessages(
+  channelId: string,
+  kinds: number[],
+): Promise<string> {
+  return invokeTauri<string>("subscribe_channel_messages", {
+    channelId,
+    kinds,
+  });
+}
+
+export async function unsubscribeChannelMessages(subId: string): Promise<void> {
+  await invokeTauri("unsubscribe_channel_messages", { subId });
+}
+
 export async function sendChannelMessage(
   channelId: string,
   content: string,
@@ -718,6 +757,9 @@ export async function sendChannelMessage(
   kind?: number,
   emojiTags?: string[][],
   mentionTags?: string[][],
+  // Thread root for encrypted replies (resolved locally from decrypted
+  // messages, since the parent rumor isn't queryable in plaintext).
+  rootEventId?: string | null,
 ): Promise<SendChannelMessageResult> {
   const response = await invokeTauri<RawSendChannelMessageResult>(
     "send_channel_message",
@@ -730,6 +772,7 @@ export async function sendChannelMessage(
       mentionTags: mentionTags ?? null,
       mentionPubkeys: mentionPubkeys ?? null,
       kind: kind ?? null,
+      rootEventId: rootEventId ?? null,
     },
   );
 
@@ -739,6 +782,40 @@ export async function sendChannelMessage(
     rootEventId: response.root_event_id,
     depth: response.depth,
     createdAt: response.created_at,
+  };
+}
+
+type RawDecryptedEvent = {
+  id: string;
+  pubkey: string;
+  created_at: number;
+  kind: number;
+  tags: string[][];
+  content: string;
+  sig: string;
+  channel_id: string | null;
+};
+
+/**
+ * Decrypt a NIP-17 gift wrap (kind 1059) addressed to us, returning the inner
+ * message rumor shaped as a RelayEvent. Used for serverless encrypted channels
+ * and DMs. Throws if the wrap isn't addressed to us or can't be decrypted.
+ */
+export async function decryptGiftWrap(
+  eventJson: string,
+): Promise<RelayEvent & { channelId: string | null }> {
+  const r = await invokeTauri<RawDecryptedEvent>("decrypt_gift_wrap", {
+    eventJson,
+  });
+  return {
+    id: r.id,
+    pubkey: r.pubkey,
+    created_at: r.created_at,
+    kind: r.kind,
+    tags: r.tags,
+    content: r.content,
+    sig: r.sig,
+    channelId: r.channel_id,
   };
 }
 
@@ -1183,11 +1260,13 @@ export async function applyWorkspace(
   relayUrl: string,
   nsec?: string,
   token?: string,
+  serverless?: boolean,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
     relayUrl,
     nsec: nsec ?? null,
     token: token ?? null,
+    serverless: serverless ?? false,
   });
 }
 
