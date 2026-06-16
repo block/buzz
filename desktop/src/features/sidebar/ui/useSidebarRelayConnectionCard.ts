@@ -48,8 +48,8 @@ function setRelayConnectivitySuccess(
   }
 }
 
-function isDocumentActive() {
-  return document.visibilityState === "visible" && document.hasFocus();
+function isDocumentVisible() {
+  return document.visibilityState === "visible";
 }
 
 export function useSidebarRelayConnectionCard(
@@ -75,7 +75,8 @@ export function useSidebarRelayConnectionCard(
     () => getRelayConnectivitySuccessSnapshot(relayUrl),
     () => false,
   );
-  const [isWindowActive, setIsWindowActive] = React.useState(isDocumentActive);
+  const [isWindowVisible, setIsWindowVisible] =
+    React.useState(isDocumentVisible);
   const canShow = isRelayConnectionActuallyDegraded || hasSuccess;
   const show = canShow && !isDismissed;
   const wasProblemCardVisibleRef = React.useRef(false);
@@ -125,7 +126,7 @@ export function useSidebarRelayConnectionCard(
       return;
     }
 
-    if (!isWindowActive) {
+    if (!isWindowVisible) {
       return;
     }
 
@@ -135,19 +136,15 @@ export function useSidebarRelayConnectionCard(
     }, SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS);
 
     return () => window.clearTimeout(timeout);
-  }, [hasSuccess, isWindowActive, relayUrl]);
+  }, [hasSuccess, isWindowVisible, relayUrl]);
 
   React.useEffect(() => {
-    const updateWindowActive = () => setIsWindowActive(isDocumentActive());
+    const updateWindowVisible = () => setIsWindowVisible(isDocumentVisible());
 
-    window.addEventListener("focus", updateWindowActive);
-    window.addEventListener("blur", updateWindowActive);
-    document.addEventListener("visibilitychange", updateWindowActive);
+    document.addEventListener("visibilitychange", updateWindowVisible);
 
     return () => {
-      window.removeEventListener("focus", updateWindowActive);
-      window.removeEventListener("blur", updateWindowActive);
-      document.removeEventListener("visibilitychange", updateWindowActive);
+      document.removeEventListener("visibilitychange", updateWindowVisible);
     };
   }, []);
 
