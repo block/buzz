@@ -123,7 +123,6 @@ export function ChannelCanvas({
         >
           <Markdown
             channelNames={channelNames}
-            compact
             content={canvasContent}
           />
         </div>

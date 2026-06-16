@@ -157,10 +157,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         <div key={messageRenderKey} className="flex flex-col gap-1">
           <SystemMessageRow
             message={message}
-            agentPubkeys={agentPubkeys}
             currentPubkey={currentPubkey}
             onToggleReaction={onToggleReaction}
-            personaLookup={personaLookup}
             profiles={profiles}
           />
           {footer}

@@ -224,7 +224,6 @@ export function FeedSection({
                 <div className="pointer-events-none relative mt-0.5 line-clamp-2">
                   <Markdown
                     className="max-w-none text-sm leading-snug text-muted-foreground"
-                    compact
                     content={feedContent(item)}
                     mentionNames={mentionNames}
                   />

@@ -107,7 +107,6 @@ function ReplyRow({
       <div className="mt-1.5 pl-8">
         <Markdown
           channelNames={channelNames}
-          compact
           content={reply.content}
           imetaByUrl={parseImetaTags(reply.tags)}
           mentionNames={replyMentionNames}
