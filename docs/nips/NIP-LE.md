@@ -64,8 +64,7 @@ The lock lives on the LOCAL filesystem at
 defines no wire format. This is why this NIP touches no relay protocol: leader
 election is entirely local to the machine running the instances.
 
-The lock file contains a JSON object with the following shape
-(provisional — finalized against Phase 2 implementation):
+The lock file contains a JSON object with the following shape:
 
 ```json
 {
@@ -82,35 +81,59 @@ The lock file contains a JSON object with the following shape
   generation fell back to the shared identifier), causing two windows to both
   match the lock and both lead. A correct election identity is unique per
   running window (for example a process-unique value derived at launch).
-- `pid`: the operating-system process id of the leading window.
-- `claimed_at`: when the current leader claimed the lock.
+- `pid`: the operating-system process id of the leading window. Read by the
+  acquire path to detect a dead leader (dead-pid takeover); informational to the
+  read side.
+- `claimed_at`: when the current leader claimed the lock. Rewritten by the
+  leader on every refresh tick, and read by the acquire path to detect a stale
+  (abandoned) claim whose pid has been recycled by an unrelated process (see
+  Claim/Steal Semantics); informational to the read side.
 
 Only `instance_id` is significant to the read side; `pid` and `claimed_at` are
-informational, written by the Phase-2 acquire path and ignored when deciding
+informational to it, written by the acquire path and ignored when deciding
 leadership.
 
 An instance is the leader for an agent identity iff a lock file exists and its
 `instance_id` equals that instance's own election identity. A malformed or
 unparseable lock file MUST fail safe to leader, preserving solo-dev behavior.
 An absent or unreadable lock file (permission error, or a partial read while
-another instance is mid-rewrite) likewise fails safe to leader. Because the read
-side is unguarded (acquire/steal `flock` is Phase 2), a concurrent rewrite read as
+another instance is mid-rewrite) likewise fails safe to leader. The read side is
+deliberately unguarded (it takes no `flock`), so a concurrent rewrite read as
 malformed can briefly produce a duplicate responder; this self-heals on the next
 refresh (≤5s, see below) and is the intended trade — a transient duplicate beats
 silencing the only responder.
 
 Leadership changes (claim, release, failover) take effect within a bounded refresh
 interval of 5 seconds: each instance re-reads its leader lock(s) every 5s, so a
-stale-cache window after a leadership change is capped at that interval. Phase 2
-MUST NOT regress this bound.
+stale-cache window after a leadership change is capped at that interval. The
+refresh also re-attempts the claim, so a survivor takes over a dead leader's lock
+within the same bound.
 
 Acquire and steal MUST be `flock`-guarded to close the read-check-write TOCTOU
-window between two instances racing to claim or steal the same lock.
+window between two instances racing to claim or steal the same lock: the writer
+holds an exclusive `flock` across the read-decide-write sequence so at most one
+racer wins.
 
 ## Claim/Steal Semantics
 
-Ownership is explicit and sticky to a window: a window claims an agent (via the
-agent sidebar menu) and remains its leader until the lock is released or stolen.
+Claim is **auto-on-launch plus explicit re-claim**. An instance self-elects at
+startup: it acquires the lock if it is unowned (absent, released, held by a
+dead pid, or held by a stale claim whose pid was recycled — see below), and
+otherwise runs as an observer. The first instance up for an agent key leads; a
+later instance under the same key observes. On graceful shutdown an instance
+releases its lock so a co-located sibling can take over without waiting out the
+dead-pid failover window. An explicit re-claim gesture (the agent sidebar menu)
+layers on top, letting a chosen window take ownership; both paths share one writer.
+
+Failover MUST tolerate pid recycling. A leader that crashes without releasing
+leaves a lock whose `pid` the OS may later reuse for an unrelated, long-lived
+process; a bare pid-liveness probe would then read the recycled pid as the
+original leader and never take over, wedging the agent leaderless. The acquire
+path therefore treats a claim as takeable when its pid is dead **or** its
+`claimed_at` is older than a staleness bound that comfortably exceeds the 5s
+refresh interval (e.g. 10s). A live leader rewrites `claimed_at` on every refresh
+tick, so only an abandoned claim ages past the bound — distinguishing a recycled
+pid from a genuinely active leader without evicting the latter.
 
 Hard-steal: claiming an agent in window B immediately aborts window A's
 in-flight turn. The abort reuses NIP-AO's `cancel_turn` control frame
