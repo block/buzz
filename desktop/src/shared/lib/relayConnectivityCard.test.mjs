@@ -68,10 +68,20 @@ test("resolveRelayConnectivityCardVariant offers VPN for Cloudflare Access redir
   );
 });
 
-test("resolveRelayConnectivityCardVariant offers access refresh for Cloudflare Access failures", () => {
+test("resolveRelayConnectivityCardVariant offers VPN for Cloudflare Access/VPN reauth redirects", () => {
   assert.equal(
     resolveRelayConnectivityCardVariant(
       "relay unreachable: network sign-in required (Cloudflare Access / VPN) - re-authenticate and reconnect",
+      "wss://sprout-oss.stage.blox.sqprod.co",
+    ),
+    "connect-vpn",
+  );
+});
+
+test("resolveRelayConnectivityCardVariant offers access refresh for auth failures", () => {
+  assert.equal(
+    resolveRelayConnectivityCardVariant(
+      "relay unreachable: 403 Forbidden from Cloudflare Access",
       "wss://sprout-oss.stage.blox.sqprod.co",
     ),
     "refresh-access",

@@ -35,8 +35,6 @@ function shouldRefreshBlockVpnAccess(errorMessage: string | null | undefined) {
 
   const detail = relayErrorDetail(errorMessage).toLowerCase();
   return (
-    detail.includes("re-authenticate") ||
-    detail.includes("reauth") ||
     detail.includes("expired") ||
     detail.includes("unauthorized") ||
     detail.includes("forbidden") ||
