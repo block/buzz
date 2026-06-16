@@ -109,14 +109,15 @@ async fn test_persona_nip33_replacement_newer_wins() {
     let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     // Publish older version
+    let now = Timestamp::now().as_secs();
     let old_content = r#"{"name":"old","display_name":"Old","description":"Old version"}"#;
-    let old_event = persona_event_at(&keys, &d_tag, old_content, 1_700_000_000);
+    let old_event = persona_event_at(&keys, &d_tag, old_content, now - 100);
     let ok = client.send_event(old_event).await.expect("send old");
     assert!(ok.accepted, "relay rejected old event: {}", ok.message);
 
     // Publish newer version with same d-tag
     let new_content = r#"{"name":"new","display_name":"New","description":"New version"}"#;
-    let new_event = persona_event_at(&keys, &d_tag, new_content, 1_700_000_100);
+    let new_event = persona_event_at(&keys, &d_tag, new_content, now);
     let ok = client.send_event(new_event).await.expect("send new");
     assert!(ok.accepted, "relay rejected new event: {}", ok.message);
 
@@ -154,14 +155,15 @@ async fn test_persona_nip33_older_does_not_replace_newer() {
     let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
     // Publish newer version first
+    let now = Timestamp::now().as_secs();
     let new_content = r#"{"name":"new","display_name":"New","description":"Newer"}"#;
-    let new_event = persona_event_at(&keys, &d_tag, new_content, 1_700_000_200);
+    let new_event = persona_event_at(&keys, &d_tag, new_content, now);
     let ok = client.send_event(new_event).await.expect("send new");
     assert!(ok.accepted, "relay rejected new event: {}", ok.message);
 
     // Publish older version — relay should accept but not replace
     let old_content = r#"{"name":"old","display_name":"Old","description":"Older"}"#;
-    let old_event = persona_event_at(&keys, &d_tag, old_content, 1_700_000_100);
+    let old_event = persona_event_at(&keys, &d_tag, old_content, now - 100);
     let _ok = client.send_event(old_event).await.expect("send old");
     // Note: relay may accept or reject the older event depending on implementation.
     // The key assertion is that querying returns the newer one.
