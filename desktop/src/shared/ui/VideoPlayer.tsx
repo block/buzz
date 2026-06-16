@@ -1876,7 +1876,7 @@ function VideoReviewCommentCard({
   replies: TimecodedComment[];
 }) {
   return (
-    <article className="rounded-lg bg-muted/40 p-3 text-sm text-foreground/90">
+    <article className="rounded-lg bg-muted/40 p-3 text-sm text-foreground">
       <VideoReviewCommentBody
         canReply={canReply}
         item={item}

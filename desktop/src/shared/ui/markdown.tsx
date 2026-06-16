@@ -1197,7 +1197,7 @@ function MarkdownInner({
     <div
       className={cn(
         [
-          "max-w-none break-words text-sm leading-relaxed text-foreground/90",
+          "max-w-none break-words text-sm leading-relaxed text-foreground",
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           "[&>*+*]:mt-3",
           "[&>*+h1]:mt-3.5 [&>*+h2]:mt-3.5 [&>*+h3]:mt-3.5",

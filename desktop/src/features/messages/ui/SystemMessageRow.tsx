@@ -313,7 +313,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
         />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <div className="truncate text-sm font-semibold leading-none tracking-tight text-foreground/90">
+            <div className="truncate text-sm font-semibold leading-none tracking-tight text-foreground">
               {description.title}
             </div>
             <MessageTimestamp
@@ -321,7 +321,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
               time={message.time}
             />
           </div>
-          <p className="mt-1 text-sm leading-snug text-muted-foreground/70">
+          <p className="mt-1 text-sm leading-snug text-foreground">
             {description.action}
           </p>
           <div>
