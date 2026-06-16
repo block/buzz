@@ -93,6 +93,7 @@ pub async fn cmd_list_issues(
 // Status — publish kind:1630/1631/1632/1633 against an issue
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_issue_status(
     client: &BuzzClient,
     issue: &str,
@@ -101,6 +102,7 @@ pub async fn cmd_issue_status(
     repo_owner: Option<&str>,
     repo_id: Option<&str>,
     euc: Option<&str>,
+    to: &[String],
 ) -> Result<(), CliError> {
     validate_hex64(issue)?;
     let status = crate::commands::patches::parse_status(status)?;
@@ -126,12 +128,26 @@ pub async fn cmd_issue_status(
         }
     };
 
+    // Mirrors `buzz patches status`: default a `p` tag to the repo owner
+    // for discoverability, plus a `--to` escape hatch for the issue author
+    // or anyone else who should be notified of the status change.
+    let mut recipients = Vec::new();
+    if let Some(ref repo) = repo {
+        recipients.push(repo.owner.clone());
+    }
+    for recipient in to {
+        validate_hex64(recipient)?;
+        if !recipients.contains(recipient) {
+            recipients.push(recipient.clone());
+        }
+    }
+
     let meta = GitStatusMeta {
         root_event: issue.to_string(),
         accepted_revision_root: None,
         repo,
         euc: euc.map(str::to_string),
-        recipients: vec![],
+        recipients,
         applied_patches: vec![],
         merge_commit: None,
         applied_as_commits: vec![],
@@ -154,22 +170,11 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
         IssuesCmd::Create {
             repo_owner,
             repo_id,
-            subject,
+            title,
             content,
             label,
             to,
-        } => {
-            cmd_create_issue(
-                client,
-                &repo_owner,
-                &repo_id,
-                &subject,
-                &content,
-                &label,
-                &to,
-            )
-            .await
-        }
+        } => cmd_create_issue(client, &repo_owner, &repo_id, &title, &content, &label, &to).await,
         IssuesCmd::Get { event } => cmd_get_issue(client, &event).await,
         IssuesCmd::List {
             repo_owner,
@@ -195,6 +200,7 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
             repo_owner,
             repo_id,
             euc,
+            to,
         } => {
             cmd_issue_status(
                 client,
@@ -204,6 +210,7 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
                 repo_owner.as_deref(),
                 repo_id.as_deref(),
                 euc.as_deref(),
+                &to,
             )
             .await
         }

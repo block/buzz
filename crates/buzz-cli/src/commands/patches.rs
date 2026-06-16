@@ -1,7 +1,9 @@
 use crate::client::BuzzClient;
 use crate::error::CliError;
-use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
-use buzz_sdk::{GitPatchMeta, GitRepoCoord, GitStatus, GitStatusMeta};
+use crate::validate::{
+    read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64, validate_repo_id,
+};
+use buzz_sdk::{GitAppliedPatchRef, GitPatchMeta, GitRepoCoord, GitStatus, GitStatusMeta};
 
 // ---------------------------------------------------------------------------
 // Send patch — publish kind:1617
@@ -25,7 +27,7 @@ pub async fn cmd_send_patch(
 ) -> Result<(), CliError> {
     validate_hex64(repo_owner)?;
     validate_repo_id(repo_id)?;
-    let content = read_or_stdin(patch)?;
+    let content = read_file_or_stdin(patch)?;
 
     let committer = match committer {
         Some(spec) => Some(parse_committer(spec)?),
@@ -134,6 +136,7 @@ pub async fn cmd_patch_status(
     repo_id: Option<&str>,
     euc: Option<&str>,
     revision: Option<&str>,
+    to: &[String],
     q: &[String],
     merge_commit: Option<&str>,
     applied_as_commit: &[String],
@@ -162,13 +165,33 @@ pub async fn cmd_patch_status(
         }
     };
 
+    // NIP-34 expects status events to `p`-tag the repo owner (plus root/
+    // revision authors) so they're discoverable by subscription. Default
+    // to the repo owner when known; `--to` covers root-author / revision-
+    // author / anyone else the caller wants to notify.
+    let mut recipients = Vec::new();
+    if let Some(ref repo) = repo {
+        recipients.push(repo.owner.clone());
+    }
+    for recipient in to {
+        validate_hex64(recipient)?;
+        if !recipients.contains(recipient) {
+            recipients.push(recipient.clone());
+        }
+    }
+
+    let applied_patches = q
+        .iter()
+        .map(|spec| GitAppliedPatchRef::parse(spec).map_err(sdk_err))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let meta = GitStatusMeta {
         root_event: root.to_string(),
         accepted_revision_root: revision.map(str::to_string),
         repo,
         euc: euc.map(str::to_string),
-        recipients: vec![],
-        applied_patches: q.to_vec(),
+        recipients,
+        applied_patches,
         merge_commit: merge_commit.map(str::to_string),
         applied_as_commits: applied_as_commit.to_vec(),
     };
@@ -249,6 +272,7 @@ pub async fn dispatch(cmd: crate::PatchesCmd, client: &BuzzClient) -> Result<(),
             repo_id,
             euc,
             revision,
+            to,
             q,
             merge_commit,
             applied_as_commit,
@@ -262,6 +286,7 @@ pub async fn dispatch(cmd: crate::PatchesCmd, client: &BuzzClient) -> Result<(),
                 repo_id.as_deref(),
                 euc.as_deref(),
                 revision.as_deref(),
+                &to,
                 &q,
                 merge_commit.as_deref(),
                 &applied_as_commit,

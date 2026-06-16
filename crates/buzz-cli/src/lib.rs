@@ -1116,7 +1116,13 @@ pub enum PatchesCmd {
         /// Root id of the revision that was accepted (status=merged only)
         #[arg(long)]
         revision: Option<String>,
-        /// Applied patch event id — can be specified multiple times (status=merged only)
+        /// Additional recipient pubkey(s) for the status event (besides the
+        /// repo owner, which is tagged automatically when --repo-owner is
+        /// given) — e.g. root/revision author. Can be specified multiple times.
+        #[arg(long = "to")]
+        to: Vec<String>,
+        /// Applied patch event id — can be specified multiple times (status=merged only).
+        /// Accepts `<id>`, `<id>:<relay-url>`, or `<id>:<relay-url>:<pubkey>`.
         #[arg(long = "q")]
         q: Vec<String>,
         /// Merge commit id (status=merged only)
@@ -1143,8 +1149,8 @@ pub enum IssuesCmd {
         #[arg(long)]
         repo_id: String,
         /// Issue title
-        #[arg(long)]
-        subject: String,
+        #[arg(long, alias = "subject")]
+        title: String,
         /// Issue body, markdown. Use '-' to read from stdin.
         #[arg(long)]
         content: String,
@@ -1199,6 +1205,11 @@ pub enum IssuesCmd {
         /// Earliest-unique-commit of the repo
         #[arg(long)]
         euc: Option<String>,
+        /// Additional recipient pubkey(s) for the status event (besides the
+        /// repo owner, which is tagged automatically when --repo-owner is
+        /// given) — e.g. the issue author. Can be specified multiple times.
+        #[arg(long = "to")]
+        to: Vec<String>,
     },
 }
 
