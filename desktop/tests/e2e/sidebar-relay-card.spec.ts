@@ -7,6 +7,8 @@ const CUSTOM_RELAY_URL = "wss://relay.example.com";
 const CONNECT_ERROR = "relay unreachable: could not connect to relay";
 const PROXY_ERROR =
   "relay unreachable: relay returned an unexpected HTML page (VPN or proxy sign-in?)";
+const CLOUDFLARE_ACCESS_ERROR =
+  "relay unreachable: network sign-in required (Cloudflare Access / VPN) - re-authenticate and reconnect";
 
 test("Block workspace sidebar generic relay failures offer the VPN card", async ({
   page,
@@ -26,12 +28,30 @@ test("Block workspace sidebar generic relay failures offer the VPN card", async 
   await expect(page.getByTestId("sidebar-relay-unreachable")).toHaveCount(0);
 });
 
-test("Block workspace sidebar proxy failures offer access refresh", async ({
+test("Block workspace sidebar proxy failures offer the VPN card", async ({
   page,
 }) => {
   await installMockBridge(
     page,
     { channelsReadError: PROXY_ERROR },
+    { relayWsUrl: BLOCK_RELAY_URL },
+  );
+
+  await page.goto("/");
+
+  const card = page.getByTestId("sidebar-vpn-off");
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Turn on VPN");
+  await expect(page.getByTestId("sidebar-connect-vpn")).toBeVisible();
+  await expect(page.getByTestId("sidebar-vpn-access-refresh")).toHaveCount(0);
+});
+
+test("Block workspace sidebar Cloudflare Access failures offer access refresh", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    { channelsReadError: CLOUDFLARE_ACCESS_ERROR },
     { relayWsUrl: BLOCK_RELAY_URL },
   );
 

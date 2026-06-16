@@ -35,12 +35,13 @@ function shouldRefreshBlockVpnAccess(errorMessage: string | null | undefined) {
 
   const detail = relayErrorDetail(errorMessage).toLowerCase();
   return (
-    detail.includes("cloudflare") ||
-    detail.includes("access") ||
-    detail.includes("sign-in") ||
     detail.includes("re-authenticate") ||
     detail.includes("reauth") ||
-    detail.includes("proxy")
+    detail.includes("expired") ||
+    detail.includes("unauthorized") ||
+    detail.includes("forbidden") ||
+    detail.includes("401") ||
+    detail.includes("403")
   );
 }
 

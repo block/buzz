@@ -38,10 +38,40 @@ test("resolveRelayConnectivityCardVariant offers VPN for generic Block relay fai
   );
 });
 
-test("resolveRelayConnectivityCardVariant offers access refresh for Block proxy failures", () => {
+test("resolveRelayConnectivityCardVariant offers VPN for generic Block proxy failures", () => {
   assert.equal(
     resolveRelayConnectivityCardVariant(
       "relay unreachable: relay returned an unexpected HTML page (VPN or proxy sign-in?)",
+      "wss://sprout-oss.stage.blox.sqprod.co",
+    ),
+    "connect-vpn",
+  );
+});
+
+test("resolveRelayConnectivityCardVariant offers VPN for Block HTTP redirects", () => {
+  assert.equal(
+    resolveRelayConnectivityCardVariant(
+      "HTTP error: 302 Found",
+      "wss://sprout-oss.stage.blox.sqprod.co",
+    ),
+    "connect-vpn",
+  );
+});
+
+test("resolveRelayConnectivityCardVariant offers VPN for Cloudflare Access redirects without reauth detail", () => {
+  assert.equal(
+    resolveRelayConnectivityCardVariant(
+      "HTTP error: 302 Found - Cloudflare Access sign-in required",
+      "wss://sprout-oss.stage.blox.sqprod.co",
+    ),
+    "connect-vpn",
+  );
+});
+
+test("resolveRelayConnectivityCardVariant offers access refresh for Cloudflare Access failures", () => {
+  assert.equal(
+    resolveRelayConnectivityCardVariant(
+      "relay unreachable: network sign-in required (Cloudflare Access / VPN) - re-authenticate and reconnect",
       "wss://sprout-oss.stage.blox.sqprod.co",
     ),
     "refresh-access",
