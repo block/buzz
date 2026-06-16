@@ -123,9 +123,11 @@ function ReminderRow({
     <div className="flex items-start gap-3 rounded-md border p-3">
       <div className="flex-1 min-w-0">
         <p className="text-sm font-medium truncate">
-          {reminder.content.target.preview || "Message"}
+          {reminder.content.target?.preview ||
+            reminder.content.note ||
+            "Reminder"}
         </p>
-        {reminder.content.note ? (
+        {reminder.content.target && reminder.content.note ? (
           <p className="text-xs text-muted-foreground mt-0.5 truncate">
             {reminder.content.note}
           </p>
@@ -207,7 +209,10 @@ export function RemindersPanel({ pubkey }: { pubkey: string }) {
         if (!r.notBefore) continue;
         if (r.notBefore > lastCheck && r.notBefore <= now) {
           toast("Reminder due", {
-            description: r.content.target.preview || "A reminder is waiting",
+            description:
+              r.content.target?.preview ||
+              r.content.note ||
+              "A reminder is waiting",
             icon: <Bell className="h-4 w-4" />,
           });
         }

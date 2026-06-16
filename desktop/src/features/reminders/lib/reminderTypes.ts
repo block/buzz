@@ -12,7 +12,8 @@ export type ReminderTarget = {
 };
 
 export type ReminderContent = {
-  target: ReminderTarget;
+  /** Target message. Absent for note-only reminders (NIP-ER allows either). */
+  target?: ReminderTarget;
   /** Optional user-provided note. */
   note?: string;
   status: ReminderStatus;
