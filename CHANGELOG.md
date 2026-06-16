@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.3.24
+
+de24b90aa feat(desktop): refine thread-unread badge to two-token form (#1069)
+fd2553726 fix(buzz): prevent reconnect storms from reaped ephemeral channels (#1071)
+5a651632d fix(buzz-acp): trim oversized observer frames to fit instead of dropping (#1072)
+07efae7b5 perf(ci): speed up PR CI wall clock and local dev builds (#1028)
+56a5ac279 chore(deps): update react monorepo (#1048)
+9f99e62d4 Polish desktop visual details (#1067)
+e3736f08b ci: use running postgres for pgschema desired-state planning (#1070)
+2d26db6d8 fix(desktop): anchor active-turn badge to skew-corrected agent start (#1068)
+ba776b995 feat(desktop): add configurable transport reconnect hook (#1059)
+2300248d3 Add automatic database migrations (#988)
+f8715612a Add composer spoiler formatting (#1055)
+2a2c1c800 feat(desktop): in-channel and in-thread unread indicators (#1008)
+cbc754cff perf(timeline): gate heavy message render behind useDeferredValue (#1022)
+116486592 Add animated profile avatars (#1031)
+89ae31d20 Polish direct message and members modals (#1054)
+5234fc816 Polish huddles UI (#1041)
+424ea7025 Fix video review comments in threads (#1056)
+81296d976 Polish message reaction tray (#1002)
+c30d7274c Refine app loading skeletons (#1001)
+ee34ca818 Polish channel modal forms (#1000)
+19656fff4 Normalize desktop icon sizing (#999)
+7a2e35521 Add shared skeleton loader primitives (#998)
+9ee5aeebd chore(scripts): update post-screenshots repo name to block/buzz (#1042)
+b2ad3074b docs: fix stale sprout repo references in RELEASING.md (#1043)
+
+
 ## v0.3.23
 
 9b410325 fix(release): publish manifest from successful platforms (#1039)
