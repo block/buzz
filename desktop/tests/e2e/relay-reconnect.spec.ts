@@ -92,3 +92,26 @@ test("sidebar reconnect prompt flips on live relay degradation without a query e
   // surface the affordance, don't yank context).
   await expect(page.getByTestId("channel-general")).toBeVisible();
 });
+
+test("profile popover reconnect item is hidden when healthy and shown when degraded", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  // Healthy boot: open the profile popover and wait for it to mount. The
+  // reconnect item must be ABSENT because the relay is connected. Anchoring on
+  // a stable popover item first ensures the count assertion reflects the gate,
+  // not an un-mounted popover. Pre-fix the item rendered unconditionally, so
+  // this fails before the gate is added.
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+  await page.getByTestId("sidebar-profile-avatar-button").click();
+  await expect(page.getByTestId("profile-popover-settings")).toBeVisible();
+  await expect(page.getByTestId("profile-popover-reconnect")).toHaveCount(0);
+
+  // Drive the live connection degraded. The gate reads `useRelayConnection()`,
+  // so the item surfaces reactively while the popover stays open.
+  await driveConnectionDegraded(page, "disconnected");
+  await expect(page.getByTestId("profile-popover-reconnect")).toBeVisible({
+    timeout: 5_000,
+  });
+});
