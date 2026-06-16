@@ -1748,6 +1748,15 @@ async fn handle_ws_message(
                     subscription_id,
                     message,
                 } => {
+                    // A per-channel membership denial means THIS channel is
+                    // forbidden, not the whole connection. Drop just this
+                    // channel's subscription and keep the socket — otherwise the
+                    // socket is torn down, the forbidden channel is resubscribed,
+                    // and the same CLOSED arrives again: a tight reconnect loop.
+                    if drop_channel_on_access_denied(state, &subscription_id, &message) {
+                        return true;
+                    }
+
                     // Finding #15: CLOSED needs cleanup and resubscribe, not just logging.
                     // Classify the error to decide how to respond.
                     let is_auth_error = message.starts_with("auth-required")
@@ -2563,6 +2572,46 @@ fn channel_id_from_sub_id(sub_id: &str) -> Option<Uuid> {
     sub_id
         .strip_prefix("ch-")
         .and_then(|s| s.parse::<Uuid>().ok())
+}
+
+/// Per-channel CLOSED denials: the channel is forbidden but the connection is
+/// fine. Match these EXACT strings, never a `starts_with("restricted")` prefix —
+/// a prefix would also swallow connection-level `restricted: insufficient scope`,
+/// dropping a channel instead of reconnecting. The only CLOSED senders of these
+/// strings are `req.rs:153` (not a channel member) and `side_effects.rs:71`
+/// (channel access revoked, via member eviction / open→private flip).
+/// `ingest.rs` returns these as EVENT-publish `OK(false)`, never as a
+/// subscription CLOSED, so it is not a source here.
+const CHANNEL_ACCESS_DENIED_REASONS: &[&str] = &[
+    "restricted: not a channel member",
+    "restricted: channel access revoked",
+];
+
+/// Handle a CLOSED that denies access to a single channel: drop just that
+/// channel's subscription (the proven Unsubscribe cleanup) and keep the socket.
+///
+/// Returns `true` when the CLOSED was an exact per-channel denial on a `ch-`
+/// subscription and the channel was dropped — the caller keeps the connection
+/// with no reconnect. Returns `false` for everything else (connection-level
+/// `restricted: insufficient scope`, `auth-required`, non-channel subs), which
+/// falls through to the existing reconnect path.
+///
+/// An already-removed channel is a harmless no-op: the remove/clear simply
+/// affect nothing, and the dropped channel is never re-subscribed, so the loop
+/// cannot re-form.
+fn drop_channel_on_access_denied(state: &mut BgState, sub_id: &str, message: &str) -> bool {
+    if !CHANNEL_ACCESS_DENIED_REASONS.contains(&message) {
+        return false;
+    }
+    let Some(channel_id) = channel_id_from_sub_id(sub_id) else {
+        return false;
+    };
+    warn!(
+        "channel {channel_id} access denied by relay: {message} — dropping subscription, keeping connection"
+    );
+    state.active_subscriptions.remove(&channel_id);
+    state.clear_channel_state(&channel_id);
+    true
 }
 
 /// Apply the appropriate auth header to a reqwest request builder.
@@ -3476,6 +3525,149 @@ mod tests {
         assert!(
             state.seen_ids.insert(event_id_hex),
             "after backpressure removal, replay must be accepted"
+        );
+    }
+
+    // ── drop_channel_on_access_denied (Phenomenon A: reconnect loop) ──────────
+
+    /// Subscribe a channel via the production command path so the test exercises
+    /// real subscription state (active_subscriptions + active_filters + since).
+    fn subscribe_channel(state: &mut BgState, channel_id: Uuid) {
+        apply_command_to_state(
+            state,
+            RelayCommand::Subscribe {
+                channel_id,
+                filter: ChannelFilter {
+                    kinds: Some(vec![9]),
+                    require_mention: false,
+                },
+                replay_since: Some(1_000),
+            },
+        );
+    }
+
+    #[test]
+    fn not_a_channel_member_drops_channel_without_reconnect() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+
+        let handled = drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: not a channel member",
+        );
+
+        assert!(handled, "per-channel denial must be handled (no reconnect)");
+        assert!(
+            !state.active_subscriptions.contains_key(&channel_id),
+            "the forbidden channel's subscription must be dropped"
+        );
+        assert!(
+            !state.active_filters.contains_key(&channel_id),
+            "channel state must be cleared (Unsubscribe cleanup)"
+        );
+    }
+
+    #[test]
+    fn channel_access_revoked_drops_channel_without_reconnect() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+
+        let handled = drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: channel access revoked",
+        );
+
+        assert!(handled, "per-channel denial must be handled (no reconnect)");
+        assert!(!state.active_subscriptions.contains_key(&channel_id));
+        assert!(!state.active_filters.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn insufficient_scope_is_not_dropped_and_reconnects() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+
+        let handled = drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: insufficient scope",
+        );
+
+        assert!(
+            !handled,
+            "connection-level insufficient-scope must fall through to reconnect, not drop the channel"
+        );
+        assert!(
+            state.active_subscriptions.contains_key(&channel_id),
+            "the channel must survive so reconnect can restore it"
+        );
+    }
+
+    #[test]
+    fn auth_required_is_not_dropped_and_reconnects() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+
+        let handled = drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "auth-required: not authenticated",
+        );
+
+        assert!(
+            !handled,
+            "auth-required must fall through to reconnect, not drop the channel"
+        );
+        assert!(state.active_subscriptions.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn already_removed_channel_is_a_no_op() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        // Channel was never subscribed (or already dropped) — a delayed CLOSED.
+
+        let handled = drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: not a channel member",
+        );
+
+        assert!(
+            handled,
+            "an exact per-channel denial is still handled (keep socket) even if the channel is gone"
+        );
+        assert!(
+            !state.active_subscriptions.contains_key(&channel_id),
+            "no-op: nothing to remove and nothing resurrected"
+        );
+    }
+
+    #[test]
+    fn dropped_channel_is_not_resubscribed_so_loop_cannot_re_form() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+
+        drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: not a channel member",
+        );
+
+        // Simulate a reconnect: only channels still in active_subscriptions are
+        // restored. The dropped channel must not be among them — otherwise the
+        // forbidden channel would be resubscribed and earn the same CLOSED again.
+        let resubscribed: Vec<Uuid> = state.active_subscriptions.keys().copied().collect();
+        assert!(
+            !resubscribed.contains(&channel_id),
+            "the dropped channel must not be resubscribed — the loop cannot re-form"
         );
     }
 }
