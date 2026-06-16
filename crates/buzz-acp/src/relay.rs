@@ -85,6 +85,81 @@ pub struct ChannelInfo {
     pub channel_type: String,
 }
 
+/// Build the discovered-channel subscribe set from the membership UUIDs and the
+/// kind:39000 metadata events, **skipping any channel flagged `archived=true`**.
+///
+/// Archived channels (e.g. auto-archived by the ephemeral-channel reaper) are
+/// unusable: re-offering one on reconnect draws a `CLOSED restricted` and would
+/// re-form the reconnect loop. Dropping them here is the defense-in-depth
+/// backstop to the relay-side live-subscription eviction — it covers a client
+/// that was offline when the channel was reaped and so missed the CLOSED.
+/// A channel with no metadata event defaults to a `stream` named `unknown`,
+/// preserving prior behavior for non-archived channels.
+fn merge_discovered_channels(
+    channel_uuids: Vec<Uuid>,
+    meta_events: &serde_json::Value,
+) -> HashMap<Uuid, ChannelInfo> {
+    let mut meta_map: HashMap<Uuid, (String, String)> = HashMap::new();
+    let mut archived: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    if let Some(arr) = meta_events.as_array() {
+        for ev in arr {
+            let tags = match ev.get("tags").and_then(|t| t.as_array()) {
+                Some(t) => t,
+                None => continue,
+            };
+            let mut d_val = None;
+            let mut name = None;
+            let mut is_hidden = false;
+            let mut is_private = false;
+            let mut is_archived = false;
+            for tag in tags {
+                if let Some(arr) = tag.as_array() {
+                    match arr.first().and_then(|v| v.as_str()) {
+                        Some("d") => d_val = arr.get(1).and_then(|v| v.as_str()),
+                        Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
+                        Some("hidden") => is_hidden = true,
+                        Some("private") => is_private = true,
+                        Some("archived") => {
+                            is_archived = arr.get(1).and_then(|v| v.as_str()) == Some("true")
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(d) = d_val {
+                if let Ok(uuid) = d.parse::<Uuid>() {
+                    if is_archived {
+                        archived.insert(uuid);
+                        continue;
+                    }
+                    let ch_name = name.unwrap_or("unknown").to_string();
+                    // DMs have the "hidden" tag; private channels have "private".
+                    let ch_type = if is_hidden {
+                        "dm".to_string()
+                    } else if is_private {
+                        "private".to_string()
+                    } else {
+                        "stream".to_string()
+                    };
+                    meta_map.insert(uuid, (ch_name, ch_type));
+                }
+            }
+        }
+    }
+
+    let mut map = HashMap::with_capacity(channel_uuids.len());
+    for uuid in channel_uuids {
+        if archived.contains(&uuid) {
+            continue;
+        }
+        let (name, channel_type) = meta_map
+            .remove(&uuid)
+            .unwrap_or_else(|| ("unknown".to_string(), "stream".to_string()));
+        map.insert(uuid, ChannelInfo { name, channel_type });
+    }
+    map
+}
+
 /// Lightweight HTTP client for pre-prompt context fetches via the Nostr HTTP bridge.
 ///
 /// Extracted from `HarnessRelay` fields so it can be shared (via `Arc`) with
@@ -565,54 +640,8 @@ impl HarnessRelay {
             .custom_tags(d_tag, d_values);
         let meta_events = rest.query(&[meta_filter]).await?;
 
-        // Build UUID → (name, channel_type) from metadata events.
-        let mut meta_map: HashMap<Uuid, (String, String)> = HashMap::new();
-        if let Some(arr) = meta_events.as_array() {
-            for ev in arr {
-                let tags = match ev.get("tags").and_then(|t| t.as_array()) {
-                    Some(t) => t,
-                    None => continue,
-                };
-                let mut d_val = None;
-                let mut name = None;
-                let mut is_hidden = false;
-                let mut is_private = false;
-                for tag in tags {
-                    if let Some(arr) = tag.as_array() {
-                        match arr.first().and_then(|v| v.as_str()) {
-                            Some("d") => d_val = arr.get(1).and_then(|v| v.as_str()),
-                            Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
-                            Some("hidden") => is_hidden = true,
-                            Some("private") => is_private = true,
-                            _ => {}
-                        }
-                    }
-                }
-                if let Some(d) = d_val {
-                    if let Ok(uuid) = d.parse::<Uuid>() {
-                        let ch_name = name.unwrap_or("unknown").to_string();
-                        // DMs have the "hidden" tag; private channels have "private".
-                        let ch_type = if is_hidden {
-                            "dm".to_string()
-                        } else if is_private {
-                            "private".to_string()
-                        } else {
-                            "stream".to_string()
-                        };
-                        meta_map.insert(uuid, (ch_name, ch_type));
-                    }
-                }
-            }
-        }
-
-        // Step 3: Merge into final map.
-        let mut map = HashMap::with_capacity(channel_uuids.len());
-        for uuid in channel_uuids {
-            let (name, channel_type) = meta_map
-                .remove(&uuid)
-                .unwrap_or_else(|| ("unknown".to_string(), "stream".to_string()));
-            map.insert(uuid, ChannelInfo { name, channel_type });
-        }
+        // Step 3: Build the final subscribe set, skipping archived channels.
+        let map = merge_discovered_channels(channel_uuids, &meta_events);
 
         debug!("discovered {} channel(s)", map.len());
         Ok(map)
@@ -2965,6 +2994,73 @@ mod tests {
     #[test]
     fn channel_id_from_sub_id_empty() {
         assert!(channel_id_from_sub_id("").is_none());
+    }
+
+    // ── merge_discovered_channels (archived skip) ─────────────────────────────
+
+    fn meta_event(uuid: Uuid, name: &str, extra: &[&str]) -> serde_json::Value {
+        let mut tags = vec![
+            serde_json::json!(["d", uuid.to_string()]),
+            serde_json::json!(["name", name]),
+        ];
+        // `extra` is a flat list of single-value tag names (e.g. archived=true).
+        for pair in extra.chunks(2) {
+            match pair {
+                [k, v] => tags.push(serde_json::json!([k, v])),
+                [k] => tags.push(serde_json::json!([k])),
+                _ => {}
+            }
+        }
+        serde_json::json!({ "tags": tags })
+    }
+
+    #[test]
+    fn merge_discovered_channels_skips_archived_metadata() {
+        let live = Uuid::new_v4();
+        let archived = Uuid::new_v4();
+        let meta = serde_json::json!([
+            meta_event(live, "live", &[]),
+            meta_event(archived, "dead", &["archived", "true"]),
+        ]);
+
+        let map = merge_discovered_channels(vec![live, archived], &meta);
+
+        assert!(map.contains_key(&live), "non-archived channel is kept");
+        assert!(
+            !map.contains_key(&archived),
+            "archived=true channel is skipped from the subscribe set"
+        );
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn merge_discovered_channels_skips_archived_even_when_still_a_member() {
+        // The offline feeder: the agent is still listed as a member
+        // (uuid present in channel_uuids, the kind:39002 membership set), but the
+        // channel was reaped while the agent was offline. Even though the agent
+        // missed the eviction CLOSED, the archived=true kind:39000 makes the
+        // client skip re-subscribing on reconnect — proving (b) closes the loop
+        // independently of the relay-side eviction.
+        let reaped = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(reaped, "reaped", &["archived", "true"])]);
+
+        let map = merge_discovered_channels(vec![reaped], &meta);
+
+        assert!(
+            map.is_empty(),
+            "a still-member but archived channel is not re-subscribed"
+        );
+    }
+
+    #[test]
+    fn merge_discovered_channels_archived_false_is_kept() {
+        // An explicit archived=false (e.g. after unarchive) must NOT be skipped.
+        let ch = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(ch, "back", &["archived", "false"])]);
+
+        let map = merge_discovered_channels(vec![ch], &meta);
+
+        assert!(map.contains_key(&ch), "archived=false is treated as live");
     }
 
     // ── parse_relay_message ───────────────────────────────────────────────────

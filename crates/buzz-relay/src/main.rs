@@ -389,6 +389,16 @@ async fn main() -> anyhow::Result<()> {
                     {
                         error!(channel = %channel_id, "reaper discovery update failed: {e}");
                     }
+
+                    // Close live subscriptions so connected clients drop the
+                    // archived channel immediately (CLOSED is in the client's
+                    // drop-set → no reconnect storm). Offline clients are caught
+                    // by the archived=true skip in discover_channels on reconnect.
+                    buzz_relay::handlers::side_effects::evict_all_channel_subscriptions(
+                        &reaper_state,
+                        *channel_id,
+                    )
+                    .await;
                 }
             }
         });

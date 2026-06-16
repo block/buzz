@@ -988,6 +988,51 @@ mod tests {
     }
 
     #[test]
+    fn test_evict_all_subscribers_leaves_no_channel_subscriptions() {
+        // Models the reaper's evict_all_channel_subscriptions: remove every
+        // subscriber conn of a channel, leaving the channel with zero live subs
+        // while an unrelated channel is untouched. This is the registry behavior
+        // that lets an auto-archived channel stop fanning out without a storm.
+        let registry = SubscriptionRegistry::new();
+        let conn_a = Uuid::new_v4();
+        let conn_b = Uuid::new_v4();
+        let reaped = Uuid::new_v4();
+        let survivor = Uuid::new_v4();
+
+        registry.register(
+            conn_a,
+            "a".to_string(),
+            vec![Filter::new().kind(Kind::TextNote)],
+            Some(reaped),
+        );
+        registry.register(
+            conn_b,
+            "b".to_string(),
+            vec![Filter::new().kind(Kind::TextNote)],
+            Some(reaped),
+        );
+        registry.register(
+            conn_a,
+            "keep".to_string(),
+            vec![Filter::new().kind(Kind::TextNote)],
+            Some(survivor),
+        );
+
+        for conn_id in registry.channel_subscriber_conns(reaped) {
+            registry.remove_channel_subscriptions(conn_id, reaped);
+        }
+
+        assert!(registry.channel_subscriber_conns(reaped).is_empty());
+        assert!(registry
+            .fan_out(&make_stored_event(Kind::TextNote, Some(reaped)))
+            .is_empty());
+        // Unrelated channel still fans out.
+        let survivor_matches = registry.fan_out(&make_stored_event(Kind::TextNote, Some(survivor)));
+        assert_eq!(survivor_matches.len(), 1);
+        assert_eq!(survivor_matches[0].1, "keep");
+    }
+
+    #[test]
     fn test_global_kind_index_fan_out() {
         // Global subscriptions with explicit kinds should use the global_kind_index
         // for sub-linear fan-out instead of scanning all subs.

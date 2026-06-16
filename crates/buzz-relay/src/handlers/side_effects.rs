@@ -97,6 +97,21 @@ async fn evict_non_member_channel_subscriptions(
     Ok(())
 }
 
+/// Close every live subscription on a channel, for all subscribers, sending
+/// `CLOSED restricted: channel access revoked` to each.
+///
+/// Used when a channel is archived (e.g. the ephemeral-channel reaper): the
+/// channel becomes unusable for everyone, so all live subscriptions must close.
+/// The `channel access revoked` reason is in the client's drop-set, so a
+/// connected agent drops just that channel and keeps its socket — no reconnect
+/// storm. Offline/reconnecting clients are covered by the discovery-time
+/// `archived=true` skip in `discover_channels`.
+pub async fn evict_all_channel_subscriptions(state: &Arc<AppState>, channel_id: Uuid) {
+    for conn_id in state.sub_registry.channel_subscriber_conns(channel_id) {
+        evict_conn_channel_subscriptions(state, channel_id, conn_id).await;
+    }
+}
+
 /// Dispatch side effects for a stored event.
 pub async fn handle_side_effects(
     kind: u32,
