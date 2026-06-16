@@ -169,18 +169,25 @@ test.describe("config bridge screenshots", () => {
     await logRow.screenshot({ path: `${SHOTS}/05-advanced-expanded.png` });
   });
 
-  test("06 — sources footer", async ({ page }) => {
+  test("06 — config provenance", async ({ page }) => {
     await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
     await openAgentsView(page);
     await expandAgent(page, GOOSE_PUBKEY);
 
-    // The sources footer shows tier status indicators
+    // Each config value carries an inline provenance sentence below it.
+    // The goose fixture's model is buzzExplicit ("Set in Buzz"); its provider
+    // and thinking effort are configFile, so multiple rows render the same
+    // "From config file (...)" sentence — assert the first match.
     const agentRow = page.getByTestId(`managed-agent-${GOOSE_PUBKEY}`);
-    const sourcesFooter = agentRow
-      .locator("p")
-      .filter({ hasText: "Config file" });
-    await expect(sourcesFooter).toBeVisible();
-    await sourcesFooter.screenshot({ path: `${SHOTS}/06-sources-footer.png` });
+    await expect(agentRow.getByText("Set in Buzz")).toBeVisible();
+    await expect(
+      agentRow
+        .getByText("From config file (~/.config/goose/config.yaml)")
+        .first(),
+    ).toBeVisible();
+
+    const logRow = agentRow.getByTestId("managed-agent-log-row");
+    await logRow.screenshot({ path: `${SHOTS}/06-config-provenance.png` });
   });
 
   test("07 — codex dual mode", async ({ page }) => {

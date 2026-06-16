@@ -17,8 +17,9 @@ pub enum ConfigOrigin {
     /// Read from harness config file on disk (tier 2b, lowest precedence).
     ConfigFile,
     /// Value inherited from persona defaults.
-    /// Forward slot — not yet populated by any reader. Will be wired when
-    /// persona pack config resolution is added to `read_config_surface`.
+    /// Populated by the `get_agent_config_surface` call site: persona values are
+    /// resolved before calling the reader, then the surface is post-processed to
+    /// re-tag injected fields from `BuzzExplicit` to `PersonaDefault`.
     PersonaDefault,
 }
 

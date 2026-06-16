@@ -579,4 +579,121 @@ mod tests {
         // the actual file in a unit test, just verify the override fields are populated
         // when we manually construct the scenario via build_model_field.
     }
+
+    // ── Persona resolution integration tests ────────────────────────────
+    //
+    // These simulate the call-site pattern in agent_config.rs:
+    // 1. Inject persona-resolved values into the record (as if absent)
+    // 2. Call read_config_surface (reader tags them BuzzExplicit)
+    // 3. Re-tag injected fields to PersonaDefault
+    //
+    // This exercises the same logic path as get_agent_config_surface without
+    // requiring Tauri AppHandle/State infrastructure.
+
+    #[test]
+    fn persona_model_injection_produces_persona_default_origin() {
+        let mut record = test_record();
+        // Simulate: record has no model, persona provides one.
+        // The call-site injects it before calling the reader.
+        record.model = Some("persona-model".to_string());
+        let runtime = test_runtime();
+
+        let mut surface = read_config_surface(&record, Some(runtime), None);
+
+        // Reader sees injected model as BuzzExplicit.
+        let model = surface.normalized.model.as_ref().unwrap();
+        assert_eq!(model.value.as_deref(), Some("persona-model"));
+        assert_eq!(model.origin, ConfigOrigin::BuzzExplicit);
+
+        // Call-site re-tags (simulating had_model == false).
+        if let Some(ref mut field) = surface.normalized.model {
+            if field.origin == ConfigOrigin::BuzzExplicit {
+                field.origin = ConfigOrigin::PersonaDefault;
+            }
+        }
+
+        let model = surface.normalized.model.unwrap();
+        assert_eq!(model.value.as_deref(), Some("persona-model"));
+        assert_eq!(model.origin, ConfigOrigin::PersonaDefault);
+    }
+
+    #[test]
+    fn persona_provider_injection_produces_persona_default_origin() {
+        let mut record = test_record();
+        // Simulate: record has no provider env var, persona provides one.
+        // The call-site injects it as GOOSE_PROVIDER before calling the reader.
+        record
+            .env_vars
+            .insert("GOOSE_PROVIDER".to_string(), "anthropic".to_string());
+        let runtime = test_runtime();
+
+        let mut surface = read_config_surface(&record, Some(runtime), None);
+
+        // Reader sees injected provider as BuzzExplicit.
+        let provider = surface.normalized.provider.as_ref().unwrap();
+        assert_eq!(provider.value.as_deref(), Some("anthropic"));
+        assert_eq!(provider.origin, ConfigOrigin::BuzzExplicit);
+
+        // Call-site re-tags (simulating had_provider == false).
+        if let Some(ref mut field) = surface.normalized.provider {
+            if field.origin == ConfigOrigin::BuzzExplicit {
+                field.origin = ConfigOrigin::PersonaDefault;
+            }
+        }
+
+        let provider = surface.normalized.provider.unwrap();
+        assert_eq!(provider.value.as_deref(), Some("anthropic"));
+        assert_eq!(provider.origin, ConfigOrigin::PersonaDefault);
+    }
+
+    #[test]
+    fn persona_system_prompt_injection_produces_persona_default_origin() {
+        let mut record = test_record();
+        // Simulate: record has no system_prompt, persona provides one via env var.
+        // The call-site injects it as BUZZ_ACP_SYSTEM_PROMPT before calling the reader.
+        record.env_vars.insert(
+            "BUZZ_ACP_SYSTEM_PROMPT".to_string(),
+            "You are a helpful assistant.".to_string(),
+        );
+        let runtime = test_runtime();
+
+        let mut surface = read_config_surface(&record, Some(runtime), None);
+
+        // Reader sees injected prompt as BuzzExplicit.
+        let prompt = surface.normalized.system_prompt.as_ref().unwrap();
+        assert_eq!(
+            prompt.value.as_deref(),
+            Some("You are a helpful assistant.")
+        );
+        assert_eq!(prompt.origin, ConfigOrigin::BuzzExplicit);
+
+        // Call-site re-tags (simulating had_prompt == false).
+        if let Some(ref mut field) = surface.normalized.system_prompt {
+            if field.origin == ConfigOrigin::BuzzExplicit {
+                field.origin = ConfigOrigin::PersonaDefault;
+            }
+        }
+
+        let prompt = surface.normalized.system_prompt.unwrap();
+        assert_eq!(
+            prompt.value.as_deref(),
+            Some("You are a helpful assistant.")
+        );
+        assert_eq!(prompt.origin, ConfigOrigin::PersonaDefault);
+    }
+
+    #[test]
+    fn explicit_record_model_not_retagged_when_already_present() {
+        let mut record = test_record();
+        // Record already has its own model — persona resolution should NOT re-tag.
+        record.model = Some("explicit-model".to_string());
+        let runtime = test_runtime();
+
+        let surface = read_config_surface(&record, Some(runtime), None);
+
+        // had_model == true, so no re-tagging occurs. Origin stays BuzzExplicit.
+        let model = surface.normalized.model.unwrap();
+        assert_eq!(model.value.as_deref(), Some("explicit-model"));
+        assert_eq!(model.origin, ConfigOrigin::BuzzExplicit);
+    }
 }

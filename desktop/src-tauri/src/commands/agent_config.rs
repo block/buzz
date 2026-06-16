@@ -6,20 +6,100 @@ use crate::{
         config_bridge::{
             reader::read_config_surface,
             types::{
-                AcpConfigOptionEntry, AcpConfigOptionValue, AcpModelEntry, ConfigWriteMechanism,
-                RuntimeConfigSurface, SessionConfigCache, WriteConfigFieldRequest,
-                WriteConfigResult, WriteConfigTarget,
+                AcpConfigOptionEntry, AcpConfigOptionValue, AcpModelEntry, ConfigOrigin,
+                ConfigWriteMechanism, NormalizedField, RuntimeConfigSurface, SessionConfigCache,
+                WriteConfigFieldRequest, WriteConfigResult, WriteConfigTarget,
             },
             writer::plan_config_write,
         },
-        known_acp_runtime, load_managed_agents, save_managed_agents, sync_managed_agent_processes,
+        known_acp_runtime, load_managed_agents, load_personas,
+        resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
+        KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
     },
 };
+
+/// Resolve the config surface with persona values applied.
+///
+/// Both the read path (`get_agent_config_surface`) and the write path
+/// (`write_agent_config_field`) must see the same surface, so this is the
+/// single place persona resolution happens. The pipeline: resolve the linked
+/// persona's prompt/model/provider, inject each into the record only where the
+/// record lacks its own value, let `read_config_surface` tag those injected
+/// fields `BuzzExplicit`, then re-tag exactly the injected fields to
+/// `PersonaDefault`.
+///
+/// The re-tag is triple-gated — a field is re-tagged only when (a) the record
+/// did not already have it (`!had_*`), (b) the surface produced the field, and
+/// (c) the reader tagged it `BuzzExplicit`. A value the user set explicitly in
+/// Buzz keeps `had_* == true` and is never re-tagged.
+fn resolve_config_surface(
+    mut record: ManagedAgentRecord,
+    personas: &[PersonaRecord],
+    runtime_meta: Option<&KnownAcpRuntime>,
+    session_cache: Option<&SessionConfigCache>,
+) -> RuntimeConfigSurface {
+    let had_prompt =
+        record.system_prompt.is_some() || record.env_vars.contains_key("BUZZ_ACP_SYSTEM_PROMPT");
+    let had_model = record.model.is_some();
+
+    let provider_env_key = runtime_meta.and_then(|m| m.provider_env_var).unwrap_or("");
+    let had_provider = record.env_vars.contains_key(provider_env_key);
+
+    let (persona_prompt, persona_model, persona_provider) = resolve_effective_prompt_model_provider(
+        record.persona_id.as_deref(),
+        personas,
+        record.system_prompt.clone(),
+        record.model.clone(),
+    );
+
+    // Inject resolved persona values into the record where absent.
+    if !had_prompt {
+        if let Some(p) = persona_prompt {
+            record
+                .env_vars
+                .insert("BUZZ_ACP_SYSTEM_PROMPT".to_string(), p);
+        }
+    }
+    if !had_model {
+        record.model = persona_model;
+    }
+    if !had_provider && !provider_env_key.is_empty() {
+        if let Some(prov) = persona_provider {
+            record.env_vars.insert(provider_env_key.to_string(), prov);
+        }
+    }
+
+    let mut surface = read_config_surface(&record, runtime_meta, session_cache);
+
+    // Re-tag persona-sourced fields from BuzzExplicit to PersonaDefault.
+    if !had_prompt {
+        retag_persona_default(&mut surface.normalized.system_prompt);
+    }
+    if !had_model {
+        retag_persona_default(&mut surface.normalized.model);
+    }
+    if !had_provider && !provider_env_key.is_empty() {
+        retag_persona_default(&mut surface.normalized.provider);
+    }
+
+    surface
+}
+
+/// Re-tag a field's origin from `BuzzExplicit` to `PersonaDefault`, leaving any
+/// other origin untouched. No-op when the field is absent.
+fn retag_persona_default(field: &mut Option<NormalizedField>) {
+    if let Some(field) = field {
+        if field.origin == ConfigOrigin::BuzzExplicit {
+            field.origin = ConfigOrigin::PersonaDefault;
+        }
+    }
+}
 
 /// Get the full config surface for a managed agent.
 ///
 /// Returns normalized + advanced config from all available tiers.
 /// Pre-spawn agents show config file values with ACP tiers marked as pending.
+/// Persona-sourced values are resolved by `resolve_config_surface`.
 #[tauri::command]
 pub async fn get_agent_config_surface(
     pubkey: String,
@@ -45,11 +125,13 @@ pub async fn get_agent_config_surface(
             .ok_or_else(|| format!("agent {pubkey} not found"))?
     };
 
+    let personas = load_personas(&app).unwrap_or_default();
     let runtime_meta = known_acp_runtime(&record.agent_command);
     let session_cache = state.get_session_cache(&pubkey);
 
-    Ok(read_config_surface(
-        &record,
+    Ok(resolve_config_surface(
+        record,
+        &personas,
         runtime_meta,
         session_cache.as_ref(),
     ))
@@ -60,6 +142,10 @@ pub async fn get_agent_config_surface(
 /// Plans the write mechanism based on the current config surface, then
 /// executes: either updating the record (for env var respawn) or returning
 /// the mechanism for the frontend to send via observer control (for ACP writes).
+///
+/// Uses the same persona-resolved surface as `get_agent_config_surface` so
+/// `plan_config_write` sees persona-sourced fields and never returns
+/// "field not available" for a value inherited from the linked persona.
 #[tauri::command]
 pub async fn write_agent_config_field(
     request: WriteConfigFieldRequest,
@@ -78,9 +164,10 @@ pub async fn write_agent_config_field(
         .cloned()
         .ok_or_else(|| format!("agent {} not found", request.pubkey))?;
 
+    let personas = load_personas(&app).unwrap_or_default();
     let runtime_meta = known_acp_runtime(&record.agent_command);
     let session_cache = state.get_session_cache(&request.pubkey);
-    let surface = read_config_surface(&record, runtime_meta, session_cache.as_ref());
+    let surface = resolve_config_surface(record, &personas, runtime_meta, session_cache.as_ref());
 
     let mut result = plan_config_write(&surface, &request.field);
 
@@ -292,4 +379,137 @@ fn parse_models(raw: Option<&serde_json::Value>) -> (Vec<AcpModelEntry>, Option<
         })
         .collect();
     (models, current_model)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::managed_agents::{BackendKind, RespondTo};
+
+    fn goose_runtime() -> &'static KnownAcpRuntime {
+        &KnownAcpRuntime {
+            id: "goose",
+            label: "Goose",
+            commands: &["goose"],
+            aliases: &[],
+            avatar_url: "",
+            mcp_command: None,
+            mcp_hooks: false,
+            underlying_cli: None,
+            cli_install_commands: &[],
+            adapter_install_commands: &[],
+            install_instructions_url: "",
+            cli_install_hint: "",
+            adapter_install_hint: "",
+            skill_dir: None,
+            supports_acp_model_switching: false,
+            model_env_var: Some("GOOSE_MODEL"),
+            provider_env_var: Some("GOOSE_PROVIDER"),
+            provider_locked: false,
+            default_env: &[],
+            config_file_path: Some("~/.config/goose/config.yaml"),
+            config_file_format: Some("yaml"),
+            supports_acp_native_config: true,
+            thinking_env_var: Some("GOOSE_THINKING_EFFORT"),
+        }
+    }
+
+    fn agent_record() -> ManagedAgentRecord {
+        ManagedAgentRecord {
+            pubkey: "agent".to_string(),
+            name: "Agent".to_string(),
+            persona_id: Some("persona-1".to_string()),
+            private_key_nsec: "".to_string(),
+            auth_tag: None,
+            relay_url: "ws://localhost:3000".to_string(),
+            avatar_url: None,
+            acp_command: "buzz-acp".to_string(),
+            agent_command: "goose".to_string(),
+            agent_args: vec![],
+            mcp_command: "".to_string(),
+            turn_timeout_seconds: 300,
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            parallelism: 1,
+            system_prompt: None,
+            model: None,
+            mcp_toolsets: None,
+            env_vars: BTreeMap::new(),
+            start_on_app_launch: false,
+            runtime_pid: None,
+            backend: BackendKind::Local,
+            backend_agent_id: None,
+            provider_binary_path: None,
+            persona_team_dir: None,
+            persona_name_in_team: None,
+            created_at: "".to_string(),
+            updated_at: "".to_string(),
+            last_started_at: None,
+            last_stopped_at: None,
+            last_exit_code: None,
+            last_error: None,
+            respond_to: RespondTo::OwnerOnly,
+            respond_to_allowlist: vec![],
+            relay_mesh: None,
+        }
+    }
+
+    fn persona_with_model(model: &str) -> PersonaRecord {
+        PersonaRecord {
+            id: "persona-1".to_string(),
+            display_name: "Persona".to_string(),
+            avatar_url: None,
+            system_prompt: "You are a persona.".to_string(),
+            runtime: None,
+            model: Some(model.to_string()),
+            provider: None,
+            name_pool: Vec::new(),
+            is_builtin: false,
+            is_active: true,
+            source_team: None,
+            source_team_persona_slug: None,
+            env_vars: BTreeMap::new(),
+            created_at: "".to_string(),
+            updated_at: "".to_string(),
+        }
+    }
+
+    /// The write path must see a persona-inherited model. Without persona
+    /// resolution `surface.normalized.model` would be `None` and
+    /// `plan_config_write` would return "field not available for this runtime".
+    #[test]
+    fn write_path_sees_persona_sourced_model_field() {
+        let record = agent_record();
+        let personas = vec![persona_with_model("persona-model")];
+
+        let surface = resolve_config_surface(record, &personas, Some(goose_runtime()), None);
+
+        let model = surface.normalized.model.as_ref().expect("model resolved");
+        assert_eq!(model.value.as_deref(), Some("persona-model"));
+        assert_eq!(model.origin, ConfigOrigin::PersonaDefault);
+
+        let result = plan_config_write(&surface, &WriteConfigTarget::Model);
+        assert!(result.success, "write plan failed: {:?}", result.error);
+        assert!(matches!(
+            result.mechanism_used,
+            ConfigWriteMechanism::RespawnWithEnvVar { .. }
+        ));
+    }
+
+    /// A model the user set explicitly in Buzz must never be re-tagged to
+    /// `PersonaDefault`, even when the linked persona also has a model.
+    #[test]
+    fn explicit_record_model_outranks_persona_and_keeps_buzz_explicit_origin() {
+        let mut record = agent_record();
+        record.model = Some("explicit-model".to_string());
+        let personas = vec![persona_with_model("persona-model")];
+
+        let surface = resolve_config_surface(record, &personas, Some(goose_runtime()), None);
+
+        let model = surface.normalized.model.as_ref().expect("model resolved");
+        assert_eq!(model.value.as_deref(), Some("explicit-model"));
+        assert_eq!(model.origin, ConfigOrigin::BuzzExplicit);
+    }
 }

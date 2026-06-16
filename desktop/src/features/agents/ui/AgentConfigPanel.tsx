@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, ChevronRight, Info } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 
 import { useAgentConfigSurface } from "../hooks";
 import { cn } from "@/shared/lib/cn";
@@ -7,9 +7,9 @@ import { Spinner } from "@/shared/ui/spinner";
 import type {
   ConfigField,
   ConfigOrigin,
+  ConfigWriteMechanism,
   NormalizedConfig,
   NormalizedField,
-  ConfigSourceReport,
 } from "@/shared/api/types";
 
 type Props = {
@@ -17,66 +17,32 @@ type Props = {
   isRunning: boolean;
 };
 
-// ── Origin badge ─────────────────────────────────────────────────────────────
+// ── Provenance sentence ──────────────────────────────────────────────────────
 
-function originLabel(
+function provenanceSentence(
   origin: ConfigOrigin,
+  writeVia: ConfigWriteMechanism,
   configFilePath: string | null,
 ): string {
   switch (origin) {
     case "buzzExplicit":
-      return "Buzz";
-    case "acpConfigOption":
-      return "ACP";
-    case "acpNativeRead":
-      return "ACP";
-    case "envVar":
-      return "Env";
-    case "configFile": {
-      if (configFilePath) {
-        const parts = configFilePath.split(/[/\\]/);
-        return parts[parts.length - 1] ?? configFilePath;
+      return "Set in Buzz";
+    case "personaDefault":
+      return "Inherited from persona";
+    case "envVar": {
+      if (writeVia.type === "respawnWithEnvVar") {
+        return `From environment variable (${writeVia.envKey})`;
       }
-      return "Config";
+      return "From environment variable";
     }
-    case "personaDefault":
-      return "Persona";
-  }
-}
-
-function originColorClass(origin: ConfigOrigin): string {
-  switch (origin) {
-    case "buzzExplicit":
-      return "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300";
+    case "configFile":
+      return configFilePath
+        ? `From config file (${configFilePath})`
+        : "From config file";
     case "acpConfigOption":
     case "acpNativeRead":
-      return "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300";
-    case "configFile":
-    case "personaDefault":
-      return "bg-muted text-muted-foreground";
-    case "envVar":
-      return "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300";
+      return "From ACP session";
   }
-}
-
-function OriginBadge({
-  origin,
-  configFilePath,
-}: {
-  origin: ConfigOrigin;
-  configFilePath: string | null;
-}) {
-  return (
-    <span
-      className={cn(
-        "inline-block max-w-[120px] truncate rounded px-1.5 py-0.5 text-[10px] font-medium leading-none",
-        originColorClass(origin),
-      )}
-      title={originLabel(origin, configFilePath)}
-    >
-      {originLabel(origin, configFilePath)}
-    </span>
-  );
 }
 
 // ── Normalized row ────────────────────────────────────────────────────────────
@@ -107,19 +73,13 @@ function NormalizedRow({
     field.origin === "acpNativeRead" || field.origin === "acpConfigOption";
 
   return (
-    <div className="flex items-center gap-2 py-1 text-sm">
-      <span className="w-36 shrink-0 text-xs text-muted-foreground">
-        {label}
-      </span>
-
-      {/* Value area: effective value + strikethrough overridden value */}
-      <span className="min-w-0 flex-1 truncate font-medium">
+    <div className="py-2">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mt-0.5 truncate text-sm font-medium">
         {isPreSpawn && isAcpOnly ? (
-          <em className="font-normal text-muted-foreground not-italic text-xs">
+          <span className="font-normal text-muted-foreground text-xs">
             Available after agent starts
-          </em>
-        ) : isPreSpawn && field.origin === "configFile" && !field.value ? (
-          <span className="text-xs text-muted-foreground/70">—</span>
+          </span>
         ) : (
           <>
             {field.value ?? <span className="text-muted-foreground">—</span>}
@@ -130,25 +90,11 @@ function NormalizedRow({
             )}
           </>
         )}
-      </span>
-
-      {/* Badge area: effective badge + strikethrough overridden badge */}
-      <span className="flex items-center gap-1 shrink-0">
-        <OriginBadge origin={field.origin} configFilePath={configFilePath} />
-        {field.overriddenOrigin && (
-          <span className="opacity-50 line-through">
-            <OriginBadge
-              origin={field.overriddenOrigin}
-              configFilePath={configFilePath}
-            />
-          </span>
-        )}
-      </span>
-
-      {!field.isWritable && (
-        <span title="Read-only — edit this field directly in the config file">
-          <Info className="h-3 w-3 shrink-0 text-muted-foreground/50" />
-        </span>
+      </div>
+      {field.value && (
+        <div className="mt-0.5 text-[11px] text-muted-foreground/70">
+          {provenanceSentence(field.origin, field.writeVia, configFilePath)}
+        </div>
       )}
     </div>
   );
@@ -164,50 +110,19 @@ function AdvancedRow({
   configFilePath: string | null;
 }) {
   return (
-    <div className="flex items-center gap-2 py-1 text-sm">
-      <span className="w-36 shrink-0 text-xs text-muted-foreground">
-        {field.label}
-      </span>
-      <span className="min-w-0 flex-1 truncate font-medium font-mono text-xs">
+    <div className="py-2">
+      <div className="text-xs text-muted-foreground">{field.label}</div>
+      <div className="mt-0.5 truncate text-sm font-medium font-mono">
         {field.value ?? (
-          <span className="not-italic text-muted-foreground">—</span>
+          <span className="font-sans text-muted-foreground">—</span>
         )}
-      </span>
-      <OriginBadge origin={field.origin} configFilePath={configFilePath} />
-      {!field.isWritable && (
-        <span title="Read-only — edit this field directly in the config file">
-          <Info className="h-3 w-3 shrink-0 text-muted-foreground/50" />
-        </span>
+      </div>
+      {field.value && (
+        <div className="mt-0.5 text-[11px] text-muted-foreground/70">
+          {provenanceSentence(field.origin, field.writeVia, configFilePath)}
+        </div>
       )}
     </div>
-  );
-}
-
-// ── Sources footer ────────────────────────────────────────────────────────────
-
-const STATUS_ICON: Record<string, string> = {
-  available: "✓",
-  pending: "⏳",
-  notApplicable: "—",
-};
-
-function SourcesFooter({ sources }: { sources: ConfigSourceReport }) {
-  const tiers = [
-    { label: "Config file", status: sources.configFile },
-    { label: "ACP native", status: sources.acpNative },
-    { label: "ACP config", status: sources.acpConfigOptions },
-    { label: "Env vars", status: sources.envVars },
-  ] as const;
-
-  return (
-    <p className="mt-3 text-[10px] text-muted-foreground/70">
-      {tiers.map((tier, i) => (
-        <React.Fragment key={tier.label}>
-          {i > 0 && <span className="mx-1.5">|</span>}
-          {tier.label} <span>{STATUS_ICON[tier.status] ?? tier.status}</span>
-        </React.Fragment>
-      ))}
-    </p>
   );
 }
 
@@ -302,8 +217,6 @@ export function AgentConfigPanel({ pubkey, isRunning: _isRunning }: Props) {
           )}
         </div>
       )}
-
-      <SourcesFooter sources={sources} />
     </div>
   );
 }
