@@ -29,6 +29,7 @@ const MIC_VOICE_GATE_MARGIN_RMS = 0.012;
 const MIC_LEVEL_ACTIVE_RANGE_RMS = 0.11;
 const MIC_MIN_ACTIVE_LEVEL = 0.18;
 const MIC_LEVEL_ATTACK = 0.58;
+const MIC_ACTIVE_NOISE_FLOOR_RISE = 0.006;
 
 function isRedundantHuddlePhaseError(message: string): boolean {
   return /^cannot (?:start|join) huddle: already in phase /i.test(message);
@@ -565,9 +566,15 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
       );
       voiceActive = voiceActive ? rms > idleThreshold : rms > activeThreshold;
 
+      const floorRate =
+        rms < noiseFloor
+          ? 0.18
+          : voiceActive
+            ? MIC_ACTIVE_NOISE_FLOOR_RISE
+            : 0.025;
+      noiseFloor += (rms - noiseFloor) * floorRate;
+
       if (!voiceActive) {
-        const floorRate = rms < noiseFloor ? 0.18 : 0.025;
-        noiseFloor += (rms - noiseFloor) * floorRate;
         smoothedLevel = 0;
         setMicLevel(0);
         return;

@@ -64,6 +64,7 @@ const MAX_ACTIVE = 760;
 const MAX_DPR = 2;
 const EMOJI_CACHE_PX = 64;
 const EMOJI_CACHE_SCALE = 2;
+// Keep the label's old reference scale so larger sprites do not shift its offset.
 const EMOJI_LABEL_REFERENCE_SCALE = 1.5;
 const PICKER_PARTICLES_PER_BURST = 5;
 const PICKER_PARTICLE_LIFE_FRAMES = 108;
