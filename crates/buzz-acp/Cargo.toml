@@ -71,10 +71,11 @@ toml = "1.0"
 # Filter expressions
 evalexpr = { workspace = true }
 
-# Process-group kill (safe wrapper around killpg) — Unix-only; kill_process_group
-# has a #[cfg(not(unix))] fallback in acp.rs.
+# Process-group kill (safe wrapper around killpg) and leader-lock flock — Unix-only.
+# kill_process_group (acp.rs) and the leader-lock writer (leader.rs) both have
+# #[cfg(not(unix))] fallbacks. "fs" pulls in the safe `Flock` RAII wrapper.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "fs"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

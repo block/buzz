@@ -1266,6 +1266,20 @@ async fn tokio_main() -> Result<()> {
     let mut queue = EventQueue::new(dedup_mode);
 
     let base_prompt_content = config.base_prompt_content.take();
+    // Leader election: self-mint an election id and auto-claim this agent
+    // key's lock so the first instance up leads and a later instance under the
+    // same key observes. Best-effort — acquire fails safe to leader on IO error
+    // and yields observer only when a live foreign instance holds the lock.
+    // The concrete handle is kept (separately from the `Arc<dyn LeaderCheck>`
+    // stored in `ctx`) so the lifecycle can re-acquire on failover and release
+    // on shutdown.
+    let agent_pubkey_hex = config.keys.public_key().to_hex();
+    let leader = Arc::new(leader::FileLeaderCheck::from_env_or_mint());
+    if leader.acquire(&agent_pubkey_hex) {
+        tracing::info!(agent = %agent_pubkey_hex, "leader lock acquired — active responder");
+    } else {
+        tracing::info!(agent = %agent_pubkey_hex, "leader lock held by another instance — observing");
+    }
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -1296,7 +1310,7 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
-        leader: Arc::new(leader::FileLeaderCheck::from_env()),
+        leader: leader.clone(),
     });
 
     if !config.memory_enabled {
@@ -1957,9 +1971,14 @@ async fn tokio_main() -> Result<()> {
                 }
                 _ = leader_refresh.tick() => {
                     let _ = result_rx;
-                    // Re-read leader lock(s) so claim/release/failover by
-                    // another instance flips this process between active and
-                    // observer without a restart.
+                    // Re-attempt the claim first: if the current leader died
+                    // without releasing, its lock now names a dead pid and this
+                    // acquire takes over (failover); otherwise it's a no-op
+                    // rewrite of our own lock or a no-op observe. Then re-read
+                    // so the cached status reflects any claim/release/failover
+                    // and flips this process between active and observer without
+                    // a restart.
+                    leader.acquire(&agent_pubkey_hex);
                     ctx.leader.refresh();
                     None
                 }
@@ -2038,6 +2057,9 @@ async fn tokio_main() -> Result<()> {
     }
 
     // ── Shutdown sequence ─────────────────────────────────────────────────────
+    // Relinquish leadership first so a co-located sibling can take over
+    // immediately rather than waiting out the dead-pid failover window.
+    leader.release(&agent_pubkey_hex);
     tracing::info!("shutdown: waiting for in-flight prompts");
     // 30 s is generous for in-flight prompts to be cancelled; using
     // max_turn_duration here would cause Ctrl+C to hang for up to an hour.

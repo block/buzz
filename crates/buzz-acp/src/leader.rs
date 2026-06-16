@@ -1,4 +1,4 @@
-//! Client-side leader election (read side).
+//! Client-side leader election.
 //!
 //! When multiple Buzz instances share the same agent keypair, the relay fans
 //! every matching event out to all of them (NIP-01). Without coordination,
@@ -7,9 +7,10 @@
 //! instance as the active responder; non-leaders still receive and render
 //! events but suppress the prompt path (and the pre-dispatch `👀` side-effect).
 //!
-//! This module owns only the **read** half: given a lock file written by some
-//! instance, decide whether *this* process is the leader for a given agent
-//! pubkey. Lock acquisition, stealing, and failover live elsewhere (Phase 2).
+//! This module owns both halves: the **read** side decides whether *this*
+//! process is the leader for a given agent pubkey; the **write** side
+//! ([`FileLeaderCheck::acquire`] / [`FileLeaderCheck::release`]) claims and
+//! relinquishes the lock.
 //!
 //! # Lock contract
 //!
@@ -20,11 +21,29 @@
 //!   lock (permission, mid-write truncation) fails safe to leader for the same reason.
 //! - **Present** → leader iff the lock's `instance_id` equals this process's
 //!   own election id ([`ELECTION_ID_ENV`]).
-//! - **No instance id** (env unset, e.g. solo CLI use or pre-Phase-2 where
-//!   nothing writes the election id) → leader. There is no coordinating
-//!   desktop, so there is nothing to defer to.
+//! - **No instance id** (`instance_id` unset on the check itself, e.g. tests
+//!   constructing a read-only checker) → leader. There is no coordinating
+//!   instance, so there is nothing to defer to. The harness always carries a
+//!   minted id (see [`FileLeaderCheck::from_env_or_mint`]).
 //! - **Malformed** lock file → fail safe to leader. A corrupt lock must never
 //!   silence the only responder.
+//!
+//! ## Claim
+//!
+//! Claim is **auto-on-launch plus explicit re-claim**. The harness self-elects
+//! at startup: [`FileLeaderCheck::from_env_or_mint`] gives every process a
+//! unique election id, and the lifecycle calls [`acquire`](FileLeaderCheck::acquire)
+//! to take an *unowned* lock. An explicit re-claim / hard-steal gesture (sidebar
+//! UI) layers on top in a later phase; both paths share the same writer.
+//!
+//! Acquisition is guarded by an exclusive `flock` held across the
+//! read-decide-write window, closing the TOCTOU race between two instances
+//! racing to claim the same key. A claim **succeeds** when the lock is free
+//! (absent, empty, or malformed), already ours, held by a **dead** pid, or held
+//! by a **stale** claim whose pid was recycled by an unrelated process
+//! (failover when a leader crashes without releasing); it **fails** — leaving
+//! this process an observer — only when a *live* foreign pid holds a *fresh*
+//! claim.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -34,14 +53,27 @@ use serde::Deserialize;
 
 /// Environment variable carrying this window's leader-election identity.
 ///
-/// Per-window election identity; Phase 2 supplies a process-unique value —
-/// the Tauri bundle identifier is NOT sufficient (it collides across
-/// same-class windows like DMG + dev, or worktrees whose icon-gen fell back
-/// to the shared dev id). Kept behind this constant so Phase 2 can swap the
-/// source without touching the gate. Distinct from `BUZZ_MANAGED_AGENT`
-/// (reaper identity): reaper identity partitions by app-class, election
-/// identity must be unique per window — opposite uniqueness requirements.
+/// Per-window election identity. The desktop may inject a process-unique value
+/// per spawn; when unset, [`FileLeaderCheck::from_env_or_mint`] mints one
+/// in-process so the harness can self-elect headlessly. The Tauri bundle
+/// identifier is NOT sufficient as a source — it collides across same-class
+/// windows (DMG + dev, or worktrees whose icon-gen fell back to the shared dev
+/// id). Distinct from `BUZZ_MANAGED_AGENT` (reaper identity): reaper identity
+/// partitions by app-class, election identity must be unique per window —
+/// opposite uniqueness requirements.
 const ELECTION_ID_ENV: &str = "BUZZ_INSTANCE_ELECTION_ID";
+
+/// A claim older than this is treated as abandoned for takeover purposes, even
+/// if its pid still maps to a live process (which can happen after the OS
+/// recycles a crashed leader's pid).
+///
+/// Must comfortably exceed the 5s `leader_refresh` cadence in `lib.rs`: a live
+/// leader rewrites `claimed_at` on every tick, so this bound only ever elapses
+/// for an abandoned claim. The 2x margin tolerates a single delayed tick
+/// without falsely evicting an active leader (which would split-brain — worse
+/// than the stall this guards against).
+#[cfg(unix)]
+const STALE_CLAIM: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Decides whether this process should act on events for a given agent key.
 pub trait LeaderCheck: Send + Sync {
@@ -58,9 +90,10 @@ pub trait LeaderCheck: Send + Sync {
     fn refresh(&self);
 }
 
-/// On-disk lock file shape. Only `instance_id` is load-bearing for the read
-/// side; `pid` and `claimed_at` are written by the (Phase 2) acquire path and
-/// ignored here.
+/// On-disk lock file shape for the read side. Only `instance_id` is
+/// load-bearing here; `pid` and `claimed_at` are written by the acquire path
+/// and ignored by the reader. The write side parses with [`OwnerInfo`] instead,
+/// which also reads `pid` for dead-pid takeover.
 #[derive(Deserialize)]
 struct LockFile {
     instance_id: String,
@@ -79,15 +112,36 @@ pub struct FileLeaderCheck {
 }
 
 impl FileLeaderCheck {
-    /// Build from the ambient environment: election id from
-    /// [`ELECTION_ID_ENV`], lock dir under `$HOME/.buzz/leader-locks/`.
-    pub fn from_env() -> Self {
-        let lock_dir = std::env::var_os("HOME")
+    /// Build from the ambient environment, minting a process-unique election
+    /// id when [`ELECTION_ID_ENV`] is unset so a process with no externally
+    /// supplied identity can still claim a lock and self-elect headlessly.
+    /// Lock dir is `$HOME/.buzz/leader-locks/`.
+    ///
+    /// The minted id is `{pid}-{nanos}`. The pid feeds dead-pid takeover; the
+    /// launch-time nanos make the id unique across processes that share a pid
+    /// over time, so a recycled pid can't be mistaken for *us* in the
+    /// self-ownership check. Recycled-pid takeover (a crashed leader's pid
+    /// reused by an unrelated live process) is handled separately by the
+    /// `claimed_at` staleness bound in [`lock_is_takeable`](Self::lock_is_takeable),
+    /// not by the nanos. An externally set env value is honored verbatim
+    /// (desktop per-spawn injection).
+    pub fn from_env_or_mint() -> Self {
+        let instance_id = std::env::var(ELECTION_ID_ENV).ok().unwrap_or_else(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("{}-{}", std::process::id(), nanos)
+        });
+        Self::new(Some(instance_id), Self::default_lock_dir())
+    }
+
+    fn default_lock_dir() -> PathBuf {
+        std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_default()
             .join(".buzz")
-            .join("leader-locks");
-        Self::new(std::env::var(ELECTION_ID_ENV).ok(), lock_dir)
+            .join("leader-locks")
     }
 
     fn new(instance_id: Option<String>, lock_dir: PathBuf) -> Self {
@@ -115,6 +169,179 @@ impl FileLeaderCheck {
             // Malformed lock → fail safe to leader.
             Err(_) => true,
         }
+    }
+
+    /// Claim the leader lock for `pubkey_hex`, returning whether this process
+    /// now holds it (and may act as leader).
+    ///
+    /// Holds an exclusive `flock` across the read-decide-write window so two
+    /// instances racing to claim the same key cannot both win. Succeeds when
+    /// the lock is free (absent/empty/malformed), already ours, or held by a
+    /// dead pid; fails (observer) only when a live foreign pid holds it.
+    ///
+    /// Best-effort and idempotent: an IO error (e.g. unwritable lock dir)
+    /// returns the read-side fail-safe (leader) rather than propagating, and
+    /// re-claiming a lock we already own simply rewrites it.
+    #[cfg(unix)]
+    pub fn acquire(&self, pubkey_hex: &str) -> bool {
+        use nix::fcntl::{Flock, FlockArg};
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        // No election id → nothing to claim with; mirror the read-side
+        // always-leader contract.
+        let Some(self_id) = self.instance_id.as_deref() else {
+            return true;
+        };
+
+        if std::fs::create_dir_all(&self.lock_dir).is_err() {
+            return true; // can't write a lock → fail safe to leader
+        }
+        let path = self.lock_dir.join(format!("{pubkey_hex}.lock"));
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(_) => return true,
+        };
+        let mut locked = match Flock::lock(file, FlockArg::LockExclusive) {
+            Ok(l) => l,
+            Err(_) => return true,
+        };
+
+        let mut contents = String::new();
+        if locked.read_to_string(&mut contents).is_err() {
+            return true;
+        }
+        if !self.lock_is_takeable(&contents, self_id) {
+            return false; // live foreign owner — observe
+        }
+
+        let body = format!(
+            r#"{{"instance_id":"{self_id}","pid":{},"claimed_at":"{}"}}"#,
+            std::process::id(),
+            chrono::Utc::now().to_rfc3339(),
+        );
+        // Truncate-then-write under the held lock so a shorter claim can't
+        // leave a trailing tail of the previous owner's JSON.
+        let written = locked
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| locked.set_len(0))
+            .and_then(|_| locked.write_all(body.as_bytes()))
+            .and_then(|_| locked.flush());
+        written.is_ok()
+    }
+
+    /// Release the leader lock for `pubkey_hex` if and only if we own it.
+    ///
+    /// Empties the file rather than unlinking it: removing a file another
+    /// process may already hold an `flock` fd on would race a fresh claim onto
+    /// a detached inode. An empty file reads back as malformed → fail-safe to
+    /// leader, so the next acquirer treats it as free.
+    #[cfg(unix)]
+    pub fn release(&self, pubkey_hex: &str) {
+        use nix::fcntl::{Flock, FlockArg};
+        use std::io::Read;
+
+        let Some(self_id) = self.instance_id.as_deref() else {
+            return;
+        };
+        let path = self.lock_dir.join(format!("{pubkey_hex}.lock"));
+        let Ok(file) = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        else {
+            return; // nothing to release
+        };
+        let Ok(mut locked) = Flock::lock(file, FlockArg::LockExclusive) else {
+            return;
+        };
+        let mut contents = String::new();
+        if locked.read_to_string(&mut contents).is_err() {
+            return;
+        }
+        // Only clear a lock we still own — never stomp a successor's claim.
+        if matches!(serde_json::from_str::<LockFile>(&contents), Ok(l) if l.instance_id == self_id)
+        {
+            let _ = locked.set_len(0);
+        }
+    }
+
+    /// Whether the current lock `contents` may be claimed by `self_id`:
+    /// free (absent text/empty/malformed), already ours, held by a dead pid, or
+    /// held by a *stale* claim whose pid has been recycled by an unrelated
+    /// process.
+    ///
+    /// The stale arm closes a failover stall: a leader SIGKILLed without
+    /// release leaves a lock whose pid the OS may recycle for an unrelated,
+    /// long-lived process. A bare pid-alive probe would then read that recycled
+    /// pid as the original leader and never take over, wedging the agent
+    /// leaderless indefinitely. A *live* leader rewrites `claimed_at` on every
+    /// refresh tick, so its claim is always fresher than [`STALE_CLAIM`]; only
+    /// an abandoned claim ages past the bound. Pairing pid-alive with a stale
+    /// timestamp distinguishes a recycled pid from a genuinely active leader
+    /// without evicting the latter.
+    #[cfg(unix)]
+    fn lock_is_takeable(&self, contents: &str, self_id: &str) -> bool {
+        #[derive(serde::Deserialize)]
+        struct OwnerInfo {
+            instance_id: String,
+            pid: u32,
+            claimed_at: String,
+        }
+        match serde_json::from_str::<OwnerInfo>(contents) {
+            Ok(owner) => {
+                owner.instance_id == self_id
+                    || !pid_is_alive(owner.pid)
+                    || claim_is_stale(&owner.claimed_at)
+            }
+            Err(_) => true, // empty or malformed → free to take
+        }
+    }
+
+    /// Non-Unix has no `flock`; claims always succeed (always-leader), matching
+    /// the read-side absent→leader contract and the `kill_process_group`
+    /// `#[cfg(not(unix))]` pattern. The desktop targets macOS/Linux only.
+    #[cfg(not(unix))]
+    pub fn acquire(&self, _pubkey_hex: &str) -> bool {
+        true
+    }
+
+    /// Non-Unix release is a no-op (nothing was written).
+    #[cfg(not(unix))]
+    pub fn release(&self, _pubkey_hex: &str) {}
+}
+
+/// Whether a process with `pid` is alive, via signal 0 (existence probe).
+/// `ESRCH` means gone; other errors (e.g. `EPERM` for a live process we can't
+/// signal) are treated as alive so we never steal from a running leader.
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    !matches!(kill(Pid::from_raw(pid as i32), None), Err(Errno::ESRCH))
+}
+
+/// Whether an RFC 3339 `claimed_at` is older than [`STALE_CLAIM`].
+///
+/// An unparseable timestamp is treated as stale (takeable): a claim we can't
+/// date can't be proven fresh, so we must not let it wedge a takeover. A claim
+/// timestamped in the future (clock skew) is not stale — `signed_duration_since`
+/// is negative, which never exceeds the positive bound.
+#[cfg(unix)]
+fn claim_is_stale(claimed_at: &str) -> bool {
+    match chrono::DateTime::parse_from_rfc3339(claimed_at) {
+        Ok(claimed) => {
+            chrono::Utc::now().signed_duration_since(claimed)
+                > chrono::Duration::from_std(STALE_CLAIM).unwrap_or(chrono::Duration::MAX)
+        }
+        Err(_) => true,
     }
 }
 
@@ -265,5 +492,197 @@ mod tests {
         std::fs::remove_file(dir.lock_path()).unwrap();
         lc.refresh();
         assert!(lc.is_leader(PUBKEY));
+    }
+
+    // ── Writer (acquire / release) — Unix only ───────────────────────────────
+    #[cfg(unix)]
+    mod writer {
+        use super::*;
+
+        /// A checker rooted at `dir` with election id `id`, as the harness
+        /// builds it (always `Some(id)`).
+        fn checker(dir: &TmpDir, id: &str) -> FileLeaderCheck {
+            FileLeaderCheck::new(Some(id.into()), dir.0.clone())
+        }
+
+        /// PID guaranteed not to be alive: spawn a trivial child, reap it.
+        /// The kernel won't recycle the number while the test runs.
+        fn dead_pid() -> u32 {
+            let mut child = std::process::Command::new("true").spawn().unwrap();
+            let pid = child.id();
+            child.wait().unwrap();
+            pid
+        }
+
+        /// An RFC 3339 timestamp `secs` in the past — `now()` minus an offset,
+        /// so a fixture can model a fresh (active) or aged (abandoned) claim.
+        fn claimed_secs_ago(secs: i64) -> String {
+            (chrono::Utc::now() - chrono::Duration::seconds(secs)).to_rfc3339()
+        }
+
+        #[test]
+        fn test_acquire_unowned_lock_succeeds_and_writes_self() {
+            let dir = TmpDir::new();
+            let lc = checker(&dir, SELF_ID);
+            assert!(lc.acquire(PUBKEY), "free lock must be claimable");
+            // Read side now sees our own id → leader.
+            assert!(lc.is_leader(PUBKEY));
+        }
+
+        #[test]
+        fn test_acquire_creates_lock_dir_when_absent() {
+            let dir = TmpDir::new();
+            let nested = dir.0.join("missing-subdir");
+            let lc = FileLeaderCheck::new(Some(SELF_ID.into()), nested.clone());
+            assert!(lc.acquire(PUBKEY));
+            assert!(nested.join(format!("{PUBKEY}.lock")).exists());
+        }
+
+        #[test]
+        fn test_two_writers_race_exactly_one_wins() {
+            let dir = TmpDir::new();
+            let a = checker(&dir, SELF_ID);
+            let b = checker(&dir, OTHER_ID);
+            // First claim wins; the second sees a live foreign owner (this
+            // very test process is alive) and must observe.
+            assert!(a.acquire(PUBKEY), "first writer claims the free lock");
+            assert!(!b.acquire(PUBKEY), "second writer must not double-claim");
+            assert!(a.is_leader(PUBKEY));
+            assert!(!b.is_leader(PUBKEY));
+        }
+
+        #[test]
+        fn test_dead_pid_lock_is_taken_over() {
+            let dir = TmpDir::new();
+            dir.write_lock(&format!(
+                r#"{{"instance_id":"{OTHER_ID}","pid":{},"claimed_at":"2026-06-15T00:00:00Z"}}"#,
+                dead_pid()
+            ));
+            let lc = checker(&dir, SELF_ID);
+            assert!(lc.acquire(PUBKEY), "dead-pid lock must be reclaimable");
+            assert!(lc.is_leader(PUBKEY), "takeover rewrites the lock to us");
+        }
+
+        #[test]
+        fn test_live_foreign_lock_blocks_acquire() {
+            let dir = TmpDir::new();
+            // Live pid + fresh claim → an active leader; claim must fail.
+            dir.write_lock(&format!(
+                r#"{{"instance_id":"{OTHER_ID}","pid":{},"claimed_at":"{}"}}"#,
+                std::process::id(),
+                claimed_secs_ago(0),
+            ));
+            let lc = checker(&dir, SELF_ID);
+            assert!(
+                !lc.acquire(PUBKEY),
+                "live foreign owner must block the claim"
+            );
+            assert!(!lc.is_leader(PUBKEY));
+        }
+
+        #[test]
+        fn test_recycled_pid_with_stale_claim_is_taken_over() {
+            // A crashed leader's pid recycled to an unrelated live process:
+            // pid probes alive, but the abandoned claim has aged past the
+            // staleness bound. Without the bound this wedges leaderless.
+            let dir = TmpDir::new();
+            dir.write_lock(&format!(
+                r#"{{"instance_id":"{OTHER_ID}","pid":{},"claimed_at":"{}"}}"#,
+                std::process::id(), // a guaranteed-live pid stands in for the recycled one
+                claimed_secs_ago(STALE_CLAIM.as_secs() as i64 + 5),
+            ));
+            let lc = checker(&dir, SELF_ID);
+            assert!(
+                lc.acquire(PUBKEY),
+                "stale claim on a live (recycled) pid must be reclaimable"
+            );
+            assert!(lc.is_leader(PUBKEY), "takeover rewrites the lock to us");
+        }
+
+        #[test]
+        fn test_reacquire_own_lock_is_idempotent() {
+            let dir = TmpDir::new();
+            let lc = checker(&dir, SELF_ID);
+            assert!(lc.acquire(PUBKEY));
+            assert!(lc.acquire(PUBKEY), "re-claiming our own lock stays leader");
+            assert!(lc.is_leader(PUBKEY));
+        }
+
+        #[test]
+        fn test_release_frees_lock_for_another_writer() {
+            let dir = TmpDir::new();
+            let a = checker(&dir, SELF_ID);
+            let b = checker(&dir, OTHER_ID);
+            assert!(a.acquire(PUBKEY));
+            assert!(!b.acquire(PUBKEY), "blocked while A holds it");
+
+            a.release(PUBKEY);
+            // After release the file is empty (malformed) → free to take.
+            assert!(b.acquire(PUBKEY), "released lock must be claimable");
+            assert!(b.is_leader(PUBKEY));
+            assert!(!a.is_leader(PUBKEY), "A no longer owns the lock");
+        }
+
+        #[test]
+        fn test_release_does_not_stomp_a_successor() {
+            let dir = TmpDir::new();
+            let a = checker(&dir, SELF_ID);
+            // B (a different, live owner with a fresh claim) holds the lock.
+            dir.write_lock(&format!(
+                r#"{{"instance_id":"{OTHER_ID}","pid":{},"claimed_at":"{}"}}"#,
+                std::process::id(),
+                claimed_secs_ago(0),
+            ));
+            // A releasing must NOT clear B's claim (A doesn't own it).
+            a.release(PUBKEY);
+            assert!(
+                !FileLeaderCheck::new(Some(SELF_ID.into()), dir.0.clone()).acquire(PUBKEY),
+                "B's live lock must survive A's release"
+            );
+        }
+
+        #[test]
+        fn test_no_instance_id_acquire_is_noop_always_leader() {
+            let dir = TmpDir::new();
+            let lc = FileLeaderCheck::new(None, dir.0.clone());
+            assert!(lc.acquire(PUBKEY), "no id → always leader, no write");
+            assert!(
+                !dir.lock_path().exists(),
+                "no-id acquire must not write a lock file"
+            );
+        }
+
+        #[test]
+        fn test_concurrent_acquire_yields_exactly_one_winner() {
+            // Without the flock guard, two threads could both read the empty
+            // lock and both write — two leaders. The exclusive flock forces a
+            // serial read-decide-write, so exactly one wins and the rest see a
+            // live foreign owner (this same process's pid).
+            let dir = std::sync::Arc::new(TmpDir::new());
+            let winners = std::sync::Arc::new(AtomicU32::new(0));
+            let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let handles: Vec<_> = (0..8)
+                .map(|i| {
+                    let dir = dir.clone();
+                    let winners = winners.clone();
+                    let start = start.clone();
+                    std::thread::spawn(move || {
+                        let lc = FileLeaderCheck::new(Some(format!("id-{i}")), dir.0.clone());
+                        start.wait();
+                        if lc.acquire(PUBKEY) {
+                            winners.fetch_add(1, Ordering::Relaxed);
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+            assert_eq!(
+                winners.load(Ordering::Relaxed),
+                1,
+                "exactly one concurrent writer may win the lock"
+            );
+        }
     }
 }
