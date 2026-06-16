@@ -42,12 +42,17 @@ const listeners = new Set<() => void>();
 // milliseconds. Estimated as the running minimum of
 // (Date.now() - Date.parse(event.timestamp)) across that agent's events. The
 // minimum converges on true skew minus the smallest network/processing delay
-// seen — a conservative, monotonically tightening estimate immune to per-event
-// jitter. A turn's badge anchor is startedAt + offset: the agent's own start,
-// translated into desktop-clock terms. Anchors are derived at read time so a
-// later, tighter offset retroactively corrects every live turn — distinct agent
-// starts then yield distinct anchors (no lockstep) and a turn started long ago
-// anchors into the past (large elapsed) instead of resetting to Date.now().
+// seen — a monotonically tightening estimate immune to per-event jitter. While
+// true skew is constant or shrinking it is conservative: elapsed under-reports
+// by the minimum delay and never inflates. The minimum never loosens, so under
+// GROWING skew (an NTP step forward, or the host clock drifting further behind
+// mid-session) the stored estimate goes stale-too-small and elapsed can over-
+// report — bounded by how far the skew grows, sub-second over a session. A
+// turn's badge anchor is startedAt + offset: the agent's own start, translated
+// into desktop-clock terms. Anchors are derived at read time so a later, tighter
+// offset retroactively corrects every live turn — distinct agent starts then
+// yield distinct anchors (no lockstep) and a turn started long ago anchors into
+// the past (large elapsed) instead of resetting to Date.now().
 const clockOffsetByAgent = new Map<string, number>();
 
 // Cached snapshots for useSyncExternalStore reference stability.

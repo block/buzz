@@ -789,6 +789,48 @@ describe("activeAgentTurnsStore", () => {
         "skew-corrected elapsed must track true duration as the clock advances",
       );
     });
+
+    it("retroactively corrects a live turn's anchor when the offset tightens", () => {
+      // The design's load-bearing invariant: anchors are derived at READ time,
+      // so a later, tighter offset must shift an ALREADY-LIVE turn earlier.
+      // The turn first goes live under a loose offset (its start arrives with a
+      // +5s processing delay → offset +5000), then a delay-free liveness sample
+      // tightens the running minimum to 0. The live turn's surfaced anchor must
+      // move earlier by exactly that 5000ms delta. A regression that froze
+      // anchorAt at startTurn would leave the anchor at its loose value and
+      // fail this assertion.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: agentTs(EPOCH - 5_000, 0), // observed 5s after its start
+        }),
+      ]);
+      const looseAnchor = getActiveTurnsForAgent(AGENT).find(
+        (s) => s.channelId === "c1",
+      ).anchorAt;
+
+      mock.timers.tick(1_000); // 1s of true time so the liveness arrives later
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 2,
+          kind: "turn_liveness",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: agentTs(EPOCH + 1_000, 0), // delay-free → offset tightens to 0
+        }),
+      ]);
+      const tightAnchor = getActiveTurnsForAgent(AGENT).find(
+        (s) => s.channelId === "c1",
+      ).anchorAt;
+
+      assert.equal(
+        tightAnchor - looseAnchor,
+        -5_000,
+        "a tighter offset must shift the live turn's read-time anchor earlier by the tightening delta",
+      );
+    });
   });
 });
 
