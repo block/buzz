@@ -47,9 +47,24 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
+
+/// Stand-down timeout: how long `acquire()` is suppressed after `stand_down()`.
+///
+/// 2× the 5s refresh tick guarantees the target gets at least one full tick to
+/// acquire before the old leader resumes. If the target is alive, it acquires
+/// within 5s. If the target crashed, the old leader recovers after this timeout
+/// — zero-leader window is bounded and self-healing.
+#[cfg(not(test))]
+const STAND_DOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Shortened for tests so we can exercise the auto-expire path without sleeping.
+#[cfg(test)]
+const STAND_DOWN_TIMEOUT: Duration = Duration::from_millis(5);
 
 /// Environment variable carrying this window's leader-election identity.
 ///
@@ -109,6 +124,13 @@ pub struct FileLeaderCheck {
     /// Cached leader status per agent pubkey hex. Seeded read-through on first
     /// `is_leader`, refreshed in place by `refresh`.
     cache: Mutex<HashMap<String, bool>>,
+    /// When set, `acquire()` becomes a no-op (returns false without touching
+    /// the lock file) until the stand-down is cleared by `resume()` or after
+    /// [`STAND_DOWN_TIMEOUT`] expires.
+    standing_down: AtomicBool,
+    /// When the stand-down was entered. Used by `is_standing_down()` to
+    /// auto-expire the suppression after [`STAND_DOWN_TIMEOUT`].
+    stood_down_at: Mutex<Option<Instant>>,
 }
 
 impl FileLeaderCheck {
@@ -149,6 +171,8 @@ impl FileLeaderCheck {
             instance_id,
             lock_dir,
             cache: Mutex::new(HashMap::new()),
+            standing_down: AtomicBool::new(false),
+            stood_down_at: Mutex::new(None),
         }
     }
 
@@ -171,6 +195,47 @@ impl FileLeaderCheck {
         }
     }
 
+    /// Returns this instance's election id, or `None` for always-leader mode.
+    pub fn instance_id(&self) -> Option<&str> {
+        self.instance_id.as_deref()
+    }
+
+    /// Enter stand-down: suppress all `acquire()` calls until `resume()` or
+    /// [`STAND_DOWN_TIMEOUT`] expires. Called when this instance receives a
+    /// `claim_leadership` targeting a different instance and this instance is
+    /// the current leader.
+    pub fn stand_down(&self) {
+        self.standing_down.store(true, Ordering::Release);
+        *self.stood_down_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+    }
+
+    /// Exit stand-down. Called by the target after successful acquire, or
+    /// automatically when [`STAND_DOWN_TIMEOUT`] expires.
+    #[allow(dead_code)]
+    pub fn resume(&self) {
+        self.standing_down.store(false, Ordering::Release);
+        *self.stood_down_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Whether this instance is currently standing down (suppressing acquire).
+    /// Auto-expires after [`STAND_DOWN_TIMEOUT`] to prevent permanent
+    /// zero-leader on a lost handoff.
+    fn is_standing_down(&self) -> bool {
+        if !self.standing_down.load(Ordering::Acquire) {
+            return false;
+        }
+        let mut guard = self.stood_down_at.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = *guard {
+            if at.elapsed() > STAND_DOWN_TIMEOUT {
+                // Auto-expire: clear stand-down inline to avoid re-locking.
+                self.standing_down.store(false, Ordering::Release);
+                *guard = None;
+                return false;
+            }
+        }
+        true
+    }
+
     /// Claim the leader lock for `pubkey_hex`, returning whether this process
     /// now holds it (and may act as leader).
     ///
@@ -186,6 +251,11 @@ impl FileLeaderCheck {
     pub fn acquire(&self, pubkey_hex: &str) -> bool {
         use nix::fcntl::{Flock, FlockArg};
         use std::io::{Read, Seek, SeekFrom, Write};
+
+        // Stand-down suppresses re-claim during cooperative handoff.
+        if self.is_standing_down() {
+            return false;
+        }
 
         // No election id → nothing to claim with; mirror the read-side
         // always-leader contract.
@@ -308,6 +378,9 @@ impl FileLeaderCheck {
     /// `#[cfg(not(unix))]` pattern. The desktop targets macOS/Linux only.
     #[cfg(not(unix))]
     pub fn acquire(&self, _pubkey_hex: &str) -> bool {
+        if self.is_standing_down() {
+            return false;
+        }
         true
     }
 
@@ -683,6 +756,72 @@ mod tests {
                 1,
                 "exactly one concurrent writer may win the lock"
             );
+        }
+
+        #[test]
+        fn test_stand_down_suppresses_acquire() {
+            let dir = TmpDir::new();
+            let a = checker(&dir, SELF_ID);
+            let b = checker(&dir, OTHER_ID);
+            assert!(a.acquire(PUBKEY), "A claims the free lock");
+            // A stands down and releases — simulating cooperative handoff.
+            a.stand_down();
+            a.release(PUBKEY);
+            // A's next tick: acquire returns false (standing down).
+            assert!(
+                !a.acquire(PUBKEY),
+                "standing-down instance must not re-claim"
+            );
+            // B can now take the free lock.
+            assert!(b.acquire(PUBKEY), "B must acquire the released lock");
+        }
+
+        #[test]
+        fn test_stand_down_auto_expires() {
+            let dir = TmpDir::new();
+            let a = checker(&dir, SELF_ID);
+            assert!(a.acquire(PUBKEY));
+            a.stand_down();
+            a.release(PUBKEY);
+            // acquire is suppressed while standing down.
+            assert!(!a.acquire(PUBKEY));
+            // Wait for the test-configured timeout (5ms) to expire.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            // After timeout, stand-down auto-expires and acquire succeeds.
+            assert!(
+                a.acquire(PUBKEY),
+                "acquire must succeed after stand-down timeout expires"
+            );
+        }
+
+        #[test]
+        fn test_cooperative_handoff_transfers_leadership() {
+            let dir = TmpDir::new();
+            let a = checker(&dir, SELF_ID);
+            let b = checker(&dir, OTHER_ID);
+            assert!(a.acquire(PUBKEY), "A is leader");
+            assert!(!b.acquire(PUBKEY), "B blocked while A holds it");
+
+            // Cooperative handoff: A stands down + releases.
+            a.stand_down();
+            a.release(PUBKEY);
+            // B acquires on its next tick.
+            assert!(b.acquire(PUBKEY), "B must win after A stands down");
+            // A's next tick: still standing down, can't re-grab.
+            assert!(
+                !a.acquire(PUBKEY),
+                "A must not re-claim while standing down"
+            );
+        }
+
+        #[test]
+        fn test_instance_id_accessor() {
+            let dir = TmpDir::new();
+            let with_id = FileLeaderCheck::new(Some("test-id-123".into()), dir.0.clone());
+            assert_eq!(with_id.instance_id(), Some("test-id-123"));
+
+            let without_id = FileLeaderCheck::new(None, dir.0.clone());
+            assert_eq!(without_id.instance_id(), None);
         }
     }
 }

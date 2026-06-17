@@ -135,6 +135,57 @@ refresh interval (e.g. 10s). A live leader rewrites `claimed_at` on every refres
 tick, so only an abandoned claim ages past the bound — distinguishing a recycled
 pid from a genuinely active leader without evicting the latter.
 
+### Cooperative Steal (Manual Leadership Transfer)
+
+A deliberate steal — initiated from the desktop sidebar UI — uses a
+**cooperative** mechanism: the current leader voluntarily stands down rather than
+being forcibly evicted. This preserves the split-brain guard (`lock_is_takeable`)
+that prevents two leaders from coexisting.
+
+**Stand-down primitive.** When the current leader receives a `claim_leadership`
+control frame targeting a different instance, it enters *stand-down*: a state
+that suppresses `acquire()` (returns false without touching the lock file) until
+either `resume()` is called or a timeout expires. The leader then releases its
+lock, making it free for the target.
+
+**Timeout.** Stand-down auto-expires after 10 seconds (2× the 5s refresh tick).
+This bounds the zero-leader window: if the target instance crashes or fails to
+acquire, the old leader resumes and re-claims on its next tick. The worst case
+is a brief gap with no leader (bounded, self-healing) — never a split-brain.
+
+**Handoff sequence:**
+
+1. Desktop sends a `claim_leadership` control frame (NIP-AO kind 24200) with
+   `{ "type": "claim_leadership", "targetInstanceId": "<target>" }`.
+2. All co-located instances receive the broadcast.
+3. The **current leader** (non-target): calls `stand_down()` then `release()`.
+   Its next refresh tick's `acquire()` returns false (standing down), preventing
+   re-grab.
+4. The **target instance** (match): calls `acquire()`. If the lock is now free
+   (old leader released), it succeeds and emits a `control_result` with
+   `status: "claimed"`. If the lock is not yet free (race — old leader hasn't
+   processed the frame yet), it does nothing; its next 5s refresh tick will
+   succeed once the old leader stands down.
+5. **Other observers** (non-target, non-leader): ignore the frame.
+
+**Failure direction.** Cooperative steal never bypasses the live-leader guard.
+The worst case is zero leaders briefly (stand-down entered but target didn't
+acquire), which self-heals via the 10s timeout. This is preferable to force-steal
+which would risk two leaders briefly.
+
+### Scope Boundary
+
+Leader election is **single-host only**. The lock file lives at
+`~/.buzz/leader-locks/<pubkey>.lock` — a local filesystem artifact. Instances on
+different machines have different `~/.buzz/` directories and cannot see each
+other's locks.
+
+The `claim_leadership` control frame (sent via the relay) reaches all subscribed
+instances regardless of host, but the `acquire()` that follows only contends with
+co-located processes sharing the same lock file. Cross-machine coordination
+(relay-mediated lock or consensus) is a separate future change, explicitly out of
+scope.
+
 Hard-steal: claiming an agent in window B immediately aborts window A's
 in-flight turn. The abort reuses NIP-AO's `cancel_turn` control frame
 (kind 24200); this NIP does not define a separate cancel mechanism. See NIP-AO
