@@ -1703,6 +1703,13 @@ function createMarkdownComponents(
         return <span className="font-medium text-current">{children}</span>;
       }
 
+      // Markdown image-link syntax (`[![alt](src)](href)`) otherwise nests the
+      // image lightbox button inside an anchor. Keep the image as the lightbox
+      // trigger and suppress the parent link activation for block media.
+      if (hasBlockMedia(React.Children.toArray(children))) {
+        return <>{children}</>;
+      }
+
       // Generic file attachment: a `[filename](url)` link whose href matches an
       // imeta entry with a non-image, non-video MIME. Render a download card
       // instead of a plain link. (Media uses the `img` renderer, not this path.)
