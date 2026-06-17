@@ -1,7 +1,10 @@
 import * as React from "react";
 import { ArrowDown, ArrowUp, Hash } from "lucide-react";
 
-import { selectTimelineSurface } from "@/features/messages/lib/timelineSnapshot";
+import {
+  selectTimelineBodySurface,
+  selectTimelineIntroSurface,
+} from "@/features/messages/lib/timelineSnapshot";
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -167,23 +170,27 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     ? `message-timeline:${channelId ?? "none"}:target:${targetMessageId}`
     : `message-timeline:${channelId ?? "none"}`;
 
-  const timelineSurface = selectTimelineSurface({
+  const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
-    hasChannelIntro: channelIntro !== null && directMessageIntro === null,
-    hasDirectMessageIntro: directMessageIntro !== null,
     isLoading,
     liveCount: messages.length,
   });
-  const showDirectMessageIntro = timelineSurface === "direct-message-intro";
-  const showChannelIntro = timelineSurface === "channel-intro";
+  const showTimelineSkeleton = timelineBodySurface === "skeleton";
+  const timelineIntroSurface = selectTimelineIntroSurface({
+    hasChannelIntro: channelIntro !== null && directMessageIntro === null,
+    hasDirectMessageIntro: directMessageIntro !== null,
+    isSkeletonVisible: showTimelineSkeleton,
+  });
+  const showDirectMessageIntro =
+    timelineIntroSurface === "direct-message-intro";
+  const showChannelIntro = timelineIntroSurface === "channel-intro";
   const activeDirectMessageIntro = showDirectMessageIntro
     ? directMessageIntro
     : null;
   const activeChannelIntro = showChannelIntro ? channelIntro : null;
   const showIntro = showDirectMessageIntro || showChannelIntro;
-  const showGenericEmpty = timelineSurface === "empty";
-  const showMessageList = timelineSurface === "list";
-  const showTimelineSkeleton = timelineSurface === "skeleton";
+  const showGenericEmpty = timelineBodySurface === "empty" && !showIntro;
+  const showMessageList = timelineBodySurface === "list";
 
   const {
     bottomAnchorRef,

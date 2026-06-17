@@ -8,7 +8,8 @@ import {
   resolveDeepLinkTarget,
   selectDeferredListRenderState,
   selectLatestMessageKey,
-  selectTimelineSurface,
+  selectTimelineBodySurface,
+  selectTimelineIntroSurface,
 } from "./timelineSnapshot.ts";
 
 // Local-midnight unix-second timestamps so isSameDay (local time) is stable
@@ -289,22 +290,18 @@ test("deferred-render: keys the empty decision off the live count, not deferred"
   assert.equal(selectDeferredListRenderState(0, 1), "pending");
 });
 
-test("timeline-surface: loading and deferred-pending both paint the single static skeleton", () => {
+test("timeline-body-surface: loading and deferred-pending both paint the single static skeleton", () => {
   assert.equal(
-    selectTimelineSurface({
+    selectTimelineBodySurface({
       deferredCount: 0,
-      hasChannelIntro: false,
-      hasDirectMessageIntro: false,
       isLoading: true,
       liveCount: 0,
     }),
     "skeleton",
   );
   assert.equal(
-    selectTimelineSurface({
+    selectTimelineBodySurface({
       deferredCount: 0,
-      hasChannelIntro: true,
-      hasDirectMessageIntro: false,
       isLoading: false,
       liveCount: 3,
     }),
@@ -312,12 +309,10 @@ test("timeline-surface: loading and deferred-pending both paint the single stati
   );
 });
 
-test("timeline-surface: live rows win over intro/empty surfaces", () => {
+test("timeline-body-surface: deferred rows paint the message list", () => {
   assert.equal(
-    selectTimelineSurface({
+    selectTimelineBodySurface({
       deferredCount: 2,
-      hasChannelIntro: true,
-      hasDirectMessageIntro: true,
       isLoading: false,
       liveCount: 2,
     }),
@@ -325,35 +320,65 @@ test("timeline-surface: live rows win over intro/empty surfaces", () => {
   );
 });
 
-test("timeline-surface: empty channels choose exactly one intro or empty surface", () => {
+test("timeline-body-surface: empty only when live and deferred rows are empty", () => {
   assert.equal(
-    selectTimelineSurface({
+    selectTimelineBodySurface({
       deferredCount: 0,
-      hasChannelIntro: false,
-      hasDirectMessageIntro: true,
-      isLoading: false,
-      liveCount: 0,
-    }),
-    "direct-message-intro",
-  );
-  assert.equal(
-    selectTimelineSurface({
-      deferredCount: 0,
-      hasChannelIntro: true,
-      hasDirectMessageIntro: false,
-      isLoading: false,
-      liveCount: 0,
-    }),
-    "channel-intro",
-  );
-  assert.equal(
-    selectTimelineSurface({
-      deferredCount: 0,
-      hasChannelIntro: false,
-      hasDirectMessageIntro: false,
       isLoading: false,
       liveCount: 0,
     }),
     "empty",
+  );
+});
+
+test("timeline-intro-surface: skeleton suppresses intro while loading", () => {
+  assert.equal(
+    selectTimelineIntroSurface({
+      hasChannelIntro: true,
+      hasDirectMessageIntro: false,
+      isSkeletonVisible: true,
+    }),
+    null,
+  );
+});
+
+test("timeline-intro-surface: intro may coexist with the message list", () => {
+  assert.equal(
+    selectTimelineBodySurface({
+      deferredCount: 2,
+      isLoading: false,
+      liveCount: 2,
+    }),
+    "list",
+  );
+  assert.equal(
+    selectTimelineIntroSurface({
+      hasChannelIntro: true,
+      hasDirectMessageIntro: false,
+      isSkeletonVisible: false,
+    }),
+    "channel-intro",
+  );
+});
+
+test("timeline-intro-surface: direct-message intro wins over channel intro", () => {
+  assert.equal(
+    selectTimelineIntroSurface({
+      hasChannelIntro: true,
+      hasDirectMessageIntro: true,
+      isSkeletonVisible: false,
+    }),
+    "direct-message-intro",
+  );
+});
+
+test("timeline-intro-surface: no intro without an intro model", () => {
+  assert.equal(
+    selectTimelineIntroSurface({
+      hasChannelIntro: false,
+      hasDirectMessageIntro: false,
+      isSkeletonVisible: false,
+    }),
+    null,
   );
 });

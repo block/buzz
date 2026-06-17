@@ -149,26 +149,17 @@ export function selectDeferredListRenderState(
   return "pending";
 }
 
-export type TimelineSurface =
-  | "skeleton"
-  | "direct-message-intro"
-  | "channel-intro"
-  | "empty"
-  | "list";
+export type TimelineBodySurface = "skeleton" | "empty" | "list";
 
-export function selectTimelineSurface({
+export function selectTimelineBodySurface({
   deferredCount,
-  hasChannelIntro,
-  hasDirectMessageIntro,
   isLoading,
   liveCount,
 }: {
   deferredCount: number;
-  hasChannelIntro: boolean;
-  hasDirectMessageIntro: boolean;
   isLoading: boolean;
   liveCount: number;
-}): TimelineSurface {
+}): TimelineBodySurface {
   if (isLoading) {
     return "skeleton";
   }
@@ -177,8 +168,25 @@ export function selectTimelineSurface({
   if (renderState === "pending") {
     return "skeleton";
   }
-  if (renderState === "list") {
-    return "list";
+  return renderState;
+}
+
+export type TimelineIntroSurface =
+  | "direct-message-intro"
+  | "channel-intro"
+  | null;
+
+export function selectTimelineIntroSurface({
+  hasChannelIntro,
+  hasDirectMessageIntro,
+  isSkeletonVisible,
+}: {
+  hasChannelIntro: boolean;
+  hasDirectMessageIntro: boolean;
+  isSkeletonVisible: boolean;
+}): TimelineIntroSurface {
+  if (isSkeletonVisible) {
+    return null;
   }
   if (hasDirectMessageIntro) {
     return "direct-message-intro";
@@ -186,5 +194,5 @@ export function selectTimelineSurface({
   if (hasChannelIntro) {
     return "channel-intro";
   }
-  return "empty";
+  return null;
 }
