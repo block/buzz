@@ -43,32 +43,6 @@ export function isNearBottom(container: HTMLDivElement): boolean {
   });
 }
 
-/** Distance (px) from the top within which the timeline counts as "at top". */
-export const TOP_THRESHOLD_PX = 8;
-
-/**
- * Is the timeline scrolled close enough to the top to count as "at top"?
- *
- * This gates the channel-intro header's VISUAL reveal. The intro is the
- * terminal header of a bottom-anchored list — it must surface only once the
- * user has genuinely arrived at the true top, never get painted up front while
- * the list is still streaming in from the bottom (a standard overflow container
- * rests at scrollTop 0 during the estimate→measure→settle window, so "scrollTop
- * is 0" alone is NOT a trustworthy at-top signal until the first-load bottom pin
- * has landed). Pure over geometry so the threshold math is unit-testable without
- * a DOM — the surrounding flexbox layout is not, jsdom does no layout.
- */
-export function isAtTopMetrics(
-  metrics: Pick<ScrollMetrics, "scrollTop">,
-): boolean {
-  return metrics.scrollTop <= TOP_THRESHOLD_PX;
-}
-
-/** Reads live scroll geometry off a container and applies the top-threshold rule. */
-export function isAtTop(container: HTMLDivElement): boolean {
-  return isAtTopMetrics({ scrollTop: container.scrollTop });
-}
-
 /**
  * Identity of the last message in a snapshot, used to detect "a new latest
  * message arrived" for autoscroll. Prefers `renderKey` (stable across optimistic

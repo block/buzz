@@ -32,6 +32,7 @@ import { VirtualizedTimelineList } from "./VirtualizedTimelineList";
 // no fixed-height assumption.
 const ESTIMATED_MESSAGE_HEIGHT = 64;
 const ESTIMATED_DIVIDER_HEIGHT = 32;
+const ESTIMATED_INTRO_HEIGHT = 320;
 const VIRTUAL_OVERSCAN = 8;
 
 // Fallback escape hatch for find-in-page: when find is open, optionally bypass
@@ -169,7 +170,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   const scrollContainerRef = externalScrollRef ?? internalScrollRef;
   const topSentinelRef = React.useRef<HTMLDivElement>(null);
   // Wraps the virtualized list; its offset within the scroll container is the
-  // virtualizer's `scrollMargin` (content above it: sentinel, spinner, intro).
+  // virtualizer's `scrollMargin` (content above it: sentinel, spinner).
   const listOuterRef = React.useRef<HTMLDivElement>(null);
 
   // Gate the heavy timeline render (each row runs a synchronous
@@ -201,9 +202,18 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     () => entries.map((entry) => entry.message),
     [entries],
   );
+  // The channel intro is the terminal header at the true top of history. Include
+  // it as virtual row 0 only once the deferred list has settled AND we've reached
+  // the genuine history boundary (no older pages remain).
+  const introReady =
+    !isLoading &&
+    channelIntro !== null &&
+    directMessageIntro === null &&
+    !isRenderPending &&
+    (deferredMessages.length === 0 || !hasOlderMessages);
   const rows = React.useMemo(
-    () => buildVirtualTimelineRows(entryMessages),
-    [entryMessages],
+    () => buildVirtualTimelineRows(entryMessages, { includeIntro: introReady }),
+    [entryMessages, introReady],
   );
 
   // When the render-all escape hatch is enabled AND find is open, expand the
@@ -216,9 +226,9 @@ export const MessageTimeline = React.memo(function MessageTimeline({
       : VIRTUAL_OVERSCAN;
 
   // Offset of the virtualized list within the scroll container — content above
-  // it (sentinel, "load older" spinner, intro banner) lives in the SAME
-  // scrollable element, so the virtualizer must know that offset or rows paint
-  // at the wrong scrollTop (header/list sandwich + anchor drift on fill).
+  // it (sentinel, "load older" spinner) lives in the SAME scrollable element,
+  // so the virtualizer must know that offset or rows paint at the wrong
+  // scrollTop (header/list sandwich + anchor drift on fill).
   const scrollMargin = useVirtualScrollMargin(
     scrollContainerRef,
     listOuterRef,
@@ -226,7 +236,6 @@ export const MessageTimeline = React.memo(function MessageTimeline({
       isLoading,
       isFetchingOlder,
       deferredMessages.length,
-      channelIntro,
       directMessageIntro,
       rows.length,
     ],
@@ -235,24 +244,32 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollContainerRef.current,
-    estimateSize: (index) =>
-      rows[index]?.kind === "day-divider"
-        ? ESTIMATED_DIVIDER_HEIGHT
-        : ESTIMATED_MESSAGE_HEIGHT,
+    estimateSize: (index) => {
+      const row = rows[index];
+      if (!row) {
+        return ESTIMATED_MESSAGE_HEIGHT;
+      }
+      if (row.kind === "day-divider") {
+        return ESTIMATED_DIVIDER_HEIGHT;
+      }
+      if (row.kind === "intro") {
+        return ESTIMATED_INTRO_HEIGHT;
+      }
+      return ESTIMATED_MESSAGE_HEIGHT;
+    },
     // Stable per-row identity. THIS is what lets a top-prepend (older page)
     // retain scroll position natively — surviving rows keep their key, so the
     // measurement cache survives and the virtualizer re-anchors itself. No
     // before/after scrollHeight delta math, no double-rAF correction.
     getItemKey: (index) => rows[index]?.key ?? index,
     overscan,
-    // Account for the sentinel/spinner/intro above the list inside the same
-    // scroll container, so item offsets line up with where they actually paint.
+    // Account for the sentinel/spinner above the list inside the same scroll
+    // container, so item offsets line up with where they actually paint.
     scrollMargin: scrollMargin.value,
   });
 
   const {
     highlightedMessageId,
-    introRevealed,
     isAtBottom,
     newMessageCount,
     scrollToBottom,
@@ -318,6 +335,13 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     [renderContext],
   );
 
+  const renderChannelIntro = React.useCallback(() => {
+    if (!channelIntro) {
+      return null;
+    }
+    return <ChannelIntroHeader intro={channelIntro} />;
+  }, [channelIntro]);
+
   // Pagination trigger only — the virtualizer holds scroll position on prepend
   // natively (stable keys), so there is no position-restore plumbing to pass.
   useLoadOlderOnScroll({
@@ -329,27 +353,17 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   });
 
   const showDirectMessageIntro = !isLoading && directMessageIntro !== null;
-  const showChannelIntro =
-    !isLoading && channelIntro !== null && directMessageIntro === null;
-  const showIntro = showDirectMessageIntro || showChannelIntro;
-  // The channel intro is the TERMINAL header of a bottom-anchored list — the
-  // thing you reach only once you've genuinely arrived at the true top. It must
-  // NOT be force-painted flush at the viewport top during first-load, because
-  // at that point "where the top is" isn't even determined yet (the list is
-  // still streaming in from the bottom). So the intro lives in-flow ABOVE the
-  // virtualized list and shares the bottom-pin (`min-h-full` + `mt-auto`): the
-  // intro+list block fills the container and pins to the bottom, leaving the
-  // intro scrolled off the top until the user scrolls up to it or the top
-  // naturally loads into view. The header is then EARNED by reaching the top,
-  // not asserted up front. (The earlier `topAlignIntro` flush-top flag was a
-  // different flavor of the step-5 lie — asserting "this is the top" before the
-  // top was determined — and is gone.)
   const showGenericEmpty =
     !isLoading &&
     deferredMessages.length === 0 &&
     directMessageIntro === null &&
     channelIntro === null;
-  const showMessageList = !isLoading && deferredMessages.length > 0;
+  const showVirtualList =
+    !isLoading && (deferredMessages.length > 0 || introReady);
+  const useMinHeightFill =
+    showDirectMessageIntro ||
+    showGenericEmpty ||
+    (introReady && deferredMessages.length === 0);
   const timelineSkeletonRows = useTimelineSkeletonRows({
     channelId,
     isLoading,
@@ -373,7 +387,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
             className={cn(
               "flex w-full flex-col gap-2",
               channelChrome.contentPadding,
-              (showIntro || showGenericEmpty) && "min-h-full",
+              useMinHeightFill && "min-h-full",
             )}
           >
             <div ref={topSentinelRef} aria-hidden className="h-px" />
@@ -387,12 +401,12 @@ export const MessageTimeline = React.memo(function MessageTimeline({
             <SkeletonReveal
               className={cn(
                 "min-h-[18rem]",
-                (showIntro || showGenericEmpty) && "min-h-full",
-                showMessageList && !showIntro && "mt-auto",
+                useMinHeightFill && "min-h-full",
+                showVirtualList && !showDirectMessageIntro && "mt-auto",
               )}
               contentClassName={cn(
                 "flex flex-col gap-2",
-                (showIntro || showGenericEmpty) && "min-h-full",
+                useMinHeightFill && "min-h-full",
               )}
               loading={isLoading}
               skeleton={<TimelineSkeleton rows={timelineSkeletonRows} />}
@@ -418,107 +432,6 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                 </div>
               ) : null}
 
-              {showChannelIntro ? (
-                <div
-                  aria-hidden={!introRevealed}
-                  className={cn(
-                    "mb-0.5 mt-auto flex w-full max-w-2xl flex-col items-start px-3 py-2 text-left transition-opacity",
-                    // Reserve the intro's space (feeds scrollMargin) but only
-                    // REVEAL it once the bottom pin has landed AND we're at the
-                    // genuine top — never painted up front while the list
-                    // streams in from the bottom.
-                    introRevealed ? "opacity-100" : "opacity-0",
-                  )}
-                  data-testid="message-channel-intro"
-                >
-                  <div
-                    className="flex h-[60px] w-[60px] items-center justify-center rounded-2xl border border-border/70 bg-muted/40 text-muted-foreground"
-                    data-testid="message-channel-intro-icon"
-                  >
-                    {channelIntro.icon ?? (
-                      <Hash aria-hidden className="h-7 w-7" />
-                    )}
-                  </div>
-                  <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
-                    #{channelIntro.channelName}
-                  </p>
-                  <p className="mt-1 max-w-full text-sm leading-5 text-muted-foreground">
-                    This is the beginning of the{" "}
-                    <span className="font-medium text-foreground">
-                      {channelIntro.channelKindLabel}
-                    </span>
-                    .
-                  </p>
-                  {channelIntro.description ? (
-                    <p className="mt-2 max-w-xl text-sm leading-5 text-muted-foreground">
-                      {channelIntro.description}
-                    </p>
-                  ) : null}
-                  {channelIntro.actions?.length ? (
-                    <div className="mt-4 flex max-w-full flex-nowrap gap-3 overflow-x-auto pb-1">
-                      {channelIntro.actions.map((action) => {
-                        const hasDescription = Boolean(action.description);
-
-                        return (
-                          <button
-                            className={cn(
-                              "flex shrink-0 border border-border/70 bg-background/70 text-left transition-colors hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-                              hasDescription
-                                ? "h-56 w-[13.75rem] flex-col rounded-2xl p-4"
-                                : "h-28 w-64 flex-col rounded-xl p-4",
-                            )}
-                            data-testid={action.testId}
-                            key={action.label}
-                            onClick={action.onClick}
-                            type="button"
-                          >
-                            <span
-                              className={cn(
-                                "flex shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground",
-                                hasDescription
-                                  ? "h-12 w-12 [&_svg]:h-6 [&_svg]:w-6"
-                                  : "h-10 w-10 [&_svg]:h-5 [&_svg]:w-5",
-                              )}
-                              data-testid={
-                                action.testId
-                                  ? `${action.testId}-icon`
-                                  : undefined
-                              }
-                            >
-                              {action.icon}
-                            </span>
-                            <span className="mt-auto min-w-0">
-                              <span
-                                className="block whitespace-normal break-words text-base font-medium leading-6 text-foreground"
-                                data-testid={
-                                  action.testId
-                                    ? `${action.testId}-title`
-                                    : undefined
-                                }
-                              >
-                                {action.label}
-                              </span>
-                              {action.description ? (
-                                <span
-                                  className="mt-1 block whitespace-normal break-words text-sm leading-5 text-muted-foreground"
-                                  data-testid={
-                                    action.testId
-                                      ? `${action.testId}-description`
-                                      : undefined
-                                  }
-                                >
-                                  {action.description}
-                                </span>
-                              ) : null}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-
               {showGenericEmpty ? (
                 <div
                   className="mt-auto rounded-3xl border border-dashed border-border/80 bg-card/70 px-6 py-10 text-center shadow-xs"
@@ -533,11 +446,10 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                 </div>
               ) : null}
 
-              {showMessageList ? (
+              {showVirtualList ? (
                 <div
                   className={cn(
                     "flex flex-col",
-                    !showIntro && "mt-auto",
                     // While a deferred render is in flight the painted
                     // list lags the latest `messages`. Dim it slightly so the
                     // streaming-in feels intentional instead of frozen.
@@ -549,6 +461,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                   <VirtualizedTimelineList
                     entries={entries}
                     renderEntry={renderEntry}
+                    renderIntro={introReady ? renderChannelIntro : undefined}
                     rows={rows}
                     scrollMargin={scrollMargin.value}
                     virtualizer={virtualizer}
@@ -584,7 +497,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
           </div>
         ) : null}
 
-        {showMessageList ? (
+        {showVirtualList ? (
           <TimelineDebugOverlay
             highlightedMessageId={highlightedMessageId}
             isAtBottom={isAtBottom}
@@ -601,6 +514,95 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     </TooltipProvider>
   );
 });
+
+function ChannelIntroHeader({ intro }: { intro: ChannelIntro }) {
+  return (
+    <div
+      className="mb-0.5 flex w-full max-w-2xl flex-col items-start px-3 py-2 text-left"
+      data-testid="message-channel-intro"
+    >
+      <div
+        className="flex h-[60px] w-[60px] items-center justify-center rounded-2xl border border-border/70 bg-muted/40 text-muted-foreground"
+        data-testid="message-channel-intro-icon"
+      >
+        {intro.icon ?? <Hash aria-hidden className="h-7 w-7" />}
+      </div>
+      <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
+        #{intro.channelName}
+      </p>
+      <p className="mt-1 max-w-full text-sm leading-5 text-muted-foreground">
+        This is the beginning of the{" "}
+        <span className="font-medium text-foreground">
+          {intro.channelKindLabel}
+        </span>
+        .
+      </p>
+      {intro.description ? (
+        <p className="mt-2 max-w-xl text-sm leading-5 text-muted-foreground">
+          {intro.description}
+        </p>
+      ) : null}
+      {intro.actions?.length ? (
+        <div className="mt-4 flex max-w-full flex-nowrap gap-3 overflow-x-auto pb-1">
+          {intro.actions.map((action) => {
+            const hasDescription = Boolean(action.description);
+
+            return (
+              <button
+                className={cn(
+                  "flex shrink-0 border border-border/70 bg-background/70 text-left transition-colors hover:bg-muted/60 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                  hasDescription
+                    ? "h-56 w-[13.75rem] flex-col rounded-2xl p-4"
+                    : "h-28 w-64 flex-col rounded-xl p-4",
+                )}
+                data-testid={action.testId}
+                key={action.label}
+                onClick={action.onClick}
+                type="button"
+              >
+                <span
+                  className={cn(
+                    "flex shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground",
+                    hasDescription
+                      ? "h-12 w-12 [&_svg]:h-6 [&_svg]:w-6"
+                      : "h-10 w-10 [&_svg]:h-5 [&_svg]:w-5",
+                  )}
+                  data-testid={
+                    action.testId ? `${action.testId}-icon` : undefined
+                  }
+                >
+                  {action.icon}
+                </span>
+                <span className="mt-auto min-w-0">
+                  <span
+                    className="block whitespace-normal break-words text-base font-medium leading-6 text-foreground"
+                    data-testid={
+                      action.testId ? `${action.testId}-title` : undefined
+                    }
+                  >
+                    {action.label}
+                  </span>
+                  {action.description ? (
+                    <span
+                      className="mt-1 block whitespace-normal break-words text-sm leading-5 text-muted-foreground"
+                      data-testid={
+                        action.testId
+                          ? `${action.testId}-description`
+                          : undefined
+                      }
+                    >
+                      {action.description}
+                    </span>
+                  ) : null}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 function DirectMessageIntroAvatarStack({
   participants,

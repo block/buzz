@@ -3,9 +3,7 @@ import test from "node:test";
 
 import {
   BOTTOM_THRESHOLD_PX,
-  TOP_THRESHOLD_PX,
   buildDayGroupBoundaries,
-  isAtTopMetrics,
   isNearBottomMetrics,
   resolveDeepLinkTarget,
   selectDeferredListRenderState,
@@ -77,20 +75,6 @@ test("isNearBottomMetrics: false when scrolled up beyond the threshold", () => {
     }),
     false,
   );
-});
-
-// --- earned channel-intro header (at-top reveal gate) -------------------------
-
-test("isAtTopMetrics: true when within threshold of the top", () => {
-  assert.equal(isAtTopMetrics({ scrollTop: 4 }), true);
-});
-
-test("isAtTopMetrics: true exactly at the threshold boundary", () => {
-  assert.equal(isAtTopMetrics({ scrollTop: TOP_THRESHOLD_PX }), true);
-});
-
-test("isAtTopMetrics: false when scrolled down beyond the threshold", () => {
-  assert.equal(isAtTopMetrics({ scrollTop: TOP_THRESHOLD_PX + 1 }), false);
 });
 
 test("selectLatestMessageKey: prefers renderKey, falls back to id, undefined when empty", () => {

@@ -14,7 +14,8 @@
  * reuses `buildDayGroupBoundaries` so divider placement is byte-identical to the
  * current render — no second source of truth for "where does a day start".
  *
- * Two row kinds come out, in render order:
+ * Row kinds come out, in render order:
+ *   - { kind: "intro", key: "channel-intro" } — optional terminal header row
  *   - { kind: "day-divider", key, label-source timestamp, messageIndex: -1 }
  *   - { kind: "message", key, messageIndex } — index back into the snapshot
  *
@@ -29,6 +30,21 @@
 
 import type { TimelineMessage } from "@/features/messages/types";
 import { buildDayGroupBoundaries } from "./timelineSnapshot";
+
+/** Options for flattening a snapshot into virtual rows. */
+export type BuildVirtualTimelineRowsOptions = {
+  /** When true, prepend a channel-intro row before dividers and messages. */
+  includeIntro?: boolean;
+};
+
+/** The channel intro header — the terminal row at the true top of history. */
+export type VirtualIntroRow = {
+  kind: "intro";
+  /** Stable virtualizer key. */
+  key: "channel-intro";
+  /** Always -1 — the intro does not map to a message. */
+  messageIndex: -1;
+};
 
 /** A divider row — one per calendar-day boundary. Carries no message. */
 export type VirtualDayDividerRow = {
@@ -50,10 +66,13 @@ export type VirtualMessageRow = {
   messageIndex: number;
 };
 
-export type VirtualTimelineRow = VirtualDayDividerRow | VirtualMessageRow;
+export type VirtualTimelineRow =
+  | VirtualIntroRow
+  | VirtualDayDividerRow
+  | VirtualMessageRow;
 
 /**
- * Flatten a message snapshot into ordered virtual rows (dividers + messages).
+ * Flatten a message snapshot into ordered virtual rows (intro + dividers + messages).
  *
  * Walks the snapshot once; emits a divider row at each day-group start index
  * (computed by `buildDayGroupBoundaries`, the same helper the live render uses),
@@ -63,8 +82,18 @@ export type VirtualTimelineRow = VirtualDayDividerRow | VirtualMessageRow;
  */
 export function buildVirtualTimelineRows(
   messages: readonly TimelineMessage[],
+  options?: BuildVirtualTimelineRowsOptions,
 ): VirtualTimelineRow[] {
   const rows: VirtualTimelineRow[] = [];
+
+  if (options?.includeIntro) {
+    rows.push({
+      kind: "intro",
+      key: "channel-intro",
+      messageIndex: -1,
+    });
+  }
+
   const dayStartIndices = new Set(
     buildDayGroupBoundaries(messages).map((boundary) => boundary.startIndex),
   );

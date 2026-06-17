@@ -60,6 +60,10 @@ function renderEntryStub(entry: MainTimelineEntry) {
   return <span data-testid="entry">{entry.message.body}</span>;
 }
 
+function renderIntroStub() {
+  return <div data-testid="message-channel-intro">intro</div>;
+}
+
 function divider(timestamp: number): VirtualTimelineRow {
   return {
     kind: "day-divider",
@@ -168,4 +172,22 @@ test("positions rows at start minus scrollMargin (content-above offset)", () => 
   assert.ok(wrapper);
   // 200 - 128 = 72
   assert.match(wrapper.style.transform, /translateY\(72px\)/);
+});
+
+test("renders an intro row through the injected intro renderer", () => {
+  const rows: VirtualTimelineRow[] = [
+    { kind: "intro", key: "channel-intro", messageIndex: -1 },
+    divider(DAY_1),
+  ];
+  render(
+    <VirtualizedTimelineList
+      entries={[]}
+      renderEntry={renderEntryStub}
+      renderIntro={renderIntroStub}
+      scrollMargin={0}
+      rows={rows}
+      virtualizer={fakeVirtualizer(rows)}
+    />,
+  );
+  assert.ok(screen.getByTestId("message-channel-intro"));
 });

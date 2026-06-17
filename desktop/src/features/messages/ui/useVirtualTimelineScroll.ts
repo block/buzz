@@ -6,7 +6,6 @@ import {
   type VirtualTimelineRow,
 } from "@/features/messages/lib/buildVirtualTimelineRows";
 import {
-  isAtTop,
   isNearBottom,
   resolveDeepLinkTarget,
   selectLatestMessageKey,
@@ -79,14 +78,6 @@ export function useVirtualTimelineScroll({
   const [highlightedMessageId, setHighlightedMessageId] = React.useState<
     string | null
   >(null);
-  // Drives the channel-intro header's VISUAL reveal. The intro is the terminal
-  // header of a bottom-anchored list: it reserves its space (scrollMargin), but
-  // must only become VISIBLE once the first-load bottom pin has landed AND the
-  // user has genuinely arrived at the true top — never painted up front while
-  // the list streams in from the bottom. A standard overflow container rests at
-  // scrollTop 0 during the estimate→measure→settle window, so we gate on
-  // `hasInitialized && isAtTop`, not "scrollTop is 0" alone.
-  const [introRevealed, setIntroRevealed] = React.useState(false);
 
   const lastRowIndex = rows.length - 1;
 
@@ -119,18 +110,7 @@ export function useVirtualTimelineScroll({
     setIsAtBottom(true);
     setNewMessageCount(0);
     setHighlightedMessageId(null);
-    setIntroRevealed(false);
   }, [channelId]);
-
-  // Recompute whether the channel intro should be visible: only once the
-  // first-load pin has landed (`hasInitialized`) AND the container is genuinely
-  // at the top. Cheap geometry read, only flips state on a real change.
-  const syncIntroRevealed = React.useCallback(() => {
-    const container = scrollContainerRef.current;
-    const revealed =
-      hasInitializedRef.current && container !== null && isAtTop(container);
-    setIntroRevealed((current) => (current === revealed ? current : revealed));
-  }, [scrollContainerRef]);
 
   // Track bottom-pinned state off the native scroll event. The virtualizer owns
   // the scrollTop; we only read it to decide whether to keep auto-following.
@@ -145,8 +125,7 @@ export function useVirtualTimelineScroll({
     if (atBottom) {
       setNewMessageCount(0);
     }
-    syncIntroRevealed();
-  }, [scrollContainerRef, syncIntroRevealed]);
+  }, [scrollContainerRef]);
 
   const latestMessage =
     messages.length > 0 ? messages[messages.length - 1] : undefined;
@@ -173,10 +152,6 @@ export function useVirtualTimelineScroll({
       hasInitializedRef.current = true;
       previousLastMessageKeyRef.current = latestMessageKey;
       previousMessageCountRef.current = messages.length;
-      // The first-load pin just landed: recompute reveal so a short channel
-      // (everything fits → top is genuinely also the bottom) surfaces its intro,
-      // while a long channel pinned off-top stays hidden.
-      syncIntroRevealed();
       return;
     }
 
@@ -216,7 +191,6 @@ export function useVirtualTimelineScroll({
     messages.length,
     scrollMarginReady,
     scrollToBottom,
-    syncIntroRevealed,
     targetMessageId,
   ]);
 
@@ -245,18 +219,7 @@ export function useVirtualTimelineScroll({
     }
     lastPinnedTotalSizeRef.current = totalSize;
     virtualizer.scrollToIndex(lastRowIndex, { align: "end" });
-    // Re-anchor changed the scroll position: recompute reveal so the intro
-    // tracks the new resting place (stays hidden off-top, surfaces only if the
-    // grown content still leaves us genuinely at the top).
-    syncIntroRevealed();
-  }, [
-    totalSize,
-    isLoading,
-    targetMessageId,
-    lastRowIndex,
-    syncIntroRevealed,
-    virtualizer,
-  ]);
+  }, [totalSize, isLoading, targetMessageId, lastRowIndex, virtualizer]);
 
   // Deep-link jump-to-message. Drives the virtualizer to mount and center the
   // target row, replacing the bespoke querySelector + scrollIntoView path that
@@ -340,7 +303,6 @@ export function useVirtualTimelineScroll({
 
   return {
     highlightedMessageId,
-    introRevealed,
     isAtBottom,
     newMessageCount,
     scrollToBottom,

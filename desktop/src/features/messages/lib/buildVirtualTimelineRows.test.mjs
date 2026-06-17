@@ -26,6 +26,34 @@ test("empty snapshot produces no rows", () => {
   assert.deepEqual(buildVirtualTimelineRows([]), []);
 });
 
+test("empty snapshot with includeIntro emits only the intro row", () => {
+  const rows = buildVirtualTimelineRows([], { includeIntro: true });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].kind, "intro");
+  assert.equal(rows[0].key, "channel-intro");
+});
+
+test("includeIntro prepends the intro row before dividers and messages", () => {
+  const rows = buildVirtualTimelineRows([message({ id: "a" })], {
+    includeIntro: true,
+  });
+  assert.deepEqual(
+    rows.map((row) => row.kind),
+    ["intro", "day-divider", "message"],
+  );
+});
+
+test("findVirtualRowIndexForMessage still resolves after an intro row is prepended", () => {
+  const messages = [
+    message({ id: "a", createdAt: DAY_1 }),
+    message({ id: "b", createdAt: DAY_2 }),
+  ];
+  const rows = buildVirtualTimelineRows(messages, { includeIntro: true });
+  // layout: [intro, div, a, div, b]
+  assert.equal(findVirtualRowIndexForMessage(rows, "a", messages), 2);
+  assert.equal(findVirtualRowIndexForMessage(rows, "b", messages), 4);
+});
+
 test("single message emits one divider then the message row", () => {
   const rows = buildVirtualTimelineRows([message({ id: "a" })]);
   assert.equal(rows.length, 2);

@@ -13,7 +13,7 @@ type VirtualizedTimelineListProps = {
   entries: MainTimelineEntry[];
   /**
    * The virtualizer's `scrollMargin` — the list's offset within the scroll
-   * container (content above it: sentinel, spinner, intro). `virtualItem.start`
+   * container (content above it: sentinel, spinner). `virtualItem.start`
    * is in scroll-element coords (includes this margin), so rows are positioned
    * at `start - scrollMargin` within the spacer, which sits at that offset.
    */
@@ -25,6 +25,8 @@ type VirtualizedTimelineListProps = {
    * `renderTimelineEntry` bound to its render context.
    */
   renderEntry: (entry: MainTimelineEntry) => React.ReactNode;
+  /** Renders the channel intro header when an intro row is in the virtual list. */
+  renderIntro?: () => React.ReactNode;
 };
 
 /**
@@ -43,6 +45,7 @@ export const VirtualizedTimelineList = React.memo(
     entries,
     scrollMargin,
     renderEntry,
+    renderIntro,
   }: VirtualizedTimelineListProps) {
     const virtualItems = virtualizer.getVirtualItems();
 
@@ -74,7 +77,9 @@ export const VirtualizedTimelineList = React.memo(
                 transform: `translateY(${virtualItem.start - scrollMargin}px)`,
               }}
             >
-              {row.kind === "day-divider" ? (
+              {row.kind === "intro" ? (
+                renderIntro?.()
+              ) : row.kind === "day-divider" ? (
                 <DayDivider label={formatDayHeading(row.headingTimestamp)} />
               ) : entry ? (
                 renderEntry(entry)
