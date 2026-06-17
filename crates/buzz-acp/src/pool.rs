@@ -665,7 +665,10 @@ pub(crate) fn prepend_base_for_legacy(
 /// rather than an unlabeled blob that would be mislabeled as `[Base]`.
 fn framed_system_prompt(base_prompt: Option<&str>, system_prompt: Option<&str>) -> Option<String> {
     match (base_prompt, system_prompt) {
-        (Some(bp), Some(sp)) => Some(format!("{}\n\n[System]\n{sp}", crate::queue::base_section(bp))),
+        (Some(bp), Some(sp)) => Some(format!(
+            "{}\n\n[System]\n{sp}",
+            crate::queue::base_section(bp)
+        )),
         (Some(bp), None) => Some(crate::queue::base_section(bp)),
         (None, Some(sp)) => Some(format!("[System]\n{sp}")),
         (None, None) => None,
