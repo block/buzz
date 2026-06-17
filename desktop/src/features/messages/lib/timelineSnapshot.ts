@@ -148,3 +148,43 @@ export function selectDeferredListRenderState(
   }
   return "pending";
 }
+
+export type TimelineSurface =
+  | "skeleton"
+  | "direct-message-intro"
+  | "channel-intro"
+  | "empty"
+  | "list";
+
+export function selectTimelineSurface({
+  deferredCount,
+  hasChannelIntro,
+  hasDirectMessageIntro,
+  isLoading,
+  liveCount,
+}: {
+  deferredCount: number;
+  hasChannelIntro: boolean;
+  hasDirectMessageIntro: boolean;
+  isLoading: boolean;
+  liveCount: number;
+}): TimelineSurface {
+  if (isLoading) {
+    return "skeleton";
+  }
+
+  const renderState = selectDeferredListRenderState(deferredCount, liveCount);
+  if (renderState === "pending") {
+    return "skeleton";
+  }
+  if (renderState === "list") {
+    return "list";
+  }
+  if (hasDirectMessageIntro) {
+    return "direct-message-intro";
+  }
+  if (hasChannelIntro) {
+    return "channel-intro";
+  }
+  return "empty";
+}

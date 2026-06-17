@@ -8,6 +8,7 @@ import {
   resolveDeepLinkTarget,
   selectDeferredListRenderState,
   selectLatestMessageKey,
+  selectTimelineSurface,
 } from "./timelineSnapshot.ts";
 
 // Local-midnight unix-second timestamps so isSameDay (local time) is stable
@@ -286,4 +287,73 @@ test("deferred-render: keys the empty decision off the live count, not deferred"
   // the empty state is a function of the LIVE list, never the lagging one.
   assert.equal(selectDeferredListRenderState(0, 0), "empty");
   assert.equal(selectDeferredListRenderState(0, 1), "pending");
+});
+
+test("timeline-surface: loading and deferred-pending both paint the single static skeleton", () => {
+  assert.equal(
+    selectTimelineSurface({
+      deferredCount: 0,
+      hasChannelIntro: false,
+      hasDirectMessageIntro: false,
+      isLoading: true,
+      liveCount: 0,
+    }),
+    "skeleton",
+  );
+  assert.equal(
+    selectTimelineSurface({
+      deferredCount: 0,
+      hasChannelIntro: true,
+      hasDirectMessageIntro: false,
+      isLoading: false,
+      liveCount: 3,
+    }),
+    "skeleton",
+  );
+});
+
+test("timeline-surface: live rows win over intro/empty surfaces", () => {
+  assert.equal(
+    selectTimelineSurface({
+      deferredCount: 2,
+      hasChannelIntro: true,
+      hasDirectMessageIntro: true,
+      isLoading: false,
+      liveCount: 2,
+    }),
+    "list",
+  );
+});
+
+test("timeline-surface: empty channels choose exactly one intro or empty surface", () => {
+  assert.equal(
+    selectTimelineSurface({
+      deferredCount: 0,
+      hasChannelIntro: false,
+      hasDirectMessageIntro: true,
+      isLoading: false,
+      liveCount: 0,
+    }),
+    "direct-message-intro",
+  );
+  assert.equal(
+    selectTimelineSurface({
+      deferredCount: 0,
+      hasChannelIntro: true,
+      hasDirectMessageIntro: false,
+      isLoading: false,
+      liveCount: 0,
+    }),
+    "channel-intro",
+  );
+  assert.equal(
+    selectTimelineSurface({
+      deferredCount: 0,
+      hasChannelIntro: false,
+      hasDirectMessageIntro: false,
+      isLoading: false,
+      liveCount: 0,
+    }),
+    "empty",
+  );
 });
