@@ -97,7 +97,8 @@ export function useReminderNotifications(
       // Defer until the query has resolved at least once — an empty array from
       // an unresolved query must not advance the watermark past reminders that
       // came due while the app was closed (the "missed-while-asleep" window).
-      if (remindersRef.current.length === 0 && !queryResolvedRef.current) return;
+      if (remindersRef.current.length === 0 && !queryResolvedRef.current)
+        return;
 
       const watermark = readWatermark(pubkey);
       const now = Math.floor(Date.now() / 1_000);

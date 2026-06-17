@@ -156,6 +156,7 @@ export function InboxListPane({
               <DropdownMenuTrigger asChild>
                 <Button
                   className="inline-flex shrink-0 items-center gap-1.5 rounded-full border-border/70 bg-background/70 px-2.5 text-2xs font-medium leading-none text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/60 hover:text-foreground"
+                  data-testid="inbox-filter-trigger"
                   size="sm"
                   type="button"
                   variant="outline"
@@ -174,7 +175,9 @@ export function InboxListPane({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-40">
                 <DropdownMenuRadioGroup
-                  onValueChange={(value) => onFilterChange(value as InboxFilter)}
+                  onValueChange={(value) =>
+                    onFilterChange(value as InboxFilter)
+                  }
                   value={filter}
                 >
                   {FILTER_OPTIONS.map((option) => (

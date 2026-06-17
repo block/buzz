@@ -6,6 +6,39 @@ import { installMockBridge } from "../helpers/bridge";
 const SHOTS = "test-results/reminders";
 const MOCK_PUBKEY = "deadbeef".repeat(8);
 
+// The inbox filter dropdown lives in the home pane, not the chat view. Land on
+// home and wait for the inbox before reaching for the filter trigger.
+async function gotoInboxHome(page: import("@playwright/test").Page) {
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox")).toBeVisible();
+}
+
+// Reminders is reached by opening the inbox filter dropdown and selecting the
+// "Reminders" option — there is no standalone nav entry or view-mode slider.
+async function openRemindersFilter(page: import("@playwright/test").Page) {
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Reminders" }).click();
+}
+
+// The reminders query mounts (for the badge) before tests seed events, so a
+// bare seed lands behind its cached empty result. Invalidate after seeding to
+// force the refetch that picks up the mock events.
+async function seedReminders(
+  page: import("@playwright/test").Page,
+  events: unknown[],
+) {
+  await page.evaluate((seeded) => {
+    window.__BUZZ_E2E_SEED_MOCK_REMINDERS__?.(
+      seeded as Parameters<
+        NonNullable<typeof window.__BUZZ_E2E_SEED_MOCK_REMINDERS__>
+      >[0],
+    );
+    window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+      queryKey: ["reminders"],
+    });
+  }, events);
+}
+
 function mockReminderEvent(opts: {
   id: string;
   dTag: string;
@@ -32,18 +65,21 @@ test.describe("reminders screenshots", () => {
     await installMockBridge(page);
   });
 
-  test("01 — sidebar shows Reminders nav item", async ({ page }) => {
-    await page.goto("/");
-    await page.getByTestId("channel-general").click();
-    await expect(page.getByTestId("chat-title")).toHaveText("general");
+  test("01 — inbox filter dropdown shows Reminders option", async ({
+    page,
+  }) => {
+    await gotoInboxHome(page);
 
-    const remindersNav = page.getByTestId("open-reminders-view");
-    await expect(remindersNav).toBeVisible();
+    await page.getByTestId("inbox-filter-trigger").click();
+    const remindersOption = page.getByRole("menuitemradio", {
+      name: "Reminders",
+    });
+    await expect(remindersOption).toBeVisible();
     await waitForAnimations(page);
 
     await page.screenshot({
-      path: `${SHOTS}/01-sidebar-reminders-nav.png`,
-      clip: { x: 0, y: 0, width: 256, height: 720 },
+      path: `${SHOTS}/01-inbox-filter-reminders-option.png`,
+      clip: { x: 0, y: 0, width: 900, height: 720 },
     });
   });
 
@@ -106,12 +142,10 @@ test.describe("reminders screenshots", () => {
   });
 
   test("04 — Reminders panel empty state", async ({ page }) => {
-    await page.goto("/");
-    await page.getByTestId("channel-general").click();
-    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await gotoInboxHome(page);
 
-    await page.getByTestId("open-reminders-view").click();
-    await expect(page.getByText("No pending reminders")).toBeVisible();
+    await openRemindersFilter(page);
+    await expect(page.getByText("No reminders")).toBeVisible();
     await waitForAnimations(page);
 
     await page.screenshot({
@@ -123,9 +157,7 @@ test.describe("reminders screenshots", () => {
   test("05 — Reminders panel with active pending reminder", async ({
     page,
   }) => {
-    await page.goto("/");
-    await page.getByTestId("channel-general").click();
-    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await gotoInboxHome(page);
 
     // Seed a pending reminder due in the future
     const futureTimestamp = Math.floor(Date.now() / 1000) + 3600;
@@ -140,21 +172,16 @@ test.describe("reminders screenshots", () => {
       status: "pending",
     });
 
-    await page.evaluate(
-      ({ event }) => {
-        window.__BUZZ_E2E_SEED_MOCK_REMINDERS__?.([event]);
-      },
-      {
-        event: mockReminderEvent({
-          id: "reminder-active-01",
-          dTag: "rem-active-01",
-          content: reminderContent,
-          notBefore: futureTimestamp,
-        }),
-      },
-    );
+    await seedReminders(page, [
+      mockReminderEvent({
+        id: "reminder-active-01",
+        dTag: "rem-active-01",
+        content: reminderContent,
+        notBefore: futureTimestamp,
+      }),
+    ]);
 
-    await page.getByTestId("open-reminders-view").click();
+    await openRemindersFilter(page);
     await expect(page.getByText("Follow up on this message")).toBeVisible();
     await waitForAnimations(page);
 
@@ -165,9 +192,7 @@ test.describe("reminders screenshots", () => {
   });
 
   test("06 — Reminders panel with fired/overdue reminder", async ({ page }) => {
-    await page.goto("/");
-    await page.getByTestId("channel-general").click();
-    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await gotoInboxHome(page);
 
     // Seed a reminder that has already fired (notBefore in the past)
     const pastTimestamp = Math.floor(Date.now() / 1000) - 7200;
@@ -195,29 +220,22 @@ test.describe("reminders screenshots", () => {
       status: "pending",
     });
 
-    await page.evaluate(
-      ({ events }) => {
-        window.__BUZZ_E2E_SEED_MOCK_REMINDERS__?.(events);
-      },
-      {
-        events: [
-          mockReminderEvent({
-            id: "reminder-overdue-01",
-            dTag: "rem-overdue-01",
-            content: overdueContent,
-            notBefore: pastTimestamp,
-          }),
-          mockReminderEvent({
-            id: "reminder-upcoming-01",
-            dTag: "rem-upcoming-01",
-            content: activeContent,
-            notBefore: futureTimestamp,
-          }),
-        ],
-      },
-    );
+    await seedReminders(page, [
+      mockReminderEvent({
+        id: "reminder-overdue-01",
+        dTag: "rem-overdue-01",
+        content: overdueContent,
+        notBefore: pastTimestamp,
+      }),
+      mockReminderEvent({
+        id: "reminder-upcoming-01",
+        dTag: "rem-upcoming-01",
+        content: activeContent,
+        notBefore: futureTimestamp,
+      }),
+    ]);
 
-    await page.getByTestId("open-reminders-view").click();
+    await openRemindersFilter(page);
     await expect(page.getByText("Reply to Alice")).toBeVisible();
     await expect(page.getByRole("heading", { name: "Overdue" })).toBeVisible();
     await waitForAnimations(page);

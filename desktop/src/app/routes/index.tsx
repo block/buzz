@@ -12,7 +12,6 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 
 type HomeRouteSearch = {
   item?: string;
-  view?: "reminders";
 };
 
 function validateHomeSearch(search: Record<string, unknown>): HomeRouteSearch {
@@ -21,7 +20,6 @@ function validateHomeSearch(search: Record<string, unknown>): HomeRouteSearch {
       typeof search.item === "string" && search.item.length > 0
         ? search.item
         : undefined,
-    view: search.view === "reminders" ? "reminders" : undefined,
   };
 }
 

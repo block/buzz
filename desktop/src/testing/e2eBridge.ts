@@ -623,6 +623,9 @@ declare global {
       slotId: string;
     }) => unknown;
     __BUZZ_E2E_SEED_MOCK_REMINDERS__?: (reminders: RelayEvent[]) => void;
+    __BUZZ_E2E_QUERY_CLIENT__?: {
+      invalidateQueries: (filters: { queryKey: readonly unknown[] }) => unknown;
+    };
   }
 }
 
