@@ -170,3 +170,12 @@ test("groupReminders_never_surfaces_cancelled_reminders", () => {
 test("groupReminders_empty_list_returns_empty", () => {
   assert.deepEqual(groupReminders([]), []);
 });
+
+test("groupReminders_buckets_epoch_zero_notBefore_as_overdue", () => {
+  // Guards on `notBefore !== undefined`, matching isDue/dueSince: 0 is kept.
+  const groups = groupReminders([reminder({ notBefore: 0 })]);
+  assert.deepEqual(
+    groups.map((g) => g.label),
+    ["Overdue"],
+  );
+});

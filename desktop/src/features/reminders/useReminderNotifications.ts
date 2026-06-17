@@ -91,6 +91,10 @@ export function useReminderNotifications(
       const now = Math.floor(Date.now() / 1_000);
       const due = dueSince(remindersRef.current, watermark, now);
       fire(due);
+      // Advance unconditionally, even when fire() suppressed the toast
+      // (notifications off or needs_action slot muted). Re-enabling later must
+      // not backlog-replay reminders that came due while muted — same no-replay
+      // rationale as seed-to-now. Suppressed reminders still show in panel/badge.
       window.localStorage.setItem(watermarkStorageKey(pubkey), String(now));
     };
 

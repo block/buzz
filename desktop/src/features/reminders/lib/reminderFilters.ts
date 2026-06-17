@@ -73,7 +73,7 @@ export function groupReminders(
       continue;
     }
     if (r.content.status !== "pending") continue;
-    if (!r.notBefore) continue;
+    if (r.notBefore === undefined) continue;
     if (r.notBefore <= now) {
       overdue.push(r);
     } else if (r.notBefore <= endOfTodaySecs) {
