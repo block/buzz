@@ -512,7 +512,7 @@
 /* ── Tiptap rich-text composer ──────────────────────────────────────── */
 .rich-text-composer .tiptap {
   outline: none;
-  min-height: var(--text-sm--line-height);
+  min-height: 1lh;
   font-size: var(--text-sm);
   line-height: var(--text-sm--line-height);
 }
