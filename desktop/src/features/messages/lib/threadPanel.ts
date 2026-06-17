@@ -26,8 +26,9 @@ export type MainTimelineEntry = {
   summary: TimelineThreadSummary | null;
 };
 
-type ThreadDescendantStats = {
+export type ThreadDescendantStats = {
   descendantCount: number;
+  unreadDescendantCount: number;
   lastReplyAt: number | null;
   recentParticipantsNewestFirst: TimelineThreadSummaryParticipant[];
 };
@@ -47,14 +48,47 @@ function normalizeHeadMessage(message: TimelineMessage): TimelineMessage {
   };
 }
 
+// Thread rows feed `MessageRow` a depth-normalized copy of each reply. Building
+// that copy fresh (`{ ...message, depth }`) on every render hands `MessageRow` a
+// new object identity every time `timelineMessages` churns (typing/presence),
+// even when the reply and its depth are byte-identical — which defeats the
+// row/markdown memo and forces a ~1.4ms/row re-parse on threads where the main
+// timeline (which passes the raw stable ref) stays cheap.
+//
+// Mirror the main list's per-id context memoization (`videoReviewContextById`):
+// cache the normalized object keyed on the source reply identity + depth, so an
+// unrelated channel churn that leaves a reply (and its tree position) intact
+// reuses the exact same object reference and the memo hits.
+//
+// Keyed on the source `reply` reference via a WeakMap: a new `timelineMessages`
+// set produces new reply objects (genuine recompute), and stale entries are
+// collected automatically when the old message set is dropped.
+const normalizedInlineReplyCache = new WeakMap<
+  TimelineMessage,
+  Map<number, TimelineMessage>
+>();
+
 function normalizeInlineReplyMessage(
   message: TimelineMessage,
   depth: number,
 ): TimelineMessage {
-  return {
+  let byDepth = normalizedInlineReplyCache.get(message);
+  if (!byDepth) {
+    byDepth = new Map<number, TimelineMessage>();
+    normalizedInlineReplyCache.set(message, byDepth);
+  }
+
+  const cached = byDepth.get(depth);
+  if (cached) {
+    return cached;
+  }
+
+  const normalized: TimelineMessage = {
     ...message,
     depth,
   };
+  byDepth.set(depth, normalized);
+  return normalized;
 }
 
 function buildDirectChildrenByParentId(messages: TimelineMessage[]) {
@@ -73,15 +107,19 @@ function buildDirectChildrenByParentId(messages: TimelineMessage[]) {
   return childrenByParentId;
 }
 
-function buildDescendantStatsByMessageId(
+export function buildDescendantStatsByMessageId(
   messages: TimelineMessage[],
-  messageById: Map<string, TimelineMessage>,
+  unreadReplyIds: ReadonlySet<string> = new Set(),
+  messageById: Map<string, TimelineMessage> = new Map(
+    messages.map((message) => [message.id, message]),
+  ),
 ): Map<string, ThreadDescendantStats> {
   const descendantStatsByMessageId = new Map<string, ThreadDescendantStats>(
     messages.map((message) => [
       message.id,
       {
         descendantCount: 0,
+        unreadDescendantCount: 0,
         lastReplyAt: null,
         recentParticipantsNewestFirst: [],
       },
@@ -110,6 +148,7 @@ function buildDescendantStatsByMessageId(
     let ancestorId = message.parentId ?? null;
     let hops = 0;
     const maxHops = messages.length + 1;
+    const isUnread = unreadReplyIds.has(message.id);
 
     while (ancestorId && hops < maxHops) {
       const ancestorStats = descendantStatsByMessageId.get(ancestorId);
@@ -118,6 +157,9 @@ function buildDescendantStatsByMessageId(
       }
 
       ancestorStats.descendantCount += 1;
+      if (isUnread) {
+        ancestorStats.unreadDescendantCount += 1;
+      }
       ancestorStats.lastReplyAt = Math.max(
         ancestorStats.lastReplyAt ?? 0,
         message.createdAt,
@@ -143,6 +185,7 @@ function buildDescendantStatsByMessageId(
 
 export function buildThreadPanelIndex(
   messages: TimelineMessage[],
+  unreadReplyIds: ReadonlySet<string> = new Set(),
 ): ThreadPanelIndex {
   const messageById = new Map(messages.map((message) => [message.id, message]));
 
@@ -150,6 +193,7 @@ export function buildThreadPanelIndex(
     directChildrenByParentId: buildDirectChildrenByParentId(messages),
     descendantStatsByMessageId: buildDescendantStatsByMessageId(
       messages,
+      unreadReplyIds,
       messageById,
     ),
     messageById,
@@ -241,8 +285,12 @@ function buildVisibleThreadReplies(params: {
 
 export function buildMainTimelineEntries(
   messages: TimelineMessage[],
+  unreadReplyIds: ReadonlySet<string> = new Set(),
 ): MainTimelineEntry[] {
-  const { descendantStatsByMessageId } = buildThreadPanelIndex(messages);
+  const { descendantStatsByMessageId } = buildThreadPanelIndex(
+    messages,
+    unreadReplyIds,
+  );
 
   return messages
     .filter(
@@ -258,6 +306,21 @@ export function buildMainTimelineEntries(
         ),
       };
     });
+}
+
+/**
+ * Whether the unread "New" divider should render above the entry at `index`.
+ * The divider marks a read/unread boundary, so it only makes sense when there
+ * is a rendered message above the first unread. When the first unread is the
+ * first rendered top-level entry (index 0) — the fresh/never-read channel case
+ * — there is nothing above it to separate from, so the divider is suppressed.
+ */
+export function shouldRenderUnreadDivider(
+  index: number,
+  messageId: string,
+  firstUnreadMessageId: string | null,
+): boolean {
+  return index > 0 && messageId === firstUnreadMessageId;
 }
 
 export function buildThreadPanelDataFromIndex(

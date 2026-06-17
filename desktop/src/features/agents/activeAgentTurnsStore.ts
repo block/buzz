@@ -25,19 +25,35 @@ type ActiveTurn = {
   turnId: string;
   channelId: string;
   startedAt: number;
-  observedAt: number;
   lastActivityAt: number;
 };
 
 /** One working channel surfaced to the UI, anchored to the desktop clock. */
 export type ActiveTurnSummary = {
   channelId: string;
-  observedAt: number;
+  anchorAt: number;
 };
 
 // Module-level state: agentPubkey → turnId → ActiveTurn
 const activeTurnsByAgent = new Map<string, Map<string, ActiveTurn>>();
 const listeners = new Set<() => void>();
+
+// Per-agent clock offset: the desktop clock minus the agent-host clock, in
+// milliseconds. Estimated as the running minimum of
+// (Date.now() - Date.parse(event.timestamp)) across that agent's events. The
+// minimum converges on true skew minus the smallest network/processing delay
+// seen — a monotonically tightening estimate immune to per-event jitter. While
+// true skew is constant or shrinking it is conservative: elapsed under-reports
+// by the minimum delay and never inflates. The minimum never loosens, so under
+// GROWING skew (an NTP step forward, or the host clock drifting further behind
+// mid-session) the stored estimate goes stale-too-small and elapsed can over-
+// report — bounded by how far the skew grows, sub-second over a session. A
+// turn's badge anchor is startedAt + offset: the agent's own start, translated
+// into desktop-clock terms. Anchors are derived at read time so a later, tighter
+// offset retroactively corrects every live turn — distinct agent starts then
+// yield distinct anchors (no lockstep) and a turn started long ago anchors into
+// the past (large elapsed) instead of resetting to Date.now().
+const clockOffsetByAgent = new Map<string, number>();
 
 // Cached snapshots for useSyncExternalStore reference stability.
 // Only regenerated when the underlying turn map for an agent actually changes.
@@ -59,6 +75,23 @@ function notifyListeners() {
   for (const listener of listeners) {
     listener();
   }
+}
+
+/**
+ * Refine this agent's clock-offset estimate from one observer event. Samples
+ * Date.now() - Date.parse(timestamp) and keeps the running minimum. When the
+ * minimum tightens, every live anchor for the agent shifts, so the cache is
+ * invalidated. Events with an unparseable timestamp contribute no sample.
+ * Returns true when the offset changed.
+ */
+function sampleClockOffset(agentKey: string, timestamp: string): boolean {
+  const sample = Date.now() - Date.parse(timestamp);
+  if (Number.isNaN(sample)) return false;
+  const prior = clockOffsetByAgent.get(agentKey);
+  if (prior !== undefined && sample >= prior) return false;
+  clockOffsetByAgent.set(agentKey, sample);
+  invalidateCache(agentKey);
+  return true;
 }
 
 function startTurn(
@@ -89,15 +122,12 @@ function startTurn(
     }
   }
 
-  const now = Date.parse(timestamp) || Date.now();
+  const startedAt = Date.parse(timestamp) || Date.now();
   agentTurns.set(turnId, {
     turnId,
     channelId,
-    startedAt: now,
-    // Desktop-clock anchor for the live elapsed counter. Must NOT use startedAt
-    // (agent-host clock) — ticking the desktop clock against it skews remote agents.
-    observedAt: Date.now(),
-    lastActivityAt: now,
+    startedAt,
+    lastActivityAt: Date.now(),
   });
   invalidateCache(key);
 }
@@ -179,6 +209,11 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
   }
   lastProcessed.set(key, event);
 
+  // Refine the clock offset from every fresh event. A tighter offset shifts
+  // every live anchor for this agent, so a change must reach the UI even when
+  // the event itself surfaces no new turn.
+  const offsetChanged = sampleClockOffset(key, event.timestamp);
+
   switch (event.kind) {
     case "turn_started":
       if (event.channelId) {
@@ -189,6 +224,7 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
           event.timestamp,
         );
         notifyListeners();
+        return;
       }
       break;
     case "turn_completed":
@@ -196,15 +232,19 @@ function processEvent(agentPubkey: string, event: ObserverEvent) {
     case "agent_panic":
       endTurn(agentPubkey, event.turnId ?? null, event.channelId ?? null);
       notifyListeners();
-      break;
+      return;
     case "acp_read":
     case "acp_write":
     // turn_liveness keeps a quiet-but-alive turn from being pruned; same
-    // refresh-only path as stream activity — no surfaced summary change, so
-    // no notifyListeners().
+    // refresh-only path as stream activity — no surfaced summary change on its
+    // own, so it only notifies when the offset above actually moved.
     case "turn_liveness":
       recordActivity(agentPubkey, event.turnId ?? null);
       break;
+  }
+
+  if (offsetChanged) {
+    notifyListeners();
   }
 }
 
@@ -237,7 +277,7 @@ export function subscribeActiveAgentTurns(listener: () => void) {
 
 /**
  * Returns the channels where the given agent has active turns, sorted by
- * channelId, each anchored to the earliest `observedAt` for that channel.
+ * channelId, each anchored to the earliest `anchorAt` for that channel.
  * The array reference is cached and stable until the turn map mutates — a
  * requirement for `useSyncExternalStore`.
  */
@@ -252,18 +292,24 @@ export function getActiveTurnsForAgent(
   const cached = cachedTurnSummaries.get(key);
   if (cached) return cached;
 
-  // Collapse multiple turns in one channel to the earliest observation —
-  // the badge should count from when the channel first went active.
+  const offset = clockOffsetByAgent.get(key) ?? 0;
+
+  // Collapse multiple turns in one channel to the earliest start — the badge
+  // should count from when the channel's oldest live turn began. Anchors are
+  // derived here (startedAt + offset) so the latest skew estimate applies.
   const earliestByChannel = new Map<string, number>();
   for (const turn of agentTurns.values()) {
     const prior = earliestByChannel.get(turn.channelId);
-    if (prior === undefined || turn.observedAt < prior) {
-      earliestByChannel.set(turn.channelId, turn.observedAt);
+    if (prior === undefined || turn.startedAt < prior) {
+      earliestByChannel.set(turn.channelId, turn.startedAt);
     }
   }
 
   const result = [...earliestByChannel.entries()]
-    .map(([channelId, observedAt]) => ({ channelId, observedAt }))
+    .map(([channelId, startedAt]) => ({
+      channelId,
+      anchorAt: startedAt + offset,
+    }))
     .sort((a, b) => a.channelId.localeCompare(b.channelId));
   cachedTurnSummaries.set(key, result);
   return result;
@@ -286,7 +332,7 @@ export function syncAgentTurnsFromEvents(
 
 /**
  * Hook: returns the channels where the given agent is currently working, each
- * with the desktop-clock `observedAt` to anchor a live elapsed counter.
+ * with the desktop-clock `anchorAt` to anchor a live elapsed counter.
  * Re-renders when the set of channels changes — not when the clock ticks.
  */
 export function useActiveAgentTurns(
@@ -324,6 +370,7 @@ export function useActiveAgentTurnsBridge(
 export function resetActiveAgentTurnsStore() {
   activeTurnsByAgent.clear();
   lastProcessed.clear();
+  clockOffsetByAgent.clear();
   cachedTurnSummaries.clear();
   notifyListeners();
 }

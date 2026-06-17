@@ -25,6 +25,7 @@ import {
   handleCodeFenceEnter,
   insertNewlineInCodeBlock,
 } from "./codeBlockExtensions";
+import { SpoilerMark } from "./spoilerMark";
 
 /**
  * Plain-text edit descriptor returned by autocomplete hooks
@@ -293,6 +294,7 @@ export function useRichTextEditor({
           },
         }),
         CodeBlockAfterHardBreak,
+        SpoilerMark,
         MentionHighlightExtension,
         customEmojiWiring.extension,
         Placeholder.configure({

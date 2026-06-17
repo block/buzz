@@ -1,4 +1,4 @@
-import { ClockFading, Hash } from "lucide-react";
+import { ChevronDown, ClockFading, Hash, type LucideIcon } from "lucide-react";
 import * as React from "react";
 
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
@@ -8,15 +8,18 @@ import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
 import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
-import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import { Switch } from "@/shared/ui/switch";
 import { Textarea } from "@/shared/ui/textarea";
 
 /** Default TTL for ephemeral channels: 1 day of inactivity. */
 const EPHEMERAL_TTL_SECONDS = 86400;
 const CREATE_FIELD_SHELL_CLASS =
-  "rounded-xl border border-input bg-background shadow-xs transition-colors duration-150 ease-out hover:border-muted-foreground/40 hover:bg-muted/70 focus-within:border-muted-foreground/50 focus-within:bg-muted/70";
+  "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
 const CREATE_FIELD_CONTROL_CLASS =
-  "border-0 bg-transparent shadow-none outline-none ring-0 placeholder:text-muted-foreground/45 focus:bg-transparent focus:outline-hidden focus-visible:ring-0";
+  "border-0 bg-transparent text-muted-foreground/55 shadow-none outline-none ring-0 transition-colors duration-150 ease-out placeholder:text-muted-foreground/55 focus:bg-transparent focus:text-foreground focus:outline-hidden focus-visible:ring-0";
+const CREATE_LABEL_OPTIONAL_CLASS =
+  "ml-1 text-xs font-normal text-muted-foreground/50";
 
 type ChannelKind = "stream" | "forum";
 
@@ -53,12 +56,15 @@ export function CreateChannelDialog({
   const [selectedTemplateId, setSelectedTemplateId] = React.useState<
     string | null
   >(null);
+  const [typePopoverOpen, setTypePopoverOpen] = React.useState(false);
   const nameInputRef = React.useRef<HTMLInputElement>(null);
 
   const templatesQuery = useChannelTemplatesQuery();
   const templates = templatesQuery.data ?? [];
 
   const kindLabel = channelKind === "forum" ? "forum" : "channel";
+  const durationLabel = ephemeral ? "Temporary" : "Ongoing";
+  const DurationIcon = ephemeral ? ClockFading : Hash;
 
   // Reset form state when dialog opens/closes or kind changes
   React.useEffect(() => {
@@ -70,6 +76,7 @@ export function CreateChannelDialog({
     setEphemeral(false);
     setErrorMessage(null);
     setSelectedTemplateId(null);
+    setTypePopoverOpen(false);
 
     // Small delay to let dialog animation start before focusing
     const timerId = globalThis.setTimeout(() => {
@@ -152,15 +159,52 @@ export function CreateChannelDialog({
             : "Channels are real-time streams for team conversation."
         }
         footer={
-          <div className="flex w-full items-center justify-end gap-2">
-            <Button
-              disabled={isCreating}
-              onClick={() => onOpenChange(false)}
-              type="button"
-              variant="ghost"
-            >
-              Cancel
-            </Button>
+          <div className="flex w-full items-center justify-between gap-3">
+            <Popover onOpenChange={setTypePopoverOpen} open={typePopoverOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  aria-label={`Channel duration: ${durationLabel}`}
+                  className="-ml-2.5 h-9 px-2.5 text-sm font-medium text-foreground hover:bg-muted/50"
+                  disabled={isCreating}
+                  type="button"
+                  variant="ghost"
+                >
+                  <DurationIcon className="h-4 w-4" />
+                  {durationLabel}
+                  <ChevronDown className="h-3.5 w-3.5 text-muted-foreground/70" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-72 p-1">
+                <div className="px-3 pb-1.5 pt-2 text-xs font-medium text-muted-foreground/70">
+                  Channel type
+                </div>
+                <fieldset className="space-y-1">
+                  <legend className="sr-only">Channel type</legend>
+                  <ChannelDurationOption
+                    ariaLabel="Ongoing channel"
+                    checked={!ephemeral}
+                    description="For projects, teams, and recurring conversations."
+                    icon={Hash}
+                    label="Ongoing"
+                    onSelect={() => {
+                      setEphemeral(false);
+                      setTypePopoverOpen(false);
+                    }}
+                  />
+                  <ChannelDurationOption
+                    ariaLabel="Ephemeral - auto-archives after 1 day of inactivity"
+                    checked={ephemeral}
+                    description="For quick discussions that archive automatically when inactive."
+                    icon={ClockFading}
+                    label="Temporary"
+                    onSelect={() => {
+                      setEphemeral(true);
+                      setTypePopoverOpen(false);
+                    }}
+                  />
+                </fieldset>
+              </PopoverContent>
+            </Popover>
             <Button
               data-testid="create-channel-submit"
               disabled={isCreating || name.trim().length === 0}
@@ -189,7 +233,7 @@ export function CreateChannelDialog({
             </label>
             <div
               className={cn(
-                "flex h-9 items-center px-3",
+                "flex min-h-11 items-center px-3",
                 CREATE_FIELD_SHELL_CLASS,
               )}
             >
@@ -197,7 +241,10 @@ export function CreateChannelDialog({
                 autoCapitalize="none"
                 autoComplete="off"
                 autoCorrect="off"
-                className={cn("h-full px-0 py-0", CREATE_FIELD_CONTROL_CLASS)}
+                className={cn(
+                  "h-8 px-0 py-0 leading-6",
+                  CREATE_FIELD_CONTROL_CLASS,
+                )}
                 data-testid="create-channel-name"
                 disabled={isCreating}
                 id="create-channel-name"
@@ -223,15 +270,13 @@ export function CreateChannelDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="create-channel-description"
             >
-              Description{" "}
-              <span className="font-normal text-muted-foreground">
-                (optional)
-              </span>
+              Description
+              <span className={CREATE_LABEL_OPTIONAL_CLASS}>Optional</span>
             </label>
             <div className={CREATE_FIELD_SHELL_CLASS}>
               <Textarea
                 className={cn(
-                  "min-h-16 resize-none px-3 py-2",
+                  "min-h-20 resize-none px-3 py-3 leading-5",
                   CREATE_FIELD_CONTROL_CLASS,
                 )}
                 data-testid="create-channel-description"
@@ -248,87 +293,39 @@ export function CreateChannelDialog({
             </div>
           </div>
 
-          {/* Type */}
-          <div className="space-y-2">
-            <p className="text-sm font-medium text-foreground">Type</p>
-            <Tabs
-              className="w-full"
-              data-testid="create-channel-ephemeral"
-              onValueChange={(value) => setEphemeral(value === "temporary")}
-              value={ephemeral ? "temporary" : "ongoing"}
-            >
-              <TabsList className="relative grid h-auto w-full grid-cols-2 items-stretch rounded-xl bg-muted/45 p-1 text-muted-foreground">
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute bottom-1 left-1 top-1 z-0 w-[calc(50%-0.25rem)] rounded-lg bg-background/95 shadow-xs transition-transform duration-[180ms] ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none"
-                  data-testid="create-channel-type-indicator"
-                  style={{
-                    transform: ephemeral
-                      ? "translate3d(100%, 0, 0)"
-                      : "translate3d(0, 0, 0)",
-                  }}
-                />
-                <TabsTrigger
-                  className="group/type-tab relative z-10 h-full min-h-24 flex-col items-start justify-start gap-1.5 whitespace-normal rounded-lg bg-transparent px-3 py-2.5 text-left text-muted-foreground/55 opacity-70 shadow-none transition-[color,opacity] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] hover:text-muted-foreground hover:opacity-85 data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:opacity-100 data-[state=active]:shadow-none motion-reduce:transition-none"
-                  disabled={isCreating}
-                  value="ongoing"
-                >
-                  <Hash className="mt-0.5 h-4 w-4 shrink-0 text-current" />
-                  <span className="min-w-0 space-y-0.5">
-                    <span className="block text-sm font-medium">Ongoing</span>
-                    <span className="block text-xs leading-4 text-muted-foreground/45 group-data-[state=active]/type-tab:text-muted-foreground/65">
-                      For projects, teams, and recurring conversations.
-                    </span>
-                  </span>
-                </TabsTrigger>
-                <TabsTrigger
-                  aria-label="Ephemeral — auto-archives after 1 day of inactivity"
-                  className="group/type-tab relative z-10 h-full min-h-24 flex-col items-start justify-start gap-1.5 whitespace-normal rounded-lg bg-transparent px-3 py-2.5 text-left text-muted-foreground/55 opacity-70 shadow-none transition-[color,opacity] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] hover:text-muted-foreground hover:opacity-85 data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:opacity-100 data-[state=active]:shadow-none motion-reduce:transition-none"
-                  disabled={isCreating}
-                  value="temporary"
-                >
-                  <ClockFading className="mt-0.5 h-4 w-4 shrink-0 text-current" />
-                  <span className="min-w-0 space-y-0.5">
-                    <span className="block text-sm font-medium">Temporary</span>
-                    <span className="block text-xs leading-4 text-muted-foreground/45 group-data-[state=active]/type-tab:text-muted-foreground/65">
-                      For quick discussions that archive automatically when
-                      inactive.
-                    </span>
-                  </span>
-                </TabsTrigger>
-              </TabsList>
-            </Tabs>
-          </div>
-
-          {/* Permissions */}
-          <fieldset
-            className="space-y-2"
+          <div
+            className={cn(
+              "flex min-h-12 items-center justify-between gap-4 rounded-xl py-1",
+              isCreating && "opacity-50",
+            )}
             data-testid="create-channel-visibility"
           >
-            <legend className="text-sm font-medium text-foreground">
-              Permissions
-            </legend>
-            <div className="space-y-1">
-              <PermissionOption
-                description={`Anyone can see and join this ${kindLabel}.`}
-                disabled={isCreating}
-                name="create-channel-visibility"
-                onChange={() => setVisibility("open")}
-                selected={visibility === "open"}
-                title="Open"
-                value="open"
-              />
-              <PermissionOption
-                description={`Only members can invite people to this ${kindLabel}.`}
-                disabled={isCreating}
-                name="create-channel-visibility"
-                onChange={() => setVisibility("private")}
-                selected={visibility === "private"}
-                title="Private"
-                value="private"
-              />
-            </div>
-          </fieldset>
+            <label
+              className="min-w-0 cursor-pointer space-y-0.5"
+              htmlFor="create-channel-private"
+            >
+              <span className="block text-sm font-medium text-foreground">
+                Private
+              </span>
+              <span
+                className="block text-xs leading-4 text-muted-foreground/65"
+                id="create-channel-private-description"
+              >
+                Only members can invite people to this {kindLabel}.
+              </span>
+            </label>
+            <Switch
+              aria-describedby="create-channel-private-description"
+              checked={visibility === "private"}
+              className="shrink-0 shadow-none [&>span]:shadow-none"
+              data-testid="create-channel-private-toggle"
+              disabled={isCreating}
+              id="create-channel-private"
+              onCheckedChange={(checked) =>
+                setVisibility(checked ? "private" : "open")
+              }
+            />
+          </div>
 
           {/* Template Selector */}
           {templates.length > 0 ? (
@@ -337,13 +334,11 @@ export function CreateChannelDialog({
                 className="text-sm font-medium text-foreground"
                 htmlFor="create-channel-template"
               >
-                Template{" "}
-                <span className="font-normal text-muted-foreground">
-                  (optional)
-                </span>
+                Template
+                <span className={CREATE_LABEL_OPTIONAL_CLASS}>Optional</span>
               </label>
               <select
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                className="flex min-h-11 w-full rounded-xl border border-input bg-muted/40 px-3 py-2 text-sm text-muted-foreground/55 shadow-none transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus:border-muted-foreground/50 focus:text-foreground focus-visible:outline-hidden disabled:cursor-not-allowed disabled:opacity-50"
                 data-testid="create-channel-template"
                 disabled={isCreating}
                 id="create-channel-template"
@@ -370,62 +365,61 @@ export function CreateChannelDialog({
   );
 }
 
-function PermissionOption({
+function ChannelDurationOption({
+  ariaLabel,
+  checked,
   description,
-  disabled,
-  name,
-  onChange,
-  selected,
-  title,
-  value,
+  icon: Icon,
+  label,
+  onSelect,
 }: {
+  ariaLabel: string;
+  checked: boolean;
   description: string;
-  disabled: boolean;
-  name: string;
-  onChange: () => void;
-  selected: boolean;
-  title: string;
-  value: ChannelVisibility;
+  icon: LucideIcon;
+  label: string;
+  onSelect: () => void;
 }) {
   return (
     <label
       className={cn(
-        "group flex cursor-pointer items-start gap-3 rounded-lg px-1 py-1.5 transition-none",
-        "has-[:focus-visible]:outline-hidden has-[:focus-visible]:ring-1 has-[:focus-visible]:ring-ring",
-        selected
-          ? "text-foreground"
-          : "text-muted-foreground hover:text-foreground",
-        disabled && "pointer-events-none opacity-50",
+        "relative flex min-h-16 cursor-pointer items-start gap-3 rounded-lg px-3 py-2.5 text-left text-muted-foreground/75 transition-colors duration-150 ease-out hover:bg-muted/50 hover:text-foreground has-[:focus-visible]:outline-hidden has-[:focus-visible]:ring-1 has-[:focus-visible]:ring-ring",
+        checked && "text-foreground",
       )}
     >
       <input
-        checked={selected}
-        className="sr-only"
-        disabled={disabled}
-        name={name}
-        onChange={onChange}
+        aria-label={ariaLabel}
+        checked={checked}
+        className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+        name="create-channel-duration"
+        onChange={onSelect}
         type="radio"
-        value={value}
       />
       <span
         className={cn(
-          "mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-none",
-          selected
-            ? "border-foreground"
-            : "border-muted-foreground/45 group-hover:border-muted-foreground",
+          "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-muted-foreground/40",
+          checked && "border-foreground",
         )}
         aria-hidden="true"
       >
         <span
           className={cn(
-            "h-1.5 w-1.5 rounded-full bg-foreground transition-[opacity,transform] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
-            selected ? "scale-100 opacity-100" : "scale-50 opacity-0",
+            "h-1.5 w-1.5 rounded-full bg-foreground transition-opacity duration-150",
+            checked ? "opacity-100" : "opacity-0",
           )}
         />
       </span>
-      <span className="min-w-0 space-y-0.5">
-        <span className="block text-sm font-medium text-current">{title}</span>
-        <span className="block text-xs leading-4 text-muted-foreground/65">
+      <span className="grid min-w-0 flex-1 grid-cols-[1rem_minmax(0,1fr)] gap-x-2 gap-y-1">
+        <Icon className="h-4 w-4 shrink-0 text-current" />
+        <span className="block text-sm font-medium leading-4 text-current">
+          {label}
+        </span>
+        <span
+          className={cn(
+            "col-span-2 block text-xs leading-4 text-muted-foreground/70",
+            checked && "text-muted-foreground/65",
+          )}
+        >
           {description}
         </span>
       </span>

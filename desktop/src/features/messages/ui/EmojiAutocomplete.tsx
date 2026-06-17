@@ -2,6 +2,11 @@ import * as React from "react";
 
 import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
 import { cn } from "@/shared/lib/cn";
+import {
+  POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+  POPOVER_SHADOW_STYLE,
+  POPOVER_SURFACE_CLASS,
+} from "@/shared/ui/popoverSurface";
 
 type EmojiAutocompleteProps = {
   suggestions: EmojiSuggestion[];
@@ -37,8 +42,16 @@ export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
       )}
     >
       <div
-        className="max-h-48 overflow-y-auto rounded-xl border bg-popover p-1 shadow-lg"
+        className={cn(
+          "max-h-48 overflow-y-auto rounded-xl p-1",
+          POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+          position === "below"
+            ? "origin-top slide-in-from-top-1"
+            : "origin-bottom slide-in-from-bottom-1",
+          POPOVER_SURFACE_CLASS,
+        )}
         ref={listRef}
+        style={POPOVER_SHADOW_STYLE}
       >
         {suggestions.map((suggestion, index) => (
           <button

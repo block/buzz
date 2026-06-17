@@ -46,7 +46,7 @@ unacceptable behavior to **conduct@buzz-relay.org**.
 | Docker | 24+ | For Postgres, Redis, Typesense |
 | `just` | latest | Task runner — `cargo install just` |
 | `lefthook` | latest | Optional; run `lefthook install` for local Git hooks |
-| `pgschema` | latest | Schema tool — `just migrate` applies `schema/schema.sql` declaratively |
+| `sqlx` migrations | workspace crate | `just migrate` applies embedded migrations from `migrations/` |
 
 This repo uses [Hermit](https://cashapp.github.io/hermit/) for toolchain
 pinning. Activate it once per shell session:

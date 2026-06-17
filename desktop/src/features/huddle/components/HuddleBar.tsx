@@ -124,7 +124,7 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
     localAudioTrack,
     leaveHuddle,
     micConnected,
-    micBands,
+    micLevel,
     pttActive,
     voiceInputMode,
     setVoiceInputMode,
@@ -525,7 +525,7 @@ export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
             isPttMode={isPttMode}
             pttActive={pttActive}
             micConnected={micConnected}
-            micBands={micBands}
+            micLevel={micLevel}
             onSelectVoiceInputMode={setVoiceInputMode}
             audioDevices={audioDevices}
             selectedDeviceId={selectedDeviceId}

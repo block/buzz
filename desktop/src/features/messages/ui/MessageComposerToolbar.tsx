@@ -1,12 +1,25 @@
 import * as React from "react";
 import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion } from "motion/react";
-import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
+import {
+  ALargeSmall,
+  ArrowUp,
+  AtSign,
+  HatGlasses,
+  Paperclip,
+  X,
+} from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
+import { cn } from "@/shared/lib/cn";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
-import { FormattingToolbar } from "./FormattingToolbar";
+import {
+  FormattingToolbar,
+  isSpoilerFormattingActive,
+  type SpoilerToggleState,
+  toggleSpoilerFormatting,
+} from "./FormattingToolbar";
 
 /** Spring for enter/exit of button groups — all fire simultaneously. */
 const presenceSpring = {
@@ -31,7 +44,9 @@ export const MessageComposerToolbar = React.memo(
     onFormattingToggle,
     onOpenMentionPicker,
     onPaperclip,
+    onSpoilerToggle,
     sendDisabled,
+    spoilerActive,
   }: {
     composerDisabled: boolean;
     editor: Editor | null;
@@ -47,8 +62,38 @@ export const MessageComposerToolbar = React.memo(
     onFormattingToggle: (pressed: boolean) => void;
     onOpenMentionPicker: () => void;
     onPaperclip: () => void;
+    onSpoilerToggle?: (state: SpoilerToggleState) => void;
     sendDisabled: boolean;
+    spoilerActive?: boolean;
   }) {
+    const [spoilerFormattingActive, setSpoilerFormattingActive] =
+      React.useState(() =>
+        editor ? isSpoilerFormattingActive(editor) : false,
+      );
+
+    React.useEffect(() => {
+      if (!editor) {
+        setSpoilerFormattingActive(false);
+        return;
+      }
+
+      const update = () => {
+        setSpoilerFormattingActive(isSpoilerFormattingActive(editor));
+      };
+      update();
+      editor.on("transaction", update);
+      return () => {
+        editor.off("transaction", update);
+      };
+    }, [editor]);
+
+    const isSpoilerActive = spoilerFormattingActive || Boolean(spoilerActive);
+
+    const handleSpoilerClick = React.useCallback(() => {
+      if (!editor) return;
+      onSpoilerToggle?.(toggleSpoilerFormatting(editor));
+    }, [editor, onSpoilerToggle]);
+
     return (
       <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-h-10 min-w-0 flex-1 items-center gap-1 py-1">
@@ -189,6 +234,27 @@ export const MessageComposerToolbar = React.memo(
                   onTriggerMouseDown={onCaptureSelection}
                   open={isEmojiPickerOpen}
                 />
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      aria-label="Spoiler"
+                      aria-pressed={isSpoilerActive}
+                      className={cn(
+                        isSpoilerActive &&
+                          "bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground",
+                      )}
+                      disabled={composerDisabled || !editor || isUploading}
+                      onClick={handleSpoilerClick}
+                      onMouseDown={onCaptureSelection}
+                      size="icon"
+                      type="button"
+                      variant={isSpoilerActive ? "default" : "ghost"}
+                    >
+                      <HatGlasses />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Spoiler</TooltipContent>
+                </Tooltip>
                 <motion.div
                   initial={{ x: -8, opacity: 0 }}
                   animate={{ x: 0, opacity: 1 }}

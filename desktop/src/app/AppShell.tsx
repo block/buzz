@@ -3,6 +3,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
 
+import {
+  deriveShellRoute,
+  isWindowDragHandleEvent,
+  toSearchHit,
+} from "@/app/AppShell.helpers";
 import { AppShellProvider } from "@/app/AppShellContext";
 import {
   AppShellOverlays,
@@ -79,98 +84,10 @@ import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { ConnectionBanner } from "@/shared/ui/ConnectionBanner";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 
-type AppView =
-  | "home"
-  | "channel"
-  | "agents"
-  | "workflows"
-  | "pulse"
-  | "projects";
-
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
   return { default: module.SettingsScreen };
 });
-
-const WINDOW_DRAG_HANDLE_HEIGHT = 44;
-const WINDOW_DRAG_INTERACTIVE_SELECTOR =
-  'button, a, input, textarea, select, [role="button"], [contenteditable="true"]';
-
-function isWindowDragHandleEvent(event: MouseEvent | PointerEvent) {
-  if (event.clientY > WINDOW_DRAG_HANDLE_HEIGHT) {
-    return false;
-  }
-
-  const target = event.target;
-  return !(
-    target instanceof Element &&
-    target.closest(WINDOW_DRAG_INTERACTIVE_SELECTOR)
-  );
-}
-
-function toSearchHit(target: DesktopNotificationTarget): SearchHit | null {
-  if (!target.eventId) {
-    return null;
-  }
-
-  return {
-    eventId: target.eventId,
-    content: target.content ?? "",
-    kind: target.kind ?? 9,
-    pubkey: target.pubkey ?? "",
-    channelId: target.channelId,
-    channelName: target.channelName ?? null,
-    createdAt: target.createdAt ?? Math.floor(Date.now() / 1_000),
-    score: 0,
-    threadRootId: target.threadRootId ?? null,
-  };
-}
-
-function deriveShellRoute(pathname: string): {
-  selectedChannelId: string | null;
-  selectedView: AppView;
-} {
-  if (pathname.startsWith("/channels/")) {
-    const [, , rawChannelId] = pathname.split("/");
-    return {
-      selectedChannelId: rawChannelId ? decodeURIComponent(rawChannelId) : null,
-      selectedView: "channel",
-    };
-  }
-
-  if (pathname === "/agents") {
-    return {
-      selectedChannelId: null,
-      selectedView: "agents",
-    };
-  }
-
-  if (pathname === "/workflows" || pathname.startsWith("/workflows/")) {
-    return {
-      selectedChannelId: null,
-      selectedView: "workflows",
-    };
-  }
-
-  if (pathname === "/projects" || pathname.startsWith("/projects/")) {
-    return {
-      selectedChannelId: null,
-      selectedView: "projects",
-    };
-  }
-
-  if (pathname === "/pulse") {
-    return {
-      selectedChannelId: null,
-      selectedView: "pulse",
-    };
-  }
-
-  return {
-    selectedChannelId: null,
-    selectedView: "home",
-  };
-}
 
 export function AppShell() {
   useWebviewZoomShortcuts();
@@ -373,30 +290,39 @@ export function AppShell() {
     highPriorityUnreadChannelIds,
     getEffectiveTimestamp: getChannelReadAt,
     readStateVersion,
+    setContextParentResolver,
     participatedRootIds,
     authoredRootIds,
     threadActivityItems,
     mutedRootIds,
     muteThread,
     unmuteThread,
-  } = useUnreadChannels(
-    sidebarChannels,
-    activeChannel,
-    // Wait for ChannelScreen to report the latest loaded message before
-    // advancing unread state for the active channel.
-    null,
-    {
-      pubkey: identityQuery.data?.pubkey,
-      relayClient,
-      currentPubkey: identityQuery.data?.pubkey,
-      mutedChannelIds,
-      notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
-      onChannelMessage: handleChannelNotification,
-      onDmMessage: handleDmNotification,
-      onLiveMention: refetchHomeFeedOnLiveMention,
-      onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
-      followedRootIds,
+  } = useUnreadChannels(sidebarChannels, activeChannel, {
+    pubkey: identityQuery.data?.pubkey,
+    relayClient,
+    currentPubkey: identityQuery.data?.pubkey,
+    mutedChannelIds,
+    notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
+    onChannelMessage: handleChannelNotification,
+    onDmMessage: handleDmNotification,
+    onLiveMention: refetchHomeFeedOnLiveMention,
+    onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
+    followedRootIds,
+  });
+
+  const getThreadReadAt = React.useCallback(
+    (rootId: string) => getChannelReadAt(`thread:${rootId}`),
+    [getChannelReadAt],
+  );
+
+  const markThreadRead = React.useCallback(
+    (rootId: string, timestamp: number) => {
+      markChannelRead(
+        `thread:${rootId}`,
+        new Date(timestamp * 1_000).toISOString(),
+      );
     },
+    [markChannelRead],
   );
 
   // Badge count is computed here (rather than inside useHomeFeedNotifications)
@@ -743,7 +669,10 @@ export function AppShell() {
               setIsChannelManagementOpen(true);
             },
             getChannelReadAt,
+            getThreadReadAt,
+            markThreadRead,
             readStateVersion,
+            setContextParentResolver,
             followThread: handleFollowThread,
             unfollowThread: handleUnfollowThread,
             isFollowingThread,

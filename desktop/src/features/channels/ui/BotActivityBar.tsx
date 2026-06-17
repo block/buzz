@@ -207,7 +207,7 @@ export function BotActivityComposerAction({
       </PopoverTrigger>
       <PopoverContent
         align={isInline ? "start" : "end"}
-        className="w-64 p-2"
+        className="w-64 p-1"
         onMouseEnter={keepOpen}
         onMouseLeave={closeWithDelay}
         onOpenAutoFocus={(event) => event.preventDefault()}
@@ -224,7 +224,7 @@ export function BotActivityComposerAction({
             return (
               <button
                 className={cn(
-                  "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                  "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors",
                   isSelected
                     ? "bg-primary/10 text-primary"
                     : "text-foreground hover:bg-accent hover:text-accent-foreground",

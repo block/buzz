@@ -133,7 +133,7 @@ export function ChannelCombobox({
             filtered.map((channel, index) => (
               <button
                 className={cn(
-                  "flex w-full items-center gap-2 rounded-xs px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
+                  "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
                   channel.id === value && "bg-accent/50",
                   index === highlightedIndex &&
                     "bg-accent text-accent-foreground",

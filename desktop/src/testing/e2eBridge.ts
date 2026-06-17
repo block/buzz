@@ -70,6 +70,7 @@ type E2eConfig = {
     channelsReadError?: string;
     feedReadError?: string;
     canvasReadError?: string;
+    openDmDelayMs?: number;
     profileReadDelayMs?: number;
     profileReadError?: string;
     profileUpdateError?: string;
@@ -91,6 +92,7 @@ type E2eConfig = {
     // (e.g. a generic PDF) without a real upload pipeline. See
     // tests/helpers/bridge.ts:MockBridgeOptions.uploadDescriptors.
     meshReporterPubkey?: string;
+    uploadDelayMs?: number;
     uploadDescriptors?: RawBlobDescriptor[];
   };
   relayHttpUrl?: string;
@@ -580,6 +582,7 @@ declare global {
       kind?: number;
       mentionPubkeys?: string[];
       extraTags?: string[][];
+      createdAt?: number;
     }) => RelayEvent;
     __BUZZ_E2E_EMIT_MOCK_TYPING__?: (input: {
       channelName: string;
@@ -1214,6 +1217,38 @@ const mockChannels: MockChannel[] = [
       createMockMember(ALICE_PUBKEY, "owner", 1400),
       createMockMember(MOCK_IDENTITY_PUBKEY, "member", 1300),
       createMockMember(BOB_PUBKEY, "member", 1000),
+    ],
+  }),
+  // Reproduces the all-replies-window regression (NIP-RS Fix A): a busy
+  // single-thread channel whose top-level root has scrolled past the history
+  // limit. `last_message_at` is a far-future timestamp standing in for the
+  // backend's reply-inclusive MAX(created_at) — it is NEWER than any top-level
+  // message the window can load, so falling back to it would advance the
+  // channel marker past unread replies. Seeded as its own channel so existing
+  // channels' unread state is undisturbed.
+  createMockChannel({
+    id: "fa11bac0-0000-4000-8000-000000000012",
+    name: "all-replies",
+    channel_type: "stream",
+    visibility: "open",
+    description: "Single-thread channel with the root past the history limit",
+    topic: null,
+    purpose: null,
+    last_message_at: new Date("2999-01-01T00:00:00.000Z").toISOString(),
+    archived_at: null,
+    created_by: ALICE_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: null,
+    nip29_group_id: null,
+    created_minutes_ago: 1400,
+    updated_minutes_ago: 1400,
+    members: [
+      createMockMember(ALICE_PUBKEY, "owner", 1400),
+      createMockMember(MOCK_IDENTITY_PUBKEY, "member", 1300),
     ],
   }),
   createMockChannel({
@@ -2304,6 +2339,7 @@ function emitMockChannelMessage(
   kind?: number,
   mentionPubkeys?: string[],
   extraTags?: string[][],
+  createdAt?: number,
 ) {
   const eventKind = kind ?? 9;
   if (!parentEventId) {
@@ -2313,7 +2349,7 @@ function emitMockChannelMessage(
       pubkey ?? DEFAULT_MOCK_IDENTITY.pubkey,
     );
     if (extraTags) tags.push(...extraTags);
-    const event = createMockEvent(eventKind, content, tags, pubkey);
+    const event = createMockEvent(eventKind, content, tags, pubkey, createdAt);
     recordMockMessage(channelId, event);
     emitMockLiveEvent(channelId, event);
     return event;
@@ -2338,7 +2374,13 @@ function emitMockChannelMessage(
     mentionPubkeys,
   );
   if (extraTags) tags.push(...extraTags);
-  const event = createMockEvent(eventKind, content, tags, authorPubkey);
+  const event = createMockEvent(
+    eventKind,
+    content,
+    tags,
+    authorPubkey,
+    createdAt,
+  );
   recordMockMessage(channelId, event);
   emitMockLiveEvent(channelId, event);
   return event;
@@ -3291,6 +3333,11 @@ async function handleOpenDm(
   },
   config: E2eConfig | undefined,
 ) {
+  const delayMs = config?.mock?.openDmDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
   const normalizedPubkeys = normalizeParticipantPubkeys(args.pubkeys);
   if (normalizedPubkeys.length === 0) {
     throw new Error("Select at least one person to start a DM.");
@@ -5082,9 +5129,14 @@ async function handleSearchMessages(
  * PDF so the file-attachment flow (chip → send → FileCard) can be exercised
  * out of the box.
  */
-function resolveMockUploadDescriptors(
+async function resolveMockUploadDescriptors(
   config: E2eConfig | undefined,
-): RawBlobDescriptor[] {
+): Promise<RawBlobDescriptor[]> {
+  const delayMs = config?.mock?.uploadDelayMs ?? 0;
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
   const configured = config?.mock?.uploadDescriptors;
   // `undefined` means "not configured" → default PDF. An explicit `[]` is a
   // valid override (e.g. modelling a picker cancel / no-files-selected), so it
@@ -5824,6 +5876,7 @@ export function maybeInstallE2eTauriMocks() {
     kind,
     mentionPubkeys,
     extraTags,
+    createdAt,
   }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
@@ -5840,6 +5893,7 @@ export function maybeInstallE2eTauriMocks() {
       kind,
       mentionPubkeys,
       extraTags,
+      createdAt,
     );
   };
   window.__BUZZ_E2E_EMIT_MOCK_TYPING__ = ({ channelName, pubkey }) => {
@@ -6415,9 +6469,9 @@ export function maybeInstallE2eTauriMocks() {
       case "get_media_proxy_port":
         return MOCK_MEDIA_PROXY_PORT;
       case "pick_and_upload_media":
-        return resolveMockUploadDescriptors(activeConfig);
+        return await resolveMockUploadDescriptors(activeConfig);
       case "upload_media_bytes":
-        return resolveMockUploadDescriptors(activeConfig)[0];
+        return (await resolveMockUploadDescriptors(activeConfig))[0];
       case "download_image":
       case "download_file":
         // The save dialog can't run headlessly; report a successful save so the

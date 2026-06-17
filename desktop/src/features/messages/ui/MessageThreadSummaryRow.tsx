@@ -7,7 +7,7 @@ import { formatThreadSummaryLastReplyTime } from "@/features/messages/lib/dateFo
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const MESSAGE_TEXT_OFFSET_PX = 54;
-const MESSAGE_BODY_OFFSET_PX = MESSAGE_TEXT_OFFSET_PX + 4;
+const MESSAGE_BODY_OFFSET_PX = MESSAGE_TEXT_OFFSET_PX;
 const NESTED_REPLY_OFFSET_PX = 28;
 
 function ParticipantAvatar({
@@ -48,12 +48,14 @@ export function MessageThreadSummaryRow({
   onOpenThread,
   showDepthGuides = true,
   summary,
+  unreadCount,
 }: {
   depth?: number;
   message: TimelineMessage;
   onOpenThread: (message: TimelineMessage) => void;
   showDepthGuides?: boolean;
   summary: TimelineThreadSummary;
+  unreadCount?: number;
 }) {
   const visibleDepth = Math.min(Math.max(depth, 0), 6);
   const indentPx =
@@ -121,6 +123,11 @@ export function MessageThreadSummaryRow({
             <span className="font-medium transition-colors group-hover:text-foreground">
               {summary.replyCount} {replyLabel}
             </span>
+            {unreadCount != null && unreadCount > 0 ? (
+              <span className="ml-1" data-testid="thread-unread-badge">
+                ({unreadCount} new)
+              </span>
+            ) : null}
             {summary.lastReplyAt ? (
               <>
                 <span className="mx-1 font-normal text-muted-foreground/50">

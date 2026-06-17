@@ -66,7 +66,7 @@ jobs:
           RELEASE_SHA=$(git rev-parse HEAD)
           NOTES=""
           if [[ -f CHANGELOG.md ]]; then
-            NOTES=$(awk "/^## v${VERSION}$/,/^## v/" CHANGELOG.md | sed '$d')
+            NOTES=$(awk "/^## v${VERSION}\$/{found=1; next} found && /^## v/{exit} found && !/^\$/" CHANGELOG.md)
           fi
           if [[ -z "$NOTES" ]]; then
             NOTES="Buzz Desktop v${VERSION}"

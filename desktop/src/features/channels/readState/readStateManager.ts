@@ -49,6 +49,36 @@ function slotIdKey(pubkey: string): string {
 
 export type ApplyRemoteContextResult = "unchanged" | "advanced";
 
+export type ContextParentResolver = (contextId: string) => string | null;
+
+/**
+ * NIP-RS Hierarchical Frontier Rule (NIP-RS.md:141-167):
+ * `effective(ctx) = max(merged[ctx], effective(parent(ctx)))`.
+ *
+ * The thread→channel relationship is NOT serialized into the blob
+ * (NIP-RS.md:136-139); it is derived from the event graph at evaluation time
+ * via `parentResolver`. When the resolver yields no parent (channels, or an
+ * unresolvable thread root), the frontier degrades to the context's own merged
+ * value alone (NIP-RS.md:165-167). Returns null when the context has never been
+ * read and no parent term covers it.
+ */
+export function resolveEffectiveTimestamp(args: {
+  effectiveState: Map<string, number>;
+  contextId: string;
+  parentResolver: ContextParentResolver | null;
+}): number | null {
+  const { effectiveState, contextId, parentResolver } = args;
+  const own = effectiveState.get(contextId) ?? null;
+
+  const parentId = parentResolver?.(contextId) ?? null;
+  if (parentId === null) return own;
+
+  const parent = effectiveState.get(parentId) ?? null;
+  if (parent === null) return own;
+  if (own === null) return parent;
+  return Math.max(own, parent);
+}
+
 function resolveRemoteContextTimestamp(args: {
   current: number;
   timestamp: number;
@@ -106,6 +136,7 @@ export class ReadStateManager {
   private contextSourceCreatedAt = new Map<string, number>();
   private pendingSyncedAdvances = new Set<string>();
   private destroyed = false;
+  private parentResolver: ContextParentResolver | null = null;
 
   constructor(pubkey: string, relayClient: RelayClient) {
     this.pubkey = pubkey;
@@ -182,7 +213,32 @@ export class ReadStateManager {
   }
 
   getEffectiveTimestamp(contextId: string): number | null {
+    return resolveEffectiveTimestamp({
+      effectiveState: this.effectiveState,
+      contextId,
+      parentResolver: this.parentResolver,
+    });
+  }
+
+  /**
+   * The context's OWN merged read marker, WITHOUT the hierarchical parent term.
+   * Callers that evaluate a `thread:<root>` context outside the active channel
+   * (e.g. the sidebar unread scan over background channels) must use this:
+   * getEffectiveTimestamp folds in parentResolver, which is installed by the
+   * active ChannelScreen and maps every thread to the *active* channel — using
+   * it for a background channel's thread would borrow the wrong channel marker.
+   */
+  getOwnTimestamp(contextId: string): number | null {
     return this.effectiveState.get(contextId) ?? null;
+  }
+
+  /**
+   * Inject the thread→channel parent resolver derived from the React event
+   * graph (NIP-RS.md:136-139). The hierarchical max in getEffectiveTimestamp
+   * is a no-op until this is set.
+   */
+  setContextParentResolver(resolver: ContextParentResolver | null): void {
+    this.parentResolver = resolver;
   }
 
   subscribe(listener: () => void): () => void {
@@ -536,6 +592,27 @@ export class ReadStateManager {
       }
       contexts[ctx] = ts;
     }
+
+    // Evict oldest thread:* entries when approaching the MAX_CONTEXTS cap
+    // (10,000). Channel keys are never evicted — only thread read-state keys
+    // are eligible. This prevents silent blob rejection by isValidBlob().
+    const EVICTION_THRESHOLD = 8_000;
+    const contextCount = Object.keys(contexts).length;
+    if (contextCount > EVICTION_THRESHOLD) {
+      const threadEntries: [string, number][] = [];
+      for (const [key, ts] of Object.entries(contexts)) {
+        if (key.startsWith("thread:")) {
+          threadEntries.push([key, ts]);
+        }
+      }
+      // Sort oldest-first (lowest timestamp = oldest)
+      threadEntries.sort((a, b) => a[1] - b[1]);
+      const toEvict = contextCount - EVICTION_THRESHOLD;
+      for (let i = 0; i < Math.min(toEvict, threadEntries.length); i++) {
+        delete contexts[threadEntries[i][0]];
+      }
+    }
+
     return contexts;
   }
 

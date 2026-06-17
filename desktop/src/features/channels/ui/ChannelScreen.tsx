@@ -3,6 +3,14 @@ import { useAppShell } from "@/app/AppShellContext";
 import { useActiveChannelHeader } from "@/features/channels/useActiveChannelHeader";
 import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandlers";
 import {
+  buildCreatedAtByMessageId,
+  buildDirectReplyIdsByParentId,
+  collectReplyDescendantIds,
+  directRepliesMaxCreatedAt,
+  subtreeMaxCreatedAt,
+} from "@/features/channels/lib/subtreeCreatedAt";
+import { computeThreadReplyUnreadCounts } from "@/features/channels/lib/threadReplyUnreadCounts";
+import {
   useChannelMembersQuery,
   useJoinChannelMutation,
 } from "@/features/channels/hooks";
@@ -37,6 +45,11 @@ import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
 } from "@/features/messages/lib/threadPanel";
+import { getThreadReference } from "@/features/messages/lib/threading";
+import {
+  computeChannelUnreadMarker,
+  computeThreadUnreadMarker,
+} from "@/features/messages/lib/unreadMarker";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
@@ -64,6 +77,7 @@ import {
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
+import { useWelcomeInitialUnreadSuppression } from "./useWelcomeInitialUnreadSuppression";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760;
@@ -82,6 +96,10 @@ export function ChannelScreen({
   const {
     markChannelRead,
     markChannelUnread,
+    getChannelReadAt,
+    getThreadReadAt,
+    markThreadRead,
+    setContextParentResolver,
     openCreateChannel,
     openChannelManagement,
     followThread,
@@ -125,17 +143,109 @@ export function ChannelScreen({
   useChannelSubscription(activeChannel);
   const { fetchOlder, hasOlderMessages, isFetchingOlder } =
     useFetchOlderMessages(activeChannel);
-  const latestActiveMessage =
-    messagesQuery.data?.[messagesQuery.data.length - 1] ?? null;
+  // Newest TOP-LEVEL message only. The channel read-marker must clear the
+  // channel timeline without clearing its threads (NIP-RS Option 1): thread
+  // replies are kind-9 channel events, so taking the last message outright
+  // would advance the channel frontier past unread replies and the hierarchical
+  // effective(thread) = max(thread, channel) would silently clear every thread
+  // badge on channel entry. Scanning from the end for the last message with no
+  // reply tag keeps the frontier at the last top-level message, leaving thread
+  // badges intact until the thread itself is read.
+  const latestActiveMessage = React.useMemo(() => {
+    const messages = messagesQuery.data;
+    if (!messages) return null;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (getThreadReference(messages[index].tags).parentId === null) {
+        return messages[index];
+      }
+    }
+    return null;
+  }, [messagesQuery.data]);
+  // No `lastMessageAt` fallback: that timestamp is reply-inclusive (the backend
+  // takes MAX(created_at) over kind-9 events without a parent filter), so using
+  // it when the window has no top-level message would advance the channel
+  // marker past an unread reply and clear its thread/sidebar unread — the exact
+  // regression Fix A prevents. null suppresses the marker advance (markChannelRead
+  // early-returns on markAt === null) until a real top-level position is known.
   const activeReadAt = latestActiveMessage
     ? new Date(latestActiveMessage.created_at * 1_000).toISOString()
-    : (activeChannel?.lastMessageAt ?? null);
+    : null;
+  // Capture the read frontier as it stood the instant this channel was opened,
+  // BEFORE the mark-read effect below advances it to latest. Written during
+  // render (not in an effect) so the value is read prior to any effect for
+  // this commit — the divider must reflect "what was unread on open", not the
+  // post-open frontier. Keyed per channel and recomputed only when the channel
+  // id changes, never when activeReadAt advances, or the divider would vanish
+  // the moment the open marks the channel read.
+  const openFrontierRef = React.useRef(new Map<string, number | null>());
+  if (activeChannelId && !openFrontierRef.current.has(activeChannelId)) {
+    openFrontierRef.current.set(
+      activeChannelId,
+      getChannelReadAt(activeChannelId),
+    );
+  }
+  const openFrontierSeconds = activeChannelId
+    ? (openFrontierRef.current.get(activeChannelId) ?? null)
+    : null;
+  // Channels the user manually marked unread this session. A deliberate
+  // mark-unread has no meaningful "new" boundary inside the timeline — the
+  // open-time snapshot already covers every message — so the pill and divider
+  // would otherwise render nothing while the sidebar dot says unread. Suppress
+  // the marker for such channels to avoid that visible contradiction. The flag
+  // is cleared on re-open (a fresh snapshot is recomputed for the channel).
+  const forcedUnreadRef = React.useRef(new Set<string>());
+  const [, forceUnreadRender] = React.useReducer((n: number) => n + 1, 0);
+  const isActiveChannelForcedUnread =
+    !!activeChannelId && forcedUnreadRef.current.has(activeChannelId);
+  const isActiveWelcomeInitialUnreadSuppressed =
+    useWelcomeInitialUnreadSuppression(activeChannelId, forceUnreadRender);
+  // Drop the forced-unread flag when the user leaves a channel, so reopening
+  // it recomputes a normal marker rather than staying suppressed forever.
+  React.useEffect(() => {
+    const channelId = activeChannelId;
+    if (!channelId) return;
+    return () => {
+      forcedUnreadRef.current.delete(channelId);
+    };
+  }, [activeChannelId]);
+  // Clear the open-time frontier on channel leave so re-visiting captures a
+  // fresh read position. Without this, switching away and back would reuse the
+  // stale frontier from the first open, producing a phantom "New" divider over
+  // already-read messages.
+  React.useEffect(() => {
+    const channelId = activeChannelId;
+    if (!channelId) return;
+    return () => {
+      openFrontierRef.current.delete(channelId);
+    };
+  }, [activeChannelId]);
   React.useEffect(() => {
     if (!activeChannelId || activeChannel?.isMember === false) {
       return;
     }
-    markChannelRead(activeChannelId, activeReadAt);
+    // Passive channel-open: advance the marker to the newest top-level message
+    // only (NIP-RS Option 1). `topLevelOnly` stops the read-state layer folding
+    // in observed thread replies, so opening a channel clears the timeline but
+    // leaves thread badges intact until each thread is opened — and leaves the
+    // channel's sidebar dot lit (the reply is still unread for the channel).
+    markChannelRead(activeChannelId, activeReadAt, { topLevelOnly: true });
   }, [activeChannel?.isMember, activeChannelId, activeReadAt, markChannelRead]);
+  // Install the NIP-RS parent resolver: every `thread:<root>` context evaluated
+  // while this channel is active belongs to it (getThreadReadAt is only ever
+  // called on the active channel's timeline messages), so the parent is always
+  // the active channel. Non-thread keys (channels) have no parent → null, which
+  // degrades effective() to the own term. Cleared on channel leave / unmount so
+  // a stale channel id never becomes the parent of another channel's threads.
+  React.useEffect(() => {
+    if (!activeChannelId) {
+      setContextParentResolver(null);
+      return;
+    }
+    setContextParentResolver((contextId) =>
+      contextId.startsWith("thread:") ? activeChannelId : null,
+    );
+    return () => setContextParentResolver(null);
+  }, [activeChannelId, setContextParentResolver]);
   const {
     activeChannelTitle,
     activeDmAvatarUrl,
@@ -293,33 +403,53 @@ export function ChannelScreen({
     channelId: activeChannelId,
     messages: timelineMessages,
   });
-  const directReplyIdsByParentId = React.useMemo(() => {
-    const map = new Map<string, string[]>();
-    for (const message of timelineMessages) {
-      if (!message.parentId) continue;
-      const currentReplies = map.get(message.parentId) ?? [];
-      currentReplies.push(message.id);
-      map.set(message.parentId, currentReplies);
-    }
-    return map;
-  }, [timelineMessages]);
+  // Oldest unread top-level message + count from the open-time frontier.
+  // Keyed per channel so the pill/divider survive the mark-read effect.
+  const { firstUnreadMessageId, unreadCount } = React.useMemo(
+    () =>
+      computeChannelUnreadMarker(
+        timelineMessages,
+        openFrontierSeconds,
+        isActiveChannelForcedUnread || isActiveWelcomeInitialUnreadSuppressed,
+        currentPubkey,
+      ),
+    [
+      currentPubkey,
+      isActiveChannelForcedUnread,
+      isActiveWelcomeInitialUnreadSuppressed,
+      openFrontierSeconds,
+      timelineMessages,
+    ],
+  );
+  const directReplyIdsByParentId = React.useMemo(
+    () => buildDirectReplyIdsByParentId(timelineMessages),
+    [timelineMessages],
+  );
   const getFirstReplyIdForMessage = React.useCallback(
     (messageId: string) => directReplyIdsByParentId.get(messageId)?.[0] ?? null,
     [directReplyIdsByParentId],
   );
   const getReplyDescendantIdsForMessage = React.useCallback(
-    (messageId: string) => {
-      const descendantIds: string[] = [];
-      const pendingIds = [...(directReplyIdsByParentId.get(messageId) ?? [])];
-      while (pendingIds.length > 0) {
-        const currentId = pendingIds.pop();
-        if (!currentId) continue;
-        descendantIds.push(currentId);
-        pendingIds.push(...(directReplyIdsByParentId.get(currentId) ?? []));
-      }
-      return descendantIds;
-    },
+    (messageId: string) =>
+      collectReplyDescendantIds(messageId, directReplyIdsByParentId),
     [directReplyIdsByParentId],
+  );
+  const createdAtByMessageId = React.useMemo(
+    () => buildCreatedAtByMessageId(timelineMessages),
+    [timelineMessages],
+  );
+  // Newest createdAt across an expanded branch (the message itself plus every
+  // descendant). Drilling into a branch advances the thread frontier to this,
+  // consuming everything chronologically up to the deepest reply read. Returns
+  // null when the message is absent so the caller skips the read-state write.
+  const getSubtreeMaxCreatedAt = React.useCallback(
+    (messageId: string) =>
+      subtreeMaxCreatedAt(
+        messageId,
+        directReplyIdsByParentId,
+        createdAtByMessageId,
+      ),
+    [createdAtByMessageId, directReplyIdsByParentId],
   );
   const threadPanelIndex = React.useMemo(
     () => buildThreadPanelIndex(timelineMessages),
@@ -343,6 +473,175 @@ export function ChannelScreen({
   const openThreadHeadMessage = threadPanelData.threadHead;
   const threadMessages = threadPanelData.visibleReplies;
   const threadReplyTargetMessage = threadPanelData.replyTargetMessage;
+
+  // --- Thread unread state ---
+  // Capture the thread read frontier on open (same pattern as channel frontier).
+  // Keyed per thread root so switching threads captures a fresh frontier.
+  const threadOpenFrontierRef = React.useRef(new Map<string, number | null>());
+  if (
+    openThreadHeadId &&
+    !threadOpenFrontierRef.current.has(openThreadHeadId)
+  ) {
+    threadOpenFrontierRef.current.set(
+      openThreadHeadId,
+      getThreadReadAt(openThreadHeadId),
+    );
+  }
+  const threadOpenFrontierSeconds = openThreadHeadId
+    ? (threadOpenFrontierRef.current.get(openThreadHeadId) ?? null)
+    : null;
+  // Clear the thread frontier when the thread closes so re-opening captures fresh.
+  React.useEffect(() => {
+    const rootId = openThreadHeadId;
+    if (!rootId) return;
+    return () => {
+      threadOpenFrontierRef.current.delete(rootId);
+    };
+  }, [openThreadHeadId]);
+  // Mark thread read when the panel opens, advancing the frontier to the max
+  // createdAt over the head and its DIRECT replies — the content visible
+  // without expanding anything. This mirrors channel-open parity: opening
+  // consumes what you can see, clearing the channel-level badge for unread that
+  // lived in the visible direct replies, while deeper collapsed branches stay
+  // unread until drilled into (expand advances the frontier further from here).
+  // Only persist read state for threads the user has notification interest in
+  // (participated, authored, or followed) to avoid bloating the context blob.
+  React.useEffect(() => {
+    if (!openThreadHeadId) return;
+    if (!isNotifiedForCurrentThread) return;
+    const openReadCeiling = directRepliesMaxCreatedAt(
+      openThreadHeadId,
+      directReplyIdsByParentId,
+      createdAtByMessageId,
+    );
+    if (openReadCeiling === null) return;
+    markThreadRead(openThreadHeadId, openReadCeiling);
+  }, [
+    openThreadHeadId,
+    directReplyIdsByParentId,
+    createdAtByMessageId,
+    markThreadRead,
+    isNotifiedForCurrentThread,
+  ]);
+  // Compute the in-thread "New" divider position from the open-time frontier.
+  const { firstUnreadReplyId: threadFirstUnreadReplyId } = React.useMemo(() => {
+    if (!openThreadHeadId || threadMessages.length === 0) {
+      return { firstUnreadReplyId: null, unreadCount: 0 };
+    }
+    const replies = threadMessages.map((entry) => entry.message);
+    return computeThreadUnreadMarker(
+      replies,
+      threadOpenFrontierSeconds,
+      currentPubkey,
+    );
+  }, [
+    currentPubkey,
+    openThreadHeadId,
+    threadMessages,
+    threadOpenFrontierSeconds,
+  ]);
+  // Per-row subtree unread counts for the in-panel thread summary rows. Scoped
+  // to the open thread's subtree and measured against the open-time frontier
+  // snapshot (threadOpenFrontierSeconds) — the same boundary the in-thread
+  // divider uses (above). The LIVE root marker can't be used here: on
+  // channel-open markChannelRead advances the channel marker to the newest
+  // top-level message, and effective(thread) = max(thread_own, channel_marker),
+  // so a channel marker past the nested replies would zero every badge the
+  // instant the panel opens. The snapshot reflects "what was unread on open."
+  // Expand-clears-badge is preserved independently: it's driven by the
+  // expandedSubtreeReplyIds gate inside computeThreadReplyUnreadCounts, not by
+  // the frontier.
+  const threadReplyUnreadCounts = React.useMemo(
+    () =>
+      openThreadHeadId
+        ? computeThreadReplyUnreadCounts({
+            timelineMessages,
+            subtreeReplyIds: getReplyDescendantIdsForMessage(openThreadHeadId),
+            visibleReplyIds: threadMessages.map((entry) => entry.message.id),
+            expandedReplyIds: expandedThreadReplyIds,
+            expandedSubtreeReplyIds: new Set(
+              [...expandedThreadReplyIds].flatMap((id) =>
+                getReplyDescendantIdsForMessage(id),
+              ),
+            ),
+            frontierSeconds: threadOpenFrontierSeconds,
+            currentPubkey,
+          })
+        : new Map<string, number>(),
+    [
+      openThreadHeadId,
+      threadMessages,
+      timelineMessages,
+      threadOpenFrontierSeconds,
+      expandedThreadReplyIds,
+      getReplyDescendantIdsForMessage,
+      currentPubkey,
+    ],
+  );
+  // Snapshot per-thread read frontiers at channel-open time. Same pattern as
+  // openFrontierRef: captured during render (before the mark-read effect) so
+  // the badge reflects "what was unread on open" rather than the post-advance
+  // frontier. Keyed by activeChannelId → rootId → frontier value.
+  const threadBadgeFrontiersRef = React.useRef(
+    new Map<string, Map<string, number | null>>(),
+  );
+  if (activeChannelId) {
+    let channelFrontiers = threadBadgeFrontiersRef.current.get(activeChannelId);
+    if (!channelFrontiers) {
+      channelFrontiers = new Map();
+      threadBadgeFrontiersRef.current.set(activeChannelId, channelFrontiers);
+    }
+    for (const message of timelineMessages) {
+      if (message.parentId) continue;
+      if (!isNotifiedForThread(message.id)) continue;
+      if (channelFrontiers.has(message.id)) continue;
+      // Only capture for messages that have thread replies
+      const hasReplies = timelineMessages.some(
+        (m) => m.parentId === message.id,
+      );
+      if (!hasReplies) continue;
+      channelFrontiers.set(message.id, getThreadReadAt(message.id));
+    }
+  }
+  // Clear the thread badge frontiers on channel leave (same cleanup as
+  // openFrontierRef) so re-visiting captures fresh snapshots.
+  React.useEffect(() => {
+    const channelId = activeChannelId;
+    if (!channelId) return;
+    return () => {
+      threadBadgeFrontiersRef.current.delete(channelId);
+    };
+  }, [activeChannelId]);
+  // Compute per-thread unread counts for summary rows in the main timeline.
+  // Only compute for threads the user has notification interest in — this
+  // aligns the badge display with the read-state write path. Uses the
+  // snapshotted frontier (threadBadgeFrontiersRef) so badges are stable for
+  // the session and don't flash when markChannelRead advances the channel
+  // marker.
+  const threadUnreadCounts = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    const channelFrontiers = activeChannelId
+      ? threadBadgeFrontiersRef.current.get(activeChannelId)
+      : undefined;
+    for (const message of timelineMessages) {
+      if (message.parentId) continue;
+      if (!isNotifiedForThread(message.id)) continue;
+      const directReplies = timelineMessages.filter(
+        (m) => m.parentId === message.id,
+      );
+      if (directReplies.length === 0) continue;
+      const frontier = channelFrontiers?.get(message.id) ?? null;
+      const { unreadCount } = computeThreadUnreadMarker(
+        directReplies,
+        frontier,
+        currentPubkey,
+      );
+      if (unreadCount > 0) {
+        counts.set(message.id, unreadCount);
+      }
+    }
+    return counts;
+  }, [activeChannelId, currentPubkey, timelineMessages, isNotifiedForThread]);
   const editTargetMessage = React.useMemo(
     () =>
       timelineMessages.find((message) => message.id === editTargetId) ?? null,
@@ -368,6 +667,8 @@ export function ChannelScreen({
     expandedThreadReplyIds,
     getFirstReplyIdForMessage,
     getReplyDescendantIdsForMessage,
+    getSubtreeMaxCreatedAt,
+    markThreadRead,
     openThreadHeadId,
     sendMessageMutation,
     setExpandedThreadReplyIds,
@@ -408,6 +709,10 @@ export function ChannelScreen({
       : undefined;
   const handleMarkUnread = React.useCallback(() => {
     if (!activeChannelId) return;
+    // Mirror the deliberate mark-unread locally so the timeline marker is
+    // suppressed (see forcedUnreadRef above). Re-render so the memo re-runs.
+    forcedUnreadRef.current.add(activeChannelId);
+    forceUnreadRender();
     markChannelUnread(activeChannelId);
   }, [activeChannelId, markChannelUnread]);
   const {
@@ -658,6 +963,8 @@ export function ChannelScreen({
                   profilePanelPubkey={profilePanelPubkey}
                   personaLookup={personaLookup}
                   profiles={messageProfiles}
+                  firstUnreadMessageId={firstUnreadMessageId}
+                  unreadCount={unreadCount}
                   targetMessageId={mainTimelineTargetMessageId}
                   threadHeadMessage={openThreadHeadMessage}
                   threadMessages={threadMessages}
@@ -665,6 +972,9 @@ export function ChannelScreen({
                   threadTypingPubkeys={threadTypingPubkeys}
                   threadReplyTargetMessage={threadReplyTargetMessage}
                   threadScrollTargetId={threadScrollTargetId}
+                  threadUnreadCounts={threadUnreadCounts}
+                  threadReplyUnreadCounts={threadReplyUnreadCounts}
+                  threadFirstUnreadReplyId={threadFirstUnreadReplyId}
                   isJoining={joinChannelMutation.isPending}
                   onJoinChannel={joinChannelMutation.mutateAsync}
                   typingPubkeys={humanTypingPubkeys}

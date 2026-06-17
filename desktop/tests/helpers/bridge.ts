@@ -95,6 +95,7 @@ type MockBridgeOptions = {
   channelsReadError?: string;
   feedReadError?: string;
   canvasReadError?: string;
+  openDmDelayMs?: number;
   profileReadDelayMs?: number;
   profileReadError?: string;
   profileUpdateError?: string;
@@ -132,6 +133,7 @@ type MockBridgeOptions = {
    * generic PDF so the file-attachment flow can be exercised by default. An
    * explicit `[]` is honoured (models a picker cancel / no files selected).
    */
+  uploadDelayMs?: number;
   uploadDescriptors?: {
     url: string;
     sha256: string;

@@ -21,6 +21,7 @@ import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
+import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -1445,7 +1446,12 @@ function VideoReviewDialog({
   if (!open) return null;
 
   return createPortal(
-    <div className="dark video-review-theme fixed inset-0 z-50 flex min-h-0 min-w-0 items-center justify-center bg-black/75 p-4 text-foreground backdrop-blur-sm sm:p-8 lg:p-10">
+    <div
+      className={cn(
+        "dark video-review-theme fixed inset-0 z-50 flex min-h-0 min-w-0 items-center justify-center bg-black/75 p-4 text-foreground sm:p-8 lg:p-10",
+        MODAL_BACKDROP_BLUR_CLASS,
+      )}
+    >
       <button
         aria-label="Close video review"
         className="absolute inset-0 cursor-default"

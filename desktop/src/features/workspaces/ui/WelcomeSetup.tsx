@@ -363,7 +363,7 @@ export function WelcomeSetup({
                   {isConnecting ? (
                     <Spinner
                       aria-label="Joining workspace"
-                      className="h-4 w-4"
+                      className="h-4 w-4 border-2"
                     />
                   ) : (
                     "Join a workspace"

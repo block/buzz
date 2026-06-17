@@ -29,8 +29,10 @@ import { MessageComposer } from "./MessageComposer";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
+import { UnreadDivider } from "./UnreadDivider";
 import { useComposerHeightPadding } from "./useComposerHeightPadding";
 import { useTimelineScrollManager } from "./useTimelineScrollManager";
+import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
 
 type MessageThreadPanelProps = {
   agentPubkeys?: ReadonlySet<string>;
@@ -39,6 +41,8 @@ type MessageThreadPanelProps = {
   channelName: string;
   currentPubkey?: string;
   disabled?: boolean;
+  /** Event id of the first unread reply, or null/undefined if all read. */
+  firstUnreadReplyId?: string | null;
   layout?: "standalone" | "split";
   editTarget?: {
     author: string;
@@ -74,6 +78,8 @@ type MessageThreadPanelProps = {
   scrollTargetId: string | null;
   threadHead: TimelineMessage | null;
   threadReplies: MainTimelineEntry[];
+  /** Subtree unread counts for collapsed summary rows, keyed by reply id. */
+  threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadTypingPubkeys: string[];
   threadHeadVideoReviewContext?: VideoReviewContext;
   toolbarExtraActions?: React.ReactNode;
@@ -82,6 +88,12 @@ type MessageThreadPanelProps = {
   onFollowThread?: () => void;
   onUnfollowThread?: () => void;
 };
+
+/** Stable empty reference used as the `useDeferredValue` initial value so the
+ *  first render when a thread opens stays light instead of blocking on the full
+ *  reply list. Must be module-level so its identity never changes. Mirrors
+ *  `EMPTY_MESSAGES` in MessageTimeline. */
+const EMPTY_THREAD_REPLIES: MainTimelineEntry[] = [];
 
 type MessageThreadPanelSkeletonProps = {
   isSinglePanelView?: boolean;
@@ -261,6 +273,7 @@ export function MessageThreadPanel({
   channelName,
   currentPubkey,
   disabled = false,
+  firstUnreadReplyId,
   layout = "standalone",
   editTarget,
   isSending,
@@ -287,6 +300,7 @@ export function MessageThreadPanel({
   threadHead,
   threadHeadVideoReviewContext,
   threadReplies,
+  threadReplyUnreadCounts,
   threadTypingPubkeys,
   toolbarExtraActions,
   widthPx,
@@ -314,9 +328,35 @@ export function MessageThreadPanel({
         }
       : null;
 
+  // The thread side pane renders its reply list straight into heavy
+  // `react-markdown` rows (`MessageRow`), so opening a deep thread would block
+  // the main thread and the OS would show the busy cursor. Gate the reply render
+  // behind `useDeferredValue`. `initialValue: []` keeps even the FIRST render on
+  // thread-open light; the heavy list streams in on a deferred, interruptible
+  // commit. We deliberately drive BOTH the scroll manager and the rendered list
+  // off the SAME deferred value — sticky-bottom / deep-link logic reads the DOM
+  // (`scrollIntoView`), so it must stay consistent with what's actually painted.
+  // You can't scroll to a reply that hasn't committed yet. The thread pane gets
+  // this no-tearing guarantee for free by routing through the same
+  // `useTimelineScrollManager` (and its `timelineSnapshot` helpers) as the main
+  // timeline.
+  const deferredThreadReplies = React.useDeferredValue(
+    threadReplies,
+    EMPTY_THREAD_REPLIES,
+  );
+  const isRepliesPending = deferredThreadReplies !== threadReplies;
+
+  // Which of the three states the reply region paints this frame. Delegated to
+  // a pure helper so the "don't flash empty over an incoming list" rule is
+  // covered in the lib test suite (see selectDeferredListRenderState).
+  const repliesRenderState = selectDeferredListRenderState(
+    deferredThreadReplies.length,
+    threadReplies.length,
+  );
+
   const threadMessages = React.useMemo(
-    () => threadReplies.map((entry) => entry.message),
-    [threadReplies],
+    () => deferredThreadReplies.map((entry) => entry.message),
+    [deferredThreadReplies],
   );
 
   const {
@@ -385,18 +425,31 @@ export function MessageThreadPanel({
         </div>
 
         <div className="px-3 pb-3 pt-1" data-testid="message-thread-replies">
-          {threadReplies.length > 0 ? (
-            <div className="space-y-2.5">
-              {threadReplies.map((entry) => {
+          {repliesRenderState === "list" ? (
+            <div
+              className={cn(
+                "space-y-2.5",
+                // While a deferred render is in flight the painted reply list
+                // lags the latest `threadReplies`. Dim it slightly so the
+                // streaming-in reads as intentional instead of frozen — mirrors
+                // the main timeline.
+                isRepliesPending && "opacity-60 transition-opacity",
+              )}
+              data-render-pending={isRepliesPending ? "true" : undefined}
+            >
+              {deferredThreadReplies.map((entry, index) => {
+                const showUnreadDivider =
+                  index > 0 && entry.message.id === firstUnreadReplyId;
                 return (
                   <div
                     className={cn(
                       "flex flex-col gap-1",
                       entry.summary &&
-                        "group/message -mx-1 rounded-2xl px-1 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+                        "group/message mx-1 rounded-2xl px-0 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
                     )}
                     key={entry.message.renderKey ?? entry.message.id}
                   >
+                    {showUnreadDivider ? <UnreadDivider /> : null}
                     <MessageRow
                       agentPubkeys={agentPubkeys}
                       channelId={channelId}
@@ -425,13 +478,19 @@ export function MessageThreadPanel({
                         message={entry.message}
                         onOpenThread={onExpandReplies}
                         summary={entry.summary}
+                        unreadCount={threadReplyUnreadCounts?.get(
+                          entry.message.id,
+                        )}
                       />
                     ) : null}
                   </div>
                 );
               })}
             </div>
-          ) : (
+          ) : repliesRenderState === "empty" ? (
+            // Only show the empty state when the thread is GENUINELY empty.
+            // Keying off `deferredThreadReplies` would flash "No replies" for a
+            // frame while a non-empty list streams in on the deferred commit.
             <div className="rounded-2xl border border-dashed border-border/70 bg-card/40 px-4 py-6 text-center">
               <p className="text-sm font-medium text-foreground/80">
                 No replies in this branch yet
@@ -440,7 +499,10 @@ export function MessageThreadPanel({
                 Reply in the thread to continue this branch.
               </p>
             </div>
-          )}
+          ) : // "pending": deferred list is empty but the live list has content —
+          // rows are streaming in on the deferred commit. Paint nothing rather
+          // than flashing the empty state.
+          null}
           <div aria-hidden className="h-px" ref={bottomAnchorRef} />
         </div>
       </div>

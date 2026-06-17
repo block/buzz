@@ -64,6 +64,10 @@ function useSidebar() {
   return context;
 }
 
+function useOptionalSidebar() {
+  return React.useContext(SidebarContext);
+}
+
 function clampSidebarWidth(width: number) {
   return Math.min(
     SIDEBAR_WIDTH_MAX,
@@ -1038,4 +1042,5 @@ export {
   SidebarSeparator,
   SidebarTrigger,
   useSidebar,
+  useOptionalSidebar,
 };

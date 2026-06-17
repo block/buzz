@@ -252,7 +252,7 @@ export function NostrKeyImportForm({
           type="submit"
         >
           {isBusy ? (
-            <Spinner aria-label="Importing key" className="h-4 w-4" />
+            <Spinner aria-label="Importing key" className="h-4 w-4 border-2" />
           ) : (
             "Continue with this key"
           )}

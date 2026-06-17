@@ -140,8 +140,8 @@ test("video upload previews use poster frames and inline videos open review mode
   await expect(composerPoster).toHaveAttribute("src", POSTER_DATA_URL);
 
   const box = await composerPoster.boundingBox();
-  expect(box?.width).toBeGreaterThanOrEqual(104);
-  expect(box?.width).toBeLessThanOrEqual(132);
+  expect(box?.width).toBeGreaterThanOrEqual(53);
+  expect(box?.width).toBeLessThanOrEqual(58);
   expect(box?.height).toBeGreaterThanOrEqual(52);
   expect(box?.height).toBeLessThanOrEqual(58);
 

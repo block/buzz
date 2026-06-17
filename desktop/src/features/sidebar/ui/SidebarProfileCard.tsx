@@ -10,6 +10,10 @@ import type { Workspace } from "@/features/workspaces/types";
 import { WorkspaceSwitcher } from "@/features/workspaces/ui/WorkspaceSwitcher";
 import type { PresenceStatus, Profile, UserStatus } from "@/shared/api/types";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
+import {
+  isRelayConnectionDegraded,
+  useRelayConnection,
+} from "@/shared/api/useRelayConnection";
 import { cn } from "@/shared/lib/cn";
 
 type SidebarProfileCardProps = {
@@ -54,6 +58,12 @@ export function SidebarProfileCard({
   // workspace-provider and QueryClient safe at this level.
   const selfProfileCache = useSelfProfileCache();
   const { isPending, reconnect } = useReconnectRelay();
+  // Only offer reconnect when the relay is actually degraded — keep the item
+  // visible while a reconnect is in flight so it does not vanish mid-click if
+  // the live state briefly flips.
+  const isRelayConnectionDegradedNow = isRelayConnectionDegraded(
+    useRelayConnection(),
+  );
 
   const [profilePopoverOpen, setProfilePopoverOpen] = React.useState(false);
   const profileCardRef = React.useRef<HTMLDivElement | null>(null);
@@ -134,7 +144,11 @@ export function SidebarProfileCard({
             isStatusPending={isPresencePending}
             onClearUserStatus={onClearUserStatus}
             onOpenSettings={onOpenSettings}
-            onReconnect={() => void reconnect()}
+            onReconnect={
+              isRelayConnectionDegradedNow || isPending
+                ? () => void reconnect()
+                : undefined
+            }
             onSetStatus={onSetPresenceStatus ?? (() => {})}
             onSetUserStatus={onSetUserStatus}
             triggerContainerRef={profileCardRef}

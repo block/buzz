@@ -20,33 +20,16 @@ type HuddleJoinInfo = {
 };
 
 type VoiceInputMode = "push_to_talk" | "voice_activity";
-type MicFrequencyBands = {
-  low: number;
-  mid: number;
-  high: number;
-};
 
-type MicBandKey = keyof MicFrequencyBands;
-type MicBandDynamics = {
-  floor: MicFrequencyBands;
-  ceiling: MicFrequencyBands;
-};
-
-const EMPTY_MIC_BANDS: MicFrequencyBands = {
-  low: 0,
-  mid: 0,
-  high: 0,
-};
-
-const MIC_BAND_KEYS: MicBandKey[] = ["low", "mid", "high"];
-const MIC_BAND_CONFIG: Record<
-  MicBandKey,
-  { fromHz: number; toHz: number; gain: number }
-> = {
-  low: { fromHz: 120, toHz: 360, gain: 1.22 },
-  mid: { fromHz: 360, toHz: 1800, gain: 1.18 },
-  high: { fromHz: 1800, toHz: 6200, gain: 1.28 },
-};
+const MIC_ANALYSER_UPDATE_INTERVAL_MS = 33;
+const MIC_INITIAL_NOISE_FLOOR = 0.01;
+const MIC_VOICE_GATE_ON_RMS = 0.018;
+const MIC_VOICE_GATE_OFF_RMS = 0.012;
+const MIC_VOICE_GATE_MARGIN_RMS = 0.012;
+const MIC_LEVEL_ACTIVE_RANGE_RMS = 0.11;
+const MIC_MIN_ACTIVE_LEVEL = 0.18;
+const MIC_LEVEL_ATTACK = 0.58;
+const MIC_ACTIVE_NOISE_FLOOR_RISE = 0.006;
 
 function isRedundantHuddlePhaseError(message: string): boolean {
   return /^cannot (?:start|join) huddle: already in phase /i.test(message);
@@ -54,94 +37,6 @@ function isRedundantHuddlePhaseError(message: string): boolean {
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
-}
-
-function binForFrequency(
-  frequency: number,
-  sampleRate: number,
-  fftSize: number,
-  maxBin: number,
-): number {
-  const binWidth = sampleRate / fftSize;
-  return Math.min(maxBin, Math.max(0, Math.floor(frequency / binWidth)));
-}
-
-function averageFrequencyBand(
-  buffer: Uint8Array,
-  startBin: number,
-  endBin: number,
-): number {
-  const start = Math.min(buffer.length - 1, Math.max(0, startBin));
-  const end = Math.min(buffer.length, Math.max(start + 1, endBin));
-  let sum = 0;
-  for (let i = start; i < end; i += 1) {
-    sum += buffer[i];
-  }
-  return sum / ((end - start) * 255);
-}
-
-function shapeMicBand(signal: number, ceiling: number, gain: number): number {
-  if (signal <= 0) return 0;
-  const normalized = (signal * gain) / Math.max(ceiling, 0.012);
-  const compressed = normalized / (normalized + 0.82);
-  return clamp01(0.08 + compressed * 0.72);
-}
-
-function followMicBandFloor(rawValue: number, previousFloor: number): number {
-  const rate = rawValue < previousFloor ? 0.3 : 0.004;
-  return previousFloor + (rawValue - previousFloor) * rate;
-}
-
-function followMicBandCeiling(signal: number, previousCeiling: number): number {
-  const target = Math.max(signal, 0.012);
-  const rate = target > previousCeiling ? 0.16 : 0.12;
-  return previousCeiling + (target - previousCeiling) * rate;
-}
-
-function computeMicFrequencyBands(
-  buffer: Uint8Array,
-  sampleRate: number,
-  fftSize: number,
-  previousDynamics: MicBandDynamics | null,
-): { bands: MicFrequencyBands; dynamics: MicBandDynamics } {
-  const maxBin = buffer.length - 1;
-  const raw = { ...EMPTY_MIC_BANDS };
-  const shaped = { ...EMPTY_MIC_BANDS };
-  const floor = { ...EMPTY_MIC_BANDS };
-  const ceiling = { ...EMPTY_MIC_BANDS };
-
-  for (const key of MIC_BAND_KEYS) {
-    const config = MIC_BAND_CONFIG[key];
-    raw[key] = averageFrequencyBand(
-      buffer,
-      binForFrequency(config.fromHz, sampleRate, fftSize, maxBin),
-      binForFrequency(config.toHz, sampleRate, fftSize, maxBin),
-    );
-    floor[key] =
-      previousDynamics === null
-        ? raw[key]
-        : followMicBandFloor(raw[key], previousDynamics.floor[key]);
-    const signal = Math.max(0, raw[key] - floor[key]);
-    ceiling[key] =
-      previousDynamics === null
-        ? Math.max(signal, 0.012)
-        : followMicBandCeiling(signal, previousDynamics.ceiling[key]);
-    shaped[key] = shapeMicBand(signal, ceiling[key], config.gain);
-  }
-
-  const voiceEnvelope = clamp01(
-    Math.max(shaped.low, shaped.mid, shaped.high) * 0.9 +
-      ((shaped.low + shaped.mid + shaped.high) / 3) * 0.2,
-  );
-
-  return {
-    bands: {
-      low: clamp01(voiceEnvelope * 0.56 + shaped.low * 0.44),
-      mid: clamp01(voiceEnvelope * 0.68 + shaped.mid * 0.34),
-      high: clamp01(voiceEnvelope * 0.5 + shaped.high * 0.5),
-    },
-    dynamics: { floor, ceiling },
-  };
 }
 
 interface HuddleContextValue {
@@ -157,8 +52,6 @@ interface HuddleContextValue {
   micConnected: boolean;
   /** Current mic input level 0–1 (updated via requestAnimationFrame) */
   micLevel: number;
-  /** Low/mid/high mic energy bands for the compact waveform meter */
-  micBands: MicFrequencyBands;
   /** Whether the PTT key is currently held (for UI feedback) */
   pttActive: boolean;
   /** Current voice input mode — push_to_talk or voice_activity */
@@ -213,8 +106,6 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
   const clearHuddleError = React.useCallback(() => setHuddleError(null), []);
   const [micConnected, setMicConnected] = React.useState(false);
   const [micLevel, setMicLevel] = React.useState(0);
-  const [micBands, setMicBands] =
-    React.useState<MicFrequencyBands>(EMPTY_MIC_BANDS);
   /** Whether the PTT key is currently held */
   const [pttActive, setPttActive] = React.useState(false);
   /** Current voice input mode */
@@ -634,44 +525,67 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
 
   // Mic level analyser — drives the voice activity indicator
   React.useEffect(() => {
-    if (!localAudioTrack) {
+    if (!localAudioTrack || !micConnected) {
       setMicLevel(0);
-      setMicBands(EMPTY_MIC_BANDS);
       return;
     }
 
     const ctx = new AudioContext();
     const analyser = ctx.createAnalyser();
-    analyser.fftSize = 256;
-    analyser.smoothingTimeConstant = 0.12;
+    analyser.fftSize = 512;
     const source = ctx.createMediaStreamSource(
       new MediaStream([localAudioTrack]),
     );
     source.connect(analyser);
-    const buf = new Uint8Array(analyser.frequencyBinCount);
+    const buf = new Float32Array(analyser.fftSize);
 
     let raf = 0;
     let lastUpdate = 0;
-    let micBandDynamics: MicBandDynamics | null = null;
+    let voiceActive = false;
+    let noiseFloor = MIC_INITIAL_NOISE_FLOOR;
+    let smoothedLevel = 0;
     function tick(now: number) {
       raf = requestAnimationFrame(tick);
-      // Throttle state updates to ~30fps so the compact meter can track
-      // syllables without pushing the whole HuddleBar at display refresh rate.
-      if (now - lastUpdate < 33) return;
+      if (now - lastUpdate < MIC_ANALYSER_UPDATE_INTERVAL_MS) return;
       lastUpdate = now;
-      analyser.getByteFrequencyData(buf);
-      // RMS-ish: average of frequency bins, normalized to 0–1
-      let sum = 0;
-      for (let i = 0; i < buf.length; i++) sum += buf[i];
-      setMicLevel(sum / (buf.length * 255));
-      const nextMicBands = computeMicFrequencyBands(
-        buf,
-        ctx.sampleRate,
-        analyser.fftSize,
-        micBandDynamics,
+      analyser.getFloatTimeDomainData(buf);
+
+      let sumSquares = 0;
+      for (let i = 0; i < buf.length; i += 1) {
+        sumSquares += buf[i] * buf[i];
+      }
+
+      const rms = Math.sqrt(sumSquares / buf.length);
+      const activeThreshold = Math.max(
+        MIC_VOICE_GATE_ON_RMS,
+        noiseFloor + MIC_VOICE_GATE_MARGIN_RMS,
       );
-      micBandDynamics = nextMicBands.dynamics;
-      setMicBands(nextMicBands.bands);
+      const idleThreshold = Math.max(
+        MIC_VOICE_GATE_OFF_RMS,
+        noiseFloor + MIC_VOICE_GATE_MARGIN_RMS * 0.55,
+      );
+      voiceActive = voiceActive ? rms > idleThreshold : rms > activeThreshold;
+
+      const floorRate =
+        rms < noiseFloor
+          ? 0.18
+          : voiceActive
+            ? MIC_ACTIVE_NOISE_FLOOR_RISE
+            : 0.025;
+      noiseFloor += (rms - noiseFloor) * floorRate;
+
+      if (!voiceActive) {
+        smoothedLevel = 0;
+        setMicLevel(0);
+        return;
+      }
+
+      const normalized = clamp01(
+        (rms - noiseFloor) / MIC_LEVEL_ACTIVE_RANGE_RMS,
+      );
+      const targetLevel = Math.max(normalized, MIC_MIN_ACTIVE_LEVEL);
+      smoothedLevel += (targetLevel - smoothedLevel) * MIC_LEVEL_ATTACK;
+      setMicLevel(smoothedLevel);
     }
     raf = requestAnimationFrame(tick);
 
@@ -680,7 +594,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
       source.disconnect();
       void ctx.close();
     };
-  }, [localAudioTrack]);
+  }, [localAudioTrack, micConnected]);
 
   // Cleanup on unmount only — stable ref prevents re-firing mid-startup.
   const leaveHuddleRef = React.useRef(leaveHuddle);
@@ -719,7 +633,6 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
         clearHuddleError,
         micConnected,
         micLevel,
-        micBands,
         pttActive,
         voiceInputMode,
         setVoiceInputMode,

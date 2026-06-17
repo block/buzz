@@ -39,17 +39,19 @@ import {
 } from "@/shared/ui/dialog";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
+import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   MODAL_SEARCH_INPUT_CLASS,
   MODAL_SEARCH_SHELL_CLASS,
 } from "@/shared/ui/modalSearchStyles";
-import { MembersSidebarAgentControls } from "./MembersSidebarAgentControls";
 import { MembersSidebarMemberCard } from "./MembersSidebarMemberCard";
 import { useMembersSidebarActions } from "./useMembersSidebarActions";
 
 const MEMBER_ADD_RESULT_LIMIT = 50;
+const MEMBER_ROW_INSET_DIVIDER_CLASS =
+  "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
 
 function formatAddCandidateName(user: UserSearchResult) {
   return (
@@ -374,13 +376,7 @@ export function MembersSidebar({
     actionErrorMessage,
     actionNoticeMessage,
     handleLifecycleAction: handleAgentLifecycleAction,
-    handleRemoveAll,
     handleRemoveMember,
-    handleRespawnAll,
-    handleStopAll,
-    hasControllableManagedBots,
-    hasRemovableManagedBots,
-    hasStoppableManagedBots,
     isActionPending,
   } = useMembersSidebarActions({
     channelId,
@@ -542,27 +538,7 @@ export function MembersSidebar({
                 className="h-[min(50vh,24rem)] overflow-y-auto rounded-xl border border-border/70 bg-background/70"
                 data-testid="members-sidebar-people"
               >
-                <SearchResultSectionTitle
-                  action={
-                    hasControllableManagedBots ? (
-                      <MembersSidebarAgentControls
-                        canBulkRemove={hasRemovableManagedBots}
-                        canBulkRespawn={hasControllableManagedBots}
-                        canBulkStop={hasStoppableManagedBots}
-                        disabled={isActionPending || isArchived}
-                        onRemoveAll={() => {
-                          void handleRemoveAll();
-                        }}
-                        onRespawnAll={() => {
-                          void handleRespawnAll();
-                        }}
-                        onStopAll={() => {
-                          void handleStopAll();
-                        }}
-                      />
-                    ) : null
-                  }
-                >
+                <SearchResultSectionTitle>
                   {normalizedSearchQuery
                     ? "Members"
                     : `Members · ${activeMembers.length}`}
@@ -728,7 +704,10 @@ function AddMemberSearchResultRow({
 }) {
   return (
     <div
-      className="group/add-result relative isolate flex min-h-14 w-full items-center gap-3 px-4 py-3.5 text-left transition-colors duration-150 ease-out hover:bg-muted/40 focus-within:bg-muted/40"
+      className={cn(
+        "group/add-result relative isolate flex min-h-14 w-full items-center gap-3 px-4 py-3.5 text-left transition-colors duration-150 ease-out hover:bg-muted/40 focus-within:bg-muted/40",
+        MEMBER_ROW_INSET_DIVIDER_CLASS,
+      )}
       data-testid={`channel-user-search-result-${user.pubkey}`}
     >
       <button
