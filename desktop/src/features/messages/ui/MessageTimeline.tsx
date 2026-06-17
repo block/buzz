@@ -1,6 +1,7 @@
 import * as React from "react";
 import { ArrowDown, ArrowUp, Hash } from "lucide-react";
 
+import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -252,16 +253,27 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     sentinelRef: topSentinelRef,
   });
 
-  const showDirectMessageIntro = !isLoading && directMessageIntro !== null;
+  const timelineRenderState = selectDeferredListRenderState(
+    deferredMessages.length,
+    messages.length,
+  );
+  const isDeferredListPending = !isLoading && timelineRenderState === "pending";
+  const showDirectMessageIntro =
+    !isLoading &&
+    timelineRenderState !== "pending" &&
+    directMessageIntro !== null;
   const showChannelIntro =
-    !isLoading && channelIntro !== null && directMessageIntro === null;
+    !isLoading &&
+    timelineRenderState !== "pending" &&
+    channelIntro !== null &&
+    directMessageIntro === null;
   const showIntro = showDirectMessageIntro || showChannelIntro;
   const showGenericEmpty =
     !isLoading &&
-    deferredMessages.length === 0 &&
+    timelineRenderState === "empty" &&
     directMessageIntro === null &&
     channelIntro === null;
-  const showMessageList = !isLoading && deferredMessages.length > 0;
+  const showMessageList = !isLoading && timelineRenderState === "list";
   const timelineSkeletonRows = useTimelineSkeletonRows({
     channelId,
     isLoading,
@@ -327,7 +339,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                 "flex min-w-0 flex-col gap-2",
                 (showIntro || showGenericEmpty) && "min-h-full",
               )}
-              loading={isLoading}
+              loading={isLoading || isDeferredListPending}
               skeleton={<TimelineSkeleton rows={timelineSkeletonRows} />}
             >
               {showDirectMessageIntro ? (
