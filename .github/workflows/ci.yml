@@ -589,6 +589,9 @@ jobs:
       # honors on demand; the host triple already is x86_64-pc-windows-msvc.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          workspaces: |
+            .
+            desktop/src-tauri
           key: windows-msvc
           save-if: ${{ github.event_name != 'pull_request' }}
       # Tauri validates externalBin at compile time, so the Tauri-crate steps
