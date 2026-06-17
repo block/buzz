@@ -29,6 +29,8 @@ function provenanceSentence(
       return "Set in Buzz";
     case "personaDefault":
       return "Inherited from persona";
+    case "runtimeOverride":
+      return "Live override (this session only)";
     case "envVar": {
       if (writeVia.type === "respawnWithEnvVar") {
         return `From environment variable (${writeVia.envKey})`;
@@ -84,7 +86,15 @@ function NormalizedRow({
           <>
             {field.value ?? <span className="text-muted-foreground">—</span>}
             {field.overriddenValue && (
-              <span className="ml-2 text-xs text-muted-foreground/60 line-through">
+              <span
+                className={cn(
+                  "ml-2 text-xs text-muted-foreground/60",
+                  // A runtime override rides over the persona baseline rather
+                  // than superseding an explicit pick — show the persona as a
+                  // secondary value, not struck through.
+                  field.origin !== "runtimeOverride" && "line-through",
+                )}
+              >
                 {field.overriddenValue}
               </span>
             )}

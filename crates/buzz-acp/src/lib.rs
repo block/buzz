@@ -29,8 +29,8 @@ use filter::SubscriptionRule;
 use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
 use pool::{
-    AgentPool, ControlSignal, OwnedAgent, PromptContext, PromptOutcome, PromptResult, PromptSource,
-    SessionState,
+    AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
+    PromptResult, PromptSource, SessionState,
 };
 use queue::{CancelReason, EventQueue, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
@@ -710,11 +710,25 @@ fn handle_relay_observer_control_event(
     };
 
     let command_type = payload.get("type").and_then(|value| value.as_str());
-    if command_type != Some("cancel_turn") {
-        tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
-        return;
+    match command_type {
+        Some("cancel_turn") => {
+            handle_cancel_turn_control(&payload, pool, observer);
+        }
+        Some("switch_model") => {
+            handle_switch_model_control(&payload, pool, observer);
+        }
+        _ => {
+            tracing::debug!(payload = %payload, "ignoring unknown observer control frame");
+        }
     }
+}
 
+/// Handle a `cancel_turn` control frame: signal the in-flight task to cancel.
+fn handle_cancel_turn_control(
+    payload: &serde_json::Value,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+) {
     let Some(channel_id) = payload
         .get("channelId")
         .and_then(|value| value.as_str())
@@ -738,6 +752,83 @@ fn handle_relay_observer_control_event(
             serde_json::json!({
                 "type": "cancel_turn",
                 "status": status,
+            }),
+        );
+    }
+}
+
+/// Handle a `switch_model` control frame (Phase 3a, Option ii).
+///
+/// Busy path: deliver `SwitchModel` over the in-flight task's oneshot — the
+/// task cancels the turn, sets `desired_model`, and requeues the batch so it
+/// re-runs on a fresh session under the new model. A catalog miss surfaces
+/// post-cancel via `create_session_and_apply_model` (the turn restarts on the
+/// unchanged model + an `unsupported_model` result).
+///
+/// Idle path: validate against the cached catalog *before* invalidating
+/// (pre-cancel guard), then set `desired_model` + invalidate. The override
+/// takes visible effect on the agent's next turn.
+fn handle_switch_model_control(
+    payload: &serde_json::Value,
+    pool: &mut AgentPool,
+    observer: Option<&observer::ObserverHandle>,
+) {
+    let Some(channel_id) = payload
+        .get("channelId")
+        .and_then(|value| value.as_str())
+        .and_then(|value| value.parse::<Uuid>().ok())
+    else {
+        tracing::warn!("observer switch_model control frame missing valid channelId");
+        return;
+    };
+    let Some(model_id) = payload.get("modelId").and_then(|value| value.as_str()) else {
+        tracing::warn!("observer switch_model control frame missing modelId");
+        return;
+    };
+
+    // A turn is in flight for this channel iff a task_map entry exists. The
+    // agent is moved out of the pool during a turn, so the control oneshot is
+    // the only reachable lever; an idle channel has no such entry.
+    let turn_in_flight = pool
+        .task_map()
+        .values()
+        .any(|m| m.channel_id == Some(channel_id));
+
+    let status = if turn_in_flight {
+        // Busy path: deliver over the oneshot. `false` means the oneshot was
+        // already consumed this turn (a prior cancel/interrupt) — the turn is
+        // already ending, so the switch cannot land on it.
+        if signal_in_flight_task(
+            pool,
+            channel_id,
+            ControlSignal::SwitchModel(model_id.to_string()),
+        ) {
+            "sent"
+        } else {
+            "turn_ending"
+        }
+    } else {
+        // Idle path: validate against the cached catalog before invalidating.
+        match pool.switch_idle_agent_model(channel_id, model_id) {
+            IdleSwitchResult::Switched => "switched",
+            IdleSwitchResult::UnsupportedModel => "unsupported_model",
+            IdleSwitchResult::NoIdleAgent => "no_active_turn",
+        }
+    };
+
+    if let Some(observer) = observer {
+        observer.emit(
+            "control_result",
+            None,
+            &observer::ObserverContext {
+                channel_id: Some(channel_id.to_string()),
+                session_id: None,
+                turn_id: None,
+            },
+            serde_json::json!({
+                "type": "switch_model",
+                "status": status,
+                "modelId": model_id,
             }),
         );
     }
@@ -2351,8 +2442,8 @@ fn signal_in_flight_task(
 
     if let Some(meta) = entry {
         if let Some(tx) = meta.control_tx.take() {
-            let _ = tx.send(mode);
             tracing::info!(channel = %channel_id, ?mode, "control signal sent to in-flight task");
+            let _ = tx.send(mode);
             return true;
         }
     }

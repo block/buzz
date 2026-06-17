@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { subscribeToAgentObserverFrames } from "@/shared/api/observerRelay";
 import type { RelayEvent, ManagedAgent } from "@/shared/api/types";
+import type { ControlResultFrame } from "@/shared/api/types";
 import { getIdentity, putAgentSessionConfig } from "@/shared/api/tauri";
 import { decryptObserverEvent } from "@/shared/api/tauriObserver";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -37,6 +38,14 @@ const listeners = new Set<() => void>();
 const eventsByAgent = new Map<string, ObserverEvent[]>();
 const transcriptByAgent = new Map<string, TranscriptState>();
 const snapshotByAgent = new Map<string, ObserverSnapshot>();
+
+// Per-agent listeners for `control_result` frames. The ModelPicker subscribes
+// here to learn the async outcome of a `switch_model` frame (the send is
+// fire-and-forget; the harness replies out-of-band over the observer relay).
+const controlResultListeners = new Map<
+  string,
+  Set<(frame: ControlResultFrame) => void>
+>();
 
 // Normalized pubkeys of agents we are actively managing. Only events whose
 // "agent" tag matches an entry here will be decrypted (defense-in-depth).
@@ -192,6 +201,8 @@ async function handleRelayObserverEvent(
     appendAgentEvent(agentPubkey, parsed);
     if (parsed.kind === "session_config_captured") {
       void putAgentSessionConfig(agentPubkey, parsed.payload);
+    } else if (parsed.kind === "control_result") {
+      dispatchControlResult(agentPubkey, parsed.payload);
     }
   } catch (error) {
     if (activeGeneration !== generation) {
@@ -266,6 +277,53 @@ export function subscribeAgentObserverStore(listener: () => void) {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
+  };
+}
+
+function isControlResultFrame(payload: unknown): payload is ControlResultFrame {
+  return (
+    typeof payload === "object" &&
+    payload !== null &&
+    typeof (payload as { type?: unknown }).type === "string" &&
+    typeof (payload as { status?: unknown }).status === "string"
+  );
+}
+
+function dispatchControlResult(agentPubkey: string, payload: unknown) {
+  if (!isControlResultFrame(payload)) {
+    return;
+  }
+  const subscribers = controlResultListeners.get(normalizePubkey(agentPubkey));
+  if (!subscribers) {
+    return;
+  }
+  for (const subscriber of subscribers) {
+    subscriber(payload);
+  }
+}
+
+/**
+ * Subscribe to `control_result` frames for a single agent. Returns an
+ * unsubscribe function. Used by the ModelPicker to learn the async outcome of
+ * a `switch_model` frame.
+ */
+export function subscribeControlResults(
+  agentPubkey: string,
+  listener: (frame: ControlResultFrame) => void,
+) {
+  const key = normalizePubkey(agentPubkey);
+  const subscribers = controlResultListeners.get(key) ?? new Set();
+  subscribers.add(listener);
+  controlResultListeners.set(key, subscribers);
+  return () => {
+    const current = controlResultListeners.get(key);
+    if (!current) {
+      return;
+    }
+    current.delete(listener);
+    if (current.size === 0) {
+      controlResultListeners.delete(key);
+    }
   };
 }
 

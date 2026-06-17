@@ -21,6 +21,11 @@ pub enum ConfigOrigin {
     /// resolved before calling the reader, then the surface is post-processed to
     /// re-tag injected fields from `BuzzExplicit` to `PersonaDefault`.
     PersonaDefault,
+    /// Live runtime model override applied via the ModelPicker (Phase 3).
+    /// The ACP session's current model diverges from the persona model because
+    /// the user picked a different model on the running instance. Runtime-only —
+    /// never persisted; reverts to the persona model on restart/respawn.
+    RuntimeOverride,
 }
 
 /// How a config field can be written back to the runtime.

@@ -11,6 +11,7 @@ pub(crate) fn read_config_surface(
     record: &ManagedAgentRecord,
     runtime_meta: Option<&KnownAcpRuntime>,
     session_cache: Option<&SessionConfigCache>,
+    persona_model: Option<&str>,
 ) -> RuntimeConfigSurface {
     let is_pre_spawn = session_cache.is_none();
 
@@ -49,14 +50,18 @@ pub(crate) fn read_config_surface(
         .cloned();
 
     let normalized = NormalizedConfig {
-        model: Some(build_model_field(
-            &record_model,
-            &file_config.model,
-            &acp_model,
-            model_env_var,
-            supports_acp_model,
-            is_pre_spawn,
-            session_cache,
+        model: Some(apply_runtime_override(
+            build_model_field(
+                &record_model,
+                &file_config.model,
+                &acp_model,
+                model_env_var,
+                supports_acp_model,
+                is_pre_spawn,
+                session_cache,
+            ),
+            acp_model.as_deref(),
+            persona_model,
         )),
         provider: build_provider_field(
             &record_provider,
@@ -210,8 +215,32 @@ fn build_model_field(
         None
     };
 
-    // Write mechanism: prefer ACP if post-spawn and supported.
-    let write_via = if !is_pre_spawn && has_config_option(session_cache, "model") {
+    let write_via = model_write_mechanism(
+        is_pre_spawn,
+        supports_acp_model,
+        session_cache,
+        model_env_var,
+    );
+
+    NormalizedField {
+        value,
+        origin,
+        is_writable: !matches!(write_via, ConfigWriteMechanism::ReadOnly),
+        write_via,
+        overridden_value,
+        overridden_origin,
+    }
+}
+
+/// Resolve how the model field is written back to the runtime.
+/// Prefer ACP `set_config_option`/`set_model` post-spawn, else env-var respawn.
+fn model_write_mechanism(
+    is_pre_spawn: bool,
+    supports_acp_model: bool,
+    session_cache: Option<&SessionConfigCache>,
+    model_env_var: Option<&str>,
+) -> ConfigWriteMechanism {
+    if !is_pre_spawn && has_config_option(session_cache, "model") {
         let config_id = find_model_config_id(session_cache).unwrap_or_else(|| "model".to_string());
         ConfigWriteMechanism::AcpSetConfigOption { config_id }
     } else if !is_pre_spawn && supports_acp_model {
@@ -222,15 +251,38 @@ fn build_model_field(
         }
     } else {
         ConfigWriteMechanism::ReadOnly
-    };
+    }
+}
 
+/// Re-key the model field as a live runtime override when the ACP session's
+/// current model diverges from the persona model (Phase 3c).
+///
+/// The override-active signal is `acp_model != persona_model` — NOT the
+/// harness-only `desired_model`, which the desktop reader cannot see. A
+/// persona-linked agent spawns with its ACP current model equal to the persona
+/// model, so divergence only happens after a live ModelPicker switch.
+///
+/// `persona_model` is `Some` only for persona-linked agents with no explicit
+/// record model; an explicit pick has no persona baseline to override, so the
+/// field passes through unchanged. The override preserves the base field's
+/// write mechanism — only the displayed value, origin, and secondary change.
+fn apply_runtime_override(
+    base: NormalizedField,
+    acp_model: Option<&str>,
+    persona_model: Option<&str>,
+) -> NormalizedField {
+    let (Some(acp), Some(persona)) = (acp_model, persona_model) else {
+        return base;
+    };
+    if acp == persona {
+        return base;
+    }
     NormalizedField {
-        value,
-        origin,
-        is_writable: !matches!(write_via, ConfigWriteMechanism::ReadOnly),
-        write_via,
-        overridden_value,
-        overridden_origin,
+        value: Some(acp.to_string()),
+        origin: ConfigOrigin::RuntimeOverride,
+        overridden_value: Some(persona.to_string()),
+        overridden_origin: Some(ConfigOrigin::PersonaDefault),
+        ..base
     }
 }
 
@@ -493,7 +545,7 @@ mod tests {
     fn pre_spawn_surface_reports_pending_acp_tiers() {
         let record = test_record();
         let runtime = test_runtime();
-        let surface = read_config_surface(&record, Some(runtime), None);
+        let surface = read_config_surface(&record, Some(runtime), None, None);
 
         assert!(surface.is_pre_spawn);
         assert_eq!(surface.sources.acp_native, ConfigTierStatus::Pending);
@@ -510,7 +562,7 @@ mod tests {
         record.model = Some("explicit-model".to_string());
         let runtime = test_runtime();
 
-        let surface = read_config_surface(&record, Some(runtime), None);
+        let surface = read_config_surface(&record, Some(runtime), None, None);
         let model = surface.normalized.model.unwrap();
         assert_eq!(model.value.as_deref(), Some("explicit-model"));
         assert_eq!(model.origin, ConfigOrigin::BuzzExplicit);
@@ -523,7 +575,7 @@ mod tests {
             provider_locked: true,
             ..*test_runtime()
         };
-        let surface = read_config_surface(&record, Some(runtime), None);
+        let surface = read_config_surface(&record, Some(runtime), None, None);
         let provider = surface.normalized.provider.unwrap();
         assert_eq!(provider.value.as_deref(), Some("Anthropic (locked)"));
         assert!(!provider.is_writable);
@@ -548,7 +600,7 @@ mod tests {
             captured_at: "".to_string(),
         };
 
-        let surface = read_config_surface(&record, Some(runtime), Some(&cache));
+        let surface = read_config_surface(&record, Some(runtime), Some(&cache), None);
         assert!(!surface.is_pre_spawn);
         let model = surface.normalized.model.unwrap();
         assert_eq!(model.value.as_deref(), Some("claude-opus-4"));
@@ -571,7 +623,7 @@ mod tests {
             captured_at: "".to_string(),
         };
 
-        let surface = read_config_surface(&record, Some(runtime), Some(&cache));
+        let surface = read_config_surface(&record, Some(runtime), Some(&cache), None);
         let model = surface.normalized.model.unwrap();
         assert_eq!(model.value.as_deref(), Some("acp-model"));
         assert_eq!(model.origin, ConfigOrigin::AcpConfigOption);
@@ -598,7 +650,7 @@ mod tests {
         record.model = Some("persona-model".to_string());
         let runtime = test_runtime();
 
-        let mut surface = read_config_surface(&record, Some(runtime), None);
+        let mut surface = read_config_surface(&record, Some(runtime), None, None);
 
         // Reader sees injected model as BuzzExplicit.
         let model = surface.normalized.model.as_ref().unwrap();
@@ -617,6 +669,70 @@ mod tests {
         assert_eq!(model.origin, ConfigOrigin::PersonaDefault);
     }
 
+    // ── Runtime override (Phase 3c) ──────────────────────────────────────
+    //
+    // A live ModelPicker switch surfaces as the ACP session's `current_model`
+    // diverging from the persona model. The reader keys the override-active
+    // decision off that divergence (acp_model != persona_model), NOT off the
+    // harness-only `desired_model` (which the desktop reader cannot see).
+
+    #[test]
+    fn runtime_override_wins_display_when_acp_model_diverges_from_persona() {
+        // Persona-linked agent (record.model == None); persona == "persona-model".
+        // A live switch pushed "live-model" to the session.
+        let record = test_record();
+        let runtime = test_runtime();
+        let cache = SessionConfigCache {
+            config_options: vec![],
+            available_modes: vec![],
+            available_models: vec![],
+            current_model: Some("live-model".to_string()),
+            goose_native_config: None,
+            captured_at: "".to_string(),
+        };
+
+        let surface =
+            read_config_surface(&record, Some(runtime), Some(&cache), Some("persona-model"));
+        let model = surface.normalized.model.unwrap();
+
+        // Override wins the display value with a runtime-override origin.
+        assert_eq!(model.value.as_deref(), Some("live-model"));
+        assert_eq!(model.origin, ConfigOrigin::RuntimeOverride);
+        // Persona is the secondary value (not struck through — the UI keys off
+        // the RuntimeOverride origin to suppress strikethrough).
+        assert_eq!(model.overridden_value.as_deref(), Some("persona-model"));
+        assert_eq!(model.overridden_origin, Some(ConfigOrigin::PersonaDefault));
+    }
+
+    #[test]
+    fn no_runtime_override_when_acp_model_equals_persona() {
+        // At spawn the session's current_model == persona model (BUZZ_ACP_MODEL
+        // is set to the persona model). No divergence => no override; the field
+        // falls through to normal precedence (persona-wins surface, no override
+        // origin and no overridden secondary value).
+        let record = test_record();
+        let runtime = test_runtime();
+        let cache = SessionConfigCache {
+            config_options: vec![],
+            available_modes: vec![],
+            available_models: vec![],
+            current_model: Some("persona-model".to_string()),
+            goose_native_config: None,
+            captured_at: "".to_string(),
+        };
+
+        let surface =
+            read_config_surface(&record, Some(runtime), Some(&cache), Some("persona-model"));
+        let model = surface.normalized.model.unwrap();
+
+        // No divergence => the override branch is not taken: origin is the
+        // normal precedence result, never RuntimeOverride, and the persona is
+        // not surfaced as a secondary override value.
+        assert_ne!(model.origin, ConfigOrigin::RuntimeOverride);
+        assert_eq!(model.value.as_deref(), Some("persona-model"));
+        assert_ne!(model.overridden_origin, Some(ConfigOrigin::PersonaDefault));
+    }
+
     #[test]
     fn persona_provider_injection_produces_persona_default_origin() {
         let mut record = test_record();
@@ -627,7 +743,7 @@ mod tests {
             .insert("GOOSE_PROVIDER".to_string(), "anthropic".to_string());
         let runtime = test_runtime();
 
-        let mut surface = read_config_surface(&record, Some(runtime), None);
+        let mut surface = read_config_surface(&record, Some(runtime), None, None);
 
         // Reader sees injected provider as BuzzExplicit.
         let provider = surface.normalized.provider.as_ref().unwrap();
@@ -657,7 +773,7 @@ mod tests {
         );
         let runtime = test_runtime();
 
-        let mut surface = read_config_surface(&record, Some(runtime), None);
+        let mut surface = read_config_surface(&record, Some(runtime), None, None);
 
         // Reader sees injected prompt as BuzzExplicit.
         let prompt = surface.normalized.system_prompt.as_ref().unwrap();
@@ -689,7 +805,7 @@ mod tests {
         record.model = Some("explicit-model".to_string());
         let runtime = test_runtime();
 
-        let surface = read_config_surface(&record, Some(runtime), None);
+        let surface = read_config_surface(&record, Some(runtime), None, None);
 
         // had_model == true, so no re-tagging occurs. Origin stays BuzzExplicit.
         let model = surface.normalized.model.unwrap();

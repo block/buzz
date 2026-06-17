@@ -52,6 +52,16 @@ fn resolve_config_surface(
         record.model.clone(),
     );
 
+    // Retain the persona model so the reader can detect a live runtime override
+    // (ACP current model diverging from the persona model). Only meaningful when
+    // the record had no explicit model — an explicit pick is the user's choice,
+    // not a persona baseline to override.
+    let persona_model_for_override = if had_model {
+        None
+    } else {
+        persona_model.clone()
+    };
+
     // Inject resolved persona values into the record where absent.
     if !had_prompt {
         if let Some(p) = persona_prompt {
@@ -69,7 +79,12 @@ fn resolve_config_surface(
         }
     }
 
-    let mut surface = read_config_surface(&record, runtime_meta, session_cache);
+    let mut surface = read_config_surface(
+        &record,
+        runtime_meta,
+        session_cache,
+        persona_model_for_override.as_deref(),
+    );
 
     // Re-tag persona-sourced fields from BuzzExplicit to PersonaDefault.
     if !had_prompt {
