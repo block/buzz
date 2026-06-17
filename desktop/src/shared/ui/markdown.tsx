@@ -370,6 +370,11 @@ type WebKitGestureLikeEvent = Event & {
   scale?: number;
 };
 
+type ImageContextMenuPosition = {
+  x: number;
+  y: number;
+};
+
 function getImageLightboxFocusableElements(
   container: HTMLElement,
 ): HTMLElement[] {
@@ -392,12 +397,67 @@ function getImageLightboxFocusableElements(
   );
 }
 
+function useDismissImageContextMenu(isOpen: boolean, onDismiss: () => void) {
+  React.useEffect(() => {
+    if (!isOpen) return;
+    // Defer attaching the dismiss listeners until after the current event
+    // loop turn. The right-click that opens the menu (a `contextmenu` on
+    // mousedown) is often followed by a trailing `click`/`pointerup` on the
+    // same interaction; attaching synchronously lets that trailing event —
+    // and the platform `click` some webviews emit on right-button release —
+    // immediately dismiss the menu, so it only flashes. Deferring guarantees
+    // the opening interaction can never be the one that closes it.
+    let attached = false;
+    const timer = window.setTimeout(() => {
+      attached = true;
+      window.addEventListener("click", onDismiss);
+      window.addEventListener("contextmenu", onDismiss);
+      window.addEventListener("scroll", onDismiss, true);
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+      if (attached) {
+        window.removeEventListener("click", onDismiss);
+        window.removeEventListener("contextmenu", onDismiss);
+        window.removeEventListener("scroll", onDismiss, true);
+      }
+    };
+  }, [isOpen, onDismiss]);
+}
+
+function ImageDownloadContextMenu({
+  onDownload,
+  position,
+}: {
+  onDownload: () => void;
+  position: ImageContextMenuPosition;
+}) {
+  return (
+    <div
+      className={cn(
+        "fixed z-[100] min-w-60 origin-top-left rounded-xl p-1 slide-in-from-top-1",
+        POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+        POPOVER_SURFACE_CLASS,
+      )}
+      data-image-lightbox-controls=""
+      style={{ ...POPOVER_SHADOW_STYLE, left: position.x, top: position.y }}
+    >
+      <button
+        type="button"
+        className="flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground"
+        onClick={onDownload}
+      >
+        Download image
+      </button>
+    </div>
+  );
+}
+
 function ImageZoomOverlay({
   alt,
   canDownload,
   onDownload,
   onClose,
-  onContextMenuCapture,
   resolvedSrc,
   sourceBox,
 }: {
@@ -405,7 +465,6 @@ function ImageZoomOverlay({
   canDownload: boolean;
   onDownload: () => void;
   onClose: () => void;
-  onContextMenuCapture: (event: React.MouseEvent) => void;
   resolvedSrc: string;
   sourceBox: ImageLightboxBox;
 }) {
@@ -416,6 +475,7 @@ function ImageZoomOverlay({
   >(() => (prefersReducedMotion ? "open" : "opening"));
   const [hasEntered, setHasEntered] = React.useState(prefersReducedMotion);
   const [isAdjustingZoom, setIsAdjustingZoom] = React.useState(false);
+  const [menu, setMenu] = React.useState<ImageContextMenuPosition | null>(null);
   const [targetBox, setTargetBox] = React.useState(() =>
     imageLightboxTargetBox(sourceBox),
   );
@@ -434,6 +494,7 @@ function ImageZoomOverlay({
     suppressCloseUntilRef.current =
       Date.now() + IMAGE_LIGHTBOX_CONTROL_SUPPRESS_CLOSE_MS;
   }, []);
+  const closeMenu = React.useCallback(() => setMenu(null), []);
 
   const finishZoomGestureSoon = React.useCallback(() => {
     if (zoomIdleTimerRef.current != null) {
@@ -472,6 +533,8 @@ function ImageZoomOverlay({
       onClose();
     }, IMAGE_LIGHTBOX_EXIT_MS + IMAGE_LIGHTBOX_FADE_EXIT_MS);
   }, [onClose, prefersReducedMotion]);
+
+  useDismissImageContextMenu(Boolean(menu), closeMenu);
 
   React.useEffect(() => {
     if (prefersReducedMotion) {
@@ -515,10 +578,6 @@ function ImageZoomOverlay({
         ? document.activeElement
         : null;
     dialogRef.current?.focus();
-
-    return () => {
-      previouslyFocusedElementRef.current?.focus({ preventScroll: true });
-    };
   }, []);
 
   React.useEffect(() => {
@@ -561,6 +620,10 @@ function ImageZoomOverlay({
         if (!inert) {
           element.removeAttribute("inert");
         }
+      }
+
+      if (previouslyFocusedElementRef.current?.isConnected) {
+        previouslyFocusedElementRef.current.focus({ preventScroll: true });
       }
     };
   }, []);
@@ -747,6 +810,23 @@ function ImageZoomOverlay({
       (IMAGE_LIGHTBOX_MAX_ZOOM - IMAGE_LIGHTBOX_MIN_ZOOM)) *
     100;
   const label = alt?.trim() || "Image preview";
+  const handleImageContextMenu = React.useCallback(
+    (event: React.MouseEvent<HTMLImageElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation();
+      markControlGesture();
+      if (canDownload) {
+        setMenu({ x: event.clientX, y: event.clientY });
+      }
+    },
+    [canDownload, markControlGesture],
+  );
+  const handleMenuDownload = React.useCallback(() => {
+    setMenu(null);
+    markControlGesture();
+    onDownload();
+  }, [markControlGesture, onDownload]);
 
   return createPortal(
     <div
@@ -830,7 +910,7 @@ function ImageZoomOverlay({
           alt={alt}
           className="h-full w-full rounded-lg object-contain shadow-2xl"
           src={resolvedSrc}
-          onContextMenuCapture={onContextMenuCapture}
+          onContextMenuCapture={handleImageContextMenu}
         />
       </div>
       <div
@@ -901,6 +981,12 @@ function ImageZoomOverlay({
           </span>
         </div>
       </div>
+      {menu && canDownload ? (
+        <ImageDownloadContextMenu
+          onDownload={handleMenuDownload}
+          position={menu}
+        />
+      ) : null}
     </div>,
     document.body,
   );
@@ -928,7 +1014,7 @@ function ImageBlock({
     null,
   );
   const [isHiddenInSpoiler, setIsHiddenInSpoiler] = React.useState(false);
-  const [menu, setMenu] = React.useState<{ x: number; y: number } | null>(null);
+  const [menu, setMenu] = React.useState<ImageContextMenuPosition | null>(null);
   const inlineImageRef = React.useRef<HTMLImageElement | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
   const [spoilerMediaSize, setSpoilerMediaSize] = React.useState<{
@@ -1000,32 +1086,8 @@ function ImageBlock({
     return () => observer.disconnect();
   }, []);
 
-  React.useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
-    // Defer attaching the dismiss listeners until after the current event
-    // loop turn. The right-click that opens the menu (a `contextmenu` on
-    // mousedown) is often followed by a trailing `click`/`pointerup` on the
-    // same interaction; attaching synchronously lets that trailing event —
-    // and the platform `click` some webviews emit on right-button release —
-    // immediately dismiss the menu, so it only flashes. Deferring guarantees
-    // the opening interaction can never be the one that closes it.
-    let attached = false;
-    const timer = window.setTimeout(() => {
-      attached = true;
-      window.addEventListener("click", close);
-      window.addEventListener("contextmenu", close);
-      window.addEventListener("scroll", close, true);
-    }, 0);
-    return () => {
-      window.clearTimeout(timer);
-      if (attached) {
-        window.removeEventListener("click", close);
-        window.removeEventListener("contextmenu", close);
-        window.removeEventListener("scroll", close, true);
-      }
-    };
-  }, [menu]);
+  const closeMenu = React.useCallback(() => setMenu(null), []);
+  useDismissImageContextMenu(Boolean(menu), closeMenu);
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -1094,22 +1156,7 @@ function ImageBlock({
         />
       </button>
       {menu && src ? (
-        <div
-          className={cn(
-            "fixed z-[100] min-w-60 origin-top-left rounded-xl p-1 slide-in-from-top-1",
-            POPOVER_CUSTOM_ENTER_MOTION_CLASS,
-            POPOVER_SURFACE_CLASS,
-          )}
-          style={{ ...POPOVER_SHADOW_STYLE, left: menu.x, top: menu.y }}
-        >
-          <button
-            type="button"
-            className="flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground"
-            onClick={handleDownload}
-          >
-            Download image
-          </button>
-        </div>
+        <ImageDownloadContextMenu onDownload={handleDownload} position={menu} />
       ) : null}
       {lightboxBox && resolvedSrc ? (
         <ImageZoomOverlay
@@ -1117,7 +1164,6 @@ function ImageBlock({
           canDownload={Boolean(src)}
           onDownload={handleDownload}
           onClose={() => setLightboxBox(null)}
-          onContextMenuCapture={handleContextMenu}
           resolvedSrc={resolvedSrc}
           sourceBox={lightboxBox}
         />
