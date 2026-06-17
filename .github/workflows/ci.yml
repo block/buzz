@@ -583,13 +583,10 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       # MSVC needs windows.h (aws-lc-sys et al.), so this runs on a real Windows
-      # runner with dtolnay/rust-toolchain — hermit, used by the Linux jobs, does
-      # not provide MSVC. Pinned to the same toolchain as release.yml's
-      # release-windows job.
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          targets: x86_64-pc-windows-msvc
-          components: clippy
+      # runner — hermit, used by the Linux jobs, does not provide MSVC. The
+      # toolchain (1.95.0 + clippy via profile = default) comes from the
+      # repo-root rust-toolchain.toml, which the runner's preinstalled rustup
+      # honors on demand; the host triple already is x86_64-pc-windows-msvc.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: windows-msvc
