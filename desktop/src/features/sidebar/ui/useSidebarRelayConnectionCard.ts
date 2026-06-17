@@ -1,9 +1,6 @@
 import * as React from "react";
 
-import {
-  isRelayConnectionDegraded,
-  useRelayConnection,
-} from "@/shared/api/useRelayConnection";
+import { useRelayConnection } from "@/shared/api/useRelayConnection";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
 
@@ -71,10 +68,12 @@ export function useSidebarRelayConnectionCard(
     ? isRelayUnreachableError(errorMessage)
     : false;
   const isRelayConnectionStateDegraded =
-    isRelayConnectionDegraded(relayConnectionState);
+    relayConnectionState === "reconnecting" ||
+    relayConnectionState === "stalled";
   const isRelayConnectionActuallyDegraded =
     hasRelayUnreachableError || isRelayConnectionStateDegraded;
   const isRelayConnectionConnected = relayConnectionState === "connected";
+  const isRelayConnectionDisconnected = relayConnectionState === "disconnected";
   const [isDismissed, setIsDismissed] = React.useState(false);
   const hasSuccess = React.useSyncExternalStore(
     subscribeRelayConnectivitySuccess,
@@ -84,7 +83,9 @@ export function useSidebarRelayConnectionCard(
   const [isWindowVisible, setIsWindowVisible] =
     React.useState(isDocumentVisible);
   const isRelayConnectionSuccess =
-    hasSuccess && !isRelayConnectionActuallyDegraded;
+    hasSuccess &&
+    isRelayConnectionConnected &&
+    !isRelayConnectionActuallyDegraded;
   const canShow = isRelayConnectionActuallyDegraded || isRelayConnectionSuccess;
   const show = canShow && !isDismissed;
   const wasProblemCardVisibleRef = React.useRef(false);
@@ -105,11 +106,11 @@ export function useSidebarRelayConnectionCard(
   }, [isRelayConnectionSuccess, isRelayConnectionActuallyDegraded]);
 
   React.useEffect(() => {
-    if (isRelayConnectionStateDegraded) {
+    if (isRelayConnectionStateDegraded || isRelayConnectionDisconnected) {
       setRelayConnectivitySuccess(relayUrl, false);
       setIsDismissed(false);
     }
-  }, [isRelayConnectionStateDegraded, relayUrl]);
+  }, [isRelayConnectionDisconnected, isRelayConnectionStateDegraded, relayUrl]);
 
   React.useEffect(() => {
     if (isRelayConnectionActuallyDegraded) {

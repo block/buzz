@@ -8,6 +8,14 @@ const PROXY_ERROR =
 const ACCESS_ERROR = "relay unreachable: 403 Forbidden";
 const RELAY_AUTH_ERROR = "Relay authentication rejected.";
 
+type RelayConnectionState =
+  | "connected"
+  | "connecting"
+  | "disconnected"
+  | "idle"
+  | "reconnecting"
+  | "stalled";
+
 async function setChannelsReadError(page: Page, error: string | null) {
   await page.evaluate((nextError) => {
     const testWindow = window as Window & {
@@ -25,6 +33,35 @@ async function setChannelsReadError(page: Page, error: string | null) {
 
     testWindow.__BUZZ_E2E__.mock.channelsReadError = nextError;
   }, error);
+}
+
+async function setRelayConnectionState(
+  page: Page,
+  state: RelayConnectionState,
+) {
+  await page.waitForFunction(
+    () =>
+      typeof (
+        window as Window & {
+          __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: unknown;
+        }
+      ).__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ === "function",
+  );
+  await page.evaluate((nextState) => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (
+        state: RelayConnectionState,
+      ) => void;
+    };
+
+    const setConnectionState =
+      testWindow.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__;
+    if (!setConnectionState) {
+      throw new Error("Mock relay connection state helper is not installed.");
+    }
+
+    setConnectionState(nextState);
+  }, state);
 }
 
 async function expectGenericReconnectCard(page: Page) {
@@ -64,12 +101,25 @@ test("sidebar access failures use the reconnect card", async ({ page }) => {
   await expectGenericReconnectCard(page);
 });
 
-test("sidebar application auth failures stay on the error path", async ({
+test("sidebar stalled relay state uses the reconnect card", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+
+  await page.goto("/");
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+  await setRelayConnectionState(page, "stalled");
+
+  await expectGenericReconnectCard(page);
+});
+
+test("sidebar application auth disconnects stay on the error path", async ({
   page,
 }) => {
   await installMockBridge(page, { channelsReadError: RELAY_AUTH_ERROR });
 
   await page.goto("/");
+  await setRelayConnectionState(page, "disconnected");
 
   await expect(page.getByText(RELAY_AUTH_ERROR)).toBeVisible();
   await expect(page.getByTestId("sidebar-relay-unreachable")).toHaveCount(0);
