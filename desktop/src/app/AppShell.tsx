@@ -298,6 +298,7 @@ export function AppShell() {
     markChannelRead,
     markChannelUnread,
     unreadChannelIds,
+    unreadChannelCounts,
     highPriorityUnreadChannelIds,
     getEffectiveTimestamp: getChannelReadAt,
     readStateVersion,
@@ -897,6 +898,7 @@ export function AppShell() {
                           selectedChannelId={selectedChannelId}
                           selectedView={selectedView}
                           unreadChannelIds={unreadChannelIds}
+                          unreadChannelCounts={unreadChannelCounts}
                           mutedChannelIds={mutedChannelIds}
                           onMuteChannel={muteChannel}
                           onUnmuteChannel={unmuteChannel}

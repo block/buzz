@@ -307,6 +307,7 @@ export function ChannelGroupSection({
   onToggleCollapsed,
   selectedChannelId,
   title,
+  unreadChannelCounts,
   unreadChannelIds,
   sections,
   assignments,
@@ -340,6 +341,7 @@ export function ChannelGroupSection({
   onToggleCollapsed: () => void;
   selectedChannelId: string | null;
   title: string;
+  unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   hasUnread?: boolean;
   onMarkAllRead?: () => void;
@@ -369,6 +371,7 @@ export function ChannelGroupSection({
                     <ChannelMenuButton
                       channel={channel}
                       hasUnread={unreadChannelIds.has(channel.id)}
+                      unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                       isMuted={mutedChannelIds?.has(channel.id)}
                       isActive={
                         isActiveChannel && selectedChannelId === channel.id
@@ -380,6 +383,7 @@ export function ChannelGroupSection({
                   <ChannelMenuButton
                     channel={channel}
                     hasUnread={unreadChannelIds.has(channel.id)}
+                    unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                     isMuted={mutedChannelIds?.has(channel.id)}
                     isActive={
                       isActiveChannel && selectedChannelId === channel.id
@@ -468,6 +472,7 @@ export function CustomChannelSection({
   isCollapsed,
   isActiveChannel,
   selectedChannelId,
+  unreadChannelCounts,
   unreadChannelIds,
   sections,
   assignments,
@@ -498,6 +503,7 @@ export function CustomChannelSection({
   isCollapsed: boolean;
   isActiveChannel: boolean;
   selectedChannelId: string | null;
+  unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   sections: ChannelSection[];
   assignments: Record<string, string>;
@@ -643,6 +649,9 @@ export function CustomChannelSection({
                               <ChannelMenuButton
                                 channel={channel}
                                 hasUnread={unreadChannelIds.has(channel.id)}
+                                unreadCount={
+                                  unreadChannelCounts.get(channel.id) ?? 0
+                                }
                                 isMuted={mutedChannelIds?.has(channel.id)}
                                 isActive={
                                   isActiveChannel &&

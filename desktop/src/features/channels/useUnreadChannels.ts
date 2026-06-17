@@ -4,6 +4,14 @@ import {
   useLiveChannelUpdates,
   type UseLiveChannelUpdatesOptions,
 } from "@/features/channels/useLiveChannelUpdates";
+import {
+  buildChannelThreadRoots,
+  channelUnreadFrontier,
+  countUnreadObservedEvents,
+  mapsEqual,
+  recordObservedUnreadEvent,
+  type ObservedUnreadEvent,
+} from "@/features/channels/unreadChannelCounts";
 import { useReadState } from "@/features/channels/readState/useReadState";
 import {
   getThreadReference,
@@ -245,53 +253,6 @@ function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   return true;
 }
 
-// Build channelId -> set of thread rootIds observed in that channel, derived
-// from the thread-activity log (the same items that feed latestByChannelRef).
-// Used by the sidebar unread scan to fold per-thread read markers into a
-// channel's effective frontier so opening a thread clears the channel dot.
-export function buildChannelThreadRoots(
-  items: readonly ThreadActivityItem[],
-  getRootId: (tags: string[][]) => string | null,
-): Map<string, Set<string>> {
-  const byChannel = new Map<string, Set<string>>();
-  for (const item of items) {
-    const rootId = getRootId(item.tags);
-    if (rootId === null) continue;
-    let roots = byChannel.get(item.channelId);
-    if (!roots) {
-      roots = new Set<string>();
-      byChannel.set(item.channelId, roots);
-    }
-    roots.add(rootId);
-  }
-  return byChannel;
-}
-
-// The channel's effective read frontier for sidebar-unread purposes: its own
-// channel marker folded with the highest OWN thread marker among its observed
-// thread roots. Using the thread OWN marker (not the hierarchical effective
-// value) is deliberate — the hierarchical resolver maps every thread to the
-// ACTIVE channel, so it would borrow the wrong marker for a background channel.
-// An unread reply in a thread keeps the dot until that thread is opened
-// (advancing the thread marker past the reply); a never-read thread (no own
-// marker) contributes nothing and the channel marker governs.
-export function channelUnreadFrontier(
-  channelMarker: number | null,
-  threadRoots: ReadonlySet<string> | undefined,
-  getThreadOwnMarker: (rootId: string) => number | null,
-): number | null {
-  let frontier = channelMarker;
-  if (threadRoots) {
-    for (const rootId of threadRoots) {
-      const own = getThreadOwnMarker(rootId);
-      if (own !== null && (frontier === null || own > frontier)) {
-        frontier = own;
-      }
-    }
-  }
-  return frontier;
-}
-
 export function useUnreadChannels(
   channels: Channel[],
   activeChannel: Channel | null,
@@ -324,6 +285,9 @@ export function useUnreadChannels(
   // change. Stale entries for channels the user has left are silently
   // ignored by the memo (it iterates the current channels list, not the map).
   const latestByChannelRef = React.useRef(new Map<string, number>());
+  const observedUnreadEventsByChannelRef = React.useRef(
+    new Map<string, Map<string, number>>(),
+  );
   const latestHighPriorityByChannelRef = React.useRef(
     new Map<string, number>(),
   );
@@ -388,6 +352,7 @@ export function useUnreadChannels(
   // biome-ignore lint/correctness/useExhaustiveDependencies: pubkey/relayClient are intentional reset signals
   React.useEffect(() => {
     latestByChannelRef.current = new Map();
+    observedUnreadEventsByChannelRef.current = new Map();
     latestHighPriorityByChannelRef.current = new Map();
     forcedUnreadRef.current = new Set();
     caughtUpChannelsRef.current = new Set();
@@ -437,6 +402,7 @@ export function useUnreadChannels(
       // guard suppresses the readStateVersion bump.
       if (clearObserved) {
         latestByChannelRef.current.delete(channelId);
+        observedUnreadEventsByChannelRef.current.delete(channelId);
         latestHighPriorityByChannelRef.current.delete(channelId);
         bumpLatestVersion();
       }
@@ -460,8 +426,23 @@ export function useUnreadChannels(
   // and external authors, so the map is always a strict subset of "newest
   // external trigger message this client has observed."
   const callerOnChannelMessage = liveUpdateOptions.onChannelMessage;
+  const recordUnreadEvent = React.useCallback(
+    (channelId: string, event: ObservedUnreadEvent) => {
+      recordObservedUnreadEvent(
+        observedUnreadEventsByChannelRef.current,
+        channelId,
+        event,
+        CATCH_UP_LIMIT,
+      );
+    },
+    [],
+  );
   const handleChannelMessage = React.useCallback(
     (channelId: string, event: RelayEvent) => {
+      recordUnreadEvent(channelId, {
+        id: event.id,
+        createdAt: event.created_at,
+      });
       const current = latestByChannelRef.current.get(channelId) ?? 0;
       if (event.created_at > current) {
         latestByChannelRef.current.set(channelId, event.created_at);
@@ -488,7 +469,7 @@ export function useUnreadChannels(
 
       callerOnChannelMessage?.(channelId, event);
     },
-    [callerOnChannelMessage, normalizedPubkey],
+    [callerOnChannelMessage, normalizedPubkey, recordUnreadEvent],
   );
 
   const handleSelfChannelMessage = React.useCallback(
@@ -618,6 +599,7 @@ export function useUnreadChannels(
           ok: true;
           maxExternal: number;
           maxHighPriority: number;
+          unreadEvents: ObservedUnreadEvent[];
           threadReplies: ThreadActivityItem[];
         }
       | { channelId: string; ok: false };
@@ -669,6 +651,7 @@ export function useUnreadChannels(
           // applying the notification filter to both.
           let maxExternal = 0;
           let maxHighPriority = 0;
+          const unreadEvents: ObservedUnreadEvent[] = [];
           const threadReplies: ThreadActivityItem[] = [];
           const ch = channels.find((c) => c.id === channelId);
           const chType = ch?.channelType;
@@ -698,6 +681,7 @@ export function useUnreadChannels(
             if (event.created_at > maxExternal) {
               maxExternal = event.created_at;
             }
+            unreadEvents.push({ id: event.id, createdAt: event.created_at });
             if (
               chType === "dm" ||
               (normalizedPubkey !== null &&
@@ -727,6 +711,7 @@ export function useUnreadChannels(
             ok: true,
             maxExternal,
             maxHighPriority,
+            unreadEvents,
             threadReplies,
           };
         } catch {
@@ -745,9 +730,20 @@ export function useUnreadChannels(
           caughtUpChannelsRef.current.delete(result.channelId);
           continue;
         }
-        const { channelId, maxExternal, maxHighPriority, threadReplies } =
-          result;
+        const {
+          channelId,
+          maxExternal,
+          maxHighPriority,
+          unreadEvents,
+          threadReplies,
+        } = result;
         allThreadReplies.push(...threadReplies);
+        if (unreadEvents.length > 0) {
+          for (const event of unreadEvents) {
+            recordUnreadEvent(channelId, event);
+          }
+          didAdvance = true;
+        }
         if (maxExternal > 0) {
           const readAtNow = getEffectiveTimestamp(channelId) ?? 0;
           if (maxExternal > readAtNow) {
@@ -808,6 +804,7 @@ export function useUnreadChannels(
     getEffectiveTimestamp,
     isReadStateReady,
     normalizedPubkey,
+    recordUnreadEvent,
     relayClient,
   ]);
 
@@ -825,11 +822,13 @@ export function useUnreadChannels(
         return {
           unreadChannelIds: new Set<string>(),
           highPriorityUnreadChannelIds: new Set<string>(),
+          unreadChannelCounts: new Map<string, number>(),
         };
       }
 
       const unread = new Set<string>();
       const highPriority = new Set<string>();
+      const counts = new Map<string, number>();
 
       // Map each channel to the thread roots observed in it, so a channel's
       // frontier can fold in per-thread read markers (Option A): opening a
@@ -847,6 +846,7 @@ export function useUnreadChannels(
         if (forcedUnreadRef.current.has(channel.id)) {
           // Forced-unread is dot tier only — not high-priority.
           unread.add(channel.id);
+          counts.set(channel.id, 1);
           continue;
         }
 
@@ -861,6 +861,11 @@ export function useUnreadChannels(
         if (readAt !== null && latest <= readAt) continue;
 
         unread.add(channel.id);
+        const observedEvents = observedUnreadEventsByChannelRef.current.get(
+          channel.id,
+        );
+        const unreadCount = countUnreadObservedEvents(observedEvents, readAt);
+        counts.set(channel.id, Math.max(unreadCount, 1));
 
         // DM channels: any unread DM is high-priority.
         if (channel.channelType === "dm") {
@@ -882,6 +887,7 @@ export function useUnreadChannels(
       return {
         unreadChannelIds: unread,
         highPriorityUnreadChannelIds: highPriority,
+        unreadChannelCounts: counts,
       };
     }, [
       activeChannelId,
@@ -897,6 +903,9 @@ export function useUnreadChannels(
   // so downstream memos don't re-run on every render when sets are equal.
   const prevUnreadRef = React.useRef<ReadonlySet<string>>(new Set());
   const prevHighPriorityRef = React.useRef<ReadonlySet<string>>(new Set());
+  const prevUnreadCountsRef = React.useRef<ReadonlyMap<string, number>>(
+    new Map(),
+  );
 
   const unreadChannelIds = setsEqual(
     rawUnread.unreadChannelIds,
@@ -913,6 +922,14 @@ export function useUnreadChannels(
     ? prevHighPriorityRef.current
     : rawUnread.highPriorityUnreadChannelIds;
   prevHighPriorityRef.current = highPriorityUnreadChannelIds;
+
+  const unreadChannelCounts = mapsEqual(
+    rawUnread.unreadChannelCounts,
+    prevUnreadCountsRef.current,
+  )
+    ? prevUnreadCountsRef.current
+    : rawUnread.unreadChannelCounts;
+  prevUnreadCountsRef.current = unreadChannelCounts;
 
   const unreadChannelIdsRef = React.useRef(unreadChannelIds);
   unreadChannelIdsRef.current = unreadChannelIds;
@@ -935,6 +952,7 @@ export function useUnreadChannels(
 
   return {
     unreadChannelIds,
+    unreadChannelCounts,
     highPriorityUnreadChannelIds,
     markAllChannelsRead,
     markChannelRead,

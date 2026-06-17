@@ -5,8 +5,8 @@ import { computeChannelUnreadMarker } from "../messages/lib/unreadMarker.ts";
 import {
   buildChannelThreadRoots,
   channelUnreadFrontier,
-  resolveChannelReadMarker,
-} from "./useUnreadChannels.ts";
+} from "./unreadChannelCounts.ts";
+import { resolveChannelReadMarker } from "./useUnreadChannels.ts";
 
 function topLevel(id, createdAt) {
   return { id, createdAt, author: "a", time: "", body: "", depth: 0 };

@@ -23,7 +23,6 @@ import * as React from "react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
-import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import type { Workspace } from "@/features/workspaces/types";
 import { AddWorkspaceDialog } from "@/features/workspaces/ui/AddWorkspaceDialog";
 import { useDeferredLoad } from "@/shared/hooks/useDeferredStartup";
@@ -107,6 +106,7 @@ type AppSidebarProps = {
     | "workflows"
     | "pulse"
     | "projects";
+  unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   workspaces: Workspace[];
   onAddWorkspace: (workspace: Workspace) => void;
@@ -187,6 +187,7 @@ export function AppSidebar({
   errorMessage,
   selectedChannelId,
   selectedView,
+  unreadChannelCounts,
   unreadChannelIds,
   workspaces,
   onAddWorkspace,
@@ -400,16 +401,6 @@ export function AppSidebar({
     isLoading,
     streamChannels,
   });
-  const shouldLoadAgentCount = useDeferredLoad({
-    immediate: selectedView === "agents",
-    timeoutMs: 250,
-  });
-  const managedAgentsQuery = useManagedAgentsQuery({
-    enabled: shouldLoadAgentCount,
-  });
-  const totalAgentCount = managedAgentsQuery.data?.length ?? 0;
-  const shouldShowAgentCount =
-    totalAgentCount > 0 || managedAgentsQuery.isFetched;
   const resolvedDisplayName =
     profile?.displayName?.trim() ||
     fallbackDisplayName?.trim() ||
@@ -515,14 +506,6 @@ export function AppSidebar({
               <Bot className="h-4 w-4" />
               <span>Agents</span>
             </SidebarMenuButton>
-            {shouldShowAgentCount ? (
-              <SidebarMenuBadge
-                className="right-2 rounded-full bg-sidebar-accent/70 px-1.5 text-2xs leading-none text-sidebar-foreground/75 peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
-                data-testid="sidebar-agents-count"
-              >
-                <span className="leading-none">{totalAgentCount}</span>
-              </SidebarMenuBadge>
-            ) : null}
           </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton
@@ -563,7 +546,7 @@ export function AppSidebar({
             testId="sidebar-more-unread-above"
           />
         ) : null}
-        <SidebarContent className="pb-32" ref={scrollRef}>
+        <SidebarContent ref={scrollRef}>
           {isLoading ? (
             <SidebarLoadingContent shape={sidebarLoadingShape} />
           ) : null}
@@ -592,6 +575,7 @@ export function AppSidebar({
                   onToggleCollapsed={() => toggleCollapsedGroup("starred")}
                   selectedChannelId={selectedChannelId}
                   title="Starred"
+                  unreadChannelCounts={unreadChannelCounts}
                   unreadChannelIds={unreadChannelIds}
                   mutedChannelIds={mutedChannelIds}
                   onMuteChannel={onMuteChannel}
@@ -622,6 +606,7 @@ export function AppSidebar({
                     isCollapsed={collapsedSections[section.id] ?? false}
                     isActiveChannel={selectedView === "channel"}
                     selectedChannelId={selectedChannelId}
+                    unreadChannelCounts={unreadChannelCounts}
                     unreadChannelIds={unreadChannelIds}
                     sections={channelSections}
                     assignments={channelAssignments}
@@ -675,6 +660,7 @@ export function AppSidebar({
                   onToggleCollapsed={() => toggleCollapsedGroup("channels")}
                   selectedChannelId={selectedChannelId}
                   title="Channels"
+                  unreadChannelCounts={unreadChannelCounts}
                   unreadChannelIds={unreadChannelIds}
                   sections={channelSections}
                   assignments={channelAssignments}
@@ -708,6 +694,7 @@ export function AppSidebar({
                   onToggleCollapsed={() => toggleCollapsedGroup("forums")}
                   selectedChannelId={selectedChannelId}
                   title="Forums"
+                  unreadChannelCounts={unreadChannelCounts}
                   unreadChannelIds={unreadChannelIds}
                   mutedChannelIds={mutedChannelIds}
                   onMuteChannel={onMuteChannel}
@@ -746,6 +733,7 @@ export function AppSidebar({
                 selectedChannelId={selectedChannelId}
                 testId="dm-list"
                 title="Direct Messages"
+                unreadChannelCounts={unreadChannelCounts}
                 unreadChannelIds={unreadChannelIds}
                 mutedChannelIds={mutedChannelIds}
                 onMuteChannel={onMuteChannel}
@@ -790,7 +778,7 @@ export function AppSidebar({
           />
         ) : null}
 
-        <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
+        <SidebarFooter className="z-30 shrink-0 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarProfileCard
