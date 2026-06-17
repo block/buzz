@@ -13,7 +13,7 @@ use super::PersonaRecord;
 use crate::app_state::AppState;
 
 /// The JSON body stored in a persona event's content field.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersonaEventContent {
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -129,6 +129,74 @@ pub async fn fetch_persona_events(state: &AppState) -> Result<Vec<nostr::Event>,
     crate::relay::query_relay(state, &[filter]).await
 }
 
+/// SHA-256 (lowercase hex) of a persona's canonical content JSON.
+///
+/// The drift indicator compares this digest, not event timestamps, to decide
+/// whether an agent's persona snapshot is stale — timestamps are fragile across
+/// clock skew and export/import round-trips. `PersonaEventContent` field order
+/// is fixed by the struct definition, so `serde_json` produces a stable
+/// canonical encoding.
+pub fn persona_content_hash(content: &PersonaEventContent) -> String {
+    use sha2::{Digest, Sha256};
+    let json = serde_json::to_vec(content).unwrap_or_default();
+    let digest = Sha256::digest(&json);
+    hex::encode(digest)
+}
+
+/// Project a `PersonaRecord` onto the content fields published in persona
+/// events and engrams. Centralizes the field mapping so a new persona field is
+/// added in exactly one place.
+pub fn persona_event_content(record: &PersonaRecord) -> PersonaEventContent {
+    PersonaEventContent {
+        display_name: record.display_name.clone(),
+        avatar_url: record.avatar_url.clone(),
+        system_prompt: record.system_prompt.clone(),
+        runtime: record.runtime.clone(),
+        model: record.model.clone(),
+        provider: record.provider.clone(),
+        name_pool: record.name_pool.clone(),
+    }
+}
+
+/// A persona's spawn-relevant config, pinned onto a `ManagedAgentRecord` at
+/// create time. After the snapshot, spawn and deploy read these fields off the
+/// record and never the live persona, so an agent stays pinned to the config
+/// it was created with — restart reuses the snapshot, delete+respawn rewrites
+/// it.
+pub struct PersonaSnapshot {
+    pub system_prompt: Option<String>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    /// Persona env layered under the agent's own overrides (agent wins). This
+    /// is the complete env map the agent spawns with — no live persona lookup.
+    pub env_vars: BTreeMap<String, String>,
+    /// `persona_content_hash` of the persona at snapshot time; the drift basis.
+    pub source_version: String,
+}
+
+/// Build the pinned snapshot for an agent created from `persona`.
+///
+/// `agent_env_overrides` are the agent's own env vars (persona-independent);
+/// they win over persona env on key collision, matching spawn-time precedence
+/// (persona env < agent env). The persona's `system_prompt` is always present,
+/// so it is wrapped in `Some`.
+pub fn persona_snapshot(
+    persona: &PersonaRecord,
+    agent_env_overrides: &BTreeMap<String, String>,
+) -> PersonaSnapshot {
+    let mut env_vars = persona.env_vars.clone();
+    for (key, value) in agent_env_overrides {
+        env_vars.insert(key.clone(), value.clone());
+    }
+    PersonaSnapshot {
+        system_prompt: Some(persona.system_prompt.clone()),
+        model: persona.model.clone(),
+        provider: persona.provider.clone(),
+        env_vars,
+        source_version: persona_content_hash(&persona_event_content(persona)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +309,41 @@ mod tests {
         // Deserialized persona is always non-builtin and active
         assert!(!restored.is_builtin);
         assert!(restored.is_active);
+    }
+
+    #[test]
+    fn persona_content_hash_is_deterministic() {
+        let content = PersonaEventContent {
+            display_name: "Test".to_string(),
+            avatar_url: None,
+            system_prompt: "Hello".to_string(),
+            runtime: None,
+            model: None,
+            provider: None,
+            name_pool: vec![],
+        };
+        let hash1 = persona_content_hash(&content);
+        let hash2 = persona_content_hash(&content);
+        assert_eq!(hash1, hash2);
+        assert_eq!(hash1.len(), 64); // SHA-256 hex
+    }
+
+    #[test]
+    fn persona_content_hash_changes_on_edit() {
+        let content1 = PersonaEventContent {
+            display_name: "Test".to_string(),
+            avatar_url: None,
+            system_prompt: "Hello".to_string(),
+            runtime: None,
+            model: None,
+            provider: None,
+            name_pool: vec![],
+        };
+        let mut content2 = content1.clone();
+        content2.system_prompt = "Goodbye".to_string();
+        assert_ne!(
+            persona_content_hash(&content1),
+            persona_content_hash(&content2)
+        );
     }
 }

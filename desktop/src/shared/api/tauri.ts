@@ -214,6 +214,9 @@ export type RawManagedAgent = {
   parallelism: number;
   system_prompt: string | null;
   model: string | null;
+  provider: string | null;
+  persona_out_of_date: boolean;
+  persona_orphaned: boolean;
   mcp_toolsets: string | null;
   env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
@@ -869,6 +872,10 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     parallelism: agent.parallelism,
     systemPrompt: agent.system_prompt,
     model: agent.model,
+    // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
+    provider: agent.provider ?? null,
+    personaOutOfDate: agent.persona_out_of_date ?? false,
+    personaOrphaned: agent.persona_orphaned ?? false,
     mcpToolsets: agent.mcp_toolsets,
     envVars: agent.env_vars ?? {},
     status: agent.status,

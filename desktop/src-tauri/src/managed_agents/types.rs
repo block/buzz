@@ -123,6 +123,20 @@ pub struct ManagedAgentRecord {
     /// creation by matching this ID against the fresh session/new response.
     #[serde(default)]
     pub model: Option<String>,
+    /// LLM inference provider snapshotted from the persona at create time
+    /// (e.g. 'databricks', 'anthropic'). Spawn and deploy read this, never the
+    /// live persona — so the agent stays pinned to the provider it was created
+    /// with across restarts. `#[serde(default)]` so pre-existing records
+    /// deserialize as `None` and get backfilled on first load.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Content hash of the persona at the time this agent was created — the
+    /// `persona_content_hash` of the snapshot in `system_prompt` / `model` /
+    /// `provider` / `env_vars`. The Agents menu compares it against the linked
+    /// persona's current hash to flag a stale (out-of-date) instance. `None`
+    /// for non-persona agents and for pre-existing records pending backfill.
+    #[serde(default)]
+    pub persona_source_version: Option<String>,
     /// Comma-separated toolset string forwarded as BUZZ_TOOLSETS to the MCP subprocess.
     /// When None, the MCP server uses its own default ("default" toolset).
     #[serde(default)]
@@ -231,6 +245,19 @@ pub struct ManagedAgentSummary {
     pub parallelism: u32,
     pub system_prompt: Option<String>,
     pub model: Option<String>,
+    /// LLM inference provider, from the agent's pinned record snapshot.
+    pub provider: Option<String>,
+    /// `true` when the linked persona has been edited since this agent was
+    /// created — the running agent uses the older pinned snapshot. The UI
+    /// flags it and tells the user to delete + respawn to pick up the edit.
+    /// Always `false` for non-persona agents and for orphaned agents (their
+    /// persona is gone, so there is nothing newer to drift toward).
+    pub persona_out_of_date: bool,
+    /// `true` when the agent was created from a persona that no longer exists.
+    /// Distinct from out-of-date: there is no current persona to respawn into,
+    /// so the UI should not prompt a respawn — the pinned snapshot is all the
+    /// config that remains.
+    pub persona_orphaned: bool,
     pub mcp_toolsets: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env_vars: BTreeMap<String, String>,

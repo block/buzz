@@ -109,7 +109,7 @@ use huddle::{
     speak_agent_message, start_huddle, start_stt_pipeline,
 };
 use managed_agents::{
-    ensure_nest, kill_stale_tracked_processes, load_managed_agents,
+    backfill_persona_snapshots, ensure_nest, kill_stale_tracked_processes, load_managed_agents,
     restore_managed_agents_on_launch, save_managed_agents, sync_managed_agent_processes,
     try_regenerate_nest, BackendKind, ManagedAgentProcess,
 };
@@ -554,6 +554,16 @@ pub fn run() {
 
             if let Err(e) = managed_agents::sync_team_personas(&app_handle) {
                 eprintln!("buzz-desktop: sync-team-personas: {e}");
+            }
+
+            // Backfill the pinned persona snapshot for any pre-existing agent
+            // that predates the record-authoritative-spawn cutover (persona_id
+            // set but no source_version). Must run before
+            // restore_managed_agents_on_launch so no agent spawns from an empty
+            // snapshot. Synchronous and best-effort — a failure here must not
+            // block launch, but a missing persona is logged loudly inside.
+            if let Err(e) = backfill_persona_snapshots(&app_handle) {
+                eprintln!("buzz-desktop: persona-snapshot backfill failed: {e}");
             }
 
             // Store the AppHandle so huddle commands can emit `huddle-state-changed`

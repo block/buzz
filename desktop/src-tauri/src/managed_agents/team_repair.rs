@@ -289,6 +289,8 @@ mod tests {
             parallelism: 1,
             system_prompt: None,
             model: None,
+            provider: None,
+            persona_source_version: None,
             mcp_toolsets: None,
             start_on_app_launch: false,
             runtime_pid: None,

@@ -140,6 +140,8 @@ fn fixture(
         parallelism: 1,
         system_prompt: None,
         model: None,
+        provider: None,
+        persona_source_version: None,
         mcp_toolsets: None,
         env_vars: std::collections::BTreeMap::new(),
         start_on_app_launch: false,
@@ -341,7 +343,157 @@ fn persona_with_no_model_clears_stale_record_model() {
     assert_eq!(model, None);
 }
 
-// ── runtime_metadata_env_vars tests ─────────────────────────────────────
+// ── persona pin/refresh acceptance (Phase 4) ────────────────────────────
+//
+// The full lifecycle Will specified: create from P0, edit P0→P1 (env_vars
+// included), restart stays pinned to P0, delete+respawn refreshes to P1. We
+// exercise it at the pure seams that `create_managed_agent` and
+// `build_managed_agent_summary` are built from: `persona_snapshot` (what create
+// writes onto the record) and `persona_drift_state` (the Agents-menu badge).
+// The env_var assertions are load-bearing — the credential pin is the field
+// that would silently leak on restart if spawn re-read the live persona.
+
+use crate::managed_agents::persona_events::persona_snapshot;
+use std::collections::BTreeMap;
+
+/// Apply a persona snapshot onto a record, mirroring `create_managed_agent`:
+/// snapshotted prompt/model/provider/env_vars/source_version are pinned, with
+/// the system_prompt unwrapped (the persona always carries one).
+fn pin_persona(record: &mut ManagedAgentRecord, persona: &crate::managed_agents::PersonaRecord) {
+    let snapshot = persona_snapshot(persona, &record.env_vars);
+    record.persona_id = Some(persona.id.clone());
+    record.system_prompt = snapshot.system_prompt;
+    record.model = snapshot.model;
+    record.provider = snapshot.provider;
+    record.env_vars = snapshot.env_vars;
+    record.persona_source_version = Some(snapshot.source_version);
+}
+
+fn persona_v(id: &str, prompt: &str, env: &[(&str, &str)]) -> crate::managed_agents::PersonaRecord {
+    let mut p = persona_with_provider(id, prompt, Some("model-v"), Some("anthropic"));
+    p.env_vars = env
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    p
+}
+
+#[test]
+fn create_pins_full_persona_snapshot_including_env_vars() {
+    let p0 = persona_v("p", "prompt-v0", &[("ANTHROPIC_API_KEY", "key-v0")]);
+    let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    pin_persona(&mut record, &p0);
+
+    assert_eq!(record.system_prompt.as_deref(), Some("prompt-v0"));
+    assert_eq!(record.provider.as_deref(), Some("anthropic"));
+    assert_eq!(
+        record.env_vars.get("ANTHROPIC_API_KEY").map(String::as_str),
+        Some("key-v0"),
+        "create must pin persona env_vars — the credential pin"
+    );
+    assert!(record.persona_source_version.is_some());
+}
+
+#[test]
+fn restart_after_persona_edit_stays_pinned_to_old_snapshot() {
+    // Create from P0.
+    let p0 = persona_v("p", "prompt-v0", &[("ANTHROPIC_API_KEY", "key-v0")]);
+    let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    pin_persona(&mut record, &p0);
+
+    // Edit the persona to P1 (prompt + credential change). Restart reuses the
+    // SAME record — nothing rewrites the snapshot — so spawn reads P0 fields.
+    let p1 = persona_v("p", "prompt-v1", &[("ANTHROPIC_API_KEY", "key-v1")]);
+
+    assert_eq!(
+        record.system_prompt.as_deref(),
+        Some("prompt-v0"),
+        "restart must keep the pinned prompt"
+    );
+    assert_eq!(
+        record.env_vars.get("ANTHROPIC_API_KEY").map(String::as_str),
+        Some("key-v0"),
+        "restart must NOT pick up the edited credential — the CRITICAL"
+    );
+
+    // The badge flips: the record's snapshot now lags the edited persona.
+    let (out_of_date, orphaned) = super::persona_drift_state(&record, std::slice::from_ref(&p1));
+    assert!(
+        out_of_date,
+        "edited persona must mark the instance out of date"
+    );
+    assert!(!orphaned);
+}
+
+#[test]
+fn respawn_after_persona_edit_refreshes_to_new_snapshot() {
+    let p0 = persona_v("p", "prompt-v0", &[("ANTHROPIC_API_KEY", "key-v0")]);
+    let p1 = persona_v("p", "prompt-v1", &[("ANTHROPIC_API_KEY", "key-v1")]);
+
+    // Respawn = delete the old record + create a fresh one. create re-snapshots
+    // the now-current persona (P1).
+    let mut respawned = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    pin_persona(&mut respawned, &p1);
+
+    assert_eq!(respawned.system_prompt.as_deref(), Some("prompt-v1"));
+    assert_eq!(
+        respawned
+            .env_vars
+            .get("ANTHROPIC_API_KEY")
+            .map(String::as_str),
+        Some("key-v1"),
+        "respawn must refresh the credential to the edited persona"
+    );
+
+    // Now pinned to current persona → not out of date.
+    let (out_of_date, orphaned) = super::persona_drift_state(&respawned, std::slice::from_ref(&p1));
+    assert!(!out_of_date, "respawn pins to current persona — no drift");
+    assert!(!orphaned);
+
+    // Sanity: P0 differs from P1, so a record still pinned to P0 would drift.
+    let mut stale = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    pin_persona(&mut stale, &p0);
+    assert!(super::persona_drift_state(&stale, std::slice::from_ref(&p1)).0);
+}
+
+#[test]
+fn agent_env_overrides_win_over_persona_env_in_snapshot() {
+    // Agent-level env_vars (input.env_vars) layer over persona env on collision,
+    // matching spawn precedence (persona env < agent env).
+    let persona = persona_v("p", "prompt", &[("ANTHROPIC_API_KEY", "persona-key")]);
+    let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    record.env_vars = BTreeMap::from([("ANTHROPIC_API_KEY".to_string(), "agent-key".to_string())]);
+    pin_persona(&mut record, &persona);
+
+    assert_eq!(
+        record.env_vars.get("ANTHROPIC_API_KEY").map(String::as_str),
+        Some("agent-key"),
+        "agent override must win over persona env"
+    );
+}
+
+#[test]
+fn deleted_persona_is_orphaned_not_out_of_date() {
+    let p0 = persona_v("p", "prompt-v0", &[("KEY", "v0")]);
+    let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    pin_persona(&mut record, &p0);
+
+    // Persona no longer in the catalog → orphaned, never out of date (no
+    // current persona to respawn into).
+    let (out_of_date, orphaned) = super::persona_drift_state(&record, &[]);
+    assert!(!out_of_date);
+    assert!(orphaned);
+}
+
+#[test]
+fn non_persona_agent_never_drifts() {
+    // A hand-built agent (no persona_id) has nothing to drift from.
+    let record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
+    assert_eq!(record.persona_id, None);
+    let (out_of_date, orphaned) = super::persona_drift_state(&record, &[]);
+    assert!(!out_of_date);
+    assert!(!orphaned);
+}
 
 use super::runtime_metadata_env_vars;
 

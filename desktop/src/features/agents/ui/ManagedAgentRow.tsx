@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import {
+  AlertTriangle,
   ChevronDown,
   ChevronRight,
   Clipboard,
@@ -256,6 +257,12 @@ function AgentSummary({
               <Badge variant="secondary">{personaLabel}</Badge>
             ) : null}
             <AgentOriginBadge agent={agent} />
+            {agent.personaOutOfDate ? (
+              <Badge className="gap-1" variant="warning">
+                <AlertTriangle className="h-3 w-3" />
+                Out of date
+              </Badge>
+            ) : null}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <span className="font-mono">{truncatePubkey(agent.pubkey)}</span>
@@ -267,6 +274,12 @@ function AgentSummary({
               <span>Remote deployment</span>
             )}
           </div>
+          {agent.personaOutOfDate ? (
+            <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+              Persona updated since this agent was created. Delete and respawn
+              to apply the new configuration.
+            </p>
+          ) : null}
           {channelNames.length > 0 ? (
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
               {channelNames.map((channel) => (

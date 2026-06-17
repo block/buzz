@@ -1282,6 +1282,35 @@ pub fn sync_managed_agent_processes(
     changed
 }
 
+/// Classify an agent's persona against the live catalog for the Agents-menu
+/// drift indicator. Returns `(out_of_date, orphaned)`.
+///
+/// Drift basis is the RECORD's `persona_source_version`, never the engram:
+/// - persona_id set + persona present: out_of_date when the snapshot hash
+///   differs from the persona's current content hash.
+/// - persona_id set + persona gone: orphaned (no current hash to respawn into,
+///   so never out_of_date — we must not tell the user to respawn into nothing).
+/// - no persona_id: neither — a hand-built agent has no persona to drift from.
+fn persona_drift_state(
+    record: &ManagedAgentRecord,
+    personas: &[crate::managed_agents::types::PersonaRecord],
+) -> (bool, bool) {
+    let Some(persona_id) = record.persona_id.as_deref() else {
+        return (false, false);
+    };
+    let Some(persona) = personas.iter().find(|p| p.id == persona_id) else {
+        return (false, true);
+    };
+    let current = crate::managed_agents::persona_events::persona_content_hash(
+        &crate::managed_agents::persona_events::persona_event_content(persona),
+    );
+    let out_of_date = record
+        .persona_source_version
+        .as_deref()
+        .is_some_and(|pinned| pinned != current);
+    (out_of_date, false)
+}
+
 pub fn build_managed_agent_summary(
     app: &AppHandle,
     record: &ManagedAgentRecord,
@@ -1339,16 +1368,11 @@ pub fn build_managed_agent_summary(
         }
     };
 
-    // Resolve the effective model and system_prompt from the linked persona
-    // (mirrors spawn-time logic) so the UI displays the current persona values,
-    // not the stale record snapshot.
-    let (effective_prompt, effective_model, _effective_provider) =
-        resolve_effective_prompt_model_provider(
-            record.persona_id.as_deref(),
-            personas,
-            record.system_prompt.clone(),
-            record.model.clone(),
-        );
+    // Display contract: show the pinned record snapshot — what the agent
+    // actually runs — not the live persona. The drift flags below signal when
+    // the snapshot has fallen behind an edited persona; showing live values
+    // next to an "out of date" badge would contradict it.
+    let (persona_out_of_date, persona_orphaned) = persona_drift_state(record, personas);
 
     Ok(ManagedAgentSummary {
         pubkey: record.pubkey.clone(),
@@ -1363,8 +1387,11 @@ pub fn build_managed_agent_summary(
         idle_timeout_seconds: record.idle_timeout_seconds,
         max_turn_duration_seconds: record.max_turn_duration_seconds,
         parallelism: record.parallelism,
-        system_prompt: effective_prompt,
-        model: effective_model,
+        system_prompt: record.system_prompt.clone(),
+        model: record.model.clone(),
+        provider: record.provider.clone(),
+        persona_out_of_date,
+        persona_orphaned,
         mcp_toolsets: record.mcp_toolsets.clone(),
         env_vars: record.env_vars.clone(),
         backend: record.backend.clone(),
@@ -1451,10 +1478,12 @@ pub(crate) fn build_respond_to_env(
     Ok((set, remove))
 }
 
-/// Resolve the effective system prompt, model, and provider for a spawn. The
-/// linked persona always wins so persona edits propagate on the next spawn; the
-/// record snapshot is the fallback only when no persona is linked or it was
-/// deleted. Provider comes from the persona (the record has no provider field).
+/// Resolve the effective system prompt, model, and provider from the *live*
+/// persona for **display and model-discovery only** — the ModelPicker shows the
+/// current persona model as selected. The spawn and deploy paths deliberately
+/// do NOT use this; they read the pinned record snapshot so a running agent
+/// stays on the config it was created with. The linked persona wins here; the
+/// record values are the fallback when no persona is linked or it was deleted.
 pub(crate) fn resolve_effective_prompt_model_provider(
     persona_id: Option<&str>,
     personas: &[crate::managed_agents::types::PersonaRecord],
@@ -1606,18 +1635,16 @@ pub fn spawn_agent_child(
         command.env("BUZZ_ACP_PERSONA_NAME", persona_name);
     }
 
-    // Resolve system prompt, model, and provider: the linked persona is the
-    // source of truth, so persona edits reach the agent on the next spawn. Fall
-    // back to the record snapshot only when no persona is linked or it was
-    // deleted. Provider flows from the persona (the record has no provider).
-    let personas = super::load_personas(app).unwrap_or_default();
-    let (effective_prompt, effective_model, effective_provider) =
-        resolve_effective_prompt_model_provider(
-            record.persona_id.as_deref(),
-            &personas,
-            record.system_prompt.clone(),
-            record.model.clone(),
-        );
+    // System prompt, model, and provider come from the record snapshot — the
+    // record is the authoritative spawn source. For persona-created agents the
+    // snapshot was pinned at create (see `create_managed_agent`); for others
+    // these are the user-supplied values. Reading the record (never the live
+    // persona) is what keeps a running agent pinned across restarts: a persona
+    // edit reaches the agent only via delete+respawn, which rewrites the
+    // snapshot.
+    let effective_prompt = record.system_prompt.clone();
+    let effective_model = record.model.clone();
+    let effective_provider = record.provider.clone();
 
     if let Some(prompt) = &effective_prompt {
         command.env("BUZZ_ACP_SYSTEM_PROMPT", prompt);
@@ -1710,19 +1737,24 @@ pub fn spawn_agent_child(
         command.env(key, value);
     }
 
-    // ── User env vars: persona first, then per-agent (last wins) ────────
+    // ── User env vars: the record snapshot ─────────────────────────────
     //
-    // Precedence: desktop parent env < persona env_vars < agent env_vars.
-    // These writes go LAST so user-provided values win over every Buzz-set
-    // env above — EXCEPT reserved keys (BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY,
-    // BUZZ_AUTH_TAG, BUZZ_API_TOKEN, BUZZ_ACP_PRIVATE_KEY,
-    // BUZZ_ACP_API_TOKEN), which `merged_user_env` strips. Those carry
-    // Buzz's identity and must never be GUI-overridable.
-    // Fail closed on persona-lookup errors: persona env_vars carry API
-    // credentials, so silently substituting an empty map would spawn an
-    // unauthenticated agent and surface as a confusing downstream auth error.
-    let persona_env = super::env_vars::resolve_persona_env(app, record.persona_id.as_deref())?;
-    for (key, value) in super::env_vars::merged_user_env(&persona_env, &record.env_vars) {
+    // The record's `env_vars` is the complete, pinned env map — persona env
+    // (snapshotted at create) already merged under the agent's own overrides.
+    // We read it directly and never look up the live persona, so credential
+    // edits on the persona reach the agent only via delete+respawn (which
+    // rewrites the snapshot), not on a plain restart. `merged_user_env` with an
+    // empty persona map still applies the reserved-key / malformed-key / NUL
+    // filtering as defense-in-depth for older on-disk records.
+    //
+    // These writes go LAST so user-provided values win over every Buzz-set env
+    // above — EXCEPT reserved keys (BUZZ_PRIVATE_KEY, NOSTR_PRIVATE_KEY,
+    // BUZZ_AUTH_TAG, BUZZ_API_TOKEN, BUZZ_ACP_PRIVATE_KEY, BUZZ_ACP_API_TOKEN),
+    // which `merged_user_env` strips. Those carry Buzz's identity and must
+    // never be GUI-overridable.
+    for (key, value) in
+        super::env_vars::merged_user_env(&std::collections::BTreeMap::new(), &record.env_vars)
+    {
         command.env(key, value);
     }
 

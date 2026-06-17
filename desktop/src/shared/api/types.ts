@@ -283,6 +283,21 @@ export type ManagedAgent = {
   parallelism: number;
   systemPrompt: string | null;
   model: string | null;
+  /** LLM inference provider, from the agent's pinned record snapshot. */
+  provider: string | null;
+  /**
+   * `true` when the linked persona has been edited since this agent was
+   * created — the running agent uses the older pinned snapshot. Surface a
+   * "out of date" marker and prompt the user to delete + respawn to update.
+   * Always `false` for non-persona agents and for orphaned agents.
+   */
+  personaOutOfDate: boolean;
+  /**
+   * `true` when the agent's linked persona no longer exists. Distinct from
+   * out-of-date: there is no current persona to respawn into, so do not prompt
+   * a respawn — the pinned snapshot is all the config that remains.
+   */
+  personaOrphaned: boolean;
   mcpToolsets: string | null;
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;

@@ -140,39 +140,20 @@ async fn start_local_agent_with_preflight(
 
 /// Build the standard agent JSON payload for provider deploy calls.
 ///
-/// Fails closed if the agent points at a `persona_id` we can't load — persona
-/// env_vars typically hold API credentials, and silently deploying with an
-/// empty map would surface as an opaque 401 from the provider.
-fn build_deploy_payload(
-    app: &AppHandle,
-    record: &ManagedAgentRecord,
-) -> Result<serde_json::Value, String> {
-    // Merge persona env_vars + agent env_vars for provider deploy. Same
-    // precedence as local spawn: persona first, agent overrides last. Without
-    // this, provider-backed agents wouldn't receive credentials saved on the
-    // persona or the agent itself.
-    let persona_env =
-        crate::managed_agents::resolve_persona_env(app, record.persona_id.as_deref())?;
-    let merged_env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
+/// Reads the agent's pinned record snapshot — `env_vars`, `model`, `provider`
+/// were all captured from the persona at create time and never re-read live, so
+/// a provider-backed agent pins identically to a local one. A persona edit
+/// reaches it only via delete+respawn.
+fn build_deploy_payload(record: &ManagedAgentRecord) -> serde_json::Value {
+    // The record's env_vars is the complete pinned env map (persona env merged
+    // under agent overrides at create). `merged_user_env` with an empty persona
+    // map applies the reserved-key / malformed-key / NUL filtering.
+    let merged_env = crate::managed_agents::merged_user_env(
+        &std::collections::BTreeMap::new(),
+        &record.env_vars,
+    );
 
-    // Resolve effective model/provider from the persona's structured fields.
-    // Agent record's model takes precedence (user override via UI).
-    let (effective_model, effective_provider) = if let Some(ref pid) = record.persona_id {
-        let personas = load_personas(app).map_err(|e| {
-            format!("failed to load personas for deploy payload model resolution: {e}")
-        })?;
-        let persona = personas.iter().find(|p| p.id == *pid);
-        let model = record
-            .model
-            .clone()
-            .or_else(|| persona.and_then(|p| p.model.clone()));
-        let provider = persona.and_then(|p| p.provider.clone());
-        (model, provider)
-    } else {
-        (record.model.clone(), None)
-    };
-
-    Ok(serde_json::json!({
+    serde_json::json!({
         "name": &record.name,
         "relay_url": &record.relay_url,
         "private_key_nsec": &record.private_key_nsec,
@@ -180,8 +161,8 @@ fn build_deploy_payload(
         "agent_command": &record.agent_command,
         "agent_args": &record.agent_args,
         "system_prompt": &record.system_prompt,
-        "model": effective_model,
-        "provider": effective_provider,
+        "model": &record.model,
+        "provider": &record.provider,
         "turn_timeout_seconds": record.turn_timeout_seconds,
         "idle_timeout_seconds": record.idle_timeout_seconds,
         "max_turn_duration_seconds": record.max_turn_duration_seconds,
@@ -193,32 +174,7 @@ fn build_deploy_payload(
         // Merged persona + agent env vars. Providers that don't read this
         // field will simply ignore it — no protocol break.
         "env_vars": merged_env,
-    }))
-}
-
-/// Persist a deploy-preparation error (currently: persona env resolution
-/// failure inside `build_deploy_payload`) into the agent's `last_error`
-/// so a refresh shows the cause. Mirrors what `deploy_to_provider` does
-/// on its own failures — without this, an agent created with an invalid
-/// persona_id would appear as `not_deployed` with no recorded reason.
-fn persist_create_deploy_error(
-    app: &AppHandle,
-    state: &AppState,
-    pubkey: &str,
-    error: &str,
-) -> Result<(), String> {
-    let _store_guard = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let mut records = load_managed_agents(app)?;
-    let rec = records
-        .iter_mut()
-        .find(|r| r.pubkey == pubkey)
-        .ok_or_else(|| format!("agent {pubkey} not found"))?;
-    rec.last_error = Some(error.to_string());
-    rec.updated_at = now_iso();
-    save_managed_agents(app, &records)
+    })
 }
 
 /// Deploy an agent to a provider backend. Resolves the binary, calls deploy via
@@ -513,6 +469,35 @@ pub async fn create_managed_agent(
             &agent_command,
         );
 
+        // Pin the persona config onto the record at create. After this, spawn
+        // and deploy read these snapshotted fields, never the live persona, so
+        // the agent stays on the config it was created with across restarts;
+        // delete+respawn re-runs create and rewrites the snapshot. env_vars are
+        // pinned too — without that, persona credential edits would leak into a
+        // running agent on restart. Agent-level env overrides (input.env_vars)
+        // layer on top, matching spawn precedence (persona env < agent env).
+        let persona_snapshot = requested_persona_id.as_deref().and_then(|pid| {
+            load_personas(&app)
+                .ok()?
+                .into_iter()
+                .find(|persona| persona.id == pid)
+                .map(|persona| {
+                    crate::managed_agents::persona_events::persona_snapshot(
+                        &persona,
+                        &input.env_vars,
+                    )
+                })
+        });
+        let snapshot_prompt = persona_snapshot
+            .as_ref()
+            .and_then(|s| s.system_prompt.clone());
+        let snapshot_model = persona_snapshot.as_ref().and_then(|s| s.model.clone());
+        let snapshot_provider = persona_snapshot.as_ref().and_then(|s| s.provider.clone());
+        let snapshot_source_version = persona_snapshot.as_ref().map(|s| s.source_version.clone());
+        let snapshot_env_vars = persona_snapshot
+            .map(|s| s.env_vars)
+            .unwrap_or_else(|| input.env_vars.clone());
+
         let record = crate::managed_agents::ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: name.clone(),
@@ -542,18 +527,24 @@ pub async fn create_managed_agent(
                 .parallelism
                 .filter(|count| (1..=32).contains(count))
                 .unwrap_or(DEFAULT_AGENT_PARALLELISM),
-            system_prompt: input
-                .system_prompt
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
-            model: input
-                .model
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string),
+            system_prompt: snapshot_prompt.or_else(|| {
+                input
+                    .system_prompt
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            }),
+            model: snapshot_model.or_else(|| {
+                input
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            }),
+            provider: snapshot_provider,
+            persona_source_version: snapshot_source_version,
             mcp_toolsets: input
                 .mcp_toolsets
                 .as_deref()
@@ -575,7 +566,7 @@ pub async fn create_managed_agent(
             // NOT the display_name — ACP's resolve_persona_by_name() matches slugs.
             persona_team_dir: pack_metadata.as_ref().map(|(path, _)| path.clone()),
             persona_name_in_team: pack_metadata.as_ref().map(|(_, name)| name.clone()),
-            env_vars: input.env_vars.clone(),
+            env_vars: snapshot_env_vars,
             created_at: now_iso(),
             updated_at: now_iso(),
             last_started_at: None,
@@ -665,31 +656,11 @@ pub async fn create_managed_agent(
                     .iter()
                     .find(|r| r.pubkey == pubkey)
                     .ok_or_else(|| "agent disappeared".to_string())?;
-                build_deploy_payload(&app, rec)
+                build_deploy_payload(rec)
             };
-            // The agent was already persisted in Phase 3 — converting a
-            // persona-resolution failure into `spawn_error` (rather than
-            // unwinding) keeps the record on disk and surfaces the cause
-            // in the agent's last_error / UI status. We persist the same
-            // error string into `last_error` so a refresh after restart
-            // still shows *why* deploy never happened, matching what
-            // `deploy_to_provider` does on its own failures.
-            match agent_json {
-                Err(e) => {
-                    if let Err(persist_err) = persist_create_deploy_error(&app, &state, &pubkey, &e)
-                    {
-                        eprintln!(
-                            "buzz-desktop: failed to persist deploy-prep error for {pubkey}: {persist_err}"
-                        );
-                    }
-                    Some(e)
-                }
-                Ok(json) => {
-                    match deploy_to_provider(&app, &state, &pubkey, id, config, json, None).await {
-                        Ok(()) => spawn_error,
-                        Err(e) => Some(e),
-                    }
-                }
+            match deploy_to_provider(&app, &state, &pubkey, id, config, agent_json, None).await {
+                Ok(()) => spawn_error,
+                Err(e) => Some(e),
             }
         } else {
             spawn_error
@@ -803,7 +774,7 @@ pub async fn start_managed_agent(
             StartTarget::Provider {
                 backend: record.backend.clone(),
                 cached_binary_path: record.provider_binary_path.clone(),
-                agent_json: build_deploy_payload(&app, record)?,
+                agent_json: build_deploy_payload(record),
             }
         };
 
