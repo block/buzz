@@ -1,10 +1,10 @@
 import * as React from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown, {
   type Components,
   defaultUrlTransform,
 } from "react-markdown";
-import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { Copy, Download, FileText } from "lucide-react";
+import { Copy, Download, FileText, ZoomIn, ZoomOut } from "lucide-react";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
@@ -47,7 +47,6 @@ import {
   MENTION_CHIP_HOVER_CLASSES,
   MESSAGE_MARKDOWN_CLASS,
 } from "@/shared/ui/mentionChip";
-import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import {
   POPOVER_CUSTOM_ENTER_MOTION_CLASS,
@@ -244,18 +243,591 @@ type MarkdownProps = {
   videoReviewContext?: VideoReviewContext;
 };
 
+type ImageLightboxBox = {
+  height: number;
+  left: number;
+  top: number;
+  width: number;
+};
+
+const IMAGE_LIGHTBOX_ENTER_MS = 260;
+const IMAGE_LIGHTBOX_EXIT_MS = 170;
+const IMAGE_LIGHTBOX_FADE_ENTER_MS = 180;
+const IMAGE_LIGHTBOX_FADE_EXIT_MS = 90;
+const IMAGE_LIGHTBOX_REDUCED_MOTION_MS = 100;
+const IMAGE_LIGHTBOX_ZOOM_TRANSITION_MS = 80;
+const IMAGE_LIGHTBOX_BASE_VIEWPORT_RATIO = 0.8;
+const IMAGE_LIGHTBOX_CONTROL_SUPPRESS_CLOSE_MS = 450;
+const IMAGE_LIGHTBOX_TRACKPAD_ZOOM_IDLE_MS = 120;
+const IMAGE_LIGHTBOX_WHEEL_ZOOM_SPEED = 0.002;
+const IMAGE_LIGHTBOX_WHEEL_ZOOM_MAX_DELTA = 0.2;
+const IMAGE_LIGHTBOX_MIN_ZOOM = 1;
+const IMAGE_LIGHTBOX_MAX_ZOOM = 3;
+const IMAGE_LIGHTBOX_ZOOM_STEP = 0.05;
+const IMAGE_LIGHTBOX_EASE_OUT = "cubic-bezier(0.23, 1, 0.32, 1)";
+const IMAGE_LIGHTBOX_EASE_IN_OUT = "cubic-bezier(0.77, 0, 0.175, 1)";
+
+function imageLightboxBoxFromRect(rect: DOMRect): ImageLightboxBox {
+  return {
+    height: rect.height,
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+  };
+}
+
+function imageLightboxTargetBox(sourceBox: ImageLightboxBox): ImageLightboxBox {
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const horizontalPadding = Math.min(80, Math.max(16, viewportWidth * 0.0625));
+  const verticalPadding = Math.min(24, Math.max(16, viewportHeight * 0.033));
+  const maxWidth = Math.max(
+    1,
+    Math.min(
+      viewportWidth - horizontalPadding * 2,
+      viewportWidth * IMAGE_LIGHTBOX_BASE_VIEWPORT_RATIO,
+    ),
+  );
+  const maxHeight = Math.max(
+    1,
+    Math.min(
+      viewportHeight - verticalPadding * 2,
+      viewportHeight * IMAGE_LIGHTBOX_BASE_VIEWPORT_RATIO,
+    ),
+  );
+  const scale = Math.min(
+    maxWidth / sourceBox.width,
+    maxHeight / sourceBox.height,
+  );
+  const width = Math.max(1, sourceBox.width * scale);
+  const height = Math.max(1, sourceBox.height * scale);
+
+  return {
+    height,
+    left: (viewportWidth - width) / 2,
+    top: (viewportHeight - height) / 2,
+    width,
+  };
+}
+
+function imageLightboxStyle(box: ImageLightboxBox): React.CSSProperties {
+  return {
+    height: `${box.height}px`,
+    left: `${box.left}px`,
+    top: `${box.top}px`,
+    width: `${box.width}px`,
+  };
+}
+
+function clampImageLightboxZoom(value: number): number {
+  return Math.min(
+    IMAGE_LIGHTBOX_MAX_ZOOM,
+    Math.max(IMAGE_LIGHTBOX_MIN_ZOOM, value),
+  );
+}
+
+function normalizedWheelDeltaY(event: WheelEvent): number {
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) {
+    return event.deltaY * 16;
+  }
+
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    return event.deltaY * window.innerHeight;
+  }
+
+  return event.deltaY;
+}
+
+function imageLightboxTransform(
+  sourceBox: ImageLightboxBox,
+  targetBox: ImageLightboxBox,
+): string {
+  const scaleX = targetBox.width / Math.max(1, sourceBox.width);
+  const scaleY = targetBox.height / Math.max(1, sourceBox.height);
+  const translateX = targetBox.left - sourceBox.left;
+  const translateY = targetBox.top - sourceBox.top;
+
+  return `translate3d(${translateX}px, ${translateY}px, 0) scale(${scaleX}, ${scaleY})`;
+}
+
+function imageLightboxZoomBox(
+  targetBox: ImageLightboxBox,
+  zoom: number,
+): ImageLightboxBox {
+  const width = targetBox.width * zoom;
+  const height = targetBox.height * zoom;
+
+  return {
+    height,
+    left: targetBox.left + (targetBox.width - width) / 2,
+    top: targetBox.top + (targetBox.height - height) / 2,
+    width,
+  };
+}
+
+function usePrefersReducedMotion() {
+  const [prefersReducedMotion, setPrefersReducedMotion] = React.useState(() => {
+    if (
+      typeof window === "undefined" ||
+      typeof window.matchMedia !== "function"
+    ) {
+      return false;
+    }
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  });
+
+  React.useEffect(() => {
+    if (
+      typeof window === "undefined" ||
+      typeof window.matchMedia !== "function"
+    ) {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const handleChange = () => setPrefersReducedMotion(mediaQuery.matches);
+
+    handleChange();
+    mediaQuery.addEventListener("change", handleChange);
+
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }, []);
+
+  return prefersReducedMotion;
+}
+
+type WebKitGestureLikeEvent = Event & {
+  scale?: number;
+};
+
+function ImageZoomOverlay({
+  alt,
+  canDownload,
+  onDownload,
+  onClose,
+  onContextMenuCapture,
+  resolvedSrc,
+  sourceBox,
+}: {
+  alt: string | undefined;
+  canDownload: boolean;
+  onDownload: () => void;
+  onClose: () => void;
+  onContextMenuCapture: (event: React.MouseEvent) => void;
+  resolvedSrc: string;
+  sourceBox: ImageLightboxBox;
+}) {
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const [phase, setPhase] = React.useState<
+    "opening" | "open" | "closing" | "fading"
+  >(() => (prefersReducedMotion ? "open" : "opening"));
+  const [hasEntered, setHasEntered] = React.useState(prefersReducedMotion);
+  const [isAdjustingZoom, setIsAdjustingZoom] = React.useState(false);
+  const [targetBox, setTargetBox] = React.useState(() =>
+    imageLightboxTargetBox(sourceBox),
+  );
+  const [zoom, setZoom] = React.useState(IMAGE_LIGHTBOX_MIN_ZOOM);
+  const controlPointerDownRef = React.useRef(false);
+  const fadeTimerRef = React.useRef<number | null>(null);
+  const closeTimerRef = React.useRef<number | null>(null);
+  const dialogRef = React.useRef<HTMLDivElement | null>(null);
+  const descriptionId = React.useId();
+  const gestureScaleRef = React.useRef(1);
+  const suppressCloseUntilRef = React.useRef(0);
+  const zoomIdleTimerRef = React.useRef<number | null>(null);
+
+  const markControlGesture = React.useCallback(() => {
+    suppressCloseUntilRef.current =
+      Date.now() + IMAGE_LIGHTBOX_CONTROL_SUPPRESS_CLOSE_MS;
+  }, []);
+
+  const finishZoomGestureSoon = React.useCallback(() => {
+    if (zoomIdleTimerRef.current != null) {
+      window.clearTimeout(zoomIdleTimerRef.current);
+    }
+    zoomIdleTimerRef.current = window.setTimeout(() => {
+      setIsAdjustingZoom(false);
+      zoomIdleTimerRef.current = null;
+    }, IMAGE_LIGHTBOX_TRACKPAD_ZOOM_IDLE_MS);
+  }, []);
+
+  const setClampedZoom = React.useCallback((nextZoom: number) => {
+    setZoom(clampImageLightboxZoom(nextZoom));
+  }, []);
+
+  const updateZoom = React.useCallback((updater: (zoom: number) => number) => {
+    setZoom((currentZoom) => clampImageLightboxZoom(updater(currentZoom)));
+  }, []);
+
+  const close = React.useCallback(() => {
+    if (closeTimerRef.current != null) return;
+
+    if (prefersReducedMotion) {
+      setPhase("fading");
+      closeTimerRef.current = window.setTimeout(() => {
+        onClose();
+      }, IMAGE_LIGHTBOX_REDUCED_MOTION_MS);
+      return;
+    }
+
+    setPhase("closing");
+    fadeTimerRef.current = window.setTimeout(() => {
+      setPhase("fading");
+    }, IMAGE_LIGHTBOX_EXIT_MS);
+    closeTimerRef.current = window.setTimeout(() => {
+      onClose();
+    }, IMAGE_LIGHTBOX_EXIT_MS + IMAGE_LIGHTBOX_FADE_EXIT_MS);
+  }, [onClose, prefersReducedMotion]);
+
+  React.useEffect(() => {
+    if (prefersReducedMotion) {
+      setPhase("open");
+      return;
+    }
+
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => setPhase("open"));
+    });
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) {
+        window.cancelAnimationFrame(secondFrame);
+      }
+    };
+  }, [prefersReducedMotion]);
+
+  React.useEffect(() => {
+    if (phase !== "open") {
+      return;
+    }
+
+    if (prefersReducedMotion) {
+      setHasEntered(true);
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setHasEntered(true);
+    }, IMAGE_LIGHTBOX_ENTER_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [phase, prefersReducedMotion]);
+
+  React.useEffect(() => {
+    dialogRef.current?.focus();
+  }, []);
+
+  React.useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const handleResize = () => setTargetBox(imageLightboxTargetBox(sourceBox));
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [sourceBox]);
+
+  React.useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [close]);
+
+  React.useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog || phase !== "open") {
+      return;
+    }
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      markControlGesture();
+      setIsAdjustingZoom(true);
+
+      const normalizedDelta = normalizedWheelDeltaY(event);
+      const zoomDelta = Math.max(
+        -IMAGE_LIGHTBOX_WHEEL_ZOOM_MAX_DELTA,
+        Math.min(
+          IMAGE_LIGHTBOX_WHEEL_ZOOM_MAX_DELTA,
+          -normalizedDelta * IMAGE_LIGHTBOX_WHEEL_ZOOM_SPEED,
+        ),
+      );
+      updateZoom((currentZoom) => currentZoom * (1 + zoomDelta));
+      finishZoomGestureSoon();
+    };
+
+    const handleGestureStart = (event: Event) => {
+      event.preventDefault();
+      markControlGesture();
+      setIsAdjustingZoom(true);
+      gestureScaleRef.current = 1;
+    };
+
+    const handleGestureChange = (event: Event) => {
+      event.preventDefault();
+      markControlGesture();
+      setIsAdjustingZoom(true);
+
+      const gestureEvent = event as WebKitGestureLikeEvent;
+      const nextGestureScale =
+        typeof gestureEvent.scale === "number" && gestureEvent.scale > 0
+          ? gestureEvent.scale
+          : 1;
+      const previousGestureScale = Math.max(0.01, gestureScaleRef.current);
+      gestureScaleRef.current = nextGestureScale;
+      updateZoom(
+        (currentZoom) =>
+          currentZoom * (nextGestureScale / previousGestureScale),
+      );
+      finishZoomGestureSoon();
+    };
+
+    const handleGestureEnd = (event: Event) => {
+      event.preventDefault();
+      markControlGesture();
+      gestureScaleRef.current = 1;
+      finishZoomGestureSoon();
+    };
+
+    dialog.addEventListener("wheel", handleWheel, { passive: false });
+    dialog.addEventListener("gesturestart", handleGestureStart, {
+      passive: false,
+    });
+    dialog.addEventListener("gesturechange", handleGestureChange, {
+      passive: false,
+    });
+    dialog.addEventListener("gestureend", handleGestureEnd, {
+      passive: false,
+    });
+
+    return () => {
+      dialog.removeEventListener("wheel", handleWheel);
+      dialog.removeEventListener("gesturestart", handleGestureStart);
+      dialog.removeEventListener("gesturechange", handleGestureChange);
+      dialog.removeEventListener("gestureend", handleGestureEnd);
+    };
+  }, [finishZoomGestureSoon, markControlGesture, phase, updateZoom]);
+
+  React.useEffect(() => {
+    return () => {
+      if (fadeTimerRef.current != null) {
+        window.clearTimeout(fadeTimerRef.current);
+      }
+      if (closeTimerRef.current != null) {
+        window.clearTimeout(closeTimerRef.current);
+      }
+      if (zoomIdleTimerRef.current != null) {
+        window.clearTimeout(zoomIdleTimerRef.current);
+      }
+    };
+  }, []);
+
+  const isClosing = phase === "closing";
+  const isOpen = phase === "open";
+  const isFading = phase === "fading";
+  const displayBox = imageLightboxZoomBox(targetBox, zoom);
+  const transform =
+    prefersReducedMotion || isOpen
+      ? imageLightboxTransform(sourceBox, displayBox)
+      : "translate3d(0, 0, 0) scale(1)";
+  const imageTransitionDuration = prefersReducedMotion
+    ? IMAGE_LIGHTBOX_REDUCED_MOTION_MS
+    : isClosing
+      ? IMAGE_LIGHTBOX_EXIT_MS
+      : hasEntered
+        ? isAdjustingZoom
+          ? 0
+          : IMAGE_LIGHTBOX_ZOOM_TRANSITION_MS
+        : IMAGE_LIGHTBOX_ENTER_MS;
+  const backgroundTransitionDuration = prefersReducedMotion
+    ? IMAGE_LIGHTBOX_REDUCED_MOTION_MS
+    : isFading
+      ? IMAGE_LIGHTBOX_FADE_EXIT_MS
+      : IMAGE_LIGHTBOX_FADE_ENTER_MS;
+  const zoomFillPercent =
+    ((zoom - IMAGE_LIGHTBOX_MIN_ZOOM) /
+      (IMAGE_LIGHTBOX_MAX_ZOOM - IMAGE_LIGHTBOX_MIN_ZOOM)) *
+    100;
+  const label = alt?.trim() || "Image preview";
+
+  return createPortal(
+    <div
+      aria-describedby={descriptionId}
+      aria-label={label}
+      aria-modal="true"
+      className="fixed inset-0 z-50 cursor-zoom-out outline-hidden"
+      onClick={(event) => {
+        if (Date.now() < suppressCloseUntilRef.current) {
+          return;
+        }
+        if (
+          event.target instanceof HTMLElement &&
+          event.target.closest("[data-image-lightbox-controls]")
+        ) {
+          markControlGesture();
+          return;
+        }
+        close();
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          close();
+        }
+      }}
+      onPointerCancelCapture={() => {
+        if (controlPointerDownRef.current) {
+          markControlGesture();
+          controlPointerDownRef.current = false;
+        }
+      }}
+      onPointerDownCapture={(event) => {
+        if (
+          event.target instanceof HTMLElement &&
+          event.target.closest("[data-image-lightbox-controls]")
+        ) {
+          controlPointerDownRef.current = true;
+          markControlGesture();
+        }
+      }}
+      onPointerUpCapture={() => {
+        if (controlPointerDownRef.current) {
+          markControlGesture();
+          controlPointerDownRef.current = false;
+        }
+      }}
+      ref={dialogRef}
+      role="dialog"
+      tabIndex={-1}
+    >
+      <p className="sr-only" id={descriptionId}>
+        Full-size image preview. Press Escape or click to close.
+      </p>
+      <div
+        className={cn(
+          "absolute inset-0 bg-[#08090a] transition-opacity",
+          isOpen || isClosing ? "opacity-100" : "opacity-0",
+        )}
+        style={{
+          transitionDuration: `${backgroundTransitionDuration}ms`,
+          transitionTimingFunction: IMAGE_LIGHTBOX_EASE_OUT,
+        }}
+      />
+      <div
+        className="absolute z-10 origin-top-left overflow-visible transition-[opacity,transform] will-change-transform"
+        style={{
+          ...imageLightboxStyle(sourceBox),
+          opacity: prefersReducedMotion && isClosing ? 0 : 1,
+          transform,
+          transitionDuration: `${imageTransitionDuration}ms`,
+          transitionProperty: prefersReducedMotion
+            ? "opacity"
+            : "opacity, transform",
+          transitionTimingFunction: isClosing
+            ? IMAGE_LIGHTBOX_EASE_IN_OUT
+            : IMAGE_LIGHTBOX_EASE_OUT,
+        }}
+      >
+        <img
+          alt={alt}
+          className="h-full w-full rounded-lg object-contain shadow-2xl"
+          src={resolvedSrc}
+          onContextMenuCapture={onContextMenuCapture}
+        />
+      </div>
+      <div
+        className={cn(
+          "absolute inset-x-0 bottom-4 z-20 flex justify-center px-4 transition-[opacity,transform]",
+          isOpen ? "translate-y-0 opacity-100" : "translate-y-1.5 opacity-0",
+        )}
+        style={{
+          transitionDuration: `${prefersReducedMotion ? IMAGE_LIGHTBOX_REDUCED_MOTION_MS : 160}ms`,
+          transitionTimingFunction: IMAGE_LIGHTBOX_EASE_OUT,
+        }}
+      >
+        <div
+          aria-label="Image controls"
+          className="relative isolate flex min-h-11 max-w-[calc(100vw-2rem)] items-center gap-2 rounded-xl px-2 py-1.5 text-white"
+          data-image-lightbox-controls=""
+          role="toolbar"
+        >
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-0 -z-10 rounded-[inherit] border border-white/10 bg-black/35 backdrop-blur-xl backdrop-saturate-150"
+          />
+          <button
+            aria-label="Download image"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white transition-colors hover:bg-white/15 outline-hidden focus-visible:ring-2 focus-visible:ring-white/60 disabled:pointer-events-none disabled:opacity-45"
+            disabled={!canDownload}
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onDownload();
+            }}
+          >
+            <Download className="h-4 w-4" />
+          </button>
+          <div aria-hidden="true" className="h-5 w-px shrink-0 bg-white/15" />
+          <ZoomOut aria-hidden="true" className="h-4 w-4 shrink-0 opacity-80" />
+          <input
+            aria-label="Image zoom"
+            className="image-zoom-slider h-3 w-32 cursor-pointer sm:w-44"
+            max={IMAGE_LIGHTBOX_MAX_ZOOM}
+            min={IMAGE_LIGHTBOX_MIN_ZOOM}
+            step={IMAGE_LIGHTBOX_ZOOM_STEP}
+            style={
+              {
+                "--image-zoom-fill": `${zoomFillPercent}%`,
+              } as React.CSSProperties
+            }
+            type="range"
+            value={zoom}
+            onBlur={() => setIsAdjustingZoom(false)}
+            onChange={(event) => {
+              markControlGesture();
+              setClampedZoom(Number(event.target.value));
+            }}
+            onPointerCancel={() => setIsAdjustingZoom(false)}
+            onPointerDown={() => {
+              markControlGesture();
+              setIsAdjustingZoom(true);
+            }}
+            onPointerUp={() => {
+              markControlGesture();
+              setIsAdjustingZoom(false);
+            }}
+          />
+          <ZoomIn aria-hidden="true" className="h-4 w-4 shrink-0 opacity-80" />
+          <span className="min-w-10 text-right text-xs font-medium tabular-nums text-white/90">
+            {Math.round(zoom * 100)}%
+          </span>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 /**
  * Inline image embed with click-to-zoom lightbox and right-click download.
  *
- * IMPORTANT: this component renders the inline `<img>` with NO wrapping div
- * and drives the Dialog via controlled `open` state — *not* via Radix's
- * `<Trigger asChild>` cloning onto a wrapper div. An earlier version used
- * the Trigger-asChild pattern around a `<div>` around the `<img>`, which
- * caused a 1-2px layout reflow in the surrounding message body on hover
- * (the gap between the username header and the body would visibly grow).
- * The nested wrapper divs + Radix attribute cloning were repainting the
- * surrounding inline flow on `:hover` state changes. Keeping the `<img>`
- * bare and managing the lightbox + context menu via React state avoids it.
+ * IMPORTANT: the trigger is a plain button that we control ourselves — not
+ * Radix's `<Trigger asChild>` cloning onto a wrapper. An earlier version used
+ * that pattern and caused a 1-2px layout reflow in the surrounding message
+ * body on hover. Keeping the trigger stable and managing the lightbox via
+ * React state avoids that repaint.
  */
 function ImageBlock({
   alt,
@@ -266,8 +838,11 @@ function ImageBlock({
   resolvedSrc: string | undefined;
   src: string | undefined;
 }) {
-  const [lightboxOpen, setLightboxOpen] = React.useState(false);
+  const [lightboxBox, setLightboxBox] = React.useState<ImageLightboxBox | null>(
+    null,
+  );
   const [menu, setMenu] = React.useState<{ x: number; y: number } | null>(null);
+  const inlineImageRef = React.useRef<HTMLImageElement | null>(null);
   const [spoilerMediaSize, setSpoilerMediaSize] = React.useState<{
     height: number;
     src: string;
@@ -297,6 +872,7 @@ function ImageBlock({
 
   const imageRef = React.useCallback(
     (image: HTMLImageElement | null) => {
+      inlineImageRef.current = image;
       if (image?.complete) updateSpoilerMediaSize(image);
     },
     [updateSpoilerMediaSize],
@@ -347,11 +923,27 @@ function ImageBlock({
     setMenu({ x: e.clientX, y: e.clientY });
   };
 
-  const handleImageClick = (event: React.MouseEvent<HTMLImageElement>) => {
-    if (isInsideHiddenSpoiler(event.currentTarget)) {
-      return;
+  const openLightbox = React.useCallback(
+    (image: HTMLImageElement) => {
+      if (!resolvedSrc || isInsideHiddenSpoiler(image)) {
+        return;
+      }
+
+      const rect = image.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return;
+      }
+
+      setMenu(null);
+      setLightboxBox(imageLightboxBoxFromRect(rect));
+    },
+    [resolvedSrc],
+  );
+
+  const handleImageTriggerClick = () => {
+    if (inlineImageRef.current) {
+      openLightbox(inlineImageRef.current);
     }
-    setLightboxOpen(true);
   };
 
   const handleDownload = () => {
@@ -365,18 +957,27 @@ function ImageBlock({
 
   return (
     <>
-      {/* biome-ignore lint/a11y/useKeyWithClickEvents: image opens lightbox on click; keyboard equivalent handled by lightbox close button */}
-      <img
-        alt={alt}
-        className="mt-1 block max-h-64 max-w-sm cursor-pointer rounded-xl object-contain"
-        data-spoiler-media-size={currentSpoilerMediaSize ? "" : undefined}
-        ref={imageRef}
-        src={resolvedSrc}
-        style={spoilerMediaStyle}
-        onClick={handleImageClick}
+      <button
+        aria-label={alt?.trim() ? `Zoom image: ${alt}` : "Zoom image"}
+        className={cn(
+          "mt-1 block w-fit max-w-sm cursor-zoom-in rounded-xl border-0 bg-transparent p-0 text-left focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
+          lightboxBox && "opacity-0",
+        )}
+        data-testid="message-image-lightbox-trigger"
+        type="button"
+        onClick={handleImageTriggerClick}
         onContextMenuCapture={handleContextMenu}
-        onLoad={(event) => updateSpoilerMediaSize(event.currentTarget)}
-      />
+      >
+        <img
+          alt={alt}
+          className="block max-h-64 max-w-full rounded-xl object-contain"
+          data-spoiler-media-size={currentSpoilerMediaSize ? "" : undefined}
+          ref={imageRef}
+          src={resolvedSrc}
+          style={spoilerMediaStyle}
+          onLoad={(event) => updateSpoilerMediaSize(event.currentTarget)}
+        />
+      </button>
       {menu && src ? (
         <div
           className={cn(
@@ -395,58 +996,17 @@ function ImageBlock({
           </button>
         </div>
       ) : null}
-      <DialogPrimitive.Root open={lightboxOpen} onOpenChange={setLightboxOpen}>
-        <DialogPrimitive.Portal>
-          <DialogPrimitive.Overlay
-            className={cn(
-              "fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
-              MODAL_BACKDROP_BLUR_CLASS,
-            )}
-          />
-          <DialogPrimitive.Content
-            className="fixed inset-0 z-50 flex items-center justify-center p-8"
-            onPointerDownOutside={(e) => e.preventDefault()}
-            onInteractOutside={(e) => e.preventDefault()}
-          >
-            <DialogPrimitive.Title className="sr-only">
-              {alt || "Image preview"}
-            </DialogPrimitive.Title>
-            <DialogPrimitive.Description className="sr-only">
-              Full-size image preview. Press Escape or click outside the image
-              to close.
-            </DialogPrimitive.Description>
-            {/* Clicking anywhere except the image closes the dialog. */}
-            <DialogPrimitive.Close
-              className="absolute inset-0 cursor-default"
-              aria-label="Close lightbox"
-            />
-            <img
-              alt={alt}
-              className="relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain"
-              src={resolvedSrc}
-              onContextMenuCapture={handleContextMenu}
-            />
-            <DialogPrimitive.Close className="absolute right-4 top-4 rounded-full bg-black/50 p-2 text-white/80 transition-colors hover:bg-black/70 hover:text-white focus:outline-hidden focus:ring-2 focus:ring-white/30">
-              <svg
-                aria-hidden="true"
-                xmlns="http://www.w3.org/2000/svg"
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </svg>
-              <span className="sr-only">Close</span>
-            </DialogPrimitive.Close>
-          </DialogPrimitive.Content>
-        </DialogPrimitive.Portal>
-      </DialogPrimitive.Root>
+      {lightboxBox && resolvedSrc ? (
+        <ImageZoomOverlay
+          alt={alt}
+          canDownload={Boolean(src)}
+          onDownload={handleDownload}
+          onClose={() => setLightboxBox(null)}
+          onContextMenuCapture={handleContextMenu}
+          resolvedSrc={resolvedSrc}
+          sourceBox={lightboxBox}
+        />
+      ) : null}
     </>
   );
 }
