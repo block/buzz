@@ -79,12 +79,11 @@ test("sidebar reconnect prompt flips on live relay degradation without a query e
   // Drive ONLY the live connection state degraded — no channelsQuery error is
   // set. Pre-fix the block keyed off `channelsQuery.error` alone, so it stays
   // absent here; post-fix the dual signal surfaces it.
-  await driveConnectionDegraded(page, "disconnected");
+  await driveConnectionDegraded(page, "stalled");
 
-  // `disconnected` reports immediately (reconnecting/stalled debounce ~2s),
-  // but allow margin for the React render to flush.
+  // `stalled` is debounced before surfacing, then React needs a render tick.
   await expect(page.getByTestId("sidebar-relay-unreachable")).toBeVisible({
-    timeout: 5_000,
+    timeout: 10_000,
   });
   await expect(page.getByTestId("sidebar-reconnect")).toBeVisible();
 

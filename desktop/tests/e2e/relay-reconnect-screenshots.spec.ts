@@ -20,7 +20,7 @@ async function settle(page: import("@playwright/test").Page) {
 /** Drive the relay client into a state via the real E2E connection-state seam. */
 async function driveConnectionState(
   page: import("@playwright/test").Page,
-  state: "connected" | "disconnected",
+  state: "connected" | "reconnecting" | "stalled" | "disconnected",
 ) {
   await page.evaluate((s) => {
     const setter = (
@@ -131,9 +131,9 @@ test.describe("relay reconnect affordance screenshots", () => {
     await page.goto("/");
 
     await expect(page.getByTestId("channel-general")).toBeVisible();
-    await driveConnectionState(page, "disconnected");
+    await driveConnectionState(page, "stalled");
     await expect(page.getByTestId("sidebar-relay-unreachable")).toBeVisible({
-      timeout: 5_000,
+      timeout: 10_000,
     });
     await expect(page.getByTestId("sidebar-reconnect")).toBeVisible();
     // The cached channel list stays visible alongside the prompt.
