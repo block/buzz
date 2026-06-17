@@ -1165,10 +1165,6 @@ test("generic relay save failures use the generic reconnect card", async ({
   await expect(
     page.getByTestId("onboarding-relay-reconnect-card"),
   ).toContainText("Click to connect");
-  await expect(page.getByTestId("onboarding-vpn-off-card")).toHaveCount(0);
-  await expect(
-    page.getByTestId("onboarding-vpn-access-refresh-card"),
-  ).toHaveCount(0);
 });
 
 test("custom relay proxy sign-in failures use the generic reconnect card", async ({
@@ -1179,7 +1175,7 @@ test("custom relay proxy sign-in failures use the generic reconnect card", async
     page,
     {
       profileUpdateError:
-        "relay unreachable: relay returned an unexpected HTML page (VPN or proxy sign-in?)",
+        "relay unreachable: relay returned an unexpected HTML page (network sign-in?)",
     },
     { skipOnboardingSeed: true },
   );
@@ -1194,89 +1190,18 @@ test("custom relay proxy sign-in failures use the generic reconnect card", async
   await expect(
     page.getByTestId("onboarding-relay-reconnect-card"),
   ).toContainText("Can't reach the relay");
-  await expect(
-    page.getByTestId("onboarding-vpn-access-refresh-card"),
-  ).toHaveCount(0);
 });
 
-test("Block relay save failures offer the VPN card", async ({ page }) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(
-    page,
-    {
-      profileUpdateError: "relay unreachable: could not connect to relay",
-    },
-    {
-      relayWsUrl: "wss://buzz-oss.stage.blox.sqprod.co",
-      skipOnboardingSeed: true,
-    },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await page.getByTestId("onboarding-next").click();
-
-  await expect(page.getByTestId("onboarding-vpn-off-card")).toBeVisible();
-  await expect(page.getByTestId("onboarding-vpn-off-card")).toContainText(
-    "Turn on VPN",
-  );
-  await expect(page.getByTestId("onboarding-vpn-off-card")).toContainText(
-    "Click to connect",
-  );
-  await expect(page.getByTestId("onboarding-relay-reconnect-card")).toHaveCount(
-    0,
-  );
-  await expect(
-    page.getByTestId("onboarding-vpn-access-refresh-card"),
-  ).toHaveCount(0);
-});
-
-test("Block relay proxy sign-in failures offer the VPN card", async ({
+test("relay access failures use the generic reconnect card", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
     {
-      profileUpdateError:
-        "relay unreachable: relay returned an unexpected HTML page (VPN or proxy sign-in?)",
+      profileUpdateError: "relay unreachable: 403 Forbidden",
     },
-    {
-      relayWsUrl: "wss://buzz-oss.stage.blox.sqprod.co",
-      skipOnboardingSeed: true,
-    },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await page.getByTestId("onboarding-next").click();
-
-  await expect(page.getByTestId("onboarding-vpn-off-card")).toBeVisible();
-  await expect(page.getByTestId("onboarding-vpn-off-card")).toContainText(
-    "Turn on VPN",
-  );
-  await expect(page.getByTestId("onboarding-relay-reconnect-card")).toHaveCount(
-    0,
-  );
-  await expect(
-    page.getByTestId("onboarding-vpn-access-refresh-card"),
-  ).toHaveCount(0);
-});
-
-test("Block relay Cloudflare Access failures offer refresh access", async ({
-  page,
-}) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(
-    page,
-    {
-      profileUpdateError:
-        "relay unreachable: 403 Forbidden from Cloudflare Access",
-    },
-    {
-      relayWsUrl: "wss://buzz-oss.stage.blox.sqprod.co",
-      skipOnboardingSeed: true,
-    },
+    { skipOnboardingSeed: true },
   );
   await page.goto("/");
 
@@ -1284,47 +1209,11 @@ test("Block relay Cloudflare Access failures offer refresh access", async ({
   await page.getByTestId("onboarding-next").click();
 
   await expect(
-    page.getByTestId("onboarding-vpn-access-refresh-card"),
+    page.getByTestId("onboarding-relay-reconnect-card"),
   ).toBeVisible();
   await expect(
-    page.getByTestId("onboarding-vpn-access-refresh-card"),
-  ).toContainText("Refresh VPN access");
-  await expect(page.getByTestId("onboarding-vpn-off-card")).toHaveCount(0);
-  await expect(page.getByTestId("onboarding-relay-reconnect-card")).toHaveCount(
-    0,
-  );
-});
-
-test("Block relay Cloudflare Access redirects offer the VPN card", async ({
-  page,
-}) => {
-  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
-  await installMockBridge(
-    page,
-    {
-      profileUpdateError:
-        "relay unreachable: network sign-in required (Cloudflare Access / VPN) - re-authenticate and reconnect",
-    },
-    {
-      relayWsUrl: "wss://buzz-oss.stage.blox.sqprod.co",
-      skipOnboardingSeed: true,
-    },
-  );
-  await page.goto("/");
-
-  await page.getByTestId("onboarding-display-name").fill("Morty QA");
-  await page.getByTestId("onboarding-next").click();
-
-  await expect(page.getByTestId("onboarding-vpn-off-card")).toBeVisible();
-  await expect(page.getByTestId("onboarding-vpn-off-card")).toContainText(
-    "Turn on VPN",
-  );
-  await expect(
-    page.getByTestId("onboarding-vpn-access-refresh-card"),
-  ).toHaveCount(0);
-  await expect(page.getByTestId("onboarding-relay-reconnect-card")).toHaveCount(
-    0,
-  );
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toContainText("Can't reach the relay");
 });
 
 test("dismissed relay save failures reappear on retry", async ({ page }) => {

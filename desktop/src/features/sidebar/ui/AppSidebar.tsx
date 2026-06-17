@@ -38,11 +38,7 @@ import {
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
-import {
-  SidebarBlockAccessRefreshCompactCard,
-  SidebarBlockVpnOffCompactCard,
-  SidebarRelayConnectionCard,
-} from "@/features/sidebar/ui/SidebarRelayConnectionCard";
+import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import {
   SidebarLoadingContent,
@@ -781,56 +777,18 @@ export function AppSidebar({
         <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
           {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
             <div className="mb-2 group-data-[collapsible=icon]:hidden">
-              {sidebarRelayConnectionCard.cardVariant === "refresh-access" ? (
-                <SidebarBlockAccessRefreshCompactCard
-                  actionTestId="sidebar-refresh-vpn-access"
-                  isActionDisabled={
-                    sidebarRelayConnectionCard.isRelayReconnectPending
-                  }
-                  isActionPending={
-                    sidebarRelayConnectionCard.isRelayReconnectPending
-                  }
-                  isActionSuccess={
-                    sidebarRelayConnectionCard.isRelayConnectionSuccess
-                  }
-                  onAction={sidebarRelayConnectionCard.onReconnectRelay}
-                  onDismiss={
-                    sidebarRelayConnectionCard.onDismissRelayConnectionCard
-                  }
-                  testId="sidebar-vpn-access-refresh"
-                />
-              ) : sidebarRelayConnectionCard.cardVariant === "connect-vpn" ? (
-                <SidebarBlockVpnOffCompactCard
-                  actionTestId="sidebar-connect-vpn"
-                  isActionDisabled={
-                    sidebarRelayConnectionCard.isRelayReconnectPending
-                  }
-                  isActionPending={
-                    sidebarRelayConnectionCard.isRelayReconnectPending
-                  }
-                  isActionSuccess={
-                    sidebarRelayConnectionCard.isRelayConnectionSuccess
-                  }
-                  onAction={sidebarRelayConnectionCard.onReconnectRelay}
-                  onDismiss={
-                    sidebarRelayConnectionCard.onDismissRelayConnectionCard
-                  }
-                  testId="sidebar-vpn-off"
-                />
-              ) : (
-                <SidebarRelayConnectionCard
-                  isConnected={
-                    sidebarRelayConnectionCard.isRelayConnectionSuccess
-                  }
-                  isReconnectPending={
-                    sidebarRelayConnectionCard.isRelayReconnectPending
-                  }
-                  onDismiss={
-                    sidebarRelayConnectionCard.onDismissRelayConnectionCard
-                  }
-                  onReconnect={sidebarRelayConnectionCard.onReconnectRelay}
-                />
-              )}
+              <SidebarRelayConnectionCard
+                isConnected={
+                  sidebarRelayConnectionCard.isRelayConnectionSuccess
+                }
+                isReconnectPending={
+                  sidebarRelayConnectionCard.isRelayReconnectPending
+                }
+                onDismiss={
+                  sidebarRelayConnectionCard.onDismissRelayConnectionCard
+                }
+                onReconnect={sidebarRelayConnectionCard.onReconnectRelay}
+              />
             </div>
           ) : null}
           {showSidebarUpdateCard ? (

@@ -5,7 +5,6 @@ import {
   useRelayConnection,
 } from "@/shared/api/useRelayConnection";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
-import { resolveRelayConnectivityCardVariant } from "@/shared/lib/relayConnectivityCard";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
 
 const SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 6_000;
@@ -71,11 +70,6 @@ export function useSidebarRelayConnectionCard(
   const hasRelayUnreachableError = errorMessage
     ? isRelayUnreachableError(errorMessage)
     : false;
-  const cardVariant = resolveRelayConnectivityCardVariant(
-    errorMessage,
-    relayUrl,
-  );
-  const lastProblemCardVariantRef = React.useRef(cardVariant);
   const isRelayConnectionStateDegraded =
     isRelayConnectionDegraded(relayConnectionState);
   const isRelayConnectionActuallyDegraded =
@@ -109,12 +103,6 @@ export function useSidebarRelayConnectionCard(
       setIsDismissed(false);
     }
   }, [isRelayConnectionSuccess, isRelayConnectionActuallyDegraded]);
-
-  React.useEffect(() => {
-    if (isRelayConnectionActuallyDegraded) {
-      lastProblemCardVariantRef.current = cardVariant;
-    }
-  }, [cardVariant, isRelayConnectionActuallyDegraded]);
 
   React.useEffect(() => {
     if (isRelayConnectionStateDegraded) {
@@ -220,9 +208,6 @@ export function useSidebarRelayConnectionCard(
   }, [reconnect, relayUrl, startConnectivityAction]);
 
   return {
-    cardVariant: isRelayConnectionSuccess
-      ? lastProblemCardVariantRef.current
-      : cardVariant,
     hasRelayUnreachableError,
     isRelayConnectionSuccess,
     isRelayReconnectPending,

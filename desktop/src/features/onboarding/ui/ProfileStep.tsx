@@ -1,14 +1,9 @@
 import * as React from "react";
 import { toast } from "sonner";
 
-import {
-  SidebarBlockAccessRefreshCompactCard,
-  SidebarBlockVpnOffCompactCard,
-  SidebarRelayConnectionCompactCard,
-} from "@/features/sidebar/ui/SidebarRelayConnectionCard";
+import { SidebarRelayConnectionCompactCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { cn } from "@/shared/lib/cn";
-import { resolveRelayConnectivityCardVariant } from "@/shared/lib/relayConnectivityCard";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
@@ -27,47 +22,26 @@ type ProfileStepProps = {
   state: ProfileStepState;
 };
 
-type OnboardingConnectivityAction =
-  | "connect-vpn"
-  | "reconnect-relay"
-  | "refresh-access";
-type OnboardingRelayCardVariant =
-  | "connect-vpn"
-  | "reconnect-relay"
-  | "refresh-access";
-
 const ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 2_500;
-
-function resolveOnboardingRelayCardVariant(
-  errorMessage: string,
-  relayUrl: string | null | undefined,
-): OnboardingRelayCardVariant {
-  return resolveRelayConnectivityCardVariant(errorMessage, relayUrl);
-}
 
 function OnboardingRelayConnectionErrorCard({
   isSaving,
   message,
-  relayUrl,
 }: {
   isSaving: boolean;
   message: string;
-  relayUrl?: string | null;
 }) {
   const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
   const [dismissedErrorMessage, setDismissedErrorMessage] = React.useState<
     string | null
   >(null);
-  const [connectivityAction, setConnectivityAction] =
-    React.useState<OnboardingConnectivityAction | null>(null);
-  const [successAction, setSuccessAction] =
-    React.useState<OnboardingConnectivityAction | null>(null);
-  const connectivityActionRef =
-    React.useRef<OnboardingConnectivityAction | null>(null);
+  const [isReconnectActionPending, setIsReconnectActionPending] =
+    React.useState(false);
+  const [hasSuccess, setHasSuccess] = React.useState(false);
+  const reconnectActionPendingRef = React.useRef(false);
   const successTimeoutRef = React.useRef<number | null>(null);
   const wasSavingRef = React.useRef(isSaving);
-  const cardVariant = resolveOnboardingRelayCardVariant(message, relayUrl);
-  const isActionPending = connectivityAction !== null || isReconnectPending;
+  const isActionPending = isReconnectActionPending || isReconnectPending;
 
   React.useEffect(() => {
     return () => {
@@ -84,72 +58,52 @@ function OnboardingRelayConnectionErrorCard({
         successTimeoutRef.current = null;
       }
       setDismissedErrorMessage(null);
-      setSuccessAction(null);
+      setHasSuccess(false);
     }
     wasSavingRef.current = isSaving;
   }, [isSaving]);
 
-  const markSuccess = React.useCallback(
-    (action: OnboardingConnectivityAction) => {
-      setSuccessAction(action);
-      if (successTimeoutRef.current !== null) {
-        window.clearTimeout(successTimeoutRef.current);
-      }
-      successTimeoutRef.current = window.setTimeout(() => {
-        successTimeoutRef.current = null;
-        setDismissedErrorMessage(message);
-      }, ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS);
-    },
-    [message],
-  );
+  const markSuccess = React.useCallback(() => {
+    setHasSuccess(true);
+    if (successTimeoutRef.current !== null) {
+      window.clearTimeout(successTimeoutRef.current);
+    }
+    successTimeoutRef.current = window.setTimeout(() => {
+      successTimeoutRef.current = null;
+      setDismissedErrorMessage(message);
+    }, ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS);
+  }, [message]);
 
   const runConnectivityAction = React.useCallback(
-    (
-      action: OnboardingConnectivityAction,
-      runAction: () => Promise<boolean | undefined>,
-    ) => {
-      if (connectivityActionRef.current !== null) {
+    (runAction: () => Promise<boolean | undefined>) => {
+      if (reconnectActionPendingRef.current) {
         return;
       }
 
-      connectivityActionRef.current = action;
-      setConnectivityAction(action);
-      setSuccessAction(null);
+      reconnectActionPendingRef.current = true;
+      setIsReconnectActionPending(true);
+      setHasSuccess(false);
       void Promise.resolve()
         .then(runAction)
         .then((didReconnect) => {
           if (didReconnect !== false) {
-            markSuccess(action);
+            markSuccess();
           }
         })
         .catch((error) => {
           const detail = error instanceof Error ? error.message : String(error);
-          const label =
-            action === "refresh-access"
-              ? "Could not refresh VPN access."
-              : action === "connect-vpn"
-                ? "Could not turn on VPN."
-                : "Could not reconnect to the relay.";
-          toast.error(`${label} ${detail}`);
+          toast.error(`Could not reconnect to the relay. ${detail}`);
         })
         .finally(() => {
-          connectivityActionRef.current = null;
-          setConnectivityAction(null);
+          reconnectActionPendingRef.current = false;
+          setIsReconnectActionPending(false);
         });
     },
     [markSuccess],
   );
 
-  const handleConnectWarpVpn = React.useCallback(() => {
-    runConnectivityAction("connect-vpn", reconnect);
-  }, [reconnect, runConnectivityAction]);
-
   const handleReconnectRelay = React.useCallback(() => {
-    runConnectivityAction("reconnect-relay", reconnect);
-  }, [reconnect, runConnectivityAction]);
-
-  const handleRefreshWarpAccess = React.useCallback(() => {
-    runConnectivityAction("refresh-access", reconnect);
+    runConnectivityAction(reconnect);
   }, [reconnect, runConnectivityAction]);
 
   if (dismissedErrorMessage === message) {
@@ -158,42 +112,16 @@ function OnboardingRelayConnectionErrorCard({
 
   return (
     <div className="fixed bottom-4 left-4 z-50 w-[calc(100vw-2rem)] text-left sm:bottom-6 sm:left-6 sm:w-[22rem]">
-      {cardVariant === "refresh-access" ? (
-        <SidebarBlockAccessRefreshCompactCard
-          actionTestId="onboarding-refresh-vpn-access"
-          isActionDisabled={isActionPending}
-          isActionPending={connectivityAction === "refresh-access"}
-          isActionSuccess={successAction === "refresh-access"}
-          onAction={handleRefreshWarpAccess}
-          onDismiss={() => setDismissedErrorMessage(message)}
-          surface="secondary"
-          testId="onboarding-vpn-access-refresh-card"
-        />
-      ) : cardVariant === "connect-vpn" ? (
-        <SidebarBlockVpnOffCompactCard
-          actionTestId="onboarding-connect-vpn"
-          isActionDisabled={isActionPending}
-          isActionPending={connectivityAction === "connect-vpn"}
-          isActionSuccess={successAction === "connect-vpn"}
-          onAction={handleConnectWarpVpn}
-          onDismiss={() => setDismissedErrorMessage(message)}
-          surface="secondary"
-          testId="onboarding-vpn-off-card"
-        />
-      ) : (
-        <SidebarRelayConnectionCompactCard
-          actionTestId="onboarding-reconnect-relay"
-          isActionDisabled={isActionPending}
-          isConnected={successAction === "reconnect-relay"}
-          isReconnectPending={
-            connectivityAction === "reconnect-relay" || isReconnectPending
-          }
-          onDismiss={() => setDismissedErrorMessage(message)}
-          onReconnect={handleReconnectRelay}
-          surface="secondary"
-          testId="onboarding-relay-reconnect-card"
-        />
-      )}
+      <SidebarRelayConnectionCompactCard
+        actionTestId="onboarding-reconnect-relay"
+        isActionDisabled={isActionPending}
+        isConnected={hasSuccess}
+        isReconnectPending={isActionPending}
+        onDismiss={() => setDismissedErrorMessage(message)}
+        onReconnect={handleReconnectRelay}
+        surface="secondary"
+        testId="onboarding-relay-reconnect-card"
+      />
     </div>
   );
 }
@@ -201,11 +129,9 @@ function OnboardingRelayConnectionErrorCard({
 function ErrorBanner({
   isSaving,
   message,
-  relayUrl,
 }: {
   isSaving: boolean;
   message: string | null;
-  relayUrl?: string | null;
 }) {
   if (!message) {
     return null;
@@ -217,7 +143,6 @@ function ErrorBanner({
         isSaving={isSaving}
         key={message}
         message={message}
-        relayUrl={relayUrl}
       />
     );
   }
@@ -232,7 +157,6 @@ function ErrorBanner({
 export function ProfileStep({
   actions,
   direction,
-  relayUrl,
   transitionEffect = "line-slide",
   state,
 }: ProfileStepProps) {
@@ -318,11 +242,7 @@ export function ProfileStep({
       </label>
 
       {saveRecovery.errorMessage ? (
-        <ErrorBanner
-          isSaving={isSaving}
-          message={saveRecovery.errorMessage}
-          relayUrl={relayUrl}
-        />
+        <ErrorBanner isSaving={isSaving} message={saveRecovery.errorMessage} />
       ) : null}
 
       <div className="mt-12 flex w-full max-w-[500px] flex-col gap-3">

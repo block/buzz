@@ -5,7 +5,7 @@
  * Deliberately uses `relayClient.preconnect()` + `queryClient.invalidateQueries()`
  * rather than the full `reconnectWorkspace()` path, which unmounts the entire
  * React tree and clears drafts. The goal here is a transparent re-handshake
- * when WARP VPN comes back online; the user should not lose their in-progress
+ * when the transport comes back online; the user should not lose their in-progress
  * compose state.
  */
 
@@ -54,7 +54,7 @@ export function useReconnectRelay(): {
     inFlightRef.current = true;
     setIsPending(true);
     try {
-      // Run transport-layer reconnect hook (e.g. WARP VPN re-auth for internal builds).
+      // Run the transport-layer reconnect hook configured by internal builds.
       // No-op in OSS builds. Non-fatal — transport failure shouldn't block relay reconnect.
       try {
         await withTimeout(
@@ -85,7 +85,7 @@ export function useReconnectRelay(): {
       // transitions back to "connected", which is the user-visible confirmation.
       return true;
     } catch (err) {
-      toast.error("Reconnect failed — check your VPN or network.");
+      toast.error("Reconnect failed — check your network.");
       console.error("[useReconnectRelay] reconnect failed:", err);
       return false;
     } finally {

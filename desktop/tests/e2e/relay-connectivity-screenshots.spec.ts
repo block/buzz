@@ -99,9 +99,7 @@ test.describe("relay connectivity screenshots", () => {
 
     // HomeView renders the error card when the feed query fails.
     await expect(
-      page.getByText(
-        "Can't reach the relay — check your VPN or network connection.",
-      ),
+      page.getByText("Can't reach the relay — check your network connection."),
     ).toBeVisible();
     await settle(page);
 
