@@ -1,13 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
-
-import { getIdentity } from "@/shared/api/tauri";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { RemindersPanel } from "./RemindersPanel";
 
 export function RemindersScreen() {
-  const identityQuery = useQuery({
-    queryKey: ["identity"],
-    queryFn: getIdentity,
-  });
+  const identityQuery = useIdentityQuery();
 
   if (!identityQuery.data?.pubkey) {
     return null;
