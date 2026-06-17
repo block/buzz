@@ -56,6 +56,13 @@ export function useReminderNotifications(
   const settingsRef = React.useRef(settings);
   settingsRef.current = settings;
 
+  // Track whether the query has resolved at least once. On mount,
+  // useRemindersQuery is still loading (data === undefined), so
+  // remindersRef.current is []. Without this guard, check() would advance
+  // the watermark past any reminders that came due while the app was closed.
+  const queryResolvedRef = React.useRef(false);
+  if (reminders !== undefined) queryResolvedRef.current = true;
+
   const fire = React.useEffectEvent((due: Reminder[]) => {
     const current = settingsRef.current;
     if (
@@ -87,6 +94,11 @@ export function useReminderNotifications(
     if (!pubkey) return;
 
     const check = () => {
+      // Defer until the query has resolved at least once — an empty array from
+      // an unresolved query must not advance the watermark past reminders that
+      // came due while the app was closed (the "missed-while-asleep" window).
+      if (remindersRef.current.length === 0 && !queryResolvedRef.current) return;
+
       const watermark = readWatermark(pubkey);
       const now = Math.floor(Date.now() / 1_000);
       const due = dueSince(remindersRef.current, watermark, now);
