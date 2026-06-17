@@ -234,6 +234,45 @@ export function AppSidebar({
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
+
+  React.useEffect(() => {
+    const scrollElement = scrollRef.current;
+    if (!scrollElement) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.deltaY === 0) return;
+
+      const maxScrollTop =
+        scrollElement.scrollHeight - scrollElement.clientHeight;
+      if (maxScrollTop <= 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+
+      const atTop = scrollElement.scrollTop <= 0;
+      const atBottom = scrollElement.scrollTop >= maxScrollTop - 1;
+      const scrollingPastTop = event.deltaY < 0 && atTop;
+      const scrollingPastBottom = event.deltaY > 0 && atBottom;
+
+      if (scrollingPastTop || scrollingPastBottom) {
+        event.preventDefault();
+        event.stopPropagation();
+        scrollElement.scrollTop = scrollingPastTop ? 0 : maxScrollTop;
+      }
+    };
+
+    scrollElement.addEventListener("wheel", handleWheel, {
+      capture: true,
+      passive: false,
+    });
+    return () => {
+      scrollElement.removeEventListener("wheel", handleWheel, {
+        capture: true,
+      });
+    };
+  }, []);
+
   const [createDialogKind, setCreateDialogKind] =
     React.useState<CreateChannelKind | null>(null);
 
@@ -443,99 +482,6 @@ export function AppSidebar({
       data-testid="app-sidebar"
       variant="sidebar"
     >
-      <SidebarHeader
-        className="cursor-default select-none pt-11"
-        data-tauri-drag-region
-      >
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              isActive={selectedView === "home"}
-              onClick={onSelectHome}
-              tooltip="Home"
-              type="button"
-            >
-              <Home className="h-4 w-4" />
-              <span>Home</span>
-            </SidebarMenuButton>
-            {homeBadgeCount > 0 ? (
-              <SidebarMenuBadge
-                className="right-2 rounded-full bg-primary/15 px-1.5 text-2xs text-primary peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
-                data-testid="sidebar-home-count"
-              >
-                {Math.min(homeBadgeCount, 99)}
-              </SidebarMenuBadge>
-            ) : null}
-          </SidebarMenuItem>
-          <FeatureGate feature="pulse">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-pulse-view"
-                isActive={selectedView === "pulse"}
-                onClick={onSelectPulse}
-                tooltip="Pulse"
-                type="button"
-              >
-                <Activity className="h-4 w-4" />
-                <span>Pulse</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </FeatureGate>
-          <FeatureGate feature="projects">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-projects-view"
-                isActive={selectedView === "projects"}
-                onClick={onSelectProjects}
-                tooltip="Projects"
-                type="button"
-              >
-                <FolderGit2 className="h-4 w-4" />
-                <span>Projects</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </FeatureGate>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              data-testid="open-agents-view"
-              isActive={selectedView === "agents"}
-              onClick={onSelectAgents}
-              tooltip="Agents"
-              type="button"
-            >
-              <Bot className="h-4 w-4" />
-              <span>Agents</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              data-testid="open-reminders-view"
-              isActive={selectedView === "reminders"}
-              onClick={onSelectReminders}
-              tooltip="Reminders"
-              type="button"
-            >
-              <Bell className="h-4 w-4" />
-              <span>Reminders</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-          <FeatureGate feature="workflows">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-workflows-view"
-                isActive={selectedView === "workflows"}
-                onClick={onSelectWorkflows}
-                tooltip="Workflows"
-                type="button"
-              >
-                <Zap className="h-4 w-4" />
-                <span>Workflows</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </FeatureGate>
-        </SidebarMenu>
-      </SidebarHeader>
-
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {unreadAboveCount > 0 ? (
           <MoreUnreadButton
@@ -546,7 +492,103 @@ export function AppSidebar({
             testId="sidebar-more-unread-above"
           />
         ) : null}
-        <SidebarContent ref={scrollRef}>
+        <SidebarContent
+          className="buzz-sidebar-scrollbar mt-(--buzz-top-chrome-height,2.5rem) overscroll-none"
+          ref={scrollRef}
+        >
+          <SidebarHeader
+            className="cursor-default select-none"
+            data-tauri-drag-region
+          >
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={selectedView === "home"}
+                  onClick={onSelectHome}
+                  tooltip="Home"
+                  type="button"
+                >
+                  <Home className="h-4 w-4" />
+                  <span>Home</span>
+                </SidebarMenuButton>
+                {homeBadgeCount > 0 ? (
+                  <SidebarMenuBadge
+                    className="right-2 rounded-full bg-primary/15 px-1.5 text-2xs text-primary peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
+                    data-testid="sidebar-home-count"
+                  >
+                    {Math.min(homeBadgeCount, 99)}
+                  </SidebarMenuBadge>
+                ) : null}
+              </SidebarMenuItem>
+              <FeatureGate feature="pulse">
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    data-testid="open-pulse-view"
+                    isActive={selectedView === "pulse"}
+                    onClick={onSelectPulse}
+                    tooltip="Pulse"
+                    type="button"
+                  >
+                    <Activity className="h-4 w-4" />
+                    <span>Pulse</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </FeatureGate>
+              <FeatureGate feature="projects">
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    data-testid="open-projects-view"
+                    isActive={selectedView === "projects"}
+                    onClick={onSelectProjects}
+                    tooltip="Projects"
+                    type="button"
+                  >
+                    <FolderGit2 className="h-4 w-4" />
+                    <span>Projects</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </FeatureGate>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-testid="open-agents-view"
+                  isActive={selectedView === "agents"}
+                  onClick={onSelectAgents}
+                  tooltip="Agents"
+                  type="button"
+                >
+                  <Bot className="h-4 w-4" />
+                  <span>Agents</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-testid="open-reminders-view"
+                  isActive={selectedView === "reminders"}
+                  onClick={onSelectReminders}
+                  tooltip="Reminders"
+                  type="button"
+                >
+                  <Bell className="h-4 w-4" />
+                  <span>Reminders</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <FeatureGate feature="workflows">
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    data-testid="open-workflows-view"
+                    isActive={selectedView === "workflows"}
+                    onClick={onSelectWorkflows}
+                    tooltip="Workflows"
+                    type="button"
+                  >
+                    <Zap className="h-4 w-4" />
+                    <span>Workflows</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </FeatureGate>
+            </SidebarMenu>
+          </SidebarHeader>
+
           {isLoading ? (
             <SidebarLoadingContent shape={sidebarLoadingShape} />
           ) : null}

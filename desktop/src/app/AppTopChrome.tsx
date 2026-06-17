@@ -4,6 +4,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
 } from "lucide-react";
+import * as React from "react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import type { Channel, SearchHit } from "@/shared/api/types";
@@ -98,6 +99,7 @@ function CenterColumnTopbarSearch({
 
 const TOP_CHROME_ICON_BUTTON_CLASS =
   "h-7 w-7 rounded-[4px] text-muted-foreground/70 hover:bg-border/45 hover:text-foreground [&_svg]:size-4";
+const TOP_CHROME_WHEEL_GUARD_HEIGHT = 40;
 
 function TopChromeSidebarTrigger() {
   const sidebar = useOptionalSidebar();
@@ -134,6 +136,22 @@ export function AppTopChrome({
   searchFocusRequest,
   searchLoading = false,
 }: AppTopChromeProps) {
+  React.useEffect(() => {
+    const handleWheel = (event: WheelEvent) => {
+      if (event.clientY <= TOP_CHROME_WHEEL_GUARD_HEIGHT) {
+        event.preventDefault();
+      }
+    };
+
+    document.addEventListener("wheel", handleWheel, {
+      capture: true,
+      passive: false,
+    });
+    return () => {
+      document.removeEventListener("wheel", handleWheel, { capture: true });
+    };
+  }, []);
+
   return (
     <>
       <div
