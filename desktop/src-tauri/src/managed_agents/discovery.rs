@@ -228,6 +228,21 @@ pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRunti
     KNOWN_ACP_RUNTIMES.iter().find(|p| p.id == id)
 }
 
+/// The agent command a freshly-created agent defaults to when the create
+/// request supplies none. Resolves the bundled `buzz-agent` from the catalog —
+/// the same shape `mesh_llm::preset` uses — so the default can't drift from the
+/// provider definition. Falls back to the id if the catalog entry is missing.
+///
+/// The previous default was the bare global `goose`, which is not on PATH on a
+/// stock Windows install: every worker failed with `program not found`. The
+/// bundled `buzz-agent` ships with the app and resolves on every platform.
+pub fn default_agent_command() -> String {
+    known_acp_runtime_exact("buzz-agent")
+        .and_then(|p| p.commands.first().copied())
+        .unwrap_or("buzz-agent")
+        .to_string()
+}
+
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
@@ -562,8 +577,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        classify_runtime, find_via_login_shell, managed_agent_avatar_url, normalize_agent_args,
-        BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+        classify_runtime, default_agent_command, find_via_login_shell, managed_agent_avatar_url,
+        normalize_agent_args, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
+        GOOSE_AVATAR_URL,
     };
     use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -597,6 +613,18 @@ mod tests {
     #[test]
     fn returns_none_for_unknown_commands() {
         assert!(managed_agent_avatar_url("custom-agent").is_none());
+    }
+
+    #[test]
+    fn default_agent_command_resolves_bundled_buzz_agent() {
+        // The create-path default must be the bundled buzz-agent, never the
+        // bare `goose` that isn't on PATH on a stock Windows install.
+        assert_eq!(default_agent_command(), "buzz-agent");
+        // And buzz-agent takes no `acp` arg — confirm no arg leakage from the default.
+        assert_eq!(
+            normalize_agent_args(&default_agent_command(), vec!["acp".into()]),
+            Vec::<String>::new()
+        );
     }
 
     #[test]

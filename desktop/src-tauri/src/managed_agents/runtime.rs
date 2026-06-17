@@ -284,9 +284,17 @@ pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
+    // No job handle is available on this path (e.g. after an app restart, when
+    // we only recovered the PID from the record), so fall back to taskkill on
+    // the whole tree.
+    super::process_lifecycle::taskkill_tree(pid)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn terminate_process(_pid: u32) -> Result<(), String> {
-    Err("managed agent shutdown after app restart is only supported on Unix".to_string())
+    Err("managed agent shutdown after app restart is not supported on this platform".to_string())
 }
 
 /// Send SIGTERM to all given PIDs (as process groups), wait, then SIGKILL
@@ -1473,7 +1481,7 @@ pub fn spawn_agent_child(
     app: &AppHandle,
     record: &ManagedAgentRecord,
     owner_hex: Option<&str>,
-) -> Result<(std::process::Child, std::path::PathBuf), String> {
+) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     let log_path = managed_agent_log_path(app, &record.pubkey)?;
     append_log_marker(
         &log_path,
@@ -1516,22 +1524,25 @@ pub fn spawn_agent_child(
     //   - bundled sidecars (buzz, buzz-acp, etc.) via exe parent (Contents/MacOS/)
     //   - runtimes (node, python, etc.) via login shell PATH
     let augmented_path = {
-        let mut parts: Vec<String> = Vec::new();
+        let mut parts: Vec<std::path::PathBuf> = Vec::new();
         if let Some(home) = dirs::home_dir() {
-            parts.push(home.join(".local").join("bin").display().to_string());
+            parts.push(home.join(".local").join("bin"));
         }
         if let Ok(exe) = std::env::current_exe() {
             if let Some(parent) = exe.parent() {
-                parts.push(parent.display().to_string());
+                parts.push(parent.to_path_buf());
             }
         }
         if let Some(shell_path) = login_shell_path() {
-            parts.push(shell_path);
+            parts.push(std::path::PathBuf::from(shell_path));
         }
         if parts.is_empty() {
             None
         } else {
-            Some(parts.join(":"))
+            // join_paths uses the platform separator (':' on Unix, ';' on Windows).
+            std::env::join_paths(parts)
+                .ok()
+                .map(|s| s.to_string_lossy().into_owned())
         }
     };
 
@@ -1730,6 +1741,15 @@ pub fn spawn_agent_child(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    // Windows: suppress the harness console window. Without this a bare
+    // terminal pops for buzz-acp.exe and lingers (the app itself sets
+    // windows_subsystem="windows", but the spawned child does not inherit it).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
 
     let child = command.spawn().map_err(|error| {
         format!(
@@ -1741,7 +1761,16 @@ pub fn spawn_agent_child(
 
     let _ = super::write_agent_pid_file(app, &record.pubkey, child.id());
 
-    Ok((child, log_path))
+    // Windows: assign the harness to a Job Object so its whole tree dies with
+    // the handle. The Unix process-group equivalent is set above.
+    #[cfg(windows)]
+    return Ok(super::process_lifecycle::finish_spawn(
+        child,
+        log_path,
+        &record.name,
+    ));
+    #[cfg(not(windows))]
+    Ok(crate::managed_agents::ManagedAgentProcess { child, log_path })
 }
 
 fn child_rust_log_filter() -> String {
@@ -1798,20 +1827,17 @@ pub fn start_managed_agent_process(
         record.runtime_pid = None;
     }
 
-    let (child, log_path) = spawn_agent_child(app, record, owner_hex)?;
+    let process = spawn_agent_child(app, record, owner_hex)?;
 
     let now = now_iso();
     record.updated_at = now.clone();
-    record.runtime_pid = Some(child.id());
+    record.runtime_pid = Some(process.child.id());
     record.last_started_at = Some(now);
     record.last_stopped_at = None;
     record.last_exit_code = None;
     record.last_error = None;
 
-    runtimes.insert(
-        record.pubkey.clone(),
-        ManagedAgentProcess { child, log_path },
-    );
+    runtimes.insert(record.pubkey.clone(), process);
     Ok(())
 }
 
@@ -1838,11 +1864,20 @@ pub fn stop_managed_agent_process(
     };
 
     // On Unix, kill the entire process group via terminate_process.
-    // On non-Unix, fall back to Child::kill() since terminate_process
-    // is not implemented there.
+    // On Windows, drop the Job Object handle (KILL_ON_JOB_CLOSE) so the whole
+    // harness tree dies — Child::kill() would orphan the agent workers + MCP
+    // servers. If job assignment failed at spawn, fall back to Child::kill().
     #[cfg(unix)]
     terminate_process(runtime.child.id())?;
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    match runtime.job.take() {
+        Some(job) => drop(job),
+        None => runtime
+            .child
+            .kill()
+            .map_err(|error| format!("failed to kill agent process: {error}"))?,
+    }
+    #[cfg(not(any(unix, windows)))]
     runtime
         .child
         .kill()

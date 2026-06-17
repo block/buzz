@@ -9,7 +9,7 @@ use crate::util;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
 
-type SpawnResult = Result<(std::process::Child, std::path::PathBuf), String>;
+type SpawnResult = Result<ManagedAgentProcess, String>;
 type AgentSpawnResult = (String, SpawnResult);
 
 /// Restore managed agents that were running before the app was closed.
@@ -176,15 +176,15 @@ pub async fn restore_managed_agents_on_launch(
             Err(_) => continue,
         };
         match result {
-            Ok((child, log_path)) => {
+            Ok(process) => {
                 let now = util::now_iso();
                 record.updated_at = now.clone();
-                record.runtime_pid = Some(child.id());
+                record.runtime_pid = Some(process.child.id());
                 record.last_started_at = Some(now);
                 record.last_stopped_at = None;
                 record.last_exit_code = None;
                 record.last_error = None;
-                runtimes.insert(pubkey.clone(), ManagedAgentProcess { child, log_path });
+                runtimes.insert(pubkey.clone(), process);
                 successfully_spawned.push(pubkey);
             }
             Err(error) => {

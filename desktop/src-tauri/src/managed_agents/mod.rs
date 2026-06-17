@@ -5,6 +5,8 @@ mod nest;
 mod persona_avatars;
 mod persona_card;
 mod personas;
+#[cfg(windows)]
+mod process_lifecycle;
 #[cfg(feature = "mesh-llm")]
 mod relay_mesh;
 mod restore;
@@ -20,6 +22,8 @@ pub use env_vars::*;
 pub use nest::*;
 pub use persona_card::*;
 pub use personas::*;
+#[cfg(windows)]
+pub use process_lifecycle::*;
 #[cfg(feature = "mesh-llm")]
 pub use relay_mesh::*;
 pub use restore::*;

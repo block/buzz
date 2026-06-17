@@ -60,6 +60,13 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "BUZZ_RELAY_URL",
 ];
 
+// Windows has no $TMPDIR/$HOME. TMP/TEMP/USERPROFILE are what
+// std::env::temp_dir() consults — without them it falls back to C:\Windows,
+// which child processes can't write to (PermissionDenied). USERPROFILE is the
+// always-set floor. LOCALAPPDATA/APPDATA carry child-tool config (git, etc.).
+#[cfg(windows)]
+const PASSTHROUGH_ENV_WINDOWS: &[&str] = &["TMP", "TEMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA"];
+
 type Client = RunningService<RoleClient, ()>;
 
 #[derive(Clone)]
@@ -697,6 +704,12 @@ async fn spawn_one(
             cmd.env(k, v);
         }
     }
+    #[cfg(windows)]
+    for k in PASSTHROUGH_ENV_WINDOWS {
+        if let Ok(v) = std::env::var(k) {
+            cmd.env(k, v);
+        }
+    }
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
@@ -965,6 +978,19 @@ fn tool_result_content(
 mod content_tests {
     use super::*;
     use rmcp::model::Content;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_passthrough_includes_temp_dir_vars() {
+        // std::env::temp_dir() consults these in order; without them it falls
+        // back to C:\Windows, which children can't write to.
+        for var in ["TMP", "TEMP", "USERPROFILE"] {
+            assert!(
+                PASSTHROUGH_ENV_WINDOWS.contains(&var),
+                "{var} must pass through or temp_dir() falls back to C:\\Windows"
+            );
+        }
+    }
 
     #[test]
     fn tool_result_content_preserves_images() {
