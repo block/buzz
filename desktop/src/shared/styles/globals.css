@@ -1778,6 +1778,8 @@
 
 .image-zoom-slider:focus-visible {
   outline: none;
+  border-radius: 9999px;
+  box-shadow: 0 0 0 2px rgb(255 255 255 / 0.7);
 }
 
 .image-zoom-slider::-webkit-slider-runnable-track {
@@ -1801,6 +1803,12 @@
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
 }
 
+.image-zoom-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 3px rgb(255 255 255 / 0.25),
+    0 1px 3px rgb(0 0 0 / 0.3);
+}
+
 .image-zoom-slider::-moz-range-track {
   height: 4px;
   border-radius: 9999px;
@@ -1820,6 +1828,12 @@
   border-radius: 9999px;
   background: white;
   box-shadow: 0 1px 3px rgb(0 0 0 / 0.3);
+}
+
+.image-zoom-slider:focus-visible::-moz-range-thumb {
+  box-shadow:
+    0 0 0 3px rgb(255 255 255 / 0.25),
+    0 1px 3px rgb(0 0 0 / 0.3);
 }
 
 /* ── Video review overlay theme (shared/ui/VideoPlayer) ─────────────────
