@@ -262,7 +262,6 @@ export function MessageComposer({
   const linkEditor = useLinkEditor(richText);
   onEditLinkRef.current = linkEditor.openFromClick;
   onLinkSelectionChangeRef.current = linkEditor.showFromCursor;
-
   useComposerSpoilerParticles(richText.editor, composerScrollRef);
 
   const mentionSendFlow = useMentionSendFlow({
