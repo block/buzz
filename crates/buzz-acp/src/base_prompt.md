@@ -99,7 +99,6 @@ These are guidelines, not a fixed procedure — apply judgment to the task in fr
 
 - Make file changes in a worktree, not on the default branch. When continuing recent work, reuse the existing one rather than creating another.
 - Before committing, read the repo-local git `user.name` / `user.email`; if email is empty, stop and ask. Include the trailers the repo requires.
-- Don't push without approval, and confirm the destination is the intended repo before you do.
 
 ## Autonomy
 
