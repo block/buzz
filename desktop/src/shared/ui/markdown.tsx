@@ -1088,6 +1088,21 @@ function createMarkdownComponents(
         {children}
       </h3>
     ),
+    h4: ({ children }) => (
+      <h4 className="text-sm font-semibold leading-5 tracking-tight">
+        {children}
+      </h4>
+    ),
+    h5: ({ children }) => (
+      <h5 className="text-sm font-semibold leading-5 tracking-tight">
+        {children}
+      </h5>
+    ),
+    h6: ({ children }) => (
+      <h6 className="text-sm font-medium leading-5 tracking-tight text-muted-foreground">
+        {children}
+      </h6>
+    ),
     hr: () => <hr className="border-border/80" />,
     img: ({ alt, src }) => {
       const { imetaByUrl } = runtimeRef.current;
@@ -1420,8 +1435,10 @@ function MarkdownInner({
           "max-w-none break-words text-sm leading-relaxed text-foreground",
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           "[&>*+*]:mt-3",
-          "[&>*+h1]:mt-3.5 [&>*+h2]:mt-3.5 [&>*+h3]:mt-3.5",
-          "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5",
+          "[&>p+p]:mt-1.5",
+          "[&>*+h1]:mt-3.5 [&>*+h2]:mt-3.5 [&>*+h3]:mt-3.5 [&>*+h4]:mt-3.5 [&>*+h5]:mt-3.5 [&>*+h6]:mt-3.5",
+          "[&>h1+*]:mt-0.5 [&>h2+*]:mt-0.5 [&>h3+*]:mt-0.5 [&>h4+*]:mt-0.5 [&>h5+*]:mt-0.5 [&>h6+*]:mt-0.5",
+          "[&>h1+h2]:mt-1.5! [&>h2+h3]:mt-1.5! [&>h3+h4]:mt-1.5! [&>h4+h5]:mt-1.5! [&>h5+h6]:mt-1.5!",
           "[&>*+blockquote]:mt-3.5 [&>blockquote+*]:mt-3.5",
           "[&>*+[data-code-block]]:mt-3.5 [&>[data-code-block]+*]:mt-3.5",
           "[&>*+[data-table-block]]:mt-3.5 [&>[data-table-block]+*]:mt-3.5",
