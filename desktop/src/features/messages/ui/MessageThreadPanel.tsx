@@ -428,14 +428,7 @@ export function MessageThreadPanel({
         <div className="px-3 pb-3 pt-1" data-testid="message-thread-replies">
           {repliesRenderState === "list" ? (
             <div
-              className={cn(
-                "space-y-2.5",
-                // While a deferred render is in flight the painted reply list
-                // lags the latest `threadReplies`. Dim it slightly so the
-                // streaming-in reads as intentional instead of frozen — mirrors
-                // the main timeline.
-                isRepliesPending && "opacity-60 transition-opacity",
-              )}
+              className="space-y-2.5"
               data-render-pending={isRepliesPending ? "true" : undefined}
             >
               {deferredThreadReplies.map((entry, index) => {
