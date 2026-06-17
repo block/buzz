@@ -102,7 +102,7 @@ function NormalizedRow({
         )}
       </div>
       {field.value && (
-        <div className="mt-0.5 text-[11px] text-muted-foreground/70">
+        <div className="mt-0.5 text-2xs text-muted-foreground/70">
           {provenanceSentence(field.origin, field.writeVia, configFilePath)}
         </div>
       )}
@@ -128,7 +128,7 @@ function AdvancedRow({
         )}
       </div>
       {field.value && (
-        <div className="mt-0.5 text-[11px] text-muted-foreground/70">
+        <div className="mt-0.5 text-2xs text-muted-foreground/70">
           {provenanceSentence(field.origin, field.writeVia, configFilePath)}
         </div>
       )}
