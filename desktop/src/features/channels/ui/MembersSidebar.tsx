@@ -432,46 +432,47 @@ export function MembersSidebar({
 
   function renderMemberCard(member: ChannelMember, memberIsBot: boolean) {
     return (
-      <MembersSidebarMemberCard
-        canChangeRole={canManageMembers && member.pubkey !== currentPubkey}
-        canRemoveMember={canRemoveMember(member)}
-        isActionPending={isActionPending || changeRoleMutation.isPending}
-        isArchived={isArchived}
-        key={member.pubkey}
-        managedAgent={
-          memberIsBot
-            ? managedAgentByPubkey.get(normalizePubkey(member.pubkey))
-            : undefined
-        }
-        member={member}
-        memberIsBot={memberIsBot}
-        memberAvatarLabel={member.displayName ?? formatPubkey(member.pubkey)}
-        memberLabel={formatMemberName(member, currentPubkey)}
-        onChangeRole={(m, role) => {
-          void changeRoleMutation.mutateAsync({ pubkey: m.pubkey, role });
-        }}
-        onEditRespondTo={memberIsBot ? setEditRespondToAgent : undefined}
-        onManagedAgentAction={(agent) => {
-          void handleAgentLifecycleAction(agent);
-        }}
-        onOpenProfile={handleOpenProfile}
-        onRemoveMember={handleRemoveMember}
-        onViewActivity={
-          onViewActivity
-            ? (pubkey: string) => {
-                onOpenChange(false);
-                onViewActivity(pubkey);
-              }
-            : undefined
-        }
-        presenceStatus={
-          memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
-        }
-        profileAvatarUrl={
-          memberProfilesQuery.data?.profiles[member.pubkey.toLowerCase()]
-            ?.avatarUrl ?? null
-        }
-      />
+      <div className="content-visibility-auto" key={member.pubkey}>
+        <MembersSidebarMemberCard
+          canChangeRole={canManageMembers && member.pubkey !== currentPubkey}
+          canRemoveMember={canRemoveMember(member)}
+          isActionPending={isActionPending || changeRoleMutation.isPending}
+          isArchived={isArchived}
+          managedAgent={
+            memberIsBot
+              ? managedAgentByPubkey.get(normalizePubkey(member.pubkey))
+              : undefined
+          }
+          member={member}
+          memberIsBot={memberIsBot}
+          memberAvatarLabel={member.displayName ?? formatPubkey(member.pubkey)}
+          memberLabel={formatMemberName(member, currentPubkey)}
+          onChangeRole={(m, role) => {
+            void changeRoleMutation.mutateAsync({ pubkey: m.pubkey, role });
+          }}
+          onEditRespondTo={memberIsBot ? setEditRespondToAgent : undefined}
+          onManagedAgentAction={(agent) => {
+            void handleAgentLifecycleAction(agent);
+          }}
+          onOpenProfile={handleOpenProfile}
+          onRemoveMember={handleRemoveMember}
+          onViewActivity={
+            onViewActivity
+              ? (pubkey: string) => {
+                  onOpenChange(false);
+                  onViewActivity(pubkey);
+                }
+              : undefined
+          }
+          presenceStatus={
+            memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
+          }
+          profileAvatarUrl={
+            memberProfilesQuery.data?.profiles[member.pubkey.toLowerCase()]
+              ?.avatarUrl ?? null
+          }
+        />
+      </div>
     );
   }
 

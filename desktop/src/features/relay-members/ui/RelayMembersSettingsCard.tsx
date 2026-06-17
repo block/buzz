@@ -36,6 +36,7 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { Input } from "@/shared/ui/input";
+import { VirtualizedList } from "@/shared/ui/VirtualizedList";
 
 type AssignableRelayRole = Exclude<RelayMemberRole, "owner">;
 
@@ -486,17 +487,22 @@ export function RelayMembersSettingsCard({
               No members match your search.
             </p>
           ) : (
-            <div className="max-h-[28rem] space-y-2 overflow-y-auto pr-1">
-              {filteredMembers.map((member) => (
-                <RelayMemberRow
-                  currentPubkey={currentPubkey}
-                  currentRole={currentRole}
-                  key={member.pubkey}
-                  member={member}
-                  profile={profiles?.[normalizePubkey(member.pubkey)]}
-                />
-              ))}
-            </div>
+            <VirtualizedList
+              className="max-h-[28rem] pr-1"
+              estimateSize={56}
+              getItemKey={(member) => member.pubkey}
+              items={filteredMembers}
+              renderItem={(member) => (
+                <div className="pb-2">
+                  <RelayMemberRow
+                    currentPubkey={currentPubkey}
+                    currentRole={currentRole}
+                    member={member}
+                    profile={profiles?.[normalizePubkey(member.pubkey)]}
+                  />
+                </div>
+              )}
+            />
           )}
         </div>
       </div>

@@ -1779,6 +1779,12 @@
     contain-intrinsic-size: auto 200px;
   }
 
+  /* Compact variant for short single-line rows (sidebar channels, etc). */
+  .content-visibility-auto-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 2rem;
+  }
+
   .buzz-huddle-tooltip {
     --primary: var(
       --huddle-tooltip-surface,
