@@ -45,6 +45,7 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@tanstack/react-query": "^5.90.21",
     "@tanstack/react-router": "^1.168.10",
+    "@tanstack/react-virtual": "^3.14.2",
     "@tauri-apps/api": "~2.11",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-opener": "~2.5",
