@@ -49,22 +49,26 @@ async function driveConnectionDegraded(
 }
 
 test.describe("relay connectivity screenshots", () => {
-  test("01 — sidebar unreachable banner", async ({ page }) => {
+  test("01 — sidebar unreachable card", async ({ page }) => {
     await installMockBridge(page, { channelsReadError: RELAY_UNREACHABLE });
     await page.goto("/");
 
-    await expect(page.getByTestId("sidebar-relay-unreachable")).toBeVisible();
+    const relayCard = page.getByTestId("sidebar-relay-unreachable");
+    await expect(relayCard).toBeVisible();
+    await expect(relayCard).toContainText("Can't reach the relay");
+    await expect(relayCard).toContainText("Click to connect");
     await expect(page.getByTestId("sidebar-reconnect")).toBeVisible();
+    await expect(page.getByTestId("connection-banner")).toHaveCount(0);
     await settle(page);
 
-    // Clip to sidebar width (256px) so the banner and channel list are both visible.
+    // Clip to sidebar width (256px) so the card and channel list are both visible.
     await page.screenshot({
       path: `${SHOTS}/01-sidebar-unreachable.png`,
       clip: { x: 0, y: 0, width: 256, height: 720 },
     });
   });
 
-  test("02 — connection banner while reconnecting", async ({ page }) => {
+  test("02 — sidebar reconnect card while reconnecting", async ({ page }) => {
     await installMockBridge(page);
     await page.goto("/");
 
@@ -72,40 +76,24 @@ test.describe("relay connectivity screenshots", () => {
     await expect(page.getByTestId("channel-general")).toBeVisible();
     await driveConnectionDegraded(page);
 
-    // ConnectionBanner debounces non-healthy states by 2 s before rendering.
-    await expect(page.getByTestId("connection-banner")).toBeVisible({
+    // useRelayConnection debounces non-healthy states by 2 s before surfacing.
+    const relayCard = page.getByTestId("sidebar-relay-unreachable");
+    await expect(relayCard).toBeVisible({
       timeout: 5_000,
     });
-    await expect(page.getByTestId("connection-banner-reconnect")).toBeVisible();
+    await expect(relayCard).toContainText("Can't reach the relay");
+    await expect(relayCard).toContainText("Click to connect");
+    await expect(page.getByTestId("sidebar-reconnect")).toBeVisible();
     await settle(page);
 
-    // Capture a horizontal strip spanning the full width that shows the banner
-    // above the content pane.
+    // Clip to the sidebar, where degraded relay state is now surfaced.
     await page.screenshot({
-      path: `${SHOTS}/02-connection-banner.png`,
-      clip: { x: 0, y: 0, width: 1280, height: 180 },
+      path: `${SHOTS}/02-sidebar-reconnecting.png`,
+      clip: { x: 0, y: 0, width: 256, height: 720 },
     });
   });
 
-  test("03 — home feed unreachable", async ({ page }) => {
-    await installMockBridge(page, { feedReadError: RELAY_UNREACHABLE });
-    await page.goto("/");
-
-    // HomeView renders the error card when the feed query fails.
-    await expect(
-      page.getByText(
-        "Can't reach the relay — check your VPN or network connection.",
-      ),
-    ).toBeVisible();
-    await settle(page);
-
-    await page.screenshot({
-      path: `${SHOTS}/03-home-unreachable.png`,
-      clip: { x: 0, y: 0, width: 1280, height: 500 },
-    });
-  });
-
-  test("04 — canvas unreachable in management sheet", async ({ page }) => {
+  test("03 — canvas unreachable in management sheet", async ({ page }) => {
     await installMockBridge(page, { canvasReadError: RELAY_UNREACHABLE });
     await page.goto("/");
 
@@ -135,11 +123,11 @@ test.describe("relay connectivity screenshots", () => {
 
     // Capture the whole sheet so the error renders in its Canvas-section context.
     await sheet.screenshot({
-      path: `${SHOTS}/04-canvas-unreachable.png`,
+      path: `${SHOTS}/03-canvas-unreachable.png`,
     });
   });
 
-  test("05 — cached identity shown offline (avatar + display name)", async ({
+  test("04 — cached identity shown offline (avatar + display name)", async ({
     page,
   }) => {
     // Seed the self-profile cache BEFORE installMockBridge so addInitScript
@@ -168,11 +156,11 @@ test.describe("relay connectivity screenshots", () => {
     await settle(page);
 
     await profileCard.screenshot({
-      path: `${SHOTS}/05-cached-identity-offline.png`,
+      path: `${SHOTS}/04-cached-identity-offline.png`,
     });
   });
 
-  test("06 — no-cache npub fallback when offline", async ({ page }) => {
+  test("05 — no-cache npub fallback when offline", async ({ page }) => {
     // No cache seeded — profile card falls back to the mock identity npub name.
     await installMockBridge(page, { profileReadError: RELAY_UNREACHABLE });
     await page.goto("/");
@@ -183,11 +171,11 @@ test.describe("relay connectivity screenshots", () => {
     await settle(page);
 
     await profileCard.screenshot({
-      path: `${SHOTS}/06-no-cache-npub-fallback.png`,
+      path: `${SHOTS}/05-no-cache-npub-fallback.png`,
     });
   });
 
-  test("07 — profile popover reconnect button while degraded", async ({
+  test("06 — sidebar card shows connected after external relay recovery", async ({
     page,
   }) => {
     await installMockBridge(page);
@@ -196,31 +184,21 @@ test.describe("relay connectivity screenshots", () => {
     await expect(page.getByTestId("channel-general")).toBeVisible();
     await driveConnectionDegraded(page);
 
-    // 2 s debounce on the "reconnecting" state before ConnectionBanner shows.
-    await expect(page.getByTestId("connection-banner")).toBeVisible({
+    const relayCard = page.getByTestId("sidebar-relay-unreachable");
+    await expect(relayCard).toBeVisible({
       timeout: 5_000,
     });
+    await expect(relayCard).toContainText("Can't reach the relay");
+    await expect(relayCard).toContainText("Click to connect");
 
-    await page.getByTestId("sidebar-profile-avatar-button").click();
-    const reconnectBtn = page.getByTestId("profile-popover-reconnect");
-    await expect(reconnectBtn).toBeVisible();
+    await driveConnectionDegraded(page, "connected");
 
-    // Wait for the Radix popover open animation on the [data-state] ancestor —
-    // the popper wrapper itself carries no animations, so querying it returns
-    // an empty list and screenshots capture a half-faded popover.
-    await reconnectBtn.evaluate((el) =>
-      Promise.all(
-        el
-          .closest("[data-state]")
-          ?.getAnimations()
-          .map((a) => a.finished) ?? [],
-      ),
-    );
-
-    // Clip to the sidebar-bottom region that includes the open popover.
-    await page.screenshot({
-      path: `${SHOTS}/07-profile-popover-reconnect.png`,
-      clip: { x: 0, y: 300, width: 480, height: 420 },
+    await expect(relayCard).toContainText("Connected");
+    await expect(relayCard).not.toContainText("Click to connect");
+    await page.waitForTimeout(3_000);
+    await expect(relayCard).toContainText("Connected");
+    await expect(relayCard).toBeHidden({
+      timeout: 5_000,
     });
   });
 });
