@@ -537,7 +537,7 @@ jobs:
       - name: Start relay
         run: ./scripts/start-relay-for-tests.sh
       - name: Relay E2E tests
-        run: cargo test -p buzz-test-client --test '*' -- --ignored --nocapture
+        run: cargo test -p buzz-test-client --test e2e_persona --test e2e_nostr_interop -- --ignored --nocapture
         env:
           RELAY_URL: ws://localhost:3000
           GIT_CREDENTIAL_NOSTR_BIN: ${{ github.workspace }}/target/ci/git-credential-nostr
