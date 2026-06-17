@@ -225,7 +225,6 @@ export function useTimelineScrollManager({
     [pinToBottom, syncScrollState],
   );
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: timelineRef is a stable React ref — its identity never changes
   React.useEffect(() => {
     const timeline = timelineRef.current;
 

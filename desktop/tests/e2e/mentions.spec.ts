@@ -737,7 +737,9 @@ test("system member-joined rows render the joined person as a mention chip", asy
     "background-color",
     "rgba(0, 0, 0, 0)",
   );
-  await expect(joinedPersonChip.locator(".mention-chip-prefix")).toHaveText("@");
+  await expect(joinedPersonChip.locator(".mention-chip-prefix")).toHaveText(
+    "@",
+  );
 });
 
 test("selecting a non-member agent from a DM inserts @Name into input", async ({
