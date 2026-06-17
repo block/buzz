@@ -630,18 +630,36 @@ export function useRichTextEditor({
 
   /**
    * Apply a link to the given range, replacing the covered text with
-   * `text` and marking it with `href`. When `from === to` (no range), the
-   * linked text is inserted at the caret. Used by both the toolbar button
-   * and the click-to-edit modal.
+   * `text` and marking it with `href`. When `range` is omitted (an
+   * empty-caret insert with no live selection), the link is inserted at the
+   * current caret — never at the placeholder position `0`, which sits
+   * outside the document content. When `from === to`, the linked text is
+   * inserted at that point. Used by both the toolbar button and the
+   * click-to-edit modal.
    */
   const applyLink = React.useCallback(
-    ({ href, text, from, to }: LinkSelectionInfo) => {
+    ({
+      href,
+      text,
+      from,
+      to,
+    }: {
+      href: string;
+      text: string;
+      from?: number;
+      to?: number;
+    }) => {
       if (!editor) return;
+      // Default to the live caret when no range is supplied, so an
+      // empty-caret insert lands at the cursor rather than doc position 0.
+      const selection = editor.state.selection;
+      const start = from ?? selection.from;
+      const end = to ?? start;
       const label = text.trim().length > 0 ? text : href;
       const linkMark = editor.schema.marks.link.create({ href });
       const node = editor.schema.text(label, [linkMark]);
-      const tr = editor.state.tr.replaceRangeWith(from, to, node);
-      const cursorPM = tr.mapping.map(to);
+      const tr = editor.state.tr.replaceRangeWith(start, end, node);
+      const cursorPM = tr.mapping.map(end);
       tr.setSelection(TextSelection.create(tr.doc, cursorPM));
       editor.view.dispatch(tr);
       editor.view.focus();

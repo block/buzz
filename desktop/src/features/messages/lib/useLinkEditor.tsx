@@ -28,6 +28,12 @@ type DraftState = {
   url: string;
   from: number;
   to: number;
+  /**
+   * Whether `from`/`to` point at a real document range. `false` for an
+   * empty-caret toolbar insert, where the range is resolved from the live
+   * selection at save time instead of the (placeholder) draft positions.
+   */
+  hasRange: boolean;
   /** Whether the targeted range already carried a link (enables Remove). */
   isExistingLink: boolean;
   initialFocus: LinkEditorInitialFocus;
@@ -141,6 +147,7 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
       url: info.href,
       from: info.from,
       to: info.to,
+      hasRange: true,
       isExistingLink: info.href.length > 0,
       initialFocus: getLinkEditorInitialFocus(info),
     });
@@ -166,6 +173,7 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
       url: "",
       from: 0,
       to: 0,
+      hasRange: false,
       isExistingLink: false,
       initialFocus: "text",
     });
@@ -179,21 +187,23 @@ export function useLinkEditor(richText: UseRichTextEditorResult) {
     if (!draft) return;
     const url = draft.url.trim();
     if (!url) return;
-    if (draft.from === 0 && draft.to === 0) {
-      // Empty-caret insert: fall back to current selection range.
-      const info = getLinkSelectionInfo();
-      applyLink({
-        href: url,
-        text: draft.text,
-        from: info?.from ?? 0,
-        to: info?.to ?? 0,
-      });
-    } else {
+    if (draft.hasRange) {
       applyLink({
         href: url,
         text: draft.text,
         from: draft.from,
         to: draft.to,
+      });
+    } else {
+      // Empty-caret insert: prefer the live selection range; if there's no
+      // selection, omit the range so `applyLink` inserts at the caret rather
+      // than at the placeholder doc position 0.
+      const info = getLinkSelectionInfo();
+      applyLink({
+        href: url,
+        text: draft.text,
+        from: info?.from,
+        to: info?.to,
       });
     }
     close();
