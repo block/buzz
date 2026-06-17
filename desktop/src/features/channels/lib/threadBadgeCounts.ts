@@ -6,6 +6,13 @@ import type { TimelineMessage } from "@/features/messages/types";
  * descendant, walked through the direct-replies adjacency map. A reply-to-a-
  * reply must count toward the root's badge, so the badge tally needs the whole
  * subtree rather than the root's direct children alone.
+ *
+ * Terminates without a visited-set: buildDirectRepliesByParentId places each
+ * message under exactly one parent key, and the only caller seeds the walk from
+ * true roots (parentId === null), so a node in a malformed parent cycle — whose
+ * members all key off each other, never off a root — is unreachable from any
+ * root's bucket. Seeding from a non-root id, or a builder that filed one node
+ * under two keys, would break that invariant.
  */
 function collectSubtreeReplies(
   rootId: string,
