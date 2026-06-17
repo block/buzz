@@ -1,7 +1,9 @@
--- Buzz — Declarative Postgres schema (managed by pgschema)
+-- Buzz Postgres schema reference.
 --
--- This file represents the desired state of the database schema.
--- Use `pgschema apply --file schema/schema.sql` to bring the database up to date.
+-- Runtime migrations live under migrations/ and are applied by sqlx. Keep this
+-- file in sync as a human-readable snapshot of the desired schema.
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ── Custom types ──────────────────────────────────────────────────────────────
 

@@ -86,19 +86,19 @@ export function ProjectsView() {
                 <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground/70">
                   {project.cloneUrls.length > 0 ? (
                     <span className="flex items-center gap-1">
-                      <GitFork className="h-3 w-3" />
+                      <GitFork className="h-4 w-4" />
                       {project.cloneUrls[0]}
                     </span>
                   ) : null}
                   {project.contributors.length > 0 ? (
                     <span className="flex items-center gap-1">
-                      <Users className="h-3 w-3" />
+                      <Users className="h-4 w-4" />
                       {project.contributors.length}
                     </span>
                   ) : null}
                   {project.webUrl ? (
                     <span className="flex items-center gap-1">
-                      <ExternalLink className="h-3 w-3" />
+                      <ExternalLink className="h-4 w-4" />
                       Web
                     </span>
                   ) : null}

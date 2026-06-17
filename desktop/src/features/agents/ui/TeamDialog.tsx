@@ -422,7 +422,7 @@ export function TeamDialog({
                           />
                           <ProfileAvatar
                             avatarUrl={persona.avatarUrl}
-                            className="h-6 w-6 text-[10px]"
+                            className="h-6 w-6 text-2xs"
                             label={persona.displayName}
                           />
                           <span className="text-sm">{persona.displayName}</span>
@@ -475,12 +475,12 @@ export function TeamDialog({
                           : undefined
                       }
                     >
-                      <Upload className="h-3.5 w-3.5" />
+                      <Upload className="h-4 w-4" />
                       <span className="max-w-[16rem] truncate">
                         {importButtonLabel}
                       </span>
                       {isImportingUpdate ? (
-                        <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                        <RefreshCw className="h-4 w-4 animate-spin" />
                       ) : null}
                     </button>
                   </>

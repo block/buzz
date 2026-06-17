@@ -20,6 +20,7 @@ import {
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
+import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -34,6 +35,7 @@ export const MessageRow = React.memo(
     channelId = null,
     highlighted = false,
     hoverBackground = true,
+    actionBarPlacement = "floating",
     isFollowingThread,
     layoutVariant = "default",
     message,
@@ -46,6 +48,7 @@ export const MessageRow = React.memo(
     onUnfollowThread,
     profiles,
     searchQuery,
+    showDepthGuides = true,
     agentPubkeys,
     videoReviewContext,
   }: {
@@ -53,6 +56,7 @@ export const MessageRow = React.memo(
     channelId?: string | null;
     highlighted?: boolean;
     hoverBackground?: boolean;
+    actionBarPlacement?: "floating" | "inside";
     isFollowingThread?: boolean;
     layoutVariant?: "default" | "thread-reply";
     message: TimelineMessage;
@@ -69,6 +73,7 @@ export const MessageRow = React.memo(
     onUnfollowThread?: (message: TimelineMessage) => void;
     profiles?: UserProfileLookup;
     searchQuery?: string;
+    showDepthGuides?: boolean;
     videoReviewContext?: VideoReviewContext;
   }) {
     const [expandedDiffId, setExpandedDiffId] = React.useState<string | null>(
@@ -131,6 +136,7 @@ export const MessageRow = React.memo(
       () => isEmojiOnlyMessage(message.body, customEmoji),
       [message.body, customEmoji],
     );
+    const bodyOffsetClass = emojiOnly ? "mt-1" : "-mt-0.5";
 
     const { channels } = useChannelNavigation();
     const channelNames = React.useMemo(
@@ -188,9 +194,9 @@ export const MessageRow = React.memo(
             <Markdown
               channelNames={channelNames}
               className={cn(
-                "max-w-full text-[15px] leading-6",
+                "max-w-full text-sm",
                 emojiOnly &&
-                  "text-4xl leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
+                  "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
               )}
               content={message.body}
               customEmoji={customEmoji}
@@ -199,7 +205,6 @@ export const MessageRow = React.memo(
               mentionNames={mentionNames}
               mentionPubkeysByName={mentionPubkeysByName}
               searchQuery={searchQuery}
-              tight
               videoReviewContext={videoReviewContext}
             />
           );
@@ -208,7 +213,7 @@ export const MessageRow = React.memo(
 
     const isThreadReplyLayout = layoutVariant === "thread-reply";
     const guideBleedPx = isThreadReplyLayout ? 4 : 0;
-    const avatarSizeClass = "!h-9 !w-9";
+    const avatarSizeClass = "!h-10 !w-10";
     const avatarButtonRadiusClass = "rounded-full";
 
     const respondToDotColor =
@@ -245,17 +250,20 @@ export const MessageRow = React.memo(
     );
 
     const authorNode = message.pubkey ? (
-      <span className="truncate text-[15px] font-semibold leading-none tracking-tight hover:underline">
-        {message.author}
-      </span>
+      <MessageAuthorText hoverUnderline>{message.author}</MessageAuthorText>
     ) : (
-      <h3 className="truncate text-[15px] font-semibold leading-none tracking-tight">
-        {message.author}
-      </h3>
+      <MessageAuthorText as="h3">{message.author}</MessageAuthorText>
     );
 
     const actionBarNode = (
-      <div className="absolute right-2 top-1 z-10">
+      <div
+        className={cn(
+          "absolute right-2 top-1 z-10",
+          actionBarPlacement === "floating"
+            ? "sm:top-0 sm:-translate-y-1/2"
+            : "sm:top-1 sm:translate-y-0",
+        )}
+      >
         <MessageActionBar
           channelId={channelId}
           isFollowingThread={isFollowingThread}
@@ -345,7 +353,7 @@ export const MessageRow = React.memo(
         className="relative"
         style={indentPx > 0 ? { paddingLeft: `${indentPx}px` } : undefined}
       >
-        {depthGuideOffsets.length > 0 ? (
+        {showDepthGuides && depthGuideOffsets.length > 0 ? (
           <div
             aria-hidden
             className="pointer-events-none absolute left-0"
@@ -369,8 +377,10 @@ export const MessageRow = React.memo(
 
         <article
           className={cn(
-            "group/message relative rounded-2xl px-3 py-2 transition-colors",
-            hoverBackground && "hover:bg-muted/50 focus-within:bg-muted/50",
+            "group/message relative rounded-2xl py-2 transition-colors",
+            hoverBackground
+              ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
+              : "px-2",
             "flex items-start gap-2.5",
             highlighted
               ? "-mx-4 rounded-none px-6 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-8"
@@ -400,8 +410,8 @@ export const MessageRow = React.memo(
               ) : (
                 <div className="flex shrink-0 items-start">{avatarNode}</div>
               )}
-              <div className="-mt-1 min-w-0 flex-1 space-y-0">
-                <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0">
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <MessageHeaderRow>
                   {message.pubkey ? (
                     <UserProfilePopover
                       pubkey={message.pubkey}
@@ -409,7 +419,7 @@ export const MessageRow = React.memo(
                       botIdenticonValue={message.author}
                     >
                       <button
-                        className="truncate rounded focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                        className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                         type="button"
                       >
                         {authorNode}
@@ -425,8 +435,8 @@ export const MessageRow = React.memo(
                       {message.personaDisplayName}
                     </span>
                   ) : null}
-                </div>
-                <div className="-mt-0.5">{messageBodyNode}</div>
+                </MessageHeaderRow>
+                <div className={bodyOffsetClass}>{messageBodyNode}</div>
               </div>
             </>
           ) : (
@@ -450,8 +460,8 @@ export const MessageRow = React.memo(
               ) : (
                 <div className="flex shrink-0 items-start">{avatarNode}</div>
               )}
-              <div className="-mt-1 min-w-0 flex-1 space-y-0">
-                <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0">
+              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                <MessageHeaderRow>
                   {message.pubkey ? (
                     <UserProfilePopover
                       pubkey={message.pubkey}
@@ -459,7 +469,7 @@ export const MessageRow = React.memo(
                       botIdenticonValue={message.author}
                     >
                       <button
-                        className="truncate rounded focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                        className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                         type="button"
                       >
                         {authorNode}
@@ -475,8 +485,8 @@ export const MessageRow = React.memo(
                       {message.personaDisplayName}
                     </span>
                   ) : null}
-                </div>
-                <div className="-mt-0.5">{messageBodyNode}</div>
+                </MessageHeaderRow>
+                <div className={bodyOffsetClass}>{messageBodyNode}</div>
               </div>
             </>
           )}

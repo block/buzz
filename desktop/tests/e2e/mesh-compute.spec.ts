@@ -75,6 +75,13 @@ async function openManagedAgentActions(
   await expect(trigger).toHaveAttribute("data-state", "open");
 }
 
+async function openNewAgentMenu(page: import("@playwright/test").Page) {
+  await page
+    .getByTestId("agents-library-personas")
+    .getByRole("button", { name: "New", exact: true })
+    .click();
+}
+
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
@@ -140,7 +147,7 @@ test("Run-on-relay-mesh ensures the client node BEFORE spawning the agent", asyn
 }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await openNewAgentMenu(page);
   await page.getByText("Custom Agent").click();
 
   // Member is admitted -> the relay-mesh toggle becomes enabled (availability
@@ -184,7 +191,7 @@ test("Run-on-relay-mesh skips connect signaling for own serve target", async ({
 }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await openNewAgentMenu(page);
   await page.getByText("Custom Agent").click();
   await page.getByTestId("agent-name-input").fill("Own Mesh Agent");
 
@@ -224,7 +231,7 @@ test("Run-on-relay-mesh canonicalizes the mesh connect #p target", async ({
   });
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await openNewAgentMenu(page);
   await page.getByText("Custom Agent").click();
   await page.getByTestId("agent-name-input").fill("Mesh Agent");
 
@@ -262,7 +269,7 @@ test("a non-member cannot enable relay-mesh — membership is the gate", async (
   await setMesh(page, { admitted: false, denyReason: "not a relay member" });
 
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await openNewAgentMenu(page);
   await page.getByText("Custom Agent").click();
 
   // The relay-mesh toggle stays disabled — a non-member cannot even opt into
@@ -281,7 +288,7 @@ test("saved relay-mesh agents restart via the backend serve-target preflight", a
 }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await openNewAgentMenu(page);
   await page.getByText("Custom Agent").click();
   await page.getByTestId("agent-name-input").fill("Saved relay mesh agent");
 

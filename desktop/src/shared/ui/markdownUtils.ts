@@ -10,10 +10,18 @@ import * as React from "react";
 function isBlockMedia(child: React.ReactNode): boolean {
   if (!React.isValidElement(child)) return false;
 
-  const props = child.props as Record<string, unknown>;
+  const props = child.props as {
+    children?: React.ReactNode;
+    node?: { tagName?: unknown };
+    [key: string]: unknown;
+  };
   const node = props?.node as { tagName?: unknown } | undefined;
 
-  return props?.["data-block-media"] != null || node?.tagName === "img";
+  if (props?.["data-block-media"] != null || node?.tagName === "img") {
+    return true;
+  }
+
+  return React.Children.toArray(props.children).some(isBlockMedia);
 }
 
 /**

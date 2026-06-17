@@ -171,7 +171,7 @@ export function NoteCard({
             displayName={displayName}
           />
           {isAgent ? (
-            <Bot className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-background p-0.5 text-muted-foreground" />
+            <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
           ) : null}
         </button>
       </UserProfilePopover>
@@ -191,7 +191,7 @@ export function NoteCard({
             </button>
           </UserProfilePopover>
           {isAgent ? (
-            <span className="inline-flex h-4 items-center rounded bg-muted px-1 text-[10px] font-medium text-muted-foreground">
+            <span className="inline-flex h-4 items-center rounded bg-muted px-1 text-2xs font-medium text-muted-foreground">
               bot
             </span>
           ) : null}
@@ -213,7 +213,7 @@ export function NoteCard({
         ) : null}
 
         <div className="mt-0.5 pb-3 text-sm text-foreground">
-          <Markdown content={note.content} tight />
+          <Markdown content={note.content} />
         </div>
 
         <div className="flex flex-wrap items-center gap-5 text-xs font-medium">

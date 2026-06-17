@@ -79,10 +79,7 @@ export function AgentSessionThreadPanel({
   const agentHeaderActions = (
     <div className="ml-auto flex shrink-0 items-center gap-2">
       {isLive && isWorking ? (
-        <Badge
-          className="shrink-0 gap-1 px-2 py-0 text-[10px]"
-          variant="default"
-        >
+        <Badge className="shrink-0 gap-1 px-2 py-0 text-2xs" variant="default">
           <CircleDot className="h-2.5 w-2.5" />
           Live
         </Badge>
@@ -92,7 +89,7 @@ export function AgentSessionThreadPanel({
           <TooltipTrigger asChild>
             <Button
               aria-label="Stop current agent turn"
-              className="h-6 px-2 text-[11px]"
+              className="h-6 px-2 text-2xs"
               data-testid="agent-session-stop-turn"
               disabled={!canInterruptTurn}
               onClick={() => {
@@ -102,7 +99,7 @@ export function AgentSessionThreadPanel({
               type="button"
               variant="outline"
             >
-              <Octagon className="h-3 w-3" />
+              <Octagon className="h-4 w-4" />
               Stop
             </Button>
           </TooltipTrigger>

@@ -95,7 +95,7 @@ export function RelayDirectorySection({
                   className="w-full border-collapse text-left text-sm"
                   data-testid="relay-directory-table"
                 >
-                  <thead className="bg-muted/35 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                  <thead className="bg-muted/35 text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
                     <tr>
                       <th className="px-4 py-3">Agent</th>
                       <th className="px-4 py-3">Status</th>
@@ -121,7 +121,7 @@ export function RelayDirectorySection({
                         </td>
                         <td className="px-4 py-3 align-top">
                           <PresenceBadge
-                            className="px-2.5 py-0.5 text-[11px]"
+                            className="px-2.5 py-0.5 text-2xs"
                             status={agent.status}
                           />
                         </td>

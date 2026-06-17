@@ -1,4 +1,4 @@
-import { LoaderCircle, Search } from "lucide-react";
+import { Search } from "lucide-react";
 import * as React from "react";
 
 import { resolveUserLabel } from "@/features/profile/lib/identity";
@@ -14,6 +14,12 @@ import {
 } from "@/features/search/ui/SearchResultItem";
 import type { Channel, SearchHit } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import {
+  POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+  POPOVER_SHADOW_STYLE,
+  POPOVER_SURFACE_CLASS,
+} from "@/shared/ui/popoverSurface";
+import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type TopbarSearchProps = {
@@ -74,6 +80,62 @@ function formatRelativeTime(unixSeconds: number) {
     month: "short",
     day: "numeric",
   }).format(new Date(unixSeconds * 1_000));
+}
+
+const searchSkeletonRows = [
+  {
+    iconShape: "rounded-md",
+    key: "channel",
+    metaWidth: "w-16",
+    previewWidth: "w-48",
+    titleWidth: "w-28",
+    trailingWidth: "w-14",
+  },
+  {
+    iconShape: "rounded-full",
+    key: "message",
+    metaWidth: "w-24",
+    previewWidth: "w-72",
+    titleWidth: "w-24",
+    trailingWidth: "w-20",
+  },
+  {
+    iconShape: "rounded-full",
+    key: "note",
+    metaWidth: "w-20",
+    previewWidth: "w-60",
+    titleWidth: "w-32",
+    trailingWidth: "w-16",
+  },
+] as const;
+
+function SearchResultsSkeleton() {
+  return (
+    <div
+      aria-hidden="true"
+      className="max-h-[360px] overflow-y-auto p-1"
+      data-testid="search-results-loading"
+    >
+      {searchSkeletonRows.map((row) => (
+        <div
+          className="flex w-full items-center gap-3 rounded-lg px-3 py-2"
+          key={row.key}
+        >
+          <Skeleton className={cn("h-7 w-7 shrink-0", row.iconShape)} />
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <Skeleton className={cn("h-4", row.titleWidth)} />
+              <Skeleton className={cn("h-3", row.metaWidth)} />
+            </div>
+            <Skeleton
+              className={cn("mt-1.5 h-3 max-w-full", row.previewWidth)}
+            />
+          </div>
+          <Skeleton className={cn("h-3 shrink-0", row.trailingWidth)} />
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export function TopbarSearch({
@@ -156,11 +218,13 @@ export function TopbarSearch({
 
   return (
     <div className={cn("relative", className)} ref={rootRef}>
-      <div className="flex h-7 items-center gap-2 rounded-lg border border-border/70 bg-muted/45 px-2.5 text-xs text-muted-foreground shadow-xs backdrop-blur transition-colors focus-within:border-border focus-within:bg-muted/70 focus-within:text-foreground hover:bg-muted/70 supports-[backdrop-filter]:bg-muted/35">
-        <Search className="h-3.5 w-3.5 shrink-0" />
+      <div className="group/search flex h-7 items-center gap-2 rounded-lg border border-border/70 bg-background px-2.5 text-xs text-muted-foreground shadow-xs transition-colors duration-150 ease-out focus-within:border-border focus-within:bg-muted/70 focus-within:text-foreground hover:bg-muted/70">
+        <Search className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-focus-within/search:text-foreground group-hover/search:text-muted-foreground" />
         <input
           aria-label="Search everything"
-          className="min-w-0 flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground outline-none"
+          autoCapitalize="none"
+          autoCorrect="off"
+          className="min-w-0 translate-y-px flex-1 bg-transparent text-xs text-foreground placeholder:text-muted-foreground/55 outline-none transition-colors duration-150 ease-out group-focus-within/search:placeholder:text-foreground group-hover/search:placeholder:text-muted-foreground"
           data-testid="open-search"
           ref={inputRef}
           onChange={(event) => {
@@ -199,27 +263,31 @@ export function TopbarSearch({
             }
           }}
           placeholder="Search everything"
+          spellCheck={false}
           value={query}
         />
-        <kbd className="shrink-0 text-[10px] text-muted-foreground/70">
+        <kbd className="shrink-0 text-2xs text-muted-foreground/70">
           &#x2318;K
         </kbd>
       </div>
 
       {showSuggestions ? (
         <div
-          className="absolute left-1/2 top-full z-50 mt-1 w-[620px] max-w-[min(82vw,620px)] -translate-x-1/2 overflow-hidden rounded-xl border border-border/80 bg-popover text-popover-foreground shadow-xl"
+          aria-busy={searchQuery.isLoading && results.length === 0}
+          className={cn(
+            "absolute left-1/2 top-full z-50 mt-1 w-[620px] max-w-[min(82vw,620px)] -translate-x-1/2 origin-top overflow-hidden rounded-xl slide-in-from-top-1",
+            POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+            POPOVER_SURFACE_CLASS,
+          )}
           data-testid="search-results"
+          style={POPOVER_SHADOW_STYLE}
         >
           {debouncedQuery.length < MIN_SEARCH_QUERY_LENGTH ? (
-            <div className="px-3 py-3 text-[11px] text-muted-foreground">
+            <div className="px-3 py-3 text-2xs text-muted-foreground">
               <p>Type at least two characters for live suggestions.</p>
             </div>
           ) : searchQuery.isLoading && results.length === 0 ? (
-            <div className="flex items-center gap-2 px-3 py-3 text-xs text-muted-foreground">
-              <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-              Searching...
-            </div>
+            <SearchResultsSkeleton />
           ) : searchQuery.error instanceof Error && results.length === 0 ? (
             <p className="px-3 py-3 text-xs text-destructive">
               {searchQuery.error.message}
@@ -230,7 +298,7 @@ export function TopbarSearch({
               <span className="font-semibold">{trimmedQuery}</span>.
             </p>
           ) : (
-            <div className="max-h-[360px] overflow-y-auto p-1.5">
+            <div className="max-h-[360px] overflow-y-auto p-1">
               {results.map((result, index) => (
                 <button
                   className={cn(
@@ -291,7 +359,7 @@ export function TopbarSearch({
                         : truncateResultText(result.hit.content)}
                     </span>
                   </span>
-                  <span className="shrink-0 text-[11px] text-muted-foreground/75">
+                  <span className="shrink-0 text-2xs text-muted-foreground/75">
                     {result.kind === "channel"
                       ? "Channel"
                       : `${describeSearchHit(result.hit)} · ${formatRelativeTime(result.hit.createdAt)}`}

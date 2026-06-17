@@ -1,9 +1,10 @@
 import * as React from "react";
-import { Camera, Link2, Loader2, Upload, X } from "lucide-react";
+import { Camera, Link2, Upload, X } from "lucide-react";
 
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
 import { Input } from "@/shared/ui/input";
+import { Spinner } from "@/shared/ui/spinner";
 
 type AvatarUploadProps = {
   avatarUrl: string;
@@ -90,7 +91,7 @@ export function AvatarUpload({
               title="Remove photo"
               type="button"
             >
-              <X className="h-3 w-3" />
+              <X className="h-4 w-4" />
             </button>
           ) : (
             <div className="absolute -bottom-1 -right-1 flex h-8 w-8 items-center justify-center rounded-full border border-background bg-primary text-primary-foreground shadow-xs">
@@ -127,9 +128,12 @@ export function AvatarUpload({
           type="button"
         >
           {isUploading ? (
-            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            <Spinner
+              aria-hidden
+              className="h-4 w-4 border-2 text-muted-foreground"
+            />
           ) : (
-            <Upload className="h-5 w-5 text-muted-foreground" />
+            <Upload className="h-4 w-4 text-muted-foreground" />
           )}
           <span className="text-xs text-muted-foreground">
             {isUploading ? (

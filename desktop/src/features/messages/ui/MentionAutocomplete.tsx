@@ -3,6 +3,11 @@ import { Bot } from "lucide-react";
 
 import { Badge } from "@/shared/ui/badge";
 import { cn } from "@/shared/lib/cn";
+import {
+  POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+  POPOVER_SHADOW_STYLE,
+  POPOVER_SURFACE_CLASS,
+} from "@/shared/ui/popoverSurface";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 export type MentionSuggestion = {
@@ -50,8 +55,17 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
       )}
     >
       <div
-        className="max-h-48 overflow-y-auto rounded-xl border bg-popover p-1 shadow-lg"
+        className={cn(
+          "max-h-48 overflow-y-auto rounded-xl p-1",
+          POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+          position === "below"
+            ? "origin-top slide-in-from-top-1"
+            : "origin-bottom slide-in-from-bottom-1",
+          POPOVER_SURFACE_CLASS,
+        )}
+        data-testid="mention-autocomplete"
         ref={listRef}
+        style={POPOVER_SHADOW_STYLE}
       >
         {suggestions.map((suggestion, index) => {
           const suggestionKey =
@@ -98,7 +112,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     >
                       <Bot
                         aria-hidden="true"
-                        className="h-3 w-3"
+                        className="h-4 w-4"
                         data-testid="mention-agent-icon"
                       />
                       {agentLabel}

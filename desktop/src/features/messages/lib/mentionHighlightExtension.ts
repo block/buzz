@@ -5,7 +5,7 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
 export const mentionHighlightKey = new PluginKey("mentionHighlight");
 
 /**
- * TipTap extension that applies inline `mention-highlight` decorations
+ * TipTap extension that applies inline `mention-chip` decorations
  * to `@Name` and `#channel-name` patterns in the document.
  *
  * Accepts `names` (display names) and `channelNames` storage options.
@@ -264,14 +264,14 @@ function buildDecorations(
       node.text,
       pos,
       mentionPatterns,
-      "mention-highlight",
+      "mention-chip",
     );
     addMatchesForPatterns(
       decorations,
       node.text,
       pos,
       agentMentionPatterns,
-      "mention-highlight agent-mention-highlight",
+      "mention-chip agent-mention-highlight",
       { hideMentionPrefix: true },
     );
     addMatchesForPatterns(
@@ -279,7 +279,7 @@ function buildDecorations(
       node.text,
       pos,
       channelPatterns,
-      "mention-highlight",
+      "mention-chip",
     );
   });
 

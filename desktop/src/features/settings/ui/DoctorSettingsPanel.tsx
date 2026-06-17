@@ -56,9 +56,9 @@ function InstallActions({
           variant="outline"
         >
           {isInstalling ? (
-            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            <RefreshCw className="h-4 w-4 animate-spin" />
           ) : (
-            <Download className="h-3.5 w-3.5" />
+            <Download className="h-4 w-4" />
           )}
           {isInstalling ? "Installing..." : "Install"}
         </Button>
@@ -68,7 +68,7 @@ function InstallActions({
         onClick={() => void openUrl(runtime.installInstructionsUrl)}
         type="button"
       >
-        <ExternalLink className="h-3 w-3" />
+        <ExternalLink className="h-4 w-4" />
         View instructions
       </button>
     </div>
@@ -109,7 +109,7 @@ function RuntimeRow({
         <div className="flex flex-wrap items-center gap-2">
           <p className="text-sm font-medium">{runtime.label}</p>
           {runtime.command ? (
-            <code className="rounded bg-muted px-1.5 py-0.5 text-[11px]">
+            <code className="rounded bg-muted px-1.5 py-0.5 text-2xs">
               {runtime.command}
             </code>
           ) : null}
@@ -134,21 +134,21 @@ function RuntimeRow({
             {runtime.underlyingCliPath &&
             runtime.underlyingCliPath !== runtime.binaryPath ? (
               <div className="mt-1 space-y-0.5">
-                <p className="break-all font-mono text-[11px] text-muted-foreground/80">
+                <p className="break-all font-mono text-2xs text-muted-foreground/80">
                   <span className="text-muted-foreground">CLI:</span>{" "}
                   {runtime.underlyingCliPath}
                 </p>
-                <p className="break-all font-mono text-[11px] text-muted-foreground/80">
+                <p className="break-all font-mono text-2xs text-muted-foreground/80">
                   <span className="text-muted-foreground">ACP adapter:</span>{" "}
                   {runtime.binaryPath}
                 </p>
               </div>
             ) : (
               <>
-                <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground/80">
+                <p className="mt-1 break-all font-mono text-2xs text-muted-foreground/80">
                   {runtime.binaryPath}
                 </p>
-                <p className="mt-1 text-[11px] text-muted-foreground/60">
+                <p className="mt-1 text-2xs text-muted-foreground/60">
                   ACP support built-in — no separate adapter needed.
                 </p>
               </>
@@ -158,7 +158,7 @@ function RuntimeRow({
           <>
             <p className="mt-1 text-sm font-normal text-muted-foreground">
               CLI detected at{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
                 {runtime.underlyingCliPath ?? "unknown path"}
               </code>{" "}
               but ACP adapter not found.
@@ -176,7 +176,7 @@ function RuntimeRow({
           <>
             <p className="mt-1 text-sm font-normal text-muted-foreground">
               ACP adapter found at{" "}
-              <code className="rounded bg-muted px-1 py-0.5 text-[11px]">
+              <code className="rounded bg-muted px-1 py-0.5 text-2xs">
                 {runtime.binaryPath ?? "unknown path"}
               </code>{" "}
               but the {runtime.label} CLI is not installed.

@@ -4,6 +4,10 @@ on:
     branches: [main, release]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.cache/ms-playwright
@@ -81,6 +85,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
@@ -102,6 +107,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: desktop/src-tauri
@@ -264,6 +270,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: |
@@ -358,6 +365,13 @@ jobs:
           PGUSER: buzz
           PGPASSWORD: buzz_dev
           PGDATABASE: buzz
+          # Use the already-running docker postgres for desired-state planning instead of
+          # downloading an embedded Postgres from Maven Central (transient-fetch flake source).
+          PGSCHEMA_PLAN_HOST: localhost
+          PGSCHEMA_PLAN_PORT: "5432"
+          PGSCHEMA_PLAN_DB: buzz
+          PGSCHEMA_PLAN_USER: buzz
+          PGSCHEMA_PLAN_PASSWORD: buzz_dev
       - name: Download relay binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -472,9 +486,7 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
-        with:
-          channel: stable
+      - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
       - name: Install dependencies
         run: cd mobile && flutter pub get
       - name: Format check
@@ -547,8 +559,10 @@ jobs:
       - name: Build server binaries
         env:
           TARGET: ${{ matrix.target }}
+          # PRs: compile + build-script gate only (no codegen/link). Main: full link gate.
+          CARGO_CMD: ${{ github.event_name == 'pull_request' && 'check' || 'build' }}
         run: |
-          cross build --release --target "$TARGET" \
+          cross "$CARGO_CMD" --release --target "$TARGET" \
             -p buzz-relay \
             -p buzz-acp \
             -p buzz-agent \

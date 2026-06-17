@@ -59,18 +59,31 @@ function DmChannelIcon({
   presenceStatus?: PresenceStatus;
 }) {
   const primaryParticipant = participants?.[0];
-  const secondaryParticipant = participants?.[1];
 
   if (!primaryParticipant) {
     return <CircleDot className="h-4 w-4" />;
   }
 
-  if (isPair || !secondaryParticipant) {
+  if (!isPair && participants && participants.length > 1) {
+    return (
+      <span
+        aria-hidden="true"
+        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-2xs font-semibold leading-none text-sidebar-foreground shadow-none"
+        data-testid={`channel-dm-count-${channelName}`}
+      >
+        <span className="translate-x-px leading-none">
+          {participants.length}
+        </span>
+      </span>
+    );
+  }
+
+  if (isPair || !participants || participants.length <= 1) {
     return (
       <span className="relative flex h-5 w-5 shrink-0 items-center justify-center">
         <ProfileAvatar
           avatarUrl={primaryParticipant.avatarUrl}
-          className="h-5 w-5 rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-[9px] text-sidebar-foreground shadow-none"
+          className="h-5 w-5 rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-2xs text-sidebar-foreground shadow-none"
           iconClassName="h-3 w-3"
           label={primaryParticipant.label}
         />
@@ -87,27 +100,7 @@ function DmChannelIcon({
     );
   }
 
-  return (
-    <span className="relative flex h-5 w-7 shrink-0 items-center">
-      <ProfileAvatar
-        avatarUrl={primaryParticipant.avatarUrl}
-        className="absolute left-0 top-0 h-[18px] w-[18px] rounded-full border-2 border-sidebar bg-sidebar-accent/80 text-[8px] text-sidebar-foreground shadow-none"
-        iconClassName="h-2.5 w-2.5"
-        label={primaryParticipant.label}
-      />
-      <ProfileAvatar
-        avatarUrl={secondaryParticipant.avatarUrl}
-        className="absolute bottom-0 right-0 h-[18px] w-[18px] rounded-full border-2 border-sidebar bg-sidebar-accent/80 text-[8px] text-sidebar-foreground shadow-none"
-        iconClassName="h-2.5 w-2.5"
-        label={secondaryParticipant.label}
-      />
-      {participants && participants.length > 2 ? (
-        <span className="absolute -bottom-1 -right-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-sidebar-primary px-1 text-[8px] font-semibold text-sidebar-primary-foreground">
-          {participants.length}
-        </span>
-      ) : null}
-    </span>
-  );
+  return <CircleDot className="h-4 w-4" />;
 }
 
 function SidebarChannelIcon({
@@ -202,7 +195,7 @@ export function ChannelMenuButton({
       {isMuted ? (
         <BellOff
           className={cn(
-            "ml-auto h-3 w-3 shrink-0",
+            "ml-auto h-4 w-4 shrink-0",
             isActive
               ? "text-sidebar-active-foreground/60"
               : "text-sidebar-foreground/40",

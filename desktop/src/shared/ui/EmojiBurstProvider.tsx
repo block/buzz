@@ -16,8 +16,18 @@ type EmojiBurstOrigin =
   | null
   | undefined;
 
+type EmojiBurstPayload = {
+  emoji: string;
+  emojiUrl?: string | null;
+  senderName?: string | null;
+};
+
 type EmojiBurstContextValue = {
   burstEmoji: (emoji: string, origin?: EmojiBurstOrigin) => void;
+  burstHuddleReaction: (
+    reaction: string | EmojiBurstPayload,
+    origin?: EmojiBurstOrigin,
+  ) => void;
   celebrateWithEmojiFloatBurst: () => void;
 };
 
@@ -33,6 +43,8 @@ type Particle = {
   life: number;
   maxLife: number;
   emoji: string;
+  emojiUrl: string | null;
+  label: string | null;
   fontSize: number;
   radius: number;
   gravity: number;
@@ -40,6 +52,7 @@ type Particle = {
 
 const NOOP_CONTEXT: EmojiBurstContextValue = {
   burstEmoji: () => {},
+  burstHuddleReaction: () => {},
   celebrateWithEmojiFloatBurst: () => {},
 };
 
@@ -50,8 +63,13 @@ const EmojiBurstContext = React.createContext<EmojiBurstContextValue | null>(
 const MAX_ACTIVE = 760;
 const MAX_DPR = 2;
 const EMOJI_CACHE_PX = 64;
+const EMOJI_CACHE_SCALE = 2;
+// Keep the label's old reference scale so larger sprites do not shift its offset.
+const EMOJI_LABEL_REFERENCE_SCALE = 1.5;
 const PICKER_PARTICLES_PER_BURST = 5;
 const PICKER_PARTICLE_LIFE_FRAMES = 108;
+const HUDDLE_PARTICLES_PER_BURST = 14;
+const HUDDLE_PARTICLE_LIFE_FRAMES = 118;
 const CELEBRATION_PARTICLE_COUNT = 102;
 const HEART_PARTICLE_EMOJIS = [
   "❤️",
@@ -122,6 +140,10 @@ const CELEBRATION_EMOJIS = POSITIVE_EMOJI_PARTICLES;
 const POSITIVE_EMOJI_PARTICLE_SET = new Set(POSITIVE_EMOJI_PARTICLES);
 
 const emojiCanvasCache = new Map<string, HTMLCanvasElement>();
+const emojiImageCanvasCache = new Map<
+  string,
+  { canvas: HTMLCanvasElement | null }
+>();
 
 function isElement(value: unknown): value is Element {
   return typeof Element !== "undefined" && value instanceof Element;
@@ -173,12 +195,12 @@ function resizeCanvas(canvas: HTMLCanvasElement) {
 
 function getEmojiCanvas(emoji: string): HTMLCanvasElement {
   const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
-  const cacheKey = `${emoji}:${dpr}`;
+  const cacheKey = `${emoji}:${dpr}:${EMOJI_CACHE_SCALE}`;
   const existing = emojiCanvasCache.get(cacheKey);
   if (existing) return existing;
 
   const fontSize = Math.ceil(EMOJI_CACHE_PX * dpr);
-  const size = Math.ceil(fontSize * 1.5);
+  const size = Math.ceil(fontSize * EMOJI_CACHE_SCALE);
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
@@ -193,6 +215,126 @@ function getEmojiCanvas(emoji: string): HTMLCanvasElement {
 
   emojiCanvasCache.set(cacheKey, canvas);
   return canvas;
+}
+
+function getEmojiImageCanvas(src: string): HTMLCanvasElement | null {
+  const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
+  const cacheKey = `${src}:${dpr}:${EMOJI_CACHE_SCALE}`;
+  const existing = emojiImageCanvasCache.get(cacheKey);
+  if (existing) return existing.canvas;
+
+  const record: { canvas: HTMLCanvasElement | null } = {
+    canvas: null,
+  };
+  emojiImageCanvasCache.set(cacheKey, record);
+
+  const image = new Image();
+  image.decoding = "async";
+  image.onload = () => {
+    const size = Math.ceil(EMOJI_CACHE_PX * dpr * EMOJI_CACHE_SCALE);
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return;
+    }
+
+    const sourceWidth = image.naturalWidth || size;
+    const sourceHeight = image.naturalHeight || size;
+    const scale = Math.min(size / sourceWidth, size / sourceHeight);
+    const width = sourceWidth * scale;
+    const height = sourceHeight * scale;
+    context.drawImage(
+      image,
+      (size - width) / 2,
+      (size - height) / 2,
+      width,
+      height,
+    );
+    record.canvas = canvas;
+  };
+  image.src = src;
+
+  return null;
+}
+
+function roundedRectPath(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+) {
+  const cappedRadius = Math.min(radius, width / 2, height / 2);
+  context.beginPath();
+  context.moveTo(x + cappedRadius, y);
+  context.lineTo(x + width - cappedRadius, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + cappedRadius);
+  context.lineTo(x + width, y + height - cappedRadius);
+  context.quadraticCurveTo(
+    x + width,
+    y + height,
+    x + width - cappedRadius,
+    y + height,
+  );
+  context.lineTo(x + cappedRadius, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - cappedRadius);
+  context.lineTo(x, y + cappedRadius);
+  context.quadraticCurveTo(x, y, x + cappedRadius, y);
+  context.closePath();
+}
+
+function fitParticleLabel(
+  context: CanvasRenderingContext2D,
+  label: string,
+  maxWidth: number,
+) {
+  if (context.measureText(label).width <= maxWidth) return label;
+
+  const ellipsis = "…";
+  let fitted = label;
+  while (
+    fitted.length > 1 &&
+    context.measureText(`${fitted}${ellipsis}`).width > maxWidth
+  ) {
+    fitted = fitted.slice(0, -1).trimEnd();
+  }
+
+  return `${fitted}${ellipsis}`;
+}
+
+function drawParticleLabel(
+  context: CanvasRenderingContext2D,
+  particle: Particle,
+  dpr: number,
+  drawSize: number,
+) {
+  const label = particle.label?.trim();
+  if (!label) return;
+
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.font =
+    '500 11px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+
+  const maxTextWidth = 120;
+  const text = fitParticleLabel(context, label, maxTextWidth);
+  const width = Math.min(
+    144,
+    Math.max(42, context.measureText(text).width + 20),
+  );
+  const height = 20;
+  const x = particle.x - width / 2;
+  const y = particle.y + drawSize * 0.32 - height / 2;
+
+  roundedRectPath(context, x, y, width, height, height / 2);
+  context.fillStyle = "rgba(0, 0, 0, 0.72)";
+  context.fill();
+  context.fillStyle = "rgb(255, 255, 255)";
+  context.fillText(text, particle.x, y + height / 2 + 0.5, width - 12);
 }
 
 function updateParticle(particle: Particle): boolean {
@@ -262,10 +404,35 @@ function viewportCenter(): BurstPoint {
   };
 }
 
+function huddleReactionOrigin(): BurstPoint {
+  return {
+    x: 58,
+    y: Math.max(64, window.innerHeight - 58),
+  };
+}
+
+function normalizeBurstPayload(
+  reaction: string | EmojiBurstPayload,
+): EmojiBurstPayload | null {
+  if (typeof reaction === "string") {
+    const emoji = reaction.trim();
+    return emoji ? { emoji } : null;
+  }
+
+  const emoji = reaction.emoji.trim();
+  if (!emoji) return null;
+
+  return {
+    emoji,
+    emojiUrl: reaction.emojiUrl?.trim() || null,
+    senderName: reaction.senderName?.trim() || null,
+  };
+}
+
 function spawnPickerEmojiBurst(
   particles: Particle[],
   point: BurstPoint,
-  emoji: string,
+  reaction: EmojiBurstPayload,
 ) {
   if (particles.length + PICKER_PARTICLES_PER_BURST > MAX_ACTIVE) return;
 
@@ -284,10 +451,65 @@ function spawnPickerEmojiBurst(
       opacity: 1,
       life: PICKER_PARTICLE_LIFE_FRAMES,
       maxLife: PICKER_PARTICLE_LIFE_FRAMES,
-      emoji,
+      emoji: reaction.emoji,
+      emojiUrl: reaction.emojiUrl ?? null,
+      label: null,
       fontSize: 18 + Math.ceil(Math.random() * 24),
       radius: 0,
       gravity: -(0.018 + Math.random() * 0.018),
+    });
+  }
+}
+
+function spawnHuddleEmojiBurst(
+  particles: Particle[],
+  point: BurstPoint,
+  reaction: EmojiBurstPayload,
+) {
+  if (particles.length + HUDDLE_PARTICLES_PER_BURST + 1 > MAX_ACTIVE) return;
+
+  const heroLife = HUDDLE_PARTICLE_LIFE_FRAMES + 42;
+  particles.push({
+    x: point.x + 6,
+    y: point.y - 4,
+    xv: 2.6 + Math.random() * 0.8,
+    yv: -(4.6 + Math.random() * 1.2),
+    rotation: 0,
+    spin: 0,
+    scale: 0.48,
+    opacity: 1,
+    life: heroLife,
+    maxLife: heroLife,
+    emoji: reaction.emoji,
+    emojiUrl: reaction.emojiUrl ?? null,
+    label: reaction.senderName || null,
+    fontSize: 87,
+    radius: 0,
+    gravity: 0.018,
+  });
+
+  for (let i = 0; i < HUDDLE_PARTICLES_PER_BURST; i += 1) {
+    const lift = 3.2 + Math.random() * 4.1;
+    const rightwardFan = 1.2 + Math.random() * 5.4;
+    const life = HUDDLE_PARTICLE_LIFE_FRAMES + Math.floor(Math.random() * 28);
+
+    particles.push({
+      x: point.x + Math.random() * 12,
+      y: point.y + (Math.random() - 0.5) * 12,
+      xv: rightwardFan + (Math.random() - 0.5) * 1.1,
+      yv: -lift,
+      rotation: (Math.random() - 0.5) * 26,
+      spin: (Math.random() - 0.5) * 4.2,
+      scale: 0.24 + Math.random() * 0.12,
+      opacity: 1,
+      life,
+      maxLife: life,
+      emoji: reaction.emoji,
+      emojiUrl: reaction.emojiUrl ?? null,
+      label: null,
+      fontSize: 18 + Math.ceil(Math.random() * 26),
+      radius: 0,
+      gravity: 0.012 + Math.random() * 0.018,
     });
   }
 }
@@ -322,6 +544,8 @@ function spawnEmojiFloatBurst(particles: Particle[]) {
       life,
       maxLife: life,
       emoji,
+      emojiUrl: null,
+      label: null,
       fontSize: 22 + Math.ceil(Math.random() * 30),
       radius: 0,
       gravity: 0,
@@ -374,8 +598,12 @@ export function EmojiBurstProvider({
       for (const particle of particles) {
         activeContext.globalAlpha = particle.opacity;
 
-        const emojiCanvas = getEmojiCanvas(particle.emoji);
-        const drawSize = particle.fontSize * particle.scale * 1.5;
+        const emojiCanvas =
+          (particle.emojiUrl ? getEmojiImageCanvas(particle.emojiUrl) : null) ??
+          getEmojiCanvas(particle.emoji);
+        const drawSize = particle.fontSize * particle.scale * EMOJI_CACHE_SCALE;
+        const labelReferenceSize =
+          particle.fontSize * particle.scale * EMOJI_LABEL_REFERENCE_SCALE;
         const halfSize = drawSize / 2;
         const radians = (particle.rotation * Math.PI) / 180;
         const cos = Math.cos(radians) * dpr;
@@ -396,6 +624,7 @@ export function EmojiBurstProvider({
           drawSize,
           drawSize,
         );
+        drawParticleLabel(activeContext, particle, dpr, labelReferenceSize);
       }
 
       activeContext.globalAlpha = 1;
@@ -440,13 +669,28 @@ export function EmojiBurstProvider({
 
   const burstEmoji = React.useCallback(
     (emoji: string, origin?: EmojiBurstOrigin) => {
-      const trimmedEmoji = emoji.trim();
-      if (!trimmedEmoji || reducedMotionRef.current) return;
+      const reaction = normalizeBurstPayload(emoji);
+      if (!reaction || reducedMotionRef.current) return;
 
       spawnPickerEmojiBurst(
         particlesRef.current,
         pointFromOrigin(origin) ?? viewportCenter(),
-        trimmedEmoji,
+        reaction,
+      );
+      startLoop();
+    },
+    [startLoop],
+  );
+
+  const burstHuddleReaction = React.useCallback(
+    (input: string | EmojiBurstPayload, origin?: EmojiBurstOrigin) => {
+      const reaction = normalizeBurstPayload(input);
+      if (!reaction || reducedMotionRef.current) return;
+
+      spawnHuddleEmojiBurst(
+        particlesRef.current,
+        pointFromOrigin(origin) ?? huddleReactionOrigin(),
+        reaction,
       );
       startLoop();
     },
@@ -461,8 +705,8 @@ export function EmojiBurstProvider({
   }, [startLoop]);
 
   const value = React.useMemo<EmojiBurstContextValue>(
-    () => ({ burstEmoji, celebrateWithEmojiFloatBurst }),
-    [burstEmoji, celebrateWithEmojiFloatBurst],
+    () => ({ burstEmoji, burstHuddleReaction, celebrateWithEmojiFloatBurst }),
+    [burstEmoji, burstHuddleReaction, celebrateWithEmojiFloatBurst],
   );
 
   return (

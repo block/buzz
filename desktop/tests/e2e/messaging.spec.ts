@@ -404,7 +404,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   const siblingReply = `Sibling threaded reply ${timestamp}`;
   const nestedReply = `Nested threaded reply ${timestamp}`;
   const nestedReplyFromBob = `Nested reply from Bob ${timestamp}`;
-  const nestedReplyVisibleTopMaxPx = 280;
+  const nestedReplyVisibleTopMaxPx = 300;
   const fillerReplies = Array.from(
     { length: 14 },
     (_, index) => `Thread filler reply ${index} ${timestamp}`,
@@ -626,6 +626,17 @@ test("opens a single-level thread panel with inline expansion", async ({
   await expect(
     rootSummaryRow.getByTestId("message-thread-summary-participant"),
   ).toHaveCount(2);
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-participant")
+        .evaluateAll((participants) =>
+          participants
+            .map((participant) => getComputedStyle(participant).zIndex)
+            .join(","),
+        ),
+    )
+    .toBe("1,2");
 
   await expect
     .poll(async () => {
@@ -728,7 +739,7 @@ test("narrow thread view collapses channel header actions into a menu", async ({
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await expect(page.getByTestId("channel-add-bot-trigger")).toBeVisible();
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
   await expect(page.getByTestId("channel-actions-menu-trigger")).toHaveCount(0);
 
   const rootMessage = page.locator('[data-message-id="mock-general-alice"]');
@@ -741,7 +752,7 @@ test("narrow thread view collapses channel header actions into a menu", async ({
 
   const menuTrigger = page.getByTestId("channel-actions-menu-trigger");
   await expect(menuTrigger).toBeVisible();
-  await expect(page.getByTestId("channel-add-bot-trigger")).toBeHidden();
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
   await expect(page.getByTestId("channel-members-trigger")).toBeHidden();
   await expect(page.getByTestId("channel-management-trigger")).toBeHidden();
 
@@ -751,12 +762,12 @@ test("narrow thread view collapses channel header actions into a menu", async ({
     throw new Error("Expected header action menu and thread panel bounds");
   }
   const menuGapPx = threadPanelBox.x - (menuBox.x + menuBox.width);
-  expect(menuGapPx).toBeGreaterThanOrEqual(10);
-  expect(menuGapPx).toBeLessThanOrEqual(14);
+  expect(menuGapPx).toBeGreaterThanOrEqual(18);
+  expect(menuGapPx).toBeLessThanOrEqual(22);
 
   await menuTrigger.click();
 
-  await expect(page.getByTestId("channel-add-bot-trigger")).toBeVisible();
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
   await expect(page.getByTestId("channel-members-trigger")).toBeVisible();
   await expect(page.getByTestId("channel-start-huddle-trigger")).toBeVisible();
   await expect(page.getByTestId("channel-management-trigger")).toBeVisible();
@@ -771,7 +782,7 @@ test("single-panel thread view hides topbar search and channel actions", async (
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("open-search")).toBeVisible();
-  await expect(page.getByTestId("channel-add-bot-trigger")).toBeVisible();
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
 
   const rootMessage = page.locator('[data-message-id="mock-general-alice"]');
   const threadPanel = page.getByTestId("message-thread-panel");
@@ -787,7 +798,7 @@ test("single-panel thread view hides topbar search and channel actions", async (
   await threadPanel.getByTestId("message-thread-back").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("open-search")).toBeVisible();
-  await expect(page.getByTestId("channel-add-bot-trigger")).toBeVisible();
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
 });
 
 test("composer is focused after selecting a channel", async ({ page }) => {

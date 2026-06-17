@@ -47,16 +47,30 @@ function emitMockMessage(page: Page, channelName: string, content: string) {
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
-    let mediaCurrentTime = 0;
-    let mediaPaused = true;
+    type MediaState = {
+      currentTime: number;
+      paused: boolean;
+    };
+    const mediaState = new WeakMap<HTMLMediaElement, MediaState>();
+    const getMediaState = (element: HTMLMediaElement) => {
+      let state = mediaState.get(element);
+      if (!state) {
+        state = { currentTime: 0, paused: true };
+        mediaState.set(element, state);
+      }
+      return state;
+    };
+
     Object.defineProperty(HTMLMediaElement.prototype, "load", {
       configurable: true,
-      value() {},
+      value() {
+        getMediaState(this as HTMLMediaElement).currentTime = 0;
+      },
     });
     Object.defineProperty(HTMLMediaElement.prototype, "play", {
       configurable: true,
       value() {
-        mediaPaused = false;
+        getMediaState(this as HTMLMediaElement).paused = false;
         this.dispatchEvent(new Event("play"));
         return Promise.resolve();
       },
@@ -64,23 +78,24 @@ test.beforeEach(async ({ page }) => {
     Object.defineProperty(HTMLMediaElement.prototype, "pause", {
       configurable: true,
       value() {
-        mediaPaused = true;
+        getMediaState(this as HTMLMediaElement).paused = true;
         this.dispatchEvent(new Event("pause"));
       },
     });
     Object.defineProperty(HTMLMediaElement.prototype, "paused", {
       configurable: true,
       get() {
-        return mediaPaused;
+        return getMediaState(this as HTMLMediaElement).paused;
       },
     });
     Object.defineProperty(HTMLMediaElement.prototype, "currentTime", {
       configurable: true,
       get() {
-        return mediaCurrentTime;
+        return getMediaState(this as HTMLMediaElement).currentTime;
       },
       set(value) {
-        mediaCurrentTime = Number(value) || 0;
+        getMediaState(this as HTMLMediaElement).currentTime =
+          Number(value) || 0;
         this.dispatchEvent(new Event("seeked"));
       },
     });
@@ -125,8 +140,8 @@ test("video upload previews use poster frames and inline videos open review mode
   await expect(composerPoster).toHaveAttribute("src", POSTER_DATA_URL);
 
   const box = await composerPoster.boundingBox();
-  expect(box?.width).toBeGreaterThanOrEqual(104);
-  expect(box?.width).toBeLessThanOrEqual(132);
+  expect(box?.width).toBeGreaterThanOrEqual(53);
+  expect(box?.width).toBeLessThanOrEqual(58);
   expect(box?.height).toBeGreaterThanOrEqual(52);
   expect(box?.height).toBeLessThanOrEqual(58);
 
@@ -143,6 +158,12 @@ test("video upload previews use poster frames and inline videos open review mode
     const messageId = row?.getAttribute("data-message-id") ?? "";
     return Boolean(messageId) && !messageId.startsWith("optimistic");
   });
+  const videoMessageId = await reviewButton.evaluate((button) =>
+    button.closest("[data-message-id]")?.getAttribute("data-message-id"),
+  );
+  if (!videoMessageId) {
+    throw new Error("Expected uploaded video row to have a message id.");
+  }
 
   const inlinePlayer = page.getByTestId("video-player").last();
   const inlineVideo = inlinePlayer.locator("video");
@@ -179,6 +200,37 @@ test("video upload previews use poster frames and inline videos open review mode
     )
     .toBeLessThan(6.5);
   await expect(page.getByTestId("video-inline-time")).toHaveText("00:06");
+
+  await inlinePlayer.getByRole("button", { name: "Pause video" }).click();
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const restoredInlinePlayer = page.getByTestId("video-player").last();
+  const restoredInlineVideo = restoredInlinePlayer.locator("video");
+  await restoredInlineVideo.evaluate((video) => {
+    video.dispatchEvent(new Event("loadedmetadata"));
+  });
+  await expect
+    .poll(() =>
+      restoredInlineVideo.evaluate(
+        (video) => (video as HTMLVideoElement).currentTime,
+      ),
+    )
+    .toBeGreaterThan(6);
+  await expect
+    .poll(() =>
+      restoredInlineVideo.evaluate(
+        (video) => (video as HTMLVideoElement).currentTime,
+      ),
+    )
+    .toBeLessThan(6.5);
+  await restoredInlinePlayer
+    .getByRole("button", { name: "Play video" })
+    .click();
+  await expect(
+    restoredInlinePlayer.getByRole("button", { name: "Pause video" }),
+  ).toBeVisible();
 
   // Inline volume controls.
   await inlinePlayer.getByRole("button", { name: "Mute" }).click();
@@ -526,4 +578,28 @@ test("video upload previews use poster frames and inline videos open review mode
     .getByTestId("video-review-backdrop")
     .click({ position: { x: 4, y: 4 } });
   await expect(page.getByTestId("video-review-dialog")).toHaveCount(0);
+
+  const videoSummaryRow = page.locator(
+    `[data-thread-head-id="${videoMessageId}"]`,
+  );
+  await expect(videoSummaryRow).toBeVisible();
+  await videoSummaryRow.click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  const threadHead = threadPanel.getByTestId("message-thread-head");
+  await expect(threadHead.getByTestId("video-player")).toBeVisible();
+
+  await threadHead.getByRole("button", { name: "Open video review" }).click();
+  const threadReviewDialog = page.getByTestId("video-review-dialog");
+  await expect(threadReviewDialog).toBeVisible();
+  await expect(
+    threadReviewDialog.getByTestId("video-review-comments-panel"),
+  ).toBeVisible();
+  await expect(
+    threadReviewDialog.getByTestId("message-composer"),
+  ).toBeVisible();
+  await expect(
+    threadReviewDialog.getByTestId("video-review-comments"),
+  ).toContainText("Color pass looks right");
 });

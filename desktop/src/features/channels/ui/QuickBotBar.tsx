@@ -75,13 +75,13 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
                       src={rewriteRelayUrl(persona.avatarUrl)}
                     />
                   ) : (
-                    <span className="text-[9px] font-semibold text-primary">
+                    <span className="text-2xs font-semibold text-primary">
                       {initials}
                     </span>
                   )}
                   {isThisPending ? (
                     <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-background/70">
-                      <Spinner className="h-3.5 w-3.5 text-primary" />
+                      <Spinner className="h-4 w-4 border-2 text-primary" />
                     </div>
                   ) : null}
                 </button>

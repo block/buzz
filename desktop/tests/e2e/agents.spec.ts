@@ -30,7 +30,10 @@ async function gotoApp(page: import("@playwright/test").Page) {
 }
 
 async function openPersonaCatalog(page: import("@playwright/test").Page) {
-  await page.getByRole("button", { name: "New" }).click();
+  await page
+    .getByTestId("agents-library-personas")
+    .getByRole("button", { name: "New", exact: true })
+    .click();
   await page.getByText("Choose from Catalog...").click();
 }
 

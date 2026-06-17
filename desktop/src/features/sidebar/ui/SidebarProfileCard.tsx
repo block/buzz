@@ -10,6 +10,10 @@ import type { Workspace } from "@/features/workspaces/types";
 import { WorkspaceSwitcher } from "@/features/workspaces/ui/WorkspaceSwitcher";
 import type { PresenceStatus, Profile, UserStatus } from "@/shared/api/types";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
+import {
+  isRelayConnectionDegraded,
+  useRelayConnection,
+} from "@/shared/api/useRelayConnection";
 import { cn } from "@/shared/lib/cn";
 
 type SidebarProfileCardProps = {
@@ -54,6 +58,12 @@ export function SidebarProfileCard({
   // workspace-provider and QueryClient safe at this level.
   const selfProfileCache = useSelfProfileCache();
   const { isPending, reconnect } = useReconnectRelay();
+  // Only offer reconnect when the relay is actually degraded — keep the item
+  // visible while a reconnect is in flight so it does not vanish mid-click if
+  // the live state briefly flips.
+  const isRelayConnectionDegradedNow = isRelayConnectionDegraded(
+    useRelayConnection(),
+  );
 
   const [profilePopoverOpen, setProfilePopoverOpen] = React.useState(false);
   const profileCardRef = React.useRef<HTMLDivElement | null>(null);
@@ -78,7 +88,7 @@ export function SidebarProfileCard({
   const workspaceLabel = activeWorkspace?.name ?? "No workspace";
   const readonlyWorkspaceLabel = (
     <span className="flex min-w-0 cursor-pointer items-center gap-1 text-xs leading-snug text-sidebar-foreground/70">
-      <span aria-hidden="true" className="shrink-0 text-[10px] leading-none">
+      <span aria-hidden="true" className="shrink-0 text-2xs leading-none">
         🐝
       </span>
       <span className="truncate">{workspaceLabel}</span>
@@ -134,7 +144,11 @@ export function SidebarProfileCard({
             isStatusPending={isPresencePending}
             onClearUserStatus={onClearUserStatus}
             onOpenSettings={onOpenSettings}
-            onReconnect={() => void reconnect()}
+            onReconnect={
+              isRelayConnectionDegradedNow || isPending
+                ? () => void reconnect()
+                : undefined
+            }
             onSetStatus={onSetPresenceStatus ?? (() => {})}
             onSetUserStatus={onSetUserStatus}
             triggerContainerRef={profileCardRef}

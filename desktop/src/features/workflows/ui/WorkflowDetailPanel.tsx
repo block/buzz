@@ -93,7 +93,7 @@ export function WorkflowDetailPanel({
               size="sm"
               variant="outline"
             >
-              <Pencil className="mr-1 h-3 w-3" />
+              <Pencil className="mr-1 h-4 w-4" />
               Edit
             </Button>
           ) : null}
@@ -103,7 +103,7 @@ export function WorkflowDetailPanel({
             size="sm"
             variant="outline"
           >
-            <Play className="mr-1 h-3 w-3" />
+            <Play className="mr-1 h-4 w-4" />
             {triggerMutation.isPending ? "Triggering..." : "Trigger"}
           </Button>
           <Button
@@ -186,7 +186,7 @@ export function WorkflowDetailPanel({
                                 </span>
                                 <RunStatusBadge status={run.status} />
                               </div>
-                              <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 pl-6 text-[11px] text-muted-foreground">
+                              <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 pl-6 text-2xs text-muted-foreground">
                                 <span>
                                   {new Date(
                                     run.createdAt * 1000,
@@ -216,10 +216,10 @@ export function WorkflowDetailPanel({
 
                         {isSelected ? (
                           <div className="border-t border-border/60 bg-background/60 px-4 py-4">
-                            <div className="mb-3 flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                            <div className="mb-3 flex items-center gap-2 text-2xs font-medium uppercase tracking-[0.18em] text-muted-foreground">
                               <span>Execution Trace</span>
                               {approvalsQuery.isFetching ? (
-                                <span className="text-[10px] tracking-[0.12em] text-muted-foreground/80">
+                                <span className="text-2xs tracking-[0.12em] text-muted-foreground/80">
                                   Refreshing approvals...
                                 </span>
                               ) : null}
