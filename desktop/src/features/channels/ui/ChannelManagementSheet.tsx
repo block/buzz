@@ -757,7 +757,7 @@ function ChannelManagementPanelContent({
         )}
       >
         {activeView === "summary" ? (
-          <div className="space-y-6">
+          <div className="space-y-6 pt-3">
             <ChannelHero channel={resolvedChannel} />
 
             {detailsError instanceof Error ? (
