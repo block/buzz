@@ -222,6 +222,7 @@ fn team_dir_reconcile_leaves_record_when_team_missing() {
     assert!(records[0].get("persona_team_dir").is_none());
 }
 
+#[cfg(unix)]
 #[test]
 fn team_dir_reconcile_heals_to_symlinked_team_dir() {
     // When agents/teams/<id> is a symlink to a real directory elsewhere,
@@ -260,6 +261,7 @@ fn team_dir_reconcile_heals_to_symlinked_team_dir() {
     assert_eq!(records[0]["persona_team_dir"], expected_path);
 }
 
+#[cfg(unix)]
 #[test]
 fn team_dir_reconcile_skips_dangling_candidate_symlink() {
     // When agents/teams/<id> is a symlink whose target does not exist,
@@ -299,6 +301,7 @@ fn team_dir_reconcile_skips_dangling_candidate_symlink() {
     assert_eq!(records[0]["persona_pack_path"], stale_path);
 }
 
+#[cfg(unix)]
 #[test]
 fn team_dir_reconcile_through_symlink_preserves_symlink() {
     // Dev worktree instances reach the canonical store through a symlinked

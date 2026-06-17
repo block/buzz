@@ -65,6 +65,7 @@ fn copy_dir_all_preserves_nested_files_without_overwriting() {
 /// Helper: create a temp dir structure mimicking canonical + worktree layout.
 /// Packs live in a `.main` sibling (not canonical) to match real-world state.
 /// Returns `(parent_dir_handle, canonical_dir, worktree_dir)`.
+#[cfg(unix)]
 fn setup_sync_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let parent = tempfile::tempdir().unwrap();
     let canonical = parent.path().join(CANONICAL_DEV_IDENTIFIER);
@@ -97,6 +98,7 @@ fn setup_sync_layout() -> (tempfile::TempDir, PathBuf, PathBuf) {
 /// Mirrors the symlink loop of `sync_shared_agent_data` but takes explicit
 /// paths. `sync_shared_agent_data` requires a live Tauri AppHandle and
 /// cannot be unit-tested directly.
+#[cfg(unix)]
 fn sync_files(canonical: &Path, worktree: &Path) -> u32 {
     let mut synced = 0u32;
     for rel in SHARED_AGENT_FILES {
@@ -180,6 +182,7 @@ fn sync_files(canonical: &Path, worktree: &Path) -> u32 {
     synced
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_creates_symlinks_to_fresh_worktree() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -201,6 +204,7 @@ fn sync_creates_symlinks_to_fresh_worktree() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_replaces_existing_files_with_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -226,6 +230,7 @@ fn sync_replaces_existing_files_with_symlinks() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_preserves_correct_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -238,6 +243,7 @@ fn sync_preserves_correct_symlinks() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_replaces_wrong_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -256,6 +262,7 @@ fn sync_replaces_wrong_symlinks() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_handles_broken_symlinks() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -275,6 +282,7 @@ fn sync_handles_broken_symlinks() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn writes_through_symlink_reach_canonical() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -321,6 +329,7 @@ fn canonical_dev_data_dir_returns_self_for_canonical_instance() {
     assert_eq!(canonical_dev_data_dir(&canonical).unwrap(), canonical);
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_creates_teams_directory_symlink() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -341,6 +350,7 @@ fn sync_creates_teams_directory_symlink() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_migrates_teams_from_sibling_to_canonical() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -368,6 +378,7 @@ fn sync_migrates_teams_from_sibling_to_canonical() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn sync_replaces_real_teams_dir_with_symlink() {
     let (_parent, canonical, worktree) = setup_sync_layout();
@@ -386,6 +397,7 @@ fn sync_replaces_real_teams_dir_with_symlink() {
 
 // ── Packs → Teams migration tests ───────────────────────────────────
 
+#[cfg(unix)]
 #[test]
 fn migrate_packs_merge_preserves_non_empty_dir() {
     // When packs/ contains symlinks that weren't moved (e.g., external tools
