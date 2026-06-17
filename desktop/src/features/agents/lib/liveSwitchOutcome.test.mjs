@@ -77,12 +77,23 @@ test("awaitLiveSwitchOutcome resolves ok only after the last channel acks", asyn
     settled = true;
   });
 
+  // The `.then` that flips `settled` flushes on a later microtask tick than a
+  // single drain, so a single `await Promise.resolve()` would let this
+  // assertion pass even against a first-ack-resolves bug. Draining several
+  // ticks guarantees a resolved promise's callback has run, so the interim
+  // `settled === false` checks deterministically regress an early resolve.
+  const drainMicrotasks = async () => {
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+    }
+  };
+
   h.push(frame("sent"));
-  await Promise.resolve();
+  await drainMicrotasks();
   assert.equal(settled, false, "must not resolve on the first ack");
 
   h.push(frame("switched"));
-  await Promise.resolve();
+  await drainMicrotasks();
   assert.equal(settled, false, "must not resolve before the last ack");
 
   h.push(frame("turn_ending"));
