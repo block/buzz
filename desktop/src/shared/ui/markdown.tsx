@@ -45,6 +45,7 @@ import {
   INLINE_CODE_CHIP_CLASS,
   MENTION_CHIP_BASE_CLASSES,
   MENTION_CHIP_HOVER_CLASSES,
+  MENTION_CHIP_PREFIX_CLASS,
   MESSAGE_MARKDOWN_CLASS,
 } from "@/shared/ui/mentionChip";
 import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
@@ -1210,9 +1211,15 @@ function createMarkdownComponents(
       const isAgentMention =
         pubkey !== undefined &&
         agentMentionPubkeysByName?.[mentionName] === pubkey;
-      const renderedMentionText = isAgentMention
-        ? mentionText.replace(/^@/, "")
-        : children;
+      const mentionLabel = mentionText.replace(/^@/, "");
+      const renderedMentionText = isAgentMention ? (
+        mentionLabel
+      ) : (
+        <>
+          <span className={MENTION_CHIP_PREFIX_CLASS}>@</span>
+          {mentionLabel}
+        </>
+      );
       const mentionNode = (
         <span
           data-mention=""

@@ -896,6 +896,12 @@
   color: hsl(var(--primary));
 }
 
+.message-markdown .mention-chip-prefix {
+  display: inline-block;
+  line-height: 1;
+  transform: translateY(-0.12em);
+}
+
 .message-markdown .inline-code-chip,
 .message-markdown :not(pre) > code {
   font-size: var(--inline-code-font-size);
