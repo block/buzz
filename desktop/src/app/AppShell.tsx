@@ -219,6 +219,10 @@ export function AppShell() {
   const channelsQuery = useChannelsQuery();
   const { refetch: refetchChannels } = channelsQuery;
   const channels = channelsQuery.data ?? [];
+  const channelsErrorMessage =
+    channelsQuery.error instanceof Error
+      ? channelsQuery.error.message
+      : undefined;
   const memberChannels = React.useMemo(
     () => channels.filter((channel) => channel.isMember),
     [channels],
@@ -775,11 +779,7 @@ export function AppShell() {
                           activeWorkspace={workspacesHook.activeWorkspace}
                           channels={sidebarChannels}
                           currentPubkey={identityQuery.data?.pubkey}
-                          errorMessage={
-                            channelsQuery.error instanceof Error
-                              ? channelsQuery.error.message
-                              : undefined
-                          }
+                          errorMessage={channelsErrorMessage}
                           fallbackDisplayName={identityQuery.data?.displayName}
                           homeBadgeCount={homeBadgeCount}
                           isAddWorkspaceOpen={isAddWorkspaceOpen}
@@ -911,7 +911,9 @@ export function AppShell() {
                             className="min-h-0 min-w-0 overflow-hidden"
                             style={chromeCssVarDefaults}
                           >
-                            <ConnectionBanner />
+                            <ConnectionBanner
+                              errorMessage={channelsErrorMessage}
+                            />
                             <Outlet />
                           </SidebarInset>
                         </MainInsetProvider>

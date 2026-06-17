@@ -101,6 +101,31 @@ test("sidebar access failures use the reconnect card", async ({ page }) => {
   await expectGenericReconnectCard(page);
 });
 
+test("collapsed sidebar relay failures use the connection banner", async ({
+  page,
+}) => {
+  await installMockBridge(page, { channelsReadError: CONNECT_ERROR });
+
+  await page.goto("/");
+
+  await expectGenericReconnectCard(page);
+
+  await page
+    .getByRole("button", { exact: true, name: "Toggle Sidebar" })
+    .click();
+  await expect(
+    page.locator('[data-state="collapsed"][data-collapsible="offcanvas"]'),
+  ).toHaveCount(1);
+
+  const banner = page.getByTestId("connection-banner");
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("Can't reach the relay.");
+
+  await setChannelsReadError(page, null);
+  await page.getByTestId("connection-banner-reconnect").click();
+  await expect(banner).toBeHidden({ timeout: 10_000 });
+});
+
 test("sidebar stalled relay state uses the reconnect card", async ({
   page,
 }) => {
