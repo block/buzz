@@ -41,8 +41,10 @@ import remarkMentions from "@/shared/lib/remarkMentions";
 import remarkMessageLinks from "@/features/messages/lib/remarkMessageLinks";
 import { Button } from "@/shared/ui/button";
 import {
+  INLINE_CODE_CHIP_CLASS,
   MENTION_CHIP_BASE_CLASSES,
   MENTION_CHIP_HOVER_CLASSES,
+  MESSAGE_MARKDOWN_CLASS,
 } from "@/shared/ui/mentionChip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -78,7 +80,7 @@ const MAX_CACHE_ENTRIES = 100;
 const MAX_LOADED_LANGUAGES = 30;
 const MAX_HIGHLIGHT_LINES = 150;
 const CODE_BLOCK_CLASS =
-  "code-block-lines block min-w-full whitespace-pre font-mono text-sm text-foreground";
+  "code-block-lines block min-w-full whitespace-pre font-mono text-xs text-foreground";
 const DIFF_ADD_RE = /\s*\/\/\s*\[!code\s*\+\+\]\s*$/;
 const DIFF_REMOVE_RE = /\s*\/\/\s*\[!code\s*--\]\s*$/;
 
@@ -844,13 +846,7 @@ function createMarkdownComponents(
       }
 
       return (
-        <code
-          {...props}
-          className={cn(
-            "rounded-sm bg-muted px-1.5 py-0.5 font-mono text-sm text-foreground",
-            className,
-          )}
-        >
+        <code {...props} className={cn(INLINE_CODE_CHIP_CLASS, className)}>
           {children}
         </code>
       );
@@ -1196,6 +1192,7 @@ function MarkdownInner({
   return (
     <div
       className={cn(
+        MESSAGE_MARKDOWN_CLASS,
         [
           "max-w-none break-words text-sm leading-relaxed text-foreground",
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
