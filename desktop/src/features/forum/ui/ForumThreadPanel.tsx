@@ -75,7 +75,10 @@ function ReplyRow({
   const replyMentionNames = resolveMentionNames(reply.tags, profiles);
 
   return (
-    <div className="group px-4 py-3" data-forum-event-id={reply.eventId}>
+    <div
+      className="group content-visibility-auto px-4 py-3"
+      data-forum-event-id={reply.eventId}
+    >
       <div className="flex items-center gap-2">
         <UserProfilePopover pubkey={reply.pubkey}>
           <button
