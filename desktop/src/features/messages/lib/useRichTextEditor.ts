@@ -23,6 +23,7 @@ import {
   handleCodeFenceEnter,
   insertNewlineInCodeBlock,
 } from "./codeBlockExtensions";
+import { SpoilerMark } from "./spoilerMark";
 
 /**
  * Plain-text edit descriptor returned by autocomplete hooks
@@ -291,6 +292,7 @@ export function useRichTextEditor({
           },
         }),
         CodeBlockAfterHardBreak,
+        SpoilerMark,
         MentionHighlightExtension,
         customEmojiWiring.extension,
         Placeholder.configure({
@@ -324,7 +326,7 @@ export function useRichTextEditor({
           autocapitalize: "none",
           autocorrect: "off",
           class:
-            "min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-6 md:leading-6 shadow-none focus-visible:ring-0 caret-foreground outline-hidden prose-sm max-w-none",
+            "min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-6 text-foreground md:leading-6 shadow-none focus-visible:ring-0 caret-foreground outline-hidden prose-sm max-w-none",
           "data-testid": "message-input",
           spellcheck: "false",
         },

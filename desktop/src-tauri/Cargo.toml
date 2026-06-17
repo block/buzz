@@ -2,7 +2,7 @@
 
 [package]
 name = "buzz-desktop"
-version = "0.3.23"
+version = "0.3.24"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -21,6 +21,8 @@ default = []
 mesh-llm = ["dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime"]
 
 [build-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tauri-build = { version = "2", features = [] }
 
 [target.'cfg(unix)'.dependencies]

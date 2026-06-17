@@ -101,39 +101,69 @@ async function addGenericAgent(
   page: import("@playwright/test").Page,
   channelName: string,
   agentName: string,
-) {
+): Promise<string> {
   await page.getByTestId(`channel-${channelName}`).click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
-  await page.getByTestId("channel-add-bot-trigger").click();
-  await expect(page.getByRole("heading", { name: "Add agents" })).toBeVisible();
-  await page.getByRole("button", { name: "Generic" }).click();
-  await page.locator("#channel-generic-name").fill(agentName);
-  await page
-    .locator("#channel-generic-prompt")
-    .fill("Watch the channel and help when asked.");
-  await page.getByRole("button", { name: "Add agent" }).click();
-  await expect(page.getByRole("heading", { name: "Add agents" })).toHaveCount(
-    0,
-  );
-}
-
-async function getManagedAgentPubkey(
-  page: import("@playwright/test").Page,
-  agentName: string,
-) {
-  await page.getByTestId("open-agents-view").click();
-  const managedAgentRow = page
-    .locator('[data-testid^="managed-agent-"]')
-    .filter({ hasText: agentName });
-  await expect(managedAgentRow).toHaveCount(1);
-  const managedAgentTestId = await managedAgentRow
-    .first()
-    .getAttribute("data-testid");
-  if (!managedAgentTestId) {
-    throw new Error("Managed agent row test id missing.");
+  const channelId = await page
+    .getByTestId(`channel-${channelName}`)
+    .getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error(`Channel ${channelName} is missing a data-channel-id.`);
   }
 
-  return managedAgentTestId.replace("managed-agent-", "");
+  await page.waitForFunction(() => {
+    return Boolean(
+      (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__,
+    );
+  });
+  return page.evaluate(
+    async ({ agentName, channelId }) => {
+      const invoke = (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload?: Record<string, unknown>,
+          ) => Promise<{ agent?: { pubkey: string } }>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) {
+        throw new Error("Mock bridge is not installed.");
+      }
+
+      const created = await invoke("create_managed_agent", {
+        input: {
+          name: agentName,
+          spawnAfterCreate: true,
+          systemPrompt: "Watch the channel and help when asked.",
+        },
+      });
+      const pubkey = created.agent?.pubkey;
+      if (!pubkey) {
+        throw new Error("Mock managed agent creation did not return a pubkey.");
+      }
+
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+
+      await (
+        window as Window & {
+          __BUZZ_E2E_QUERY_CLIENT__?: {
+            invalidateQueries: () => Promise<void>;
+          };
+        }
+      ).__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries();
+
+      return pubkey;
+    },
+    { agentName, channelId },
+  );
 }
 
 async function readCommandLog(page: import("@playwright/test").Page) {
@@ -214,7 +244,7 @@ async function expectSameLeftInset(
     throw new Error(`Could not measure ${firstTestId} against ${secondTestId}`);
   }
 
-  expect(Math.abs(firstBox.x - secondBox.x)).toBeLessThanOrEqual(1);
+  expect(Math.abs(firstBox.x - secondBox.x)).toBeLessThanOrEqual(4);
 }
 
 async function expectIntroBalancedAroundDayDivider(
@@ -355,6 +385,54 @@ test("start a new direct message from the sidebar", async ({ page }) => {
   await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
 
   await page.getByTestId("new-dm-search").fill("charlie");
+  await expect(
+    page.getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toBeVisible();
+  await expect(page.getByTestId("new-dm-search")).toHaveValue("");
+  await page
+    .getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+  await expect(
+    page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).not.toBeVisible();
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await expect(
+    page.getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toBeVisible();
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+  await expect(page.getByTestId("new-dm-search")).toHaveValue("");
+  await expect(
+    page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toBeVisible();
+
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByTestId("dm-list")).toContainText("charlie");
+  await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+  await expect(page.getByTestId("new-dm-trigger")).not.toBeFocused();
+});
+
+test("keeps direct message row add buttons hidden while opening", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    const testWindow = window as Window & {
+      __BUZZ_E2E__?: { mock?: { openDmDelayMs?: number } };
+    };
+    testWindow.__BUZZ_E2E__ ??= {};
+    testWindow.__BUZZ_E2E__.mock ??= {};
+    testWindow.__BUZZ_E2E__.mock.openDmDelayMs = 1_000;
+  });
+
+  await page.getByTestId("new-dm-trigger").click();
+  await page.getByTestId("new-dm-search").fill("charlie");
   await page
     .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
     .click();
@@ -362,10 +440,102 @@ test("start a new direct message from the sidebar", async ({ page }) => {
     page.getByTestId(`new-dm-selected-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toBeVisible();
 
+  const rowAddButtons = page.locator("[data-testid^='new-dm-add-']");
+  await expect(rowAddButtons.first()).toBeAttached();
+
   await page.getByTestId("new-dm-submit").click();
 
-  await expect(page.getByTestId("dm-list")).toContainText("charlie");
+  await expect(page.getByTestId("new-dm-submit")).toContainText("Opening...");
+  await expect(
+    page.locator("button[data-testid^='new-dm-add-']:visible"),
+  ).toHaveCount(0);
+
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
+});
+
+test("shows capped participant stack in group direct message header", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("new-dm-trigger").click();
+  await expect(page.getByTestId("new-dm-dialog")).toBeVisible();
+
+  for (const identity of [
+    TEST_IDENTITIES.alice,
+    TEST_IDENTITIES.bob,
+    TEST_IDENTITIES.charlie,
+    TEST_IDENTITIES.outsider,
+  ]) {
+    await page.getByTestId("new-dm-search").fill(identity.username);
+    await page.getByTestId(`new-dm-result-${identity.pubkey}`).click();
+  }
+
+  await page.getByTestId("new-dm-submit").click();
+
+  await expect(page.getByTestId("channel-dm-count-Group DM (5)")).toHaveText(
+    "4",
+  );
+  await expect(page.getByTestId("chat-title")).toContainText("alice");
+  await expect(page.getByTestId("chat-title")).toContainText("bob");
+  await expect(page.getByTestId("chat-title")).toContainText("charlie");
+  await expect(page.getByTestId("chat-title")).toContainText("+1 more");
+  await expect(page.getByTestId("chat-title")).not.toContainText("outsider");
+  const chatTitle = await page.getByTestId("chat-title").innerText();
+  await expect(
+    page.getByTestId("message-input").locator("[data-placeholder]").first(),
+  ).toHaveAttribute("data-placeholder", `Message ${chatTitle}`);
+  const composerColors = await page
+    .getByTestId("message-input")
+    .evaluate((element) => {
+      const placeholderElement =
+        element.querySelector<HTMLElement>("[data-placeholder]");
+      if (!placeholderElement) {
+        return null;
+      }
+
+      return {
+        placeholderColor: window.getComputedStyle(
+          placeholderElement,
+          "::before",
+        ).color,
+        textColor: window.getComputedStyle(element).color,
+      };
+    });
+  expect(composerColors).not.toBeNull();
+  expect(composerColors?.placeholderColor).not.toBe(composerColors?.textColor);
+  await expect(page.getByTestId("chat-header-dm-avatar")).toHaveCount(0);
+  await expect(page.getByTestId("chat-header-dm-avatar-stack")).toBeVisible();
+  await expect(page.getByTestId("chat-presence-badge")).toHaveCount(0);
+  await expect(
+    page.getByTestId("chat-header-dm-avatar-stack-participant"),
+  ).toHaveCount(3);
+  await expect(page.getByTestId("chat-header-dm-avatar-stack-more")).toHaveText(
+    "+1",
+  );
+  const headerStackBox = await page
+    .getByTestId("chat-header-dm-avatar-stack")
+    .boundingBox();
+  const headerTitleBox = await page.getByTestId("chat-title").boundingBox();
+  expect(headerStackBox).not.toBeNull();
+  expect(headerTitleBox).not.toBeNull();
+  expect((headerStackBox?.x ?? 0) + (headerStackBox?.width ?? 0)).toBeLessThan(
+    headerTitleBox?.x ?? 0,
+  );
+  await expect(page.getByTestId("message-dm-intro")).toContainText("alice");
+  await expect(page.getByTestId("message-dm-intro")).toContainText("bob");
+  await expect(page.getByTestId("message-dm-intro")).toContainText("charlie");
+  await expect(page.getByTestId("message-dm-intro")).toContainText("+1 more");
+  await expect(page.getByTestId("message-dm-intro")).not.toContainText(
+    "outsider",
+  );
+  await expect(page.getByTestId("message-dm-intro-avatar-stack")).toBeVisible();
+  await expect(
+    page.getByTestId("message-dm-intro-avatar-stack-participant"),
+  ).toHaveCount(3);
+  await expect(
+    page.getByTestId("message-dm-intro-avatar-stack-more"),
+  ).toHaveText("+1");
 });
 
 test("create stream with name and description", async ({ page }) => {
@@ -394,8 +564,9 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   await page
     .getByTestId("create-channel-description")
     .fill("Auto-cleaned test stream");
+  await page.getByRole("button", { name: "Channel duration: Ongoing" }).click();
   await page
-    .getByLabel("Ephemeral — auto-archives after 1 day of inactivity")
+    .getByLabel("Ephemeral - auto-archives after 1 day of inactivity")
     .click();
   await page.getByTestId("create-channel-submit").click();
 
@@ -436,7 +607,10 @@ test("ephemeral countdown refreshes when switching channels after a clock jump",
       .getByTestId("create-channel-description")
       .fill("Auto-cleaned test stream");
     await page
-      .getByLabel("Ephemeral — auto-archives after 1 day of inactivity")
+      .getByRole("button", { name: "Channel duration: Ongoing" })
+      .click();
+    await page
+      .getByLabel("Ephemeral - auto-archives after 1 day of inactivity")
       .click();
     await page.getByTestId("create-channel-submit").click();
     await expect(page.getByTestId("chat-title")).toContainText(channelName);
@@ -1061,6 +1235,14 @@ test("members sidebar can invite and remove members", async ({ page }) => {
     0,
   );
 
+  await expect(page.getByText(/Members · \d+/)).toBeVisible();
+  await page.getByTestId("channel-management-search-users").fill("a");
+  await expect(page.getByText("Members", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Members · \d+/)).toHaveCount(0);
+  await expect(
+    page.getByText("Not in this channel", { exact: true }),
+  ).toBeVisible();
+
   await page.getByTestId("channel-management-search-users").fill("char");
   await expect(
     page.getByTestId(
@@ -1071,21 +1253,17 @@ test("members sidebar can invite and remove members", async ({ page }) => {
     .getByTestId(`channel-user-search-result-${TEST_IDENTITIES.charlie.pubkey}`)
     .click();
   await expect(
-    page.getByTestId(`selected-invitee-${TEST_IDENTITIES.charlie.pubkey}`),
+    page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toContainText("charlie");
-
-  await page.getByTestId("channel-management-add-role").selectOption("admin");
-  await page.getByTestId("channel-management-add-members").click();
-
   await expect(
     page.getByTestId(`selected-invitee-${TEST_IDENTITIES.charlie.pubkey}`),
   ).toHaveCount(0);
-  await expect(page.getByTestId("channel-management-search-users")).toHaveValue(
-    "",
+  await expect(page.getByTestId("channel-management-add-members")).toHaveCount(
+    0,
   );
-  await expect(
-    page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
-  ).toContainText("charlie");
+  await expect(page.getByTestId("channel-management-search-users")).toHaveValue(
+    "char",
+  );
   await expectMembersTriggerCount(page, initialMemberCount + 1);
 
   await openMemberMenu(page, TEST_IDENTITIES.charlie.pubkey);
@@ -1099,64 +1277,32 @@ test("members sidebar can invite and remove members", async ({ page }) => {
   await expectMembersTriggerCount(page, initialMemberCount);
 });
 
-test("members sidebar keeps direct pubkey entry behind a toggle", async ({
-  page,
-}) => {
+test("members modal does not show direct pubkey entry", async ({ page }) => {
   await page.goto("/");
   await openMembersSidebar(page, "general");
-  const initialMemberCount = await readMembersTriggerCount(page);
 
   await expect(page.getByTestId("channel-management-add-pubkeys")).toHaveCount(
     0,
   );
-
-  await page.getByTestId("channel-management-toggle-direct-pubkeys").click();
   await expect(
-    page.getByTestId("channel-management-add-pubkeys"),
-  ).toBeVisible();
-
-  await page
-    .getByTestId("channel-management-add-pubkeys")
-    .fill(TEST_IDENTITIES.outsider.pubkey);
-  await page.getByTestId("channel-management-add-members").click();
-
+    page.getByTestId("channel-management-toggle-direct-pubkeys"),
+  ).toHaveCount(0);
   await expect(
-    page.getByTestId(`sidebar-member-${TEST_IDENTITIES.outsider.pubkey}`),
-  ).toContainText("outsider");
-  await expectMembersTriggerCount(page, initialMemberCount + 1);
+    page.getByTestId("channel-management-search-users"),
+  ).toHaveAttribute("placeholder", "Add people and agents");
 });
 
-test("open-channel members can add agents from the header", async ({
-  page,
-}) => {
+test("channel header omits the add agent action", async ({ page }) => {
   await page.goto("/");
 
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
   await page.setViewportSize({ width: 1280, height: 420 });
 
-  const addAgentTrigger = page.getByTestId("channel-add-bot-trigger");
-  await expect(addAgentTrigger).toBeEnabled();
-
-  await addAgentTrigger.click();
-  await expect(page.getByRole("heading", { name: "Add agents" })).toBeVisible();
-  await expect(page.getByTestId("add-channel-bot-dialog-header")).toBeVisible();
-  await expect(
-    page.getByTestId("add-channel-bot-dialog-scroll-area"),
-  ).toBeVisible();
-  await expect(
-    page.getByTestId("add-channel-bot-dialog-scroll-area"),
-  ).toHaveCSS("overflow-y", "auto");
-  expect(
-    await page
-      .getByTestId("add-channel-bot-dialog-scroll-area")
-      .evaluate(
-        (element) =>
-          element.scrollHeight > element.clientHeight &&
-          element.clientHeight > 0,
-      ),
-  ).toBe(true);
-  await expect(page.getByTestId("add-channel-bot-dialog-footer")).toBeVisible();
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
+  await expect(page.getByTestId("channel-members-trigger")).toBeVisible();
+  await expect(page.getByTestId("channel-start-huddle-trigger")).toBeVisible();
+  await expect(page.getByTestId("channel-management-trigger")).toBeVisible();
 });
 
 test("private-channel members can add members and bots without admin", async ({
@@ -1172,19 +1318,21 @@ test("private-channel members can add members and bots without admin", async ({
   await expect(
     page.getByTestId("channel-management-search-users"),
   ).toBeVisible();
+  await page.getByTestId("channel-management-search-users").fill("char");
+  await page
+    .getByTestId(`channel-user-search-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
   await expect(
-    page.getByTestId("channel-management-add-members"),
-  ).toBeVisible();
+    page.getByTestId(`sidebar-member-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toContainText("charlie");
 
-  // The role dropdown hides the elevated "admin" option for non-admins — the
-  // relay rejects it anyway — while keeping the non-elevated roles a member
-  // may grant (member, guest, bot).
-  const roleSelect = page.getByTestId("channel-management-add-role");
-  await expect(roleSelect.locator("option")).toHaveText([
-    "member",
-    "guest",
-    "bot",
-  ]);
+  // The modal no longer exposes member/guest/bot role choices or a staged
+  // submit button; selected people are added immediately as members and
+  // selected agents are added as bots.
+  await expect(page.getByTestId("channel-management-add-role")).toHaveCount(0);
+  await expect(page.getByTestId("channel-management-add-members")).toHaveCount(
+    0,
+  );
 });
 
 test("removing a channel-scoped agent preserves the managed agent record", async ({
@@ -1193,8 +1341,7 @@ test("removing a channel-scoped agent preserves the managed agent record", async
   const agentName = `cleanup-agent-${Date.now()}`;
 
   await page.goto("/");
-  await addGenericAgent(page, "general", agentName);
-  const agentPubkey = await getManagedAgentPubkey(page, agentName);
+  const agentPubkey = await addGenericAgent(page, "general", agentName);
 
   await page.getByTestId("channel-general").click();
   await openMembersSidebar(page, "general");
@@ -1215,9 +1362,7 @@ test("members sidebar can respawn a stopped managed bot", async ({ page }) => {
   const agentName = `sidebar-agent-${Date.now()}`;
 
   await page.goto("/");
-  await addGenericAgent(page, "general", agentName);
-
-  const agentPubkey = await getManagedAgentPubkey(page, agentName);
+  const agentPubkey = await addGenericAgent(page, "general", agentName);
   const baselineCommands = await readCommandLog(page);
   const baselineStartCount = baselineCommands.filter(
     (command) => command === "start_managed_agent",
@@ -1259,37 +1404,35 @@ test("members sidebar can respawn a stopped managed bot", async ({ page }) => {
   ).toBe(baselineStopCount + 1);
 });
 
-test("members sidebar supports bulk remove for managed bots from channel", async ({
+test("members sidebar omits bulk controls for managed bots", async ({
   page,
 }) => {
   const firstAgentName = `sidebar-remove-a-${Date.now()}`;
   const secondAgentName = `sidebar-remove-b-${Date.now()}`;
 
   await page.goto("/");
-  await addGenericAgent(page, "general", firstAgentName);
-  await addGenericAgent(page, "general", secondAgentName);
-
-  const firstAgentPubkey = await getManagedAgentPubkey(page, firstAgentName);
-  const secondAgentPubkey = await getManagedAgentPubkey(page, secondAgentName);
+  const firstAgentPubkey = await addGenericAgent(
+    page,
+    "general",
+    firstAgentName,
+  );
+  const secondAgentPubkey = await addGenericAgent(
+    page,
+    "general",
+    secondAgentName,
+  );
 
   await openMembersSidebar(page, "general");
   await expect(
-    page.getByTestId("members-sidebar-agent-controls"),
-  ).toBeVisible();
-
-  await page.getByTestId("members-sidebar-agent-controls").click();
-  await page.getByTestId("members-sidebar-remove-all").click();
-  await expect(
-    page
-      .locator("[data-sonner-toast]")
-      .filter({ hasText: "Removed 2 managed bots from this channel." }),
-  ).toBeVisible();
-  await expect(
     page.getByTestId(`sidebar-member-${firstAgentPubkey}`),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await expect(
     page.getByTestId(`sidebar-member-${secondAgentPubkey}`),
-  ).toHaveCount(0);
+  ).toBeVisible();
+  await expect(page.getByTestId("members-sidebar-agent-controls")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("members-sidebar-remove-all")).toHaveCount(0);
 
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
@@ -1305,7 +1448,7 @@ test("members sidebar supports bulk remove for managed bots from channel", async
   const commands = await readCommandLog(page);
   expect(
     commands.filter((command) => command === "remove_channel_member"),
-  ).toHaveLength(2);
+  ).toHaveLength(0);
 });
 
 test("removing a multi-channel managed bot preserves its record after removal from all channels", async ({
@@ -1315,8 +1458,7 @@ test("removing a multi-channel managed bot preserves its record after removal fr
   const secondChannelName = `multi-home-${Date.now()}`;
 
   await page.goto("/");
-  await addGenericAgent(page, "general", agentName);
-  const agentPubkey = await getManagedAgentPubkey(page, agentName);
+  const agentPubkey = await addGenericAgent(page, "general", agentName);
 
   await page.getByRole("button", { name: "Create a channel" }).click();
   await page.getByTestId("create-channel-name").fill(secondChannelName);

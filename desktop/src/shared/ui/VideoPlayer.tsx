@@ -21,10 +21,19 @@ import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
+import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 import { Spinner } from "./spinner";
+import {
+  getInlinePlaybackPosition,
+  getReviewPlaybackPosition,
+  isVideoReviewOpen,
+  saveInlinePlaybackPosition,
+  saveReviewPlaybackPosition,
+  setVideoReviewOpen,
+} from "./videoPlayerState";
 
 type VideoReviewReaction = {
   emoji: string;
@@ -93,11 +102,6 @@ type TimecodedComment = {
 const TIMECODE_RE =
   /^\s*\[((?:(?:\d{1,2}:)?\d{1,2}:)?\d{2}(?:\.\d{1,3})?)\]\s*/;
 const QUICK_REACTIONS = ["😂", "😍", "😮", "🙌", "👍", "👎"];
-// Review open state and playback positions survive player remounts (e.g. the
-// optimistic→acked message row swap) so an open review dialog doesn't snap
-// shut or lose its place mid-session.
-const openReviewKeys = new Set<string>();
-const reviewPlaybackPositions = new Map<string, number>();
 
 /**
  * Frosted-glass backing layer for floating media controls. The parent must
@@ -614,7 +618,10 @@ export function VideoPlayer({
   const [isPlaying, setIsPlaying] = React.useState(false);
   const [isBuffering, setIsBuffering] = React.useState(false);
   const [hasError, setHasError] = React.useState(false);
-  const [currentTime, setCurrentTime] = React.useState(0);
+  const [currentTime, setCurrentTimeState] = React.useState(
+    () => getInlinePlaybackPosition(persistedReviewKey) ?? 0,
+  );
+  const currentTimeRef = React.useRef(currentTime);
   const [duration, setDuration] = React.useState(durationSeconds ?? 0);
   const [volume, setVolume] = React.useState(1);
   const [muted, setMuted] = React.useState(false);
@@ -622,10 +629,10 @@ export function VideoPlayer({
     number | null
   >(null);
   const [reviewOpen, setReviewOpenState] = React.useState(() =>
-    openReviewKeys.has(persistedReviewKey),
+    isVideoReviewOpen(persistedReviewKey),
   );
   const [reviewCurrentTime, setReviewCurrentTimeState] = React.useState(
-    () => reviewPlaybackPositions.get(persistedReviewKey) ?? 0,
+    () => getReviewPlaybackPosition(persistedReviewKey) ?? 0,
   );
   const [pendingSeekSeconds, setPendingSeekSeconds] = React.useState<
     number | null
@@ -642,16 +649,49 @@ export function VideoPlayer({
   }, [durationSeconds]);
 
   React.useEffect(() => {
-    setReviewOpenState(openReviewKeys.has(persistedReviewKey));
+    const savedCurrentTime = getInlinePlaybackPosition(persistedReviewKey) ?? 0;
+    currentTimeRef.current = savedCurrentTime;
+    setStarted(false);
+    setCurrentTimeState(savedCurrentTime);
+    setIsPlaying(false);
+    setIsBuffering(false);
+    setHasError(false);
+    setReviewOpenState(isVideoReviewOpen(persistedReviewKey));
     setReviewCurrentTimeState(
-      reviewPlaybackPositions.get(persistedReviewKey) ?? 0,
+      getReviewPlaybackPosition(persistedReviewKey) ?? 0,
     );
   }, [persistedReviewKey]);
 
-  const setReviewCurrentTime = React.useCallback(
+  React.useEffect(() => {
+    return () => {
+      const video = videoRef.current;
+      if (!video || !Number.isFinite(video.currentTime)) {
+        return;
+      }
+      saveInlinePlaybackPosition(
+        persistedReviewKey,
+        Math.max(video.currentTime, currentTimeRef.current),
+        { ignoreResetToZero: true },
+      );
+    };
+  }, [persistedReviewKey]);
+
+  const setCurrentTime = React.useCallback(
     (seconds: number) => {
       const nextSeconds = Number.isFinite(seconds) ? Math.max(0, seconds) : 0;
-      reviewPlaybackPositions.set(persistedReviewKey, nextSeconds);
+      currentTimeRef.current = nextSeconds;
+      saveInlinePlaybackPosition(persistedReviewKey, nextSeconds);
+      setCurrentTimeState(nextSeconds);
+    },
+    [persistedReviewKey],
+  );
+
+  const setReviewCurrentTime = React.useCallback(
+    (seconds: number) => {
+      const nextSeconds = saveReviewPlaybackPosition(
+        persistedReviewKey,
+        seconds,
+      );
       setReviewCurrentTimeState(nextSeconds);
     },
     [persistedReviewKey],
@@ -659,11 +699,7 @@ export function VideoPlayer({
 
   const setReviewOpen = React.useCallback(
     (open: boolean) => {
-      if (open) {
-        openReviewKeys.add(persistedReviewKey);
-      } else {
-        openReviewKeys.delete(persistedReviewKey);
-      }
+      setVideoReviewOpen(persistedReviewKey, open);
       setReviewOpenState(open);
     },
     [persistedReviewKey],
@@ -714,7 +750,7 @@ export function VideoPlayer({
       inlineSeek.requestSeek(bounded);
       setCurrentTime(bounded);
     },
-    [duration, inlineSeek],
+    [duration, inlineSeek, setCurrentTime],
   );
 
   const handleToggleMute = React.useCallback(() => {
@@ -752,7 +788,7 @@ export function VideoPlayer({
         // Hand the review position back to the inline player so playback
         // resumes where the review left off.
         const video = videoRef.current;
-        const reviewSeconds = reviewPlaybackPositions.get(persistedReviewKey);
+        const reviewSeconds = getReviewPlaybackPosition(persistedReviewKey);
         if (
           video &&
           reviewSeconds !== undefined &&
@@ -767,7 +803,7 @@ export function VideoPlayer({
       }
       setReviewOpen(open);
     },
-    [persistedReviewKey, setReviewOpen],
+    [persistedReviewKey, setCurrentTime, setReviewOpen],
   );
 
   const handlePendingSeekConsumed = React.useCallback(() => {
@@ -830,6 +866,22 @@ export function VideoPlayer({
                 videoWidth,
               } = event.currentTarget;
               handleMediaDuration(mediaDuration);
+              const savedSeconds =
+                getInlinePlaybackPosition(persistedReviewKey);
+              if (
+                savedSeconds !== undefined &&
+                savedSeconds > 0 &&
+                Number.isFinite(savedSeconds)
+              ) {
+                const restoredSeconds = Math.min(
+                  savedSeconds,
+                  Number.isFinite(mediaDuration) && mediaDuration > 0
+                    ? mediaDuration
+                    : savedSeconds,
+                );
+                event.currentTarget.currentTime = restoredSeconds;
+                setCurrentTime(restoredSeconds);
+              }
               if (videoWidth > 0 && videoHeight > 0) {
                 setNaturalAspectRatio(videoWidth / videoHeight);
               }
@@ -1394,7 +1446,12 @@ function VideoReviewDialog({
   if (!open) return null;
 
   return createPortal(
-    <div className="dark video-review-theme fixed inset-0 z-50 flex min-h-0 min-w-0 items-center justify-center bg-black/75 p-4 text-foreground backdrop-blur-sm sm:p-8 lg:p-10">
+    <div
+      className={cn(
+        "dark video-review-theme fixed inset-0 z-50 flex min-h-0 min-w-0 items-center justify-center bg-black/75 p-4 text-foreground sm:p-8 lg:p-10",
+        MODAL_BACKDROP_BLUR_CLASS,
+      )}
+    >
       <button
         aria-label="Close video review"
         className="absolute inset-0 cursor-default"

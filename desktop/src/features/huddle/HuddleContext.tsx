@@ -21,6 +21,24 @@ type HuddleJoinInfo = {
 
 type VoiceInputMode = "push_to_talk" | "voice_activity";
 
+const MIC_ANALYSER_UPDATE_INTERVAL_MS = 33;
+const MIC_INITIAL_NOISE_FLOOR = 0.01;
+const MIC_VOICE_GATE_ON_RMS = 0.018;
+const MIC_VOICE_GATE_OFF_RMS = 0.012;
+const MIC_VOICE_GATE_MARGIN_RMS = 0.012;
+const MIC_LEVEL_ACTIVE_RANGE_RMS = 0.11;
+const MIC_MIN_ACTIVE_LEVEL = 0.18;
+const MIC_LEVEL_ATTACK = 0.58;
+const MIC_ACTIVE_NOISE_FLOOR_RISE = 0.006;
+
+function isRedundantHuddlePhaseError(message: string): boolean {
+  return /^cannot (?:start|join) huddle: already in phase /i.test(message);
+}
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
 interface HuddleContextValue {
   /** Current local audio track (for mute toggle in HuddleBar) */
   localAudioTrack: MediaStreamTrack | null;
@@ -71,8 +89,6 @@ interface HuddleContextValue {
   /** Leave the current huddle — stops worklet, stops mic, calls Rust leave_huddle.
    *  Returns true if backend cleanup succeeded, false if it failed (caller may retry). */
   leaveHuddle: () => Promise<boolean>;
-  /** End the huddle (creator only) — archives ephemeral channel, emits huddle_ended */
-  endHuddle: () => Promise<boolean>;
 }
 
 const HuddleContext = React.createContext<HuddleContextValue | null>(null);
@@ -94,10 +110,10 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
   const [pttActive, setPttActive] = React.useState(false);
   /** Current voice input mode */
   const [voiceInputMode, setVoiceInputModeState] =
-    React.useState<VoiceInputMode>("push_to_talk");
+    React.useState<VoiceInputMode>("voice_activity");
   /** Ref tracking latest voiceInputMode — read inside connectAndSetupMedia to
    *  avoid stale closure capture when the user toggles mode mid-start. */
-  const voiceInputModeRef = React.useRef<VoiceInputMode>("push_to_talk");
+  const voiceInputModeRef = React.useRef<VoiceInputMode>("voice_activity");
   voiceInputModeRef.current = voiceInputMode;
   /** Ephemeral channel ID — set after start_huddle/join_huddle, used for TTS subscription */
   const [ephemeralChannelId, setEphemeralChannelId] = React.useState<
@@ -167,7 +183,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
     invoke<VoiceInputMode>("get_voice_input_mode")
       .then((mode) => setVoiceInputModeState(mode))
       .catch(() => {
-        /* best-effort — default is push_to_talk */
+        /* best-effort — default is voice_activity */
       });
   }, []);
 
@@ -268,39 +284,15 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
 
   const leaveHuddle = React.useCallback(async (): Promise<boolean> => {
     await disconnectMedia();
-    if (rustActiveRef.current) {
-      try {
-        await invoke("leave_huddle");
-        rustActiveRef.current = false;
-      } catch {
-        // Leave rustActiveRef true so a subsequent leaveHuddle() retries Rust cleanup
-        return false; // Signal that backend cleanup failed
-      }
+    try {
+      // `leave_huddle` is idempotent in Rust. Always call it so a provider
+      // remount cannot leave Rust's huddle state active while this ref is false.
+      await invoke("leave_huddle");
+      rustActiveRef.current = false;
+    } catch {
+      return false; // Signal that backend cleanup failed
     }
     return true; // Backend cleanup succeeded (or was not needed)
-  }, [disconnectMedia]);
-
-  const endHuddle = React.useCallback(async (): Promise<boolean> => {
-    await disconnectMedia();
-    if (rustActiveRef.current) {
-      try {
-        await invoke("end_huddle");
-        rustActiveRef.current = false;
-        return true;
-      } catch {
-        // end_huddle failed — fall back to local leave so we at least
-        // disconnect, but report false so the UI knows the huddle was
-        // NOT ended for everyone (no archive, no huddle_ended event).
-        try {
-          await invoke("leave_huddle");
-          rustActiveRef.current = false;
-        } catch {
-          // Leave rustActiveRef true so a subsequent call retries
-        }
-        return false;
-      }
-    }
-    return true;
   }, [disconnectMedia]);
 
   /**
@@ -450,10 +442,15 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
           throw e;
         }
       } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (isRedundantHuddlePhaseError(msg)) {
+          setHuddleError(null);
+          return;
+        }
+
         const w = workletRef.current;
         workletRef.current = null;
         await cleanupFailedStart(w, true);
-        const msg = e instanceof Error ? e.message : String(e);
         setHuddleError(msg);
         console.error("Failed to start huddle:", e);
         throw e;
@@ -493,10 +490,15 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
           throw e;
         }
       } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (isRedundantHuddlePhaseError(msg)) {
+          setHuddleError(null);
+          return;
+        }
+
         const w = workletRef.current;
         workletRef.current = null;
         await cleanupFailedStart(w, false);
-        const msg = e instanceof Error ? e.message : String(e);
         setHuddleError(msg);
         console.error("Failed to join huddle:", e);
         throw e;
@@ -523,33 +525,67 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
 
   // Mic level analyser — drives the voice activity indicator
   React.useEffect(() => {
-    if (!localAudioTrack) {
+    if (!localAudioTrack || !micConnected) {
       setMicLevel(0);
       return;
     }
 
     const ctx = new AudioContext();
     const analyser = ctx.createAnalyser();
-    analyser.fftSize = 256;
+    analyser.fftSize = 512;
     const source = ctx.createMediaStreamSource(
       new MediaStream([localAudioTrack]),
     );
     source.connect(analyser);
-    const buf = new Uint8Array(analyser.frequencyBinCount);
+    const buf = new Float32Array(analyser.fftSize);
 
     let raf = 0;
     let lastUpdate = 0;
+    let voiceActive = false;
+    let noiseFloor = MIC_INITIAL_NOISE_FLOOR;
+    let smoothedLevel = 0;
     function tick(now: number) {
       raf = requestAnimationFrame(tick);
-      // Throttle state updates to ~10fps — voice meters don't need 60fps
-      // visual fidelity, and setMicLevel re-renders the entire HuddleBar.
-      if (now - lastUpdate < 100) return;
+      if (now - lastUpdate < MIC_ANALYSER_UPDATE_INTERVAL_MS) return;
       lastUpdate = now;
-      analyser.getByteFrequencyData(buf);
-      // RMS-ish: average of frequency bins, normalized to 0–1
-      let sum = 0;
-      for (let i = 0; i < buf.length; i++) sum += buf[i];
-      setMicLevel(sum / (buf.length * 255));
+      analyser.getFloatTimeDomainData(buf);
+
+      let sumSquares = 0;
+      for (let i = 0; i < buf.length; i += 1) {
+        sumSquares += buf[i] * buf[i];
+      }
+
+      const rms = Math.sqrt(sumSquares / buf.length);
+      const activeThreshold = Math.max(
+        MIC_VOICE_GATE_ON_RMS,
+        noiseFloor + MIC_VOICE_GATE_MARGIN_RMS,
+      );
+      const idleThreshold = Math.max(
+        MIC_VOICE_GATE_OFF_RMS,
+        noiseFloor + MIC_VOICE_GATE_MARGIN_RMS * 0.55,
+      );
+      voiceActive = voiceActive ? rms > idleThreshold : rms > activeThreshold;
+
+      const floorRate =
+        rms < noiseFloor
+          ? 0.18
+          : voiceActive
+            ? MIC_ACTIVE_NOISE_FLOOR_RISE
+            : 0.025;
+      noiseFloor += (rms - noiseFloor) * floorRate;
+
+      if (!voiceActive) {
+        smoothedLevel = 0;
+        setMicLevel(0);
+        return;
+      }
+
+      const normalized = clamp01(
+        (rms - noiseFloor) / MIC_LEVEL_ACTIVE_RANGE_RMS,
+      );
+      const targetLevel = Math.max(normalized, MIC_MIN_ACTIVE_LEVEL);
+      smoothedLevel += (targetLevel - smoothedLevel) * MIC_LEVEL_ATTACK;
+      setMicLevel(smoothedLevel);
     }
     raf = requestAnimationFrame(tick);
 
@@ -558,7 +594,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
       source.disconnect();
       void ctx.close();
     };
-  }, [localAudioTrack]);
+  }, [localAudioTrack, micConnected]);
 
   // Cleanup on unmount only — stable ref prevents re-firing mid-startup.
   const leaveHuddleRef = React.useRef(leaveHuddle);
@@ -612,7 +648,6 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
         startHuddle,
         joinHuddle,
         leaveHuddle,
-        endHuddle,
       }}
     >
       {children}

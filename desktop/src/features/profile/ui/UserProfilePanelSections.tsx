@@ -173,12 +173,12 @@ export function ProfileSummaryView({
 
       {activeTurns.length > 0 ? (
         <div className="flex flex-wrap justify-center gap-1.5">
-          {activeTurns.map(({ channelId, observedAt }) => (
+          {activeTurns.map(({ channelId, anchorAt }) => (
             <ProfileWorkingBadge
               key={channelId}
               channelId={channelId}
               name={channelIdToName[channelId] ?? channelId}
-              observedAt={observedAt}
+              anchorAt={anchorAt}
               onNavigate={goChannel}
             />
           ))}
@@ -238,12 +238,12 @@ export function ProfileSummaryView({
 function ProfileWorkingBadge({
   channelId,
   name,
-  observedAt,
+  anchorAt,
   onNavigate,
 }: {
   channelId: string;
   name: string;
-  observedAt: number;
+  anchorAt: number;
   onNavigate: (channelId: string) => void;
 }) {
   const now = useNow(1000);
@@ -254,7 +254,7 @@ function ProfileWorkingBadge({
       variant="default"
       onClick={() => onNavigate(channelId)}
     >
-      Working in #{name} · {formatElapsed(now - observedAt)}
+      Working in #{name} · {formatElapsed(now - anchorAt)}
     </Badge>
   );
 }

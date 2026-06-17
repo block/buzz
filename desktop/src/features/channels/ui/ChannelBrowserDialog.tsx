@@ -11,6 +11,10 @@ import {
 } from "@/shared/ui/dialog";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
+import {
+  MODAL_SEARCH_INPUT_CLASS,
+  MODAL_SEARCH_SHELL_CLASS,
+} from "@/shared/ui/modalSearchStyles";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
 const BROWSE_CHANNELS_SHORTCUT_HINT = "\u21E7\u2318O";
@@ -272,14 +276,14 @@ export function ChannelBrowserDialog({
             </DialogClose>
           </div>
           <label
-            className="mt-4 flex cursor-text items-center gap-3 rounded-xl border border-input bg-background px-3 py-2.5 shadow-xs transition-colors duration-150 ease-out hover:border-muted-foreground/40 hover:bg-muted/70 focus-within:border-muted-foreground/50 focus-within:bg-muted/70 group/search"
+            className={MODAL_SEARCH_SHELL_CLASS}
             htmlFor="channel-browser-search"
           >
             <Search className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-within/search:text-foreground" />
             <input
               autoCapitalize="none"
               autoCorrect="off"
-              className="block h-6 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm leading-5 text-muted-foreground/55 shadow-none caret-foreground outline-none transition-colors duration-150 ease-out placeholder:text-muted-foreground/55 group-hover/search:text-muted-foreground group-hover/search:placeholder:text-muted-foreground group-focus-within/search:text-foreground group-focus-within/search:placeholder:text-foreground"
+              className={MODAL_SEARCH_INPUT_CLASS}
               data-testid="channel-browser-search"
               id="channel-browser-search"
               onChange={(event) => {

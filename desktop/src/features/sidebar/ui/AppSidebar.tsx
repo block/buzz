@@ -6,9 +6,13 @@ import {
   Bot,
   FolderGit2,
   Home,
-  PenSquare,
+  MessageCirclePlus,
   Zap,
 } from "lucide-react";
+import {
+  isRelayConnectionDegraded,
+  useRelayConnection,
+} from "@/shared/api/useRelayConnection";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import {
   isRelayUnreachableError,
@@ -47,7 +51,7 @@ import {
   SidebarLoadingContent,
   useSidebarLoadingShape,
 } from "@/features/sidebar/ui/sidebarLoadingSkeleton";
-import { SECTION_ACTION_VISIBILITY_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
+import { SECTION_ICON_BUTTON_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
 import type {
   Channel,
   ChannelVisibility,
@@ -55,12 +59,10 @@ import type {
   Profile,
   UserStatus,
 } from "@/shared/api/types";
-import { cn } from "@/shared/lib/cn";
 import {
   Sidebar,
   SidebarContent,
   SidebarFooter,
-  SidebarGroupAction,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuBadge,
@@ -284,6 +286,18 @@ export function AppSidebar({
 
   const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
 
+  // The sidebar reconnect prompt must surface the moment the relay drops, not
+  // only after `channelsQuery` finally errors (it has a 60s staleTime +
+  // refetchInterval, so the error lags 60-120s behind a dropped socket).
+  // OR-in the live, debounced connection state — same signal that drives
+  // ConnectionBanner — so the prompt flips within ~2s of degradation.
+  const relayConnectionState = useRelayConnection();
+  const hasRelayUnreachableError = errorMessage
+    ? isRelayUnreachableError(errorMessage)
+    : false;
+  const isRelayConnectionDegradedNow =
+    hasRelayUnreachableError || isRelayConnectionDegraded(relayConnectionState);
+
   const [createSectionState, setCreateSectionState] = React.useState<{
     open: boolean;
     pendingChannelId: string | null;
@@ -499,10 +513,10 @@ export function AppSidebar({
             </SidebarMenuButton>
             {shouldShowAgentCount ? (
               <SidebarMenuBadge
-                className="right-2 rounded-full bg-sidebar-accent/70 px-1.5 text-[11px] text-sidebar-foreground/75 peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
+                className="right-2 rounded-full bg-sidebar-accent/70 px-1.5 text-[11px] leading-none text-sidebar-foreground/75 peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
                 data-testid="sidebar-agents-count"
               >
-                {totalAgentCount}
+                <span className="leading-none">{totalAgentCount}</span>
               </SidebarMenuBadge>
             ) : null}
           </SidebarMenuItem>
@@ -686,21 +700,21 @@ export function AppSidebar({
               </FeatureGate>
               <SidebarSection
                 action={
-                  <SidebarGroupAction
-                    aria-expanded={isNewDmOpen}
-                    aria-label="Start a direct message"
-                    className={cn(
-                      "top-1/2 -translate-y-1/2 text-sidebar-foreground/50 hover:bg-sidebar-border/35 hover:text-sidebar-foreground",
-                      SECTION_ACTION_VISIBILITY_CLASS,
-                    )}
-                    data-testid="new-dm-trigger"
-                    onClick={() => {
-                      setIsNewDmOpen(true);
-                    }}
-                    type="button"
-                  >
-                    <PenSquare className="transition-transform" />
-                  </SidebarGroupAction>
+                  <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
+                    <button
+                      aria-expanded={isNewDmOpen}
+                      aria-label="Compose new message"
+                      className={SECTION_ICON_BUTTON_CLASS}
+                      data-testid="new-dm-trigger"
+                      onClick={() => {
+                        setIsNewDmOpen(true);
+                      }}
+                      title="Compose new message"
+                      type="button"
+                    >
+                      <MessageCirclePlus className="h-4 w-4" />
+                    </button>
+                  </div>
                 }
                 dmParticipantsByChannelId={dmParticipantsByChannelId}
                 isCollapsed={collapsedGroups.directMessages}
@@ -724,30 +738,28 @@ export function AppSidebar({
             </>
           ) : null}
 
-          {errorMessage ? (
-            isRelayUnreachableError(errorMessage) ? (
-              <div
-                className="px-3 py-2 text-sm"
-                data-testid="sidebar-relay-unreachable"
+          {isRelayConnectionDegradedNow ? (
+            <div
+              className="px-3 py-2 text-sm"
+              data-testid="sidebar-relay-unreachable"
+            >
+              <span className="text-muted-foreground">
+                {RELAY_UNREACHABLE_SHORT}{" "}
+              </span>
+              <button
+                className="text-primary hover:underline disabled:opacity-50"
+                data-testid="sidebar-reconnect"
+                disabled={isReconnectPending}
+                onClick={() => void reconnect()}
+                type="button"
               >
-                <span className="text-muted-foreground">
-                  {RELAY_UNREACHABLE_SHORT}{" "}
-                </span>
-                <button
-                  className="text-primary hover:underline disabled:opacity-50"
-                  data-testid="sidebar-reconnect"
-                  disabled={isReconnectPending}
-                  onClick={() => void reconnect()}
-                  type="button"
-                >
-                  {isReconnectPending ? "Reconnecting…" : "Reconnect"}
-                </button>
-              </div>
-            ) : (
-              <div className="px-3 py-2 text-sm text-destructive">
-                {errorMessage}
-              </div>
-            )
+                {isReconnectPending ? "Reconnecting…" : "Reconnect"}
+              </button>
+            </div>
+          ) : errorMessage ? (
+            <div className="px-3 py-2 text-sm text-destructive">
+              {errorMessage}
+            </div>
           ) : null}
         </SidebarContent>
 

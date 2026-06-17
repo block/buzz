@@ -209,7 +209,7 @@ export function TimelineSkeleton({ rows }: TimelineSkeletonProps) {
     <>
       {skeletonRows.map((row) => (
         <article
-          className="relative flex items-start gap-2.5 rounded-2xl px-3 py-2"
+          className="relative mx-1 flex items-start gap-2.5 rounded-2xl px-2 py-2"
           key={row.key}
         >
           <Skeleton className="h-9 w-9 shrink-0 rounded-full" />

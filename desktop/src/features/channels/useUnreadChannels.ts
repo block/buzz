@@ -213,6 +213,30 @@ function toUnixSeconds(isoOrMs: string | null | undefined): number | null {
   return ms === null ? null : Math.floor(ms / 1_000);
 }
 
+// Resolve where the read marker should land when a channel is marked read.
+// Folds the caller's timeline position together with the newest event this
+// client has observed live (`observedLatest`), so an explicit "mark read" still
+// covers messages that arrived faster than channel metadata — this fold is
+// load-bearing for the Esc shortcut, sidebar mark-read, and empty-channel open,
+// all of which pass a null/stale caller value. `clearObserved` reports whether
+// the resulting marker covers the observed timestamp, signalling the caller to
+// drop its observed refs so the unread memo sees `latest === undefined` until a
+// genuinely newer event arrives.
+export function resolveChannelReadMarker(
+  callerReadAt: string | null | undefined,
+  observedLatest: number | undefined,
+): { markAt: number | null; clearObserved: boolean } {
+  const callerUnix = toUnixSeconds(callerReadAt);
+  const markAt = Math.max(callerUnix ?? 0, observedLatest ?? 0) || null;
+  return {
+    markAt,
+    clearObserved:
+      markAt !== null &&
+      observedLatest !== undefined &&
+      observedLatest <= markAt,
+  };
+}
+
 function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   if (a.size !== b.size) return false;
   for (const item of a) {
@@ -221,10 +245,56 @@ function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   return true;
 }
 
+// Build channelId -> set of thread rootIds observed in that channel, derived
+// from the thread-activity log (the same items that feed latestByChannelRef).
+// Used by the sidebar unread scan to fold per-thread read markers into a
+// channel's effective frontier so opening a thread clears the channel dot.
+export function buildChannelThreadRoots(
+  items: readonly ThreadActivityItem[],
+  getRootId: (tags: string[][]) => string | null,
+): Map<string, Set<string>> {
+  const byChannel = new Map<string, Set<string>>();
+  for (const item of items) {
+    const rootId = getRootId(item.tags);
+    if (rootId === null) continue;
+    let roots = byChannel.get(item.channelId);
+    if (!roots) {
+      roots = new Set<string>();
+      byChannel.set(item.channelId, roots);
+    }
+    roots.add(rootId);
+  }
+  return byChannel;
+}
+
+// The channel's effective read frontier for sidebar-unread purposes: its own
+// channel marker folded with the highest OWN thread marker among its observed
+// thread roots. Using the thread OWN marker (not the hierarchical effective
+// value) is deliberate — the hierarchical resolver maps every thread to the
+// ACTIVE channel, so it would borrow the wrong marker for a background channel.
+// An unread reply in a thread keeps the dot until that thread is opened
+// (advancing the thread marker past the reply); a never-read thread (no own
+// marker) contributes nothing and the channel marker governs.
+export function channelUnreadFrontier(
+  channelMarker: number | null,
+  threadRoots: ReadonlySet<string> | undefined,
+  getThreadOwnMarker: (rootId: string) => number | null,
+): number | null {
+  let frontier = channelMarker;
+  if (threadRoots) {
+    for (const rootId of threadRoots) {
+      const own = getThreadOwnMarker(rootId);
+      if (own !== null && (frontier === null || own > frontier)) {
+        frontier = own;
+      }
+    }
+  }
+  return frontier;
+}
+
 export function useUnreadChannels(
   channels: Channel[],
   activeChannel: Channel | null,
-  activeReadAt?: string | null,
   options: UseUnreadChannelsOptions = {},
 ) {
   const {
@@ -234,20 +304,16 @@ export function useUnreadChannels(
     ...liveUpdateOptions
   } = options;
   const activeChannelId = activeChannel?.id ?? null;
-  const activeChannelLastMessageAt = activeChannel?.lastMessageAt ?? null;
   const normalizedPubkey = pubkey?.toLowerCase() ?? null;
-
-  // Let callers pass `null` to intentionally suppress the optimistic
-  // channel-metadata fallback until a real timeline position is known.
-  const effectiveActiveReadAt =
-    activeReadAt === undefined ? activeChannelLastMessageAt : activeReadAt;
 
   const {
     getEffectiveTimestamp,
     isReady: isReadStateReady,
     markContextRead,
     drainSyncedAdvances,
+    setContextParentResolver,
     readStateVersion,
+    getOwnTimestamp,
   } = useReadState(pubkey, relayClient);
 
   // Observed "latest external trigger event" per channel (unix seconds). This
@@ -336,23 +402,40 @@ export function useUnreadChannels(
     bumpLatestVersion();
   }, [pubkey, relayClient]);
 
+  // `topLevelOnly` is the passive channel-open path (NIP-RS Option 1): the
+  // caller's `readAt` is already the newest TOP-LEVEL message, so the marker
+  // must land exactly there without folding in `observedLatest` (which counts
+  // thread replies) and without clearing observed refs. Leaving the refs intact
+  // keeps the sidebar dot lit for a channel whose only unread is an unopened
+  // thread reply — viewing the channel no longer absorbs the reply, so the dot
+  // persists until an explicit mark-read (Esc, sidebar, mark-all) or a newer
+  // top-level message advances the channel marker past it. Those explicit
+  // "mark read" actions omit the flag and keep the fold, since they mean
+  // "clear everything in this channel."
   const markChannelRead = React.useCallback(
-    (channelId: string, readAt: string | null | undefined) => {
+    (
+      channelId: string,
+      readAt: string | null | undefined,
+      { topLevelOnly = false }: { topLevelOnly?: boolean } = {},
+    ) => {
       if (forcedUnreadRef.current.delete(channelId)) {
         bumpLatestVersion();
       }
-      const callerUnix = toUnixSeconds(readAt);
-      const observedLatest = latestByChannelRef.current.get(channelId);
-      const unixSeconds =
-        Math.max(callerUnix ?? 0, observedLatest ?? 0) || null;
-      if (unixSeconds === null) return;
-      markContextRead(channelId, unixSeconds);
+      const observedLatest = topLevelOnly
+        ? undefined
+        : latestByChannelRef.current.get(channelId);
+      const { markAt, clearObserved } = resolveChannelReadMarker(
+        readAt,
+        observedLatest,
+      );
+      if (markAt === null) return;
+      markContextRead(channelId, markAt);
       // Clear observed-latest refs when the read marker covers them so the
       // unread memo sees `latest === undefined` until a genuinely new event
       // arrives. Without this, `latest > readAt` resolves to `T > T` (false)
       // but the channel lingers in the set when advanceContext's monotonic
       // guard suppresses the readStateVersion bump.
-      if (observedLatest !== undefined && observedLatest <= unixSeconds) {
+      if (clearObserved) {
         latestByChannelRef.current.delete(channelId);
         latestHighPriorityByChannelRef.current.delete(channelId);
         bumpLatestVersion();
@@ -370,21 +453,6 @@ export function useUnreadChannels(
       bumpLatestVersion();
     }
   }, []);
-
-  // Mark the active channel as read when it changes or new messages arrive.
-  // Honours the caller's contract that a null activeReadAt suppresses
-  // read-marking until the timeline reports a real position. Manual
-  // mark-unread state is cleared inside markChannelRead, not here.
-  React.useEffect(() => {
-    if (!isReadStateReady) return;
-    if (!activeChannelId) return;
-    markChannelRead(activeChannelId, effectiveActiveReadAt);
-  }, [
-    activeChannelId,
-    effectiveActiveReadAt,
-    isReadStateReady,
-    markChannelRead,
-  ]);
 
   // Feed the in-session "latest external trigger" map from live channel
   // events. Composes with any caller-supplied onChannelMessage handler.
@@ -763,6 +831,16 @@ export function useUnreadChannels(
       const unread = new Set<string>();
       const highPriority = new Set<string>();
 
+      // Map each channel to the thread roots observed in it, so a channel's
+      // frontier can fold in per-thread read markers (Option A): opening a
+      // thread advances thread:<root> and must clear the channel dot even
+      // though markChannelRead only advances the channel marker to the newest
+      // TOP-LEVEL message.
+      const threadRootsByChannel = buildChannelThreadRoots(
+        threadActivityRef.current,
+        (tags) => getThreadReference(tags).rootId,
+      );
+
       for (const channel of channels) {
         if (channel.id === activeChannelId) continue;
 
@@ -775,7 +853,11 @@ export function useUnreadChannels(
         const latest = latestByChannelRef.current.get(channel.id);
         if (latest === undefined) continue;
 
-        const readAt = getEffectiveTimestamp(channel.id);
+        const readAt = channelUnreadFrontier(
+          getEffectiveTimestamp(channel.id),
+          threadRootsByChannel.get(channel.id),
+          (rootId) => getOwnTimestamp(`thread:${rootId}`),
+        );
         if (readAt !== null && latest <= readAt) continue;
 
         unread.add(channel.id);
@@ -805,6 +887,7 @@ export function useUnreadChannels(
       activeChannelId,
       channels,
       getEffectiveTimestamp,
+      getOwnTimestamp,
       isReadStateReady,
       latestVersion,
       readStateVersion,
@@ -862,6 +945,7 @@ export function useUnreadChannels(
     // should include in memo deps.
     getEffectiveTimestamp,
     readStateVersion,
+    setContextParentResolver,
     participatedRootIds: participatedRootIdsRef.current as ReadonlySet<string>,
     authoredRootIds: authoredRootIdsRef.current as ReadonlySet<string>,
     threadActivityItems: threadActivityRef.current,

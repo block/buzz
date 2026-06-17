@@ -24,7 +24,7 @@ const SYSTEM_MESSAGE_KIND = 40099;
 function autocomplete(page: import("@playwright/test").Page) {
   return page
     .getByTestId("message-composer")
-    .locator(".rounded-xl.border.bg-popover");
+    .getByTestId("mention-autocomplete");
 }
 
 async function readCommandLog(page: import("@playwright/test").Page) {
@@ -82,6 +82,15 @@ async function waitForMockLiveSubscription(
       );
     })
     .toBe(true);
+}
+
+// The channel timeline renders off a `useDeferredValue` snapshot that lags the
+// latest `messages` by a commit; the list wrapper carries
+// `data-render-pending="true"` while that commit is in flight and drops the
+// attribute once it settles. Poll for its absence before asserting on
+// freshly-sent content so the assertion does not race the deferred commit.
+async function waitForTimelineSettled(page: import("@playwright/test").Page) {
+  await expect(page.locator("[data-render-pending]")).toHaveCount(0);
 }
 
 test("@ trigger shows unified autocomplete with agents first", async ({
@@ -990,6 +999,8 @@ test("mention text is highlighted in sent messages", async ({ page }) => {
   await autocomplete(page).getByText("bob").click();
   await page.keyboard.type(suffix);
   await page.getByTestId("send-message").click();
+
+  await waitForTimelineSettled(page);
 
   const mentionChip = page
     .getByTestId("message-row")
