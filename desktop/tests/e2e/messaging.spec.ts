@@ -23,6 +23,46 @@ test("send a message and see it in timeline", async ({ page }) => {
   );
 });
 
+test("long autolink wraps without widening the timeline", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const longUrl = `https://blocked.teams.cloudflare.com/?${"dependencyconfusionnpm".repeat(18)}`;
+  const message = `Step "adapter" failed: npm error invalid json response body at <${longUrl}> reason: Unexpected token '<'`;
+
+  await page.getByTestId("message-input").fill(message);
+  await page.getByTestId("send-message").click();
+
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText('Step "adapter" failed');
+  await expect
+    .poll(() =>
+      timeline.evaluate((element) => element.scrollWidth - element.clientWidth),
+    )
+    .toBeLessThanOrEqual(1);
+
+  const row = page.getByTestId("message-row").last();
+  await row.hover();
+
+  const actionBar = page.locator('[data-testid^="message-action-bar-"]').last();
+  await expect(actionBar).toHaveCSS("opacity", "1");
+  await expect
+    .poll(async () => {
+      const [barBox, timelineBox] = await Promise.all([
+        actionBar.boundingBox(),
+        timeline.boundingBox(),
+      ]);
+      if (!barBox || !timelineBox) {
+        return Number.POSITIVE_INFINITY;
+      }
+      return barBox.x + barBox.width - (timelineBox.x + timelineBox.width);
+    })
+    .toBeLessThanOrEqual(0);
+});
+
 test("send multiple messages in sequence", async ({ page }) => {
   const ts = Date.now();
   const messages = [
