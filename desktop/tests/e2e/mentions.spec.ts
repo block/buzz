@@ -1031,7 +1031,7 @@ test("Escape dismisses autocomplete dropdown", async ({ page }) => {
 });
 
 test("mention text is highlighted in sent messages", async ({ page }) => {
-  const suffix = `check this out ${Date.now()}`;
+  const suffix = ` check this out ${Date.now()}`;
 
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -1049,8 +1049,9 @@ test("mention text is highlighted in sent messages", async ({ page }) => {
   const mentionChip = page
     .getByTestId("message-row")
     .last()
-    .locator("[data-mention]", { hasText: "@bob" });
+    .locator("[data-mention].mention-chip", { hasText: "bob" });
   await expect(mentionChip).toBeVisible();
+  await expect(mentionChip.locator(".mention-chip-prefix")).toHaveText("@");
   await expect(mentionChip.locator("svg")).toHaveCount(0);
 });
 
