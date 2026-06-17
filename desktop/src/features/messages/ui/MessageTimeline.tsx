@@ -324,7 +324,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                 showMessageList && !showIntro && "mt-auto",
               )}
               contentClassName={cn(
-                "flex flex-col gap-2",
+                "flex min-w-0 flex-col gap-2",
                 (showIntro || showGenericEmpty) && "min-h-full",
               )}
               loading={isLoading}
