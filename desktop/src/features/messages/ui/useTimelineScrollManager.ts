@@ -41,6 +41,11 @@ export function useTimelineScrollManager({
   const previousLastMessageKeyRef = React.useRef<string | undefined>(undefined);
   const previousMessageCountRef = React.useRef(0);
   const handledTargetMessageIdRef = React.useRef<string | null>(null);
+  // Mirror isLoading into a ref so the ResizeObservers (which subscribe once)
+  // can skip reacting while the skeleton is up — reacting to height churn under
+  // a streaming-in list is what makes the timeline thrash on entry.
+  const isLoadingRef = React.useRef(isLoading);
+  isLoadingRef.current = isLoading;
   const [isAtBottom, setIsAtBottom] = React.useState(true);
   const [highlightedMessageId, setHighlightedMessageId] = React.useState<
     string | null
@@ -241,6 +246,12 @@ export function useTimelineScrollManager({
       const nextTimelineHeight = entry.contentRect.height;
       previousTimelineHeightRef.current = nextTimelineHeight;
 
+      // Track height while loading, but don't scroll — the init layout-effect
+      // owns the first scroll once content settles.
+      if (isLoadingRef.current) {
+        return;
+      }
+
       if (
         previousTimelineHeight === null ||
         Math.abs(nextTimelineHeight - previousTimelineHeight) < 1
@@ -271,6 +282,9 @@ export function useTimelineScrollManager({
     }
 
     const observer = new ResizeObserver(() => {
+      if (isLoadingRef.current) {
+        return;
+      }
       if (shouldStickToBottomRef.current) {
         scrollToBottom("auto");
         return;
