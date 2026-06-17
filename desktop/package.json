@@ -1,15 +1,16 @@
 {
   "name": "buzz",
   "private": true,
-  "version": "0.3.23",
+  "version": "0.3.24",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
     "check:file-sizes": "node ./scripts/check-file-sizes.mjs",
+    "check:px-text": "node ./scripts/check-px-text.mjs",
     "lint": "biome lint .",
-    "check": "biome check . && pnpm check:file-sizes",
+    "check": "biome check . && pnpm check:file-sizes && pnpm check:px-text",
     "format": "biome format --write .",
     "test": "node --import ./test-loader.mjs --experimental-strip-types --test 'src/**/*.test.mjs'",
     "preview": "vite preview",

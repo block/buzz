@@ -142,7 +142,7 @@ export function ChannelMemberInviteCard({
           <span>Add members</span>
         </div>
         {inviteTargets.length > 0 ? (
-          <span className="rounded-full bg-background px-2 py-1 text-[11px] font-medium leading-none text-muted-foreground">
+          <span className="rounded-full bg-background px-2 py-1 text-2xs font-medium leading-none text-muted-foreground">
             {inviteTargets.length} selected
           </span>
         ) : null}
@@ -168,7 +168,7 @@ export function ChannelMemberInviteCard({
             <div className="flex flex-wrap gap-1.5 border-t border-border/70 px-2.5 py-2">
               {selectedInvitees.map((invitee) => (
                 <div
-                  className="inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-[11px] leading-none"
+                  className="inline-flex items-center gap-1.5 rounded-full border border-border/80 bg-muted/60 px-2.5 py-1 text-2xs leading-none"
                   data-testid={`selected-invitee-${invitee.pubkey}`}
                   key={invitee.pubkey}
                 >

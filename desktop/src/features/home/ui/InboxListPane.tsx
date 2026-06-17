@@ -67,7 +67,7 @@ export function InboxListPane({
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border-border/70 bg-background/70 px-2.5 text-[11px] font-medium leading-none text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/60 hover:text-foreground"
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border-border/70 bg-background/70 px-2.5 text-2xs font-medium leading-none text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/60 hover:text-foreground"
                   size="sm"
                   type="button"
                   variant="outline"
@@ -153,7 +153,7 @@ export function InboxListPane({
                             {item.senderLabel}
                           </p>
                           {item.isActionRequired ? (
-                            <span className="inline-flex shrink-0 items-center text-[10px] font-semibold uppercase tracking-[0.14em] text-amber-600 dark:text-amber-300">
+                            <span className="inline-flex shrink-0 items-center text-2xs font-semibold uppercase tracking-[0.14em] text-amber-600 dark:text-amber-300">
                               Needs action
                             </span>
                           ) : null}
@@ -182,14 +182,13 @@ export function InboxListPane({
                         content={item.preview}
                         interactive={false}
                         mentionNames={item.mentionNames}
-                        tight
                       />
                     </div>
 
                     <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                       <span
                         className={cn(
-                          "text-[11px] text-muted-foreground",
+                          "text-2xs text-muted-foreground",
                           isDone ? "font-normal" : "font-semibold",
                         )}
                       >

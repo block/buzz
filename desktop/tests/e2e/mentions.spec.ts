@@ -24,7 +24,7 @@ const SYSTEM_MESSAGE_KIND = 40099;
 function autocomplete(page: import("@playwright/test").Page) {
   return page
     .getByTestId("message-composer")
-    .locator(".rounded-xl.border.bg-popover");
+    .getByTestId("mention-autocomplete");
 }
 
 async function readCommandLog(page: import("@playwright/test").Page) {
@@ -197,7 +197,7 @@ test("selecting a person mention inserts @Name into input", async ({
   await dropdown.getByText("bob").click();
 
   await expect(input).toHaveText("Hey @bob ");
-  const mentionChip = input.locator(".mention-highlight", {
+  const mentionChip = input.locator(".mention-chip", {
     hasText: "@bob",
   });
   await expect(mentionChip).toBeVisible();
@@ -415,7 +415,7 @@ test("profile-only agents without public respond-to are hidden from mentions", a
 
   const dropdown = autocomplete(page);
   await expect(dropdown).not.toBeVisible();
-  await expect(input.locator(".mention-highlight")).toHaveCount(0);
+  await expect(input.locator(".mention-chip")).toHaveCount(0);
 });
 
 test("mentioning an in-channel stopped managed agent starts it before sending", async ({
@@ -712,11 +712,11 @@ test("selecting a non-member agent from a DM inserts @Name into input", async ({
   const dropdown = autocomplete(page);
   await expect(dropdown.getByText("charlie")).toBeVisible();
   await expect(autocomplete(page)).toHaveCount(1);
-  await expect(input.locator(".mention-highlight")).toHaveCount(0);
+  await expect(input.locator(".mention-chip")).toHaveCount(0);
   await input.press("Enter");
 
   await expect(input).toHaveText("@charlie ");
-  await expect(input.locator(".mention-highlight")).toBeVisible();
+  await expect(input.locator(".mention-chip")).toBeVisible();
 });
 
 test("do nothing sends a non-member mention without inviting", async ({

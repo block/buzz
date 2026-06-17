@@ -279,7 +279,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
             )}
           >
             <Button
-              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-primary/40 bg-primary/10 px-2.5 text-[11px] font-medium text-primary shadow-xs backdrop-blur-sm hover:bg-primary/20 [&_svg]:size-3.5"
+              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-primary/40 bg-primary/10 px-2.5 text-2xs font-medium text-primary shadow-xs backdrop-blur-sm hover:bg-primary/20 [&_svg]:size-3.5"
               data-testid="message-unread-pill"
               onClick={handleJumpToOldestUnread}
               size="sm"
@@ -293,7 +293,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
         ) : null}
         <div
           className={cn(
-            "absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-4 pt-1 [overflow-anchor:none] sm:px-6",
+            "absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-1 [overflow-anchor:none]",
             hasComposerOverlay ? "pb-24" : "pb-4",
           )}
           data-scroll-restoration-id={scrollRestorationId}
@@ -513,7 +513,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
             )}
           >
             <Button
-              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-[11px] font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
+              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-2xs font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
               data-testid="message-scroll-to-latest"
               onClick={() => {
                 scrollToBottom("smooth");

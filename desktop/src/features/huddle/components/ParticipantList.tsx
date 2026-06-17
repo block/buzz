@@ -54,7 +54,7 @@ export function HuddleParticipantsControl({
         >
           <UsersRound className="h-4 w-4" />
           {participants.length > 1 && (
-            <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none text-primary-foreground shadow-xs tabular-nums">
+            <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground shadow-xs tabular-nums">
               {participants.length}
             </span>
           )}
@@ -62,7 +62,7 @@ export function HuddleParticipantsControl({
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        className="buzz-huddle-drawer buzz-huddle-popover w-72 border-white/10 p-3 text-foreground"
+        className="buzz-huddle-drawer buzz-huddle-popover w-72 p-3 text-foreground"
         side="top"
         sideOffset={10}
       >
@@ -90,7 +90,7 @@ export function HuddleParticipantsControl({
                     avatarUrl={profile.avatarUrl ?? null}
                     label={profile.displayName || pubkey.slice(0, 6)}
                     className={cn(
-                      "h-8 w-8 rounded-full text-[10px]",
+                      "h-8 w-8 rounded-full text-2xs",
                       isActive &&
                         "ring-2 ring-green-500 ring-offset-1 ring-offset-background",
                     )}
@@ -150,7 +150,7 @@ function HexAvatar({
       role="img"
       className={cn(
         "flex items-center justify-center rounded-full font-semibold shadow-xs",
-        size === "lg" ? "h-8 w-8 text-[10px]" : "h-7 w-7 text-[9px]",
+        size === "lg" ? "h-8 w-8 text-2xs" : "h-7 w-7 text-2xs",
         isActive &&
           "ring-2 ring-green-500 ring-offset-1 ring-offset-background",
       )}

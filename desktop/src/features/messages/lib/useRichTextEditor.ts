@@ -11,6 +11,8 @@ import { Selection, TextSelection } from "@tiptap/pm/state";
 import { isMacPlatform } from "@/shared/lib/platform";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
+import { MESSAGE_MARKDOWN_CLASS } from "@/shared/ui/mentionChip";
+
 import {
   MentionHighlightExtension,
   mentionHighlightKey,
@@ -325,8 +327,7 @@ export function useRichTextEditor({
         attributes: {
           autocapitalize: "none",
           autocorrect: "off",
-          class:
-            "min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-6 text-foreground md:leading-6 shadow-none focus-visible:ring-0 caret-foreground outline-hidden prose-sm max-w-none",
+          class: `${MESSAGE_MARKDOWN_CLASS} min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-relaxed text-foreground shadow-none focus-visible:ring-0 caret-foreground outline-hidden max-w-none`,
           "data-testid": "message-input",
           spellcheck: "false",
         },

@@ -64,8 +64,8 @@ export function ManagedAgentLogPanel({
           <Skeleton className="mt-2 h-4 w-3/4" />
         </div>
       ) : (
-        <div className="mt-4 overflow-hidden rounded-xl border border-border/70 bg-[#17171d] text-[12px] text-zinc-100">
-          <div className="flex items-center justify-between border-b border-white/10 px-4 py-2 text-[11px] uppercase tracking-[0.18em] text-zinc-400">
+        <div className="mt-4 overflow-hidden rounded-xl border border-border/70 bg-[#17171d] text-xs text-zinc-100">
+          <div className="flex items-center justify-between border-b border-white/10 px-4 py-2 text-2xs uppercase tracking-[0.18em] text-zinc-400">
             <span>{selectedAgent.name}</span>
             <span>{selectedAgent.status}</span>
           </div>

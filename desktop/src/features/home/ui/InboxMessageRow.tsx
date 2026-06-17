@@ -131,7 +131,6 @@ export function InboxMessageRow({
               className="max-w-full text-left text-sm text-foreground"
               content={message.content}
               mentionNames={message.mentionNames}
-              tight
             />
             <MessageReactions
               canToggle={canToggleReactions}

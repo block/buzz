@@ -112,7 +112,7 @@ function MessageItem({
       {!isAssistant ? (
         <UserAvatar
           avatarUrl={authorProfile?.avatarUrl ?? null}
-          className="mr-2 mt-1 h-5 w-5 shrink-0 text-[8px]"
+          className="mr-2 mt-1 h-5 w-5 shrink-0 text-3xs"
           displayName={authorLabel}
           size="xs"
         />
@@ -139,7 +139,7 @@ function MessageItem({
           )}
         >
           {isAssistant ? (
-            <Markdown compact content={text || " "} />
+            <Markdown content={text || " "} />
           ) : (
             <>
               <p className="whitespace-pre-wrap break-words">{text}</p>
@@ -166,7 +166,7 @@ function ThoughtItem({
         <ChevronDown className="h-4 w-4 shrink-0 transition-transform group-open:rotate-180" />
       </summary>
       <div className="py-2 pl-5 text-sm leading-6 text-muted-foreground">
-        <Markdown compact content={item.text.trim() || " "} />
+        <Markdown content={item.text.trim() || " "} />
       </div>
     </details>
   );
@@ -198,7 +198,7 @@ function MetadataItem({
               <span className="truncate">{section.title}</span>
               <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open/section:rotate-180" />
             </summary>
-            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground">
+            <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/50 px-3 py-2 font-mono text-2xs leading-5 text-muted-foreground">
               {section.body.trim() || "No metadata."}
             </pre>
           </details>
@@ -248,7 +248,7 @@ function TranscriptTimestamp({ timestamp }: { timestamp: string }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span className="shrink-0 cursor-default text-[11px] text-muted-foreground/60">
+        <span className="shrink-0 cursor-default text-2xs text-muted-foreground/60">
           {formatted}
         </span>
       </TooltipTrigger>

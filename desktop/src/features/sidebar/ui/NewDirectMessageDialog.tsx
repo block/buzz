@@ -14,6 +14,7 @@ import {
 } from "@/features/profile/lib/userCandidateSearch";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { UserSearchResult } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import {
@@ -29,6 +30,8 @@ import {
 } from "@/shared/ui/modalSearchStyles";
 
 const DIRECT_MESSAGE_RECIPIENT_LIMIT = 50;
+const DM_RESULT_ROW_INSET_DIVIDER_CLASS =
+  "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
 const BUTTON_LABEL_MORPH_DURATION_MS = 220;
 const BUTTON_LABEL_MORPH_EASE = "cubic-bezier(0.23, 1, 0.32, 1)";
 const BUTTON_LABEL_FADE_MS = Math.min(
@@ -250,6 +253,8 @@ export function NewDirectMessageDialog({
   >(null);
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const selectedRecipientsRef = React.useRef<HTMLDivElement>(null);
+  const suppressCloseAutoFocusRef = React.useRef(false);
+  const selectedUsersCountRef = React.useRef(0);
   const [selectedRecipientsHeight, setSelectedRecipientsHeight] =
     React.useState(0);
   const deferredSearchQuery = React.useDeferredValue(searchQuery.trim());
@@ -370,11 +375,20 @@ export function NewDirectMessageDialog({
       setSelectedUsers([]);
       setSubmitErrorMessage(null);
       setSelectedRecipientsHeight(0);
+      selectedUsersCountRef.current = 0;
       return;
     }
 
+    suppressCloseAutoFocusRef.current = false;
     searchInputRef.current?.focus();
   }, [open]);
+
+  React.useEffect(() => {
+    if (selectedUsers.length > selectedUsersCountRef.current) {
+      setSearchQuery("");
+    }
+    selectedUsersCountRef.current = selectedUsers.length;
+  }, [selectedUsers.length]);
 
   React.useEffect(() => {
     const node = selectedRecipientsRef.current;
@@ -418,6 +432,7 @@ export function NewDirectMessageDialog({
     });
     setSearchQuery("");
     setSubmitErrorMessage(null);
+    searchInputRef.current?.focus({ preventScroll: true });
   }
 
   async function submitDirectMessage() {
@@ -431,6 +446,7 @@ export function NewDirectMessageDialog({
       await onSubmit({
         pubkeys: selectedUsers.map((user) => user.pubkey),
       });
+      suppressCloseAutoFocusRef.current = true;
       onOpenChange(false);
     } catch (error) {
       setSubmitErrorMessage(
@@ -450,6 +466,14 @@ export function NewDirectMessageDialog({
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           searchInputRef.current?.focus({ preventScroll: true });
+        }}
+        onCloseAutoFocus={(event) => {
+          if (!suppressCloseAutoFocusRef.current) {
+            return;
+          }
+
+          event.preventDefault();
+          suppressCloseAutoFocusRef.current = false;
         }}
         showCloseButton={false}
       >
@@ -580,7 +604,10 @@ export function NewDirectMessageDialog({
                 <div>
                   {searchResults.map((user) => (
                     <div
-                      className="group/dm-result relative flex min-h-14 w-full items-center gap-3 px-4 py-3.5 text-left transition-colors duration-150 ease-out hover:bg-muted/40 focus-within:bg-muted/40"
+                      className={cn(
+                        "group/dm-result relative flex min-h-14 w-full items-center gap-3 px-4 py-3.5 text-left transition-colors duration-150 ease-out hover:bg-muted/40 focus-within:bg-muted/40",
+                        DM_RESULT_ROW_INSET_DIVIDER_CLASS,
+                      )}
                       key={user.pubkey}
                     >
                       <button
@@ -629,7 +656,12 @@ export function NewDirectMessageDialog({
                       </div>
                       <Button
                         aria-label={`Add ${formatUserName(user)}`}
-                        className="relative z-20 shrink-0 opacity-0 transition-opacity duration-150 ease-out group-hover/dm-result:opacity-100 group-focus-within/dm-result:opacity-100"
+                        className={cn(
+                          "relative z-20 shrink-0 transition-opacity duration-150 ease-out",
+                          isPending
+                            ? "invisible opacity-0 disabled:opacity-0"
+                            : "opacity-0 group-hover/dm-result:opacity-100 group-focus-within/dm-result:opacity-100",
+                        )}
                         data-testid={`new-dm-add-${user.pubkey}`}
                         disabled={isPending || hasReachedRecipientLimit}
                         onClick={(event) => {

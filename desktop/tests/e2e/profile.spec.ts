@@ -58,36 +58,69 @@ async function addGenericAgent(
   page: Page,
   channelName: string,
   agentName: string,
-) {
+): Promise<string> {
   await page.getByTestId(`channel-${channelName}`).click();
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
-  await page.getByTestId("channel-add-bot-trigger").click();
-  await expect(page.getByRole("heading", { name: "Add agents" })).toBeVisible();
-  await page.getByRole("button", { name: "Generic" }).click();
-  await page.locator("#channel-generic-name").fill(agentName);
-  await page
-    .locator("#channel-generic-prompt")
-    .fill("Watch the channel and help when asked.");
-  await page.getByRole("button", { name: "Add agent" }).click();
-  await expect(page.getByRole("heading", { name: "Add agents" })).toHaveCount(
-    0,
-  );
-}
-
-async function getManagedAgentPubkey(page: Page, agentName: string) {
-  await page.getByTestId("open-agents-view").click();
-  const managedAgentRow = page
-    .locator('[data-testid^="managed-agent-"]')
-    .filter({ hasText: agentName });
-  await expect(managedAgentRow).toHaveCount(1);
-  const managedAgentTestId = await managedAgentRow
-    .first()
-    .getAttribute("data-testid");
-  if (!managedAgentTestId) {
-    throw new Error("Managed agent row test id missing.");
+  const channelId = await page
+    .getByTestId(`channel-${channelName}`)
+    .getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error(`Channel ${channelName} is missing a data-channel-id.`);
   }
 
-  return managedAgentTestId.replace("managed-agent-", "");
+  await page.waitForFunction(() => {
+    return Boolean(
+      (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__,
+    );
+  });
+  return page.evaluate(
+    async ({ agentName, channelId }) => {
+      const invoke = (
+        window as Window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload?: Record<string, unknown>,
+          ) => Promise<{ agent?: { pubkey: string } }>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) {
+        throw new Error("Mock bridge is not installed.");
+      }
+
+      const created = await invoke("create_managed_agent", {
+        input: {
+          name: agentName,
+          spawnAfterCreate: true,
+          systemPrompt: "Watch the channel and help when asked.",
+        },
+      });
+      const pubkey = created.agent?.pubkey;
+      if (!pubkey) {
+        throw new Error("Mock managed agent creation did not return a pubkey.");
+      }
+
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+
+      await (
+        window as Window & {
+          __BUZZ_E2E_QUERY_CLIENT__?: {
+            invalidateQueries: () => Promise<void>;
+          };
+        }
+      ).__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries();
+
+      return pubkey;
+    },
+    { agentName, channelId },
+  );
 }
 
 async function waitForMockLiveSubscription(page: Page, channelName: string) {
@@ -602,8 +635,7 @@ test("renders agent memories seeded through the Playwright mock bridge", async (
   });
   await page.goto("/");
 
-  await addGenericAgent(page, "general", "Memory Bot");
-  const agentPubkey = await getManagedAgentPubkey(page, "Memory Bot");
+  const agentPubkey = await addGenericAgent(page, "general", "Memory Bot");
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");

@@ -90,10 +90,10 @@ export function ManagedAgentRow({
   const activeWorkingChannels = React.useMemo(
     () =>
       activeTurns
-        .map(({ channelId, observedAt }) => ({
+        .map(({ channelId, anchorAt }) => ({
           id: channelId,
           name: channelIdToName[channelId] ?? channelId,
-          observedAt,
+          anchorAt,
         }))
         .slice(0, 3),
     [activeTurns, channelIdToName],
@@ -222,7 +222,7 @@ function AgentSummary({
   personaLabel,
   presenceStatus,
 }: {
-  activeWorkingChannels: { id: string; name: string; observedAt: number }[];
+  activeWorkingChannels: { id: string; name: string; anchorAt: number }[];
   agent: ManagedAgent;
   channelNames: { id: string; name: string }[];
   isExpandable: boolean;
@@ -291,7 +291,7 @@ function AgentSummary({
                   key={`working-${channel.id}`}
                   channelId={channel.id}
                   name={channel.name}
-                  observedAt={channel.observedAt}
+                  anchorAt={channel.anchorAt}
                   onNavigate={goChannel}
                 />
               ))}
@@ -306,12 +306,12 @@ function AgentSummary({
 function WorkingBadge({
   channelId,
   name,
-  observedAt,
+  anchorAt,
   onNavigate,
 }: {
   channelId: string;
   name: string;
-  observedAt: number;
+  anchorAt: number;
   onNavigate: (channelId: string) => void;
 }) {
   // The 1s tick lives here, at the leaf, so only visible working badges
@@ -327,7 +327,7 @@ function WorkingBadge({
         onNavigate(channelId);
       }}
     >
-      Working in #{name} · {formatElapsed(now - observedAt)}
+      Working in #{name} · {formatElapsed(now - anchorAt)}
     </Badge>
   );
 }
@@ -349,7 +349,7 @@ function StatusBlock({
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
+      <p className="text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
         Status
       </p>
       <AgentStatusBadge
@@ -385,7 +385,7 @@ function RuntimeBlock({
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
-      <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
+      <p className="text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
         Runtime
       </p>
       <p className="truncate font-mono text-xs text-foreground">

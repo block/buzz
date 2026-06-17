@@ -18,7 +18,10 @@ import {
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
-import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
+import {
+  type ProfilePanelView,
+  UserProfilePanel,
+} from "@/features/profile/ui/UserProfilePanel";
 import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
@@ -134,7 +137,12 @@ type ChannelPaneProps = {
   profiles?: UserProfileLookup;
   openThreadHeadId: string | null;
   openAgentSessionPubkey: string | null;
+  onProfilePanelViewChange: (
+    view: ProfilePanelView,
+    options?: { replace?: boolean },
+  ) => void;
   profilePanelPubkey?: string | null;
+  profilePanelView: ProfilePanelView;
   threadHeadMessage: TimelineMessage | null;
   threadMessages: MainTimelineEntry[];
   threadPanelWidthPx: number;
@@ -215,7 +223,9 @@ export const ChannelPane = React.memo(function ChannelPane({
   profiles,
   openThreadHeadId,
   openAgentSessionPubkey,
+  onProfilePanelViewChange,
   profilePanelPubkey,
+  profilePanelView,
   targetMessageId,
   threadHeadMessage,
   threadMessages,
@@ -678,7 +688,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           {isNonMemberView ? (
             <div
               data-testid="join-banner"
-              className="flex items-center gap-3 border-t border-border/80 bg-card/50 px-4 py-3"
+              className="flex items-center gap-3 border-t border-border/80 bg-card/50 px-5 py-3"
             >
               <div className="flex min-w-0 flex-1 items-center gap-2 text-sm text-muted-foreground">
                 <Hash className="h-4 w-4 shrink-0" />
@@ -714,6 +724,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   channelId={activeChannel?.id ?? null}
                   channelName={activeChannel?.name ?? "channel"}
                   channelType={activeChannel?.channelType ?? null}
+                  containerClassName="px-5"
                   disabled={isComposerDisabled}
                   editTarget={mainEditTarget}
                   isSending={isSending}
@@ -737,7 +748,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   }
                   showTopBorder={false}
                 />
-                <div className="h-7 overflow-visible bg-background px-4 pb-1 pt-0 sm:px-6">
+                <div className="h-7 overflow-visible bg-background px-5 pb-1 pt-0">
                   <div className="flex h-full w-full items-center gap-2 overflow-visible">
                     {hasComposerBotActivity ? (
                       <div className="shrink-0 overflow-visible">
@@ -918,8 +929,10 @@ export const ChannelPane = React.memo(function ChannelPane({
                       layout={useSplitAuxiliaryPane ? "split" : "standalone"}
                       onClose={onCloseProfilePanel}
                       onOpenDm={onOpenDm}
+                      onViewChange={onProfilePanelViewChange}
                       pubkey={profilePanelPubkey}
                       splitPaneClamp
+                      view={profilePanelView}
                       widthPx={threadPanelWidthPx}
                     />
                   );

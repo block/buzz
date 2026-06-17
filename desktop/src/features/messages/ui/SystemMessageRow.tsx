@@ -133,7 +133,7 @@ function SystemMessageAvatar({
     const avatar = (
       <UserAvatar
         avatarUrl={resolveAvatarUrl(singlePubkey, profiles)}
-        className="!h-9 !w-9 shrink-0 text-[10px]"
+        className="!h-9 !w-9 shrink-0 text-2xs"
         displayName={actorLabel}
         testId="system-message-avatar"
       />
@@ -169,12 +169,12 @@ function SystemMessageAvatar({
     >
       <UserAvatar
         avatarUrl={resolveAvatarUrl(actorPubkey, profiles)}
-        className="!h-7 !w-7 border-2 border-background text-[9px]"
+        className="!h-7 !w-7 border-2 border-background text-2xs"
         displayName={actorLabel}
       />
       <UserAvatar
         avatarUrl={resolveAvatarUrl(targetPubkey, profiles)}
-        className="!absolute !bottom-0 !right-0 !h-7 !w-7 border-2 border-background text-[9px]"
+        className="!absolute !bottom-0 !right-0 !h-7 !w-7 border-2 border-background text-2xs"
         displayName={targetLabel}
       />
     </div>
@@ -333,7 +333,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
 
   return (
     <div
-      className="group/message relative rounded-2xl px-3 py-2 transition-colors hover:bg-muted/50 focus-within:bg-muted/50"
+      className="group/message relative mx-1 rounded-2xl px-2 py-2 transition-colors hover:bg-muted/50 focus-within:bg-muted/50"
       data-testid="system-message-row"
     >
       <div className="flex items-start gap-2.5">
@@ -345,7 +345,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
         />
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <div className="truncate text-sm font-semibold leading-none tracking-tight text-foreground/90">
+            <div className="truncate text-sm font-semibold leading-none tracking-tight text-foreground">
               {description.title}
             </div>
             <MessageTimestamp
@@ -353,7 +353,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
               time={message.time}
             />
           </div>
-          <p className="mt-1 text-sm leading-snug text-muted-foreground/70">
+          <p className="mt-1 text-sm leading-snug text-foreground">
             {description.action}
           </p>
           <div>

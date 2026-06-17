@@ -172,7 +172,7 @@ export function TeamsSection({
                         </Tooltip>
                       ) : null}
                       {team.version ? (
-                        <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                        <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-2xs font-medium text-muted-foreground">
                           v{team.version}
                         </span>
                       ) : null}
@@ -199,13 +199,13 @@ export function TeamsSection({
                         {visible.map((persona) => (
                           <ProfileAvatar
                             avatarUrl={persona.avatarUrl}
-                            className="h-6 w-6 border-2 border-card text-[10px]"
+                            className="h-6 w-6 border-2 border-card text-2xs"
                             key={persona.id}
                             label={persona.displayName}
                           />
                         ))}
                         {overflow > 0 ? (
-                          <span className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-card bg-muted text-[10px] font-medium text-muted-foreground">
+                          <span className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-card bg-muted text-2xs font-medium text-muted-foreground">
                             +{overflow}
                           </span>
                         ) : null}

@@ -422,7 +422,7 @@ export function TeamDialog({
                           />
                           <ProfileAvatar
                             avatarUrl={persona.avatarUrl}
-                            className="h-6 w-6 text-[10px]"
+                            className="h-6 w-6 text-2xs"
                             label={persona.displayName}
                           />
                           <span className="text-sm">{persona.displayName}</span>

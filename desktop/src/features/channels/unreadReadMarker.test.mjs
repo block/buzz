@@ -13,8 +13,8 @@ function topLevel(id, createdAt) {
 }
 
 // The headline scenario the fix restores: messages arrive while the channel is
-// inactive, the read frontier was captured before them, and on reopen the pill
-// and divider must render. The deleted AppShell effect used to fold those
+// inactive, the read frontier was captured before them, and on reopen the
+// pill and divider must render. The deleted AppShell effect used to fold those
 // just-arrived timestamps into the frontier, hiding them; with it gone the
 // frontier stays below the new messages.
 test("receiveThenReopen_frontierBelowArrivedMessages_showsDivider", () => {

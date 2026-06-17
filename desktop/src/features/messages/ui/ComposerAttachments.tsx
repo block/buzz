@@ -10,6 +10,7 @@ import {
   type UploadingAttachmentPreview,
 } from "@/features/messages/lib/useMediaUpload";
 import { cn } from "@/shared/lib/cn";
+import { MODAL_BACKDROP_BLUR_CLASS } from "@/shared/ui/modalBackdrop";
 import { Progress } from "@/shared/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -115,7 +116,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                 >
                   <div className="flex h-5 max-w-[10rem] items-center gap-1 rounded border border-border/70 bg-muted px-1.5">
                     <FileText className="h-4 w-4 shrink-0 text-muted-foreground" />
-                    <span className="truncate text-[10px] text-muted-foreground">
+                    <span className="truncate text-2xs text-muted-foreground">
                       {label}
                     </span>
                   </div>
@@ -186,7 +187,12 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                       </div>
                     </DialogPrimitive.Trigger>
                     <DialogPrimitive.Portal>
-                      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+                      <DialogPrimitive.Overlay
+                        className={cn(
+                          "fixed inset-0 z-50 bg-black/80 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
+                          MODAL_BACKDROP_BLUR_CLASS,
+                        )}
+                      />
                       <DialogPrimitive.Content
                         className="fixed inset-0 z-50 flex items-center justify-center p-8"
                         onPointerDownOutside={(e) => e.preventDefault()}

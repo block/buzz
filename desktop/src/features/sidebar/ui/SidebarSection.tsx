@@ -68,7 +68,7 @@ function DmChannelIcon({
     return (
       <span
         aria-hidden="true"
-        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-[10px] font-semibold leading-none text-sidebar-foreground shadow-none"
+        className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-2xs font-semibold leading-none text-sidebar-foreground shadow-none"
         data-testid={`channel-dm-count-${channelName}`}
       >
         <span className="translate-x-px leading-none">
@@ -83,7 +83,7 @@ function DmChannelIcon({
       <span className="relative flex h-5 w-5 shrink-0 items-center justify-center">
         <ProfileAvatar
           avatarUrl={primaryParticipant.avatarUrl}
-          className="h-5 w-5 rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-[9px] text-sidebar-foreground shadow-none"
+          className="h-5 w-5 rounded-full border border-sidebar-border/80 bg-sidebar-accent/80 text-2xs text-sidebar-foreground shadow-none"
           iconClassName="h-3 w-3"
           label={primaryParticipant.label}
         />

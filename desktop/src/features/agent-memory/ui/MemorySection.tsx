@@ -253,8 +253,8 @@ function MemoryGraphView({
           className="text-xs italic text-muted-foreground"
           data-testid="agent-memory-no-core"
         >
-          No <code className="font-mono text-[10px]">core</code> memory yet —
-          agent identity is unrooted.
+          No <code className="font-mono text-2xs">core</code> memory yet — agent
+          identity is unrooted.
         </p>
       ) : null}
 

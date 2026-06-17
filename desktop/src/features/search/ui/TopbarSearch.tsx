@@ -14,6 +14,11 @@ import {
 } from "@/features/search/ui/SearchResultItem";
 import type { Channel, SearchHit } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import {
+  POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+  POPOVER_SHADOW_STYLE,
+  POPOVER_SURFACE_CLASS,
+} from "@/shared/ui/popoverSurface";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
@@ -108,7 +113,7 @@ function SearchResultsSkeleton() {
   return (
     <div
       aria-hidden="true"
-      className="max-h-[360px] overflow-y-auto p-1.5"
+      className="max-h-[360px] overflow-y-auto p-1"
       data-testid="search-results-loading"
     >
       {searchSkeletonRows.map((row) => (
@@ -261,7 +266,7 @@ export function TopbarSearch({
           spellCheck={false}
           value={query}
         />
-        <kbd className="shrink-0 text-[10px] text-muted-foreground/70">
+        <kbd className="shrink-0 text-2xs text-muted-foreground/70">
           &#x2318;K
         </kbd>
       </div>
@@ -269,11 +274,16 @@ export function TopbarSearch({
       {showSuggestions ? (
         <div
           aria-busy={searchQuery.isLoading && results.length === 0}
-          className="absolute left-1/2 top-full z-50 mt-1 w-[620px] max-w-[min(82vw,620px)] -translate-x-1/2 overflow-hidden rounded-xl border border-border/80 bg-popover text-popover-foreground shadow-xl"
+          className={cn(
+            "absolute left-1/2 top-full z-50 mt-1 w-[620px] max-w-[min(82vw,620px)] -translate-x-1/2 origin-top overflow-hidden rounded-xl slide-in-from-top-1",
+            POPOVER_CUSTOM_ENTER_MOTION_CLASS,
+            POPOVER_SURFACE_CLASS,
+          )}
           data-testid="search-results"
+          style={POPOVER_SHADOW_STYLE}
         >
           {debouncedQuery.length < MIN_SEARCH_QUERY_LENGTH ? (
-            <div className="px-3 py-3 text-[11px] text-muted-foreground">
+            <div className="px-3 py-3 text-2xs text-muted-foreground">
               <p>Type at least two characters for live suggestions.</p>
             </div>
           ) : searchQuery.isLoading && results.length === 0 ? (
@@ -288,7 +298,7 @@ export function TopbarSearch({
               <span className="font-semibold">{trimmedQuery}</span>.
             </p>
           ) : (
-            <div className="max-h-[360px] overflow-y-auto p-1.5">
+            <div className="max-h-[360px] overflow-y-auto p-1">
               {results.map((result, index) => (
                 <button
                   className={cn(
@@ -349,7 +359,7 @@ export function TopbarSearch({
                         : truncateResultText(result.hit.content)}
                     </span>
                   </span>
-                  <span className="shrink-0 text-[11px] text-muted-foreground/75">
+                  <span className="shrink-0 text-2xs text-muted-foreground/75">
                     {result.kind === "channel"
                       ? "Channel"
                       : `${describeSearchHit(result.hit)} · ${formatRelativeTime(result.hit.createdAt)}`}

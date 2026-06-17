@@ -9,7 +9,28 @@ const PulseScreen = React.lazy(async () => {
   return { default: module.PulseScreen };
 });
 
+type PulseRouteSearch = {
+  profile?: string;
+  profileView?: "memories" | "channels";
+};
+
+function validatePulseSearch(
+  search: Record<string, unknown>,
+): PulseRouteSearch {
+  return {
+    profile:
+      typeof search.profile === "string" && search.profile.length > 0
+        ? search.profile
+        : undefined,
+    profileView:
+      search.profileView === "memories" || search.profileView === "channels"
+        ? search.profileView
+        : undefined,
+  };
+}
+
 export const Route = createFileRoute("/pulse")({
+  validateSearch: validatePulseSearch,
   component: PulseRouteComponent,
 });
 

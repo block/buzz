@@ -95,6 +95,7 @@ type MockBridgeOptions = {
   channelsReadError?: string;
   feedReadError?: string;
   canvasReadError?: string;
+  openDmDelayMs?: number;
   profileReadDelayMs?: number;
   profileReadError?: string;
   profileUpdateError?: string;

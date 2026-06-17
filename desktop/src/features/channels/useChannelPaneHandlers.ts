@@ -46,7 +46,7 @@ export function useChannelPaneHandlers({
   sendMessageMutation: ReturnType<typeof useSendMessageMutation>;
   setExpandedThreadReplyIds: React.Dispatch<React.SetStateAction<Set<string>>>;
   setEditTargetId: React.Dispatch<React.SetStateAction<string | null>>;
-  setOpenThreadHeadId: React.Dispatch<React.SetStateAction<string | null>>;
+  setOpenThreadHeadId: (value: string | null) => void;
   setThreadReplyTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   setThreadScrollTargetId: React.Dispatch<React.SetStateAction<string | null>>;
   threadReplyTargetId: string | null;

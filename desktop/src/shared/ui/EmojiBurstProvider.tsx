@@ -63,6 +63,9 @@ const EmojiBurstContext = React.createContext<EmojiBurstContextValue | null>(
 const MAX_ACTIVE = 760;
 const MAX_DPR = 2;
 const EMOJI_CACHE_PX = 64;
+const EMOJI_CACHE_SCALE = 2;
+// Keep the label's old reference scale so larger sprites do not shift its offset.
+const EMOJI_LABEL_REFERENCE_SCALE = 1.5;
 const PICKER_PARTICLES_PER_BURST = 5;
 const PICKER_PARTICLE_LIFE_FRAMES = 108;
 const HUDDLE_PARTICLES_PER_BURST = 14;
@@ -192,12 +195,12 @@ function resizeCanvas(canvas: HTMLCanvasElement) {
 
 function getEmojiCanvas(emoji: string): HTMLCanvasElement {
   const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
-  const cacheKey = `${emoji}:${dpr}`;
+  const cacheKey = `${emoji}:${dpr}:${EMOJI_CACHE_SCALE}`;
   const existing = emojiCanvasCache.get(cacheKey);
   if (existing) return existing;
 
   const fontSize = Math.ceil(EMOJI_CACHE_PX * dpr);
-  const size = Math.ceil(fontSize * 1.5);
+  const size = Math.ceil(fontSize * EMOJI_CACHE_SCALE);
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
@@ -216,7 +219,7 @@ function getEmojiCanvas(emoji: string): HTMLCanvasElement {
 
 function getEmojiImageCanvas(src: string): HTMLCanvasElement | null {
   const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
-  const cacheKey = `${src}:${dpr}`;
+  const cacheKey = `${src}:${dpr}:${EMOJI_CACHE_SCALE}`;
   const existing = emojiImageCanvasCache.get(cacheKey);
   if (existing) return existing.canvas;
 
@@ -228,7 +231,7 @@ function getEmojiImageCanvas(src: string): HTMLCanvasElement | null {
   const image = new Image();
   image.decoding = "async";
   image.onload = () => {
-    const size = Math.ceil(EMOJI_CACHE_PX * dpr * 1.5);
+    const size = Math.ceil(EMOJI_CACHE_PX * dpr * EMOJI_CACHE_SCALE);
     const canvas = document.createElement("canvas");
     canvas.width = size;
     canvas.height = size;
@@ -598,7 +601,9 @@ export function EmojiBurstProvider({
         const emojiCanvas =
           (particle.emojiUrl ? getEmojiImageCanvas(particle.emojiUrl) : null) ??
           getEmojiCanvas(particle.emoji);
-        const drawSize = particle.fontSize * particle.scale * 1.5;
+        const drawSize = particle.fontSize * particle.scale * EMOJI_CACHE_SCALE;
+        const labelReferenceSize =
+          particle.fontSize * particle.scale * EMOJI_LABEL_REFERENCE_SCALE;
         const halfSize = drawSize / 2;
         const radians = (particle.rotation * Math.PI) / 180;
         const cos = Math.cos(radians) * dpr;
@@ -619,7 +624,7 @@ export function EmojiBurstProvider({
           drawSize,
           drawSize,
         );
-        drawParticleLabel(activeContext, particle, dpr, drawSize);
+        drawParticleLabel(activeContext, particle, dpr, labelReferenceSize);
       }
 
       activeContext.globalAlpha = 1;

@@ -115,7 +115,7 @@ test.describe("unread pill & divider screenshots", () => {
 
     await emitUnreadMessages(page, 20);
 
-    // Switch back to general — pill should appear
+    // Switch back to general — pill should appear.
     await page.getByTestId("channel-general").click();
     await expect(page.getByTestId("chat-title")).toHaveText("general");
 

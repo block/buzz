@@ -84,7 +84,6 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   isSendingVideoReviewComment = false,
   onSendVideoReviewComment,
   onToggleReaction,
-  personaLookup,
   profiles,
   searchActiveMessageId = null,
   searchMatchingMessageIds,
@@ -184,10 +183,8 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         <div key={messageRenderKey} className="flex flex-col gap-1">
           <SystemMessageRow
             message={message}
-            agentPubkeys={agentPubkeys}
             currentPubkey={currentPubkey}
             onToggleReaction={onToggleReaction}
-            personaLookup={personaLookup}
             profiles={profiles}
           />
           {footer}
@@ -200,7 +197,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
         <div
           key={messageRenderKey}
           className={cn(
-            "group/message relative -mx-1 flex flex-col gap-0 rounded-2xl px-1 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+            "group/message relative mx-1 flex flex-col gap-0 rounded-2xl px-0 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
             isHighlighted &&
               "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
           )}

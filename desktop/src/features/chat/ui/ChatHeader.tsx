@@ -98,7 +98,7 @@ export function ChatHeader({
   const header = (
     <header
       className={cn(
-        "pointer-events-auto relative z-30 flex min-w-0 shrink-0 cursor-default select-none items-center gap-2.5 bg-transparent px-4 transition-[margin,padding] duration-200 ease-linear sm:px-6",
+        "pointer-events-auto relative z-30 flex min-w-0 shrink-0 cursor-default select-none items-center gap-2.5 bg-transparent px-5 transition-[margin,padding] duration-200 ease-linear",
         density === "compact"
           ? belowSystemChrome
             ? "min-h-8 py-1.5"

@@ -445,7 +445,7 @@ export function MessageThreadPanel({
                     className={cn(
                       "flex flex-col gap-1",
                       entry.summary &&
-                        "group/message -mx-1 rounded-2xl px-1 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+                        "group/message mx-1 rounded-2xl px-0 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
                     )}
                     key={entry.message.renderKey ?? entry.message.id}
                   >
@@ -514,7 +514,7 @@ export function MessageThreadPanel({
       {!isAtBottom ? (
         <div className="pointer-events-none absolute inset-x-0 bottom-36 z-20 flex justify-center px-4">
           <Button
-            className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-[11px] font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-3.5"
+            className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-2xs font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-3.5"
             data-testid="thread-scroll-to-latest"
             onClick={() => scrollToBottom("smooth")}
             size="sm"

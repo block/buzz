@@ -227,7 +227,7 @@ export function NostrKeyImportForm({
             <p className="font-medium text-foreground">
               This will use this Nostr identity:
             </p>
-            <p className="break-all font-mono text-[11px] text-muted-foreground">
+            <p className="break-all font-mono text-2xs text-muted-foreground">
               {shortenNpub(previewNpub)}
             </p>
           </div>
@@ -252,7 +252,7 @@ export function NostrKeyImportForm({
           type="submit"
         >
           {isBusy ? (
-            <Spinner aria-label="Importing key" className="h-4 w-4" />
+            <Spinner aria-label="Importing key" className="h-4 w-4 border-2" />
           ) : (
             "Continue with this key"
           )}

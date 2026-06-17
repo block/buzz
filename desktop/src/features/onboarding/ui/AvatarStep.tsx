@@ -86,7 +86,7 @@ function AvatarPreview({
         >
           <span
             className={cn(
-              "buzz-avatar-emoji-glyph flex h-full w-full items-center justify-center text-[6rem] leading-[100px]",
+              "buzz-avatar-emoji-glyph flex h-full w-full items-center justify-center text-[6rem] leading-[6.25rem]",
               avatarSquishKey > 0 && "buzz-avatar-squish",
             )}
             data-testid="onboarding-avatar-preview-emoji"

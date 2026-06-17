@@ -10,7 +10,21 @@ import {
 } from "@/features/onboarding/welcome";
 import { useIdentityQuery } from "@/shared/api/hooks";
 
+type HomeRouteSearch = {
+  item?: string;
+};
+
+function validateHomeSearch(search: Record<string, unknown>): HomeRouteSearch {
+  return {
+    item:
+      typeof search.item === "string" && search.item.length > 0
+        ? search.item
+        : undefined,
+  };
+}
+
 export const Route = createFileRoute("/")({
+  validateSearch: validateHomeSearch,
   component: HomeRouteComponent,
 });
 

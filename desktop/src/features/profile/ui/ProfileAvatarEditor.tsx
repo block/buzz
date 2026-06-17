@@ -620,7 +620,7 @@ export function ProfileAvatarEditor({
                     {isUploading ? (
                       <Spinner
                         aria-hidden
-                        className="relative h-8 w-8 text-muted-foreground"
+                        className="relative h-8 w-8 border-2 text-muted-foreground"
                       />
                     ) : (
                       <UploadCloud
@@ -894,7 +894,7 @@ export function ProfileAvatarEditor({
                         >
                           <Spinner
                             aria-label="Saving avatar"
-                            className="h-4 w-4"
+                            className="h-4 w-4 border-2"
                           />
                           <span>Saving</span>
                         </motion.span>

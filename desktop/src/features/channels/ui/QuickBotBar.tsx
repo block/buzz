@@ -75,7 +75,7 @@ export function QuickBotBar({ personas, pending, onAdd }: QuickBotBarProps) {
                       src={rewriteRelayUrl(persona.avatarUrl)}
                     />
                   ) : (
-                    <span className="text-[9px] font-semibold text-primary">
+                    <span className="text-2xs font-semibold text-primary">
                       {initials}
                     </span>
                   )}

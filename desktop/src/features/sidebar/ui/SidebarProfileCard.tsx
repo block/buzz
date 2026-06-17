@@ -88,7 +88,7 @@ export function SidebarProfileCard({
   const workspaceLabel = activeWorkspace?.name ?? "No workspace";
   const readonlyWorkspaceLabel = (
     <span className="flex min-w-0 cursor-pointer items-center gap-1 text-xs leading-snug text-sidebar-foreground/70">
-      <span aria-hidden="true" className="shrink-0 text-[10px] leading-none">
+      <span aria-hidden="true" className="shrink-0 text-2xs leading-none">
         🐝
       </span>
       <span className="truncate">{workspaceLabel}</span>

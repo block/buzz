@@ -22,6 +22,7 @@ import type {
   ManagedAgent,
   PresenceStatus,
 } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -52,6 +53,9 @@ type MembersSidebarMemberCardProps = {
   presenceStatus?: PresenceStatus | null;
   profileAvatarUrl?: string | null;
 };
+
+const MEMBER_ROW_INSET_DIVIDER_CLASS =
+  "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
 
 function formatRoleLabel(member: ChannelMember, memberIsBot: boolean) {
   if (memberIsBot) {
@@ -188,7 +192,10 @@ export function MembersSidebarMemberCard({
 
   return (
     <div
-      className="group/member relative isolate flex min-h-14 items-center gap-3 px-4 py-3.5 text-left transition-colors duration-150 ease-out hover:bg-muted/40 focus-within:bg-muted/40"
+      className={cn(
+        "group/member relative isolate flex min-h-14 items-center gap-3 px-4 py-3.5 text-left transition-colors duration-150 ease-out hover:bg-muted/40 focus-within:bg-muted/40",
+        MEMBER_ROW_INSET_DIVIDER_CLASS,
+      )}
       data-testid={`sidebar-member-${member.pubkey}`}
     >
       {onOpenProfile ? (

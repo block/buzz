@@ -450,11 +450,14 @@ describe("activeAgentTurnsStore", () => {
       assert.equal(ref1, ref2, "should return cached array reference");
     });
 
-    it("preserves a desktop-clock observedAt per channel", () => {
+    it("anchors a turn to its skew-corrected start, not the local insert clock", () => {
+      // The badge anchor must reflect the agent's true start translated into
+      // desktop time (startedAt + clock offset), so a turn whose event arrives
+      // with a stale timestamp does NOT reset to ~Date.now(). With a single
+      // event the offset is exactly Date.now() - startedAt, so the anchor lands
+      // on Date.now() here — the regression coverage for skew lives below.
       const before = Date.now();
       syncAgentTurnsFromEvents(AGENT, [
-        // startedAt comes from the (stale) event timestamp; observedAt must
-        // instead anchor to the local clock at insert time.
         makeEvent({
           seq: 1,
           turnId: "t1",
@@ -466,69 +469,114 @@ describe("activeAgentTurnsStore", () => {
       const [summary] = getActiveTurnsForAgent(AGENT);
       assert.equal(summary.channelId, "c1");
       assert.ok(
-        summary.observedAt >= before && summary.observedAt <= after,
-        "observedAt must be the local clock at insert, not the event timestamp",
+        summary.anchorAt >= before && summary.anchorAt <= after,
+        "anchorAt must be the skew-corrected start, here equal to the local clock",
       );
     });
 
-    it("collapses two turns in one channel to the earliest observedAt", () => {
+    it("gives two turns with different startedAt different anchors (no lockstep)", () => {
+      // The lockstep bug: turns processed in the same JS tick were all anchored
+      // to one shared Date.now(), so their elapsed counters ticked in unison.
+      // Anchoring to startedAt + offset makes distinct agent-host starts produce
+      // distinct anchors. A single sampleClockOffset minimum is shared, so the
+      // anchor difference equals the startedAt difference.
       syncAgentTurnsFromEvents(AGENT, [
-        makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+        makeEvent({
+          seq: 1,
+          turnId: "t1",
+          channelId: "c-early",
+          timestamp: "2024-01-01T00:00:00Z",
+        }),
+        makeEvent({
+          seq: 2,
+          turnId: "t2",
+          channelId: "c-late",
+          timestamp: "2024-01-01T00:05:00Z",
+        }),
       ]);
-      const firstObservedAt = getActiveTurnsForAgent(AGENT)[0].observedAt;
+      const byChannel = new Map(
+        getActiveTurnsForAgent(AGENT).map((s) => [s.channelId, s.anchorAt]),
+      );
+      assert.notEqual(
+        byChannel.get("c-early"),
+        byChannel.get("c-late"),
+        "distinct startedAt must yield distinct anchors",
+      );
+      assert.equal(
+        byChannel.get("c-late") - byChannel.get("c-early"),
+        5 * 60_000,
+        "anchor spacing must equal the agent-host start spacing",
+      );
+    });
 
-      // Second turn in the same channel — its observedAt is >= the first
-      // because the clock is monotonic, so the earliest must still win.
+    it("collapses two turns in one channel to the earliest anchor", () => {
+      // Same agent-host start timestamp, distinct turns (seq bumped so the
+      // second passes the watermark). Identical timestamps mean the offset does
+      // not move, so the surfaced anchor is stable and the earliest wins.
       syncAgentTurnsFromEvents(AGENT, [
-        makeEvent({ seq: 2, turnId: "t2", channelId: "c1" }),
+        makeEvent({
+          seq: 1,
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:00Z",
+        }),
+      ]);
+      const firstAnchor = getActiveTurnsForAgent(AGENT)[0].anchorAt;
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 2,
+          turnId: "t2",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:00Z",
+        }),
       ]);
       const summaries = getActiveTurnsForAgent(AGENT);
       assert.equal(summaries.length, 1, "same channel collapses to one entry");
       assert.equal(
-        summaries[0].observedAt,
-        firstObservedAt,
-        "earliest observedAt for the channel must be surfaced",
+        summaries[0].anchorAt,
+        firstAnchor,
+        "earliest start's anchor must be surfaced",
       );
     });
 
-    it("advances to the surviving turn's observedAt after the earliest ends", () => {
+    it("advances to the surviving turn's anchor after the earliest ends", () => {
       // Two turns in one channel; the array must be rebuilt from the LIVE map
-      // on every mutation, so ending the earliest-observed turn must surface
-      // the survivor's observedAt — not a stale cached minimum.
+      // on every mutation, so ending the earliest-started turn must surface the
+      // survivor's (later) anchor — not a stale cached minimum.
       syncAgentTurnsFromEvents(AGENT, [
-        makeEvent({ seq: 1, turnId: "t-early", channelId: "c1" }),
+        makeEvent({
+          seq: 1,
+          turnId: "t-early",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:00:00Z",
+        }),
+        makeEvent({
+          seq: 2,
+          turnId: "t-later",
+          channelId: "c1",
+          timestamp: "2024-01-01T00:02:00Z",
+        }),
       ]);
-      const tEarly = getActiveTurnsForAgent(AGENT)[0].observedAt;
+      const tEarly = getActiveTurnsForAgent(AGENT)[0].anchorAt;
 
-      // Force the second turn's observedAt strictly past the first so the
-      // advance is observable even when Date.now() would otherwise collide.
-      const spinUntil = Date.now() + 2;
-      while (Date.now() < spinUntil) {
-        /* busy-wait one clock tick */
-      }
-      syncAgentTurnsFromEvents(AGENT, [
-        makeEvent({ seq: 2, turnId: "t-later", channelId: "c1" }),
-      ]);
-      assert.equal(
-        getActiveTurnsForAgent(AGENT)[0].observedAt,
-        tEarly,
-        "earliest wins while both turns survive",
-      );
-
-      // End the earliest turn by its turnId.
+      // End the earliest turn by its turnId. Reuse t-later's timestamp (seq
+      // bumped to pass the watermark) so the offset does not tighten and the
+      // surviving anchor's advance is exactly the 2-minute start gap.
       syncAgentTurnsFromEvents(AGENT, [
         makeEvent({
           seq: 3,
           kind: "turn_completed",
           turnId: "t-early",
           channelId: "c1",
+          timestamp: "2024-01-01T00:02:00Z",
         }),
       ]);
       const [survivor] = getActiveTurnsForAgent(AGENT);
       assert.equal(survivor.channelId, "c1");
-      assert.ok(
-        survivor.observedAt > tEarly,
-        "surfaced observedAt must advance to the surviving turn after eviction",
+      assert.equal(
+        survivor.anchorAt - tEarly,
+        2 * 60_000,
+        "surfaced anchor must advance to the surviving turn after eviction",
       );
     });
 
@@ -639,6 +687,148 @@ describe("activeAgentTurnsStore", () => {
         getActiveTurnsForAgent(AGENT).length,
         0,
         "a null-turnId liveness must not refresh activity, so the turn still prunes",
+      );
+    });
+  });
+
+  describe("skew-corrected elapsed (real-time arrival)", () => {
+    // The clock offset estimate (running minimum of Date.now() - event time)
+    // is only meaningful when events arrive at distinct real times — exactly
+    // how the harness streams them. Faking Date lets us advance the desktop
+    // clock between events so an earlier event calibrates the offset before the
+    // measured turn starts. The fixed epoch is the desktop clock floor.
+    const EPOCH = Date.parse("2024-06-01T00:00:00Z");
+
+    beforeEach(() => {
+      mock.timers.enable({ apis: ["Date"], now: EPOCH });
+    });
+
+    afterEach(() => {
+      mock.timers.reset();
+    });
+
+    /** Agent-host clock = desktop clock + skew, as an ISO timestamp. */
+    const agentTs = (desktopMs, skew) =>
+      new Date(desktopMs + skew).toISOString();
+
+    it("shows a large elapsed for a turn that started well in the past", () => {
+      // Clocks synced (skew 0). An early event at the true present calibrates
+      // offset ≈ 0. Five true minutes pass. Then the desktop first observes a
+      // turn whose start timestamp is that 5-minutes-ago instant — the badge
+      // must read ~5 minutes, not reset to 0s on first sight.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          kind: "turn_liveness",
+          turnId: "warm",
+          channelId: "c0",
+          timestamp: agentTs(EPOCH - 1_000, 0),
+        }),
+      ]);
+      mock.timers.tick(5 * 60_000); // 5 true minutes elapse
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 2,
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: agentTs(EPOCH, 0), // started 5 minutes ago
+        }),
+      ]);
+      const summary = getActiveTurnsForAgent(AGENT).find(
+        (s) => s.channelId === "c1",
+      );
+      assert.equal(
+        Date.now() - summary.anchorAt,
+        5 * 60_000 - 1_000,
+        "a 5-minute-old turn must show ~5 minutes elapsed, not 0s",
+      );
+    });
+
+    it("corrects for agent-host clock skew so elapsed tracks true duration", () => {
+      // Agent host is 1 hour AHEAD of the desktop. A liveness event received at
+      // the true present (desktop EPOCH) carries a timestamp an hour in the
+      // future, calibrating offset ≈ -1h. The turn then starts 30s later in
+      // true time; its future-stamped start, corrected by the offset, anchors
+      // to the true start — without correction elapsed would be deeply negative.
+      const SKEW = 60 * 60_000;
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          kind: "turn_liveness",
+          turnId: "warm",
+          channelId: "c0",
+          timestamp: agentTs(EPOCH, SKEW),
+        }),
+      ]);
+      mock.timers.tick(30_000); // 30s of true time passes
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 2,
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: agentTs(EPOCH + 30_000, SKEW),
+        }),
+      ]);
+      const summary = getActiveTurnsForAgent(AGENT).find(
+        (s) => s.channelId === "c1",
+      );
+      assert.equal(
+        Date.now() - summary.anchorAt,
+        0,
+        "a just-started turn under heavy skew must read ~0s, not a negative/huge value",
+      );
+
+      // Let the turn run 45s; elapsed must track that true duration exactly.
+      mock.timers.tick(45_000);
+      const stillRunning = getActiveTurnsForAgent(AGENT).find(
+        (s) => s.channelId === "c1",
+      );
+      assert.equal(
+        Date.now() - stillRunning.anchorAt,
+        45_000,
+        "skew-corrected elapsed must track true duration as the clock advances",
+      );
+    });
+
+    it("retroactively corrects a live turn's anchor when the offset tightens", () => {
+      // The design's load-bearing invariant: anchors are derived at READ time,
+      // so a later, tighter offset must shift an ALREADY-LIVE turn earlier.
+      // The turn first goes live under a loose offset (its start arrives with a
+      // +5s processing delay → offset +5000), then a delay-free liveness sample
+      // tightens the running minimum to 0. The live turn's surfaced anchor must
+      // move earlier by exactly that 5000ms delta. A regression that froze
+      // anchorAt at startTurn would leave the anchor at its loose value and
+      // fail this assertion.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: agentTs(EPOCH - 5_000, 0), // observed 5s after its start
+        }),
+      ]);
+      const looseAnchor = getActiveTurnsForAgent(AGENT).find(
+        (s) => s.channelId === "c1",
+      ).anchorAt;
+
+      mock.timers.tick(1_000); // 1s of true time so the liveness arrives later
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 2,
+          kind: "turn_liveness",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: agentTs(EPOCH + 1_000, 0), // delay-free → offset tightens to 0
+        }),
+      ]);
+      const tightAnchor = getActiveTurnsForAgent(AGENT).find(
+        (s) => s.channelId === "c1",
+      ).anchorAt;
+
+      assert.equal(
+        tightAnchor - looseAnchor,
+        -5_000,
+        "a tighter offset must shift the live turn's read-time anchor earlier by the tightening delta",
       );
     });
   });

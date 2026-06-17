@@ -105,7 +105,7 @@ export function ChannelScreenHeader({
           ) : (
             <ProfileAvatar
               avatarUrl={activeDmAvatarUrl}
-              className="h-6 w-6 rounded-full text-[10px]"
+              className="h-6 w-6 rounded-full text-2xs"
               iconClassName="h-3.5 w-3.5"
               label={activeChannelTitle}
               testId="chat-header-dm-avatar"
@@ -157,7 +157,7 @@ function DmHeaderParticipantStack({
         >
           <UserAvatar
             avatarUrl={participant.avatarUrl}
-            className="h-7 w-7 text-[10px]"
+            className="h-7 w-7 text-2xs"
             displayName={participant.displayName}
             size="sm"
           />
@@ -170,7 +170,7 @@ function DmHeaderParticipantStack({
           style={{ zIndex: stackItemCount }}
         >
           <span className="flex h-7 w-7 items-center justify-center rounded-full bg-secondary font-semibold text-secondary-foreground shadow-xs">
-            <span className="text-[11px] leading-none">+{hiddenCount}</span>
+            <span className="text-2xs leading-none">+{hiddenCount}</span>
           </span>
         </div>
       ) : null}

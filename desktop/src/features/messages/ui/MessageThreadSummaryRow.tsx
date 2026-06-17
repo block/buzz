@@ -7,7 +7,7 @@ import { formatThreadSummaryLastReplyTime } from "@/features/messages/lib/dateFo
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const MESSAGE_TEXT_OFFSET_PX = 54;
-const MESSAGE_BODY_OFFSET_PX = MESSAGE_TEXT_OFFSET_PX + 4;
+const MESSAGE_BODY_OFFSET_PX = MESSAGE_TEXT_OFFSET_PX;
 const NESTED_REPLY_OFFSET_PX = 28;
 
 function ParticipantAvatar({
@@ -34,7 +34,7 @@ function ParticipantAvatar({
     >
       <UserAvatar
         avatarUrl={participant.avatarUrl}
-        className="h-7 w-7 text-[10px]"
+        className="h-7 w-7 text-2xs"
         displayName={participant.author}
         size="sm"
       />
@@ -124,11 +124,8 @@ export function MessageThreadSummaryRow({
               {summary.replyCount} {replyLabel}
             </span>
             {unreadCount != null && unreadCount > 0 ? (
-              <span
-                className="ml-1.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-none text-primary-foreground"
-                data-testid="thread-unread-badge"
-              >
-                {unreadCount}
+              <span className="ml-1" data-testid="thread-unread-badge">
+                ({unreadCount} new)
               </span>
             ) : null}
             {summary.lastReplyAt ? (

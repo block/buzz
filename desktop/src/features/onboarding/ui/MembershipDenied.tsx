@@ -177,7 +177,7 @@ export function MembershipDenied({
                     <p className="font-medium text-foreground">
                       This will use this Nostr identity:
                     </p>
-                    <p className="break-all font-mono text-[11px] text-muted-foreground">
+                    <p className="break-all font-mono text-2xs text-muted-foreground">
                       {shortenNpub(previewNpub)}
                     </p>
                   </div>
