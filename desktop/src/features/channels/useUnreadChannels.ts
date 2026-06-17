@@ -503,24 +503,26 @@ export function useUnreadChannels(
   const handleSelfChannelMessage = React.useCallback(
     (event: RelayEvent) => {
       const ref = getThreadReference(event.tags);
-      if (ref.rootId !== null) {
-        participatedRootIdsRef.current.add(ref.rootId);
-        if (normalizedPubkey !== null) {
-          writeParticipationToStorage(
-            normalizedPubkey,
-            participatedRootIdsRef.current,
-          );
-        }
-      } else {
-        authoredRootIdsRef.current.add(event.id);
-        if (normalizedPubkey !== null) {
-          writeAuthoredToStorage(normalizedPubkey, authoredRootIdsRef.current);
-        }
+      // Participation roots key on the thread root; authored roots (no thread
+      // ref) key on the event id itself.
+      const isParticipation = ref.rootId !== null;
+      const targetSet = isParticipation
+        ? participatedRootIdsRef.current
+        : authoredRootIdsRef.current;
+      const sizeBefore = targetSet.size;
+      targetSet.add(ref.rootId ?? event.id);
+      if (normalizedPubkey !== null) {
+        const write = isParticipation
+          ? writeParticipationToStorage
+          : writeAuthoredToStorage;
+        write(normalizedPubkey, targetSet);
       }
-      // Self-posts are infrequent, so re-deriving the gate snapshot on every
-      // one (even when the root was already tracked) is cheap and keeps the
-      // notify gate current without size-diff bookkeeping.
-      bumpMembershipVersion();
+      // Only re-derive the gate snapshot when the set actually grew; a self-post
+      // to an already-tracked root is a no-op for the notify gate, so skipping
+      // the bump avoids a wasted snapshot re-allocation + gate recompute.
+      if (targetSet.size !== sizeBefore) {
+        bumpMembershipVersion();
+      }
       bumpLatestVersion();
     },
     [normalizedPubkey],

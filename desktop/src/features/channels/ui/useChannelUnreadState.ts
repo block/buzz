@@ -2,6 +2,7 @@ import * as React from "react";
 
 import {
   buildCreatedAtByMessageId,
+  buildDirectRepliesByParentId,
   buildDirectReplyIdsByParentId,
   collectReplyDescendantIds,
   directRepliesMaxCreatedAt,
@@ -118,6 +119,10 @@ export function useChannelUnreadState({
 
   const directReplyIdsByParentId = React.useMemo(
     () => buildDirectReplyIdsByParentId(timelineMessages),
+    [timelineMessages],
+  );
+  const directRepliesByParentId = React.useMemo(
+    () => buildDirectRepliesByParentId(timelineMessages),
     [timelineMessages],
   );
   const getFirstReplyIdForMessage = React.useCallback(
@@ -312,6 +317,7 @@ export function useChannelUnreadState({
     seedThreadBadgeFrontiers(
       channelFrontiers,
       timelineMessages,
+      directRepliesByParentId,
       isNotifiedForThread,
       getThreadReadAt,
     );
@@ -334,6 +340,7 @@ export function useChannelUnreadState({
     () =>
       computeThreadBadgeCounts(
         timelineMessages,
+        directRepliesByParentId,
         activeChannelId
           ? threadBadgeFrontiersRef.current.get(activeChannelId)
           : undefined,
@@ -344,6 +351,7 @@ export function useChannelUnreadState({
       activeChannelId,
       currentPubkey,
       timelineMessages,
+      directRepliesByParentId,
       isNotifiedForThread,
       readStateVersion,
     ],

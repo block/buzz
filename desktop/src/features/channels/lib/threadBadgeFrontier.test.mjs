@@ -3,9 +3,18 @@ import test from "node:test";
 
 import { nextThreadBadgeFrontier } from "./threadBadgeFrontier.ts";
 import { seedThreadBadgeFrontiers } from "./threadBadgeFrontier.ts";
+import { buildDirectRepliesByParentId } from "./subtreeCreatedAt.ts";
 
 const msg = (id, parentId) => ({ id, parentId });
 const seedAll = () => true;
+const seed = (frontiers, messages, isNotified, getReadAt) =>
+  seedThreadBadgeFrontiers(
+    frontiers,
+    messages,
+    buildDirectRepliesByParentId(messages),
+    isNotified,
+    getReadAt,
+  );
 
 test("nextThreadBadgeFrontier_unseededNullMarker_seedsNull", () => {
   // Thread never read: snapshot seeds to null (everything unread).
@@ -47,22 +56,20 @@ test("nextThreadBadgeFrontier_storedNullMarkerZero_advancesToZero", () => {
 test("seedThreadBadgeFrontiers_threadWithReplies_seedsToMarker", () => {
   const frontiers = new Map();
   const messages = [msg("root", null), msg("r1", "root")];
-  seedThreadBadgeFrontiers(frontiers, messages, seedAll, (id) =>
-    id === "root" ? 100 : null,
-  );
+  seed(frontiers, messages, seedAll, (id) => (id === "root" ? 100 : null));
   assert.equal(frontiers.get("root"), 100);
 });
 
 test("seedThreadBadgeFrontiers_threadWithoutReplies_skipped", () => {
   const frontiers = new Map();
-  seedThreadBadgeFrontiers(frontiers, [msg("root", null)], seedAll, () => 100);
+  seed(frontiers, [msg("root", null)], seedAll, () => 100);
   assert.equal(frontiers.has("root"), false);
 });
 
 test("seedThreadBadgeFrontiers_notNotified_skipped", () => {
   const frontiers = new Map();
   const messages = [msg("root", null), msg("r1", "root")];
-  seedThreadBadgeFrontiers(
+  seed(
     frontiers,
     messages,
     () => false,
@@ -75,7 +82,7 @@ test("seedThreadBadgeFrontiers_replyEntry_neverSeeded", () => {
   // A reply is never a badge root even if its id collides with a notified set.
   const frontiers = new Map();
   const messages = [msg("r1", "root"), msg("r2", "root")];
-  seedThreadBadgeFrontiers(frontiers, messages, seedAll, () => 100);
+  seed(frontiers, messages, seedAll, () => 100);
   assert.equal(frontiers.size, 0);
 });
 
@@ -83,9 +90,9 @@ test("seedThreadBadgeFrontiers_reseed_advancesMonotonically", () => {
   const frontiers = new Map([["root", 100]]);
   const messages = [msg("root", null), msg("r1", "root")];
   // Re-render after the live marker advanced to 250 on read.
-  seedThreadBadgeFrontiers(frontiers, messages, seedAll, () => 250);
+  seed(frontiers, messages, seedAll, () => 250);
   assert.equal(frontiers.get("root"), 250);
   // A stale lower marker never lowers an already-advanced snapshot.
-  seedThreadBadgeFrontiers(frontiers, messages, seedAll, () => 100);
+  seed(frontiers, messages, seedAll, () => 100);
   assert.equal(frontiers.get("root"), 250);
 });

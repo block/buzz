@@ -783,4 +783,75 @@ test.describe("thread unread indicator screenshots", () => {
       path: `${SHOTS}/12-sidebar-dot-all-replies.png`,
     });
   });
+
+  // Regression guard for BUG-2 (clear-on-read): opening an unread thread marks
+  // its visible direct replies read, and the depth-0 badge must clear to zero
+  // IN PLACE — without leaving and re-entering the channel. Every other test
+  // re-enters the channel to refresh the badge; none asserts that reading the
+  // thread alone clears it. The mechanism: the mark-read effect advances the
+  // thread frontier over the head + direct replies on open, bumping
+  // readStateVersion, which recomputes computeThreadBadgeCounts against the
+  // now-advanced snapshot. Before the fix the badge read a frozen open-time
+  // snapshot that mark-read never invalidated, so it persisted until channel
+  // re-entry. This walks badge=3 -> open thread -> close -> badge gone, all
+  // while staying in general.
+  test("13-thread-badge-clears-on-read-without-reentry", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+
+    // Read frontier over an initial reply, then close the thread (same setup as
+    // test 01) so the subsequent replies land strictly past the frontier.
+    await emitMockMessage(page, "general", "First reply to welcome", {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: Math.floor(Date.now() / 1000) - 10,
+    });
+    const threadSummary = page.getByTestId("message-thread-summary").first();
+    await expect(threadSummary).toBeVisible();
+    await threadSummary.click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await page.getByTestId("message-thread-close").click();
+    await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+
+    // Leave, emit unread replies, return — badge appears (same as test 01).
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+    const base = unreadTimestamp();
+    for (let i = 0; i < 3; i++) {
+      await emitMockMessage(page, "general", `Unread reply ${i + 1}`, {
+        parentEventId: "mock-general-welcome",
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        createdAt: base + i,
+      });
+    }
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    const badge = page.getByTestId("thread-unread-badge");
+    await expect(badge).toBeVisible();
+    await expect(badge).toContainText("3");
+
+    await page.screenshot({
+      path: `${SHOTS}/13-thread-badge-before-read.png`,
+    });
+
+    // The crux: open the thread (mark-read advances the frontier past all three
+    // direct replies), then close it. Stay in general the entire time — no
+    // channel switch. The badge must clear to zero off the readStateVersion
+    // recompute alone. Before the BUG-2 fix it would persist at 3 here.
+    await page.getByTestId("message-thread-summary").first().click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await page.getByTestId("message-thread-close").click();
+    await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await expect(badge).toHaveCount(0);
+
+    await page.screenshot({
+      path: `${SHOTS}/13-thread-badge-clears-on-read.png`,
+    });
+  });
 });

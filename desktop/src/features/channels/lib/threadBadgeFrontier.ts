@@ -38,13 +38,14 @@ export function nextThreadBadgeFrontier(
 export function seedThreadBadgeFrontiers(
   channelFrontiers: Map<string, number | null>,
   messages: TimelineMessage[],
+  directRepliesByParentId: ReadonlyMap<string, TimelineMessage[]>,
   isNotified: (rootId: string) => boolean,
   getReadAt: (rootId: string) => number | null,
 ): void {
   for (const message of messages) {
     if (message.parentId) continue;
     if (!isNotified(message.id)) continue;
-    if (!messages.some((m) => m.parentId === message.id)) continue;
+    if (!directRepliesByParentId.has(message.id)) continue;
     channelFrontiers.set(
       message.id,
       nextThreadBadgeFrontier(
