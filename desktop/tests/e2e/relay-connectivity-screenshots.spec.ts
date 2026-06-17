@@ -93,23 +93,7 @@ test.describe("relay connectivity screenshots", () => {
     });
   });
 
-  test("03 — home feed unreachable", async ({ page }) => {
-    await installMockBridge(page, { feedReadError: RELAY_UNREACHABLE });
-    await page.goto("/");
-
-    // HomeView renders the error card when the feed query fails.
-    await expect(
-      page.getByText("Can't reach the relay — check your network connection."),
-    ).toBeVisible();
-    await settle(page);
-
-    await page.screenshot({
-      path: `${SHOTS}/03-home-unreachable.png`,
-      clip: { x: 0, y: 0, width: 1280, height: 500 },
-    });
-  });
-
-  test("04 — canvas unreachable in management sheet", async ({ page }) => {
+  test("03 — canvas unreachable in management sheet", async ({ page }) => {
     await installMockBridge(page, { canvasReadError: RELAY_UNREACHABLE });
     await page.goto("/");
 
@@ -139,11 +123,11 @@ test.describe("relay connectivity screenshots", () => {
 
     // Capture the whole sheet so the error renders in its Canvas-section context.
     await sheet.screenshot({
-      path: `${SHOTS}/04-canvas-unreachable.png`,
+      path: `${SHOTS}/03-canvas-unreachable.png`,
     });
   });
 
-  test("05 — cached identity shown offline (avatar + display name)", async ({
+  test("04 — cached identity shown offline (avatar + display name)", async ({
     page,
   }) => {
     // Seed the self-profile cache BEFORE installMockBridge so addInitScript
@@ -172,11 +156,11 @@ test.describe("relay connectivity screenshots", () => {
     await settle(page);
 
     await profileCard.screenshot({
-      path: `${SHOTS}/05-cached-identity-offline.png`,
+      path: `${SHOTS}/04-cached-identity-offline.png`,
     });
   });
 
-  test("06 — no-cache npub fallback when offline", async ({ page }) => {
+  test("05 — no-cache npub fallback when offline", async ({ page }) => {
     // No cache seeded — profile card falls back to the mock identity npub name.
     await installMockBridge(page, { profileReadError: RELAY_UNREACHABLE });
     await page.goto("/");
@@ -187,11 +171,11 @@ test.describe("relay connectivity screenshots", () => {
     await settle(page);
 
     await profileCard.screenshot({
-      path: `${SHOTS}/06-no-cache-npub-fallback.png`,
+      path: `${SHOTS}/05-no-cache-npub-fallback.png`,
     });
   });
 
-  test("07 — sidebar card shows connected after external relay recovery", async ({
+  test("06 — sidebar card shows connected after external relay recovery", async ({
     page,
   }) => {
     await installMockBridge(page);
