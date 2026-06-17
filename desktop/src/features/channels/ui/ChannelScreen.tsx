@@ -91,6 +91,7 @@ export function ChannelScreen({
     unfollowThread,
     isFollowingThread,
     isNotifiedForThread,
+    readStateVersion,
     setTopbarSearchHidden,
   } = useAppShell();
   const {
@@ -369,6 +370,7 @@ export function ChannelScreen({
     markChannelUnread,
     markThreadRead,
     isNotifiedForThread,
+    readStateVersion,
   });
   const editTargetMessage = React.useMemo(
     () =>

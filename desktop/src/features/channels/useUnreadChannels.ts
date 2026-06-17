@@ -382,6 +382,14 @@ export function useUnreadChannels(
     0,
   );
 
+  // Version signal bumped only when the participated/authored root-id sets
+  // change, so the gate snapshots (re-derived below) don't re-allocate on every
+  // observed external message the way reusing latestVersion would.
+  const [membershipVersion, bumpMembershipVersion] = React.useReducer(
+    (x: number) => x + 1,
+    0,
+  );
+
   // Reset all in-session state when the identity or relay changes. Unread
   // tracking depends only on NIP-RS read markers + observed relay events for
   // this user; nothing here is persisted across restarts.
@@ -400,6 +408,7 @@ export function useUnreadChannels(
     mutedRootIdsRef.current = pubkey ? readMutedFromStorage(pubkey) : new Set();
     threadActivityRef.current = pubkey ? readActivityFromStorage(pubkey) : [];
     bumpLatestVersion();
+    bumpMembershipVersion();
   }, [pubkey, relayClient]);
 
   // `topLevelOnly` is the passive channel-open path (NIP-RS Option 1): the
@@ -508,6 +517,10 @@ export function useUnreadChannels(
           writeAuthoredToStorage(normalizedPubkey, authoredRootIdsRef.current);
         }
       }
+      // Self-posts are infrequent, so re-deriving the gate snapshot on every
+      // one (even when the root was already tracked) is cheap and keeps the
+      // notify gate current without size-diff bookkeeping.
+      bumpMembershipVersion();
       bumpLatestVersion();
     },
     [normalizedPubkey],
@@ -611,6 +624,13 @@ export function useUnreadChannels(
     }
 
     let isCancelled = false;
+
+    // Snapshot membership sizes so the `.then` can detect whether the catch-up
+    // discovered new participated/authored roots (pass 1 mutates the refs in
+    // place). A pure-participation discovery produces no maxExternal advance, so
+    // without this the notify gate would never invalidate to surface the badge.
+    const participatedSizeBefore = participatedRootIdsRef.current.size;
+    const authoredSizeBefore = authoredRootIdsRef.current.size;
 
     type CatchUpResult =
       | {
@@ -792,6 +812,12 @@ export function useUnreadChannels(
         }
       }
       if (didAdvance) bumpLatestVersion();
+      if (
+        participatedRootIdsRef.current.size !== participatedSizeBefore ||
+        authoredRootIdsRef.current.size !== authoredSizeBefore
+      ) {
+        bumpMembershipVersion();
+      }
     });
 
     return () => {
@@ -933,6 +959,21 @@ export function useUnreadChannels(
     bumpLatestVersion();
   }, [getEffectiveTimestamp, markContextRead]);
 
+  // Identity-stable snapshots of the membership sets for the notify gate.
+  // Re-derived only when membershipVersion bumps (a set actually changed), so
+  // `isNotifiedForThread`'s useCallback deps invalidate on async discovery
+  // while live consumers keep reading the mutable refs directly.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: membershipVersion is the intentional re-derivation signal
+  const participatedRootIds = React.useMemo(
+    () => new Set(participatedRootIdsRef.current) as ReadonlySet<string>,
+    [membershipVersion],
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: membershipVersion is the intentional re-derivation signal
+  const authoredRootIds = React.useMemo(
+    () => new Set(authoredRootIdsRef.current) as ReadonlySet<string>,
+    [membershipVersion],
+  );
+
   return {
     unreadChannelIds,
     highPriorityUnreadChannelIds,
@@ -946,8 +987,8 @@ export function useUnreadChannels(
     getEffectiveTimestamp,
     readStateVersion,
     setContextParentResolver,
-    participatedRootIds: participatedRootIdsRef.current as ReadonlySet<string>,
-    authoredRootIds: authoredRootIdsRef.current as ReadonlySet<string>,
+    participatedRootIds,
+    authoredRootIds,
     threadActivityItems: threadActivityRef.current,
     mutedRootIds: mutedRootIdsRef.current as ReadonlySet<string>,
     muteThread,
