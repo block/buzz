@@ -391,10 +391,6 @@ export function AppShell() {
     setBrowseDialogType("stream");
     void refetchChannels();
   }, [refetchChannels]);
-  const handleOpenBrowseForums = React.useCallback(() => {
-    setBrowseDialogType("forum");
-    void refetchChannels();
-  }, [refetchChannels]);
   const handleOpenSearch = React.useCallback(() => {
     setSearchFocusRequest((request) => request + 1);
     void refetchChannels();
@@ -856,8 +852,6 @@ export function AppShell() {
                           onMarkAllChannelsRead={markAllChannelsRead}
                           onMarkChannelRead={markChannelRead}
                           onMarkChannelUnread={markChannelUnread}
-                          onOpenBrowseChannels={handleOpenBrowseChannels}
-                          onOpenBrowseForums={handleOpenBrowseForums}
                           onOpenDm={async ({ pubkeys }) => {
                             const directMessage =
                               await openDmMutation.mutateAsync({

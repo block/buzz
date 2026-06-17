@@ -35,7 +35,9 @@ import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
 const SECTION_LABEL_CHEVRON_CLASS =
-  "h-2.5 w-2.5 shrink-0 opacity-0 text-sidebar-foreground/45 transition-[color,opacity,transform] group-hover/section-label:opacity-100 group-hover/section-label:text-sidebar-foreground group-focus-visible/section-label:opacity-100 group-focus-visible/section-label:text-sidebar-foreground";
+  "relative size-2.5 shrink-0 opacity-0 text-sidebar-foreground/45 transition-[color,opacity] group-hover/sidebar-section:opacity-100 group-hover/sidebar-section:text-sidebar-foreground group-hover/section-label:opacity-100 group-hover/section-label:text-sidebar-foreground group-focus-within/sidebar-section:opacity-100 group-focus-within/sidebar-section:text-sidebar-foreground group-focus-visible/section-label:opacity-100 group-focus-visible/section-label:text-sidebar-foreground";
+const SECTION_LABEL_CHEVRON_ICON_CLASS =
+  "absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2";
 const SIDEBAR_ROW_ACTION_VISIBILITY_CLASS =
   "group-focus-within/menu-item:opacity-100 group-hover/menu-item:opacity-100 md:opacity-0";
 const SIDEBAR_ROW_ICON_ACTION_CLASS =
@@ -310,13 +312,14 @@ export function SidebarSection({
               type="button"
             >
               <span>{title}</span>
-              <ChevronDown
-                aria-hidden="true"
-                className={cn(
-                  SECTION_LABEL_CHEVRON_CLASS,
-                  isCollapsed ? "-rotate-90" : "rotate-0",
-                )}
-              />
+              <span aria-hidden="true" className={SECTION_LABEL_CHEVRON_CLASS}>
+                <ChevronDown
+                  className={cn(
+                    SECTION_LABEL_CHEVRON_ICON_CLASS,
+                    isCollapsed ? "-rotate-90" : "rotate-0",
+                  )}
+                />
+              </span>
             </button>
           ) : (
             title

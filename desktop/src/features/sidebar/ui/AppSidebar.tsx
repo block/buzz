@@ -7,7 +7,7 @@ import {
   Bot,
   FolderGit2,
   Home,
-  MessageCirclePlus,
+  Plus,
   Zap,
 } from "lucide-react";
 import {
@@ -51,7 +51,10 @@ import {
   SidebarLoadingContent,
   useSidebarLoadingShape,
 } from "@/features/sidebar/ui/sidebarLoadingSkeleton";
-import { SECTION_ICON_BUTTON_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
+import {
+  SECTION_ACTION_VISIBILITY_CLASS,
+  SECTION_ICON_BUTTON_CLASS,
+} from "@/features/sidebar/ui/sidebarSectionStyles";
 import type {
   Channel,
   ChannelVisibility,
@@ -126,8 +129,6 @@ type AppSidebarProps = {
     templateId?: string;
   }) => Promise<void>;
   onOpenAddWorkspace: () => void;
-  onOpenBrowseChannels: () => void;
-  onOpenBrowseForums: () => void;
   onHideDm: (channelId: string) => void;
   onMarkChannelUnread: (channelId: string) => void;
   onMarkChannelRead: (
@@ -195,8 +196,6 @@ export function AppSidebar({
   onCreateChannel,
   onCreateForum,
   onOpenAddWorkspace,
-  onOpenBrowseChannels,
-  onOpenBrowseForums,
   onHideDm,
   onMarkChannelUnread,
   onMarkChannelRead,
@@ -597,7 +596,6 @@ export function AppSidebar({
             <>
               {starredChannels.length > 0 ? (
                 <ChannelGroupSection
-                  browseAriaLabel="Starred channels"
                   createAriaLabel="Starred channels"
                   hasUnread={starredChannels.some((c) =>
                     unreadChannelIds.has(c.id),
@@ -681,8 +679,6 @@ export function AppSidebar({
                   />
                 ))}
                 <ChannelGroupSection
-                  browseAriaLabel="Browse channels"
-                  browseTestId="browse-channels"
                   createAriaLabel="Create a channel"
                   draggable
                   groupClassName={
@@ -693,7 +689,6 @@ export function AppSidebar({
                   isActiveChannel={selectedView === "channel"}
                   items={sectionBuckets.unassigned}
                   listTestId="stream-list"
-                  onBrowse={onOpenBrowseChannels}
                   onCreateClick={() => setCreateDialogKind("stream")}
                   onMarkAllRead={onMarkAllChannelsRead}
                   onMarkChannelRead={onMarkChannelRead}
@@ -719,15 +714,12 @@ export function AppSidebar({
               </SidebarDndContext>
               <FeatureGate feature="forum">
                 <ChannelGroupSection
-                  browseAriaLabel="Browse forums"
-                  browseTestId="browse-forums"
                   createAriaLabel="Create a forum"
                   hasUnread={unreadChannelIds.size > 0}
                   isCollapsed={collapsedGroups.forums}
                   isActiveChannel={selectedView === "channel"}
                   items={forumChannels}
                   listTestId="forum-list"
-                  onBrowse={onOpenBrowseForums}
                   onCreateClick={() => setCreateDialogKind("forum")}
                   onMarkAllRead={onMarkAllChannelsRead}
                   onMarkChannelRead={onMarkChannelRead}
@@ -749,7 +741,7 @@ export function AppSidebar({
                     <button
                       aria-expanded={isNewDmOpen}
                       aria-label="Compose new message"
-                      className={SECTION_ICON_BUTTON_CLASS}
+                      className={`${SECTION_ICON_BUTTON_CLASS} ${SECTION_ACTION_VISIBILITY_CLASS}`}
                       data-testid="new-dm-trigger"
                       onClick={() => {
                         setIsNewDmOpen(true);
@@ -757,7 +749,7 @@ export function AppSidebar({
                       title="Compose new message"
                       type="button"
                     >
-                      <MessageCirclePlus className="h-4 w-4" />
+                      <Plus className="h-4 w-4" />
                     </button>
                   </div>
                 }

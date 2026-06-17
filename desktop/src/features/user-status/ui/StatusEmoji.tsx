@@ -43,10 +43,7 @@ export function StatusEmoji({ value, className }: StatusEmojiProps) {
           alt={value}
           title={displayName}
           src={rewriteRelayUrl(found.url)}
-          className={cn(
-            "inline-block object-contain align-text-bottom",
-            className,
-          )}
+          className={cn("inline-block object-contain align-middle", className)}
           draggable={false}
         />
       );
@@ -57,7 +54,13 @@ export function StatusEmoji({ value, className }: StatusEmojiProps) {
   // Thread the caller's className through so native statuses keep the spacing
   // (e.g. `mr-1`) every display site applies to the image branch above.
   return (
-    <span className={className} title={displayName}>
+    <span
+      className={cn(
+        "inline-flex items-center justify-center leading-normal align-middle",
+        className,
+      )}
+      title={displayName}
+    >
       {value}
     </span>
   );
