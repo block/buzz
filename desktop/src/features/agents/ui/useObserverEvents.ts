@@ -2,10 +2,12 @@ import * as React from "react";
 
 import {
   ensureRelayObserverSubscription,
+  getAgentLeadership,
   getAgentObserverSnapshot,
   getAgentTranscript,
   subscribeAgentObserverStore,
 } from "@/features/agents/observerRelayStore";
+import type { InstanceLeadership } from "@/features/agents/observerRelayStore";
 import type { TranscriptItem } from "./agentSessionTypes";
 
 // Stable subscribe reference shared by all useSyncExternalStore hooks.
@@ -40,6 +42,18 @@ export function useAgentTranscript(
 ): TranscriptItem[] {
   const getSnapshot = React.useCallback(
     () => getAgentTranscript(agentPubkey, enabled),
+    [agentPubkey, enabled],
+  );
+
+  return React.useSyncExternalStore(subscribeToStore, getSnapshot);
+}
+
+export function useAgentLeadership(
+  enabled: boolean,
+  agentPubkey?: string | null,
+): InstanceLeadership[] {
+  const getSnapshot = React.useCallback(
+    () => getAgentLeadership(agentPubkey, enabled),
     [agentPubkey, enabled],
   );
 

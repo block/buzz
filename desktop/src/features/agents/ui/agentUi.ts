@@ -2,6 +2,18 @@ export function truncatePubkey(pubkey: string) {
   return `${pubkey.slice(0, 8)}…${pubkey.slice(-6)}`;
 }
 
+/**
+ * Election instance ids are `{pid}-{launch-nanos}` (minted per harness window).
+ * The pid prefix identifies the process; the long nanos tail only disambiguates
+ * relaunches, so keep the prefix and a short suffix. Short ids pass through.
+ */
+export function truncateInstanceId(instanceId: string) {
+  if (instanceId.length <= 16) {
+    return instanceId;
+  }
+  return `${instanceId.slice(0, 8)}…${instanceId.slice(-4)}`;
+}
+
 function commandLooksLikePath(command: string) {
   const trimmed = command.trim();
   return (
