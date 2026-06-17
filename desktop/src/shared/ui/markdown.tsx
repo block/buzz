@@ -885,6 +885,8 @@ function ImageBlock({
     ? ({
         "--buzz-spoiler-media-height": `${currentSpoilerMediaSize.height}px`,
         "--buzz-spoiler-media-width": `${currentSpoilerMediaSize.width}px`,
+        height: `${currentSpoilerMediaSize.height}px`,
+        width: `${currentSpoilerMediaSize.width}px`,
       } as React.CSSProperties)
     : undefined;
 
@@ -960,7 +962,7 @@ function ImageBlock({
       <button
         aria-label={alt?.trim() ? `Zoom image: ${alt}` : "Zoom image"}
         className={cn(
-          "mt-1 block w-fit max-w-sm cursor-zoom-in rounded-xl border-0 bg-transparent p-0 text-left focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
+          "mt-1 inline-block max-w-full cursor-zoom-in rounded-xl border-0 bg-transparent p-0 text-left align-top focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
           lightboxBox && "opacity-0",
         )}
         data-testid="message-image-lightbox-trigger"
@@ -970,7 +972,7 @@ function ImageBlock({
       >
         <img
           alt={alt}
-          className="block max-h-64 max-w-full rounded-xl object-contain"
+          className="block max-h-64 max-w-sm rounded-xl object-contain"
           data-spoiler-media-size={currentSpoilerMediaSize ? "" : undefined}
           ref={imageRef}
           src={resolvedSrc}
