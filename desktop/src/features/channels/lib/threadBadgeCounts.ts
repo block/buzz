@@ -2,16 +2,39 @@ import { computeThreadUnreadMarker } from "@/features/messages/lib/unreadMarker"
 import type { TimelineMessage } from "@/features/messages/types";
 
 /**
+ * All reply messages in a root's subtree — direct children plus every deeper
+ * descendant, walked through the direct-replies adjacency map. A reply-to-a-
+ * reply must count toward the root's badge, so the badge tally needs the whole
+ * subtree rather than the root's direct children alone.
+ */
+function collectSubtreeReplies(
+  rootId: string,
+  directRepliesByParentId: ReadonlyMap<string, TimelineMessage[]>,
+): TimelineMessage[] {
+  const replies: TimelineMessage[] = [];
+  const pending = [...(directRepliesByParentId.get(rootId) ?? [])];
+  while (pending.length > 0) {
+    const reply = pending.pop();
+    if (!reply) continue;
+    replies.push(reply);
+    pending.push(...(directRepliesByParentId.get(reply.id) ?? []));
+  }
+  return replies;
+}
+
+/**
  * Per-thread unread reply counts for the summary rows in the main timeline.
  *
  * Counts are computed only for threads the user has notification interest in
  * (`isNotified`) and measured against the per-root frontier snapshot rather
  * than the live marker, so badges stay stable for the session (see
- * nextThreadBadgeFrontier for the snapshot-advance-on-read rationale).
+ * nextThreadBadgeFrontier for the snapshot-advance-on-read rationale). The
+ * count spans the root's WHOLE subtree, so a reply nested under another reply
+ * still tallies toward the root's badge.
  *
  * @param messages Top-level timeline entries in chronological order.
- * @param directRepliesByParentId Direct replies keyed by parent id, for O(1)
- *   per-thread lookup instead of re-scanning the timeline.
+ * @param directRepliesByParentId Direct replies keyed by parent id, walked to
+ *   collect each root's full descendant subtree.
  * @param frontiers Per-root read frontier in unix seconds, or null/undefined
  *   when the thread was never read (every reply counts unread).
  * @param isNotified Whether a thread root is one the user is notified for.
@@ -28,10 +51,13 @@ export function computeThreadBadgeCounts(
   for (const message of messages) {
     if (message.parentId) continue;
     if (!isNotified(message.id)) continue;
-    const directReplies = directRepliesByParentId.get(message.id);
-    if (!directReplies || directReplies.length === 0) continue;
+    const subtreeReplies = collectSubtreeReplies(
+      message.id,
+      directRepliesByParentId,
+    );
+    if (subtreeReplies.length === 0) continue;
     const { unreadCount } = computeThreadUnreadMarker(
-      directReplies,
+      subtreeReplies,
       frontiers?.get(message.id) ?? null,
       currentPubkey,
     );
