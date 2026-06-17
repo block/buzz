@@ -279,7 +279,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
             )}
           >
             <Button
-              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-primary/40 bg-primary/10 px-2.5 text-2xs font-medium text-primary shadow-xs backdrop-blur-sm hover:bg-primary/20 [&_svg]:size-3.5"
+              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-primary/40 bg-primary/10 px-2.5 text-2xs font-medium text-primary shadow-xs backdrop-blur-sm hover:bg-primary/20 [&_svg]:size-4"
               data-testid="message-unread-pill"
               onClick={handleJumpToOldestUnread}
               size="sm"
@@ -402,7 +402,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                                 "flex shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground",
                                 hasDescription
                                   ? "h-12 w-12 [&_svg]:h-6 [&_svg]:w-6"
-                                  : "h-10 w-10 [&_svg]:h-5 [&_svg]:w-5",
+                                  : "h-10 w-10 [&_svg]:h-4 [&_svg]:w-4",
                               )}
                               data-testid={
                                 action.testId

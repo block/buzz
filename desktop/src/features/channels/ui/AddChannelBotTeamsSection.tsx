@@ -130,7 +130,7 @@ export function AddChannelBotTeamsSection({
                               : "bg-muted/60 text-muted-foreground",
                           )}
                         >
-                          <Check className="h-2.5 w-2.5" />
+                          <Check className="h-4 w-4" />
                           {allInChannel
                             ? "All in channel"
                             : `${inChannelCount} in channel`}
@@ -165,7 +165,7 @@ export function AddChannelBotTeamsSection({
                               {persona.displayName}
                             </span>
                             {personaInChannel ? (
-                              <Check className="h-2.5 w-2.5 text-emerald-300" />
+                              <Check className="h-4 w-4 text-emerald-300" />
                             ) : null}
                           </div>
                         );

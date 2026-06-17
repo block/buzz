@@ -150,7 +150,7 @@ function ReminderRow({
           onClick={() => void handleComplete()}
           title="Complete"
         >
-          <Check className="h-3.5 w-3.5" />
+          <Check className="h-4 w-4" />
         </Button>
         <Button
           size="sm"
@@ -160,7 +160,7 @@ function ReminderRow({
           onClick={() => void handleSnooze()}
           title="Snooze 1 hour"
         >
-          <RotateCcw className="h-3.5 w-3.5" />
+          <RotateCcw className="h-4 w-4" />
         </Button>
         <Button
           size="sm"
@@ -170,7 +170,7 @@ function ReminderRow({
           onClick={() => void handleCancel()}
           title="Cancel"
         >
-          <X className="h-3.5 w-3.5" />
+          <X className="h-4 w-4" />
         </Button>
       </div>
     </div>

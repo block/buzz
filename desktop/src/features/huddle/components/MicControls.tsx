@@ -185,10 +185,10 @@ export function MicControls({
                     style={micMeterBarStyle(rightBarHeight)}
                   />
                 </span>
-                <ChevronUp className="hidden h-3 w-3 group-data-[state=open]:block group-focus-visible:block group-hover:block" />
+                <ChevronUp className="hidden h-4 w-4 group-data-[state=open]:block group-focus-visible:block group-hover:block" />
               </span>
             ) : (
-              <ChevronUp className="h-3 w-3" />
+              <ChevronUp className="h-4 w-4" />
             )}
           </Button>
         </PopoverTrigger>

@@ -776,7 +776,7 @@ export function AnimatedAvatarCapture({
       ) : phase === "starting" ? (
         <div className="absolute inset-0 grid place-items-center rounded-full bg-background/70 text-center shadow-inner">
           <div className="grid justify-items-center gap-2 px-4">
-            <Spinner aria-label="Starting camera" className="h-5 w-5" />
+            <Spinner aria-label="Starting camera" className="h-4 w-4" />
             <span className="text-xs font-medium text-muted-foreground">
               Starting camera
             </span>

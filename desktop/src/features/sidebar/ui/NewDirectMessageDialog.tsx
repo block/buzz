@@ -582,7 +582,7 @@ export function NewDirectMessageDialog({
                       {user.isAgent ? (
                         <Bot
                           aria-label="agent"
-                          className="h-3.5 w-3.5 text-muted-foreground"
+                          className="h-4 w-4 text-muted-foreground"
                         />
                       ) : null}
                     </button>

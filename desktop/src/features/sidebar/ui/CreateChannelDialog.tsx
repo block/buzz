@@ -171,7 +171,7 @@ export function CreateChannelDialog({
                 >
                   <DurationIcon className="h-4 w-4" />
                   {durationLabel}
-                  <ChevronDown className="h-3.5 w-3.5 text-muted-foreground/70" />
+                  <ChevronDown className="h-4 w-4 text-muted-foreground/70" />
                 </Button>
               </PopoverTrigger>
               <PopoverContent align="start" className="w-72 p-1">

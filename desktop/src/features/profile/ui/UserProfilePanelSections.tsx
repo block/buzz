@@ -505,7 +505,7 @@ function ProfileQuickAction({
             : "bg-muted/60 text-foreground hover:bg-muted/80",
         )}
       >
-        <Icon className="h-5 w-5" />
+        <Icon className="h-4 w-4" />
       </span>
       <span
         className={cn(

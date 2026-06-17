@@ -181,7 +181,7 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                             className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]"
                             data-composer-media-spoiler=""
                           >
-                            <HatGlasses className="h-5 w-5" />
+                            <HatGlasses className="h-4 w-4" />
                           </div>
                         ) : null}
                       </div>

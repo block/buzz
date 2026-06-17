@@ -730,7 +730,7 @@ function AddMemberSearchResultRow({
               {formatAddCandidateName(user)}
             </span>
             <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-              <Bot aria-hidden="true" className="h-3 w-3" />
+              <Bot aria-hidden="true" className="h-4 w-4" />
               agent
             </span>
           </div>

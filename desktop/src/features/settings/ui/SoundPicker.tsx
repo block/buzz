@@ -95,7 +95,7 @@ export function SoundPicker({
             <span className="truncate">{value}</span>
             <span className="flex items-center gap-1.5">
               <Waveform className="h-6 w-15 opacity-70" name={value} />
-              <ChevronDown className="h-3 w-3 text-muted-foreground" />
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
             </span>
           </Button>
         </DropdownMenuTrigger>
