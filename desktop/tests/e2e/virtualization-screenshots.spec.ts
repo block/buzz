@@ -78,13 +78,15 @@ test.describe("list virtualization screenshots", () => {
     });
     await expect
       .poll(async () =>
-        composer.evaluate((el, scrollEl) => {
-          const composerTop = el.getBoundingClientRect().top;
-          const scrollTop = (
-            scrollEl as HTMLElement
-          ).getBoundingClientRect().top;
-          return Math.abs(composerTop - scrollTop);
-        }, await scroller.elementHandle()),
+        composer.evaluate(
+          (el, scrollEl) => {
+            const composerTop = el.getBoundingClientRect().top;
+            const scrollTop = (scrollEl as HTMLElement).getBoundingClientRect()
+              .top;
+            return Math.abs(composerTop - scrollTop);
+          },
+          await scroller.elementHandle(),
+        ),
       )
       .toBeLessThan(80);
 
@@ -172,9 +174,10 @@ test.describe("list virtualization screenshots", () => {
 
     const sectionOrder = async () =>
       headers.evaluateAll((rows) =>
-        rows.map((row) => row.textContent?.trim().startsWith("Priority")
-          ? "Priority"
-          : "Archive",
+        rows.map((row) =>
+          row.textContent?.trim().startsWith("Priority")
+            ? "Priority"
+            : "Archive",
         ),
       );
     expect(await sectionOrder()).toEqual(["Priority", "Archive"]);
