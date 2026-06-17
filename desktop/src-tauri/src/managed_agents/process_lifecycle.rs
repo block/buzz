@@ -45,10 +45,19 @@ impl Drop for JobHandle {
 /// the caller can fall back to `Child::kill()` — a degraded teardown beats a
 /// failed spawn.
 ///
-/// Assignment happens immediately after spawn. The harness connects to the
-/// relay before it spawns any agent workers, so the tiny window between spawn
-/// and assignment never contains a grandchild; once assigned, Windows places
-/// every subsequently-spawned descendant in the job automatically.
+/// Assignment happens immediately after spawn, on the same parent thread. The
+/// child (buzz-acp) does spawn its 24 workers before it connects to the relay,
+/// so the window between our spawn and our assignment is NOT structurally empty.
+/// What closes it is assign-latency: `OpenProcess` + `AssignProcessToJobObject`
+/// are a few synchronous Win32 calls (microseconds), while buzz-acp must init
+/// tokio, parse its config, and spawn 24 children (tens-to-hundreds of ms), so
+/// the assign reliably wins before any worker exists. Once assigned, Windows
+/// places every subsequently-spawned descendant in the job automatically.
+///
+/// `CREATE_SUSPENDED` -> assign -> `ResumeThread` would make the window airtight
+/// regardless of child timing, but it requires raw `CreateProcessW`/`ResumeThread`
+/// (materially more unsafe Win32) to close a microsecond race, so it is
+/// deliberately not used here.
 fn create_job_for_child(pid: u32) -> Option<JobHandle> {
     use std::ptr::null;
     use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
