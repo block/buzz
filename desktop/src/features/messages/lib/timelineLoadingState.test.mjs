@@ -101,6 +101,12 @@ test("latch: switching channels resets and loads the new one", () => {
 });
 
 test("latch: no active channel passes loadingNow through untouched", () => {
-  assert.equal(resolveTimelineLoadingLatch("chan-a", null, true).isLoading, true);
-  assert.equal(resolveTimelineLoadingLatch("chan-a", null, false).isLoading, false);
+  assert.equal(
+    resolveTimelineLoadingLatch("chan-a", null, true).isLoading,
+    true,
+  );
+  assert.equal(
+    resolveTimelineLoadingLatch("chan-a", null, false).isLoading,
+    false,
+  );
 });
