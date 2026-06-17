@@ -512,9 +512,9 @@
 /* ── Tiptap rich-text composer ──────────────────────────────────────── */
 .rich-text-composer .tiptap {
   outline: none;
-  min-height: calc(var(--text-sm) * var(--leading-relaxed));
+  min-height: var(--text-sm--line-height);
   font-size: var(--text-sm);
-  line-height: var(--leading-relaxed);
+  line-height: var(--text-sm--line-height);
 }
 
 .rich-text-composer .tiptap p {

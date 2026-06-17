@@ -954,7 +954,7 @@ function createMarkdownComponents(
   runtimeRef: React.RefObject<MarkdownRuntime>,
   interactive = true,
 ): Components {
-  const paragraphClassName = "leading-relaxed";
+  const paragraphClassName = "leading-[inherit]";
   const listItemClassName = "my-1 [&_p]:inline";
   const listClassName = "space-y-1 pl-6 marker:text-muted-foreground";
 
@@ -1432,7 +1432,7 @@ function MarkdownInner({
       className={cn(
         MESSAGE_MARKDOWN_CLASS,
         [
-          "max-w-none [overflow-wrap:anywhere] text-sm leading-relaxed text-foreground",
+          "max-w-none [overflow-wrap:anywhere] text-sm leading-5 text-foreground",
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           "[&>*+*]:mt-3",
           "[&>p+p]:mt-1.5",
