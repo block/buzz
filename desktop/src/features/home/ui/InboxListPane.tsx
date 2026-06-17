@@ -151,7 +151,9 @@ export function InboxListPane({
     >
       <TopChromeInsetHeader>
         <div className="px-5 py-1">
-          <div className="flex min-w-0 items-center justify-end gap-3">
+          {/* Cap to the list-column width so the right-aligned dropdown stays
+              put when the pane goes full-width in reminders mode. */}
+          <div className="flex min-w-0 max-w-[var(--home-inbox-list-width)] items-center justify-end gap-3">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
