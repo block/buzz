@@ -997,6 +997,7 @@ test("mention text is highlighted in sent messages", async ({ page }) => {
   const input = page.getByTestId("message-input");
   await input.fill("Hey @bo");
   await autocomplete(page).getByText("bob").click();
+  await expect(input).toHaveText("Hey @bob ");
   await page.keyboard.type(suffix);
   await page.getByTestId("send-message").click();
 
