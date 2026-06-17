@@ -499,7 +499,6 @@ export function ChannelScreen({
       timelineLoadingNow,
     );
   settledChannelIdRef.current = settledChannelId;
-  const shouldShowInitialChannelLoading = isTimelineLoading;
   // Panel identity (thread/profile/agent session) lives in the URL search
   // params, so channel changes and back/forward traversals carry it per
   // history entry — only the local ephemeral targets need resetting here.
@@ -626,9 +625,7 @@ export function ChannelScreen({
           ref={channelContentRef}
         >
           {activeChannel ? (
-            shouldShowInitialChannelLoading ? (
-              <ViewLoadingFallback includeHeader kind="channel" />
-            ) : activeChannel.channelType === "forum" ? (
+            activeChannel.channelType === "forum" ? (
               <>
                 {channelHeader}
                 <React.Suspense fallback={<ViewLoadingFallback kind="forum" />}>
