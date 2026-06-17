@@ -2211,6 +2211,31 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
               content: "Looks good to me. We should ship it.",
               sig: "mocksig".repeat(20).slice(0, 128),
             },
+            // Filler replies so the thread overflows the panel viewport — the
+            // deep-link target (mock-forum-release-deeplink) sits below the fold
+            // at open, proving scrollIntoView lands an offscreen content-
+            // visibility row. Named IDs above are untouched.
+            ...Array.from({ length: 24 }, (_, index) => ({
+              id:
+                index === 23
+                  ? "mock-forum-release-deeplink"
+                  : `mock-forum-release-filler-${index}`,
+              pubkey: ALICE_PUBKEY,
+              created_at: Math.floor(Date.now() / 1000) - (79 - index) * 60,
+              kind: 45003,
+              tags: buildReplyMessageTags(
+                channelId,
+                ALICE_PUBKEY,
+                "mock-forum-release-thread",
+                "mock-forum-release-thread",
+                undefined,
+              ),
+              content:
+                index === 23
+                  ? "Deep-link target: confirmed the rollout plan end to end."
+                  : `Follow-up note #${index + 1} on the release checklist.`,
+              sig: "mocksig".repeat(20).slice(0, 128),
+            })),
           ]
         : channelId === "94a444a4-c0a3-5966-ab05-530c6ddc2301"
           ? [
@@ -2522,7 +2547,9 @@ function getMockUserNotes(pubkey: string): RawUserNote[] {
   const now = Math.floor(Date.now() / 1000);
 
   if (pubkey === DEFAULT_MOCK_IDENTITY.pubkey) {
-    return [
+    // Two named notes plus generated filler so the Pulse feed overflows the
+    // viewport — required to exercise windowed scroll + sticky-composer offset.
+    const named: RawUserNote[] = [
       {
         id: "mock-note-launch",
         pubkey,
@@ -2538,6 +2565,14 @@ function getMockUserNotes(pubkey: string): RawUserNote[] {
         tags: [],
       },
     ];
+    const filler: RawUserNote[] = Array.from({ length: 28 }, (_, index) => ({
+      id: `mock-note-filler-${index}`,
+      pubkey,
+      created_at: now - (4 + index) * 60 * 60,
+      content: `Pulse update #${index + 1}: tracking virtualization rollout across desktop surfaces.`,
+      tags: [],
+    }));
+    return [...named, ...filler];
   }
 
   if (pubkey === ALICE_PUBKEY) {

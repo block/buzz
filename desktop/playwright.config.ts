@@ -48,6 +48,7 @@ export default defineConfig({
         "**/thread-unread-screenshots.spec.ts",
         "**/animated-avatar-screenshots.spec.ts",
         "**/reminders-screenshots.spec.ts",
+        "**/virtualization-screenshots.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],
