@@ -5,6 +5,7 @@ import ReactMarkdown, {
   defaultUrlTransform,
 } from "react-markdown";
 import { Copy, Download, FileText, ZoomIn, ZoomOut } from "lucide-react";
+import { useReducedMotion } from "motion/react";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
@@ -365,40 +366,31 @@ function imageLightboxZoomBox(
   };
 }
 
-function usePrefersReducedMotion() {
-  const [prefersReducedMotion, setPrefersReducedMotion] = React.useState(() => {
-    if (
-      typeof window === "undefined" ||
-      typeof window.matchMedia !== "function"
-    ) {
-      return false;
-    }
-    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  });
-
-  React.useEffect(() => {
-    if (
-      typeof window === "undefined" ||
-      typeof window.matchMedia !== "function"
-    ) {
-      return;
-    }
-
-    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const handleChange = () => setPrefersReducedMotion(mediaQuery.matches);
-
-    handleChange();
-    mediaQuery.addEventListener("change", handleChange);
-
-    return () => mediaQuery.removeEventListener("change", handleChange);
-  }, []);
-
-  return prefersReducedMotion;
-}
-
 type WebKitGestureLikeEvent = Event & {
   scale?: number;
 };
+
+function getImageLightboxFocusableElements(
+  container: HTMLElement,
+): HTMLElement[] {
+  return Array.from(
+    container.querySelectorAll<HTMLElement>(
+      [
+        "a[href]",
+        "button:not(:disabled)",
+        "input:not(:disabled)",
+        "select:not(:disabled)",
+        "textarea:not(:disabled)",
+        "[tabindex]:not([tabindex='-1'])",
+      ].join(","),
+    ),
+  ).filter(
+    (element) =>
+      !element.hasAttribute("disabled") &&
+      element.getAttribute("aria-hidden") !== "true" &&
+      element.getClientRects().length > 0,
+  );
+}
 
 function ImageZoomOverlay({
   alt,
@@ -417,7 +409,8 @@ function ImageZoomOverlay({
   resolvedSrc: string;
   sourceBox: ImageLightboxBox;
 }) {
-  const prefersReducedMotion = usePrefersReducedMotion();
+  const shouldReduceMotion = useReducedMotion();
+  const prefersReducedMotion = shouldReduceMotion === true;
   const [phase, setPhase] = React.useState<
     "opening" | "open" | "closing" | "fading"
   >(() => (prefersReducedMotion ? "open" : "opening"));
@@ -433,6 +426,7 @@ function ImageZoomOverlay({
   const dialogRef = React.useRef<HTMLDivElement | null>(null);
   const descriptionId = React.useId();
   const gestureScaleRef = React.useRef(1);
+  const previouslyFocusedElementRef = React.useRef<HTMLElement | null>(null);
   const suppressCloseUntilRef = React.useRef(0);
   const zoomIdleTimerRef = React.useRef<number | null>(null);
 
@@ -516,7 +510,15 @@ function ImageZoomOverlay({
   }, [phase, prefersReducedMotion]);
 
   React.useEffect(() => {
+    previouslyFocusedElementRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
     dialogRef.current?.focus();
+
+    return () => {
+      previouslyFocusedElementRef.current?.focus({ preventScroll: true });
+    };
   }, []);
 
   React.useEffect(() => {
@@ -524,6 +526,42 @@ function ImageZoomOverlay({
     document.body.style.overflow = "hidden";
     return () => {
       document.body.style.overflow = previousOverflow;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) {
+      return;
+    }
+
+    const siblings = Array.from(document.body.children).filter(
+      (element): element is HTMLElement =>
+        element instanceof HTMLElement && element !== dialog,
+    );
+    const previousSiblingAttributes = siblings.map((element) => ({
+      ariaHidden: element.getAttribute("aria-hidden"),
+      element,
+      inert: element.hasAttribute("inert"),
+    }));
+
+    for (const sibling of siblings) {
+      sibling.setAttribute("aria-hidden", "true");
+      sibling.setAttribute("inert", "");
+    }
+
+    return () => {
+      for (const { ariaHidden, element, inert } of previousSiblingAttributes) {
+        if (ariaHidden == null) {
+          element.removeAttribute("aria-hidden");
+        } else {
+          element.setAttribute("aria-hidden", ariaHidden);
+        }
+
+        if (!inert) {
+          element.removeAttribute("inert");
+        }
+      }
     };
   }, []);
 
@@ -538,6 +576,54 @@ function ImageZoomOverlay({
       if (event.key === "Escape") {
         event.preventDefault();
         close();
+        return;
+      }
+
+      if (event.key !== "Tab") {
+        return;
+      }
+
+      const dialog = dialogRef.current;
+      if (!dialog) {
+        return;
+      }
+
+      const focusableElements = getImageLightboxFocusableElements(dialog);
+      if (focusableElements.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+      const activeElement = document.activeElement;
+
+      if (activeElement === dialog) {
+        event.preventDefault();
+        if (event.shiftKey) {
+          lastElement.focus();
+        } else {
+          firstElement.focus();
+        }
+        return;
+      }
+
+      if (!dialog.contains(activeElement)) {
+        event.preventDefault();
+        firstElement.focus();
+        return;
+      }
+
+      if (event.shiftKey && activeElement === firstElement) {
+        event.preventDefault();
+        lastElement.focus();
+        return;
+      }
+
+      if (!event.shiftKey && activeElement === lastElement) {
+        event.preventDefault();
+        firstElement.focus();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
