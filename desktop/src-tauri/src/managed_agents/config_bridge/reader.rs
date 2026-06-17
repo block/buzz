@@ -11,7 +11,7 @@ pub(crate) fn read_config_surface(
     record: &ManagedAgentRecord,
     runtime_meta: Option<&KnownAcpRuntime>,
     session_cache: Option<&SessionConfigCache>,
-    persona_model: Option<&str>,
+    baseline: Option<(&str, ConfigOrigin)>,
 ) -> RuntimeConfigSurface {
     let is_pre_spawn = session_cache.is_none();
 
@@ -63,7 +63,7 @@ pub(crate) fn read_config_surface(
                 session_cache,
             ),
             acp_model.as_deref(),
-            persona_model,
+            baseline,
             model_overridden,
         )),
         provider: build_provider_field(
@@ -265,32 +265,49 @@ fn model_write_mechanism(
 /// would false-positive when a persona model is edited mid-life while the
 /// session is stale on the old model.
 ///
-/// `persona_model` is `Some` only for persona-linked agents with no explicit
-/// record model; an explicit pick has no persona baseline to override, so the
-/// field passes through unchanged. The `acp == persona` short-circuit keeps a
-/// pick of the persona model itself from rendering a no-op "override of X with
-/// X". The override preserves the base field's write mechanism — only the
-/// displayed value, origin, and secondary change.
+/// `baseline` is the value the live model overrides, paired with its true
+/// origin — `(persona_model, PersonaDefault)` for a persona-linked agent, or
+/// `(record_model, BuzzExplicit)` for a genuine-explicit agent that live-
+/// switched. It is `Some` only when there is such a baseline to override
+/// against; otherwise the field passes through unchanged. Carrying the origin
+/// in the pair (rather than hardcoding it) lets the secondary be tagged by its
+/// real source instead of always reading `PersonaDefault`.
+///
+/// The `acp == baseline_value` short-circuit keeps a live pick of the baseline
+/// model itself from rendering a no-op "override of X with X". It yields a
+/// CLEAN single-value field — `overridden_value`/`overridden_origin` cleared —
+/// rather than passing `base` through, because `build_model_field` already
+/// populates `base`'s secondary with an `AcpConfigOption` row for the
+/// record-model-plus-live-session case; returning `base` would leak that
+/// spurious row. The override preserves the base field's write mechanism — only
+/// the displayed value, origin, and secondary change.
 fn apply_runtime_override(
     base: NormalizedField,
     acp_model: Option<&str>,
-    persona_model: Option<&str>,
+    baseline: Option<(&str, ConfigOrigin)>,
     model_overridden: bool,
 ) -> NormalizedField {
     if !model_overridden {
         return base;
     }
-    let (Some(acp), Some(persona)) = (acp_model, persona_model) else {
+    let (Some(acp), Some((baseline_value, baseline_origin))) = (acp_model, baseline) else {
         return base;
     };
-    if acp == persona {
-        return base;
+    if acp == baseline_value {
+        // Live pick equals the baseline — no real divergence. Strip any
+        // secondary `build_model_field` may have produced so the panel shows a
+        // single clean value rather than "X overridden by X".
+        return NormalizedField {
+            overridden_value: None,
+            overridden_origin: None,
+            ..base
+        };
     }
     NormalizedField {
         value: Some(acp.to_string()),
         origin: ConfigOrigin::RuntimeOverride,
-        overridden_value: Some(persona.to_string()),
-        overridden_origin: Some(ConfigOrigin::PersonaDefault),
+        overridden_value: Some(baseline_value.to_string()),
+        overridden_origin: Some(baseline_origin),
         ..base
     }
 }
@@ -703,8 +720,12 @@ mod tests {
             captured_at: "".to_string(),
         };
 
-        let surface =
-            read_config_surface(&record, Some(runtime), Some(&cache), Some("persona-model"));
+        let surface = read_config_surface(
+            &record,
+            Some(runtime),
+            Some(&cache),
+            Some(("persona-model", ConfigOrigin::PersonaDefault)),
+        );
         let model = surface.normalized.model.unwrap();
 
         // Override wins the display value with a runtime-override origin.
@@ -733,8 +754,12 @@ mod tests {
             captured_at: "".to_string(),
         };
 
-        let surface =
-            read_config_surface(&record, Some(runtime), Some(&cache), Some("persona-model"));
+        let surface = read_config_surface(
+            &record,
+            Some(runtime),
+            Some(&cache),
+            Some(("persona-model", ConfigOrigin::PersonaDefault)),
+        );
         let model = surface.normalized.model.unwrap();
 
         // model_overridden is false => the override branch is not taken: origin
@@ -767,7 +792,7 @@ mod tests {
             &record,
             Some(runtime),
             Some(&cache),
-            Some("new-persona-model"),
+            Some(("new-persona-model", ConfigOrigin::PersonaDefault)),
         );
         let model = surface.normalized.model.unwrap();
 

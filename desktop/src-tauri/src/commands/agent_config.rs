@@ -52,14 +52,29 @@ fn resolve_config_surface(
         record.model.clone(),
     );
 
-    // Retain the persona model so the reader can detect a live runtime override
-    // (ACP current model diverging from the persona model). Only meaningful when
-    // the record had no explicit model — an explicit pick is the user's choice,
-    // not a persona baseline to override.
-    let persona_model_for_override = if had_model {
-        None
+    // Build the baseline the reader overrides a live model against, paired with
+    // its true origin so the secondary is tagged correctly. Two sources:
+    //   - persona-linked, no explicit record model: the persona model is the
+    //     baseline (PersonaDefault).
+    //   - genuine-explicit (record had its own model) that live-switched: the
+    //     record's own model is the baseline (BuzzExplicit). Gated behind
+    //     `model_overridden` so a persona edited mid-life (override flag false)
+    //     never synthesizes a baseline and false-positives an override.
+    // An explicit pick with no live switch has no baseline to override.
+    let model_overridden = session_cache.is_some_and(|c| c.model_overridden);
+    let baseline = if had_model {
+        if model_overridden {
+            record
+                .model
+                .clone()
+                .map(|m| (m, ConfigOrigin::BuzzExplicit))
+        } else {
+            None
+        }
     } else {
-        persona_model.clone()
+        persona_model
+            .clone()
+            .map(|m| (m, ConfigOrigin::PersonaDefault))
     };
 
     // Inject resolved persona values into the record where absent.
@@ -83,7 +98,7 @@ fn resolve_config_surface(
         &record,
         runtime_meta,
         session_cache,
-        persona_model_for_override.as_deref(),
+        baseline.as_ref().map(|(m, o)| (m.as_str(), o.clone())),
     );
 
     // Re-tag persona-sourced fields from BuzzExplicit to PersonaDefault.
@@ -496,6 +511,21 @@ mod tests {
         }
     }
 
+    /// A post-spawn session cache whose live model is `current_model` and whose
+    /// `model_overridden` flag records whether a `SwitchModel` control signal set
+    /// it (the live-switch signal).
+    fn session_cache(current_model: &str, model_overridden: bool) -> SessionConfigCache {
+        SessionConfigCache {
+            config_options: vec![],
+            available_modes: vec![],
+            available_models: vec![],
+            current_model: Some(current_model.to_string()),
+            model_overridden,
+            goose_native_config: None,
+            captured_at: "".to_string(),
+        }
+    }
+
     /// The write path must see a persona-inherited model. Without persona
     /// resolution `surface.normalized.model` would be `None` and
     /// `plan_config_write` would return "field not available for this runtime".
@@ -531,5 +561,93 @@ mod tests {
         let model = surface.normalized.model.as_ref().expect("model resolved");
         assert_eq!(model.value.as_deref(), Some("explicit-model"));
         assert_eq!(model.origin, ConfigOrigin::BuzzExplicit);
+    }
+
+    /// Part A — pending-pick: a genuine-explicit pick X with a divergent live
+    /// model Y but `model_overridden == false` (the live switch is not yet
+    /// applied — a restart is pending) must keep X as the primary and must NOT
+    /// surface Y as an override row. The live `acp_model` does not win. This
+    /// FAILS against a let-live-acp-win variant (one that dropped the
+    /// `model_overridden` gate), so it is not vacuous.
+    #[test]
+    fn pending_pick_keeps_explicit_x_and_does_not_surface_live_y() {
+        let mut record = agent_record();
+        record.persona_id = None;
+        record.model = Some("model-x".to_string());
+        let personas: Vec<PersonaRecord> = vec![];
+        let cache = session_cache("model-y", false);
+
+        let surface =
+            resolve_config_surface(record, &personas, Some(goose_runtime()), Some(&cache));
+        let model = surface.normalized.model.expect("model resolved");
+
+        assert_eq!(model.value.as_deref(), Some("model-x"));
+        assert_eq!(model.origin, ConfigOrigin::BuzzExplicit);
+        assert_ne!(model.origin, ConfigOrigin::RuntimeOverride);
+        assert_ne!(model.overridden_value.as_deref(), Some("model-y"));
+    }
+
+    /// W2 — genuine-explicit live switch: record.model = X, no persona,
+    /// `model_overridden == true`, live model = Y. The live Y must render as the
+    /// primary with a `RuntimeOverride` origin and X as the secondary tagged
+    /// `BuzzExplicit` (its true source — NOT `PersonaDefault`). FAILS against the
+    /// shipped no-persona early-return, which left X as primary and Y struck.
+    #[test]
+    fn genuine_explicit_live_switch_renders_y_over_x_buzz_explicit_secondary() {
+        let mut record = agent_record();
+        record.persona_id = None;
+        record.model = Some("model-x".to_string());
+        let personas: Vec<PersonaRecord> = vec![];
+        let cache = session_cache("model-y", true);
+
+        let surface =
+            resolve_config_surface(record, &personas, Some(goose_runtime()), Some(&cache));
+        let model = surface.normalized.model.expect("model resolved");
+
+        assert_eq!(model.value.as_deref(), Some("model-y"));
+        assert_eq!(model.origin, ConfigOrigin::RuntimeOverride);
+        assert_eq!(model.overridden_value.as_deref(), Some("model-x"));
+        assert_eq!(model.overridden_origin, Some(ConfigOrigin::BuzzExplicit));
+    }
+
+    /// Y==X collision: a genuine-explicit agent live-switches to the SAME value
+    /// it already had. There is no real divergence, so the field must be a clean
+    /// single value with NO secondary row. FAILS against a naive `return base`
+    /// that would leak the `AcpConfigOption` row `build_model_field` populates.
+    #[test]
+    fn genuine_explicit_live_switch_to_same_model_yields_clean_field() {
+        let mut record = agent_record();
+        record.persona_id = None;
+        record.model = Some("model-x".to_string());
+        let personas: Vec<PersonaRecord> = vec![];
+        let cache = session_cache("model-x", true);
+
+        let surface =
+            resolve_config_surface(record, &personas, Some(goose_runtime()), Some(&cache));
+        let model = surface.normalized.model.expect("model resolved");
+
+        assert_eq!(model.value.as_deref(), Some("model-x"));
+        assert_eq!(model.overridden_value, None);
+        assert_eq!(model.overridden_origin, None);
+    }
+
+    /// Persona parity (regression): a persona-linked agent with no explicit
+    /// record model that live-switches still renders the persona model as the
+    /// secondary tagged `PersonaDefault` — the typed-baseline change must NOT
+    /// regress the persona arm to a different origin.
+    #[test]
+    fn persona_linked_live_switch_keeps_persona_default_secondary() {
+        let record = agent_record();
+        let personas = vec![persona_with_model("persona-model")];
+        let cache = session_cache("model-y", true);
+
+        let surface =
+            resolve_config_surface(record, &personas, Some(goose_runtime()), Some(&cache));
+        let model = surface.normalized.model.expect("model resolved");
+
+        assert_eq!(model.value.as_deref(), Some("model-y"));
+        assert_eq!(model.origin, ConfigOrigin::RuntimeOverride);
+        assert_eq!(model.overridden_value.as_deref(), Some("persona-model"));
+        assert_eq!(model.overridden_origin, Some(ConfigOrigin::PersonaDefault));
     }
 }
