@@ -439,7 +439,7 @@ async fn session_new_rejects_oversized_system_prompt() {
     let id = h
         .send(
             "session/new",
-            json!({"cwd":"/tmp","mcpServers":[],"systemPrompt": big_prompt}),
+            json!({"cwd":"/tmp","mcpServers":[],"_meta":{"buzz.systemPrompt": big_prompt}}),
         )
         .await;
     let r = h.recv_until(|v| v["id"] == json!(id)).await;
@@ -476,7 +476,7 @@ async fn system_prompt_reaches_llm_system_role() {
     let sn_id = h
         .send(
             "session/new",
-            json!({"cwd":"/tmp","mcpServers":[],"systemPrompt": canary}),
+            json!({"cwd":"/tmp","mcpServers":[],"_meta":{"buzz.systemPrompt": canary}}),
         )
         .await;
     let r = h.recv_until(|v| v["id"] == json!(sn_id)).await;

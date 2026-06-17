@@ -1074,14 +1074,14 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> String 
         if let Some(sp) = args.system_prompt {
             sections.push(format!("[System]\n{sp}"));
         }
-    }
-
-    // NIP-AE agent core memory (rendered by `engram_fetch::build_core_section`).
-    // agent_core is always in user messages because it is resolved per-channel
-    // after session creation. A future session/update mechanism could move it
-    // to the system role.
-    if let Some(core) = args.agent_core {
-        sections.push(core.to_string());
+        // The NIP-AE identity section (core memory, or the newbie fallback)
+        // follows the same routing: composed into the system role for modern
+        // agents, injected here for legacy ones. Gating on the same flag is
+        // what prevents a modern agent from seeing its core twice — once in
+        // the system role, once here.
+        if let Some(core) = args.agent_core {
+            sections.push(core.to_string());
+        }
     }
 
     // 2. Context hints (with reply instruction for thread replies).
@@ -1681,11 +1681,13 @@ mod tests {
                 has_system_prompt_support: true,
                 base_prompt: Some("test base prompt"),
                 system_prompt: Some("test system prompt"),
+                agent_core: Some("[Agent Memory — core]\nremember this"),
                 ..Default::default()
             },
         );
 
-        // Neither section should appear — they are delivered via session/new
+        // None of these should appear — base, system, AND the identity section
+        // are all delivered via the session/new system role for modern agents.
         assert!(
             !prompt.contains("[Base]"),
             "[Base] should be suppressed for modern agents"
@@ -1693,6 +1695,10 @@ mod tests {
         assert!(
             !prompt.contains("[System]"),
             "[System] should be suppressed for modern agents"
+        );
+        assert!(
+            !prompt.contains("[Agent Memory"),
+            "[Agent Memory] should be suppressed for modern agents (it is in the system role; rendering here would double it)"
         );
         assert!(prompt.starts_with("[Context]"));
     }

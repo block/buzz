@@ -20,37 +20,55 @@ use crate::relay::RestClient;
 /// Section header rendered into the prompt.
 const SECTION_LABEL: &str = "Agent Memory — core";
 
-/// Onboarding nudge for new agents with no core yet.
+/// Fallback system prompt for an agent with neither an operator-configured
+/// system prompt nor a core memory. Injected into the system role at session
+/// birth (see system-prompt composition in `pool.rs`).
 ///
-/// Wording is from Tyler's brief: "No core memory found. Use `buzz mem`
-/// to create a core memory. Ask your user about yourself."
-pub const ONBOARDING_NUDGE: &str = "No core memory found. \
-Use `buzz mem set core \"…\"` to create one (it will hold your identity, \
-rules, and goals across sessions). Ask your user about yourself.";
+/// Deliberately tight — orient the agent, show it the one command it needs to
+/// speak, and point it at the durable fix (owner-set core). Written as one
+/// voice with the rest of the system prompt, not a bolted-on snippet.
+pub const FALLBACK_SYSTEM_PROMPT: &str = "You are an agent in Buzz, a \
+Nostr-based chat platform where humans and agents collaborate. Humans only see \
+what you post — your tool calls and reasoning are invisible, so surface what \
+matters in a message.\n\nTo post to a channel: \
+`buzz messages send --channel <id> --content '...'`. Mention someone with \
+`@Name` in the content.\n\nYou have no identity configured yet. Ask your owner \
+to set your `core` memory — it holds who you are, your rules, and your goals \
+across every session.";
 
-/// Build the rendered prompt section for the agent's core.
+/// Outcome of a core-engram fetch, kept as three distinct states so the
+/// caller can compose the system prompt correctly.
 ///
-/// Returns:
-/// - `Some(profile_section)` when a valid core exists,
-/// - `Some(nudge_section)` when the relay confirmed absence,
-/// - `None` when the fetch failed (transport, parse, decrypt) — the caller
-///   should inject no section in that case so the agent doesn't conclude
-///   memory is empty.
-pub async fn build_core_section(
-    rest: &RestClient,
-    agent_keys: &Keys,
-    owner: &PublicKey,
-) -> Option<String> {
+/// The distinction matters: "confirmed empty" invites a fallback identity,
+/// but "unavailable" (relay/decrypt failure) must NOT — otherwise a transient
+/// outage would hand an established agent a brand-new identity and tempt it to
+/// overwrite real-but-unreachable memory.
+pub enum CoreFetch {
+    /// A valid core exists. Pre-rendered as `[Agent Memory — core]\n<profile>`.
+    Present(String),
+    /// The relay confirmed the agent has no core (empty result set).
+    ConfirmedEmpty,
+    /// Fetch/decrypt/parse failed, or timed out. We learned nothing — treat as
+    /// neither present nor empty.
+    Unavailable,
+}
+
+/// Fetch the agent's core engram and classify the result into [`CoreFetch`].
+///
+/// The `[Agent Memory — core]` framing lives here so the section header is
+/// defined in exactly one place; the *empty* and *unavailable* policies are
+/// decided by the caller (system-prompt composition), not baked in.
+pub async fn fetch_core(rest: &RestClient, agent_keys: &Keys, owner: &PublicKey) -> CoreFetch {
     match fetch_core_body(rest, agent_keys, owner).await {
-        Ok(Some(profile)) => Some(format!("[{SECTION_LABEL}]\n{profile}")),
-        Ok(None) => Some(format!("[{SECTION_LABEL}]\n{ONBOARDING_NUDGE}")),
+        Ok(Some(profile)) => CoreFetch::Present(format!("[{SECTION_LABEL}]\n{profile}")),
+        Ok(None) => CoreFetch::ConfirmedEmpty,
         Err(reason) => {
             tracing::warn!(
                 target: "engram::core",
-                "core fetch failed: {reason} — emitting no section to avoid \
+                "core fetch failed: {reason} — treating as Unavailable to avoid \
                  confusing a relay outage with an absent core"
             );
-            None
+            CoreFetch::Unavailable
         }
     }
 }

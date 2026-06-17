@@ -298,8 +298,12 @@ impl AcpClient {
     /// Send `session/new` and return the full response alongside the session ID.
     ///
     /// `cwd` must be an absolute path. `mcp_servers` may be empty.
-    /// `system_prompt` is included in the request when `Some` — agents that
-    /// support the field will use it; others ignore unknown fields per JSON-RPC.
+    /// `system_prompt`, when `Some`, is attached under ACP's sanctioned
+    /// extension point — `_meta` — namespaced as `buzz.systemPrompt`. ACP's
+    /// `NewSessionRequest` defines no `systemPrompt` field; `_meta` is the
+    /// spec's reserved object for client/agent extensions, so this keeps us
+    /// compliant rather than riding an undocumented top-level key. Agents that
+    /// support the field read it from `_meta`; others ignore it.
     /// Callers use [`extract_model_config_options`] and [`extract_model_state`]
     /// to pull model info from the raw result.
     pub async fn session_new_full(
@@ -313,7 +317,7 @@ impl AcpClient {
             "mcpServers": mcp_servers,
         });
         if let Some(sp) = system_prompt {
-            params["systemPrompt"] = serde_json::Value::String(sp.to_owned());
+            params["_meta"] = serde_json::json!({ "buzz.systemPrompt": sp });
         }
         let result = self.send_request("session/new", params).await?;
         let session_id = result["sessionId"]
@@ -2044,7 +2048,7 @@ mod tests {
         );
     }
 
-    // ── session_new_full systemPrompt serialization ──────────────────────
+    // ── session_new_full systemPrompt serialization (via _meta) ──────────
 
     #[tokio::test]
     async fn session_new_full_includes_system_prompt_when_some() {
@@ -2068,17 +2072,23 @@ mod tests {
             .expect("session_new_full should succeed");
 
         assert_eq!(resp.session_id, "ses_test");
-        let received = &resp.raw["_receivedRequest"];
+        let params = &resp.raw["_receivedRequest"]["params"];
+        // Compliance: carried under ACP's `_meta` extension point, namespaced.
         assert_eq!(
-            received["params"]["systemPrompt"].as_str(),
+            params["_meta"]["buzz.systemPrompt"].as_str(),
             Some("Custom system prompt"),
-            "systemPrompt should be included in params when Some"
+            "system prompt should be in _meta.buzz.systemPrompt when Some"
+        );
+        // And NOT as a bare top-level key (the old, non-compliant placement).
+        assert!(
+            params["systemPrompt"].is_null(),
+            "system prompt must not be a top-level key"
         );
     }
 
     #[tokio::test]
     async fn session_new_full_omits_system_prompt_when_none() {
-        // When system_prompt is None, the field should not appear in params.
+        // When system_prompt is None, neither _meta nor a top-level field appears.
         let script = r#"
             read -t 2 _init
             echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
@@ -2098,10 +2108,14 @@ mod tests {
             .expect("session_new_full should succeed");
 
         assert_eq!(resp.session_id, "ses_test");
-        let received = &resp.raw["_receivedRequest"];
+        let params = &resp.raw["_receivedRequest"]["params"];
         assert!(
-            received["params"]["systemPrompt"].is_null(),
-            "systemPrompt should NOT be in params when value is None"
+            params["systemPrompt"].is_null(),
+            "systemPrompt should NOT be a top-level key when value is None"
+        );
+        assert!(
+            params["_meta"].is_null(),
+            "_meta should not be added when there is no system prompt"
         );
     }
 }

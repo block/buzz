@@ -82,9 +82,11 @@ pub struct SessionState {
     pub turn_counts: HashMap<Uuid, u32>,
     /// Turn counter for the heartbeat session.
     pub heartbeat_turn_count: u32,
-    /// channel_id → rendered NIP-AE core prompt section, populated once at
-    /// session creation per Tyler's spec (no mid-session refresh).
-    pub core_sections: HashMap<Uuid, String>,
+    /// channel_id → rendered identity section (operator prompt and/or NIP-AE
+    /// core memory, or the fallback), populated once at session creation per
+    /// Tyler's spec (no mid-session refresh). Read only by the legacy
+    /// user-message path; v2 agents carry the same value in the system role.
+    pub identity_sections: HashMap<Uuid, String>,
 }
 
 impl SessionState {
@@ -105,7 +107,7 @@ impl SessionState {
     /// Returns `true` if the channel had an active session.
     pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> bool {
         self.turn_counts.remove(channel_id);
-        self.core_sections.remove(channel_id);
+        self.identity_sections.remove(channel_id);
         self.sessions.remove(channel_id).is_some()
     }
 
@@ -115,14 +117,14 @@ impl SessionState {
         self.turn_counts.clear();
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
-        self.core_sections.clear();
+        self.identity_sections.clear();
     }
 
     #[cfg(test)]
     fn has_channel_state(&self, channel_id: &Uuid) -> bool {
         self.sessions.contains_key(channel_id)
             || self.turn_counts.contains_key(channel_id)
-            || self.core_sections.contains_key(channel_id)
+            || self.identity_sections.contains_key(channel_id)
     }
 }
 
@@ -248,7 +250,7 @@ pub struct PromptContext {
     /// injection is skipped entirely (no owner = no `(agent, owner)` pair).
     pub agent_owner_pubkey: Option<nostr::PublicKey>,
     /// Whether NIP-AE agent core memory injection is enabled. When false,
-    /// the per-session core engram fetch is skipped and `core_sections`
+    /// the per-session core engram fetch is skipped and `identity_sections`
     /// remains empty for every channel, so `format_prompt` renders no
     /// `[Agent Memory — core]` section. On by default; disabled via
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
@@ -421,6 +423,65 @@ const MODEL_SWITCH_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
 const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Resolve the agent's *identity section* — the portion of the system prompt
+/// that carries who the agent is (its core memory) or, failing that, a fallback
+/// that teaches a brand-new agent how to bootstrap one.
+///
+/// This is decided once, at session birth, from the core-fetch outcome and
+/// whether the operator configured a system prompt. The truth table (locked
+/// with Tyler):
+///
+/// | operator prompt | core fetch       | identity section          |
+/// |-----------------|------------------|---------------------------|
+/// | any             | `Present(s)`     | `Some(s)` — core composes in additively |
+/// | yes             | `ConfirmedEmpty` | `None` — operator prompt is the identity |
+/// | no              | `ConfirmedEmpty` | `Some(FALLBACK)` — orient the newbie |
+/// | any             | `Unavailable`    | `None` — never hand an established agent a newbie identity over a relay hiccup |
+///
+/// The two non-obvious rows are the load-bearing ones: core is *additive*, not
+/// exclusive (a configured operator prompt does NOT suppress real core memory),
+/// and `Unavailable` must inject neither core nor fallback (a transient outage
+/// must not look like "no core").
+fn resolve_identity_section(
+    has_operator_prompt: bool,
+    core: crate::engram_fetch::CoreFetch,
+) -> Option<String> {
+    use crate::engram_fetch::{CoreFetch, FALLBACK_SYSTEM_PROMPT};
+    match core {
+        CoreFetch::Present(section) => Some(section),
+        CoreFetch::ConfirmedEmpty if !has_operator_prompt => {
+            Some(FALLBACK_SYSTEM_PROMPT.to_string())
+        }
+        CoreFetch::ConfirmedEmpty | CoreFetch::Unavailable => None,
+    }
+}
+
+/// Compose the system-role string sent in `session/new` from its three parts,
+/// in order: base prompt, operator prompt, identity section. Any subset may be
+/// absent; sections are joined with a blank line. Returns `None` only when all
+/// three are absent (nothing to send).
+fn compose_system_prompt(
+    base_prompt: Option<&str>,
+    operator_prompt: Option<&str>,
+    identity_section: Option<&str>,
+) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::with_capacity(3);
+    if let Some(bp) = base_prompt {
+        parts.push(bp.trim_end());
+    }
+    if let Some(sp) = operator_prompt {
+        parts.push(sp);
+    }
+    if let Some(id) = identity_section {
+        parts.push(id);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
 /// on the agent (first session only), and apply `desired_model` if set.
 ///
@@ -430,17 +491,18 @@ const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
+    identity_section: Option<&str>,
 ) -> Result<String, AcpError> {
-    // Combine base_prompt + system_prompt into a single systemPrompt value
-    // for the session/new request. Only sent when the agent declares protocol
-    // version >= 2 (supports systemPrompt); legacy agents ignore it.
+    // Compose the system-role string (base + operator + identity) for the
+    // session/new request. Only sent when the agent declares protocol version
+    // >= 2 (supports systemPrompt); legacy agents ignore it and receive these
+    // sections in the user message via `format_prompt` instead.
     let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
-        match (ctx.base_prompt, ctx.system_prompt.as_deref()) {
-            (Some(bp), Some(sp)) => Some(format!("{}\n\n{sp}", bp.trim_end())),
-            (Some(bp), None) => Some(bp.trim_end().to_string()),
-            (None, Some(sp)) => Some(sp.to_string()),
-            (None, None) => None,
-        }
+        compose_system_prompt(
+            ctx.base_prompt,
+            ctx.system_prompt.as_deref(),
+            identity_section,
+        )
     } else {
         None
     };
@@ -732,13 +794,79 @@ pub async fn run_prompt_task(
         turn_id.clone(),
     );
 
+    // ── NIP-AE: resolve the identity section BEFORE session creation ──────
+    //
+    // The identity section (core memory, or the newbie fallback) must be known
+    // before `session/new` so it can be composed into the system prompt at
+    // session birth. We therefore fetch here — gated on the same conditions as
+    // the original post-creation fetch — rather than after the session exists.
+    //
+    // The fetch runs only for a channel that has no cached session yet (a cheap
+    // map lookup). Heartbeat sessions never carry an identity section, matching
+    // the original behavior.
+    //
+    // Failure modes (all fail open — no crash, no block):
+    //   * memory disabled / no owner / not a channel → no identity section
+    //   * confirmed absence + no operator prompt → newbie fallback prompt
+    //   * transport / decrypt / parse error / timeout → Unavailable → inject
+    //     nothing. We never mistake "relay slow or broken" for "no core" —
+    //     that would hand an established agent a fresh identity and tempt it to
+    //     overwrite real, just-unreachable memory.
+    //
+    // Per Tyler's locked spec: NO mid-session refreshes. Re-fetch only happens
+    // when a session is invalidated and recreated.
+    //
+    // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` disables this path.
+    let identity_section: Option<String> = match &source {
+        PromptSource::Channel(cid)
+            if ctx.memory_enabled && !agent.state.sessions.contains_key(cid) =>
+        {
+            if let Some(owner_pk) = ctx.agent_owner_pubkey.as_ref() {
+                // Bounded — we'd rather start the session with no identity
+                // section than block session creation on a stalled relay.
+                const CORE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+                let fetch =
+                    crate::engram_fetch::fetch_core(&ctx.rest_client, &ctx.agent_keys, owner_pk);
+                let core = match tokio::time::timeout(CORE_FETCH_TIMEOUT, fetch).await {
+                    Ok(c) => c,
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "engram::core",
+                            channel = %cid,
+                            timeout_ms = CORE_FETCH_TIMEOUT.as_millis() as u64,
+                            "core fetch timed out — treating as Unavailable"
+                        );
+                        crate::engram_fetch::CoreFetch::Unavailable
+                    }
+                };
+                let section = resolve_identity_section(ctx.system_prompt.is_some(), core);
+                if let Some(ref s) = section {
+                    tracing::info!(
+                        target: "engram::core",
+                        channel = %cid,
+                        section_len = s.len(),
+                        "resolved NIP-AE identity section"
+                    );
+                }
+                section
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
     let (session_id, is_new_session) = match &source {
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false)
             } else {
-                // Create new session with model application.
-                match create_session_and_apply_model(&mut agent, &ctx).await {
+                // Create new session with model application. The identity
+                // section is composed into the system prompt for v2 agents;
+                // for v1 agents it is cached below for the user-message path.
+                match create_session_and_apply_model(&mut agent, &ctx, identity_section.as_deref())
+                    .await
+                {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
@@ -773,7 +901,8 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx).await {
+                // Heartbeat sessions carry no identity section.
+                match create_session_and_apply_model(&mut agent, &ctx, None).await {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
@@ -819,65 +948,20 @@ pub async fn run_prompt_task(
         }),
     );
 
-    // ── NIP-AE: fetch core engram on new channel sessions ────────────────
+    // ── NIP-AE: cache the identity section for the legacy user-message path ──
     //
-    // Fire one synchronous fetch + decrypt + render right after the session
-    // is born; cache the rendered section in `state.core_sections` keyed by
-    // channel id. Subsequent turns in the same session reuse the cached
-    // section. `format_prompt` reads it from the per-channel cache.
+    // The identity section was already resolved before session creation (see
+    // above) and composed into the system prompt for v2 agents. For v1 agents
+    // there is no system role, so `format_prompt` injects it as a user-message
+    // section instead — reading it from this per-channel cache. The cache is
+    // populated for both versions; `format_prompt` gates the render on
+    // `!has_system_prompt_support` so v2 agents never see it twice.
     //
-    // Failure modes (all fail open — no crash, no block):
-    //   * no owner configured → skip (no NIP-AE namespace exists)
-    //   * confirmed absence → cache the onboarding nudge so the agent
-    //     learns how to bootstrap itself.
-    //   * transport / decrypt / parse error → inject nothing. We never
-    //     mistake "relay slow or broken" for "no core" — that would invite
-    //     the agent to overwrite real, just-unreachable memory.
-    //   * fetch exceeds CORE_FETCH_TIMEOUT → inject nothing, same reason.
-    //
-    // Per Tyler's locked spec: NO mid-session refreshes. Re-fetch only
-    // happens when a session is invalidated and recreated (see
-    // `SessionState::invalidate_channel`).
-    //
-    // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` disables the
-    // NIP-AE injection path. By default we run the fetch and populate
-    // `state.core_sections`, so `format_prompt` renders the core section.
-    // When disabled we skip the fetch outright and leave `core_sections`
-    // empty. The `buzz mem` CLI and the relay's acceptance of
-    // kind:30174 engrams are unaffected.
-    if is_new_session && ctx.memory_enabled {
-        if let (PromptSource::Channel(cid), Some(owner_pk)) =
-            (&source, ctx.agent_owner_pubkey.as_ref())
-        {
-            // Bounded — we'd rather start the session with no core hint
-            // than block prompt formatting on a stalled relay.
-            const CORE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-            let fetch = crate::engram_fetch::build_core_section(
-                &ctx.rest_client,
-                &ctx.agent_keys,
-                owner_pk,
-            );
-            let section = match tokio::time::timeout(CORE_FETCH_TIMEOUT, fetch).await {
-                Ok(s) => s,
-                Err(_) => {
-                    tracing::warn!(
-                        target: "engram::core",
-                        channel = %cid,
-                        timeout_ms = CORE_FETCH_TIMEOUT.as_millis() as u64,
-                        "core fetch timed out — emitting no section"
-                    );
-                    None
-                }
-            };
-            if let Some(rendered) = section {
-                tracing::info!(
-                    target: "engram::core",
-                    channel = %cid,
-                    section_len = rendered.len(),
-                    "injected NIP-AE core section"
-                );
-                agent.state.core_sections.insert(*cid, rendered);
-            }
+    // Per Tyler's locked spec: NO mid-session refreshes. The section is frozen
+    // for the life of the session.
+    if is_new_session {
+        if let (PromptSource::Channel(cid), Some(rendered)) = (&source, &identity_section) {
+            agent.state.identity_sections.insert(*cid, rendered.clone());
         }
     }
 
@@ -1042,7 +1126,7 @@ pub async fn run_prompt_task(
             );
         }
 
-        let agent_core_section = agent.state.core_sections.get(&b.channel_id).cloned();
+        let agent_core_section = agent.state.identity_sections.get(&b.channel_id).cloned();
         crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
@@ -2307,6 +2391,83 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use serde_json::json;
 
+    // ── resolve_identity_section: the locked truth table ─────────────────────
+    use crate::engram_fetch::{CoreFetch, FALLBACK_SYSTEM_PROMPT};
+
+    #[test]
+    fn identity_present_core_composes_in_regardless_of_operator_prompt() {
+        // Core present → it is the identity, whether or not an operator prompt
+        // exists. (Additive, not exclusive — Max's correction.)
+        let core = || CoreFetch::Present("[Agent Memory — core]\nI am Sami.".into());
+        assert_eq!(
+            resolve_identity_section(false, core()).as_deref(),
+            Some("[Agent Memory — core]\nI am Sami.")
+        );
+        assert_eq!(
+            resolve_identity_section(true, core()).as_deref(),
+            Some("[Agent Memory — core]\nI am Sami.")
+        );
+    }
+
+    #[test]
+    fn identity_confirmed_empty_no_operator_yields_fallback() {
+        // The only path that injects the newbie fallback.
+        assert_eq!(
+            resolve_identity_section(false, CoreFetch::ConfirmedEmpty).as_deref(),
+            Some(FALLBACK_SYSTEM_PROMPT)
+        );
+    }
+
+    #[test]
+    fn identity_confirmed_empty_with_operator_yields_none() {
+        // Operator prompt is the identity; no fallback over the top of it.
+        assert_eq!(
+            resolve_identity_section(true, CoreFetch::ConfirmedEmpty),
+            None
+        );
+    }
+
+    #[test]
+    fn identity_unavailable_always_yields_none() {
+        // A relay hiccup must never hand an established agent a newbie identity,
+        // with or without an operator prompt.
+        assert_eq!(
+            resolve_identity_section(false, CoreFetch::Unavailable),
+            None
+        );
+        assert_eq!(resolve_identity_section(true, CoreFetch::Unavailable), None);
+    }
+
+    // ── compose_system_prompt: ordering and absence handling ─────────────────
+
+    #[test]
+    fn compose_joins_all_three_in_order() {
+        let out = compose_system_prompt(Some("BASE  "), Some("OP"), Some("ID")).unwrap();
+        // Base is trimmed at the trailing edge; sections joined by a blank line.
+        assert_eq!(out, "BASE\n\nOP\n\nID");
+    }
+
+    #[test]
+    fn compose_skips_absent_parts() {
+        assert_eq!(
+            compose_system_prompt(Some("BASE"), None, Some("ID")).as_deref(),
+            Some("BASE\n\nID")
+        );
+        assert_eq!(
+            compose_system_prompt(None, None, Some("ID")).as_deref(),
+            Some("ID")
+        );
+        assert_eq!(
+            compose_system_prompt(Some("BASE"), None, None).as_deref(),
+            Some("BASE")
+        );
+    }
+
+    #[test]
+    fn compose_all_absent_is_none() {
+        assert_eq!(compose_system_prompt(None, None, None), None);
+    }
+
     // ── prepend_base_for_legacy regression tests ─────────────────────────────
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
@@ -2699,8 +2860,8 @@ mod tests {
         s.sessions.insert(ch_b, "sess-b".into());
         s.turn_counts.insert(ch_a, 5);
         s.turn_counts.insert(ch_b, 3);
-        s.core_sections.insert(ch_a, "core-a".into());
-        s.core_sections.insert(ch_b, "core-b".into());
+        s.identity_sections.insert(ch_a, "core-a".into());
+        s.identity_sections.insert(ch_b, "core-b".into());
         s.heartbeat_session = Some("sess-hb".into());
         s.heartbeat_turn_count = 7;
         (s, ch_a, ch_b)
@@ -2718,11 +2879,11 @@ mod tests {
 
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.identity_sections.contains_key(&ch_a));
         assert!(!s.has_channel_state(&ch_a));
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.identity_sections.get(&ch_b).unwrap(), "core-b");
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
         assert_eq!(s.heartbeat_turn_count, 7);
     }
@@ -2739,7 +2900,7 @@ mod tests {
 
         assert_eq!(s.sessions.get(&ch_a).unwrap(), "sess-a");
         assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
-        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
+        assert_eq!(s.identity_sections.get(&ch_a).unwrap(), "core-a");
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
     }
 
@@ -2750,12 +2911,12 @@ mod tests {
 
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.identity_sections.contains_key(&ch_a));
         assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.identity_sections.get(&ch_b).unwrap(), "core-b");
         // heartbeat untouched
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
         assert_eq!(s.heartbeat_turn_count, 7);
@@ -2772,8 +2933,8 @@ mod tests {
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.identity_sections.get(&ch_a).unwrap(), "core-a");
+        assert_eq!(s.identity_sections.get(&ch_b).unwrap(), "core-b");
     }
 
     #[test]
@@ -2783,7 +2944,7 @@ mod tests {
 
         assert!(s.sessions.is_empty());
         assert!(s.turn_counts.is_empty());
-        assert!(s.core_sections.is_empty());
+        assert!(s.identity_sections.is_empty());
         assert!(s.heartbeat_session.is_none());
         assert_eq!(s.heartbeat_turn_count, 0);
     }
@@ -2799,8 +2960,8 @@ mod tests {
         assert_eq!(s.turn_counts.len(), 2);
         assert_eq!(*s.turn_counts.get(&ch_a).unwrap(), 5);
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_a).unwrap(), "core-a");
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.identity_sections.get(&ch_a).unwrap(), "core-a");
+        assert_eq!(s.identity_sections.get(&ch_b).unwrap(), "core-b");
     }
 
     #[test]
@@ -2809,7 +2970,7 @@ mod tests {
         s.invalidate_all(); // should not panic
         assert!(s.sessions.is_empty());
         assert!(s.turn_counts.is_empty());
-        assert!(s.core_sections.is_empty());
+        assert!(s.identity_sections.is_empty());
     }
 
     #[test]
@@ -2818,12 +2979,12 @@ mod tests {
         assert!(s.invalidate_channel(&ch_a));
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.identity_sections.contains_key(&ch_a));
         assert!(!s.has_channel_state(&ch_a));
         // ch_b untouched
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.identity_sections.get(&ch_b).unwrap(), "core-b");
         // heartbeat untouched
         assert_eq!(s.heartbeat_session.as_deref(), Some("sess-hb"));
         assert_eq!(s.heartbeat_turn_count, 7);
@@ -2850,11 +3011,11 @@ mod tests {
         }
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
-        assert!(!s.core_sections.contains_key(&ch_a));
+        assert!(!s.identity_sections.contains_key(&ch_a));
         assert!(!s.has_channel_state(&ch_a));
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
-        assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
+        assert_eq!(s.identity_sections.get(&ch_b).unwrap(), "core-b");
     }
 
     // ── turn liveness emission ───────────────────────────────────────────────

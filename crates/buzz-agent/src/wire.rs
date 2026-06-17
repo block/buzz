@@ -49,8 +49,32 @@ pub struct SessionNewParams {
     pub cwd: String,
     #[serde(default)]
     pub mcp_servers: Vec<McpServerStdio>,
-    #[serde(default)]
+    /// System prompt, read from ACP's `_meta` extension object under the
+    /// namespaced key `buzz.systemPrompt`. The harness attaches it there (see
+    /// `buzz-acp`'s `session_new_full`) because ACP's `NewSessionRequest`
+    /// defines no `systemPrompt` field — `_meta` is the spec's reserved
+    /// extension point. Absent or wrong-shaped `_meta` → `None`.
+    #[serde(
+        default,
+        rename = "_meta",
+        deserialize_with = "system_prompt_from_meta"
+    )]
     pub system_prompt: Option<String>,
+}
+
+/// Pull `buzz.systemPrompt` out of the `_meta` object. Any shape other than a
+/// string value at that key yields `None`, so a malformed or partial `_meta`
+/// can never crash session creation.
+fn system_prompt_from_meta<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let meta = Option::<Value>::deserialize(deserializer)?;
+    Ok(meta
+        .as_ref()
+        .and_then(|m| m.get("buzz.systemPrompt"))
+        .and_then(Value::as_str)
+        .map(str::to_owned))
 }
 
 #[derive(Debug, Deserialize)]
@@ -186,11 +210,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_new_params_deserializes_system_prompt() {
+    fn session_new_params_deserializes_system_prompt_from_meta() {
         let json = serde_json::json!({
             "cwd": "/tmp/test",
             "mcpServers": [],
-            "systemPrompt": "You are a helpful agent."
+            "_meta": { "buzz.systemPrompt": "You are a helpful agent." }
         });
         let params: SessionNewParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.cwd, "/tmp/test");
@@ -225,12 +249,51 @@ mod tests {
     }
 
     #[test]
+    fn session_new_params_top_level_system_prompt_is_ignored() {
+        // The old, non-compliant placement (bare top-level key) is no longer
+        // read — the prompt lives under `_meta` now. Pin this so a regression
+        // can't silently resurrect the top-level path.
+        let json = serde_json::json!({
+            "cwd": "/tmp/test",
+            "mcpServers": [],
+            "systemPrompt": "top-level, should be ignored"
+        });
+        let params: SessionNewParams = serde_json::from_value(json).unwrap();
+        assert!(params.system_prompt.is_none());
+    }
+
+    #[test]
+    fn session_new_params_malformed_meta_is_none() {
+        // `_meta` present but missing/wrong-typed `buzz.systemPrompt` → None,
+        // never an error. Session creation must not be crashable via `_meta`.
+        let wrong_type = serde_json::json!({
+            "cwd": "/tmp/test",
+            "mcpServers": [],
+            "_meta": { "buzz.systemPrompt": 42 }
+        });
+        assert!(serde_json::from_value::<SessionNewParams>(wrong_type)
+            .unwrap()
+            .system_prompt
+            .is_none());
+
+        let missing_key = serde_json::json!({
+            "cwd": "/tmp/test",
+            "mcpServers": [],
+            "_meta": { "somethingElse": "x" }
+        });
+        assert!(serde_json::from_value::<SessionNewParams>(missing_key)
+            .unwrap()
+            .system_prompt
+            .is_none());
+    }
+
+    #[test]
     fn session_new_params_empty_string_system_prompt() {
         // An explicit empty string is distinct from absent — deserializes to Some("").
         let json = serde_json::json!({
             "cwd": "/tmp/test",
             "mcpServers": [],
-            "systemPrompt": ""
+            "_meta": { "buzz.systemPrompt": "" }
         });
         let params: SessionNewParams = serde_json::from_value(json).unwrap();
         assert_eq!(params.system_prompt, Some(String::new()));
