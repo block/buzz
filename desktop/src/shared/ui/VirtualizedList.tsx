@@ -62,14 +62,34 @@ export function VirtualizedList<T>({
   onVirtualizer,
 }: VirtualizedListProps<T>) {
   const internalScrollRef = React.useRef<HTMLDivElement>(null);
+  const spacerRef = React.useRef<HTMLDivElement>(null);
   const ownsScroll = scrollRef === undefined;
+  const resolvedScrollRef = scrollRef ?? internalScrollRef;
   // Read the element lazily inside the callback so the virtualizer picks it up
   // once the ref attaches — capturing `ref.current` at render time would freeze
   // it at the first-render `null`.
   const getScrollElement = React.useCallback(
-    () => (scrollRef ?? internalScrollRef).current,
-    [scrollRef],
+    () => resolvedScrollRef.current,
+    [resolvedScrollRef],
   );
+
+  // When a sticky header (or any caller content) sits above the rows in the
+  // same scroll container, the row spacer no longer starts at scrollTop 0.
+  // Feed that offset to the virtualizer as `scrollMargin` so the visible-range
+  // math stays aligned; without it the wrong rows render near the top.
+  const [scrollMargin, setScrollMargin] = React.useState(0);
+  React.useLayoutEffect(() => {
+    const scrollEl = resolvedScrollRef.current;
+    const spacer = spacerRef.current;
+    if (!scrollEl || !spacer) {
+      return;
+    }
+    const offset =
+      spacer.getBoundingClientRect().top -
+      scrollEl.getBoundingClientRect().top +
+      scrollEl.scrollTop;
+    setScrollMargin((prev) => (prev === offset ? prev : offset));
+  });
 
   const virtualizer = useVirtualizer({
     count: items.length,
@@ -77,6 +97,7 @@ export function VirtualizedList<T>({
     estimateSize: () => estimateSize,
     getItemKey: (index) => getItemKey(items[index], index),
     overscan,
+    scrollMargin,
   });
 
   React.useEffect(() => {
@@ -88,6 +109,7 @@ export function VirtualizedList<T>({
       {stickyHeader}
       <div
         className={cn("relative w-full", innerClassName)}
+        ref={spacerRef}
         style={{ height: `${virtualizer.getTotalSize()}px` }}
       >
         {virtualizer.getVirtualItems().map((virtualRow) => (
@@ -100,7 +122,7 @@ export function VirtualizedList<T>({
               top: 0,
               left: 0,
               width: "100%",
-              transform: `translateY(${virtualRow.start}px)`,
+              transform: `translateY(${virtualRow.start - scrollMargin}px)`,
             }}
           >
             {renderItem(items[virtualRow.index], virtualRow.index)}
