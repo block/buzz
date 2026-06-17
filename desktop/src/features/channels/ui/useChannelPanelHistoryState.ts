@@ -23,11 +23,13 @@ export type PanelValueSetter = (
   options?: PanelSetterOptions,
 ) => void;
 
-const PANEL_SEARCH_KEYS = [
+const CHANNEL_SEARCH_KEYS = [
   "agentSession",
+  "messageId",
   "profile",
   "profileView",
   "thread",
+  "threadRootId",
 ] as const;
 
 function asProfilePanelView(value: string | null): ProfilePanelView {
@@ -35,7 +37,7 @@ function asProfilePanelView(value: string | null): ProfilePanelView {
 }
 
 export function useChannelPanelHistoryState() {
-  const { applyPatch, values } = useHistorySearchState(PANEL_SEARCH_KEYS);
+  const { applyPatch, values } = useHistorySearchState(CHANNEL_SEARCH_KEYS);
 
   const setOpenThreadHeadId = React.useCallback<PanelValueSetter>(
     (value, options) => applyPatch({ thread: value }, options),
@@ -61,7 +63,14 @@ export function useChannelPanelHistoryState() {
     [applyPatch],
   );
 
+  const clearMessageRouteTarget = React.useCallback(
+    (options?: PanelSetterOptions) =>
+      applyPatch({ messageId: null, threadRootId: null }, options),
+    [applyPatch],
+  );
+
   return {
+    clearMessageRouteTarget,
     openAgentSessionPubkey: values.agentSession,
     openThreadHeadId: values.thread,
     profilePanelPubkey: values.profile,
