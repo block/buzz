@@ -308,6 +308,7 @@ export function AppShell() {
     setContextParentResolver,
     participatedRootIds,
     authoredRootIds,
+    mentionedRootIds,
     threadActivityItems,
     mutedRootIds,
     muteThread,
@@ -364,8 +365,15 @@ export function AppShell() {
       !mutedRootIds.has(rootId) &&
       (followedRootIds.has(rootId) ||
         participatedRootIds.has(rootId) ||
-        authoredRootIds.has(rootId)),
-    [followedRootIds, mutedRootIds, participatedRootIds, authoredRootIds],
+        authoredRootIds.has(rootId) ||
+        mentionedRootIds.has(rootId)),
+    [
+      followedRootIds,
+      mutedRootIds,
+      participatedRootIds,
+      authoredRootIds,
+      mentionedRootIds,
+    ],
   );
 
   const handleFollowThread = React.useCallback(
