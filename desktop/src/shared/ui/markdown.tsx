@@ -927,8 +927,10 @@ function ImageBlock({
   const [lightboxBox, setLightboxBox] = React.useState<ImageLightboxBox | null>(
     null,
   );
+  const [isHiddenInSpoiler, setIsHiddenInSpoiler] = React.useState(false);
   const [menu, setMenu] = React.useState<{ x: number; y: number } | null>(null);
   const inlineImageRef = React.useRef<HTMLImageElement | null>(null);
+  const triggerRef = React.useRef<HTMLButtonElement | null>(null);
   const [spoilerMediaSize, setSpoilerMediaSize] = React.useState<{
     height: number;
     src: string;
@@ -975,6 +977,28 @@ function ImageBlock({
         width: `${currentSpoilerMediaSize.width}px`,
       } as React.CSSProperties)
     : undefined;
+
+  React.useLayoutEffect(() => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+
+    const updateHiddenState = () => {
+      setIsHiddenInSpoiler(isInsideHiddenSpoiler(trigger));
+    };
+
+    updateHiddenState();
+
+    const spoiler = trigger.closest(".buzz-spoiler[data-spoiler]");
+    if (!spoiler) return;
+
+    const observer = new MutationObserver(updateHiddenState);
+    observer.observe(spoiler, {
+      attributeFilter: ["data-revealed"],
+      attributes: true,
+    });
+
+    return () => observer.disconnect();
+  }, []);
 
   React.useEffect(() => {
     if (!menu) return;
@@ -1046,12 +1070,15 @@ function ImageBlock({
   return (
     <>
       <button
+        aria-hidden={isHiddenInSpoiler ? true : undefined}
         aria-label={alt?.trim() ? `Zoom image: ${alt}` : "Zoom image"}
         className={cn(
           "mt-1 inline-block max-w-full cursor-zoom-in rounded-xl border-0 bg-transparent p-0 text-left align-top focus:outline-hidden focus-visible:ring-2 focus-visible:ring-ring/50",
           lightboxBox && "opacity-0",
         )}
         data-testid="message-image-lightbox-trigger"
+        ref={triggerRef}
+        tabIndex={isHiddenInSpoiler ? -1 : undefined}
         type="button"
         onClick={handleImageTriggerClick}
         onContextMenuCapture={handleContextMenu}
