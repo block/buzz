@@ -20,6 +20,7 @@ import {
   extractToolIdentity,
   extractToolResult,
   parsePromptText,
+  parseSystemPromptSections,
 } from "./agentSessionTranscriptHelpers";
 
 export { describeRawEvent } from "./agentSessionTranscriptHelpers";
@@ -330,6 +331,27 @@ export function processTranscriptEvent(
             `prompt-context:${ch}:${event.turnId ?? event.seq}`,
             "Prompt context",
             parsedPrompt.sections,
+            event.timestamp,
+            channelId,
+          );
+        }
+      }
+    } else if (event.kind === "acp_write" && method === "session/new") {
+      // The base + persona prompts ride session/new's systemPrompt, framed by
+      // the harness as [Base]/[System]. Surface them as one "System prompt" item
+      // keyed per channel-session — the frame carries no session id (it predates
+      // session creation), and session/new fires once per channel-session, so a
+      // re-created session correctly replaces the prior item.
+      const params = asRecord(payload.params);
+      const systemPrompt = asString(params.systemPrompt);
+      if (systemPrompt) {
+        const sections = parseSystemPromptSections(systemPrompt);
+        if (sections.length > 0) {
+          upsertMetadata(
+            d,
+            `system-prompt:${ch}`,
+            "System prompt",
+            sections,
             event.timestamp,
             channelId,
           );
