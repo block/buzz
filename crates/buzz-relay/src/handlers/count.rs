@@ -6,6 +6,7 @@ use nostr::Filter;
 use tracing::warn;
 
 use crate::connection::{AuthState, ConnectionState};
+use crate::handlers::req::is_author_only_event;
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 
@@ -61,6 +62,13 @@ pub async fn handle_count(
         ));
         return;
     }
+    if !super::req::author_only_filters_authorized(&filters, &authed_pubkey_hex) {
+        conn.send(RelayMessage::closed(
+            &sub_id,
+            "restricted: author-only kinds require authors=[self]",
+        ));
+        return;
+    }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
     let accessible_channels = match state.get_accessible_channel_ids_cached(&pubkey_bytes).await {
@@ -75,6 +83,11 @@ pub async fn handle_count(
     // For each filter, count matching events with channel access enforcement.
     let mut total: u64 = 0;
     for filter in &filters {
+        // Determine if this filter can match author-only kinds — if so, the
+        // fast-path count_events() cannot be used because it doesn't do
+        // per-event author filtering.
+        let needs_author_only_filtering = super::req::filter_can_match_author_only_kinds(filter);
+
         if let Some(ch_id) = extract_channel_from_filter(filter) {
             // Filter targets a specific channel — verify access.
             if !accessible_channels.contains(&ch_id) {
@@ -83,7 +96,15 @@ pub async fn handle_count(
             // Channel is accessible — count with pushability check.
             let query =
                 super::req::build_event_query_from_filter(filter, &pubkey_bytes, &state).await;
-            if super::req::filter_fully_pushable(filter) {
+            let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
+                !authors.is_empty()
+                    && authors
+                        .iter()
+                        .all(|a| a.to_hex().eq_ignore_ascii_case(&authed_pubkey_hex))
+            });
+            if super::req::filter_fully_pushable(filter)
+                && (!needs_author_only_filtering || author_is_self)
+            {
                 match state.db.count_events(&query).await {
                     Ok(n) => total += n as u64,
                     Err(e) => {
@@ -99,9 +120,14 @@ pub async fn handle_count(
                 match state.db.query_events(&q).await {
                     Ok(stored_events) => {
                         for se in stored_events {
-                            if buzz_core::filter::filters_match(std::slice::from_ref(filter), &se) {
-                                total += 1;
+                            if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se)
+                            {
+                                continue;
                             }
+                            if is_author_only_event(&se.event, &pubkey_bytes) {
+                                continue;
+                            }
+                            total += 1;
                         }
                     }
                     Err(e) => {
@@ -121,7 +147,15 @@ pub async fn handle_count(
                 super::req::build_event_query_from_filter(filter, &pubkey_bytes, &state).await;
             query.channel_ids = Some(accessible_channels.to_vec());
 
-            if super::req::filter_fully_pushable(filter) {
+            let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
+                !authors.is_empty()
+                    && authors
+                        .iter()
+                        .all(|a| a.to_hex().eq_ignore_ascii_case(&authed_pubkey_hex))
+            });
+            if super::req::filter_fully_pushable(filter)
+                && (!needs_author_only_filtering || author_is_self)
+            {
                 query.limit = None; // COUNT doesn't need a row limit
                 match state.db.count_events(&query).await {
                     Ok(n) => total += n as u64,
@@ -137,9 +171,14 @@ pub async fn handle_count(
                 match state.db.query_events(&query).await {
                     Ok(stored_events) => {
                         for se in stored_events {
-                            if buzz_core::filter::filters_match(std::slice::from_ref(filter), &se) {
-                                total += 1;
+                            if !buzz_core::filter::filters_match(std::slice::from_ref(filter), &se)
+                            {
+                                continue;
                             }
+                            if is_author_only_event(&se.event, &pubkey_bytes) {
+                                continue;
+                            }
+                            total += 1;
                         }
                     }
                     Err(e) => {

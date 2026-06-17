@@ -100,6 +100,20 @@ impl PubSubManager {
     }
 
     /// Publish an event to the Redis channel. Returns subscriber count.
+    ///
+    /// Routing note (NIP-ER author-private reminders): events are keyed by
+    /// `channel_id` (`buzz:channel:{id}`), and every relay node's subscriber
+    /// `PSUBSCRIBE buzz:channel:*` — so the channel key is a routing label, not
+    /// an isolation boundary; every node already receives every published event.
+    /// Author-private reminders (kind:30300, stored under the nil channel
+    /// sentinel) are therefore NOT protected by per-author Redis routing, and
+    /// adding it would be pointless: the reminder's author may be connected to
+    /// any node, so every node must still receive it. The actual author-only
+    /// delivery boundary is `filter_fanout_by_access` in the relay, which runs
+    /// on BOTH the in-process and the Redis cross-node (`subscribe_local`)
+    /// fan-out paths and drops every recipient that is not the event author.
+    /// Redis only ever carries events between nodes inside the relay trust
+    /// domain; the ciphertext is NIP-44-encrypted to the author regardless.
     pub async fn publish_event(
         &self,
         channel_id: Uuid,

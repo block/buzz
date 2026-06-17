@@ -33,6 +33,7 @@ export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_MESH_STATUS_REPORT = 24620;
 export const KIND_MESH_CONNECT_REQUEST = 24621;
 export const KIND_MESH_CALL_ME_NOW = 24622;
+export const KIND_EVENT_REMINDER = 30300;
 export const KIND_REPO_ANNOUNCEMENT = 30617;
 // NIP-DV: relay-signed per-viewer DM visibility snapshot (d=viewer pubkey,
 // h-tags = currently-hidden DM channel ids).

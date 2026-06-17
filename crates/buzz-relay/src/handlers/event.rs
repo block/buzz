@@ -6,7 +6,7 @@ use tracing::{debug, error, info, warn};
 
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
-    event_kind_u32, is_ephemeral, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP,
+    event_kind_u32, is_ephemeral, AUTHOR_ONLY_KINDS, KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP,
     KIND_MESH_CONNECT_REQUEST, KIND_MESH_STATUS_REPORT, KIND_PRESENCE_UPDATE,
 };
 use buzz_core::observer::{
@@ -61,6 +61,27 @@ pub async fn filter_fanout_by_access(
     stored_event: &StoredEvent,
     matches: Vec<(crate::subscription::ConnId, crate::subscription::SubId)>,
 ) -> Vec<(crate::subscription::ConnId, crate::subscription::SubId)> {
+    // Author-only kinds (NIP-ER reminders) may only ever be delivered to the
+    // event's own author. This gate lives here — the chokepoint shared by the
+    // ingest fan-out path and the Redis cross-node `subscribe_local` path, the
+    // only paths that route author-only kinds — so no such delivery can bypass
+    // it. It runs before (and independent of) the channel-membership filter
+    // below because author-only kinds are stored globally (channel_id = None).
+    let matches = if AUTHOR_ONLY_KINDS.contains(&event_kind_u32(&stored_event.event)) {
+        let author = stored_event.event.pubkey.to_bytes();
+        matches
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                state
+                    .conn_manager
+                    .pubkey_for_conn(*conn_id)
+                    .is_some_and(|pk| pk == author)
+            })
+            .collect()
+    } else {
+        matches
+    };
+
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
     };
@@ -138,6 +159,8 @@ pub(crate) async fn dispatch_persistent_event(
                 .find_map(|t| t.content().map(|s| s.to_string()))
         })
         .flatten();
+    // Author-only delivery gating (NIP-ER reminders) is enforced centrally in
+    // filter_fanout_by_access, applied to `matches` above before this loop.
     let mut drop_count = 0u32;
     for (target_conn_id, sub_id) in &matches {
         if let Some(ref owner_hex) = dm_visibility_owner {
@@ -162,10 +185,12 @@ pub(crate) async fn dispatch_persistent_event(
         );
     }
 
-    // Skip search indexing for NIP-17 gift wraps (ciphertext) and NIP-DV
-    // visibility snapshots (per-viewer private hide state, owner-gated reads).
+    // Skip search indexing for NIP-17 gift wraps (ciphertext), NIP-DV
+    // visibility snapshots (per-viewer private hide state, owner-gated reads),
+    // and author-only kinds (ciphertext not useful in search, defense in depth).
     if kind_u32 != KIND_GIFT_WRAP
         && kind_u32 != buzz_core::kind::KIND_DM_VISIBILITY
+        && !AUTHOR_ONLY_KINDS.contains(&kind_u32)
         && state
             .search_index_tx
             .try_send(stored_event.clone())
@@ -1115,6 +1140,41 @@ mod tests {
             let out =
                 filter_fanout_by_access(&state, &channel_event(Some(channel_id)), matches).await;
             assert_eq!(out, vec![(member, "m".to_string())]);
+        }
+
+        #[tokio::test]
+        async fn author_only_reminder_delivers_to_author_only() {
+            let state = test_state().await;
+
+            let author_keys = Keys::generate();
+            let author_pk = author_keys.public_key().to_bytes().to_vec();
+            let other_pk = vec![9u8; 32];
+
+            // KIND_EVENT_REMINDER (30300) is in AUTHOR_ONLY_KINDS and is stored
+            // globally (channel_id = None), so the gate must apply independent
+            // of any channel-membership check.
+            let reminder = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_EVENT_REMINDER as u16),
+                "{}",
+            )
+            .sign_with_keys(&author_keys)
+            .expect("sign reminder");
+            let stored = StoredEvent::new(reminder, None);
+
+            let author_conn = register_conn(&state, Some(author_pk));
+            let other_conn = register_conn(&state, Some(other_pk));
+            let unauthed_conn = register_conn(&state, None);
+
+            let matches = vec![
+                (author_conn, "a".to_string()),
+                (other_conn, "o".to_string()),
+                (unauthed_conn, "u".to_string()),
+            ];
+            let out = filter_fanout_by_access(&state, &stored, matches).await;
+
+            // Only the author's subscription survives; the non-author and the
+            // unauthenticated connection are both dropped.
+            assert_eq!(out, vec![(author_conn, "a".to_string())]);
         }
     }
 }

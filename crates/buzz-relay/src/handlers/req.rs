@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    KIND_AGENT_ENGRAM, KIND_AGENT_OBSERVER_FRAME, KIND_DM_VISIBILITY, KIND_GIFT_WRAP,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_OBSERVER_FRAME, KIND_DM_VISIBILITY,
+    KIND_GIFT_WRAP, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
 };
 use buzz_db::EventQuery;
 use hex;
@@ -116,6 +116,13 @@ pub async fn handle_req(
             ));
             return;
         }
+        if !author_only_filters_authorized(&filters, &authed_pubkey_hex) {
+            conn.send(RelayMessage::closed(
+                &sub_id,
+                "restricted: author-only kinds require authors=[self]",
+            ));
+            return;
+        }
     }
 
     // ── NIP-50 search: one-shot, no persistent subscription ──────────────────
@@ -138,6 +145,7 @@ pub async fn handle_req(
             &accessible_channels,
             token_channel_ids.is_none(),
             &hex::encode(&pubkey_bytes),
+            &pubkey_bytes,
             &conn,
             &state,
         )
@@ -228,6 +236,12 @@ pub async fn handle_req(
                 continue;
             }
 
+            // Author-only kinds: only the event author may see these events.
+            // Mixed-kind filters still serve other kinds normally.
+            if is_author_only_event(&stored.event, &pubkey_bytes) {
+                continue;
+            }
+
             // Dedup AFTER acceptance — an event that fails filter A's constraints
             // must remain eligible for filter B (NIP-01 OR semantics).
             if !seen_ids.insert(stored.event.id) {
@@ -283,12 +297,14 @@ pub(crate) fn build_search_channel_scope_filter(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_search_req(
     sub_id: &str,
     filters: &[Filter],
     accessible_channels: &[uuid::Uuid],
     include_global: bool,
     reader_pubkey_hex: &str,
+    reader_pubkey_bytes: &[u8],
     conn: &ConnectionState,
     state: &AppState,
 ) {
@@ -445,6 +461,9 @@ async fn handle_search_req(
                         &stored.event,
                         reader_pubkey_hex,
                     ) {
+                        continue;
+                    }
+                    if is_author_only_event(&stored.event, reader_pubkey_bytes) {
                         continue;
                     }
                     // Dedup AFTER acceptance — an event that fails filter A's constraints
@@ -803,6 +822,61 @@ pub(crate) fn engram_filters_authorized(filters: &[Filter], authed_pubkey_hex: &
 
         filter.generic_tags.get(&p_tag).is_some_and(|values| {
             !values.is_empty() && values.iter().all(|v| v == authed_pubkey_hex)
+        })
+    })
+}
+
+/// Returns `true` if the filter CAN match author-only kinds — meaning it either
+/// has no `kinds` constraint (wildcard) or includes at least one author-only kind.
+///
+/// Used by the COUNT handler to force the fallback path (per-event filtering)
+/// instead of the fast `count_events()` which cannot exclude other authors'
+/// author-only events from the aggregate count.
+pub(crate) fn filter_can_match_author_only_kinds(filter: &Filter) -> bool {
+    filter.kinds.as_ref().is_none_or(|ks| {
+        ks.iter()
+            .any(|k| AUTHOR_ONLY_KINDS.contains(&(k.as_u16() as u32)))
+    })
+}
+
+/// Returns `true` if the event is an author-only kind and the requester is NOT
+/// the author. Used as a per-event filter during historical delivery and fan-out
+/// to silently omit unauthorized events from mixed-kind result sets.
+pub(crate) fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes: &[u8]) -> bool {
+    let kind_u32 = event.kind.as_u16() as u32;
+    AUTHOR_ONLY_KINDS.contains(&kind_u32) && event.pubkey.to_bytes() != requester_pubkey_bytes
+}
+
+/// Pre-filter authorization for filters that exclusively target author-only kinds.
+///
+/// If a filter targets ONLY author-only kinds (e.g. `{kinds:[30300]}`), the
+/// `authors` field MUST contain only the requester's pubkey. Otherwise the relay
+/// would execute a DB query guaranteed to return zero results after per-event
+/// filtering — wasting resources and potentially leaking timing information.
+///
+/// For unauthenticated single-kind 30300 requests, the WS handler closes with
+/// `auth-required:`. For authenticated requests targeting another author's
+/// reminders, the WS handler closes with `restricted:`.
+///
+/// Mixed-kind filters (e.g. `{kinds:[30300, 9]}`) pass this gate — the per-event
+/// filter in the delivery loop handles the author-only omission.
+pub(crate) fn author_only_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
+    filters.iter().all(|filter| {
+        let targets_only_author_only = filter.kinds.as_ref().is_some_and(|ks| {
+            !ks.is_empty()
+                && ks
+                    .iter()
+                    .all(|k| AUTHOR_ONLY_KINDS.contains(&(k.as_u16() as u32)))
+        });
+        if !targets_only_author_only {
+            return true;
+        }
+        // Filter exclusively targets author-only kinds — require authors=[self].
+        filter.authors.as_ref().is_some_and(|authors| {
+            !authors.is_empty()
+                && authors
+                    .iter()
+                    .all(|a| a.to_hex().eq_ignore_ascii_case(authed_pubkey_hex))
         })
     })
 }

@@ -1432,7 +1432,7 @@ function MarkdownInner({
       className={cn(
         MESSAGE_MARKDOWN_CLASS,
         [
-          "max-w-none break-words text-sm leading-relaxed text-foreground",
+          "max-w-none [overflow-wrap:anywhere] text-sm leading-relaxed text-foreground",
           "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
           "[&>*+*]:mt-3",
           "[&>p+p]:mt-1.5",
