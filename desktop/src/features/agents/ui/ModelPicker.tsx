@@ -15,6 +15,7 @@ import {
   updateManagedAgent,
 } from "@/shared/api/tauri";
 import { switchManagedAgentModel } from "@/shared/api/agentControl";
+import { awaitLiveSwitchOutcome } from "@/features/agents/lib/liveSwitchOutcome";
 import { subscribeControlResults } from "@/features/agents/observerRelayStore";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import { Button } from "@/shared/ui/button";
@@ -125,45 +126,27 @@ export function ModelPicker({
   // result rejects the whole pick immediately; all other statuses must arrive
   // from every channel before resolving success.
   const sendLiveSwitch = React.useCallback(
-    async (modelId: string) => {
+    (modelId: string) => {
       const channelIds = activeTurns.map((turn) => turn.channelId);
-      const outstanding = channelIds.length;
-
-      const settled = new Promise<"ok" | "unsupported">((resolve) => {
-        let unsubscribe = () => {};
-        let remaining = outstanding;
-        const finish = (outcome: "ok" | "unsupported") => {
-          window.clearTimeout(timeout);
-          unsubscribe();
-          resolve(outcome);
-        };
+      return awaitLiveSwitchOutcome({
+        channelCount: channelIds.length,
+        modelId,
+        subscribe: (listener) =>
+          subscribeControlResults(agent.pubkey, listener),
+        sendSwitches: async () => {
+          await Promise.all(
+            channelIds.map((channelId) =>
+              switchManagedAgentModel(agent.pubkey, channelId, modelId),
+            ),
+          );
+        },
         // No reply in time: treat as sent. The override still rides the
         // requeued/next session; we just can't confirm synchronously.
-        const timeout = window.setTimeout(() => finish("ok"), 8_000);
-        unsubscribe = subscribeControlResults(agent.pubkey, (frame) => {
-          if (frame.type !== "switch_model" || frame.modelId !== modelId) {
-            return;
-          }
-          if (frame.status === "unsupported_model") {
-            // Any single failure rejects the whole pick immediately.
-            finish("unsupported");
-            return;
-          }
-          // sent / switched / turn_ending — count as success for this channel.
-          remaining -= 1;
-          if (remaining <= 0) {
-            finish("ok");
-          }
-        });
+        scheduleTimeout: (onTimeout) => {
+          const timeout = window.setTimeout(onTimeout, 8_000);
+          return () => window.clearTimeout(timeout);
+        },
       });
-
-      await Promise.all(
-        channelIds.map((channelId) =>
-          switchManagedAgentModel(agent.pubkey, channelId, modelId),
-        ),
-      );
-
-      return settled;
     },
     [activeTurns, agent.pubkey],
   );
