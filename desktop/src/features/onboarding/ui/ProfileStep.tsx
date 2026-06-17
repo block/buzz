@@ -17,7 +17,6 @@ import type { ProfileStepActions, ProfileStepState } from "./types";
 type ProfileStepProps = {
   actions: ProfileStepActions;
   direction: OnboardingTransitionDirection;
-  relayUrl?: string | null;
   transitionEffect?: OnboardingTransitionEffect;
   state: ProfileStepState;
 };

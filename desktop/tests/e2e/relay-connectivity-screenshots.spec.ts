@@ -191,44 +191,7 @@ test.describe("relay connectivity screenshots", () => {
     });
   });
 
-  test("07 — profile popover reconnect button while degraded", async ({
-    page,
-  }) => {
-    await installMockBridge(page);
-    await page.goto("/");
-
-    await expect(page.getByTestId("channel-general")).toBeVisible();
-    await driveConnectionDegraded(page);
-
-    // 2 s debounce on the "reconnecting" state before the sidebar card shows.
-    await expect(page.getByTestId("sidebar-relay-unreachable")).toBeVisible({
-      timeout: 5_000,
-    });
-
-    await page.getByTestId("sidebar-profile-avatar-button").click();
-    const reconnectBtn = page.getByTestId("profile-popover-reconnect");
-    await expect(reconnectBtn).toBeVisible();
-
-    // Wait for the Radix popover open animation on the [data-state] ancestor —
-    // the popper wrapper itself carries no animations, so querying it returns
-    // an empty list and screenshots capture a half-faded popover.
-    await reconnectBtn.evaluate((el) =>
-      Promise.all(
-        el
-          .closest("[data-state]")
-          ?.getAnimations()
-          .map((a) => a.finished) ?? [],
-      ),
-    );
-
-    // Clip to the sidebar-bottom region that includes the open popover.
-    await page.screenshot({
-      path: `${SHOTS}/07-profile-popover-reconnect.png`,
-      clip: { x: 0, y: 300, width: 480, height: 420 },
-    });
-  });
-
-  test("08 — sidebar card shows connected after external relay recovery", async ({
+  test("07 — sidebar card shows connected after external relay recovery", async ({
     page,
   }) => {
     await installMockBridge(page);

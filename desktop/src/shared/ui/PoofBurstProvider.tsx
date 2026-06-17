@@ -56,10 +56,6 @@ function playPoofSound() {
   }
 }
 
-function triggerPoof(target: Element) {
-  return getPoofOrigin(target);
-}
-
 export function PoofBurstProvider({ children }: { children: React.ReactNode }) {
   const [bursts, setBursts] = useState<PoofBurst[]>([]);
   const idRef = useRef(0);
@@ -87,7 +83,7 @@ export function PoofBurstProvider({ children }: { children: React.ReactNode }) {
 
       setBursts((current) => [
         ...current.slice(-5),
-        { ...triggerPoof(target), id },
+        { ...getPoofOrigin(target), id },
       ]);
       playPoofSound();
 

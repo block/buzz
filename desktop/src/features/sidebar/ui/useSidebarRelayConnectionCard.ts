@@ -34,6 +34,7 @@ function setRelayConnectivitySuccess(
     return;
   }
 
+  // Don't let one workspace clear another workspace's success state.
   if (!next && relayConnectivitySuccessKey !== relaySuccessKey(relayUrl)) {
     return;
   }
