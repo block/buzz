@@ -1,4 +1,4 @@
-import { ChevronDown, Inbox } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import * as React from "react";
 
 import {
@@ -6,6 +6,7 @@ import {
   type InboxFilter,
   type InboxItem,
 } from "@/features/home/lib/inbox";
+import { RemindersPanel } from "@/features/reminders/ui/RemindersPanel";
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
@@ -27,6 +28,7 @@ const FILTER_OPTIONS: Array<{ label: string; value: InboxFilter }> = [
   { value: "needs_action", label: "Needs Action" },
   { value: "activity", label: "Activity" },
   { value: "agent_activity", label: "Agents" },
+  { value: "reminders", label: "Reminders" },
 ];
 
 type InboxListPaneProps = {
@@ -37,6 +39,8 @@ type InboxListPaneProps = {
   onSelect: (itemId: string) => void;
   selectedId: string | null;
   showRightDivider?: boolean;
+  dueReminderCount: number;
+  reminderPubkey?: string;
 };
 
 export function InboxListPane({
@@ -47,8 +51,11 @@ export function InboxListPane({
   onSelect,
   selectedId,
   showRightDivider = false,
+  dueReminderCount,
+  reminderPubkey,
 }: InboxListPaneProps) {
   const activeFilter = FILTER_OPTIONS.find((option) => option.value === filter);
+  const isReminders = filter === "reminders";
   const scrollRef = React.useRef<HTMLDivElement>(null);
 
   const renderItem = (item: InboxItem) => {
@@ -144,13 +151,7 @@ export function InboxListPane({
     >
       <TopChromeInsetHeader>
         <div className="px-5 py-1">
-          <div className="flex min-w-0 items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-[6px]">
-              <Inbox className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <h2 className="translate-y-px truncate text-sm font-semibold leading-5 tracking-tight">
-                Inbox
-              </h2>
-            </div>
+          <div className="flex min-w-0 items-center justify-end gap-3">
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -160,14 +161,20 @@ export function InboxListPane({
                   variant="outline"
                 >
                   <span>{activeFilter?.label ?? "All"}</span>
+                  {dueReminderCount > 0 ? (
+                    <span
+                      className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
+                      data-testid="inbox-reminder-badge"
+                    >
+                      {dueReminderCount}
+                    </span>
+                  ) : null}
                   <ChevronDown className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="min-w-40">
                 <DropdownMenuRadioGroup
-                  onValueChange={(value) =>
-                    onFilterChange(value as InboxFilter)
-                  }
+                  onValueChange={(value) => onFilterChange(value as InboxFilter)}
                   value={filter}
                 >
                   {FILTER_OPTIONS.map((option) => (
@@ -175,7 +182,18 @@ export function InboxListPane({
                       key={option.value}
                       value={option.value}
                     >
-                      {option.label}
+                      <span className="flex flex-1 items-center justify-between gap-2">
+                        {option.label}
+                        {option.value === "reminders" &&
+                        dueReminderCount > 0 ? (
+                          <span
+                            className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
+                            data-testid="inbox-reminder-badge-option"
+                          >
+                            {dueReminderCount}
+                          </span>
+                        ) : null}
+                      </span>
                     </DropdownMenuRadioItem>
                   ))}
                 </DropdownMenuRadioGroup>
@@ -185,32 +203,43 @@ export function InboxListPane({
         </div>
       </TopChromeInsetHeader>
 
-      <div
-        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
-        data-testid="home-inbox-list"
-        ref={scrollRef}
-      >
-        {items.length === 0 ? (
-          <div className="flex h-full min-h-64 items-center justify-center px-6 text-center">
-            <div>
-              <p className="text-sm font-medium text-foreground">
-                No messages found
-              </p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                Switch back to all mail to see more messages.
-              </p>
+      {isReminders ? (
+        <div
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          data-testid="home-inbox-reminders"
+        >
+          {reminderPubkey ? (
+            <RemindersPanel includeDone pubkey={reminderPubkey} />
+          ) : null}
+        </div>
+      ) : (
+        <div
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+          data-testid="home-inbox-list"
+          ref={scrollRef}
+        >
+          {items.length === 0 ? (
+            <div className="flex h-full min-h-64 items-center justify-center px-6 text-center">
+              <div>
+                <p className="text-sm font-medium text-foreground">
+                  No messages found
+                </p>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Switch back to all mail to see more messages.
+                </p>
+              </div>
             </div>
-          </div>
-        ) : (
-          <VirtualizedList
-            estimateSize={76}
-            getItemKey={(item) => item.id}
-            items={items}
-            renderItem={renderItem}
-            scrollRef={scrollRef}
-          />
-        )}
-      </div>
+          ) : (
+            <VirtualizedList
+              estimateSize={76}
+              getItemKey={(item) => item.id}
+              items={items}
+              renderItem={renderItem}
+              scrollRef={scrollRef}
+            />
+          )}
+        </div>
+      )}
     </section>
   );
 }

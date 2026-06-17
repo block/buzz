@@ -66,6 +66,7 @@ import {
 } from "@/features/settings/ui/SettingsPanels";
 import { HuddleBar, HuddleProvider } from "@/features/huddle";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
+import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
@@ -115,7 +116,6 @@ export function AppShell() {
     goChannel,
     goHome,
     goProjects,
-    goReminders,
     goPulse,
     goSettings,
     goWorkflows,
@@ -163,6 +163,10 @@ export function AppShell() {
   const setUserStatusMutation = useSetUserStatusMutation(deferredPubkey);
   const { feedProfilesQuery, homeFeedQuery, notificationSettings } =
     useHomeFeedNotifications(identityQuery.data?.pubkey);
+  useReminderNotifications(
+    identityQuery.data?.pubkey,
+    notificationSettings.settings,
+  );
   const refetchHomeFeedOnLiveMention = React.useEffectEvent(() => {
     void homeFeedQuery.refetch();
   });
@@ -714,7 +718,7 @@ export function AppShell() {
           }}
         >
           <HuddleProvider>
-            <RemindMeLaterProvider>
+            <RemindMeLaterProvider pubkey={identityQuery.data?.pubkey}>
               <div
                 className="buzz-huddle-shell relative h-dvh overflow-hidden overscroll-none"
                 data-huddle-open={isHuddleDrawerOpen}
@@ -879,7 +883,6 @@ export function AppShell() {
                           onSelectHome={() => void goHome()}
                           onSelectProjects={() => void goProjects()}
                           onSelectPulse={() => void goPulse()}
-                          onSelectReminders={() => void goReminders()}
                           onSelectSettings={handleOpenSettings}
                           onSelectWorkflows={() => void goWorkflows()}
                           onSetPresenceStatus={(status) =>
