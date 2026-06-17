@@ -110,10 +110,27 @@ export function useChannelRouteTarget({
     }
 
     const targetMessage = timelineMessageById.get(targetMessageId) ?? null;
-    if (
-      !targetMessage?.parentId ||
-      isBroadcastReply(targetMessage.tags ?? [])
-    ) {
+    if (!targetMessage) {
+      return;
+    }
+
+    if (!targetMessage.parentId) {
+      closeAgentSession();
+      // Root message links should open the reply panel for that root. The
+      // timeline scroll/highlight target alone is not enough: root links have
+      // no parent/thread metadata, so the reply-only branch below cannot infer
+      // a thread head.
+      setProfilePanelPubkey(null, { replace: true });
+      setEditTargetId(null);
+      setOpenThreadHeadId(targetMessage.id, { replace: true });
+      setThreadReplyTargetId(targetMessage.id);
+      setThreadScrollTargetId(null);
+      setExpandedThreadReplyIds(new Set());
+      handledThreadRouteTargetRef.current = targetKey;
+      return;
+    }
+
+    if (isBroadcastReply(targetMessage.tags ?? [])) {
       return;
     }
 

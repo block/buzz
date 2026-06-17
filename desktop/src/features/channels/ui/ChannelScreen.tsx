@@ -94,6 +94,7 @@ export function ChannelScreen({
     setTopbarSearchHidden,
   } = useAppShell();
   const {
+    clearMessageRouteTarget,
     openAgentSessionPubkey,
     openThreadHeadId,
     profilePanelPubkey,
@@ -493,6 +494,9 @@ export function ChannelScreen({
   const handleThreadScrollTargetResolved = React.useCallback(() => {
     setThreadScrollTargetId(null);
   }, []);
+  const handleTargetReached = React.useCallback(() => {
+    clearMessageRouteTarget({ replace: true });
+  }, [clearMessageRouteTarget]);
   React.useEffect(() => {
     resetComposerTargets(activeChannelId);
   }, [activeChannelId, resetComposerTargets]);
@@ -693,6 +697,7 @@ export function ChannelScreen({
                     handleThreadScrollTargetResolved
                   }
                   onThreadPanelResizeStart={handleThreadPanelResizeStart}
+                  onTargetReached={handleTargetReached}
                   onToggleReaction={effectiveToggleReaction}
                   openAgentSessionPubkey={openAgentSessionPubkey}
                   openThreadHeadId={openThreadHeadId}

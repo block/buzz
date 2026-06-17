@@ -266,6 +266,77 @@ test("settings is a route: section survives reload, closing returns to the previ
   await expect(threadPanel).toBeVisible();
 });
 
+test("message links to visible root messages open the thread panel", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "Welcome to #general",
+  );
+
+  const link =
+    "buzz://message?channel=9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50&id=mock-general-welcome";
+  await page.getByTestId("message-input").fill(`Root link repro ${link}`);
+  await page.getByTestId("send-message").click();
+
+  const linkMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Root link repro" })
+    .last();
+  await expect(linkMessage).toBeVisible();
+  await linkMessage
+    .getByRole("button", { name: "Open message in general" })
+    .click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  await expect(page).toHaveURL(/thread=mock-general-welcome/);
+  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
+    "Welcome to #general",
+  );
+});
+
+test("message links reopen a closed thread when the same messageId is already in the URL", async ({
+  page,
+}) => {
+  await page.goto(
+    "/#/channels/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50?messageId=mock-general-welcome",
+  );
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
+    "Welcome to #general",
+  );
+
+  await threadPanel.getByRole("button", { name: "Close thread" }).click();
+  await expect(threadPanel).not.toBeVisible();
+
+  const link =
+    "buzz://message?channel=9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50&id=mock-general-welcome";
+  await page
+    .getByTestId("message-input")
+    .fill(`Reopen same root link repro ${link}`);
+  await page.getByTestId("send-message").click();
+
+  const linkMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Reopen same root link repro" })
+    .last();
+  await expect(linkMessage).toBeVisible();
+  await linkMessage
+    .getByRole("button", { name: "Open message in general" })
+    .click();
+
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
+    "Welcome to #general",
+  );
+});
+
 test("message deep links survive reload", async ({ page }) => {
   await page.goto(
     `/#/channels/${ENGINEERING_CHANNEL_ID}?messageId=mock-engineering-shipped`,
