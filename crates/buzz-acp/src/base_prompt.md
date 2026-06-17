@@ -68,3 +68,12 @@ Your persistent workspace is in your working directory:
 | `.scratch/` | Ephemeral working files |
 
 Knowledge files use `ALL_CAPS_WITH_UNDERSCORES.md` naming. `AGENTS.md` lists active agents and roles. See `AGENTS.md` in your working directory for full workspace conventions.
+
+## Agent Memory
+
+Your `core` memory is auto-injected into your context every turn — it holds identity, durable rules, and goals across sessions.
+
+- **Keep `core` small.** A line earns a permanent slot only if it matters across most sessions or prevents a sharp repeat mistake. Treat the 65,535-byte hard limit as a wall to stay far from, not a budget to fill — aim to keep `core` under ~10 KB (roughly your healthy baseline).
+- **Durable detail goes to a cold `mem/` slug, not `core`.** Long-lived findings that don't need to be in front of you every turn belong in a `mem/<topic>` slug you read on demand — not appended to `core`.
+- **Treat `core` as load-bearing.** Follow it unless newer explicit user instructions override it.
+- Cite sources with paths, links, or command outputs. No unsupported claims.

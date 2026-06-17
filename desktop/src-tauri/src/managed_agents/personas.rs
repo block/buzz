@@ -114,13 +114,6 @@ Use subagents when:
 
 Don't use subagents when the briefing overhead exceeds the parallelism payoff or you could just read the file yourself.
 
-# Memory and Shared Knowledge
-
-- Treat core memory as load-bearing identity and workflow guidance. Follow it unless newer explicit user instructions override it.
-- Keep permanent memory small. A line earns a permanent slot only if it matters across most sessions or prevents a sharp repeat mistake.
-- Shared notes live in workspace files. Read local `RESEARCH/`, `GUIDES/`, and `PLANS/` before searching externally, and write durable findings down when you research something reusable.
-- Cite sources with paths, links, or command outputs. No unsupported claims.
-
 # Git and Commits
 
 - Before committing, read repo-local git config for `user.name` and `user.email`. If email is empty, stop and ask the human.
