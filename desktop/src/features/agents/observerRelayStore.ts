@@ -328,6 +328,31 @@ export function useManagedAgentObserverBridge(
   }, [hasActiveAgent]);
 }
 
+// Test-only: inject synthetic `leadership_status` frames through the real
+// ingest path (`appendAgentEvent`), so the cached-map rebuild the consumer
+// reads is exercised — not a fake. Registers the agent as known so the row
+// renders. Production ingest (`handleRelayObserverEvent`) is untouched.
+export function seedLeadershipForTest(
+  agentPubkey: string,
+  instances: readonly { instanceId: string; isLeader: boolean }[],
+) {
+  knownAgentPubkeys.add(normalizePubkey(agentPubkey));
+  let seq = Date.now();
+  for (const { instanceId, isLeader } of instances) {
+    seq += 1;
+    appendAgentEvent(agentPubkey, {
+      seq,
+      timestamp: new Date().toISOString(),
+      kind: LEADERSHIP_EVENT_KIND,
+      agentIndex: null,
+      channelId: null,
+      sessionId: null,
+      turnId: null,
+      payload: { instanceId, isLeader },
+    });
+  }
+}
+
 export function resetAgentObserverStore() {
   generation += 1;
   const unsubscribe = unsubscribeRelay;
