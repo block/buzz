@@ -368,7 +368,8 @@ export function MessageThreadPanel({
     syncScrollState,
   } = useTimelineScrollManager({
     channelId: threadHeadId,
-    isLoading: false,
+    // Wait for deferred replies to commit before scroll-init (else rows mount un-scrolled).
+    isLoading: repliesRenderState === "pending",
     messages: threadMessages,
     onTargetReached: onScrollTargetResolved,
     scrollContainerRef: threadBodyRef,
