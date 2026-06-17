@@ -35,7 +35,10 @@ import {
 } from "@/features/messages/lib/formatTimelineMessages";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
-import { selectTimelineLoadingState } from "@/features/messages/lib/timelineLoadingState";
+import {
+  resolveTimelineLoadingLatch,
+  selectTimelineLoadingState,
+} from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
@@ -477,7 +480,7 @@ export function ChannelScreen({
     });
   // `data !== undefined` is not "loaded": the cache is seeded early by stale
   // placeholders and the live subscription. Wait for the history fetch to settle.
-  const isTimelineLoading =
+  const timelineLoadingNow =
     activeChannel !== null &&
     activeChannel.channelType !== "forum" &&
     selectTimelineLoadingState({
@@ -486,6 +489,16 @@ export function ChannelScreen({
       isPlaceholderData: messagesQuery.isPlaceholderData,
       dataLength: messagesQuery.data?.length ?? null,
     });
+  // Latch loaded per channel so a later background refetch can't flip back to
+  // the skeleton — that re-flip is the "skeleton bouncing up and down" on entry.
+  const settledChannelIdRef = React.useRef<string | null>(null);
+  const { settledChannelId, isLoading: isTimelineLoading } =
+    resolveTimelineLoadingLatch(
+      settledChannelIdRef.current,
+      activeChannelId,
+      timelineLoadingNow,
+    );
+  settledChannelIdRef.current = settledChannelId;
   const shouldShowInitialChannelLoading = isTimelineLoading;
   // Panel identity (thread/profile/agent session) lives in the URL search
   // params, so channel changes and back/forward traversals carry it per

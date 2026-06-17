@@ -28,3 +28,28 @@ export function selectTimelineLoadingState(
     (status.isPlaceholderData || (status.dataLength ?? 0) === 0)
   );
 }
+
+/**
+ * Monotonic loading latch keyed by channel. Once a channel has settled (loaded),
+ * `loadingNow` blipping true again (a background refetch) must not re-show the
+ * skeleton — that re-flip is the visible skeleton bounce on entry. A different
+ * channel id resets the latch so the new channel loads fresh.
+ */
+export function resolveTimelineLoadingLatch(
+  settledChannelId: string | null,
+  activeChannelId: string | null,
+  loadingNow: boolean,
+): { settledChannelId: string | null; isLoading: boolean } {
+  if (activeChannelId === null) {
+    return { settledChannelId, isLoading: loadingNow };
+  }
+  if (settledChannelId === activeChannelId) {
+    // Already settled for this channel — stay loaded through refetch blips.
+    return { settledChannelId, isLoading: false };
+  }
+  if (!loadingNow) {
+    // First settle for this channel; latch it.
+    return { settledChannelId: activeChannelId, isLoading: false };
+  }
+  return { settledChannelId, isLoading: true };
+}
