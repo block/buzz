@@ -210,12 +210,12 @@ export function SidebarCompactActionCard({
   const cardTransition: Transition = shouldReduceMotion
     ? { duration: 0.08 }
     : {
-        duration: 0.22,
+        duration: 0.28,
         ease: [0.22, 1, 0.36, 1] as const,
       };
   const cardHiddenState = shouldReduceMotion
     ? { opacity: 0 }
-    : { opacity: 0, scale: 0.94 };
+    : { opacity: 0, scale: 0.9 };
   const cardVisibleState = shouldReduceMotion
     ? { opacity: 1 }
     : { opacity: 1, scale: 1 };
@@ -236,7 +236,7 @@ export function SidebarCompactActionCard({
     <motion.div
       animate={isDismissing ? cardHiddenState : cardVisibleState}
       className={cn(
-        "group/sidebar-compact-action-card relative w-full origin-center",
+        "group/sidebar-compact-action-card relative w-full origin-bottom",
         POOF_ORIGIN_CLASS,
         isDismissing && "pointer-events-none",
         className,
