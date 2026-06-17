@@ -121,15 +121,17 @@ export function ModelPicker({
   }, [configSurface]);
 
   // Send a live `switch_model` frame to each channel the agent is working in
-  // and wait for the harness to acknowledge. The model catalog is the same
-  // across all of an agent's channels, so a single `unsupported_model` result
-  // rejects the whole pick; any other status confirms the frame landed.
+  // and wait for the harness to acknowledge. Any single `unsupported_model`
+  // result rejects the whole pick immediately; all other statuses must arrive
+  // from every channel before resolving success.
   const sendLiveSwitch = React.useCallback(
     async (modelId: string) => {
       const channelIds = activeTurns.map((turn) => turn.channelId);
+      const outstanding = channelIds.length;
 
       const settled = new Promise<"ok" | "unsupported">((resolve) => {
         let unsubscribe = () => {};
+        let remaining = outstanding;
         const finish = (outcome: "ok" | "unsupported") => {
           window.clearTimeout(timeout);
           unsubscribe();
@@ -142,7 +144,16 @@ export function ModelPicker({
           if (frame.type !== "switch_model" || frame.modelId !== modelId) {
             return;
           }
-          finish(frame.status === "unsupported_model" ? "unsupported" : "ok");
+          if (frame.status === "unsupported_model") {
+            // Any single failure rejects the whole pick immediately.
+            finish("unsupported");
+            return;
+          }
+          // sent / switched / turn_ending — count as success for this channel.
+          remaining -= 1;
+          if (remaining <= 0) {
+            finish("ok");
+          }
         });
       });
 

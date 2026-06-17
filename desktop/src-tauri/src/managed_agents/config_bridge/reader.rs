@@ -49,6 +49,8 @@ pub(crate) fn read_config_surface(
         .and_then(|k| record.env_vars.get(k))
         .cloned();
 
+    let model_overridden = session_cache.is_some_and(|c| c.model_overridden);
+
     let normalized = NormalizedConfig {
         model: Some(apply_runtime_override(
             build_model_field(
@@ -62,6 +64,7 @@ pub(crate) fn read_config_surface(
             ),
             acp_model.as_deref(),
             persona_model,
+            model_overridden,
         )),
         provider: build_provider_field(
             &record_provider,
@@ -254,23 +257,29 @@ fn model_write_mechanism(
     }
 }
 
-/// Re-key the model field as a live runtime override when the ACP session's
-/// current model diverges from the persona model (Phase 3c).
+/// Re-key the model field as a live runtime override when the harness signals
+/// that a `SwitchModel` control signal set the model (Phase 3c).
 ///
-/// The override-active signal is `acp_model != persona_model` — NOT the
-/// harness-only `desired_model`, which the desktop reader cannot see. A
-/// persona-linked agent spawns with its ACP current model equal to the persona
-/// model, so divergence only happens after a live ModelPicker switch.
+/// The override-active signal is `model_overridden` from the
+/// `session_config_captured` payload — NOT `acp_model != persona_model`, which
+/// would false-positive when a persona model is edited mid-life while the
+/// session is stale on the old model.
 ///
 /// `persona_model` is `Some` only for persona-linked agents with no explicit
 /// record model; an explicit pick has no persona baseline to override, so the
-/// field passes through unchanged. The override preserves the base field's
-/// write mechanism — only the displayed value, origin, and secondary change.
+/// field passes through unchanged. The `acp == persona` short-circuit keeps a
+/// pick of the persona model itself from rendering a no-op "override of X with
+/// X". The override preserves the base field's write mechanism — only the
+/// displayed value, origin, and secondary change.
 fn apply_runtime_override(
     base: NormalizedField,
     acp_model: Option<&str>,
     persona_model: Option<&str>,
+    model_overridden: bool,
 ) -> NormalizedField {
+    if !model_overridden {
+        return base;
+    }
     let (Some(acp), Some(persona)) = (acp_model, persona_model) else {
         return base;
     };
@@ -596,6 +605,7 @@ mod tests {
             available_modes: vec![],
             available_models: vec![],
             current_model: Some("claude-opus-4".to_string()),
+            model_overridden: false,
             goose_native_config: None,
             captured_at: "".to_string(),
         };
@@ -619,6 +629,7 @@ mod tests {
             available_modes: vec![],
             available_models: vec![],
             current_model: Some("acp-model".to_string()),
+            model_overridden: false,
             goose_native_config: None,
             captured_at: "".to_string(),
         };
@@ -671,15 +682,15 @@ mod tests {
 
     // ── Runtime override (Phase 3c) ──────────────────────────────────────
     //
-    // A live ModelPicker switch surfaces as the ACP session's `current_model`
-    // diverging from the persona model. The reader keys the override-active
-    // decision off that divergence (acp_model != persona_model), NOT off the
-    // harness-only `desired_model` (which the desktop reader cannot see).
+    // A live ModelPicker switch is signalled by `model_overridden: true` in the
+    // `session_config_captured` payload. The reader keys the override-active
+    // decision off that flag — NOT off `acp_model != persona_model`, which would
+    // false-positive when a persona model is edited mid-life.
 
     #[test]
-    fn runtime_override_wins_display_when_acp_model_diverges_from_persona() {
+    fn runtime_override_wins_display_when_model_overridden_is_true() {
         // Persona-linked agent (record.model == None); persona == "persona-model".
-        // A live switch pushed "live-model" to the session.
+        // A live switch pushed "live-model" to the session and set model_overridden.
         let record = test_record();
         let runtime = test_runtime();
         let cache = SessionConfigCache {
@@ -687,6 +698,7 @@ mod tests {
             available_modes: vec![],
             available_models: vec![],
             current_model: Some("live-model".to_string()),
+            model_overridden: true,
             goose_native_config: None,
             captured_at: "".to_string(),
         };
@@ -705,11 +717,10 @@ mod tests {
     }
 
     #[test]
-    fn no_runtime_override_when_acp_model_equals_persona() {
+    fn no_runtime_override_when_model_overridden_is_false() {
         // At spawn the session's current_model == persona model (BUZZ_ACP_MODEL
-        // is set to the persona model). No divergence => no override; the field
-        // falls through to normal precedence (persona-wins surface, no override
-        // origin and no overridden secondary value).
+        // is set to the persona model) and model_overridden is false. No override;
+        // the field falls through to normal precedence.
         let record = test_record();
         let runtime = test_runtime();
         let cache = SessionConfigCache {
@@ -717,6 +728,7 @@ mod tests {
             available_modes: vec![],
             available_models: vec![],
             current_model: Some("persona-model".to_string()),
+            model_overridden: false,
             goose_native_config: None,
             captured_at: "".to_string(),
         };
@@ -725,11 +737,45 @@ mod tests {
             read_config_surface(&record, Some(runtime), Some(&cache), Some("persona-model"));
         let model = surface.normalized.model.unwrap();
 
-        // No divergence => the override branch is not taken: origin is the
-        // normal precedence result, never RuntimeOverride, and the persona is
-        // not surfaced as a secondary override value.
+        // model_overridden is false => the override branch is not taken: origin
+        // is the normal precedence result, never RuntimeOverride.
         assert_ne!(model.origin, ConfigOrigin::RuntimeOverride);
         assert_eq!(model.value.as_deref(), Some("persona-model"));
+        assert_ne!(model.overridden_origin, Some(ConfigOrigin::PersonaDefault));
+    }
+
+    #[test]
+    fn no_false_positive_override_when_persona_edited_mid_life() {
+        // Persona-linked agent whose persona model was edited A→B while the
+        // session is stale on the old model A. `model_overridden` is false
+        // because no SwitchModel control signal was sent — the session is merely
+        // stale. Despite acp_model("A") != persona_model("B"), no RuntimeOverride
+        // should be displayed.
+        let record = test_record();
+        let runtime = test_runtime();
+        let cache = SessionConfigCache {
+            config_options: vec![],
+            available_modes: vec![],
+            available_models: vec![],
+            current_model: Some("old-persona-model".to_string()),
+            model_overridden: false,
+            goose_native_config: None,
+            captured_at: "".to_string(),
+        };
+
+        let surface = read_config_surface(
+            &record,
+            Some(runtime),
+            Some(&cache),
+            Some("new-persona-model"),
+        );
+        let model = surface.normalized.model.unwrap();
+
+        // model_overridden is false => no RuntimeOverride, even though
+        // acp_model != persona_model. The old divergence-based signal would
+        // have false-positived here. The persona is never surfaced as the
+        // overridden secondary (that marker is exclusive to a real override).
+        assert_ne!(model.origin, ConfigOrigin::RuntimeOverride);
         assert_ne!(model.overridden_origin, Some(ConfigOrigin::PersonaDefault));
     }
 

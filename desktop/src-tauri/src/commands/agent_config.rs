@@ -242,12 +242,17 @@ pub fn put_agent_session_config(
     let config_options = parse_config_options(payload.get("configOptions"));
     let available_modes = parse_modes(&config_options, payload.get("modes"));
     let (available_models, current_model) = parse_models(payload.get("models"));
+    let model_overridden = payload
+        .get("modelOverridden")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let cache = SessionConfigCache {
         config_options,
         available_modes,
         available_models,
         current_model,
+        model_overridden,
         goose_native_config: None,
         captured_at: crate::util::now_iso(),
     };

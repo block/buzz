@@ -191,6 +191,12 @@ pub struct SessionConfigCache {
     pub available_modes: Vec<String>,
     pub available_models: Vec<AcpModelEntry>,
     pub current_model: Option<String>,
+    /// Whether the harness's `desired_model` was set by a live `SwitchModel`
+    /// control signal (true) vs derived from config/persona at spawn (false).
+    /// Used by the reader to distinguish a genuine runtime override from a
+    /// stale session whose persona model was edited mid-life.
+    #[serde(default)]
+    pub model_overridden: bool,
     pub goose_native_config: Option<serde_json::Value>,
     pub captured_at: String,
 }

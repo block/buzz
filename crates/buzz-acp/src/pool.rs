@@ -139,6 +139,11 @@ pub struct OwnedAgent {
     pub model_capabilities: Option<AgentModelCapabilities>,
     /// Desired model ID (from `Config.model`). Applied after every `session_new_full()`.
     pub desired_model: Option<String>,
+    /// Whether `desired_model` was set by a live `SwitchModel` control signal
+    /// (as opposed to being derived from config/persona at spawn). Used by the
+    /// desktop reader to distinguish a genuine runtime override from a stale
+    /// session whose persona model was edited. Reset on spawn/restart.
+    pub model_overridden: bool,
     /// Protocol version reported by the agent in its initialize response.
     /// Agents declaring >= 2 support `systemPrompt` in session/new.
     pub protocol_version: u32,
@@ -624,6 +629,7 @@ impl AgentPool {
         }
 
         agent.desired_model = Some(model_id.to_string());
+        agent.model_overridden = true;
         agent.state.invalidate_channel(&channel_id);
         IdleSwitchResult::Switched
     }
@@ -705,6 +711,7 @@ async fn create_session_and_apply_model(
             "configOptions": resp.raw.get("configOptions").cloned().unwrap_or(serde_json::Value::Null),
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
             "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
+            "modelOverridden": agent.model_overridden,
         }),
     );
 
@@ -1474,6 +1481,7 @@ pub async fn run_prompt_task(
                     // applies the new model. Runtime-only — never persisted.
                     if let ControlSignal::SwitchModel(ref model_id) = control_signal {
                         agent.desired_model = Some(model_id.clone());
+                        agent.model_overridden = true;
                     }
                     // Control signal received. Guard against Race 1: the turn may
                     // have completed naturally just as cancel fired.
