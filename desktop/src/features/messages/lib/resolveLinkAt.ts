@@ -27,13 +27,23 @@ export function resolveLinkAt(
   if (!linkType) return null;
 
   const $pos = state.doc.resolve(pos);
-  // The mark at the caret sits on the character *before* the position, with
-  // the character after as a fallback (caret at a link's left edge).
-  const mark =
-    linkType.isInSet($pos.marks()) ||
-    (pos < state.doc.content.size
-      ? linkType.isInSet(state.doc.resolve(pos + 1).marks())
-      : null);
+  // A caret belongs to the character *before* it, so resolve the link from
+  // `nodeBefore` first. This disambiguates the seam between two adjacent
+  // links: at that boundary both `marks()` and `nodeAfter` point at the
+  // right-hand link, but the caret should anchor on the left one. When the
+  // position is inside a text node (not on a boundary) `nodeBefore`/
+  // `nodeAfter` are null, so we fall back to `marks()` for the mid-node case
+  // and to `nodeAfter` for the caret at a link's very left edge.
+  const markBefore = $pos.nodeBefore
+    ? linkType.isInSet($pos.nodeBefore.marks)
+    : null;
+  const markAfter = $pos.nodeAfter
+    ? linkType.isInSet($pos.nodeAfter.marks)
+    : null;
+  const onBoundary = $pos.nodeBefore != null || $pos.nodeAfter != null;
+  const mark = onBoundary
+    ? markBefore || markAfter
+    : linkType.isInSet($pos.marks());
   if (!mark) return null;
 
   const href = mark.attrs.href as string;
@@ -42,15 +52,27 @@ export function resolveLinkAt(
 
   type ChildSpan = { from: number; to: number; hasLink: boolean };
   const spans: ChildSpan[] = [];
+  // Adjacent text nodes share a boundary (span N's `to` equals span N+1's
+  // `from`), so a `pos` landing exactly on a seam falls inside both. Picking
+  // the last match there would anchor on the wrong node when two links with
+  // different hrefs abut. We resolve the ambiguity in two passes: first try
+  // the span that both contains `pos` and carries our target link; only if
+  // none does (e.g. caret resting just past a link) fall back to a plain
+  // containment test with an exclusive right edge so the seam belongs to the
+  // node on its left.
   let anchorIndex = -1;
+  let linkAnchorIndex = -1;
   parent.forEach((child, childOffset) => {
     const childFrom = parentStart + childOffset;
     const childTo = childFrom + child.nodeSize;
     const childLink = linkType.isInSet(child.marks);
     const hasLink = childLink != null && childLink.attrs.href === href;
-    if (childFrom <= pos && pos <= childTo) anchorIndex = spans.length;
+    const index = spans.length;
+    if (childFrom <= pos && pos < childTo) anchorIndex = index;
+    if (hasLink && childFrom <= pos && pos <= childTo) linkAnchorIndex = index;
     spans.push({ from: childFrom, to: childTo, hasLink });
   });
+  if (linkAnchorIndex !== -1) anchorIndex = linkAnchorIndex;
 
   if (anchorIndex === -1) return { href, text: "", from: pos, to: pos };
 
