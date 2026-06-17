@@ -10,8 +10,13 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
 import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
+import {
+  MENTION_CHIP_BASE_CLASSES,
+  MENTION_CHIP_HOVER_CLASSES,
+} from "@/shared/ui/mentionChip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -62,18 +67,31 @@ function resolveDisplayLabel(
 
 function ProfileName({
   children,
+  highlight = false,
+  isAgent = false,
   pubkey,
 }: {
   children: React.ReactNode;
+  highlight?: boolean;
+  isAgent?: boolean;
   pubkey: string | undefined;
 }) {
+  const isAgentMention = highlight && isAgent;
   const node = (
     <span
+      data-mention={highlight ? "" : undefined}
       className={cn(
         pubkey && "cursor-pointer",
-        "rounded-xs transition-colors hover:text-foreground",
+        highlight
+          ? cn(
+              MENTION_CHIP_BASE_CLASSES,
+              MENTION_CHIP_HOVER_CLASSES,
+              isAgentMention && "agent-mention-highlight",
+            )
+          : "rounded-xs transition-colors hover:text-foreground",
       )}
     >
+      {highlight && !isAgentMention ? "@" : null}
       {children}
     </span>
   );
@@ -178,7 +196,14 @@ function describeSystemEvent(
   payload: SystemMessagePayload,
   currentPubkey: string | undefined,
   profiles: UserProfileLookup | undefined,
+  personaLookup?: Map<string, string>,
+  agentPubkeys?: ReadonlySet<string>,
 ): SystemMessageDescription | null {
+  const isTargetAgent =
+    payload.target !== undefined &&
+    (agentPubkeys?.has(normalizePubkey(payload.target)) === true ||
+      profiles?.[normalizePubkey(payload.target)]?.isAgent === true ||
+      personaLookup?.has(normalizePubkey(payload.target)) === true);
   const actorLabel = resolveDisplayLabel(
     payload.actor,
     currentPubkey,
@@ -193,7 +218,9 @@ function describeSystemEvent(
     <ProfileName pubkey={payload.actor}>{actorLabel}</ProfileName>
   );
   const targetName = (
-    <ProfileName pubkey={payload.target}>{targetLabel}</ProfileName>
+    <ProfileName highlight isAgent={isTargetAgent} pubkey={payload.target}>
+      {targetLabel}
+    </ProfileName>
   );
 
   switch (payload.type) {
@@ -252,12 +279,17 @@ function describeSystemEvent(
 export const SystemMessageRow = React.memo(function SystemMessageRow({
   message,
   currentPubkey,
+  agentPubkeys,
   profiles,
+  personaLookup,
   onToggleReaction,
 }: {
   message: TimelineMessage;
   currentPubkey?: string;
+  agentPubkeys?: ReadonlySet<string>;
   profiles?: UserProfileLookup;
+  /** Map from lowercase pubkey → persona display name for bot members. */
+  personaLookup?: Map<string, string>;
   onToggleReaction?: (
     message: TimelineMessage,
     emoji: string,
@@ -283,7 +315,13 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
     return null;
   }
 
-  const description = describeSystemEvent(payload, currentPubkey, profiles);
+  const description = describeSystemEvent(
+    payload,
+    currentPubkey,
+    profiles,
+    personaLookup,
+    agentPubkeys,
+  );
   if (!description) {
     return null;
   }
