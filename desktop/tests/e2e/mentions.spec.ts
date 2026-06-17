@@ -214,7 +214,7 @@ test("selecting an agent mention inserts @Name into input", async ({
   });
   await expect(agentMentionChip).toBeVisible();
   await expect(agentMentionChip).toHaveText("alice");
-  await expect(agentMentionChip).toHaveCSS("display", "inline-block");
+  await expect(agentMentionChip).toHaveCSS("display", "inline-flex");
   await expect(agentMentionChip).toHaveCSS("border-top-width", "0px");
 });
 

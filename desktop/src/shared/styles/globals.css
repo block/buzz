@@ -568,8 +568,9 @@
   background: none;
   padding: 0;
   border-radius: 0;
-  font-size: var(--text-xs);
-  line-height: var(--text-xs--line-height);
+  font-size: var(--text-sm);
+  line-height: var(--text-sm--line-height);
+  font-weight: 500;
 }
 
 .rich-text-composer .tiptap blockquote {
@@ -612,22 +613,41 @@
   margin: 0.5rem 0;
 }
 
-/* Inline chips — timeline markdown + composer share `.message-markdown` scope */
+/* Inline chips — timeline markdown + composer share `.message-markdown` scope.
+   Body copy is text-sm; inline code labels sit one step down (text-xs).
+   All chip variants share one box height so mono labels stay balanced. */
+.message-markdown {
+  --inline-chip-padding-block-start: 0.1875rem;
+  --inline-chip-padding-block-end: 0.125rem;
+  --inline-chip-padding-inline: 0.25rem;
+  --inline-chip-min-height: calc(
+    var(--text-sm) + var(--inline-chip-padding-block-start) +
+      var(--inline-chip-padding-block-end)
+  );
+  --inline-code-font-size: var(--text-xs);
+  --agent-icon-size: 0.95em;
+  --agent-icon-gap: 0.125rem;
+  --agent-icon-top: 0.125rem;
+}
+
 .message-markdown .mention-chip,
 .message-markdown .inline-code-chip,
 .message-markdown :not(pre) > code {
   box-sizing: border-box;
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--inline-chip-min-height);
+  padding: var(--inline-chip-padding-block-start)
+    var(--inline-chip-padding-inline) var(--inline-chip-padding-block-end);
   border-radius: calc(var(--radius) - 4px);
   font-weight: 500;
+  line-height: 1;
   vertical-align: baseline;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
 
 .message-markdown .mention-chip {
-  padding: 0.1875rem 0.25rem 0.125rem;
-  line-height: 1;
   font-size: inherit;
   background: hsl(var(--primary) / 0.15);
   color: hsl(var(--primary));
@@ -635,14 +655,10 @@
 
 .message-markdown .inline-code-chip,
 .message-markdown :not(pre) > code {
-  min-height: calc(var(--text-sm) + 0.375rem);
-  padding: 0.1875rem 0.25rem 0.125rem;
-  line-height: 1;
+  font-size: var(--inline-code-font-size);
   font-family: ui-monospace, monospace;
   background: hsl(var(--muted));
   color: inherit;
-  /* Mono cap height ≈ sans text-xs on text-sm body */
-  font-size: calc(var(--text-xs) / var(--text-sm) * 1em);
 }
 
 .mention-chip-hover {
@@ -673,17 +689,19 @@
 
 .message-markdown .agent-mention-highlight {
   position: relative;
-  padding-left: calc(0.25rem + 0.95em + 0.125rem);
+  padding-left: calc(
+    var(--inline-chip-padding-inline) + var(--agent-icon-size) +
+      var(--agent-icon-gap)
+  );
 }
 
 .message-markdown .agent-mention-highlight::before {
   content: "";
   position: absolute;
-  /* 0.1875rem chip padding-top − 0.0625rem (1px at 16px root) */
-  top: 0.125rem;
-  left: 0.25rem;
-  width: 0.95em;
-  height: 0.95em;
+  top: var(--agent-icon-top);
+  left: var(--inline-chip-padding-inline);
+  width: var(--agent-icon-size);
+  height: var(--agent-icon-size);
   background: currentColor;
   pointer-events: none;
   -webkit-mask:

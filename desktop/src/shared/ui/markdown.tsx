@@ -80,7 +80,7 @@ const MAX_CACHE_ENTRIES = 100;
 const MAX_LOADED_LANGUAGES = 30;
 const MAX_HIGHLIGHT_LINES = 150;
 const CODE_BLOCK_CLASS =
-  "code-block-lines block min-w-full whitespace-pre font-mono text-xs text-foreground";
+  "code-block-lines block min-w-full whitespace-pre font-mono text-sm font-medium text-foreground";
 const DIFF_ADD_RE = /\s*\/\/\s*\[!code\s*\+\+\]\s*$/;
 const DIFF_REMOVE_RE = /\s*\/\/\s*\[!code\s*--\]\s*$/;
 
