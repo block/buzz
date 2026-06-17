@@ -164,3 +164,26 @@ test("sidebar reconnect action suppresses stale refresh errors after success", a
   await page.waitForTimeout(6_500);
   await expect(card).toBeHidden();
 });
+
+test("sidebar connected success clears when relay degrades again", async ({
+  page,
+}) => {
+  await installMockBridge(page, { channelsReadError: CONNECT_ERROR });
+
+  await page.goto("/");
+
+  const card = await expectGenericReconnectCard(page);
+
+  await setChannelsReadError(page, null);
+  await page.getByTestId("sidebar-reconnect").click();
+
+  await expect(card).toContainText("Connected");
+
+  await setRelayConnectionState(page, "stalled");
+
+  await expect(card).toContainText("Can't reach the relay", {
+    timeout: 10_000,
+  });
+  await expect(card).toContainText("Click to connect");
+  await expect(card).not.toContainText("Connected");
+});
