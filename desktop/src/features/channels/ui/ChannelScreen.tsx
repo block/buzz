@@ -35,6 +35,7 @@ import {
 } from "@/features/messages/lib/formatTimelineMessages";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
+import { selectTimelineLoadingState } from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useLoadMissingAncestors } from "@/features/messages/useLoadMissingAncestors";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
@@ -474,12 +475,17 @@ export function ChannelScreen({
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     });
-  const hasTimelineData = messagesQuery.data !== undefined;
+  // `data !== undefined` is not "loaded": the cache is seeded early by stale
+  // placeholders and the live subscription. Wait for the history fetch to settle.
   const isTimelineLoading =
     activeChannel !== null &&
     activeChannel.channelType !== "forum" &&
-    !hasTimelineData &&
-    messagesQuery.isPending;
+    selectTimelineLoadingState({
+      isPending: messagesQuery.isPending,
+      isFetching: messagesQuery.isFetching,
+      isPlaceholderData: messagesQuery.isPlaceholderData,
+      dataLength: messagesQuery.data?.length ?? null,
+    });
   const shouldShowInitialChannelLoading = isTimelineLoading;
   // Panel identity (thread/profile/agent session) lives in the URL search
   // params, so channel changes and back/forward traversals carry it per
