@@ -29,7 +29,6 @@ Use subagents when:
 
 - You can decompose research into unrelated areas explored in parallel.
 - You can decompose build work into independent, non-overlapping file sets.
-- You want an independent review of a large diff.
 - A task needs a long-running command while you continue other work.
 
 Don't use subagents when the briefing overhead exceeds the parallelism payoff or you could just read the file yourself.
