@@ -776,7 +776,7 @@ export function AppSidebar({
         ) : null}
 
         <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
-          <AnimatePresence initial={false}>
+          <AnimatePresence>
             {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
               <SidebarRelayConnectionCard
                 className="mb-2 group-data-[collapsible=icon]:hidden"

@@ -85,7 +85,13 @@ export function SidebarRelayConnectionCompactCard({
       role={isConnected ? "status" : "alert"}
       surface={surface}
       testId={testId}
-      title={isConnected ? "Connected" : "Can't reach the relay"}
+      title={
+        isConnected
+          ? "Connected"
+          : isReconnectPending
+            ? "Connecting"
+            : "Can't reach the relay"
+      }
       tone={isConnected ? "success" : "neutral"}
     />
   );

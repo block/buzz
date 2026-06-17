@@ -210,12 +210,12 @@ export function SidebarCompactActionCard({
   const cardTransition: Transition = shouldReduceMotion
     ? { duration: 0.08 }
     : {
-        duration: 0.16,
+        duration: 0.22,
         ease: [0.22, 1, 0.36, 1] as const,
       };
   const cardHiddenState = shouldReduceMotion
     ? { opacity: 0 }
-    : { opacity: 0, scale: 0.96 };
+    : { opacity: 0, scale: 0.94 };
   const cardVisibleState = shouldReduceMotion
     ? { opacity: 1 }
     : { opacity: 1, scale: 1 };

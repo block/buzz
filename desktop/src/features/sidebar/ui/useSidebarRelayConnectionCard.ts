@@ -70,8 +70,6 @@ export function useSidebarRelayConnectionCard(
   const isRelayConnectionStateDegraded =
     relayConnectionState === "reconnecting" ||
     relayConnectionState === "stalled";
-  const isRelayConnectionActuallyDegraded =
-    hasRelayUnreachableError || isRelayConnectionStateDegraded;
   const isRelayConnectionConnected = relayConnectionState === "connected";
   const isRelayConnectionDisconnected = relayConnectionState === "disconnected";
   const [isDismissed, setIsDismissed] = React.useState(false);
@@ -82,6 +80,10 @@ export function useSidebarRelayConnectionCard(
   );
   const [isWindowVisible, setIsWindowVisible] =
     React.useState(isDocumentVisible);
+  const hasActiveRelayUnreachableError =
+    hasRelayUnreachableError && !(hasSuccess && isRelayConnectionConnected);
+  const isRelayConnectionActuallyDegraded =
+    hasActiveRelayUnreachableError || isRelayConnectionStateDegraded;
   const isRelayConnectionSuccess =
     hasSuccess &&
     isRelayConnectionConnected &&
@@ -141,11 +143,16 @@ export function useSidebarRelayConnectionCard(
 
     const timeout = window.setTimeout(() => {
       setRelayConnectivitySuccess(relayUrl, false);
-      setIsDismissed(true);
+      setIsDismissed(!hasRelayUnreachableError);
     }, SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS);
 
     return () => window.clearTimeout(timeout);
-  }, [isRelayConnectionSuccess, isWindowVisible, relayUrl]);
+  }, [
+    hasRelayUnreachableError,
+    isRelayConnectionSuccess,
+    isWindowVisible,
+    relayUrl,
+  ]);
 
   React.useEffect(() => {
     const updateWindowVisible = () => setIsWindowVisible(isDocumentVisible());
