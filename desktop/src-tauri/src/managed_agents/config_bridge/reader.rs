@@ -201,21 +201,15 @@ fn build_model_field(
         (None, ConfigOrigin::EnvVar)
     };
 
-    let overridden_value = if record_model.is_some() {
-        file_model.clone().or(acp_model.clone())
-    } else if acp_model.is_some() && file_model.is_some() {
-        file_model.clone()
+    // The secondary expresses ONLY the static record-vs-file precedence: a
+    // Buzz-explicit model shadowing a config-file model. The live-session
+    // override (acp vs record/persona) is exclusively `apply_runtime_override`'s
+    // job, gated on `model_overridden`. Surfacing `acp_model` here would leak an
+    // override row even when no live switch has been applied.
+    let (overridden_value, overridden_origin) = if record_model.is_some() && file_model.is_some() {
+        (file_model.clone(), Some(ConfigOrigin::ConfigFile))
     } else {
-        None
-    };
-    let overridden_origin = if record_model.is_some() && file_model.is_some() {
-        Some(ConfigOrigin::ConfigFile)
-    } else if record_model.is_some() && acp_model.is_some() {
-        Some(ConfigOrigin::AcpConfigOption)
-    } else if acp_model.is_some() && file_model.is_some() {
-        Some(ConfigOrigin::ConfigFile)
-    } else {
-        None
+        (None, None)
     };
 
     let write_via = model_write_mechanism(
