@@ -460,14 +460,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
 
               {showMessageList ? (
                 <div
-                  className={cn(
-                    "flex flex-col gap-2",
-                    !showIntro && "mt-auto",
-                    // While a deferred render is in flight the painted
-                    // list lags the latest `messages`. Dim it slightly so the
-                    // streaming-in feels intentional instead of frozen.
-                    isRenderPending && "opacity-60 transition-opacity",
-                  )}
+                  className={cn("flex flex-col gap-2", !showIntro && "mt-auto")}
                   data-render-pending={isRenderPending ? "true" : undefined}
                 >
                   <TimelineMessageList
