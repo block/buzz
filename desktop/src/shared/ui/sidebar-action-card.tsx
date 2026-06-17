@@ -243,6 +243,7 @@ export function SidebarCompactActionCard({
       )}
       data-dismissing={isDismissing ? "true" : undefined}
       data-testid={testId}
+      exit={cardHiddenState}
       initial={cardHiddenState}
       role={role}
       transition={cardTransition}

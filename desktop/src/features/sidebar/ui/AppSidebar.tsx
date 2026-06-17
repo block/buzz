@@ -10,6 +10,7 @@ import {
   Zap,
 } from "lucide-react";
 import * as React from "react";
+import { AnimatePresence } from "motion/react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
@@ -775,9 +776,10 @@ export function AppSidebar({
         ) : null}
 
         <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
-          {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
-            <div className="mb-2 group-data-[collapsible=icon]:hidden">
+          <AnimatePresence initial={false}>
+            {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
               <SidebarRelayConnectionCard
+                className="mb-2 group-data-[collapsible=icon]:hidden"
                 isConnected={
                   sidebarRelayConnectionCard.isRelayConnectionSuccess
                 }
@@ -788,9 +790,10 @@ export function AppSidebar({
                   sidebarRelayConnectionCard.onDismissRelayConnectionCard
                 }
                 onReconnect={sidebarRelayConnectionCard.onReconnectRelay}
+                key="sidebar-relay-connection-card"
               />
-            </div>
-          ) : null}
+            ) : null}
+          </AnimatePresence>
           {showSidebarUpdateCard ? (
             <div className="mb-2 group-data-[collapsible=icon]:hidden">
               <SidebarUpdateCard

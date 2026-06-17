@@ -1,13 +1,15 @@
-import { Check, CloudOff, Loader2 } from "lucide-react";
+import { Check, CloudOff } from "lucide-react";
 
 import {
   SidebarCompactActionCard,
   type SidebarActionCardSurface,
 } from "@/shared/ui/sidebar-action-card";
+import { Spinner } from "@/shared/ui/spinner";
 
 type SidebarRelayConnectionCardProps = {
   isActionDisabled?: boolean;
   actionTestId?: string;
+  className?: string;
   isConnected?: boolean;
   isReconnectPending: boolean;
   onDismiss?: () => void;
@@ -18,6 +20,7 @@ type SidebarRelayConnectionCardProps = {
 
 export function SidebarRelayConnectionCard({
   actionTestId,
+  className,
   isActionDisabled = false,
   isConnected = false,
   isReconnectPending,
@@ -28,6 +31,7 @@ export function SidebarRelayConnectionCard({
   return (
     <SidebarRelayConnectionCompactCard
       actionTestId={actionTestId ?? "sidebar-reconnect"}
+      className={className}
       isActionDisabled={isActionDisabled}
       isConnected={isConnected}
       isReconnectPending={isReconnectPending}
@@ -41,6 +45,7 @@ export function SidebarRelayConnectionCard({
 
 export function SidebarRelayConnectionCompactCard({
   actionTestId,
+  className,
   isActionDisabled = false,
   isConnected = false,
   isReconnectPending,
@@ -69,11 +74,12 @@ export function SidebarRelayConnectionCompactCard({
         isConnected ? (
           <Check aria-hidden="true" className="h-5 w-5" />
         ) : isReconnectPending ? (
-          <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin" />
+          <Spinner aria-hidden="true" className="h-5 w-5 border-2" />
         ) : (
           <CloudOff aria-hidden="true" className="h-5 w-5" />
         )
       }
+      className={className}
       onAction={onReconnect}
       onDismiss={onDismiss}
       role={isConnected ? "status" : "alert"}

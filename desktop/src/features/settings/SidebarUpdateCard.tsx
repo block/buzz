@@ -1,9 +1,10 @@
 import * as React from "react";
-import { CircleArrowUp, Loader2 } from "lucide-react";
+import { CircleArrowUp } from "lucide-react";
 
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
 import { shouldShowSidebarUpdateCard } from "./sidebarUpdateCardVisibility";
 import { SidebarCompactActionCard } from "@/shared/ui/sidebar-action-card";
+import { Spinner } from "@/shared/ui/spinner";
 
 type SidebarUpdateCardProps = {
   onDismiss: () => void;
@@ -69,7 +70,7 @@ export function SidebarUpdateCompactCard({
       dismissLabel="Dismiss update notification"
       icon={
         isRestartPending ? (
-          <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin" />
+          <Spinner aria-hidden="true" className="h-5 w-5 border-2" />
         ) : (
           <CircleArrowUp aria-hidden="true" className="h-5 w-5" />
         )
