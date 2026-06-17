@@ -250,7 +250,7 @@ export function AppSidebar({
       ? "bottom-56"
       : sidebarFooterCardCount >= 1
         ? "bottom-44"
-        : "bottom-28";
+        : "bottom-24";
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;

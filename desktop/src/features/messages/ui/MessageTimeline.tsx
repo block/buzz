@@ -274,7 +274,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
         {showUnreadPill ? (
           <div
             className={cn(
-              "pointer-events-none absolute inset-x-0 z-20 flex justify-center px-4",
+              "pointer-events-none absolute inset-x-0 z-20 flex translate-y-3 justify-center px-4",
               channelChrome.top,
             )}
           >
