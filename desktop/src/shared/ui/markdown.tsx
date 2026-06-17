@@ -1054,13 +1054,16 @@ function ImageBlock({
 
   const currentSpoilerMediaSize =
     spoilerMediaSize?.src === resolvedSrc ? spoilerMediaSize : null;
+  const hiddenSpoilerMediaSize = isHiddenInSpoiler
+    ? currentSpoilerMediaSize
+    : null;
 
-  const spoilerMediaStyle = currentSpoilerMediaSize
+  const spoilerMediaStyle = hiddenSpoilerMediaSize
     ? ({
-        "--buzz-spoiler-media-height": `${currentSpoilerMediaSize.height}px`,
-        "--buzz-spoiler-media-width": `${currentSpoilerMediaSize.width}px`,
-        height: `${currentSpoilerMediaSize.height}px`,
-        width: `${currentSpoilerMediaSize.width}px`,
+        "--buzz-spoiler-media-height": `${hiddenSpoilerMediaSize.height}px`,
+        "--buzz-spoiler-media-width": `${hiddenSpoilerMediaSize.width}px`,
+        height: `${hiddenSpoilerMediaSize.height}px`,
+        width: `${hiddenSpoilerMediaSize.width}px`,
       } as React.CSSProperties)
     : undefined;
 
@@ -1148,7 +1151,7 @@ function ImageBlock({
         <img
           alt={alt}
           className="block max-h-64 max-w-sm rounded-xl object-contain"
-          data-spoiler-media-size={currentSpoilerMediaSize ? "" : undefined}
+          data-spoiler-media-size={hiddenSpoilerMediaSize ? "" : undefined}
           ref={imageRef}
           src={resolvedSrc}
           style={spoilerMediaStyle}
