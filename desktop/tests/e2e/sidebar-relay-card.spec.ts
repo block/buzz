@@ -145,7 +145,7 @@ test("sidebar reconnect action shows connected before hiding", async ({
   await expect(card).toBeHidden({ timeout: 5_000 });
 });
 
-test("sidebar reconnect action stays actionable when refresh still fails", async ({
+test("sidebar reconnect action suppresses stale refresh errors after success", async ({
   page,
 }) => {
   await installMockBridge(page, { channelsReadError: CONNECT_ERROR });
@@ -158,13 +158,9 @@ test("sidebar reconnect action stays actionable when refresh still fails", async
 
   await page.waitForTimeout(500);
   await expect(card).toBeVisible();
-  await expect(card).toContainText("Can't reach the relay");
-  await expect(card).toContainText("Click to connect");
-  await expect(card).not.toContainText("Connected");
+  await expect(card).toContainText("Connected");
+  await expect(card).not.toContainText("Can't reach the relay");
 
   await page.waitForTimeout(6_500);
-  await expect(card).toBeVisible();
-  await expect(card).toContainText("Can't reach the relay");
-  await expect(card).toContainText("Click to connect");
-  await expect(card).not.toContainText("Connected");
+  await expect(card).toBeHidden();
 });

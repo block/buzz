@@ -81,13 +81,11 @@ export function useSidebarRelayConnectionCard(
   const [isWindowVisible, setIsWindowVisible] =
     React.useState(isDocumentVisible);
   const hasActiveRelayUnreachableError =
-    hasRelayUnreachableError && !(hasSuccess && isRelayConnectionConnected);
+    hasRelayUnreachableError && !hasSuccess;
   const isRelayConnectionActuallyDegraded =
-    hasActiveRelayUnreachableError || isRelayConnectionStateDegraded;
-  const isRelayConnectionSuccess =
-    hasSuccess &&
-    isRelayConnectionConnected &&
-    !isRelayConnectionActuallyDegraded;
+    !hasSuccess &&
+    (hasActiveRelayUnreachableError || isRelayConnectionStateDegraded);
+  const isRelayConnectionSuccess = hasSuccess && !isRelayConnectionDisconnected;
   const canShow = isRelayConnectionActuallyDegraded || isRelayConnectionSuccess;
   const show = canShow && !isDismissed;
   const wasProblemCardVisibleRef = React.useRef(false);
@@ -108,11 +106,19 @@ export function useSidebarRelayConnectionCard(
   }, [isRelayConnectionSuccess, isRelayConnectionActuallyDegraded]);
 
   React.useEffect(() => {
-    if (isRelayConnectionStateDegraded || isRelayConnectionDisconnected) {
+    if (
+      !hasSuccess &&
+      (isRelayConnectionStateDegraded || isRelayConnectionDisconnected)
+    ) {
       setRelayConnectivitySuccess(relayUrl, false);
       setIsDismissed(false);
     }
-  }, [isRelayConnectionDisconnected, isRelayConnectionStateDegraded, relayUrl]);
+  }, [
+    hasSuccess,
+    isRelayConnectionDisconnected,
+    isRelayConnectionStateDegraded,
+    relayUrl,
+  ]);
 
   React.useEffect(() => {
     if (isRelayConnectionActuallyDegraded) {
@@ -143,16 +149,11 @@ export function useSidebarRelayConnectionCard(
 
     const timeout = window.setTimeout(() => {
       setRelayConnectivitySuccess(relayUrl, false);
-      setIsDismissed(!hasRelayUnreachableError);
+      setIsDismissed(true);
     }, SIDEBAR_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS);
 
     return () => window.clearTimeout(timeout);
-  }, [
-    hasRelayUnreachableError,
-    isRelayConnectionSuccess,
-    isWindowVisible,
-    relayUrl,
-  ]);
+  }, [isRelayConnectionSuccess, isWindowVisible, relayUrl]);
 
   React.useEffect(() => {
     const updateWindowVisible = () => setIsWindowVisible(isDocumentVisible());
