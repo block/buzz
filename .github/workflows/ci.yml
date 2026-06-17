@@ -568,6 +568,56 @@ jobs:
             -p git-credential-nostr \
             -p git-sign-nostr
 
+  windows-rust:
+    name: Windows Rust (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    # Windows runners are slow and this compiles the workspace + Tauri crate
+    # cold across four steps; budget generously.
+    timeout-minutes: 45
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop-rust == 'true'
+    permissions:
+      contents: read
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      # MSVC needs windows.h (aws-lc-sys et al.), so this runs on a real Windows
+      # runner with dtolnay/rust-toolchain — hermit, used by the Linux jobs, does
+      # not provide MSVC. Pinned to the same toolchain as release.yml's
+      # release-windows job.
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: windows-msvc
+          save-if: ${{ github.event_name != 'pull_request' }}
+      # Tauri validates externalBin at compile time, so the Tauri-crate steps
+      # below fail without these stubs. Mirrors scripts/bundle-sidecars.sh's
+      # Windows naming (binaries/<bin>-<triple>.exe); empty files suffice for a
+      # type-check since nothing executes them.
+      - name: Create sidecar placeholders
+        shell: bash
+        run: |
+          mkdir -p desktop/src-tauri/binaries
+          for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
+            touch "desktop/src-tauri/binaries/${bin}-${TARGET}.exe"
+          done
+      - name: Clippy (workspace)
+        run: cargo clippy --workspace --all-targets --target $env:TARGET -- -D warnings
+      - name: Check (workspace)
+        run: cargo check --workspace --all-targets --target $env:TARGET
+      - name: Check (Tauri crate)
+        run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+      - name: Test (Tauri crate)
+        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
   desktop-build-macos:
     name: Desktop Build (macOS)
     runs-on: macos-latest
