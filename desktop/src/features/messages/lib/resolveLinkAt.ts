@@ -46,7 +46,9 @@ export function resolveLinkAt(
     : linkType.isInSet($pos.marks());
   if (!mark) return null;
 
-  const href = mark.attrs.href as string;
+  const rawHref = mark.attrs.href;
+  if (typeof rawHref !== "string") return null;
+  const href = rawHref;
   const parent = $pos.parent;
   const parentStart = $pos.start();
 
