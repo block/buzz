@@ -1,8 +1,6 @@
 // biome-ignore format: keep compact to stay within file size limit
 import {
   Activity,
-  ArrowDown,
-  ArrowUp,
   Bot,
   FolderGit2,
   Home,
@@ -556,7 +554,6 @@ export function AppSidebar({
         {unreadAboveCount > 0 ? (
           <MoreUnreadButton
             count={unreadAboveCount}
-            icon={<ArrowUp />}
             onClick={scrollToNextAbove}
             position="top"
             testId="sidebar-more-unread-above"
@@ -768,7 +765,6 @@ export function AppSidebar({
           <MoreUnreadButton
             bottomClassName={unreadBelowBottomClass}
             count={unreadBelowCount}
-            icon={<ArrowDown />}
             onClick={scrollToNextBelow}
             position="bottom"
             testId="sidebar-more-unread-below"
