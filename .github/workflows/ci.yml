@@ -705,8 +705,8 @@ jobs:
           set -euo pipefail
           stage_dir="$RUNNER_TEMP/git-bash"
           scripts/stage-windows-bash.sh "$stage_dir"
-          out=$("$stage_dir/bin/bash.exe" -c 'echo hello | rev')
-          [[ "$out" == "olleh" ]] || { echo "staged bash pipeline failed: got '$out'" >&2; exit 1; }
+          out=$("$stage_dir/usr/bin/bash.exe" -c 'echo hello | tr a-z A-Z')
+          [[ "$out" == "HELLO" ]] || { echo "staged bash pipeline failed: got '$out'" >&2; exit 1; }
           echo "staged bash spawned and ran a coreutils pipeline"
       - name: Check (Tauri crate)
         run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET

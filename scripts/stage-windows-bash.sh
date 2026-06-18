@@ -19,8 +19,8 @@ set -euo pipefail
 # exercise the download/extract/drop path on a real Windows runner — the only
 # automated gate on this logic before it ships to users.
 #
-# Single arg: the destination dir for the staged tree (bash lands at
-# <dest>/bin/bash.exe). Idempotent: a `.stage-complete` marker, written last,
+# Single arg: the destination dir for the staged tree (the real MSYS2 bash lands
+# at <dest>/usr/bin/bash.exe). Idempotent: a `.stage-complete` marker, written last,
 # proves a whole prior stage and skips the re-download; a partial stage lacks it
 # and re-extracts cleanly.
 #
@@ -29,7 +29,7 @@ set -euo pipefail
 #     `bundle.resources` SOURCE in desktop/scripts/build-release-config.mjs.
 #   - that resource's TARGET `git-bash` is staged next to the exe by Tauri's
 #     Windows installer, and crates/buzz-dev-mcp/src/shell.rs resolves
-#     `git-bash\bin\bash.exe` relative to its own executable at runtime.
+#     `git-bash\usr\bin\bash.exe` relative to its own executable at runtime.
 
 GIT_BASH_DIR=${1:?usage: stage-windows-bash.sh <dest-dir>}
 PORTABLEGIT_VERSION="2.54.0"
@@ -62,8 +62,8 @@ cp -a "$extract_dir/." "$GIT_BASH_DIR/"
 
 rm -rf "$tmp_dir"
 trap - EXIT
-[[ -f "$GIT_BASH_DIR/bin/bash.exe" ]] || {
-    echo "Error: PortableGit extracted but $GIT_BASH_DIR/bin/bash.exe is missing" >&2
+[[ -f "$GIT_BASH_DIR/usr/bin/bash.exe" ]] || {
+    echo "Error: PortableGit extracted but $GIT_BASH_DIR/usr/bin/bash.exe is missing" >&2
     exit 1
 }
 # Written last, only after cp -a and the integrity check both succeed, so it is
