@@ -1101,6 +1101,68 @@ describe("activeAgentTurnsStore", () => {
         "reset must clear terminal tombstones so they do not leak across reset",
       );
     });
+
+    it("evicts the oldest tombstone once past the cap so the map stays bounded", () => {
+      // The tombstone map is capped at MAX_TERMINAL_TOMBSTONES (16). Complete
+      // 18 distinct turns so eviction fires twice, dropping the two oldest by
+      // insertion order (t0, t1). Probe via the ONE behavior a tombstone gates
+      // that a strictly-newer frame cannot mask: an EQUAL-timestamp liveness
+      // (frameAt == terminalAt). All completions share timestamp T with rising
+      // seq, so the probe clears the per-agent watermark on the seq tiebreak
+      // (compareObserverEvents is timestamp-primary, seq-secondary) yet stays
+      // equal to the recorded terminal — reaching resurrectTurn's tombstone
+      // check rather than being shadowed by the watermark.
+      const CAP = 16;
+      const TOTAL = CAP + 2;
+      const T = at(0);
+      const completions = [];
+      for (let i = 0; i < TOTAL; i++) {
+        completions.push(
+          makeEvent({
+            seq: i + 1,
+            kind: "turn_completed",
+            turnId: `t${i}`,
+            channelId: `c${i}`,
+            timestamp: T,
+          }),
+        );
+      }
+      syncAgentTurnsFromEvents(AGENT, completions);
+
+      // A surviving tombstone (t2, third-completed) still blocks an
+      // equal-timestamp liveness — proves the tombstone is present and doing
+      // the work the watermark cannot.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: TOTAL + 1,
+          kind: "turn_liveness",
+          turnId: "t2",
+          channelId: "c2",
+          timestamp: T,
+        }),
+      ]);
+      assert.ok(
+        !channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c2"),
+        "a surviving tombstone must still block an equal-timestamp liveness",
+      );
+
+      // The oldest tombstone (t0) was evicted, so the same equal-timestamp
+      // liveness now resurrects — proving the cap fired AND evicted the
+      // oldest-by-insertion entry, not an arbitrary one.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: TOTAL + 2,
+          kind: "turn_liveness",
+          turnId: "t0",
+          channelId: "c0",
+          timestamp: T,
+        }),
+      ]);
+      assert.ok(
+        channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c0"),
+        "the oldest tombstone must be evicted once past the cap",
+      );
+    });
   });
 });
 
