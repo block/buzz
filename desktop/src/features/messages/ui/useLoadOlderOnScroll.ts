@@ -170,10 +170,29 @@ export function useLoadOlderOnScroll({
             previousScrollHeight: container.scrollHeight,
           };
 
-          void fetchOlderRef.current?.().catch(() => {
-            pendingRestoreRef.current = null;
-            observe();
-          });
+          const restorePending = pendingRestoreRef.current;
+          void fetchOlderRef.current?.().then(
+            () => {
+              // Empty-older-page guard: if the fetch resolved without a
+              // committed prepend (zero new rows or duplicate of head),
+              // the layout effect never fires and `pendingRestoreRef`
+              // would stay set, wedging the observer. Wait one paint to
+              // let any real commit run the layout effect (which clears
+              // `pendingRestoreRef`); if our pending is still the live
+              // one, treat it as a no-commit fetch and re-arm.
+              requestAnimationFrame(() => {
+                if (disposed || pendingRestoreRef.current !== restorePending) {
+                  return;
+                }
+                pendingRestoreRef.current = null;
+                resumeObservingRef.current?.();
+              });
+            },
+            () => {
+              pendingRestoreRef.current = null;
+              observe();
+            },
+          );
         },
         { root: container, rootMargin: "200px 0px 0px 0px" },
       );
