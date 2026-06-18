@@ -516,6 +516,17 @@ struct KillGroup {
     job: windows_sys::Win32::Foundation::HANDLE,
 }
 
+// SAFETY: `job` is a raw Win32 HANDLE (`*mut c_void`), which is neither `Send`
+// nor `Sync` by default. The shell tool's async future holds a `KillGroup`
+// across an `.await`, so it must be `Send` to be spawned. A job-object handle
+// is a kernel object reference, not thread-affine: `TerminateJobObject` and
+// `CloseHandle` are thread-safe, and Rust's `&self`/`&mut self` borrows still
+// serialize access to the field. Moving or sharing it across threads is sound.
+#[cfg(windows)]
+unsafe impl Send for KillGroup {}
+#[cfg(windows)]
+unsafe impl Sync for KillGroup {}
+
 #[cfg(windows)]
 impl KillGroup {
     fn new(child: &tokio::process::Child, _pid: Option<u32>) -> Self {
