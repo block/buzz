@@ -1050,9 +1050,9 @@ pub async fn run_prompt_task(
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
-    let prompt_text = if let Some(text) = prompt_text {
-        // Pre-built prompt (heartbeat or legacy path).
-        text
+    let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
+        // Pre-built prompt (heartbeat or legacy path) — a single block.
+        vec![text]
     } else if let Some(ref b) = batch {
         // Build prompt from batch with context enrichment.
         // Try startup cache first; lazy-fetch via REST for dynamic channels.
@@ -1127,11 +1127,16 @@ pub async fn run_prompt_task(
 
     // ── Send the actual prompt ────────────────────────────────────────────
 
-    // Slash-command pass-through sends two text blocks: the bare command
-    // first (so connector detection fires), then the wrapped Buzz context.
+    // Slash-command pass-through sends the bare command as the first text
+    // block (so connector detection fires), then each prompt section as its
+    // own block. Per-section blocks let the observer size trimmer elide a
+    // section body in place while every `[Header]` line survives at the head
+    // of its own leaf — so the "Prompt context" panel counts every section.
     let prompt_blocks: Vec<&str> = match slash_command {
-        Some(ref cmd) => vec![cmd.as_str(), prompt_text.as_str()],
-        None => vec![prompt_text.as_str()],
+        Some(ref cmd) => std::iter::once(cmd.as_str())
+            .chain(prompt_sections.iter().map(String::as_str))
+            .collect(),
+        None => prompt_sections.iter().map(String::as_str).collect(),
     };
 
     // ── Control-aware prompt dispatch ─────────────────────────────────────
