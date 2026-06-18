@@ -154,12 +154,7 @@ test.describe("unified unread pill — sidebar", () => {
       await waitForMockLiveSubscription(page, ch).catch(() => {});
       await page.getByTestId(`channel-${ch}`).click();
       await expect(page.getByTestId("chat-title")).toHaveText(ch);
-      await emitMockMessage(
-        page,
-        ch,
-        `Unread in ${ch}`,
-        unreadTimestamp(),
-      );
+      await emitMockMessage(page, ch, `Unread in ${ch}`, unreadTimestamp());
     }
 
     // Return to general so the others are inactive and show unread state.
