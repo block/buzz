@@ -4,6 +4,7 @@
 //! - Accepts valid persona events with proper d-tag slugs
 //! - Enforces NIP-33 replacement semantics (same d-tag, newer timestamp wins)
 //! - Rejects invalid d-tag values (empty, too long, invalid characters)
+//! - Honors NIP-09 a-tag tombstones, removing the persona coordinate
 //!
 //! # Running
 //!
@@ -41,6 +42,20 @@ fn persona_event_at(keys: &Keys, d_tag: &str, content: &str, created_at: u64) ->
     EventBuilder::new(Kind::Custom(PERSONA_KIND), content)
         .tags(vec![Tag::parse(["d", d_tag]).unwrap()])
         .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .unwrap()
+}
+
+/// Build a NIP-09 deletion (kind:5) targeting a persona's NIP-33 coordinate.
+///
+/// Mirrors the desktop `build_persona_delete` shape: a single `a`-tag carrying
+/// `30175:<owner>:<d_tag>` and no `e`-tag. An `e`-tag would route the relay to
+/// the event-id deletion path, leaving the parameterized-replaceable coordinate
+/// live; the coordinate delete removes the persona for every client.
+fn persona_delete_event(keys: &Keys, d_tag: &str) -> nostr::Event {
+    let coord = format!("{PERSONA_KIND}:{}:{d_tag}", keys.public_key().to_hex());
+    EventBuilder::new(Kind::Custom(5), "")
+        .tags(vec![Tag::parse(["a", coord.as_str()]).unwrap()])
         .sign_with_keys(keys)
         .unwrap()
 }
@@ -425,6 +440,74 @@ async fn test_persona_multiple_per_author() {
         events.len() >= 2,
         "expected at least 2 persona events, got {}",
         events.len()
+    );
+
+    client.disconnect().await.expect("disconnect");
+}
+
+// ── NIP-09 coordinate deletion (tombstone) ───────────────────────────────────
+
+/// The kind:5 a-tag tombstone is the only state-destroying operation in the
+/// persona event flow: it removes the persona for every client and across
+/// reboots. This proves the relay acts on it — publishing the persona, then an
+/// a-tag-only tombstone at its coordinate, makes a subsequent query return it
+/// gone (NIP-33 coordinate soft-delete, not the event-id path an e-tag triggers).
+#[tokio::test]
+#[ignore]
+async fn test_persona_tombstone_deletes_coordinate() {
+    let url = relay_url();
+    let keys = Keys::generate();
+    let d_tag = format!("tombstone-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+    let content = r#"{"name":"doomed","display_name":"Doomed","description":"To be deleted"}"#;
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    // Publish the persona.
+    let event = persona_event(&keys, &d_tag, content);
+    let ok = client.send_event(event).await.expect("send persona");
+    assert!(ok.accepted, "relay rejected persona event: {}", ok.message);
+
+    let filter = || {
+        Filter::new()
+            .kind(Kind::Custom(PERSONA_KIND))
+            .author(keys.public_key())
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::D), [d_tag.as_str()])
+    };
+
+    // Confirm it is live before deletion — distinguishes "deleted" from
+    // "never published" if the post-tombstone query comes back empty.
+    let sid = sub_id("tombstone-pre");
+    client
+        .subscribe(&sid, vec![filter()])
+        .await
+        .expect("subscribe pre");
+    let before = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect pre");
+    assert_eq!(before.len(), 1, "persona should be live before deletion");
+
+    // Publish the a-tag-only tombstone at the persona's coordinate.
+    let tombstone = persona_delete_event(&keys, &d_tag);
+    let ok = client.send_event(tombstone).await.expect("send tombstone");
+    assert!(ok.accepted, "relay rejected tombstone: {}", ok.message);
+
+    // Query the coordinate again — it must be gone.
+    let sid = sub_id("tombstone-post");
+    client
+        .subscribe(&sid, vec![filter()])
+        .await
+        .expect("subscribe post");
+    let after = client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect post");
+    assert_eq!(
+        after.len(),
+        0,
+        "tombstone should remove the persona coordinate, got {} event(s)",
+        after.len()
     );
 
     client.disconnect().await.expect("disconnect");
