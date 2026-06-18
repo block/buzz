@@ -1,0 +1,291 @@
+//! Serialize `ManagedAgentRecord` ↔ kind:30177 managed-agent events and
+//! publish via relay.
+//!
+//! Managed-agent events are NIP-33 parameterized replaceable events keyed by
+//! `(pubkey, kind, d_tag)` where `d_tag` is the agent's pubkey. They mirror the
+//! persona event flow (see `persona_events`): the same retention store and
+//! flush loop publish them — this module only owns the kind-specific
+//! projection, build, content-hash, and tombstone.
+//!
+//! # Security: opt-IN allowlist, never record-minus-denylist
+//!
+//! These events are world-readable on the relay. [`ManagedAgentEventContent`]
+//! is an explicit opt-IN projection: it lists exactly the fields that are safe
+//! to publish. A field added to [`super::ManagedAgentRecord`] later defaults to
+//! NOT published unless it is deliberately added here. The flush loop is a
+//! blind pre-signed pipe — this projection is the ONLY guard. It MUST NEVER
+//! carry:
+//! - `private_key_nsec` — the agent's secret key.
+//! - `auth_tag` — the NIP-OA owner attestation.
+//! - `env_vars` — may hold API keys / credentials.
+//! - `backend` — `Provider { config }` is an opaque blob that may hold secrets.
+//! - any runtime field (`runtime_pid`, `last_*`, `backend_agent_id`, …) — these
+//!   mutate on every start/stop and describe transient process state.
+
+use buzz_core_pkg::kind::KIND_MANAGED_AGENT;
+use nostr::{EventBuilder, Kind, Tag};
+use serde::{Deserialize, Serialize};
+
+use super::{ManagedAgentRecord, RespondTo};
+
+/// The JSON body stored in a managed-agent event's content field.
+///
+/// Explicit opt-IN allowlist of the agent's public identity + behavioral
+/// config. See the module docs for the exclusion contract — secrets, the
+/// provider backend blob, and all runtime/install fields are deliberately
+/// absent and must stay that way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManagedAgentEventContent {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_toolsets: Option<String>,
+    /// `persona_content_hash` of the persona snapshot pinned at create time.
+    /// Public drift indicator (not a secret) — lets other clients flag a stale
+    /// snapshot without re-reading the source persona.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona_source_version: Option<String>,
+    pub parallelism: u32,
+    /// Inbound author gate mode (wire string).
+    pub respond_to: RespondTo,
+    /// Allowlisted author pubkeys when `respond_to == Allowlist`. These are
+    /// public keys, not secrets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub respond_to_allowlist: Vec<String>,
+}
+
+/// Project a `ManagedAgentRecord` onto the content fields published in
+/// managed-agent events.
+///
+/// This is the single source of truth for what leaves the device. The
+/// retention upsert compares the serialized projection to suppress a
+/// re-publish when only excluded runtime/local fields changed, so an
+/// operational start/stop produces an identical projection and never
+/// republishes.
+pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventContent {
+    ManagedAgentEventContent {
+        name: record.name.clone(),
+        persona_id: record.persona_id.clone(),
+        system_prompt: record.system_prompt.clone(),
+        model: record.model.clone(),
+        provider: record.provider.clone(),
+        mcp_toolsets: record.mcp_toolsets.clone(),
+        persona_source_version: record.persona_source_version.clone(),
+        parallelism: record.parallelism,
+        respond_to: record.respond_to,
+        respond_to_allowlist: record.respond_to_allowlist.clone(),
+    }
+}
+
+/// Build a kind:30177 event from a `ManagedAgentRecord`.
+///
+/// Returns an unsigned `EventBuilder` — the caller signs and submits. The
+/// `d_tag` is the agent's pubkey.
+pub fn build_agent_event(record: &ManagedAgentRecord) -> Result<EventBuilder, String> {
+    let content = serde_json::to_string(&agent_event_content(record))
+        .map_err(|e| format!("failed to serialize managed-agent content: {e}"))?;
+    let tags =
+        vec![Tag::parse(["d", record.pubkey.as_str()]).map_err(|e| format!("invalid d-tag: {e}"))?];
+    Ok(EventBuilder::new(Kind::Custom(KIND_MANAGED_AGENT as u16), content).tags(tags))
+}
+
+/// Build a NIP-09 deletion (kind:5) targeting an agent's kind:30177 event.
+///
+/// Carries a single `a`-tag with the NIP-33 coordinate
+/// `30177:<owner>:<d_tag>` and no `e`-tag: an `e`-tag routes the relay to the
+/// event-id deletion path, leaving the parameterized-replaceable coordinate
+/// live. The coordinate delete removes the agent for every client and across
+/// reboots.
+pub fn build_agent_delete(d_tag: &str, owner_pubkey_hex: &str) -> Result<EventBuilder, String> {
+    let coord = format!("{KIND_MANAGED_AGENT}:{owner_pubkey_hex}:{d_tag}");
+    let tag = Tag::parse(["a", coord.as_str()]).map_err(|e| format!("invalid a-tag: {e}"))?;
+    Ok(EventBuilder::new(Kind::Custom(5), "").tags(vec![tag]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn sample_agent() -> ManagedAgentRecord {
+        ManagedAgentRecord {
+            pubkey: "agentpubkeyhex".to_string(),
+            name: "Test Agent".to_string(),
+            persona_id: Some("persona-1".to_string()),
+            private_key_nsec: "nsec1secretdonotpublish".to_string(),
+            auth_tag: Some("authtagsecret".to_string()),
+            relay_url: "wss://relay.example".to_string(),
+            avatar_url: Some("https://example.com/a.png".to_string()),
+            acp_command: "buzz-acp".to_string(),
+            agent_command: "goose".to_string(),
+            agent_command_override: None,
+            agent_args: vec!["--flag".to_string()],
+            mcp_command: "buzz-dev-mcp".to_string(),
+            turn_timeout_seconds: 320,
+            idle_timeout_seconds: None,
+            max_turn_duration_seconds: None,
+            parallelism: 24,
+            system_prompt: Some("You are a test agent.".to_string()),
+            model: Some("claude-opus-4".to_string()),
+            provider: Some("anthropic".to_string()),
+            persona_source_version: Some("abc123".to_string()),
+            mcp_toolsets: Some("default".to_string()),
+            env_vars: BTreeMap::from([("OPENAI_API_KEY".to_string(), "sk-secret".to_string())]),
+            start_on_app_launch: true,
+            runtime_pid: Some(4242),
+            backend: super::super::BackendKind::Provider {
+                id: "buzz-backend-x".to_string(),
+                config: serde_json::json!({ "api_key": "sk-provider-secret" }),
+            },
+            backend_agent_id: Some("remote-id".to_string()),
+            provider_binary_path: Some("/path/to/binary".to_string()),
+            persona_team_dir: None,
+            persona_name_in_team: None,
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T00:00:00Z".to_string(),
+            last_started_at: Some("2025-01-02T00:00:00Z".to_string()),
+            last_stopped_at: Some("2025-01-03T00:00:00Z".to_string()),
+            last_exit_code: Some(0),
+            last_error: Some("some runtime error".to_string()),
+            respond_to: RespondTo::Allowlist,
+            respond_to_allowlist: vec!["79be667e".to_string()],
+            relay_mesh: None,
+        }
+    }
+
+    #[test]
+    fn build_agent_event_produces_correct_kind() {
+        let builder = build_agent_event(&sample_agent()).unwrap();
+        let keys = nostr::Keys::generate();
+        let event = builder.sign_with_keys(&keys).unwrap();
+        assert_eq!(event.kind.as_u16() as u32, KIND_MANAGED_AGENT);
+    }
+
+    #[test]
+    fn d_tag_is_agent_pubkey() {
+        let builder = build_agent_event(&sample_agent()).unwrap();
+        let keys = nostr::Keys::generate();
+        let event = builder.sign_with_keys(&keys).unwrap();
+        let d = event
+            .tags
+            .iter()
+            .find_map(|t| {
+                let v: Vec<&str> = t.as_slice().iter().map(|s| s.as_str()).collect();
+                (v.first() == Some(&"d"))
+                    .then(|| v.get(1).map(|s| s.to_string()))
+                    .flatten()
+            })
+            .unwrap();
+        assert_eq!(d, "agentpubkeyhex");
+    }
+
+    /// The security-critical assertion: the published projection must NEVER
+    /// carry secrets, the provider backend blob, env vars, or runtime fields.
+    #[test]
+    fn content_excludes_secrets_and_runtime_fields() {
+        let json = serde_json::to_string(&agent_event_content(&sample_agent())).unwrap();
+
+        // Secrets — must never appear.
+        assert!(
+            !json.contains("nsec1secretdonotpublish"),
+            "leaked private key"
+        );
+        assert!(!json.contains("private_key"), "leaked private key field");
+        assert!(!json.contains("authtagsecret"), "leaked auth tag value");
+        assert!(!json.contains("auth_tag"), "leaked auth tag field");
+        assert!(!json.contains("OPENAI_API_KEY"), "leaked env var key");
+        assert!(!json.contains("sk-secret"), "leaked env var value");
+        assert!(!json.contains("env_vars"), "leaked env var field");
+        assert!(
+            !json.contains("sk-provider-secret"),
+            "leaked provider config secret"
+        );
+        assert!(!json.contains("backend"), "leaked backend blob");
+
+        // Runtime / install fields — must never appear.
+        assert!(!json.contains("runtime_pid"), "leaked runtime pid");
+        assert!(!json.contains("4242"), "leaked runtime pid value");
+        assert!(!json.contains("last_started_at"));
+        assert!(!json.contains("last_stopped_at"));
+        assert!(!json.contains("last_exit_code"));
+        assert!(!json.contains("last_error"));
+        assert!(!json.contains("some runtime error"));
+        assert!(!json.contains("backend_agent_id"));
+        assert!(!json.contains("provider_binary_path"));
+        assert!(!json.contains("relay_url"));
+
+        // Identity fields — must appear.
+        assert!(json.contains("\"name\""));
+        assert!(json.contains("Test Agent"));
+        assert!(json.contains("persona_id"));
+        assert!(json.contains("system_prompt"));
+    }
+
+    #[test]
+    fn projection_is_deterministic() {
+        let agent = sample_agent();
+        let a = serde_json::to_string(&agent_event_content(&agent)).unwrap();
+        let b = serde_json::to_string(&agent_event_content(&agent)).unwrap();
+        assert_eq!(a, b);
+    }
+
+    /// Mutating only runtime fields must NOT change the projection — the
+    /// guarantee that operational start/stop never republishes.
+    #[test]
+    fn projection_ignores_runtime_field_churn() {
+        let agent = sample_agent();
+        let mut churned = agent.clone();
+        churned.runtime_pid = Some(9999);
+        churned.last_started_at = Some("2099-01-01T00:00:00Z".to_string());
+        churned.last_exit_code = Some(1);
+        churned.last_error = Some("different error".to_string());
+        churned.updated_at = "2099-12-31T00:00:00Z".to_string();
+        assert_eq!(
+            agent_event_content(&agent),
+            agent_event_content(&churned),
+            "runtime field churn must not alter the published projection"
+        );
+    }
+
+    #[test]
+    fn projection_changes_on_meaningful_edit() {
+        let agent = sample_agent();
+        let mut edited = agent.clone();
+        edited.system_prompt = Some("A different prompt.".to_string());
+        assert_ne!(agent_event_content(&agent), agent_event_content(&edited));
+    }
+
+    #[test]
+    fn build_agent_delete_has_single_a_tag_no_e_tag() {
+        const OWNER: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+        let builder = build_agent_delete("agentpubkeyhex", OWNER).unwrap();
+        let keys = nostr::Keys::generate();
+        let event = builder.sign_with_keys(&keys).unwrap();
+
+        assert_eq!(event.kind, Kind::Custom(5));
+
+        let a_tags: Vec<&[String]> = event
+            .tags
+            .iter()
+            .map(|t| t.as_slice())
+            .filter(|v| v.first().map(String::as_str) == Some("a"))
+            .collect();
+        assert_eq!(a_tags.len(), 1);
+        assert_eq!(
+            a_tags[0][1],
+            format!("{KIND_MANAGED_AGENT}:{OWNER}:agentpubkeyhex")
+        );
+
+        assert!(event
+            .tags
+            .iter()
+            .all(|t| t.as_slice().first().map(String::as_str) != Some("e")));
+    }
+}

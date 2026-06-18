@@ -1137,16 +1137,97 @@ fn migrate_personas_skips_builtins() {
 }
 
 #[test]
-fn migrate_personas_skips_when_retention_already_populated() {
+fn migrate_personas_unchanged_second_run_is_noop() {
     let base = tempfile::tempdir().unwrap();
     write_base_personas(base.path(), &one_persona());
     let keys = nostr::Keys::generate();
 
-    // First run migrates; second run is a no-op (retention rows are the
-    // sentinel — no separate sentinel file).
+    // First run retains; second run with identical personas re-retains
+    // nothing — the per-coordinate content matches, so `pending_sync` is
+    // not churned.
     assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
     assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 0);
     assert!(!base.path().join("migration_state.json").exists());
+}
+
+#[test]
+fn migrate_personas_new_persona_after_first_run_gets_retained() {
+    use crate::managed_agents::retention::{get_retained_personas, open_retention_db};
+
+    let base = tempfile::tempdir().unwrap();
+    write_base_personas(base.path(), &one_persona());
+    let keys = nostr::Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+
+    // A persona added to personas.json after the first reconcile must be
+    // picked up — the whole-store sentinel that previously short-circuited
+    // this is gone.
+    let mut two = one_persona();
+    two.as_array_mut().unwrap().push(serde_json::json!({
+        "id": "test-writer",
+        "display_name": "Test Writer",
+        "system_prompt": "You write tests.",
+        "is_builtin": false,
+        "is_active": true,
+        "name_pool": [],
+        "env_vars": {},
+        "created_at": "2025-01-02T00:00:00Z",
+        "updated_at": "2025-01-02T00:00:00Z"
+    }));
+    write_base_personas(base.path(), &two);
+
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let rows = get_retained_personas(&conn, &pubkey).unwrap();
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
+fn migrate_personas_edited_persona_re_retains_pending() {
+    use crate::managed_agents::retention::{get_retained_event, mark_synced, open_retention_db};
+    use buzz_core_pkg::kind::KIND_PERSONA;
+
+    let base = tempfile::tempdir().unwrap();
+    write_base_personas(base.path(), &one_persona());
+    let keys = nostr::Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+
+    // Simulate the flush loop confirming the first publish.
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let row = get_retained_event(&conn, KIND_PERSONA, &pubkey, "code-reviewer")
+        .unwrap()
+        .unwrap();
+    mark_synced(
+        &conn,
+        KIND_PERSONA,
+        &pubkey,
+        "code-reviewer",
+        row.created_at,
+        &row.content,
+    )
+    .unwrap();
+    drop(conn);
+
+    // Editing the persona on disk must re-retain it as pending so the edit
+    // reaches the relay on the next flush.
+    let mut edited = one_persona();
+    edited.as_array_mut().unwrap()[0]["system_prompt"] =
+        serde_json::json!("You review code carefully.");
+    write_base_personas(base.path(), &edited);
+
+    assert_eq!(migrate_personas_in_dir(base.path(), &keys).unwrap(), 1);
+
+    let conn = open_retention_db(&base.path().join("retention.db")).unwrap();
+    let row = get_retained_event(&conn, KIND_PERSONA, &pubkey, "code-reviewer")
+        .unwrap()
+        .unwrap();
+    assert!(row.pending_sync);
+    assert!(row.content.contains("carefully"));
 }
 
 #[test]

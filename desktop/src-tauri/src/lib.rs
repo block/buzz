@@ -110,7 +110,7 @@ use huddle::{
     speak_agent_message, start_huddle, start_stt_pipeline,
 };
 use managed_agents::{
-    ensure_nest, kill_stale_tracked_processes, load_managed_agents,
+    backfill_persona_snapshots, ensure_nest, kill_stale_tracked_processes, load_managed_agents,
     restore_managed_agents_on_launch, save_managed_agents, sync_managed_agent_processes,
     try_regenerate_nest, BackendKind, ManagedAgentProcess,
 };
@@ -557,6 +557,16 @@ pub fn run() {
                 eprintln!("buzz-desktop: sync-team-personas: {e}");
             }
 
+            // Backfill the pinned persona snapshot for any pre-existing agent
+            // that predates the record-authoritative-spawn cutover (persona_id
+            // set but no source_version). Must run before
+            // restore_managed_agents_on_launch so no agent spawns from an empty
+            // snapshot. Synchronous and best-effort — a failure here must not
+            // block launch, but a missing persona is logged loudly inside.
+            if let Err(e) = backfill_persona_snapshots(&app_handle) {
+                eprintln!("buzz-desktop: persona-snapshot backfill failed: {e}");
+            }
+
             // Store the AppHandle so huddle commands can emit `huddle-state-changed`
             // events via `huddle::emit_huddle_state` without threading the handle
             // through every call site.
@@ -713,6 +723,32 @@ pub fn run() {
                     .await
                     .unwrap_or_default();
                     prev_orphans = new_orphans;
+                }
+            });
+
+            // Drain events the retention store flagged `pending_sync` (UI
+            // create/edit, delete tombstones, launch reconcile) to the relay.
+            // One loop is the sole publisher for persona, team, and managed-
+            // agent writers; a relay-unreachable tick leaves rows pending for
+            // the next sweep.
+            let flush_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use std::time::Duration;
+                use tauri::Manager;
+                let Ok(db_path) = managed_agents::managed_agents_base_dir(&flush_handle)
+                    .map(|d| d.join("retention.db"))
+                else {
+                    eprintln!("buzz-desktop: event-flush: cannot resolve retention db path");
+                    return;
+                };
+                loop {
+                    let state = flush_handle.state::<AppState>();
+                    if let Err(e) =
+                        managed_agents::persona_events::flush_pending_events(&db_path, &state).await
+                    {
+                        eprintln!("buzz-desktop: event-flush: {e}");
+                    }
+                    tokio::time::sleep(Duration::from_secs(30)).await;
                 }
             });
 

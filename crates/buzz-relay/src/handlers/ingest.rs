@@ -21,7 +21,7 @@ use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS, KIND_MUTE_LIST,
     KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
     KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
@@ -30,7 +30,7 @@ use buzz_core::kind::{
     KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_STREAM_MESSAGE,
     KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT,
     KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2,
-    KIND_STREAM_REMINDER, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
+    KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
     KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
     RELAY_ADMIN_REMOVE_MEMBER,
 };
@@ -155,7 +155,9 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
-        | KIND_EVENT_REMINDER | KIND_PERSONA => Ok(Scope::UsersWrite),
+        | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT => {
+            Ok(Scope::UsersWrite)
+        }
         // NIP-51 standard lists and NIP-65 relay list — user-owned global state,
         // same ownership shape as kind:3 (contacts) and kind:0 (profile).
         KIND_MUTE_LIST
@@ -347,6 +349,10 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_AGENT_PROFILE
             // NIP-AP: persona definitions (30175): owner-authored, keyed by (pubkey, kind, d_tag).
             | KIND_PERSONA
+            // NIP-AP: team (30176) + managed-agent (30177) definitions: owner-authored,
+            // keyed by (pubkey, kind, d_tag). A stray `h` tag must not channel-scope them.
+            | KIND_TEAM
+            | KIND_MANAGED_AGENT
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
             | KIND_GIT_REPO_ANNOUNCEMENT
@@ -1926,8 +1932,8 @@ mod tests {
     use super::*;
     use buzz_core::kind::{
         KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_LONG_FORM,
-        KIND_PERSONA, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_DIFF,
-        KIND_USER_STATUS,
+        KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE,
+        KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
 
     #[test]
@@ -2097,6 +2103,8 @@ mod tests {
             KIND_AGENT_ENGRAM,
             KIND_AGENT_PROFILE,
             KIND_PERSONA,
+            KIND_TEAM,
+            KIND_MANAGED_AGENT,
         ];
         for kind in migrated {
             assert!(
@@ -2168,6 +2176,32 @@ mod tests {
     fn persona_is_global_only() {
         assert!(is_global_only_kind(KIND_PERSONA));
         assert!(!requires_h_channel_scope(KIND_PERSONA));
+    }
+
+    #[test]
+    fn team_and_managed_agent_are_in_scope_allowlist() {
+        let dummy = make_dummy_event();
+        for kind in [KIND_TEAM, KIND_MANAGED_AGENT] {
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).unwrap(),
+                Scope::UsersWrite,
+                "kind {kind} should require UsersWrite scope"
+            );
+        }
+    }
+
+    #[test]
+    fn team_and_managed_agent_are_global_only() {
+        for kind in [KIND_TEAM, KIND_MANAGED_AGENT] {
+            assert!(
+                is_global_only_kind(kind),
+                "kind {kind} should be global-only (never channel-scoped)"
+            );
+            assert!(
+                !requires_h_channel_scope(kind),
+                "kind {kind} must not require an h-tag channel scope"
+            );
+        }
     }
 
     #[test]

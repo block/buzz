@@ -1,8 +1,9 @@
 #[cfg(feature = "mesh-llm")]
 use super::relay_mesh_model_id;
 use super::{
-    find_managed_agent_mut, kill_stale_tracked_processes, load_managed_agents, save_managed_agents,
-    spawn_agent_child, sync_managed_agent_processes, BackendKind, ManagedAgentProcess,
+    find_managed_agent_mut, kill_stale_tracked_processes, load_managed_agents, load_personas,
+    save_managed_agents, spawn_agent_child, sync_managed_agent_processes, BackendKind,
+    ManagedAgentProcess,
 };
 use crate::app_state::AppState;
 use crate::util;
@@ -11,6 +12,67 @@ use tauri::Manager;
 
 type SpawnResult = Result<ManagedAgentProcess, String>;
 type AgentSpawnResult = (String, SpawnResult);
+
+/// Backfill the pinned persona snapshot for pre-existing agents created before
+/// the record became the spawn source of truth. Runs once at launch, before
+/// `restore_managed_agents_on_launch` spawns anything, so no agent boots from an
+/// empty snapshot.
+///
+/// Only records with a `persona_id` but no `persona_source_version` are touched.
+/// If the linked persona is gone, we log loudly and leave the snapshot empty —
+/// the record's own `system_prompt`/`model` (possibly empty for persona-created
+/// agents) is then all the config that remains, which is the same fallback an
+/// orphaned agent already gets.
+pub fn backfill_persona_snapshots(app: &tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|error| error.to_string())?;
+
+    let mut records = load_managed_agents(app)?;
+    let needs_backfill = records
+        .iter()
+        .any(|r| r.persona_id.is_some() && r.persona_source_version.is_none());
+    if !needs_backfill {
+        return Ok(());
+    }
+
+    let personas = load_personas(app)?;
+    let mut changed = false;
+    for record in records.iter_mut() {
+        let Some(persona_id) = record.persona_id.clone() else {
+            continue;
+        };
+        if record.persona_source_version.is_some() {
+            continue;
+        }
+        let Some(persona) = personas.iter().find(|p| p.id == persona_id) else {
+            eprintln!(
+                "buzz-desktop: persona-snapshot backfill: agent {} links persona {persona_id} which no longer exists; leaving snapshot empty — it will spawn from its record fields",
+                record.pubkey
+            );
+            continue;
+        };
+        // Layer the agent's own env overrides over persona env, matching
+        // create-time precedence (persona env < agent env).
+        let snapshot = super::persona_events::persona_snapshot(persona, &record.env_vars);
+        if let Some(prompt) = snapshot.system_prompt {
+            record.system_prompt = Some(prompt);
+        }
+        record.model = snapshot.model;
+        record.provider = snapshot.provider;
+        record.env_vars = snapshot.env_vars;
+        record.persona_source_version = Some(snapshot.source_version);
+        record.updated_at = util::now_iso();
+        changed = true;
+    }
+
+    if changed {
+        save_managed_agents(app, &records)?;
+    }
+    Ok(())
+}
 
 /// Restore managed agents that were running before the app was closed.
 ///

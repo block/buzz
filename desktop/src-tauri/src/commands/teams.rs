@@ -28,6 +28,103 @@ fn trim_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+/// Retain a freshly authored team event in the local store, flagged for relay
+/// sync. Called inside a command's `managed_agents_store_lock`-held body after
+/// `save_teams`; the background flush loop publishes it out-of-band.
+///
+/// Mirrors `commands::personas::retain_persona_pending`. Built-in teams are not
+/// owner-authored, so the caller skips them — this helper assumes the team is
+/// publishable. Best-effort: a failure here is logged and swallowed so a
+/// retention hiccup never blocks the disk-authoritative write.
+///
+/// Unlike `retain_managed_agent_pending`, this has no projection-equality
+/// short-circuit: teams have no start/stop runtime churn, so a republish only
+/// happens on an actual user edit. The guard is intentionally omitted.
+fn retain_team_pending(app: &AppHandle, state: &AppState, team: &TeamRecord) {
+    use crate::managed_agents::{
+        managed_agents_base_dir,
+        retention::{open_retention_db, retain_event, RetainedEvent},
+        team_events::build_team_event,
+    };
+    use buzz_core_pkg::kind::KIND_TEAM;
+    use nostr::JsonUtil;
+
+    let result = (|| -> Result<(), String> {
+        let (pubkey, event) = {
+            let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            let event = build_team_event(team)?
+                .sign_with_keys(&keys)
+                .map_err(|e| format!("failed to sign team event: {e}"))?;
+            (keys.public_key().to_hex(), event)
+        };
+        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
+        retain_event(
+            &conn,
+            &RetainedEvent {
+                kind: KIND_TEAM,
+                pubkey,
+                d_tag: team.id.clone(),
+                content: event.content.to_string(),
+                created_at: event.created_at.as_secs() as i64,
+                raw_event: event.as_json(),
+                pending_sync: true,
+            },
+        )
+    })();
+    if let Err(e) = result {
+        eprintln!("buzz-desktop: team-retain: {e}");
+    }
+}
+
+/// Purge a deleted team's pending row and enqueue a NIP-09 tombstone, both
+/// inside the `managed_agents_store_lock`-held delete body.
+///
+/// Mirrors `commands::personas::tombstone_persona_pending`: the team row is
+/// purged first so an unpublished edit can never resurrect it after the
+/// tombstone publishes, then the kind:5 tombstone is retained at its own
+/// `(5, pubkey, d_tag)` coordinate with `pending_sync = 1`. Best-effort: a
+/// failure is logged and swallowed so a retention hiccup never blocks the
+/// disk-authoritative delete.
+fn tombstone_team_pending(app: &AppHandle, state: &AppState, d_tag: &str) {
+    use crate::managed_agents::{
+        managed_agents_base_dir,
+        retention::{delete_retained_event, open_retention_db, retain_event, RetainedEvent},
+        team_events::build_team_delete,
+    };
+    use buzz_core_pkg::kind::KIND_TEAM;
+    use nostr::JsonUtil;
+
+    const KIND_DELETE: u32 = 5;
+
+    let result = (|| -> Result<(), String> {
+        let (pubkey, event) = {
+            let keys = state.keys.lock().map_err(|e| e.to_string())?;
+            let pubkey = keys.public_key().to_hex();
+            let event = build_team_delete(d_tag, &pubkey)?
+                .sign_with_keys(&keys)
+                .map_err(|e| format!("failed to sign team tombstone: {e}"))?;
+            (pubkey, event)
+        };
+        let conn = open_retention_db(&managed_agents_base_dir(app)?.join("retention.db"))?;
+        delete_retained_event(&conn, KIND_TEAM, &pubkey, d_tag)?;
+        retain_event(
+            &conn,
+            &RetainedEvent {
+                kind: KIND_DELETE,
+                pubkey,
+                d_tag: d_tag.to_string(),
+                content: event.content.to_string(),
+                created_at: event.created_at.as_secs() as i64,
+                raw_event: event.as_json(),
+                pending_sync: true,
+            },
+        )
+    })();
+    if let Err(e) = result {
+        eprintln!("buzz-desktop: team-tombstone: {e}");
+    }
+}
+
 #[tauri::command]
 pub fn list_teams(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<TeamRecord>, String> {
     let _store_guard = state
@@ -69,6 +166,8 @@ pub fn create_team(
     };
     teams.push(team.clone());
     save_teams(&app, &teams)?;
+    // Created teams are always non-builtin; publish to the relay.
+    retain_team_pending(&app, &state, &team);
     Ok(team)
 }
 
@@ -100,6 +199,10 @@ pub fn update_team(
 
     let updated = team.clone();
     save_teams(&app, &teams)?;
+    // Built-in teams are not owner-authored — never publish them.
+    if !updated.is_builtin {
+        retain_team_pending(&app, &state, &updated);
+    }
     Ok(updated)
 }
 
@@ -110,6 +213,10 @@ pub fn delete_team(id: String, app: AppHandle, state: State<'_, AppState>) -> Re
         .lock()
         .map_err(|error| error.to_string())?;
     delete_team_with_cascade(&app, &id)?;
+    // delete_team_with_cascade rejects built-in teams via validate_team_deletion,
+    // so reaching here means this team was owner-published — tombstone it. The
+    // d_tag is the team id, captured before the record left the store.
+    tombstone_team_pending(&app, &state, &id);
     try_regenerate_nest(&app);
     Ok(())
 }
