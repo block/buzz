@@ -208,7 +208,7 @@ const MessageTimelineBase = React.forwardRef<
     highlightedMessageId,
     isAtBottom,
     newMessageCount,
-    restoreScrollPosition,
+    restoreScrollBy,
     scrollToBottom,
     scrollToBottomOnNextUpdate,
     scrollToMessage,
@@ -292,7 +292,9 @@ const MessageTimelineBase = React.forwardRef<
     fetchOlder,
     hasOlderMessages,
     isLoading: showTimelineSkeleton,
-    restoreScrollPosition,
+    renderedFirstMessageId: deferredMessages[0]?.id ?? null,
+    renderedMessageCount: deferredMessages.length,
+    restoreScrollBy,
     scrollContainerRef,
     sentinelRef: topSentinelRef,
   });
@@ -347,7 +349,10 @@ const MessageTimelineBase = React.forwardRef<
             <div ref={topSentinelRef} aria-hidden className="h-px" />
 
             {isFetchingOlder ? (
-              <div className="flex justify-center py-2">
+              <div
+                className="pointer-events-none absolute inset-x-0 top-1 flex justify-center"
+                data-testid="message-fetching-older"
+              >
                 <Spinner className="h-4 w-4 border-2 text-muted-foreground" />
               </div>
             ) : null}

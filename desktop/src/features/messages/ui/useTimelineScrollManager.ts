@@ -183,6 +183,29 @@ export function useTimelineScrollManager({
     [syncScrollState],
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: timelineRef is a stable React ref passed from the parent — its identity never changes
+  const restoreScrollBy = React.useCallback(
+    (delta: number) => {
+      const timeline = timelineRef.current;
+
+      if (!timeline || delta === 0) {
+        return;
+      }
+
+      isProgrammaticBottomScrollRef.current = false;
+      timeline.scrollBy({ top: delta, behavior: "auto" });
+      previousScrollTopRef.current += delta;
+      lockedScrollTopRef.current = previousScrollTopRef.current;
+
+      requestAnimationFrame(() => {
+        lockedScrollTopRef.current = null;
+        previousScrollTopRef.current = timeline.scrollTop;
+        syncScrollState();
+      });
+    },
+    [syncScrollState],
+  );
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: timelineRef is a stable React ref — its identity never changes
   const scrollToBottom = React.useCallback(
     (behavior: ScrollBehavior) => {
@@ -455,6 +478,7 @@ export function useTimelineScrollManager({
     highlightedMessageId,
     isAtBottom,
     newMessageCount,
+    restoreScrollBy,
     restoreScrollPosition,
     scrollToBottom,
     scrollToBottomOnNextUpdate,
