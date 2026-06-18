@@ -1,0 +1,52 @@
+services:
+  postgres:
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+
+  redis:
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+
+  typesense:
+    environment:
+      TYPESENSE_ENABLE_CORS: "true"
+    ports:
+      - "${TYPESENSE_PORT:-8108}:8108"
+
+  minio:
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+
+  adminer:
+    image: adminer:latest
+    container_name: buzz-adminer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    ports:
+      - "${ADMINER_PORT:-8082}:8080"
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: buzz-prometheus
+    volumes:
+      - ../../prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - buzz-prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
+volumes:
+  buzz-prometheus-data:
+    labels:
+      com.buzz.volume: prometheus

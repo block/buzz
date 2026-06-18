@@ -4,6 +4,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
 import 'channel_management_provider.dart';
 import 'emoji_picker.dart';
 import 'thread_detail_page.dart';
@@ -158,6 +160,7 @@ void showMessageActions({
                   _confirmDelete(
                     context: context,
                     ref: ref,
+                    channelId: channelId,
                     messageId: message.id,
                   );
                 },
@@ -220,6 +223,10 @@ void _showEditSheet({
                         channelId: channelId,
                         eventId: message.id,
                         content: text,
+                        mediaTags: buildCustomEmojiTags(
+                          text,
+                          ref.read(customEmojiListProvider),
+                        ),
                       );
                   Navigator.of(sheetContext).pop();
                 },
@@ -236,6 +243,7 @@ void _showEditSheet({
 void _confirmDelete({
   required BuildContext context,
   required WidgetRef ref,
+  required String channelId,
   required String messageId,
 }) {
   showDialog<void>(
@@ -251,7 +259,9 @@ void _confirmDelete({
         FilledButton(
           onPressed: () {
             Navigator.of(dialogContext).pop();
-            ref.read(channelActionsProvider).deleteMessage(messageId);
+            ref
+                .read(channelActionsProvider)
+                .deleteMessage(channelId: channelId, eventId: messageId);
           },
           style: FilledButton.styleFrom(
             backgroundColor: Theme.of(dialogContext).colorScheme.error,

@@ -12,7 +12,8 @@
 
 # Editor / IDE
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
 *.swp
 *.swo
 *~
@@ -41,9 +42,9 @@ node_modules/
 .sqlx/
 
 # SQLite database (created by relay in CWD)
-sprout.db
-sprout.db-wal
-sprout.db-shm
+buzz.db
+buzz.db-wal
+buzz.db-shm
 
 # Docker volumes (if mounted locally)
 mysql-data/
@@ -60,3 +61,9 @@ identity.key
 
 # Claude Code worktrees
 .claude/worktrees/
+
+# mesh-llm build cache
+.cache/
+
+# Helm dependency tarballs — regenerable from Chart.lock via `helm dependency build`
+deploy/charts/*/charts/*.tgz

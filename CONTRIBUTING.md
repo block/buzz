@@ -1,6 +1,6 @@
-# Contributing to Sprout
+# Contributing to Buzz
 
-Welcome, and thank you for your interest in contributing! Sprout is an
+Welcome, and thank you for your interest in contributing! Buzz is an
 open-source project and we're glad you're here. This guide will help you
 get from zero to a merged pull request.
 
@@ -17,10 +17,11 @@ reach out in the community channels.
 4. [Code Style](#code-style)
 5. [Making a Pull Request](#making-a-pull-request)
 6. [Architecture Overview](#architecture-overview)
-7. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
-8. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
-9. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
-10. [License and CLA](#license-and-cla)
+7. [Ecosystem](#ecosystem)
+8. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
+9. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
+10. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
+11. [License and CLA](#license-and-cla)
 
 ---
 
@@ -28,7 +29,7 @@ reach out in the community channels.
 
 This project follows the [Contributor Covenant v2.1](CODE_OF_CONDUCT.md).
 By participating you agree to uphold these standards. Please report
-unacceptable behavior to **conduct@sprout-relay.org**.
+unacceptable behavior to **conduct@buzz-relay.org**.
 
 ---
 
@@ -45,7 +46,7 @@ unacceptable behavior to **conduct@sprout-relay.org**.
 | Docker | 24+ | For Postgres, Redis, Typesense |
 | `just` | latest | Task runner — `cargo install just` |
 | `lefthook` | latest | Optional; run `lefthook install` for local Git hooks |
-| `pgschema` | latest | Schema tool — `just migrate` applies `schema/schema.sql` declaratively |
+| `sqlx` migrations | workspace crate | `just migrate` applies embedded migrations from `migrations/` |
 
 This repo uses [Hermit](https://cashapp.github.io/hermit/) for toolchain
 pinning. Activate it once per shell session:
@@ -86,7 +87,7 @@ OAuth/OIDC testing, MinIO on `:9000` for media storage, and Prometheus on
 
 ```bash
 just relay
-# or: cargo run -p sprout-relay
+# or: cargo run -p buzz-relay
 ```
 
 The relay listens on `ws://localhost:3000` by default. You should see log
@@ -125,7 +126,7 @@ already running.
 
 ### End-to-End Tests
 
-End-to-end tests live in `crates/sprout-test-client/tests/`:
+End-to-end tests live in `crates/buzz-test-client/tests/`:
 
 - `e2e_rest_api.rs` — REST API tests
 - `e2e_relay.rs` — WebSocket relay tests
@@ -139,7 +140,7 @@ End-to-end tests live in `crates/sprout-test-client/tests/`:
 Run them with (requires running infrastructure):
 
 ```bash
-cargo test -p sprout-test-client -- --ignored
+cargo test -p buzz-test-client -- --ignored
 ```
 
 See `TESTING.md` for the full multi-agent E2E testing guide.
@@ -279,44 +280,45 @@ required. The scope (in parentheses) is optional but encouraged.
 
 ## Architecture Overview
 
-See [README.md](README.md) for the full crate map and architecture diagram.
-The short version:
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design and
+[AGENTS.md](AGENTS.md#repo-structure) for the complete crate map. The key
+design principles:
 
-```
-sprout-relay      ← WebSocket server, REST API, event ingestion
-sprout-core       ← Shared types, event verification, filter matching
-sprout-db         ← Postgres access layer (sqlx)
-sprout-auth       ← NIP-42 + NIP-98 + API token scopes
-sprout-pubsub     ← Redis fan-out
-sprout-search     ← Typesense full-text search
-sprout-audit      ← Tamper-evident hash-chain audit log
-sprout-workflow   ← YAML-as-code workflow engine
-sprout-mcp        ← stdio MCP server (agent API surface)
-sprout-acp        ← ACP harness (bridges Sprout relay events to AI agents via stdio)
-sprout-proxy      ← Nostr client compatibility layer
-sprout-sdk        ← Typed Nostr event builders (used by sprout-mcp and sprout-cli)
-sprout-media      ← Blossom/S3 media storage
-sprout-cli        ← Agent-first CLI for interacting with the relay
-sprout-admin      ← Operator CLI
-sprout-test-client← Integration test harness
-desktop/          ← Desktop app (Tauri 2 + React 19 + Vite + Tailwind)
-```
+**The relay is the single source of truth.** All state flows through the
+event store. Crates communicate through the database and Redis pub/sub — not
+through direct function calls across crate boundaries (with the exception
+of `buzz-core` types, which are shared everywhere).
 
-**Key design principle:** The relay is the single source of truth. All state
-flows through the event store. Crates communicate through the database and
-Redis pub/sub — not through direct function calls across crate boundaries
-(with the exception of `sprout-core` types, which are shared everywhere).
-
-**Event kinds** are the only switch. Every action in the system — a message,
+**Event kinds are the only switch.** Every action in the system — a message,
 a reaction, a workflow step, a canvas update — is a Nostr event with a kind
 integer. Adding a new feature means defining a new kind. No breaking changes
 to existing clients.
 
 ---
 
+## Ecosystem
+
+Buzz is developed across multiple repositories. This repo (`block/sprout`)
+is the open-source home for all application code — the relay, desktop app,
+mobile app, CLI, and agent harness. Internal repositories handle
+enterprise-signed builds and infrastructure deployment.
+
+See [AGENTS.md § Ecosystem](AGENTS.md#ecosystem) for the full repo table and
+dependency diagram.
+
+**External contributors:** Fork `block/sprout`, open a PR, and CI runs
+automatically. No special access is required.
+
+**Block team members:** See the internal
+[sprout-releases CONTRIBUTING.md](https://github.com/squareup/sprout-releases/blob/main/CONTRIBUTING.md)
+for team access setup, onboarding, and the full repo inventory. See
+[RELEASING.md](RELEASING.md) for the release process.
+
+---
+
 ## How to Add a New Event Kind
 
-1. **Define the kind constant** in `sprout-core/src/kind.rs`:
+1. **Define the kind constant** in `buzz-core/src/kind.rs`:
 
    ```rust
    /// My new event kind — description of what it represents.
@@ -327,7 +329,7 @@ to existing clients.
    Check the `ALL_KINDS` array for collisions. Each sub-range is documented
    with comments in the file.
 
-2. **Define the payload type** in the appropriate module in `sprout-core/src/`
+2. **Define the payload type** in the appropriate module in `buzz-core/src/`
    (e.g., alongside `event.rs`) if the content field is structured JSON:
 
    ```rust
@@ -339,7 +341,7 @@ to existing clients.
    ```
 
 3. **Register the kind's required scope** in
-   `crates/sprout-relay/src/handlers/ingest.rs` inside
+   `crates/buzz-relay/src/handlers/ingest.rs` inside
    `required_scope_for_kind()`. This controls which auth scope a caller
    needs to submit the event:
 
@@ -348,7 +350,7 @@ to existing clients.
    ```
 
 4. **Handle post-storage side effects** by adding a match arm in
-   `crates/sprout-relay/src/handlers/side_effects.rs` inside
+   `crates/buzz-relay/src/handlers/side_effects.rs` inside
    `handle_side_effects()`:
 
    ```rust
@@ -358,21 +360,21 @@ to existing clients.
    `handle_side_effects()` runs after the event is stored — use it for
    notifications, cache invalidation, or derived data. If the new kind
    also needs a REST surface (e.g., a query endpoint for clients), add a
-   handler in `crates/sprout-relay/src/api/` and register it in
-   `crates/sprout-relay/src/router.rs`.
+   handler in `crates/buzz-relay/src/api/` and register it in
+   `crates/buzz-relay/src/router.rs`.
 
 5. **Persist to the database** — if the event needs to be queryable, add a
-   handler in `sprout-db/src/` (e.g., `sprout-db/src/my_feature.rs`) with
+   handler in `buzz-db/src/` (e.g., `buzz-db/src/my_feature.rs`) with
    the appropriate `INSERT` and `SELECT` queries.
 
 6. **Index for search** (if applicable) — add the kind to the Typesense
-   indexing logic in `sprout-search/src/index.rs`.
+   indexing logic in `buzz-search/src/index.rs`.
 
 7. **Audit** — the audit log captures all events automatically; no changes
    needed unless you need custom audit metadata.
 
 8. **Write tests** — add a unit test for payload serialization in
-   `sprout-core` and an integration test in `sprout-test-client` that sends
+   `buzz-core` and an integration test in `buzz-test-client` that sends
    the new event kind and verifies the expected behavior.
 
 9. **Document** — `kind.rs` is the authoritative registry of all kind numbers.
@@ -380,66 +382,11 @@ to existing clients.
 
 ---
 
-## How to Add a New MCP Tool
-
-MCP tools live in `crates/sprout-mcp/src/server.rs`. The `rmcp` crate
-provides the `#[tool]` and `#[tool_router]` macros.
-
-1. **Define a parameter struct:**
-
-   ```rust
-   #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-   pub struct MyToolParams {
-       /// UUID of the target channel.
-       pub channel_id: String,
-       /// Optional limit on results.
-       #[serde(default)]
-       pub limit: Option<u32>,
-   }
-   ```
-
-   Use doc comments (`///`) on fields — they become the tool's parameter
-   descriptions in the MCP schema.
-
-2. **Implement the handler method** on `SproutMcpServer`:
-
-   ```rust
-   #[tool(
-       name = "my_tool",
-       description = "One-sentence description of what this tool does"
-   )]
-   pub async fn my_tool(&self, Parameters(p): Parameters<MyToolParams>) -> String {
-       // Validate inputs at the boundary
-       if uuid::Uuid::parse_str(&p.channel_id).is_err() {
-           return format!("Error: channel_id '{}' is not a valid UUID", p.channel_id);
-       }
-       // Read tools call the relay REST API
-       match self.client.get(&format!("/api/channels/{}/my-resource", p.channel_id)).await {
-           Ok(body) => body,
-           Err(e) => format!("Error: {e}"),
-       }
-   }
-   ```
-
-   **Read vs. write tools:** Read tools use `self.client.get()` (REST).
-   Write tools build a signed Nostr event and call
-   `self.client.send_event(event)` — see `send_message` for the canonical
-   pattern.
-
-3. **The `#[tool_router]` macro** on the `impl SproutMcpServer` block
-   automatically discovers all `#[tool]`-annotated methods — no manual
-   registration or doc updates needed.
-
-4. **Write a test** — add an integration test in
-   `crates/sprout-test-client/tests/e2e_mcp.rs` that exercises the new tool end-to-end.
-
----
-
 ## How to Add a New API Endpoint
 
-REST endpoints live in `crates/sprout-relay/src/api/` — each resource has
+REST endpoints live in `crates/buzz-relay/src/api/` — each resource has
 its own submodule (e.g., `channels.rs`, `messages.rs`, `tokens.rs`). Routes
-are registered in `crates/sprout-relay/src/router.rs`.
+are registered in `crates/buzz-relay/src/router.rs`.
 
 1. **Define the handler function:**
 
@@ -452,7 +399,7 @@ are registered in `crates/sprout-relay/src/router.rs`.
        let channel_id = uuid::Uuid::parse_str(&channel_id_str)
            .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid channel_id"))?;
        let ctx = extract_auth_context(&headers, &state).await?;
-       sprout_auth::require_scope(&ctx.scopes, sprout_auth::Scope::ChannelsRead)
+       buzz_auth::require_scope(&ctx.scopes, buzz_auth::Scope::ChannelsRead)
            .map_err(scope_error)?;
        let pubkey_bytes = ctx.pubkey_bytes.clone();
        check_token_channel_access(&ctx, &channel_id)?;
@@ -464,20 +411,20 @@ are registered in `crates/sprout-relay/src/router.rs`.
    }
    ```
 
-2. **Register the route** in `crates/sprout-relay/src/router.rs`:
+2. **Register the route** in `crates/buzz-relay/src/router.rs`:
 
    ```rust
    .route("/api/channels/{channel_id}/my-resource", get(get_my_resource))
    ```
 
-3. **Add the database query** in `sprout-db/src/` — follow the existing
+3. **Add the database query** in `buzz-db/src/` — follow the existing
    patterns in `channel.rs`, `event.rs`, etc.
 
 4. **Handle errors** — use the `api_error()` and `internal_error()` helpers in
-   `sprout-relay/src/api/mod.rs`. Return `(StatusCode, Json<Value>)` tuples.
+   `buzz-relay/src/api/mod.rs`. Return `(StatusCode, Json<Value>)` tuples.
 
-5. **Write tests** — add an integration test using the `sprout-test-client`
-   harness in `crates/sprout-test-client/tests/e2e_rest_api.rs`.
+5. **Write tests** — add an integration test using the `buzz-test-client`
+   harness in `crates/buzz-test-client/tests/e2e_rest_api.rs`.
 
 6. **Document** — if the endpoint is part of the public API surface, add it
    to the API reference section of `README.md` or a dedicated `API.md`.
@@ -486,7 +433,7 @@ are registered in `crates/sprout-relay/src/router.rs`.
 
 ## License and CLA
 
-Sprout is licensed under the **Apache License, Version 2.0**. See
+Buzz is licensed under the **Apache License, Version 2.0**. See
 [LICENSE](LICENSE) for the full text.
 
 By submitting a pull request, you agree that your contribution is licensed
@@ -497,5 +444,5 @@ their sign-off. When in doubt, check with your legal team.
 
 ---
 
-*Thank you for contributing to Sprout. Every bug report, documentation fix,
-and code contribution makes the project better for everyone. 🌱*
+*Thank you for contributing to Buzz. Every bug report, documentation fix,
+and code contribution makes the project better for everyone. 🐝*

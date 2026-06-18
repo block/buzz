@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
+import { useSelfProfileCache } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { ProfilePopover } from "@/features/profile/ui/ProfilePopover";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
@@ -48,6 +49,7 @@ export function SidebarProfileCard({
   selfUserStatus,
   workspaces,
 }: SidebarProfileCardProps) {
+  const selfProfileCache = useSelfProfileCache();
   const [profilePopoverOpen, setProfilePopoverOpen] = React.useState(false);
   const profileCardRef = React.useRef<HTMLDivElement | null>(null);
   const toggleProfilePopover = React.useCallback(
@@ -71,8 +73,8 @@ export function SidebarProfileCard({
   const workspaceLabel = activeWorkspace?.name ?? "No workspace";
   const readonlyWorkspaceLabel = (
     <span className="flex min-w-0 cursor-pointer items-center gap-1 text-xs leading-snug text-sidebar-foreground/70">
-      <span aria-hidden="true" className="shrink-0 text-[10px] leading-none">
-        🌱
+      <span aria-hidden="true" className="shrink-0 text-2xs leading-none">
+        🐝
       </span>
       <span className="truncate">{workspaceLabel}</span>
     </span>
@@ -98,8 +100,9 @@ export function SidebarProfileCard({
           type="button"
         >
           <ProfileAvatar
+            avatarDataUrl={selfProfileCache?.avatarDataUrl ?? null}
             avatarUrl={profile?.avatarUrl ?? null}
-            className="h-8 w-8 rounded-xl text-xs"
+            className="h-8 w-8 text-xs"
             iconClassName="h-4 w-4"
             label={resolvedDisplayName}
             testId="sidebar-profile-avatar"
@@ -118,17 +121,18 @@ export function SidebarProfileCard({
           <ProfilePopover
             open={profilePopoverOpen}
             onOpenChange={setProfilePopoverOpen}
-            displayName={resolvedDisplayName}
+            avatarDataUrl={selfProfileCache?.avatarDataUrl ?? null}
             avatarUrl={profile?.avatarUrl ?? null}
             currentStatus={selfPresenceStatus}
+            displayName={resolvedDisplayName}
             isStatusPending={isPresencePending}
-            userStatusText={selfUserStatus?.text}
-            userStatusEmoji={selfUserStatus?.emoji}
-            onSetStatus={onSetPresenceStatus ?? (() => {})}
-            onSetUserStatus={onSetUserStatus}
             onClearUserStatus={onClearUserStatus}
             onOpenSettings={onOpenSettings}
+            onSetStatus={onSetPresenceStatus ?? (() => {})}
+            onSetUserStatus={onSetUserStatus}
             triggerContainerRef={profileCardRef}
+            userStatusEmoji={selfUserStatus?.emoji}
+            userStatusText={selfUserStatus?.text}
             workspaceSwitcherSlot={
               <WorkspaceSwitcher
                 activeWorkspace={activeWorkspace}

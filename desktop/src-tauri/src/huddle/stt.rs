@@ -216,7 +216,7 @@ fn stt_worker(
     let mut resampler = match Fft::<f32>::new(48_000, 16_000, 1024, 2, 1, FixedSync::Input) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("sprout-desktop: STT resampler init failed: {e}");
+            eprintln!("buzz-desktop: STT resampler init failed: {e}");
             return;
         }
     };
@@ -239,7 +239,7 @@ fn stt_worker(
     let model_path = model_dir.join("model.int8.onnx");
     if !tokens_path.exists() || !model_path.exists() {
         eprintln!(
-            "sprout-desktop: STT model not found at {} — STT disabled",
+            "buzz-desktop: STT model not found at {} — STT disabled",
             model_dir.display()
         );
         drain_until_shutdown(audio_rx, &shutdown);
@@ -257,7 +257,7 @@ fn stt_worker(
     let recognizer = match OfflineRecognizer::create(&cfg) {
         Some(r) => r,
         None => {
-            eprintln!("sprout-desktop: OfflineRecognizer::create returned None — STT disabled");
+            eprintln!("buzz-desktop: OfflineRecognizer::create returned None — STT disabled");
             drain_until_shutdown(audio_rx, &shutdown);
             return;
         }
@@ -369,7 +369,7 @@ fn resample_chunk(resampler: &mut rubato::Fft<f32>, chunk_48k: &[f32]) -> Vec<f3
     let input = match InterleavedSlice::new(chunk_48k, 1, chunk_48k.len()) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("sprout-desktop: STT resample input error: {e}");
+            eprintln!("buzz-desktop: STT resample input error: {e}");
             return Vec::new();
         }
     };
@@ -377,7 +377,7 @@ fn resample_chunk(resampler: &mut rubato::Fft<f32>, chunk_48k: &[f32]) -> Vec<f3
     match resampler.process(&input, 0, None) {
         Ok(out) => out.take_data(),
         Err(e) => {
-            eprintln!("sprout-desktop: STT resample error: {e}");
+            eprintln!("buzz-desktop: STT resample error: {e}");
             Vec::new()
         }
     }
@@ -545,7 +545,7 @@ fn flush_to_stt(
 
     if !text.is_empty() {
         if let Err(e) = text_tx.blocking_send(text) {
-            eprintln!("sprout-desktop: STT text channel closed: {e}");
+            eprintln!("buzz-desktop: STT text channel closed: {e}");
         }
     }
 }

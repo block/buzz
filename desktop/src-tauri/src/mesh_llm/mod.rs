@@ -1,5 +1,11 @@
 use std::collections::BTreeMap;
 
+mod coordinator;
+pub(crate) use coordinator::{
+    publish_current_status_once, publish_stopped_status_once, RelayMeshConnectRequest,
+};
+pub use coordinator::{spawn_listener, start_client, MeshCoordinator};
+
 mod discovery;
 pub use discovery::{availability_from_events, mesh_status_filter};
 use discovery::{device_name_from_status, endpoint_id_from_status, enrich_status_payload_identity};
@@ -13,15 +19,15 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_MESH_API_PORT: u16 = 9337;
 const DEFAULT_MESH_CONSOLE_PORT: u16 = 3131;
 const MESH_STATUS_KIND: u64 = 30_621;
-const MESH_API_PORT_ENV: &str = "SPROUT_MESH_API_PORT";
-const MESH_CONSOLE_PORT_ENV: &str = "SPROUT_MESH_CONSOLE_PORT";
-const RELAY_MESH_API_KEY_PLACEHOLDER: &str = "sprout-mesh-local";
+const MESH_API_PORT_ENV: &str = "BUZZ_MESH_API_PORT";
+const MESH_CONSOLE_PORT_ENV: &str = "BUZZ_MESH_CONSOLE_PORT";
+const RELAY_MESH_API_KEY_PLACEHOLDER: &str = "buzz-mesh-local";
 /// ACP provider relay-mesh agents run on. Sources of truth for its command +
-/// MCP live in the provider catalog (`known_acp_provider_exact`); these are
-/// only the fallbacks. `sprout-agent` reads the `SPROUT_AGENT_PROVIDER` /
+/// MCP live in the runtime catalog (`known_acp_runtime_exact`); these are
+/// only the fallbacks. `buzz-agent` reads the `BUZZ_AGENT_PROVIDER` /
 /// `OPENAI_COMPAT_*` env vars below — goose (the global default) does not.
-const MESH_AGENT_PROVIDER_ID: &str = "sprout-agent";
-const MESH_AGENT_MCP_COMMAND: &str = "sprout-dev-mcp";
+const MESH_AGENT_PROVIDER_ID: &str = "buzz-agent";
+const MESH_AGENT_MCP_COMMAND: &str = "buzz-dev-mcp";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -197,9 +203,29 @@ pub struct DesktopMeshRuntime {
     model_name: Option<String>,
 }
 
+fn initialize_mesh_native_runtime() -> anyhow::Result<()> {
+    let cache = mesh_llm_sdk::native_runtime::native_runtime_cache(None)?;
+    let installed = cache.installed()?;
+    let current = mesh_llm_sdk::native_runtime::CURRENT_MESH_VERSION;
+    if !installed
+        .iter()
+        .any(|runtime| runtime.mesh_version == current)
+    {
+        anyhow::bail!(
+            "mesh native runtime for MeshLLM {current} is not installed; run `just staging` or `just mesh-e2e-hardware` to prepare it"
+        );
+    }
+    mesh_llm_host_runtime::initialize_host_runtime().map_err(|error| {
+        anyhow::anyhow!(
+            "mesh native runtime failed to load; run `just staging` or `just mesh-e2e-hardware` to repair it: {error}"
+        )
+    })
+}
+
 impl DesktopMeshRuntime {
     pub async fn start(request: StartMeshNodeRequest) -> anyhow::Result<Self> {
         validate_no_leak_request(&request)?;
+        initialize_mesh_native_runtime()?;
         let model_id = request
             .model_id
             .clone()

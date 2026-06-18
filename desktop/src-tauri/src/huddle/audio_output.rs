@@ -83,7 +83,7 @@ pub(crate) fn open_output_sink_by_name(
             }
         }
         eprintln!(
-            "sprout-desktop: preferred output device {name:?} not found, falling back to default"
+            "buzz-desktop: preferred output device {name:?} not found, falling back to default"
         );
     }
 

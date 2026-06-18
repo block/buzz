@@ -37,10 +37,10 @@ pub fn get_default_relay_url() -> String {
 
 #[tauri::command]
 pub fn is_shared_identity() -> bool {
-    std::env::var("SPROUT_SHARE_IDENTITY")
+    std::env::var("BUZZ_SHARE_IDENTITY")
         .map(|v| v == "1")
         .unwrap_or(false)
-        && std::env::var("SPROUT_PRIVATE_KEY")
+        && std::env::var("BUZZ_PRIVATE_KEY")
             .ok()
             .and_then(|k| Keys::parse(k.trim()).ok())
             .is_some()
@@ -112,7 +112,7 @@ pub fn decrypt_observer_event(
         return Err("observer event has invalid signature".into());
     }
 
-    sprout_core::observer::decrypt_observer_payload(&keys, &event)
+    buzz_core_pkg::observer::decrypt_observer_payload(&keys, &event)
         .map_err(|error| format!("decrypt observer event failed: {error}"))
 }
 
@@ -132,12 +132,13 @@ pub fn build_observer_control_event(
     let agent_pubkey = PublicKey::from_hex(agent_pubkey.trim())
         .map_err(|error| format!("invalid agent pubkey: {error}"))?;
     let agent_pubkey_hex = agent_pubkey.to_hex();
-    let encrypted = sprout_core::observer::encrypt_observer_payload(&keys, &agent_pubkey, &payload)
-        .map_err(|error| format!("encrypt observer control failed: {error}"))?;
-    let builder = sprout_sdk::build_agent_observer_frame(
+    let encrypted =
+        buzz_core_pkg::observer::encrypt_observer_payload(&keys, &agent_pubkey, &payload)
+            .map_err(|error| format!("encrypt observer control failed: {error}"))?;
+    let builder = buzz_sdk_pkg::build_agent_observer_frame(
         &agent_pubkey_hex,
         &agent_pubkey_hex,
-        sprout_core::observer::OBSERVER_FRAME_CONTROL,
+        buzz_core_pkg::observer::OBSERVER_FRAME_CONTROL,
         &encrypted,
     )
     .map_err(|error| format!("build observer control failed: {error}"))?;
@@ -187,7 +188,7 @@ pub fn import_identity(
         bech32
     };
 
-    eprintln!("sprout-desktop: imported identity pubkey {}", pubkey_hex);
+    eprintln!("buzz-desktop: imported identity pubkey {}", pubkey_hex);
 
     Ok(IdentityInfo {
         pubkey: pubkey_hex,

@@ -12,7 +12,7 @@ import 'package:pointycastle/digests/sha256.dart';
 import 'relay_provider.dart';
 
 const _mediaUploadPath = '/media/upload';
-const _mediaUploadPlatformChannelName = 'sprout/media_upload';
+const _mediaUploadPlatformChannelName = 'buzz/media_upload';
 const _sanitizeImageForUploadMethod = 'sanitizeImageForUpload';
 const _transcodeVideoToMp4Method = 'transcodeVideoToMp4';
 const _transcodeImageToJpegMethod = 'transcodeImageToJpeg';
@@ -298,7 +298,7 @@ class MediaUploadService {
 
     return nostr.Event.from(
       kind: _uploadAuthKind,
-      content: 'Upload sprout-media',
+      content: 'Upload buzz-media',
       tags: tags,
       secretKey: privkeyHex,
       verify: false,

@@ -1,4 +1,4 @@
-import type { AcpProvider, ManagedAgentPrereqs } from "@/shared/api/types";
+import type { AcpRuntime, ManagedAgentPrereqs } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
 import { Textarea } from "@/shared/ui/textarea";
@@ -36,50 +36,50 @@ export function CreateAgentBasicsFields({
   );
 }
 
-export function CreateAgentRuntimeProviderField({
-  providers,
-  providersLoading,
-  selectedProvider,
-  selectedProviderId,
+export function CreateAgentRuntimeField({
+  runtimes,
+  runtimesLoading,
+  selectedRuntime,
+  selectedRuntimeId,
   unavailableCount,
-  onProviderChange,
+  onRuntimeChange,
 }: {
-  providers: AcpProvider[];
-  providersLoading: boolean;
-  selectedProvider: AcpProvider | null;
-  selectedProviderId: string;
+  runtimes: AcpRuntime[];
+  runtimesLoading: boolean;
+  selectedRuntime: AcpRuntime | null;
+  selectedRuntimeId: string;
   unavailableCount: number;
-  onProviderChange: (value: string) => void;
+  onRuntimeChange: (value: string) => void;
 }) {
   return (
     <div className="space-y-1.5">
-      <label className="text-sm font-medium" htmlFor="agent-provider">
+      <label className="text-sm font-medium" htmlFor="agent-runtime">
         Agent runtime
       </label>
       <select
         className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-        id="agent-provider"
-        onChange={(event) => onProviderChange(event.target.value)}
-        value={selectedProviderId}
+        id="agent-runtime"
+        onChange={(event) => onRuntimeChange(event.target.value)}
+        value={selectedRuntimeId}
       >
-        {providers.map((provider) => (
-          <option key={provider.id} value={provider.id}>
-            {provider.label}
+        {runtimes.map((runtime) => (
+          <option key={runtime.id} value={runtime.id}>
+            {runtime.label}
           </option>
         ))}
         <option value="custom">Custom command</option>
       </select>
-      {selectedProvider ? (
+      {selectedRuntime ? (
         <p className="text-xs text-muted-foreground">
           Detected via{" "}
           <span className="font-medium">
             {describeResolvedCommand(
-              selectedProvider.command,
-              selectedProvider.binaryPath,
+              selectedRuntime.command,
+              selectedRuntime.binaryPath,
             )}
           </span>
         </p>
-      ) : providersLoading ? (
+      ) : runtimesLoading ? (
         <p className="text-xs text-muted-foreground">
           Looking for installed ACP runtimes...
         </p>
@@ -109,7 +109,7 @@ export function CreateAgentRuntimeFields({
   mcpToolsets,
   parallelism,
   relayUrl,
-  selectedProviderId,
+  selectedRuntimeId,
   systemPrompt,
   turnTimeoutSeconds,
   onAcpCommandChange,
@@ -129,7 +129,7 @@ export function CreateAgentRuntimeFields({
   mcpToolsets: string;
   parallelism: string;
   relayUrl: string;
-  selectedProviderId: string;
+  selectedRuntimeId: string;
   systemPrompt: string;
   turnTimeoutSeconds: string;
   onAcpCommandChange: (value: string) => void;
@@ -181,13 +181,13 @@ export function CreateAgentRuntimeFields({
             className="text-xs text-muted-foreground"
             id="help-agent-acp-command"
           >
-            The sprout-acp binary path or alias used to launch the ACP harness
+            The buzz-acp binary path or alias used to launch the ACP harness
             process.
           </p>
         </div>
       </div>
 
-      {selectedProviderId === "custom" ? (
+      {selectedRuntimeId === "custom" ? (
         <div className="space-y-1.5">
           <label
             className="text-sm font-medium"
@@ -229,7 +229,7 @@ export function CreateAgentRuntimeFields({
             className="text-xs text-muted-foreground"
             id="help-agent-runtime-args"
           >
-            sprout-acp splits args on commas, matching the testing guide.
+            buzz-acp splits args on commas, matching the testing guide.
           </p>
         </div>
 
@@ -248,8 +248,8 @@ export function CreateAgentRuntimeFields({
             className="text-xs text-muted-foreground"
             id="help-agent-mcp-command"
           >
-            Command the ACP harness uses to start the MCP tool server for this
-            agent.
+            Optional. Only needed for agents that use a custom MCP server (e.g.
+            buzz-agent with buzz-dev-mcp). Leave blank for most agents.
           </p>
         </div>
 
@@ -292,7 +292,7 @@ export function CreateAgentRuntimeFields({
             className="text-xs text-muted-foreground"
             id="help-agent-parallelism"
           >
-            Number of ACP worker subprocesses. sprout-acp allows 1-32.
+            Number of ACP worker subprocesses. buzz-acp allows 1-32.
           </p>
         </div>
       </div>
@@ -309,7 +309,7 @@ export function CreateAgentRuntimeFields({
           value={mcpToolsets}
         />
         <p className="text-xs text-muted-foreground">
-          Comma-separated list of toolsets to expose via SPROUT_TOOLSETS.
+          Comma-separated list of toolsets to expose via BUZZ_TOOLSETS.
           Available: default, channel_admin, dms, canvas, workflow_admin,
           identity, forums, social, media. Leave blank for default toolsets
           (default, canvas, forums, dms, media).
@@ -332,7 +332,7 @@ export function CreateAgentRuntimeFields({
           className="text-xs text-muted-foreground"
           id="help-agent-system-prompt"
         >
-          Blank means no override. sprout-acp will not add a [System] prompt.
+          Blank means no override. buzz-acp will not add a [System] prompt.
         </p>
       </div>
     </>
@@ -402,7 +402,7 @@ export function CreateAgentOptionToggles({
         </p>
         <p className="mt-1 text-sm text-foreground/70">
           {prereqs !== null && !isSpawnSupported
-            ? "Requires both the ACP harness and MCP server binaries."
+            ? "Requires the ACP harness binary."
             : "Start the local ACP harness immediately after the profile is saved."}
         </p>
       </button>

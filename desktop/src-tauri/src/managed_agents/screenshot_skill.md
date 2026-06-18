@@ -9,7 +9,7 @@ version: 1
 
 ## CRITICAL: How to Host Screenshots for PRs
 
-**NEVER use `sprout upload`, the relay media endpoint, or any third-party image
+**NEVER use `buzz upload`, the relay media endpoint, or any third-party image
 host (imgur, imgbb, etc.) for PR screenshots.** Relay media URLs fail through
 GitHub's camo proxy (`Non-Image content-type returned`). External hosts are
 unreliable and may expose content.

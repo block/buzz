@@ -2,8 +2,8 @@ import { AlertTriangle, ChevronDown } from "lucide-react";
 import * as React from "react";
 
 import {
-  useAcpProvidersQuery,
-  useAvailableAcpProviders,
+  useAcpRuntimesQuery,
+  useAvailableAcpRuntimes,
   useBackendProvidersQuery,
   useCreateManagedAgentMutation,
   useManagedAgentPrereqsQuery,
@@ -26,7 +26,7 @@ import {
 import {
   CreateAgentBasicsFields,
   CreateAgentOptionToggles,
-  CreateAgentRuntimeProviderField,
+  CreateAgentRuntimeField,
   CreateAgentRuntimeFields,
 } from "./CreateAgentDialogSections";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
@@ -36,9 +36,9 @@ import {
 } from "./ProviderConfigFields";
 import { CreateAgentRespondToField } from "./RespondToField";
 import { RelayMeshAgentSection } from "@/features/mesh-compute/ui/RelayMeshAgentSection";
+import { meshPrepareRelayMeshClient } from "@/shared/api/tauriMesh";
 import type { MeshServeTarget } from "@/shared/api/tauriMesh";
-import { startRelayMeshClientForTarget } from "@/features/mesh-compute/startRelayMeshClientForTarget";
-import { useLastRuntimeProvider } from "@/features/agents/lib/useLastRuntimeProvider";
+import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 
 // ── Dialog ────────────────────────────────────────────────────────────────────
 
@@ -52,14 +52,14 @@ export function CreateAgentDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const createMutation = useCreateManagedAgentMutation();
-  const providersQuery = useAvailableAcpProviders();
-  const allProvidersQuery = useAcpProvidersQuery();
+  const providersQuery = useAvailableAcpRuntimes();
+  const allProvidersQuery = useAcpRuntimesQuery();
   const backendProvidersQuery = useBackendProvidersQuery();
-  const { lastProviderId, setLastProvider } = useLastRuntimeProvider();
-  const [acpCommand, setAcpCommand] = React.useState("sprout-acp");
+  const { lastRuntimeId, setLastRuntime } = useLastRuntime();
+  const [acpCommand, setAcpCommand] = React.useState("buzz-acp");
   const [agentCommand, setAgentCommand] = React.useState("goose");
   const [agentArgs, setAgentArgs] = React.useState("acp");
-  const [mcpCommand, setMcpCommand] = React.useState("sprout-mcp-server");
+  const [mcpCommand, setMcpCommand] = React.useState("");
   const [mcpToolsets, setMcpToolsets] = React.useState("");
   const prereqsQuery = useManagedAgentPrereqsQuery(acpCommand, mcpCommand);
   const [name, setName] = React.useState("");
@@ -70,7 +70,7 @@ export function CreateAgentDialog({
   const [parallelism, setParallelism] = React.useState("24");
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
-  const [selectedProviderId, setSelectedProviderId] =
+  const [selectedRuntimeId, setSelectedRuntimeId] =
     React.useState<string>("custom");
   const [hasSyncedProviderSelection, setHasSyncedProviderSelection] =
     React.useState(false);
@@ -90,7 +90,7 @@ export function CreateAgentDialog({
   const [probeError, setProbeError] = React.useState<string | null>(null);
 
   // ── Relay-mesh flow state ──────────────────────────────────────────────────
-  // When `useMesh` is on, the agent runs sprout-agent against a member's
+  // When `useMesh` is on, the agent runs buzz-agent against a member's
   // shared compute. The ACP runtime + backend selectors are hidden; runtime
   // fields are driven by `mesh_agent_preset(meshModelId)` and the submit
   // input carries `model: meshModelId`.
@@ -102,24 +102,27 @@ export function CreateAgentDialog({
   const [meshClientError, setMeshClientError] = React.useState<string | null>(
     null,
   );
+  // True while the relay-mesh client preflight (connect-request + dial) runs
+  // inside handleSubmit. That await can take tens of seconds and happens
+  // before createMutation fires, so isPending alone leaves the button live.
+  const [meshPreparing, setMeshPreparing] = React.useState(false);
 
-  const providers = providersQuery.data ?? [];
+  const runtimes = providersQuery.data ?? [];
   const allProviders = allProvidersQuery.data ?? [];
   const unavailableCount = allProviders.filter(
     (p) => p.availability !== "available",
   ).length;
   const backendProviders = backendProvidersQuery.data ?? [];
   const prereqs = prereqsQuery.data ?? null;
-  const selectedProvider = React.useMemo(
-    () =>
-      providers.find((provider) => provider.id === selectedProviderId) ?? null,
-    [providers, selectedProviderId],
+  const selectedRuntime = React.useMemo(
+    () => runtimes.find((runtime) => runtime.id === selectedRuntimeId) ?? null,
+    [runtimes, selectedRuntimeId],
   );
   const selectedBackendProvider = React.useMemo(
     () => backendProviders.find((p) => p.id === runOn) ?? null,
     [backendProviders, runOn],
   );
-  // Relay mesh always runs in local mode (sprout-agent + OpenAI-compat env);
+  // Relay mesh always runs in local mode (buzz-agent + OpenAI-compat env);
   // when on, it suppresses the backend "Run on" branch even if a stale
   // `runOn` value remains. The relay-mesh path is its own thing.
   const isProviderMode = !useMesh && runOn !== "local";
@@ -135,28 +138,28 @@ export function CreateAgentDialog({
       return;
     }
 
-    // Prefer last-used provider from localStorage
-    const remembered = lastProviderId
-      ? providers.find((provider) => provider.id === lastProviderId)
+    // Prefer last-used runtime from localStorage
+    const remembered = lastRuntimeId
+      ? runtimes.find((runtime) => runtime.id === lastRuntimeId)
       : null;
     if (remembered) {
-      setSelectedProviderId(remembered.id);
+      setSelectedRuntimeId(remembered.id);
       setAgentCommand(remembered.command);
       setAgentArgs(remembered.defaultArgs.join(","));
-      setMcpCommand(remembered.mcpCommand ?? "sprout-mcp-server");
+      setMcpCommand(remembered.mcpCommand ?? "");
     } else {
       const matchingProvider =
-        providers.find((provider) => provider.command === agentCommand) ?? null;
+        runtimes.find((runtime) => runtime.command === agentCommand) ?? null;
       if (matchingProvider) {
-        setSelectedProviderId(matchingProvider.id);
+        setSelectedRuntimeId(matchingProvider.id);
       }
     }
     setHasSyncedProviderSelection(true);
   }, [
     agentCommand,
     hasSyncedProviderSelection,
-    lastProviderId,
-    providers,
+    lastRuntimeId,
+    runtimes,
     providersQuery.isLoading,
   ]);
 
@@ -232,16 +235,16 @@ export function CreateAgentDialog({
     setRelayUrl("");
     setSpawnAfterCreate(true);
     setStartOnAppLaunch(true);
-    setAcpCommand("sprout-acp");
+    setAcpCommand("buzz-acp");
     setAgentCommand("goose");
     setAgentArgs("acp");
-    setMcpCommand("sprout-mcp-server");
+    setMcpCommand("");
     setMcpToolsets("");
     setTurnTimeoutSeconds("320");
     setParallelism("24");
     setSystemPrompt("");
     setEnvVars({});
-    setSelectedProviderId("custom");
+    setSelectedRuntimeId("custom");
     setHasSyncedProviderSelection(false);
     setShowAdvanced(false);
     setRunOn("local");
@@ -265,24 +268,24 @@ export function CreateAgentDialog({
   }
 
   function handleProviderChange(nextProviderId: string) {
-    setSelectedProviderId(nextProviderId);
+    setSelectedRuntimeId(nextProviderId);
 
     if (nextProviderId === "custom") {
       setShowAdvanced(true);
       return;
     }
 
-    const provider = providers.find(
+    const provider = runtimes.find(
       (candidate) => candidate.id === nextProviderId,
     );
     if (!provider) {
       return;
     }
 
-    setLastProvider(nextProviderId);
+    setLastRuntime(nextProviderId);
     setAgentCommand(provider.command);
     setAgentArgs(provider.defaultArgs.join(","));
-    setMcpCommand(provider.mcpCommand ?? "sprout-mcp-server");
+    setMcpCommand(provider.mcpCommand ?? "");
   }
 
   function handleRunOnChange(value: string) {
@@ -324,6 +327,7 @@ export function CreateAgentDialog({
     // Relay-mesh mode requires a concrete serve target, not just a model name.
     !(useMesh && (meshModelId.trim().length === 0 || meshTarget == null)) &&
     respondToValid &&
+    !meshPreparing &&
     !createMutation.isPending;
 
   async function handleSubmit() {
@@ -331,7 +335,18 @@ export function CreateAgentDialog({
     try {
       if (useMesh) {
         try {
-          await startRelayMeshClientForTarget(meshModelId.trim(), meshTarget);
+          if (!meshTarget) {
+            setMeshClientError(
+              "Select a relay mesh serve target before creating the agent.",
+            );
+            return;
+          }
+          setMeshPreparing(true);
+          try {
+            await meshPrepareRelayMeshClient(meshModelId.trim(), meshTarget);
+          } finally {
+            setMeshPreparing(false);
+          }
         } catch (err) {
           setMeshClientError(err instanceof Error ? err.message : String(err));
           return;
@@ -395,6 +410,7 @@ export function CreateAgentDialog({
             systemPrompt: systemPrompt.trim() || undefined,
             envVars,
             model: useMesh ? meshModelId.trim() || undefined : undefined,
+            relayMesh: useMesh ? { modelRef: meshModelId.trim() } : undefined,
             spawnAfterCreate,
             // Relay-mesh agents need a freshly selected serve target to start;
             // do not auto-restore them later with only the saved model/env.
@@ -419,7 +435,7 @@ export function CreateAgentDialog({
             <DialogTitle>Create agent</DialogTitle>
             <DialogDescription>
               This creates a local agent identity, syncs its display name when
-              possible, and can spawn `sprout-acp` immediately.
+              possible, and can spawn `buzz-acp` immediately.
             </DialogDescription>
           </DialogHeader>
 
@@ -522,12 +538,12 @@ export function CreateAgentDialog({
 
             {/* Local mode: show the ACP runtime selector */}
             {!isProviderMode && !useMesh ? (
-              <CreateAgentRuntimeProviderField
-                onProviderChange={handleProviderChange}
-                providers={providers}
-                providersLoading={providersQuery.isLoading}
-                selectedProvider={selectedProvider}
-                selectedProviderId={selectedProviderId}
+              <CreateAgentRuntimeField
+                onRuntimeChange={handleProviderChange}
+                runtimes={runtimes}
+                runtimesLoading={providersQuery.isLoading}
+                selectedRuntime={selectedRuntime}
+                selectedRuntimeId={selectedRuntimeId}
                 unavailableCount={unavailableCount}
               />
             ) : null}
@@ -599,13 +615,13 @@ export function CreateAgentDialog({
                       onTurnTimeoutChange={setTurnTimeoutSeconds}
                       parallelism={parallelism}
                       relayUrl={relayUrl}
-                      selectedProviderId={selectedProviderId}
+                      selectedRuntimeId={selectedRuntimeId}
                       systemPrompt={systemPrompt}
                       turnTimeoutSeconds={turnTimeoutSeconds}
                     />
 
                     <p className="rounded-2xl border border-border/70 bg-background/70 px-4 py-3 text-sm text-muted-foreground">
-                      Local Sprout binary checks and ACP runtime discovery now
+                      Local Buzz binary checks and ACP runtime discovery now
                       live in Settings &gt; Doctor.
                     </p>
 
@@ -661,7 +677,11 @@ export function CreateAgentDialog({
               size="sm"
               type="button"
             >
-              {createMutation.isPending ? "Creating..." : "Create agent"}
+              {meshPreparing
+                ? "Connecting to mesh..."
+                : createMutation.isPending
+                  ? "Creating..."
+                  : "Create agent"}
             </Button>
           </div>
         </div>

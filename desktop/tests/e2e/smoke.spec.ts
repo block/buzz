@@ -116,7 +116,10 @@ test("create agent supports parallelism and system prompt overrides", async ({
 
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await page
+    .getByTestId("agents-library-personas")
+    .getByRole("button", { name: "New", exact: true })
+    .click();
   await page.getByText("Custom Agent").click();
 
   await page.getByTestId("agent-name-input").fill(agentName);
@@ -314,7 +317,10 @@ test("replaces the channel pane when switching channels", async ({ page }) => {
 
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
-  await expect(page.getByTestId("message-empty")).toBeVisible();
+  await expect(page.getByTestId("message-channel-intro")).toBeVisible();
+  await expect(page.getByTestId("message-channel-intro")).toContainText(
+    "This is the beginning of the regular channel.",
+  );
   await expect(page.getByTestId("message-timeline")).not.toContainText(
     "Welcome to #general",
   );
@@ -323,7 +329,7 @@ test("replaces the channel pane when switching channels", async ({ page }) => {
 
   await page.getByTestId("channel-engineering").click();
   await expect(page.getByTestId("chat-title")).toHaveText("engineering");
-  await expect(page.getByTestId("message-empty")).toBeVisible();
+  await expect(page.getByTestId("message-channel-intro")).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toHaveCount(1);
   await expect(page.getByTestId("message-timeline-day-divider")).toHaveCount(0);
 });

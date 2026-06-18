@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -10,6 +11,9 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/syntax_highlight.dart';
 import '../../shared/theme/theme.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
+import '../custom_emoji/custom_emoji_render.dart';
 import 'media_viewer_page.dart';
 import 'message_media.dart';
 
@@ -18,7 +22,7 @@ const _messageMediaMaxImageHeight = 240.0;
 
 /// Renders message content with markdown formatting, @mentions, #channel links,
 /// and media-aware markdown images/videos.
-class MessageContent extends HookWidget {
+class MessageContent extends HookConsumerWidget {
   final String content;
 
   /// Display names for mentioned pubkeys, extracted from event p-tags.
@@ -37,6 +41,8 @@ class MessageContent extends HookWidget {
 
   final TextStyle? baseStyle;
 
+  final int? maxLines;
+
   const MessageContent({
     super.key,
     required this.content,
@@ -45,14 +51,19 @@ class MessageContent extends HookWidget {
     this.tags = const [],
     this.onChannelTap,
     this.baseStyle,
+    this.maxLines,
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final style =
         baseStyle ??
         context.textTheme.bodyMedium?.copyWith(color: context.colors.onSurface);
     final imetaByUrl = parseImetaTags(tags);
+    final customEmoji = _mergeCustomEmoji(
+      customEmojiFromTags(tags),
+      ref.watch(customEmojiListProvider),
+    );
 
     final finalContent = useMemoized(() {
       // Convert autolinks and bare URLs to standard markdown links,
@@ -132,8 +143,10 @@ class MessageContent extends HookWidget {
           _buildLink(context, linkText, url, linkStyle, style),
       imageBuilder: (context, imageUrl) =>
           _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
+      maxLines: maxLines,
       inlineComponents: [
         _MentionMd(mentionNames: mentionNames),
+        CustomEmojiMd(customEmoji),
         _ChannelLinkMd(channelNames: channelNames, onChannelTap: onChannelTap),
         ...MarkdownComponent.inlineComponents,
       ],
@@ -190,6 +203,20 @@ class MessageContent extends HookWidget {
       ),
     );
   }
+}
+
+List<CustomEmoji> _mergeCustomEmoji(
+  List<CustomEmoji> eventEmoji,
+  List<CustomEmoji> paletteEmoji,
+) {
+  if (eventEmoji.isEmpty) return paletteEmoji;
+  if (paletteEmoji.isEmpty) return eventEmoji;
+  final seen = <String>{};
+  final merged = <CustomEmoji>[];
+  for (final emoji in [...eventEmoji, ...paletteEmoji]) {
+    if (seen.add(emoji.shortcode)) merged.add(emoji);
+  }
+  return merged;
 }
 
 class _MessageImagePreview extends StatefulWidget {

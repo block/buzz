@@ -156,6 +156,86 @@ pub async fn get_channels(state: State<'_, AppState>) -> Result<Vec<ChannelInfo>
         }
     }
 
+    // Populate last_message_at by fetching the most recent human message per
+    // channel. Uses per-channel filters (single #h value each) so the relay can
+    // push the query to its indexed channel_id column. Multi-value #h is NOT
+    // SQL-pushed and would silently drop quieter channels under the global limit.
+    let channel_ids: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
+    if !channel_ids.is_empty() {
+        let filters: Vec<serde_json::Value> = channel_ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "kinds": [9, 40002],
+                    "#h": [id],
+                    "limit": 1
+                })
+            })
+            .collect();
+
+        let message_events = query_relay(&state, &filters).await.unwrap_or_default();
+
+        let mut last_message_by_channel: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        for ev in &message_events {
+            if let Some(ch_id) = ev.tags.iter().find_map(|t| {
+                let s = t.as_slice();
+                (s.len() >= 2 && s[0] == "h").then(|| s[1].clone())
+            }) {
+                let ts = ev.created_at.as_secs();
+                last_message_by_channel
+                    .entry(ch_id)
+                    .and_modify(|existing| {
+                        if ts > *existing {
+                            *existing = ts;
+                        }
+                    })
+                    .or_insert(ts);
+            }
+        }
+
+        for channel in &mut channels {
+            if let Some(&ts) = last_message_by_channel.get(&channel.id) {
+                channel.last_message_at = Some(nostr_convert::timestamp_to_iso(ts));
+            }
+        }
+    }
+
+    // NIP-DV: drop DMs the viewer has hidden. The relay maintains a per-viewer
+    // parameterized-replaceable snapshot (kind:30622, d=my pubkey) whose `h`
+    // tags list currently-hidden DM channel ids. The snapshot also carries
+    // `p`=my pubkey so the relay's #p read-gate scopes it to me; we query by
+    // `#p` for that reason. Reading the latest one is the only way the client
+    // learns hide state, which the relay tracks privately.
+    let hidden_dms: std::collections::HashSet<String> = {
+        let events = query_relay(
+            &state,
+            &[serde_json::json!({
+                "kinds": [buzz_core_pkg::kind::KIND_DM_VISIBILITY],
+                "#p": [&my_pubkey],
+                "limit": 1,
+            })],
+        )
+        .await
+        .unwrap_or_default();
+        events
+            .iter()
+            .max_by_key(|e| e.created_at.as_secs())
+            .map(|e| {
+                e.tags
+                    .iter()
+                    .filter_map(|t| {
+                        let s = t.as_slice();
+                        (s.len() >= 2 && s[0] == "h").then(|| s[1].clone())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    if !hidden_dms.is_empty() {
+        channels.retain(|c| c.channel_type != "dm" || !hidden_dms.contains(&c.id));
+    }
+
     Ok(channels)
 }
 
@@ -252,21 +332,31 @@ pub async fn get_channel_members(
         .await
         .unwrap_or_default();
 
-        // Build pubkey → display_name map from kind:0 events
-        let mut name_map = std::collections::HashMap::new();
+        // Build pubkey → profile display metadata from kind:0 events.
+        let mut profile_map = std::collections::HashMap::new();
         for ev in &profile_events {
             let pk = ev.pubkey.to_hex();
             if let Ok(profile) = nostr_convert::profile_info_from_event(ev) {
-                if let Some(name) = profile.display_name {
-                    name_map.insert(pk, name);
-                }
+                profile_map.insert(
+                    pk,
+                    (
+                        profile.display_name,
+                        nostr_convert::profile_has_valid_oa_owner(ev),
+                    ),
+                );
             }
         }
 
-        // Populate display_name on each member
+        // Populate profile-derived fields on each member.
         for member in &mut response.members {
-            if member.display_name.is_none() {
-                member.display_name = name_map.get(&member.pubkey).cloned();
+            if member.role == "bot" {
+                member.is_agent = true;
+            }
+            if let Some((display_name, is_agent)) = profile_map.get(&member.pubkey) {
+                if member.display_name.is_none() {
+                    member.display_name = display_name.clone();
+                }
+                member.is_agent = member.is_agent || *is_agent;
             }
         }
     }
@@ -329,22 +419,41 @@ pub async fn create_channel(
         .ok_or_else(|| "channel created but metadata not yet available".to_string())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateChannelInput {
+    pub channel_id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub visibility: Option<String>,
+    /// Absent = leave unchanged, `null` = clear (permanent), seconds = set.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub ttl_seconds: Option<Option<i32>>,
+}
+
 #[tauri::command]
 pub async fn update_channel(
-    channel_id: String,
-    name: Option<String>,
-    description: Option<String>,
+    input: UpdateChannelInput,
     state: State<'_, AppState>,
 ) -> Result<ChannelDetailInfo, String> {
-    let uuid = parse_channel_uuid(&channel_id)?;
-    let builder = events::build_update_channel(uuid, name.as_deref(), description.as_deref())?;
+    let uuid = parse_channel_uuid(&input.channel_id)?;
+    let builder = events::build_update_channel(
+        uuid,
+        input.name.as_deref(),
+        input.description.as_deref(),
+        input.visibility.as_deref(),
+        input.ttl_seconds,
+    )?;
     submit_event(builder, &state).await?;
 
     let events = query_relay(
         &state,
         &[serde_json::json!({
             "kinds": [39000],
-            "#d": [channel_id],
+            "#d": [input.channel_id],
             "limit": 1
         })],
     )

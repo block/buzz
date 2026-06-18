@@ -6,22 +6,23 @@ import { installMockBridge } from "../helpers/bridge";
 // hard assertion suite — it documents the two user-visible surfaces Tyler asked
 // to verify: the composer rendering and the settings card's own-vs-workspace
 // split. Artifacts land in test-results/.
-const SHORTCODE = "sprout";
+const SHORTCODE = "buzz";
 const SHOTS = "test-results/custom-emoji";
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
   // The mock emoji sets point at example.com placeholder URLs that don't
-  // resolve, so the <img> would render broken in screenshots. Serve a real
-  // 1x1-scaled magenta PNG for any example.com emoji image so the captures
-  // actually show a rendered glyph. (Screenshot-only; the bridge fixtures stay
-  // honest for the union/collapse unit + e2e assertions.)
-  const PNG = Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
-    "base64",
-  );
+  // resolve, so the <img> would render broken in screenshots. Serve a visible
+  // square glyph for any example.com emoji image so the captures show the
+  // custom-emoji sizing/alignment rather than a broken-image icon.
+  const SVG = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+      <rect width="32" height="32" rx="7" fill="#22c55e"/>
+      <circle cx="16" cy="12" r="5" fill="#fef3c7"/>
+      <path d="M8 25c2-7 14-7 16 0" fill="#fef3c7"/>
+    </svg>`;
   await page.route("https://example.com/e2e/**", (route) =>
-    route.fulfill({ contentType: "image/png", body: PNG }),
+    route.fulfill({ contentType: "image/svg+xml", body: SVG }),
   );
 });
 
@@ -47,13 +48,13 @@ test("settings card splits My emoji from read-only Workspace emoji", async ({
   await expect(page.getByTestId("settings-view")).toBeVisible();
   await page.getByTestId("settings-nav-custom-emoji").click();
 
-  // The mock identity owns :sprout: (removable); :narf: belongs to another
+  // The mock identity owns :buzz: (removable); :narf: belongs to another
   // member (read-only, no trash button).
   const card = page.getByTestId("settings-custom-emoji");
-  await expect(card.getByTestId("custom-emoji-mine")).toContainText(":sprout:");
+  await expect(card.getByTestId("custom-emoji-mine")).toContainText(":buzz:");
   const mine = card.getByTestId("custom-emoji-mine");
   await expect(
-    mine.getByRole("button", { name: "Remove :sprout:" }),
+    mine.getByRole("button", { name: "Remove :buzz:" }),
   ).toBeVisible();
 
   const workspace = card.getByTestId("custom-emoji-workspace");
@@ -66,5 +67,52 @@ test("settings card splits My emoji from read-only Workspace emoji", async ({
   await page.screenshot({
     path: `${SHOTS}/02-settings-own-vs-workspace.png`,
     fullPage: true,
+  });
+});
+
+test("message list renders inline and emoji-only messages with Slack-style emoji sizing", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+
+  await input.click();
+  await input.pressSequentially(`inline :${SHORTCODE}: message`);
+  await page.getByTestId("send-message").click();
+
+  await input.click();
+  await input.pressSequentially(`:${SHORTCODE}: 😀 ❤️`);
+  await page.getByTestId("send-message").click();
+
+  const rows = page.getByTestId("message-row");
+  const inlineRow = rows
+    .filter({
+      has: page.locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`),
+      hasText: "inline message",
+    })
+    .last();
+  const emojiOnlyRow = rows
+    .filter({
+      has: page.locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`),
+    })
+    .last();
+
+  await expect(inlineRow).toBeVisible();
+  await expect(emojiOnlyRow).toBeVisible();
+
+  const inlineBox = await inlineRow
+    .locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`)
+    .boundingBox();
+  const emojiOnlyBox = await emojiOnlyRow
+    .locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`)
+    .boundingBox();
+  expect(inlineBox?.height).toBeGreaterThan(10);
+  expect(emojiOnlyBox?.height).toBeGreaterThan((inlineBox?.height ?? 0) * 1.8);
+
+  await page.screenshot({
+    path: `${SHOTS}/03-message-list-emoji-sizing.png`,
   });
 });

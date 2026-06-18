@@ -1,6 +1,9 @@
 export const KIND_DELETION = 5;
 export const KIND_REACTION = 7;
 export const KIND_STREAM_MESSAGE = 9;
+// Buzz-native deletion. The relay soft-deletes the target and emits a
+// kind:40099 system message. Treated as a deletion marker alongside kind:5.
+export const KIND_NIP29_DELETE_EVENT = 9005;
 export const KIND_STREAM_MESSAGE_V2 = 40002;
 export const KIND_STREAM_MESSAGE_EDIT = 40003;
 export const KIND_STREAM_MESSAGE_DIFF = 40008;
@@ -15,7 +18,10 @@ export const KIND_JOB_ERROR = 43006;
 export const KIND_FORUM_POST = 45001;
 export const KIND_FORUM_COMMENT = 45003;
 export const KIND_APPROVAL_REQUEST = 46010;
+export const KIND_MEMBER_ADDED_NOTIFICATION = 44100;
+export const KIND_MEMBER_REMOVED_NOTIFICATION = 44101;
 export const KIND_TYPING_INDICATOR = 20002;
+export const KIND_HUDDLE_REACTION = 24810;
 // NIP-78 application-specific data. All use kind 30078; the relay
 // differentiates them by d-tag ("read-state:<slotId>", "channel-sections", "channel-mutes", "channel-stars").
 export const KIND_READ_STATE = 30078;
@@ -27,7 +33,11 @@ export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_MESH_STATUS_REPORT = 24620;
 export const KIND_MESH_CONNECT_REQUEST = 24621;
 export const KIND_MESH_CALL_ME_NOW = 24622;
+export const KIND_EVENT_REMINDER = 30300;
 export const KIND_REPO_ANNOUNCEMENT = 30617;
+// NIP-DV: relay-signed per-viewer DM visibility snapshot (d=viewer pubkey,
+// h-tags = currently-hidden DM channel ids).
+export const KIND_DM_VISIBILITY = 30622;
 
 // Human-visible "new content" message kinds. Used as the unread trigger set
 // (sidebar badges, catch-up queries) and as the Home-feed mention query.
@@ -41,15 +51,38 @@ export const CHANNEL_MESSAGE_EVENT_KINDS = [
   KIND_FORUM_COMMENT,
 ] as const;
 
-// Keep this in sync with the Home-feed mention query in sprout-db.
+// Keep this in sync with the Home-feed mention query in buzz-db.
 export const HOME_MENTION_EVENT_KINDS = [...CHANNEL_MESSAGE_EVENT_KINDS];
 
 export const CHANNEL_EVENT_KINDS = [
   KIND_DELETION, // 5 — NIP-09 event deletions
   KIND_REACTION, // 7 — NIP-25 reactions
+  KIND_NIP29_DELETE_EVENT, // 9005 — NIP-29 / Buzz-native deletions
   ...CHANNEL_MESSAGE_EVENT_KINDS,
   40001, // legacy: pre-migration stream messages
   KIND_STREAM_MESSAGE_EDIT, // 40003 — message edits
   KIND_STREAM_MESSAGE_DIFF, // 40008 — message diffs
   KIND_SYSTEM_MESSAGE, // 40099 — system messages (join, leave, etc.)
 ] as const;
+
+// Timeline kinds that are NOT conversational: relay-signed system rows
+// (channel-created, member-joined) and job-lifecycle events. These render in
+// the timeline but must not count toward the channel's unread pill — a freshly
+// created channel carries one channel_created + N member_joined system rows
+// that would otherwise show as phantom unreads ("4 unread, 1 message").
+const NON_CONVERSATIONAL_UNREAD_KINDS: ReadonlySet<number> = new Set([
+  KIND_SYSTEM_MESSAGE, // 40099
+  KIND_JOB_REQUEST, // 43001
+  KIND_JOB_ACCEPTED, // 43002
+  KIND_JOB_PROGRESS, // 43003
+  KIND_JOB_RESULT, // 43004
+  KIND_JOB_CANCEL, // 43005
+  KIND_JOB_ERROR, // 43006
+]);
+
+// Whether a timeline message kind should count toward unread tallies. An
+// undefined kind (optimistic/pending rows whose kind has not populated) is
+// treated as conversational so a legitimately unread message is never dropped.
+export function isConversationalUnreadKind(kind: number | undefined): boolean {
+  return kind === undefined || !NON_CONVERSATIONAL_UNREAD_KINDS.has(kind);
+}

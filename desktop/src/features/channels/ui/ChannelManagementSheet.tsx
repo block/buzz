@@ -27,6 +27,10 @@ import {
   useUpdateChannelMutation,
 } from "@/features/channels/hooks";
 import { compareMembersByRole } from "@/features/channels/lib/memberUtils";
+import {
+  formatTtlDuration,
+  parseTtlDuration,
+} from "@/features/channels/lib/ephemeralChannel";
 import { CreateWorkflowDialog } from "@/features/workflows/ui/CreateWorkflowDialog";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
@@ -48,9 +52,11 @@ import {
   Sheet,
   SheetContent,
   SheetDescription,
+  SheetFooter,
   SheetHeader,
   SheetTitle,
 } from "@/shared/ui/sheet";
+import { Switch } from "@/shared/ui/switch";
 import { Textarea } from "@/shared/ui/textarea";
 import { ChannelCanvas } from "./ChannelCanvas";
 
@@ -62,6 +68,8 @@ type ChannelManagementSheetProps = {
   open: boolean;
 };
 
+const DEFAULT_EPHEMERAL_TTL_SECONDS = 24 * 60 * 60;
+
 function MetadataPill({
   icon: Icon,
   label,
@@ -71,7 +79,7 @@ function MetadataPill({
 }) {
   return (
     <div className="inline-flex items-center gap-2 rounded-full border border-border/80 bg-muted/40 px-3 py-1 text-xs font-medium text-muted-foreground">
-      <Icon className="h-3.5 w-3.5" />
+      <Icon className="h-4 w-4" />
       <span>{label}</span>
     </div>
   );
@@ -117,7 +125,8 @@ export function ChannelManagementSheet({
   const channelId = channel?.id ?? null;
   const detailsQuery = useChannelDetailsQuery(channelId, open);
   const membersQuery = useChannelMembersQuery(channelId, open);
-  const updateChannelMutation = useUpdateChannelMutation(channelId);
+  const updateChannelDetailsMutation = useUpdateChannelMutation(channelId);
+  const updateChannelLifecycleMutation = useUpdateChannelMutation(channelId);
   const setTopicMutation = useSetChannelTopicMutation(channelId);
   const setPurposeMutation = useSetChannelPurposeMutation(channelId);
   const archiveChannelMutation = useArchiveChannelMutation(channelId);
@@ -160,6 +169,9 @@ export function ChannelManagementSheet({
   const [descriptionDraft, setDescriptionDraft] = React.useState("");
   const [topicDraft, setTopicDraft] = React.useState("");
   const [purposeDraft, setPurposeDraft] = React.useState("");
+  const [isPrivateDraft, setIsPrivateDraft] = React.useState(false);
+  const [isEphemeralDraft, setIsEphemeralDraft] = React.useState(false);
+  const [ttlDraft, setTtlDraft] = React.useState("");
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = React.useState(false);
   const [isCreateWorkflowOpen, setIsCreateWorkflowOpen] = React.useState(false);
 
@@ -188,6 +200,11 @@ export function ChannelManagementSheet({
     setDescriptionDraft(detail.description);
     setTopicDraft(detail.topic ?? "");
     setPurposeDraft(detail.purpose ?? "");
+    setIsPrivateDraft(detail.visibility === "private");
+    setIsEphemeralDraft(detail.ttlSeconds !== null);
+    setTtlDraft(
+      detail.ttlSeconds !== null ? formatTtlDuration(detail.ttlSeconds) : "",
+    );
   }, [detail, open]);
 
   if (!channel) {
@@ -216,6 +233,33 @@ export function ChannelManagementSheet({
     }
 
     onOpenChange(next);
+  }
+
+  // Parsed seconds for the ephemeral TTL field. `null` when the field is empty
+  // or malformed; the form blocks saving on a non-empty malformed value.
+  const parsedTtlSeconds = parseTtlDuration(ttlDraft);
+  const ttlInvalid =
+    isEphemeralDraft && ttlDraft.trim() !== "" && parsedTtlSeconds === null;
+
+  const currentVisibility = detail?.visibility ?? channel.visibility;
+  const currentTtlSeconds = detail?.ttlSeconds ?? null;
+  const nextVisibility: "open" | "private" = isPrivateDraft
+    ? "private"
+    : "open";
+  const nextTtlSeconds: number | null = isEphemeralDraft
+    ? (parsedTtlSeconds ?? DEFAULT_EPHEMERAL_TTL_SECONDS)
+    : null;
+  const lifecycleDirty =
+    nextVisibility !== currentVisibility ||
+    nextTtlSeconds !== currentTtlSeconds;
+
+  function handleSaveLifecycle() {
+    void updateChannelLifecycleMutation.mutateAsync({
+      visibility:
+        nextVisibility !== currentVisibility ? nextVisibility : undefined,
+      ttlSeconds:
+        nextTtlSeconds !== currentTtlSeconds ? nextTtlSeconds : undefined,
+    });
   }
 
   const resolvedChannel = detail ?? channel;
@@ -314,7 +358,7 @@ export function ChannelManagementSheet({
             className="space-y-3"
             onSubmit={(event) => {
               event.preventDefault();
-              void updateChannelMutation.mutateAsync({
+              void updateChannelDetailsMutation.mutateAsync({
                 description: descriptionDraft.trim() || undefined,
                 name: nameDraft.trim() || undefined,
               });
@@ -326,7 +370,9 @@ export function ChannelManagementSheet({
               </label>
               <Input
                 data-testid="channel-management-name"
-                disabled={!canManageChannel || updateChannelMutation.isPending}
+                disabled={
+                  !canManageChannel || updateChannelDetailsMutation.isPending
+                }
                 id="channel-name"
                 onChange={(event) => setNameDraft(event.target.value)}
                 value={nameDraft}
@@ -342,7 +388,9 @@ export function ChannelManagementSheet({
               <Textarea
                 className="min-h-24"
                 data-testid="channel-management-description"
-                disabled={!canManageChannel || updateChannelMutation.isPending}
+                disabled={
+                  !canManageChannel || updateChannelDetailsMutation.isPending
+                }
                 id="channel-description"
                 onChange={(event) => setDescriptionDraft(event.target.value)}
                 value={descriptionDraft}
@@ -350,18 +398,112 @@ export function ChannelManagementSheet({
             </div>
             <Button
               data-testid="channel-management-save-details"
-              disabled={!canManageChannel || updateChannelMutation.isPending}
+              disabled={
+                !canManageChannel || updateChannelDetailsMutation.isPending
+              }
               size="sm"
               type="submit"
             >
-              {updateChannelMutation.isPending ? "Saving..." : "Save details"}
+              {updateChannelDetailsMutation.isPending
+                ? "Saving..."
+                : "Save details"}
             </Button>
-            {updateChannelMutation.error instanceof Error ? (
+            {updateChannelDetailsMutation.error instanceof Error ? (
               <p className="text-sm text-destructive">
-                {updateChannelMutation.error.message}
+                {updateChannelDetailsMutation.error.message}
               </p>
             ) : null}
           </form>
+
+          {resolvedChannel.channelType !== "dm" ? (
+            <div
+              className="space-y-4"
+              data-testid="channel-management-lifecycle"
+            >
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-0.5">
+                  <p className="text-sm font-medium">Private</p>
+                  <p className="text-xs text-muted-foreground">
+                    Only members can find and join this channel.
+                  </p>
+                </div>
+                <Switch
+                  checked={isPrivateDraft}
+                  data-testid="channel-management-private-toggle"
+                  disabled={
+                    !canManageChannel ||
+                    updateChannelLifecycleMutation.isPending
+                  }
+                  onCheckedChange={setIsPrivateDraft}
+                />
+              </div>
+
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-0.5">
+                  <p className="text-sm font-medium">Ephemeral</p>
+                  <p className="text-xs text-muted-foreground">
+                    Automatically delete this channel after a set time.
+                  </p>
+                </div>
+                <Switch
+                  checked={isEphemeralDraft}
+                  data-testid="channel-management-ephemeral-toggle"
+                  disabled={
+                    !canManageChannel ||
+                    updateChannelLifecycleMutation.isPending
+                  }
+                  onCheckedChange={setIsEphemeralDraft}
+                />
+              </div>
+
+              {isEphemeralDraft ? (
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium" htmlFor="channel-ttl">
+                    Timeout
+                  </label>
+                  <Input
+                    aria-invalid={ttlInvalid}
+                    data-testid="channel-management-ttl"
+                    disabled={
+                      !canManageChannel ||
+                      updateChannelLifecycleMutation.isPending
+                    }
+                    id="channel-ttl"
+                    onChange={(event) => setTtlDraft(event.target.value)}
+                    placeholder="e.g. 1d, 12h, 30m"
+                    value={ttlDraft}
+                  />
+                  <p
+                    className={cn(
+                      "text-xs",
+                      ttlInvalid ? "text-destructive" : "text-muted-foreground",
+                    )}
+                  >
+                    {ttlInvalid
+                      ? "Enter a duration like 1d, 12h, or 30m."
+                      : "Defaults to 1d when left empty. Resets the deletion countdown from now whenever changed."}
+                  </p>
+                </div>
+              ) : null}
+
+              <Button
+                data-testid="channel-management-save-lifecycle"
+                disabled={
+                  !canManageChannel ||
+                  updateChannelLifecycleMutation.isPending ||
+                  ttlInvalid ||
+                  !lifecycleDirty
+                }
+                onClick={handleSaveLifecycle}
+                size="sm"
+                type="button"
+              >
+                {updateChannelLifecycleMutation.isPending
+                  ? "Saving..."
+                  : "Save visibility"}
+              </Button>
+            </div>
+          ) : null}
 
           <form
             className="space-y-3"
@@ -449,9 +591,19 @@ export function ChannelManagementSheet({
               Create workflow
             </Button>
           ) : null}
+        </div>
 
-          {resolvedChannel.channelType !== "dm" ? (
-            <div className="space-y-3">
+        {resolvedChannel.channelType !== "dm" ? (
+          <SheetFooter
+            className={cn(
+              "border-t border-border/80 px-6 py-4 sm:flex-row sm:justify-start sm:space-x-0",
+              isDark
+                ? "bg-background/60 backdrop-blur-xl supports-[backdrop-filter]:bg-background/50"
+                : "bg-background",
+            )}
+            data-testid="channel-management-footer"
+          >
+            <div className="w-full space-y-3">
               <div className="flex items-center gap-2">
                 {canLeave ? (
                   <Button
@@ -584,8 +736,8 @@ export function ChannelManagementSheet({
                 </p>
               ) : null}
             </div>
-          ) : null}
-        </div>
+          </SheetFooter>
+        ) : null}
       </SheetContent>
 
       <CreateWorkflowDialog

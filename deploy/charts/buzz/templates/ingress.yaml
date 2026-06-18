@@ -1,0 +1,43 @@
+{{- include "buzz.validate" . -}}
+{{- if .Values.ingress.enabled -}}
+{{- $fullName := include "buzz.fullname" . -}}
+{{- $svcPort := .Values.service.port -}}
+{{- $defaultHost := include "buzz.relayHost" . -}}
+{{- $hosts := .Values.ingress.hosts -}}
+{{- if not $hosts -}}
+{{- $hosts = list (dict "host" $defaultHost "paths" (list (dict "path" "/" "pathType" "Prefix"))) -}}
+{{- end -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range $hosts }}
+    - host: {{ .host | default $defaultHost | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path | default "/" }}
+            pathType: {{ .pathType | default "Prefix" }}
+            backend:
+              service:
+                name: {{ $fullName }}
+                port:
+                  number: {{ $svcPort }}
+          {{- end }}
+    {{- end }}
+{{- end }}

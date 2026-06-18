@@ -1,8 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:sprout_mobile/shared/workspace/workspace.dart';
-import 'package:sprout_mobile/shared/workspace/workspace_provider.dart';
-import 'package:sprout_mobile/shared/workspace/workspace_storage.dart';
+import 'package:buzz/shared/workspace/workspace.dart';
+import 'package:buzz/shared/workspace/workspace_provider.dart';
+import 'package:buzz/shared/workspace/workspace_storage.dart';
 
 import 'workspace_storage_test.dart';
 

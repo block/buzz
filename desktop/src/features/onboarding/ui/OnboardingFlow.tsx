@@ -1,22 +1,33 @@
 import * as React from "react";
+import { flushSync } from "react-dom";
 import { useQueryClient } from "@tanstack/react-query";
-
 import {
   profileQueryKey,
   useUpdateProfileMutation,
 } from "@/features/profile/hooks";
-import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
-import {
-  getIdentity,
-  importIdentity as tauriImportIdentity,
-} from "@/shared/api/tauri";
-import { getMyRelayMembershipLookup } from "@/shared/api/relayMembers";
-import { useIdentityQuery } from "@/shared/api/hooks";
-import { pubkeyToNpub } from "@/shared/lib/nostrUtils";
 import { relayClient } from "@/shared/api/relayClient";
+import { getMyRelayMembershipLookup } from "@/shared/api/relayMembers";
+import { getIdentity, importIdentity } from "@/shared/api/tauri";
+import {
+  ACCENT_STORAGE_KEY,
+  NEUTRAL_ACCENT,
+  THEME_STORAGE_KEY,
+  useTheme,
+} from "@/shared/theme/ThemeProvider";
+import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
+import { ONBOARDING_DEFAULT_THEME_NAME } from "@/shared/theme/theme-loader";
+import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
+import { StepProgress } from "@/shared/ui/step-progress";
+import { AvatarStep } from "./AvatarStep";
 import { MembershipDenied } from "./MembershipDenied";
+import { NostrKeyImportForm } from "./NostrKeyImportForm";
+import {
+  type OnboardingTransitionDirection,
+  OnboardingSlideTransition,
+} from "./OnboardingSlideTransition";
 import { ProfileStep } from "./ProfileStep";
 import { SetupStep } from "./SetupStep";
+import { ThemeStep, preloadThemePreviewVars } from "./ThemeStep";
 import type {
   OnboardingActions,
   OnboardingPage,
@@ -61,7 +72,9 @@ async function checkMembershipDenied(): Promise<boolean> {
 
 type OnboardingFlowProps = {
   actions: OnboardingActions;
+  canBackToWorkspaceSetup: boolean;
   initialProfile: OnboardingProfileSeed;
+  onBackToWorkspaceSetup: () => void;
 };
 
 function isFallbackDisplayName(value?: string | null) {
@@ -128,9 +141,12 @@ function resolveProfileSaveRecovery(
 
 export function OnboardingFlow({
   actions,
+  canBackToWorkspaceSetup,
   initialProfile,
+  onBackToWorkspaceSetup,
 }: OnboardingFlowProps) {
   const { complete, skipForNow } = actions;
+  const queryClient = useQueryClient();
   const savedProfile = resolveSavedProfile(initialProfile);
   const profileUpdateMutation = useUpdateProfileMutation();
   const { error: profileSaveError, isPending: isSavingProfile } =
@@ -141,31 +157,39 @@ export function OnboardingFlow({
     React.useState<OnboardingProfileValues>(savedProfile);
   const [deniedPubkey, setDeniedPubkey] = React.useState<string>("");
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
+  const [isProfileAdvancePending, setIsProfileAdvancePending] =
+    React.useState(false);
+  const [membershipRetryPage, setMembershipRetryPage] =
+    React.useState<OnboardingPage>("avatar");
+  const [transitionDirection, setTransitionDirection] =
+    React.useState<OnboardingTransitionDirection>("forward");
+  const systemColorScheme = useSystemColorScheme();
+  const { accentColor, setAccentColor, setTheme, themeName } = useTheme();
 
-  // For displaying the current identity at the top of the profile step and
-  // for refreshing the UI in place after `import_identity` completes — the
-  // `key={currentPubkey}` on this component in App.tsx remounts the whole
-  // tree once the cache update lands, giving us a clean reset of all
-  // form/import state without a `window.location.reload()`.
-  const queryClient = useQueryClient();
-  const identityQuery = useIdentityQuery();
-  const currentNpub = React.useMemo(() => {
-    const pubkey = identityQuery.data?.pubkey;
-    if (!pubkey) {
-      return null;
-    }
-    try {
-      return pubkeyToNpub(pubkey);
-    } catch {
-      return null;
-    }
-  }, [identityQuery.data?.pubkey]);
+  const ensureThemeStepDefaults = React.useCallback(() => {
+    const hasStoredTheme =
+      window.localStorage.getItem(THEME_STORAGE_KEY) !== null;
+    const hasStoredAccent =
+      window.localStorage.getItem(ACCENT_STORAGE_KEY) !== null;
 
-  // Used by the import action to update the active workspace's display
-  // pubkey. Workspaces never store the nsec — `identity.key` on disk is the
-  // single source of truth — but we keep `pubkey` accurate so switcher
-  // labels and similar UI reflect the active identity.
-  const { activeWorkspace, updateWorkspace } = useWorkspaces();
+    if (!hasStoredTheme && themeName !== ONBOARDING_DEFAULT_THEME_NAME) {
+      setTheme(ONBOARDING_DEFAULT_THEME_NAME);
+    }
+
+    if (!hasStoredAccent && accentColor !== NEUTRAL_ACCENT) {
+      setAccentColor(NEUTRAL_ACCENT);
+    }
+  }, [accentColor, setAccentColor, setTheme, themeName]);
+
+  React.useEffect(() => {
+    if (currentPage === "profile" || currentPage === "avatar") {
+      void preloadThemePreviewVars().catch(() => undefined);
+    }
+
+    if (currentPage === "avatar") {
+      ensureThemeStepDefaults();
+    }
+  }, [currentPage, ensureThemeStepDefaults]);
 
   const resetProfileSaveError = React.useCallback(() => {
     profileUpdateMutation.reset();
@@ -183,59 +207,117 @@ export function OnboardingFlow({
   );
 
   const showSetupPage = React.useCallback(() => {
+    setTransitionDirection("forward");
     setCurrentPage("setup");
   }, []);
 
+  const showThemePage = React.useCallback(
+    (direction: OnboardingTransitionDirection = "forward") => {
+      ensureThemeStepDefaults();
+      setTransitionDirection(direction);
+      setCurrentPage("theme");
+    },
+    [ensureThemeStepDefaults],
+  );
+
+  const showAvatarPage = React.useCallback(
+    (direction: OnboardingTransitionDirection = "forward") => {
+      setTransitionDirection(direction);
+      setCurrentPage("avatar");
+    },
+    [],
+  );
+
   const showProfilePage = React.useCallback(() => {
+    setTransitionDirection("backward");
     setCurrentPage("profile");
   }, []);
 
-  const saveProfileAndContinue = React.useCallback(async () => {
-    if (profileDraft.displayName.trim().length === 0) {
-      return;
-    }
+  const showKeyImportPage = React.useCallback(() => {
+    setTransitionDirection("forward");
+    setCurrentPage("key-import");
+  }, []);
 
-    // Check membership before attempting the profile save. On open relays
-    // this passes instantly. On gated relays it prevents a 403 during save.
-    const denied = await checkMembershipDenied();
-    if (denied) {
-      try {
-        const identity = await getIdentity();
-        setDeniedPubkey(identity.pubkey);
-      } catch {
-        setDeniedPubkey("");
+  const saveProfileAndContinue = React.useCallback(
+    async (nextPage: OnboardingPage) => {
+      if (isProfileAdvancePending) {
+        return;
       }
-      setCurrentPage("membership-denied");
-      return;
-    }
+      if (profileDraft.displayName.trim().length === 0) {
+        return;
+      }
 
-    const updatePayload = createProfileUpdatePayload({
-      draftProfile: profileDraft,
-      savedProfile,
-    });
+      flushSync(() => {
+        setIsProfileAdvancePending(true);
+      });
 
-    if (Object.keys(updatePayload).length > 0) {
       try {
-        await profileUpdateMutation.mutateAsync(updatePayload);
-      } catch (error) {
-        if (isRelayMembershipDeniedError(error)) {
+        // Check membership before attempting the profile save. On open relays
+        // this passes instantly. On gated relays it prevents a 403 during save.
+        const denied = await checkMembershipDenied();
+        if (denied) {
           try {
             const identity = await getIdentity();
             setDeniedPubkey(identity.pubkey);
           } catch {
             setDeniedPubkey("");
           }
+          setMembershipRetryPage(nextPage);
           setCurrentPage("membership-denied");
           return;
         }
 
-        // Error falls through to the error banner / recovery buttons.
-        return;
-      }
-    }
+        const updatePayload = createProfileUpdatePayload({
+          draftProfile: profileDraft,
+          savedProfile,
+        });
 
-    showSetupPage();
-  }, [profileDraft, profileUpdateMutation, savedProfile, showSetupPage]);
+        if (Object.keys(updatePayload).length > 0) {
+          try {
+            await profileUpdateMutation.mutateAsync(updatePayload);
+          } catch (error) {
+            if (isRelayMembershipDeniedError(error)) {
+              try {
+                const identity = await getIdentity();
+                setDeniedPubkey(identity.pubkey);
+              } catch {
+                setDeniedPubkey("");
+              }
+              setMembershipRetryPage(nextPage);
+              setCurrentPage("membership-denied");
+              return;
+            }
+
+            // Error falls through to the error banner / recovery buttons.
+            return;
+          }
+        }
+
+        if (nextPage === "avatar") {
+          showAvatarPage();
+          return;
+        }
+
+        if (nextPage === "theme") {
+          showThemePage();
+          return;
+        }
+
+        showSetupPage();
+      } finally {
+        setIsProfileAdvancePending(false);
+      }
+    },
+    [
+      isProfileAdvancePending,
+      profileDraft,
+      profileUpdateMutation,
+      savedProfile,
+      showAvatarPage,
+      showSetupPage,
+      showThemePage,
+    ],
+  );
 
   const updateDisplayNameDraft = React.useCallback(
     (value: string) => {
@@ -255,6 +337,15 @@ export function OnboardingFlow({
     updateProfileDraft({ avatarUrl: savedProfile.avatarUrl });
   }, [savedProfile.avatarUrl, updateProfileDraft]);
 
+  const advanceFromProfileWithoutSaving = React.useCallback(() => {
+    profileUpdateMutation.reset();
+    setProfileDraft((current) => ({
+      ...current,
+      displayName: savedProfile.displayName,
+    }));
+    showAvatarPage();
+  }, [profileUpdateMutation, savedProfile.displayName, showAvatarPage]);
+
   const saveErrorMessage =
     profileSaveError instanceof Error ? profileSaveError.message : null;
   const profileStepState: ProfileStepState = {
@@ -262,9 +353,8 @@ export function OnboardingFlow({
       draftUrl: profileDraft.avatarUrl,
       savedUrl: savedProfile.avatarUrl,
     },
-    currentNpub,
     isUploadingAvatar,
-    isSaving: isSavingProfile,
+    isSaving: isSavingProfile || isProfileAdvancePending,
     name: {
       draftValue: profileDraft.displayName,
       savedValue: savedProfile.displayName,
@@ -274,52 +364,59 @@ export function OnboardingFlow({
       savedProfile.displayName,
     ),
   };
+  const avatarStepState: ProfileStepState = {
+    ...profileStepState,
+    saveRecovery: saveErrorMessage
+      ? {
+          canAdvanceWithoutSaving: true,
+          canSkipForNow: false,
+          errorMessage: saveErrorMessage,
+        }
+      : profileStepState.saveRecovery,
+  };
+  const currentStep =
+    currentPage === "profile" || currentPage === "key-import"
+      ? 2
+      : currentPage === "avatar"
+        ? 3
+        : currentPage === "theme"
+          ? 4
+          : 5;
+  const hideFixedProgressOnCompact =
+    currentPage === "avatar" || currentPage === "theme";
 
-  const handleImportIdentity = React.useCallback(
+  // Swapping the identity changes the pubkey, which remounts this flow
+  // (keyed on pubkey in App.tsx) and re-runs the onboarding gate: the new
+  // key's relay profile reseeds the steps, and a key that already finished
+  // onboarding on this machine skips straight into the app.
+  const importExistingKey = React.useCallback(
     async (nsec: string) => {
-      // Backend writes the nsec to `identity.key`, swaps `state.keys`, and
-      // clears any session token. After this returns, every Rust command
-      // reads the new key fresh on the next call.
-      const next = await tauriImportIdentity(nsec);
-
-      // Drop the WebSocket so it re-AUTHs as the new pubkey on next use.
-      // Stale subscriptions bound to the old pubkey would otherwise leak
-      // through and cause confusing membership/permission errors until the
-      // user navigated away.
-      try {
-        relayClient.disconnect();
-      } catch (error) {
-        console.warn("relayClient.disconnect() during import failed", error);
-      }
-
-      // Update the active workspace's display pubkey. The workspace never
-      // stores nsec — this is purely cosmetic for the workspace switcher.
-      if (activeWorkspace && activeWorkspace.pubkey !== next.pubkey) {
-        updateWorkspace(activeWorkspace.id, { pubkey: next.pubkey });
-      }
-
-      // Drop any membership-denied banner from a previous identity.
+      const identity = await importIdentity(nsec);
+      relayClient.disconnect();
+      queryClient.setQueryData(["identity"], identity);
+      queryClient.removeQueries({ queryKey: profileQueryKey });
+      profileUpdateMutation.reset();
       setDeniedPubkey("");
-
-      // Refresh identity + profile caches. The identity query lives at
-      // staleTime: Infinity so an explicit invalidation is required.
-      // Once `["identity"]` updates, App.tsx's `key={currentPubkey}` will
-      // remount this entire component, giving us a clean form state for
-      // the new identity without a page reload.
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["identity"] }),
-        queryClient.invalidateQueries({ queryKey: profileQueryKey }),
-      ]);
+      setTransitionDirection("backward");
+      setCurrentPage("profile");
     },
-    [activeWorkspace, queryClient, updateWorkspace],
+    [profileUpdateMutation, queryClient],
   );
 
   if (currentPage === "membership-denied") {
     return (
       <MembershipDenied
-        onChangeKey={showProfilePage}
+        onChangeKey={
+          canBackToWorkspaceSetup
+            ? () => {
+                setTransitionDirection("backward");
+                onBackToWorkspaceSetup();
+              }
+            : undefined
+        }
+        onImportKey={canBackToWorkspaceSetup ? undefined : importExistingKey}
         onRetry={() => {
-          void saveProfileAndContinue();
+          void saveProfileAndContinue(membershipRetryPage);
         }}
         pubkey={deniedPubkey}
       />
@@ -328,32 +425,121 @@ export function OnboardingFlow({
 
   return (
     <div
-      className="flex min-h-dvh items-center justify-center bg-[radial-gradient(circle_at_top,hsl(var(--primary)/0.16),transparent_44%),linear-gradient(180deg,hsl(var(--background)),hsl(var(--muted)/0.5))] px-4 py-8"
+      className={`buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground ${
+        currentPage === "profile" ||
+        currentPage === "avatar" ||
+        currentPage === "key-import"
+          ? "buzz-onboarding-neutral-theme"
+          : ""
+      }`}
       data-testid="onboarding-gate"
+      data-system-color-scheme={systemColorScheme}
     >
-      <div className="w-full max-w-xl rounded-[32px] border border-border/70 bg-background/94 p-6 shadow-2xl backdrop-blur-sm sm:p-8">
+      <StartupWindowDragRegion />
+      <div
+        className={`relative flex w-full flex-col items-center text-center ${
+          currentPage === "theme"
+            ? "max-w-[1180px]"
+            : currentPage === "avatar"
+              ? "max-w-[1080px]"
+              : currentPage === "setup"
+                ? "max-w-[920px]"
+                : "max-w-[500px]"
+        }`}
+      >
+        <OnboardingSlideTransition
+          className="w-auto"
+          containerClassName={`fixed bottom-12 left-1/2 z-40 w-auto -translate-x-1/2 ${
+            hideFixedProgressOnCompact ? "max-lg:hidden" : ""
+          }`}
+          direction={transitionDirection}
+          transitionKey={`progress-${currentStep}-${transitionDirection}-${
+            hideFixedProgressOnCompact ? "compact-hidden" : "visible"
+          }`}
+        >
+          <StepProgress
+            activeSegmentClassName="bg-primary"
+            completeSegmentClassName="bg-primary/35"
+            currentStep={currentStep}
+            inactiveSegmentClassName="bg-muted-foreground/25"
+          />
+        </OnboardingSlideTransition>
+
         {currentPage === "profile" ? (
           <ProfileStep
             actions={{
-              advanceWithoutSaving: showSetupPage,
+              advanceWithoutSaving: advanceFromProfileWithoutSaving,
+              back: canBackToWorkspaceSetup
+                ? () => {
+                    setTransitionDirection("backward");
+                    onBackToWorkspaceSetup();
+                  }
+                : undefined,
               clearAvatarDraft: resetAvatarDraft,
-              importIdentity: handleImportIdentity,
+              importExistingKey: showKeyImportPage,
               onUploadingChange: setIsUploadingAvatar,
               skipForNow,
               submit: () => {
-                void saveProfileAndContinue();
+                void saveProfileAndContinue("avatar");
               },
               updateAvatarUrl: updateAvatarUrlDraft,
               updateDisplayName: updateDisplayNameDraft,
             }}
+            direction={transitionDirection}
             state={profileStepState}
+          />
+        ) : currentPage === "key-import" ? (
+          <OnboardingSlideTransition
+            className="flex w-full flex-col items-center text-center"
+            direction={transitionDirection}
+            transitionKey={`key-import-${transitionDirection}`}
+          >
+            <div className="w-full max-w-[440px]">
+              <h1 className="text-3xl font-semibold tracking-tight">
+                Use your existing key
+              </h1>
+              <p className="mt-3 text-sm leading-6 text-muted-foreground">
+                Import your Nostr private key to use that identity with Buzz. If
+                this key already has a profile on the relay, your name and
+                avatar are restored automatically.
+              </p>
+            </div>
+
+            <NostrKeyImportForm
+              onBack={showProfilePage}
+              onImport={importExistingKey}
+            />
+          </OnboardingSlideTransition>
+        ) : currentPage === "avatar" ? (
+          <AvatarStep
+            actions={{
+              advanceWithoutSaving: () => showThemePage(),
+              back: showProfilePage,
+              onUploadingChange: setIsUploadingAvatar,
+              skipForNow,
+              submit: () => {
+                void saveProfileAndContinue("theme");
+              },
+              updateAvatarUrl: updateAvatarUrlDraft,
+            }}
+            direction={transitionDirection}
+            state={avatarStepState}
+          />
+        ) : currentPage === "theme" ? (
+          <ThemeStep
+            actions={{
+              skip: showSetupPage,
+              submit: showSetupPage,
+            }}
+            direction={transitionDirection}
           />
         ) : (
           <SetupStep
             actions={{
-              back: showProfilePage,
+              back: () => showThemePage("backward"),
               complete,
             }}
+            direction={transitionDirection}
           />
         )}
       </div>

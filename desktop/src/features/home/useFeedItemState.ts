@@ -1,6 +1,6 @@
 import * as React from "react";
 
-const DONE_STORAGE_KEY = "sprout-home-feed-done.v1";
+const DONE_STORAGE_KEY = "buzz-home-feed-done.v1";
 const MAX_ITEMS = 500;
 
 function doneStorageKey(pubkey: string) {

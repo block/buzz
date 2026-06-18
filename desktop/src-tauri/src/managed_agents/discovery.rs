@@ -2,18 +2,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::managed_agents::{
-    AcpAvailabilityStatus, AcpProviderCatalogEntry, CommandAvailabilityInfo,
+    AcpAvailabilityStatus, AcpRuntimeCatalogEntry, CommandAvailabilityInfo,
 };
 
-pub(crate) struct KnownAcpProvider {
+pub(crate) struct KnownAcpRuntime {
     pub id: &'static str,
     pub label: &'static str,
     pub commands: &'static [&'static str],
     pub aliases: &'static [&'static str],
     pub avatar_url: &'static str,
-    /// MCP server binary to use instead of the default `sprout-mcp-server`.
-    /// `None` means this provider does not need a Sprout MCP server —
-    /// no MCP tools will be registered for the agent session.
+    /// Legacy MCP server binary field. Vestigial — all agents now use the bundled CLI.
+    /// directly. Will be removed when runtime discovery is simplified.
     pub mcp_command: Option<&'static str>,
     /// Whether to enable MCP hook tools (`_Stop`, `_PostCompact`) for this agent.
     pub mcp_hooks: bool,
@@ -30,17 +29,26 @@ pub(crate) struct KnownAcpProvider {
     /// Human-readable hint about installing the ACP adapter.
     pub adapter_install_hint: &'static str,
     /// Harness-specific skill discovery directory (e.g. `.goose/skills`).
-    /// `Some(dir)` → Sprout creates a symlink at `<nest>/<dir>/sprout-cli`
-    /// pointing to the canonical `.agents/skills/sprout-cli`. `None` → this
-    /// provider reads the canonical path directly or has no skill support.
+    /// `Some(dir)` → Buzz creates a symlink at `<nest>/<dir>/buzz-cli`
+    /// pointing to the canonical `.agents/skills/buzz-cli`. `None` → this
+    /// runtime reads the canonical path directly or has no skill support.
     pub skill_dir: Option<&'static str>,
+    /// Whether this runtime handles model switching via ACP protocol natively.
+    /// Currently unused — env var injection runs unconditionally regardless of
+    /// this value. Retained as scaffolding for when ACP model switching matures.
+    #[allow(dead_code)]
+    pub supports_acp_model_switching: bool,
+    pub model_env_var: Option<&'static str>,
+    pub provider_env_var: Option<&'static str>,
+    pub provider_locked: bool,
+    pub default_env: &'static [(&'static str, &'static str)],
 }
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
-const SPROUT_AGENT_AVATAR_URL: &str =
-    "https://raw.githubusercontent.com/block/sprout/refs/heads/main/crates/sprout-agent/sprout-agent.png";
+const BUZZ_AGENT_AVATAR_URL: &str =
+    "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
 fn common_binary_paths() -> &'static [PathBuf] {
     use std::sync::OnceLock;
@@ -64,8 +72,8 @@ fn common_binary_paths() -> &'static [PathBuf] {
     })
 }
 
-const KNOWN_ACP_PROVIDERS: &[KnownAcpProvider] = &[
-    KnownAcpProvider {
+const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
+    KnownAcpRuntime {
         id: "goose",
         label: "Goose",
         commands: &["goose"],
@@ -80,8 +88,13 @@ const KNOWN_ACP_PROVIDERS: &[KnownAcpProvider] = &[
         cli_install_hint: "Install Goose via the official install script.",
         adapter_install_hint: "",
         skill_dir: Some(".goose/skills"),
+        supports_acp_model_switching: false,
+        model_env_var: Some("GOOSE_MODEL"),
+        provider_env_var: Some("GOOSE_PROVIDER"),
+        provider_locked: false,
+        default_env: &[("GOOSE_MODE", "auto")],
     },
-    KnownAcpProvider {
+    KnownAcpRuntime {
         id: "claude",
         label: "Claude Code",
         commands: &["claude-agent-acp", "claude-code-acp"],
@@ -96,8 +109,13 @@ const KNOWN_ACP_PROVIDERS: &[KnownAcpProvider] = &[
         cli_install_hint: "Install the Claude Code CLI via the official install script.",
         adapter_install_hint: "Install the Claude Code ACP adapter via npm.",
         skill_dir: Some(".claude/skills"),
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
     },
-    KnownAcpProvider {
+    KnownAcpRuntime {
         id: "codex",
         label: "Codex",
         commands: &["codex-acp"],
@@ -112,28 +130,38 @@ const KNOWN_ACP_PROVIDERS: &[KnownAcpProvider] = &[
         cli_install_hint: "Install the Codex CLI via the official install script.",
         adapter_install_hint: "Install the Codex ACP adapter via npm.",
         skill_dir: Some(".codex/skills"),
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
     },
-    KnownAcpProvider {
-        id: "sprout-agent",
-        label: "Sprout Agent",
-        commands: &["sprout-agent"],
+    KnownAcpRuntime {
+        id: "buzz-agent",
+        label: "Buzz Agent",
+        commands: &["buzz-agent"],
         aliases: &[],
-        avatar_url: SPROUT_AGENT_AVATAR_URL,
-        mcp_command: Some("sprout-dev-mcp"),
+        avatar_url: BUZZ_AGENT_AVATAR_URL,
+        mcp_command: Some("buzz-dev-mcp"),
         mcp_hooks: true,
         underlying_cli: None,
         cli_install_commands: &[],
         adapter_install_commands: &[],
-        install_instructions_url: "https://github.com/block/sprout",
-        cli_install_hint: "Ships with the Sprout desktop app.",
+        install_instructions_url: "https://github.com/block/buzz",
+        cli_install_hint: "Ships with the Buzz desktop app.",
         adapter_install_hint: "",
         skill_dir: None,
+        supports_acp_model_switching: true,
+        model_env_var: Some("BUZZ_AGENT_MODEL"),
+        provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
+        provider_locked: false,
+        default_env: &[],
     },
 ];
 
-/// Skill discovery directories declared by known providers.
+/// Skill discovery directories declared by known runtimes.
 pub(crate) fn known_skill_dirs() -> impl Iterator<Item = &'static str> {
-    KNOWN_ACP_PROVIDERS.iter().filter_map(|p| p.skill_dir)
+    KNOWN_ACP_RUNTIMES.iter().filter_map(|p| p.skill_dir)
 }
 
 fn workspace_root_dir() -> PathBuf {
@@ -183,28 +211,43 @@ fn normalize_command_identity(command: &str) -> String {
     lower
 }
 
-pub(crate) fn known_acp_provider(command: &str) -> Option<&'static KnownAcpProvider> {
+pub(crate) fn known_acp_runtime(command: &str) -> Option<&'static KnownAcpRuntime> {
     let normalized = normalize_command_identity(command);
 
-    KNOWN_ACP_PROVIDERS.iter().find(|provider| {
-        normalized == provider.id
-            || provider
+    KNOWN_ACP_RUNTIMES.iter().find(|runtime| {
+        normalized == runtime.id
+            || runtime
                 .commands
                 .iter()
                 .any(|command| normalized == normalize_command_identity(command))
-            || provider.aliases.iter().any(|alias| normalized == *alias)
+            || runtime.aliases.iter().any(|alias| normalized == *alias)
     })
 }
 
-pub(crate) fn known_acp_provider_exact(id: &str) -> Option<&'static KnownAcpProvider> {
-    KNOWN_ACP_PROVIDERS.iter().find(|p| p.id == id)
+pub(crate) fn known_acp_runtime_exact(id: &str) -> Option<&'static KnownAcpRuntime> {
+    KNOWN_ACP_RUNTIMES.iter().find(|p| p.id == id)
+}
+
+/// The agent command a freshly-created agent defaults to when the create
+/// request supplies none. Resolves the bundled `buzz-agent` from the catalog —
+/// the same shape `mesh_llm::preset` uses — so the default can't drift from the
+/// provider definition. Falls back to the id if the catalog entry is missing.
+///
+/// The previous default was the bare global `goose`, which is not on PATH on a
+/// stock Windows install: every worker failed with `program not found`. The
+/// bundled `buzz-agent` ships with the app and resolves on every platform.
+pub fn default_agent_command() -> String {
+    known_acp_runtime_exact("buzz-agent")
+        .and_then(|p| p.commands.first().copied())
+        .unwrap_or("buzz-agent")
+        .to_string()
 }
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "sprout-agent" => Some(Vec::new()),
+        | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
     }
 }
@@ -260,17 +303,37 @@ fn command_search_dirs() -> Vec<PathBuf> {
     unique
 }
 
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 fn resolve_workspace_command(command: &str) -> Option<PathBuf> {
     if command_looks_like_path(command) {
         let path = PathBuf::from(command);
-        return path.exists().then_some(path);
+        return is_executable_file(&path).then_some(path);
     }
 
     let file_name = executable_basename(command);
     command_search_dirs()
         .into_iter()
         .map(|dir| dir.join(&file_name))
-        .find(|candidate| candidate.exists())
+        .find(|candidate| is_executable_file(candidate))
 }
 
 fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, Option<PathBuf>>>
@@ -323,7 +386,7 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
     }
 
     for candidate in path_candidates_from_env(command) {
-        if candidate.exists() {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
     }
@@ -333,7 +396,7 @@ fn resolve_command_uncached(command: &str) -> Option<PathBuf> {
     }
     for dir in common_binary_paths() {
         let candidate = dir.join(executable_basename(command));
-        if candidate.exists() {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
     }
@@ -373,7 +436,7 @@ fn find_via_login_shell(command: &str) -> Option<PathBuf> {
     let stdout = run_in_login_shell(&["-l", "-c", r#"command -v -- "$1""#, "_", command])?;
     let resolved = stdout.lines().rfind(|line| !line.trim().is_empty())?;
     let path = PathBuf::from(resolved.trim());
-    (path.is_absolute() && path.exists()).then_some(path)
+    (path.is_absolute() && is_executable_file(&path)).then_some(path)
 }
 
 /// Return the user's full PATH from a login shell.
@@ -413,7 +476,7 @@ pub fn missing_command_message(command: &str, role: &str) -> String {
     )
 }
 
-fn classify_provider(
+fn classify_runtime(
     adapter_result: Option<(&str, PathBuf)>,
     underlying_cli: Option<&str>,
     underlying_cli_found: bool,
@@ -439,27 +502,24 @@ fn classify_provider(
     }
 }
 
-pub fn discover_acp_providers() -> Vec<AcpProviderCatalogEntry> {
-    KNOWN_ACP_PROVIDERS
+pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
+    KNOWN_ACP_RUNTIMES
         .iter()
-        .map(|provider| {
+        .map(|runtime| {
             // Try to find the ACP adapter binary.
-            let adapter_result = provider
+            let adapter_result = runtime
                 .commands
                 .iter()
                 .find_map(|command| find_command(command).map(|path| (*command, path)));
 
-            let underlying_cli_found = provider
+            let underlying_cli_found = runtime
                 .underlying_cli
                 .map(|cli| find_command(cli).is_some())
                 .unwrap_or(false);
-            let (availability, command, binary_path) = classify_provider(
-                adapter_result,
-                provider.underlying_cli,
-                underlying_cli_found,
-            );
+            let (availability, command, binary_path) =
+                classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
 
-            let underlying_cli_path = provider
+            let underlying_cli_path = runtime
                 .underlying_cli
                 .and_then(find_command)
                 .map(|p| p.display().to_string());
@@ -469,11 +529,11 @@ pub fn discover_acp_providers() -> Vec<AcpProviderCatalogEntry> {
                 .map(|cmd| normalize_agent_args(cmd, Vec::new()))
                 .unwrap_or_default();
 
-            let can_auto_install = !provider.cli_install_commands.is_empty()
-                || !provider.adapter_install_commands.is_empty();
+            let can_auto_install = !runtime.cli_install_commands.is_empty()
+                || !runtime.adapter_install_commands.is_empty();
 
-            let cli_hint = provider.cli_install_hint;
-            let adapter_hint = provider.adapter_install_hint;
+            let cli_hint = runtime.cli_install_hint;
+            let adapter_hint = runtime.adapter_install_hint;
             let install_hint = match availability {
                 AcpAvailabilityStatus::Available => cli_hint.to_string(),
                 AcpAvailabilityStatus::CliMissing => cli_hint.to_string(),
@@ -489,17 +549,17 @@ pub fn discover_acp_providers() -> Vec<AcpProviderCatalogEntry> {
                 }
             };
 
-            AcpProviderCatalogEntry {
-                id: provider.id.to_string(),
-                label: provider.label.to_string(),
-                avatar_url: provider.avatar_url.to_string(),
+            AcpRuntimeCatalogEntry {
+                id: runtime.id.to_string(),
+                label: runtime.label.to_string(),
+                avatar_url: runtime.avatar_url.to_string(),
                 availability,
                 command,
                 binary_path,
                 default_args,
-                mcp_command: provider.mcp_command.map(str::to_string),
+                mcp_command: runtime.mcp_command.map(str::to_string),
                 install_hint,
-                install_instructions_url: provider.install_instructions_url.to_string(),
+                install_instructions_url: runtime.install_instructions_url.to_string(),
                 can_auto_install,
                 underlying_cli_path,
             }
@@ -508,8 +568,8 @@ pub fn discover_acp_providers() -> Vec<AcpProviderCatalogEntry> {
 }
 
 pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
-    let provider = known_acp_provider(command)?;
-    Some(provider.avatar_url.to_string())
+    let runtime = known_acp_runtime(command)?;
+    Some(runtime.avatar_url.to_string())
 }
 
 #[cfg(test)]
@@ -517,8 +577,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        classify_provider, find_via_login_shell, managed_agent_avatar_url, normalize_agent_args,
-        CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL, SPROUT_AGENT_AVATAR_URL,
+        classify_runtime, default_agent_command, find_via_login_shell, managed_agent_avatar_url,
+        normalize_agent_args, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
+        GOOSE_AVATAR_URL,
     };
     use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -555,6 +616,18 @@ mod tests {
     }
 
     #[test]
+    fn default_agent_command_resolves_bundled_buzz_agent() {
+        // The create-path default must be the bundled buzz-agent, never the
+        // bare `goose` that isn't on PATH on a stock Windows install.
+        assert_eq!(default_agent_command(), "buzz-agent");
+        // And buzz-agent takes no `acp` arg — confirm no arg leakage from the default.
+        assert_eq!(
+            normalize_agent_args(&default_agent_command(), vec!["acp".into()]),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
     fn normalizes_claude_and_codex_args_to_empty() {
         assert_eq!(
             normalize_agent_args("claude-agent-acp", vec!["acp".into()]),
@@ -571,25 +644,25 @@ mod tests {
     }
 
     #[test]
-    fn resolves_sprout_agent_avatar() {
+    fn resolves_buzz_agent_avatar() {
         assert_eq!(
-            managed_agent_avatar_url("sprout-agent"),
-            Some(SPROUT_AGENT_AVATAR_URL.to_string())
+            managed_agent_avatar_url("buzz-agent"),
+            Some(BUZZ_AGENT_AVATAR_URL.to_string())
         );
         assert_eq!(
-            managed_agent_avatar_url("/usr/local/bin/sprout-agent"),
-            Some(SPROUT_AGENT_AVATAR_URL.to_string())
+            managed_agent_avatar_url("/usr/local/bin/buzz-agent"),
+            Some(BUZZ_AGENT_AVATAR_URL.to_string())
         );
     }
 
     #[test]
-    fn normalizes_sprout_agent_args_to_empty() {
+    fn normalizes_buzz_agent_args_to_empty() {
         assert_eq!(
-            normalize_agent_args("sprout-agent", Vec::new()),
+            normalize_agent_args("buzz-agent", Vec::new()),
             Vec::<String>::new()
         );
         assert_eq!(
-            normalize_agent_args("sprout-agent", vec!["acp".into()]),
+            normalize_agent_args("buzz-agent", vec!["acp".into()]),
             Vec::<String>::new()
         );
     }
@@ -597,7 +670,7 @@ mod tests {
     #[test]
     fn login_shell_lookup_treats_command_as_data() {
         let marker =
-            std::env::temp_dir().join(format!("sprout-discovery-marker-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("buzz-discovery-marker-{}", uuid::Uuid::new_v4()));
         let payload = format!("doesnotexist; touch {} #", marker.display());
 
         let resolved = find_via_login_shell(&payload);
@@ -612,9 +685,37 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn explicit_path_resolution_ignores_non_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("buzz-discovery-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let bin = dir.join("buzz-acp");
+        std::fs::write(&bin, "").expect("write placeholder");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod placeholder");
+
+        assert!(
+            super::resolve_workspace_command(bin.to_str().expect("utf8 path")).is_none(),
+            "non-executable placeholder must not resolve"
+        );
+
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod executable");
+        assert_eq!(
+            super::resolve_workspace_command(bin.to_str().expect("utf8 path")),
+            Some(bin.clone())
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn classifies_available_when_adapter_found() {
-        let (status, cmd, path) = classify_provider(
+        let (status, cmd, path) = classify_runtime(
             Some(("goose", PathBuf::from("/usr/local/bin/goose"))),
             None,
             false,
@@ -626,7 +727,7 @@ mod tests {
 
     #[test]
     fn classifies_adapter_missing_when_cli_present() {
-        let (status, cmd, path) = classify_provider(None, Some("claude"), true);
+        let (status, cmd, path) = classify_runtime(None, Some("claude"), true);
         assert_eq!(status, AcpAvailabilityStatus::AdapterMissing);
         assert!(cmd.is_none());
         assert!(path.is_none());
@@ -634,7 +735,7 @@ mod tests {
 
     #[test]
     fn classifies_not_installed_when_nothing_found() {
-        let (status, cmd, path) = classify_provider(None, Some("claude"), false);
+        let (status, cmd, path) = classify_runtime(None, Some("claude"), false);
         assert_eq!(status, AcpAvailabilityStatus::NotInstalled);
         assert!(cmd.is_none());
         assert!(path.is_none());
@@ -642,7 +743,7 @@ mod tests {
 
     #[test]
     fn classifies_not_installed_when_no_underlying_cli() {
-        let (status, cmd, path) = classify_provider(None, None, false);
+        let (status, cmd, path) = classify_runtime(None, None, false);
         assert_eq!(status, AcpAvailabilityStatus::NotInstalled);
         assert!(cmd.is_none());
         assert!(path.is_none());
@@ -650,7 +751,7 @@ mod tests {
 
     #[test]
     fn classifies_cli_missing_when_adapter_found_but_cli_absent() {
-        let (status, cmd, path) = classify_provider(
+        let (status, cmd, path) = classify_runtime(
             Some(("codex-acp", PathBuf::from("/opt/homebrew/bin/codex-acp"))),
             Some("codex"),
             false,

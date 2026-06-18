@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-sprout-proxy E2E test using nostr-sdk v0.44 (Python bindings for rust-nostr)
+buzz-proxy E2E test using nostr-sdk v0.44 (Python bindings for rust-nostr)
 
 nostr-sdk is the official Rust Nostr SDK with Python/Swift/Flutter bindings.
 Second most popular Nostr SDK after nostr-tools, powers native clients.
@@ -37,7 +37,7 @@ def fail(name, detail=""):
 
 async def main():
     print("=" * 64)
-    print("  nostr-sdk v0.44 (Python/Rust) E2E TEST against sprout-proxy")
+    print("  nostr-sdk v0.44 (Python/Rust) E2E TEST against buzz-proxy")
     print("=" * 64)
 
     keys = nostr_sdk.Keys.parse(PRIVKEY_HEX)
@@ -143,7 +143,7 @@ async def main():
             all_pass = False
     print("=" * 64)
     if all_pass:
-        print("  🎉 ALL TESTS PASSED — nostr-sdk Python works with sprout-proxy!")
+        print("  🎉 ALL TESTS PASSED — nostr-sdk Python works with buzz-proxy!")
     else:
         print("  ⚠️  Some tests failed")
     print("=" * 64)

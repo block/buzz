@@ -11,6 +11,12 @@ import { Selection, TextSelection } from "@tiptap/pm/state";
 import { isMacPlatform } from "@/shared/lib/platform";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
+import { resolveLinkAt, type LinkSelectionInfo } from "./resolveLinkAt";
+
+export type { LinkSelectionInfo } from "./resolveLinkAt";
+
+import { MESSAGE_MARKDOWN_CLASS } from "@/shared/ui/mentionChip";
+
 import {
   MentionHighlightExtension,
   mentionHighlightKey,
@@ -18,11 +24,13 @@ import {
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
 import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
 import { buildPlainTextProjection } from "./plainTextProjection";
+import { createLinkInteractionExtension } from "./linkInteractionExtension";
 import {
   CodeBlockAfterHardBreak,
   handleCodeFenceEnter,
   insertNewlineInCodeBlock,
 } from "./codeBlockExtensions";
+import { SpoilerMark } from "./spoilerMark";
 
 /**
  * Plain-text edit descriptor returned by autocomplete hooks
@@ -48,6 +56,7 @@ export type RichTextEditorOptions = {
   onUpdate?: (info: { markdown: string; text: string }) => void;
   editable?: boolean;
   mentionNames?: string[];
+  agentMentionNames?: string[];
   channelNames?: string[];
   /** Known custom-emoji set; used to render `:shortcode:` inline as images. */
   customEmoji?: CustomEmoji[];
@@ -70,6 +79,19 @@ export type RichTextEditorOptions = {
   onEditLastOwnMessage?: () => boolean;
   /** When true, plain Enter is passed through (e.g. to select an autocomplete item). */
   isAutocompleteOpen?: React.RefObject<boolean>;
+  /**
+   * Called when the user clicks an existing link in the editor. The link
+   * extension runs with `openOnClick: false` (a chat composer must not
+   * navigate away on click), so we route the click here instead: the owner
+   * can surface composer-local link controls. `from`/`to` bound the full link
+   * mark range so the owner can apply edits without re-selecting.
+   */
+  onEditLink?: (info: LinkSelectionInfo) => void;
+  /**
+   * Called when the caret/selection moves onto or away from a link. Owners use
+   * this for link affordances that follow keyboard cursor movement.
+   */
+  onLinkSelectionChange?: (info: LinkSelectionInfo | null) => void;
 };
 
 /**
@@ -86,11 +108,14 @@ export function useRichTextEditor({
   onUpdate,
   editable = true,
   mentionNames,
+  agentMentionNames,
   channelNames,
   customEmoji,
   onSubmit,
   onEditLastOwnMessage,
   isAutocompleteOpen,
+  onEditLink,
+  onLinkSelectionChange,
 }: RichTextEditorOptions) {
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
@@ -100,6 +125,12 @@ export function useRichTextEditor({
 
   const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
   onEditLastOwnMessageRef.current = onEditLastOwnMessage;
+
+  const onEditLinkRef = React.useRef(onEditLink);
+  onEditLinkRef.current = onEditLink;
+
+  const onLinkSelectionChangeRef = React.useRef(onLinkSelectionChange);
+  onLinkSelectionChangeRef.current = onLinkSelectionChange;
 
   const placeholderRef = React.useRef(placeholder);
   placeholderRef.current = placeholder;
@@ -289,6 +320,7 @@ export function useRichTextEditor({
           },
         }),
         CodeBlockAfterHardBreak,
+        SpoilerMark,
         MentionHighlightExtension,
         customEmojiWiring.extension,
         Placeholder.configure({
@@ -302,13 +334,17 @@ export function useRichTextEditor({
           openOnClick: false,
           autolink: true,
           linkOnPaste: true,
-          // Allow `sprout://` (used by Copy-link-to-message + sprout://connect)
-          // through TipTap's URL sanitiser. http(s) and mailto are accepted by
-          // default; non-listed protocols are stripped on paste/typed input.
-          protocols: ["sprout"],
+          // Allow Buzz message links through TipTap's URL sanitiser.
+          // http(s) and mailto are accepted by default; non-listed protocols are
+          // stripped on paste/typed input.
+          protocols: ["buzz"],
           HTMLAttributes: {
-            class: "text-primary underline underline-offset-4 cursor-pointer",
+            class: "text-primary underline underline-offset-4 cursor-text",
           },
+        }),
+        createLinkInteractionExtension({
+          getEditLinkHandler: () => onEditLinkRef.current,
+          getSelectionChangeHandler: () => onLinkSelectionChangeRef.current,
         }),
         TiptapMarkdown.configure({
           html: false,
@@ -319,9 +355,11 @@ export function useRichTextEditor({
       ],
       editorProps: {
         attributes: {
-          class:
-            "min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-6 md:leading-6 shadow-none focus-visible:ring-0 caret-foreground outline-hidden prose-sm max-w-none",
+          autocapitalize: "none",
+          autocorrect: "off",
+          class: `${MESSAGE_MARKDOWN_CLASS} min-h-0 resize-none overflow-y-hidden border-0 bg-transparent px-0 py-0 text-sm leading-5 text-foreground shadow-none focus-visible:ring-0 caret-foreground outline-hidden max-w-none`,
           "data-testid": "message-input",
+          spellcheck: "false",
         },
         // ArrowUp in an empty composer → edit your last message (Slack
         // parity). Handled here in ProseMirror's own DOM `keydown` hook —
@@ -424,16 +462,17 @@ export function useRichTextEditor({
     if (!editor) return;
     // biome-ignore lint/suspicious/noExplicitAny: TipTap's Storage type doesn't include dynamic extension keys
     const storage = (editor.storage as any).mentionHighlight as
-      | { names: string[]; channelNames: string[] }
+      | { names: string[]; agentNames: string[]; channelNames: string[] }
       | undefined;
     if (storage) {
       storage.names = mentionNames ?? [];
+      storage.agentNames = agentMentionNames ?? [];
       storage.channelNames = channelNames ?? [];
       // Force the plugin to re-decorate by dispatching a metadata transaction.
       const { tr } = editor.state;
       editor.view.dispatch(tr.setMeta(mentionHighlightKey, true));
     }
-  }, [editor, mentionNames, channelNames]);
+  }, [editor, mentionNames, agentMentionNames, channelNames]);
 
   // Custom-emoji set changes: re-resolve the `src` attr on any existing
   // node in the doc (e.g. an emoji's image was just published).
@@ -576,6 +615,81 @@ export function useRichTextEditor({
     [editor, customEmojiWiring.resolveUrl],
   );
 
+  /**
+   * Link mark info for the current selection — its href and the covered
+   * text, expanded to the full link range when the caret merely sits inside
+   * a link. Returns `null` when there is no link. Used to prefill the
+   * link-edit modal when the user clicks the link toolbar button.
+   */
+  const getLinkSelectionInfo =
+    React.useCallback((): LinkSelectionInfo | null => {
+      if (!editor) return null;
+      const { from, to } = editor.state.selection;
+      const onLink = resolveLinkAt(editor.state, from);
+      if (onLink) return onLink;
+      if (from === to) return null;
+      // No existing link, but text is selected — seed the modal with the
+      // selected text as the display value and the selection range.
+      const text = editor.state.doc.textBetween(from, to, "\n", "\n");
+      return { href: "", text, from, to };
+    }, [editor]);
+
+  /**
+   * Apply a link to the given range, replacing the covered text with
+   * `text` and marking it with `href`. When `range` is omitted (an
+   * empty-caret insert with no live selection), the link is inserted at the
+   * current caret — never at the placeholder position `0`, which sits
+   * outside the document content. When `from === to`, the linked text is
+   * inserted at that point. Used by both the toolbar button and the
+   * click-to-edit modal.
+   */
+  const applyLink = React.useCallback(
+    ({
+      href,
+      text,
+      from,
+      to,
+    }: {
+      href: string;
+      text: string;
+      from?: number;
+      to?: number;
+    }) => {
+      if (!editor) return;
+      // Default to the live caret when no range is supplied, so an
+      // empty-caret insert lands at the cursor rather than doc position 0.
+      const selection = editor.state.selection;
+      const start = from ?? selection.from;
+      const end = to ?? start;
+      const label = text.trim().length > 0 ? text : href;
+      const linkMark = editor.schema.marks.link.create({ href });
+      const node = editor.schema.text(label, [linkMark]);
+      const tr = editor.state.tr.replaceRangeWith(start, end, node);
+      const cursorPM = tr.mapping.map(end);
+      tr.setSelection(TextSelection.create(tr.doc, cursorPM));
+      editor.view.dispatch(tr);
+      editor.view.focus();
+    },
+    [editor],
+  );
+
+  /**
+   * Remove the link mark across the given range, leaving the text in place.
+   */
+  const removeLink = React.useCallback(
+    ({ from, to }: { from: number; to: number }) => {
+      if (!editor) return;
+      editor
+        .chain()
+        .focus()
+        .setTextSelection({ from, to })
+        .unsetLink()
+        .setTextSelection(to)
+        .run();
+    },
+    [editor],
+  );
+
   return {
     editor,
     getMarkdown,
@@ -587,8 +701,13 @@ export function useRichTextEditor({
     focusPreserve,
     getPlainTextAndCursor,
     replacePlainTextRange,
+    getLinkSelectionInfo,
+    applyLink,
+    removeLink,
   };
 }
+
+export type UseRichTextEditorResult = ReturnType<typeof useRichTextEditor>;
 
 function getMarkdownFromEditor(editor: Editor): string {
   // biome-ignore lint/suspicious/noExplicitAny: tiptap-markdown storage is untyped

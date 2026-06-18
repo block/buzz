@@ -1,10 +1,10 @@
 import * as React from "react";
 
 import {
-  useAvailableAcpProviders,
+  useAvailableAcpRuntimes,
   useCreateChannelManagedAgentMutation,
 } from "@/features/agents/hooks";
-import { resolvePersonaProvider } from "@/features/agents/lib/resolvePersonaProvider";
+import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import type { AgentPersona } from "@/shared/api/types";
 
 type QuickBotDropState = {
@@ -17,7 +17,7 @@ type QuickBotDropState = {
  */
 export function useQuickBotDrop(channelId: string | null) {
   const createMutation = useCreateChannelManagedAgentMutation(channelId);
-  const providersQuery = useAvailableAcpProviders();
+  const providersQuery = useAvailableAcpRuntimes();
   const [state, setState] = React.useState<QuickBotDropState>({
     pending: false,
     error: null,
@@ -33,13 +33,13 @@ export function useQuickBotDrop(channelId: string | null) {
       setState({ pending: true, error: null });
 
       try {
-        const { provider } = resolvePersonaProvider(
-          persona.provider,
+        const { runtime } = resolvePersonaRuntime(
+          persona.runtime,
           providers,
           defaultProvider,
         );
 
-        if (!provider) {
+        if (!runtime) {
           setState({
             pending: false,
             error: "No agent runtime available.",
@@ -48,7 +48,7 @@ export function useQuickBotDrop(channelId: string | null) {
         }
 
         await createMutation.mutateAsync({
-          provider,
+          runtime,
           name: instanceName,
           systemPrompt: persona.systemPrompt,
           avatarUrl: persona.avatarUrl ?? undefined,

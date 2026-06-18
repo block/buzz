@@ -6,6 +6,7 @@ import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { SetStatusDialog } from "@/features/user-status/ui/SetStatusDialog";
+import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { PresenceStatus } from "@/shared/api/types";
 import { isMacPlatform } from "@/shared/lib/platform";
 
@@ -18,6 +19,7 @@ interface ProfilePopoverProps {
   onOpenChange: (open: boolean) => void;
   displayName: string;
   avatarUrl: string | null;
+  avatarDataUrl?: string | null;
   currentStatus: PresenceStatus;
   isStatusPending?: boolean;
   userStatusText?: string;
@@ -42,7 +44,7 @@ interface ProfilePopoverProps {
 // ---------------------------------------------------------------------------
 
 const MENU_ITEM_CLASS =
-  "flex w-full items-center gap-2 px-4 py-2 text-left text-sm text-popover-foreground hover:bg-accent focus-visible:bg-accent cursor-pointer transition-colors outline-hidden focus:outline-none focus-visible:outline-none";
+  "flex min-h-9 w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-popover-foreground outline-hidden transition-colors hover:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none";
 
 const ALL_STATUSES: PresenceStatus[] = ["online", "away", "offline"];
 
@@ -55,6 +57,7 @@ export function ProfilePopover({
   onOpenChange,
   displayName,
   avatarUrl,
+  avatarDataUrl,
   currentStatus,
   isStatusPending,
   userStatusText,
@@ -71,7 +74,7 @@ export function ProfilePopover({
   const [presenceMenuOpen, setPresenceMenuOpen] = React.useState(false);
   const presenceHoverTimer = React.useRef<number | null>(null);
   const hasUserStatus = Boolean(userStatusText || userStatusEmoji);
-  const preferencesShortcutLabel = isMacPlatform() ? "⌘," : "Ctrl+,";
+  const settingsShortcutLabel = isMacPlatform() ? "⌘," : "Ctrl+,";
 
   function clearPresenceHoverTimer() {
     if (presenceHoverTimer.current !== null) {
@@ -124,7 +127,7 @@ export function ProfilePopover({
           side="top"
           align="start"
           sideOffset={-32}
-          className="w-[280px] rounded-xl border border-border bg-popover p-0 shadow-lg"
+          className="w-[280px] p-1"
           data-testid="profile-popover"
           onInteractOutside={(event) => {
             const target = event.target as Node | null;
@@ -138,11 +141,12 @@ export function ProfilePopover({
         >
           <div aria-label="Profile menu" role="menu">
             {/* ── Identity block ─────────────────────────────────── */}
-            <div className="flex items-center gap-2 px-4 pt-3 pb-2">
+            <div className="flex items-center gap-2 px-3 pt-2 pb-2">
               <div className="relative shrink-0">
                 <ProfileAvatar
+                  avatarDataUrl={avatarDataUrl}
                   avatarUrl={avatarUrl}
-                  className="h-8 w-8 rounded-xl text-xs"
+                  className="h-8 w-8 text-xs"
                   iconClassName="h-4 w-4"
                   label={displayName}
                 />
@@ -162,9 +166,9 @@ export function ProfilePopover({
             </div>
 
             {/* ── Status input (Slack-style) ──────────────────────── */}
-            <div className="px-3 pt-0 pb-1">
+            <div className="px-2 pt-0 pb-1">
               <button
-                className="flex w-full items-center gap-2 rounded-lg border border-input bg-popover px-3 py-2 text-left text-sm outline-hidden transition-colors hover:bg-accent focus:outline-none focus-visible:bg-accent focus-visible:outline-none"
+                className="flex w-full items-center gap-2 rounded-lg border border-border/60 bg-transparent px-3 py-2 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none"
                 data-testid="profile-popover-set-status"
                 onClick={() => {
                   closePopover();
@@ -179,7 +183,10 @@ export function ProfilePopover({
                 {hasUserStatus ? (
                   <span className="flex min-w-0 flex-1 items-center gap-1 truncate text-popover-foreground">
                     {userStatusEmoji ? (
-                      <span className="shrink-0">{userStatusEmoji}</span>
+                      <StatusEmoji
+                        className="h-3.5 w-3.5 shrink-0"
+                        value={userStatusEmoji}
+                      />
                     ) : null}
                     <span className="truncate">{userStatusText}</span>
                   </span>
@@ -218,7 +225,7 @@ export function ProfilePopover({
               </PopoverTrigger>
               <PopoverContent
                 align="start"
-                className="w-44 rounded-xl border border-border bg-popover p-1 shadow-lg"
+                className="w-60 p-1"
                 onMouseEnter={() => schedulePresenceMenu(true)}
                 onMouseLeave={() => schedulePresenceMenu(false)}
                 side="right"
@@ -245,36 +252,22 @@ export function ProfilePopover({
 
             <hr className="my-1 h-px border-0 bg-border" />
 
-            {/* ── Profile / preferences ──────────────────────────── */}
-            <button
-              className={MENU_ITEM_CLASS}
-              data-testid="profile-popover-profile"
-              onClick={() => {
-                closePopover();
-                window.requestAnimationFrame(() => {
-                  onOpenSettings("profile");
-                });
-              }}
-              role="menuitem"
-              type="button"
-            >
-              <span className="flex-1">Profile</span>
-            </button>
+            {/* ── Settings ───────────────────────────────────────── */}
             <button
               className={MENU_ITEM_CLASS}
               data-testid="profile-popover-settings"
               onClick={() => {
                 closePopover();
                 window.requestAnimationFrame(() => {
-                  onOpenSettings("appearance");
+                  onOpenSettings();
                 });
               }}
               role="menuitem"
               type="button"
             >
-              <span className="flex-1">Preferences</span>
+              <span className="flex-1">Settings</span>
               <kbd className="text-xs text-muted-foreground">
-                {preferencesShortcutLabel}
+                {settingsShortcutLabel}
               </kbd>
             </button>
 
@@ -287,8 +280,6 @@ export function ProfilePopover({
                 </div>
               </>
             ) : null}
-
-            <div className="h-1" />
           </div>
         </PopoverContent>
       </Popover>

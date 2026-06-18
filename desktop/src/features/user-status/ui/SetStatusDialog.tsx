@@ -1,5 +1,4 @@
 import * as React from "react";
-import * as PopoverPrimitive from "@radix-ui/react-popover";
 
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
@@ -12,7 +11,7 @@ import {
 } from "@/shared/ui/dialog";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
-import { Popover, PopoverTrigger } from "@/shared/ui/popover";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 
 const PRESETS = [
   { text: "In a meeting", emoji: "\uD83D\uDDE3\uFE0F" },
@@ -120,7 +119,7 @@ export function SetStatusDialog({
                 {emoji ? (
                   <button
                     aria-label="Clear status emoji"
-                    className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-background bg-muted text-[10px] leading-none text-muted-foreground hover:bg-accent hover:text-foreground"
+                    className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full border border-background bg-muted text-2xs leading-none text-muted-foreground hover:bg-accent hover:text-foreground"
                     onClick={(event) => {
                       event.stopPropagation();
                       setEmoji("");
@@ -131,13 +130,13 @@ export function SetStatusDialog({
                   </button>
                 ) : null}
               </div>
-              <PopoverPrimitive.Content
+              <PopoverContent
                 align="start"
                 sideOffset={4}
-                className="z-50 w-auto overflow-hidden rounded-2xl shadow-md outline-hidden data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95"
+                className="w-auto overflow-hidden rounded-2xl p-0"
               >
                 <EmojiPicker autoFocus onSelect={handleEmojiSelect} />
-              </PopoverPrimitive.Content>
+              </PopoverContent>
             </Popover>
             <Input
               autoFocus

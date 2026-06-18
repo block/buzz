@@ -1,12 +1,12 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { toast } from "sonner";
 
 export type UpdateStatus =
   | { state: "idle" }
   | { state: "checking" }
   | { state: "up-to-date" }
+  | { state: "unavailable" }
   | { state: "available"; version: string }
   | { state: "downloading" }
   | { state: "installing" }
@@ -87,10 +87,6 @@ export function useUpdater() {
 
       updateRef.current = null;
       setStatus({ state: "ready" });
-      toast("Update ready", {
-        description: "Restart when you're ready to apply the update.",
-        duration: 8000,
-      });
     } catch (err) {
       setStatus({ state: "error", message: toErrorMessage(err) });
     } finally {
@@ -122,7 +118,9 @@ export function useUpdater() {
           setStatus({ state: "checking" });
         }
 
-        const update = await check();
+        const update = await check({
+          headers: { "Cache-Control": "no-cache" },
+        });
         const shouldShowQuietResult =
           !background || manualResultRequestedRef.current;
 
@@ -140,8 +138,12 @@ export function useUpdater() {
           !background || manualResultRequestedRef.current;
 
         if (isUpdaterUnavailable(message)) {
+          // Surface which branch fired on Windows builds where the updater
+          // plugin is missing — distinguishes plugin-unavailable from a genuine
+          // up-to-date result in Will's app log.
+          console.warn(`updater unavailable: ${message}`);
           if (shouldShowQuietResult) {
-            setStatus({ state: "idle" });
+            setStatus({ state: "unavailable" });
           }
           return;
         }

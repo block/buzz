@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/relay.dart';
+import '../custom_emoji/custom_emoji.dart';
 
 // ---------------------------------------------------------------------------
 // System event types (kind 40099)
@@ -110,6 +111,7 @@ class TimelineReaction {
   final int count;
   final bool reactedByCurrentUser;
   final List<String> userPubkeys;
+  final String? emojiUrl;
 
   /// The event ID of the current user's reaction, for deletion.
   final String? currentUserReactionId;
@@ -119,6 +121,7 @@ class TimelineReaction {
     required this.count,
     required this.reactedByCurrentUser,
     required this.userPubkeys,
+    this.emojiUrl,
     this.currentUserReactionId,
   });
 }
@@ -208,10 +211,14 @@ List<TimelineMessage> formatTimeline(
   List<NostrEvent> events, {
   String? currentPubkey,
 }) {
-  // 1. Collect deletion targets.
+  // 1. Collect deletion targets. Both kind:5 (NIP-09) and kind:9005
+  // (Buzz-native) are deletion markers; mirror desktop's behavior.
   final deletedIds = <String>{};
   for (final event in events) {
-    if (event.kind != EventKind.deletion) continue;
+    if (event.kind != EventKind.deletion &&
+        event.kind != EventKind.nip29DeleteEvent) {
+      continue;
+    }
     for (final tag in event.tags) {
       if (tag.length >= 2 && tag[0] == 'e') {
         deletedIds.add(tag[1]);
@@ -233,12 +240,14 @@ List<TimelineMessage> formatTimeline(
       edits[targetId] = _Edit(
         content: event.content,
         createdAt: event.createdAt,
+        tags: event.tags,
       );
     }
   }
 
   // 3. Aggregate reactions: targetId → { emoji → { pubkey → eventId } }.
   final reactionMap = <String, Map<String, Map<String, String>>>{};
+  final reactionEmojiUrls = <String, Map<String, String>>{};
   for (final event in events) {
     if (event.kind != EventKind.reaction) continue;
     if (deletedIds.contains(event.id)) continue;
@@ -253,6 +262,17 @@ List<TimelineMessage> formatTimeline(
             .putIfAbsent(targetId, () => {})
             .putIfAbsent(emoji, () => {})[event.pubkey.toLowerCase()] =
         event.id;
+
+    final shortcode = normalizeShortcode(emoji);
+    if (shortcode != null) {
+      for (final tag in event.tags) {
+        if (tag.length < 3 || tag[0] != 'emoji') continue;
+        if (normalizeShortcode(tag[1]) == shortcode) {
+          reactionEmojiUrls.putIfAbsent(targetId, () => {})[emoji] = tag[2];
+          break;
+        }
+      }
+    }
   }
 
   final normalizedCurrentPubkey = currentPubkey?.toLowerCase();
@@ -276,6 +296,7 @@ List<TimelineMessage> formatTimeline(
                     normalizedCurrentPubkey != null &&
                     entry.value.containsKey(normalizedCurrentPubkey),
                 userPubkeys: entry.value.keys.toList(),
+                emojiUrl: reactionEmojiUrls[event.id]?[entry.key],
                 currentUserReactionId: normalizedCurrentPubkey != null
                     ? entry.value[normalizedCurrentPubkey]
                     : null,
@@ -302,8 +323,9 @@ List<TimelineMessage> formatTimeline(
         event.kind == EventKind.streamMessageV2 ||
         event.kind == EventKind.streamMessageDiff) {
       final edit = edits[event.id];
+      final effectiveTags = edit?.tags ?? event.tags;
       final mentions = <String>[
-        for (final tag in event.tags)
+        for (final tag in effectiveTags)
           if (tag.length >= 2 && tag[0] == 'p') tag[1],
       ];
 
@@ -318,6 +340,7 @@ List<TimelineMessage> formatTimeline(
                   normalizedCurrentPubkey != null &&
                   entry.value.containsKey(normalizedCurrentPubkey),
               userPubkeys: entry.value.keys.toList(),
+              emojiUrl: reactionEmojiUrls[event.id]?[entry.key],
               currentUserReactionId: normalizedCurrentPubkey != null
                   ? entry.value[normalizedCurrentPubkey]
                   : null,
@@ -332,7 +355,7 @@ List<TimelineMessage> formatTimeline(
           pubkey: event.pubkey,
           createdAt: event.createdAt,
           content: edit?.content ?? event.content,
-          tags: event.tags,
+          tags: effectiveTags,
           edited: edit != null,
           mentionPubkeys: mentions,
           reactions: reactions,
@@ -406,7 +429,13 @@ ThreadSummary? _buildSummary(
 class _Edit {
   final String content;
   final int createdAt;
-  const _Edit({required this.content, required this.createdAt});
+  final List<List<String>> tags;
+
+  const _Edit({
+    required this.content,
+    required this.createdAt,
+    required this.tags,
+  });
 }
 
 /// Get the last `e` tag value (reaction/edit target convention).

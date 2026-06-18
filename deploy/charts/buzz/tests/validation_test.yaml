@@ -1,0 +1,105 @@
+suite: validation
+templates:
+  - templates/deployment.yaml
+tests:
+  - it: fails when relayUrl is missing
+    set:
+      relayUrl: ""
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+    asserts:
+      - failedTemplate:
+          errorMessage: "relayUrl is required: set --set relayUrl=wss://your.domain"
+
+  - it: fails when ownerPubkey is missing and requireRelayMembership is true
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: ""
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+    asserts:
+      - failedTemplate:
+          errorPattern: "ownerPubkey is required when relay.requireRelayMembership=true"
+
+  - it: fails when ownerPubkey is not 64 lowercase hex (schema-level)
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "NOTAHEX"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+    asserts:
+      - failedTemplate:
+          errorPattern: "ownerPubkey: Does not match pattern"
+
+  - it: fails when replicaCount>1 without Redis
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+      replicaCount: 3
+    asserts:
+      - failedTemplate:
+          errorPattern: "replicaCount=3 requires Redis"
+
+  - it: fails when replicaCount>1 with RWO git PVC
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      externalRedis.url: redis://h:6379
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+      replicaCount: 3
+      persistence.git.accessMode: ReadWriteOnce
+    asserts:
+      - failedTemplate:
+          errorPattern: "requires persistence.git.accessMode=ReadWriteMany"
+
+  - it: fails when ingress and httproute both enabled
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+      ingress.enabled: true
+      httproute.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "cannot both be true"
+
+  - it: fails when Postgres source is missing
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+    asserts:
+      - failedTemplate:
+          errorPattern: "Postgres source missing"
+
+  - it: fails when Typesense source is missing
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+    asserts:
+      - failedTemplate:
+          errorPattern: "Typesense source missing"
+
+  - it: fails when S3/object-storage source is missing
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+    asserts:
+      - failedTemplate:
+          errorPattern: "S3/object-storage source missing"

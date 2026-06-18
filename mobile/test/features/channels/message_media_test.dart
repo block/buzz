@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sprout_mobile/features/channels/message_media.dart';
+import 'package:buzz/features/channels/message_media.dart';
 
 void main() {
   group('classifyMediaUrl', () {

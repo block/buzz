@@ -1,12 +1,10 @@
 /**
- * `sprout://message` link encoding for "Copy link" / deep-link-to-message.
+ * `buzz://message` link encoding for "Copy link" / deep-link-to-message.
  *
- * Format: `sprout://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`
- *
- * Mirrors the existing `sprout://connect?relay=…` scheme already registered
- * in `tauri.conf.json` and handled in `desktop/src-tauri/src/lib.rs`.
+ * Format: `buzz://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`
  */
 
+const MESSAGE_LINK_SCHEME = "buzz:";
 const MESSAGE_LINK_HOST = "message";
 
 export type MessageLinkInput = {
@@ -35,7 +33,7 @@ export type MessageLinkParseResult =
   | { ok: false; reason: string };
 
 /**
- * Build a `sprout://message` URL for a given channel + message.
+ * Build a `buzz://message` URL for a given channel + message.
  *
  * Empty `threadRootId` is treated as "no thread" so callers can pass through
  * the result of `getThreadReference(tags).rootId` without extra null checks.
@@ -54,12 +52,12 @@ export function buildMessageLink(input: MessageLinkInput): string {
   if (input.threadRootId) {
     params.set("thread", input.threadRootId);
   }
-  return `sprout://${MESSAGE_LINK_HOST}?${params.toString()}`;
+  return `${MESSAGE_LINK_SCHEME}//${MESSAGE_LINK_HOST}?${params.toString()}`;
 }
 
 /**
- * Parse a `sprout://message?…` URL. Returns a discriminated result so
- * callers can render a fallback (e.g. a plain link) without throwing.
+ * Parse a `buzz://message?…` URL. Returns a discriminated result so callers can
+ * render a fallback (e.g. a plain link) without throwing.
  */
 export function parseMessageLink(url: string): MessageLinkParseResult {
   let parsed: URL;
@@ -69,10 +67,10 @@ export function parseMessageLink(url: string): MessageLinkParseResult {
     return { ok: false, reason: "invalid-url" };
   }
 
-  if (parsed.protocol !== "sprout:") {
+  if (parsed.protocol !== MESSAGE_LINK_SCHEME) {
     return { ok: false, reason: "wrong-scheme" };
   }
-  // `new URL("sprout://message?…")` puts "message" in `hostname`.
+  // `new URL("buzz://message?…")` puts "message" in `hostname`.
   if (parsed.hostname !== MESSAGE_LINK_HOST) {
     return { ok: false, reason: "wrong-host" };
   }
@@ -97,10 +95,10 @@ export function parseMessageLink(url: string): MessageLinkParseResult {
 }
 
 /**
- * Convenience: returns true if the given href is a `sprout://message` link.
+ * Convenience: returns true if the given href is a supported message link.
  * Cheap pre-check used by the markdown renderer before parsing.
  */
 export function isMessageLink(href: string | undefined | null): boolean {
   if (!href) return false;
-  return href.startsWith("sprout://message?") || href === "sprout://message";
+  return href.startsWith("buzz://message?") || href === "buzz://message";
 }

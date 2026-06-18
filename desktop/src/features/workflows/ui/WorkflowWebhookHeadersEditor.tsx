@@ -48,7 +48,7 @@ export function WorkflowWebhookHeadersEditor({
           type="button"
           variant="outline"
         >
-          <Plus className="h-3.5 w-3.5" />
+          <Plus className="h-4 w-4" />
           Add header
         </Button>
       </div>
@@ -109,7 +109,7 @@ export function WorkflowWebhookHeadersEditor({
                 type="button"
                 variant="ghost"
               >
-                <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
+                <Trash2 className="h-4 w-4 text-muted-foreground" />
               </Button>
             </div>
           ))}

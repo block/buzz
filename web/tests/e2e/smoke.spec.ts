@@ -1,8 +1,8 @@
 import { expect, test } from "@playwright/test";
 
-test("home page loads with Sprout heading", async ({ page }) => {
+test("home page loads with Buzz heading", async ({ page }) => {
   await page.goto("/");
-  await expect(page.locator("header")).toContainText("Sprout");
+  await expect(page.locator("header")).toContainText("Buzz");
 });
 
 test("home page shows repositories section", async ({ page }) => {

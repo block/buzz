@@ -16,11 +16,8 @@ type UseHomeInboxReadStateOptions = {
     channelId: string,
     readAt: string | null | undefined,
   ) => void;
-  /** Roll the NIP-RS read marker back to the given ISO timestamp. */
-  markChannelUnread: (
-    channelId: string,
-    lastMessageAt: string | null | undefined,
-  ) => void;
+  /** Mark a channel unread locally for the current session. */
+  markChannelUnread: (channelId: string) => void;
   /** Local fallback: mark a non-channel item done. */
   markDoneLocal: (id: string) => void;
   /** Local fallback: undo a non-channel item done. */
@@ -35,9 +32,8 @@ type UseHomeInboxReadStateOptions = {
  * "Mark as read/unread" actions on channel-backed items are routed through
  * `markChannelRead`/`markChannelUnread` so the sidebar, home badge, and any
  * other surfaces consuming the same ReadStateManager stay in lockstep.
- * Caveat: marking an older item unread rolls the *entire* channel marker
- * back to that item, so newer events in that channel become unread too —
- * that matches NIP-RS's channel-level granularity.
+ * Caveat: NIP-RS channel read markers are monotonic, so marking an older item
+ * unread is an in-session local affordance rather than synced state.
  */
 export function useHomeInboxReadState({
   items,
@@ -94,10 +90,7 @@ export function useHomeInboxReadState({
       const item = itemById.get(itemId);
       const channelId = item?.item.channelId ?? null;
       if (item && channelId) {
-        markChannelUnread(
-          channelId,
-          new Date(item.latestActivityAt * 1_000).toISOString(),
-        );
+        markChannelUnread(channelId);
         return;
       }
       undoDoneLocal(itemId);

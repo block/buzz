@@ -2,7 +2,7 @@
  * Workspace custom emoji (NIP-30, per-user sets).
  *
  * Each member publishes their OWN kind:30030 parameterized-replaceable event,
- * signed as themselves, keyed by `(pubkey, 30030, "sprout:custom-emoji")`. The
+ * signed as themselves, keyed by `(pubkey, 30030, "buzz:custom-emoji")`. The
  * "workspace palette" shown in the picker/renderer is the client-side UNION of
  * every member's set, collapsed to one entry per shortcode (deterministic
  * winner) — a view computed on read, not stored state. Downstream identity is
@@ -25,7 +25,7 @@ import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 export const KIND_EMOJI_SET = 30030;
 
 /** d-tag for a member's own custom emoji set. */
-export const CUSTOM_EMOJI_SET_D_TAG = "sprout:custom-emoji";
+export const CUSTOM_EMOJI_SET_D_TAG = "buzz:custom-emoji";
 
 /**
  * Resolve the image URL for a reaction whose content is a custom-emoji
@@ -52,6 +52,24 @@ export function normalizeShortcode(raw: string): string | null {
   const stripped = raw.trim().replace(/^:+/, "").replace(/:+$/, "");
   const lower = stripped.toLowerCase();
   return SHORTCODE_RE.test(lower) ? lower : null;
+}
+
+/**
+ * Suggest a valid custom-emoji shortcode from an uploaded filename.
+ * Mirrors Slack's file-first flow: strip the extension, lowercase, and collapse
+ * runs of invalid characters into a single underscore.
+ */
+export function suggestShortcodeFromFilename(filename: string): string | null {
+  const basename = filename
+    .trim()
+    .replace(/^.*[/\\]/, "")
+    .replace(/\.[^.]*$/, "");
+  const suggested = basename
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^[_-]+|[_-]+$/g, "");
+  return normalizeShortcode(suggested);
 }
 
 /**
@@ -87,25 +105,30 @@ export function customEmojiFromEvent(event: RelayEvent | null): CustomEmoji[] {
 /**
  * Union every member's kind:30030 set into the workspace palette, collapsed to
  * one entry per shortcode. When members disagree on a shortcode's URL, the
- * winner is the lexicographically-smallest URL: deterministic and stable across
- * reloads, so the same set of events always yields the same palette (no picker
- * reshuffle, no ambiguous shortcode→url resolution downstream). Output is
- * sorted by shortcode.
+ * most recently published set wins (`created_at` is signed event data, so this
+ * is as deterministic and fetch-order-independent as any pure function of the
+ * events); equal timestamps tie-break to the lexicographically-smallest URL so
+ * the same set of events always yields the same palette. Output is sorted by
+ * shortcode.
  */
 export function unionCustomEmoji(
   events: ReadonlyArray<RelayEvent>,
 ): CustomEmoji[] {
-  const urlByShortcode = new Map<string, string>();
+  const byShortcode = new Map<string, { url: string; createdAt: number }>();
   for (const event of events) {
     for (const { shortcode, url } of customEmojiFromTags(event.tags)) {
-      const existing = urlByShortcode.get(shortcode);
-      if (existing === undefined || url < existing) {
-        urlByShortcode.set(shortcode, url);
+      const winner = byShortcode.get(shortcode);
+      if (
+        winner === undefined ||
+        event.created_at > winner.createdAt ||
+        (event.created_at === winner.createdAt && url < winner.url)
+      ) {
+        byShortcode.set(shortcode, { url, createdAt: event.created_at });
       }
     }
   }
-  return [...urlByShortcode]
-    .map(([shortcode, url]) => ({ shortcode, url }))
+  return [...byShortcode]
+    .map(([shortcode, { url }]) => ({ shortcode, url }))
     .sort((a, b) => a.shortcode.localeCompare(b.shortcode));
 }
 

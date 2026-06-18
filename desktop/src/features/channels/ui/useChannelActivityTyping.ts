@@ -100,14 +100,13 @@ export function mergeAgentNamesIntoProfiles(
   const merged = { ...profiles };
   for (const agent of [...relayAgents, ...managedAgents]) {
     const key = normalizePubkey(agent.pubkey);
-    if (!merged[key]?.displayName) {
-      merged[key] = {
-        ...merged[key],
-        displayName: agent.name,
-        avatarUrl: merged[key]?.avatarUrl ?? null,
-        nip05Handle: merged[key]?.nip05Handle ?? null,
-      };
-    }
+    merged[key] = {
+      ...merged[key],
+      displayName: merged[key]?.displayName || agent.name,
+      avatarUrl: merged[key]?.avatarUrl ?? null,
+      nip05Handle: merged[key]?.nip05Handle ?? null,
+      isAgent: true,
+    };
   }
   return merged;
 }

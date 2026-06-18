@@ -49,24 +49,67 @@ load_env() {
     set +o allexport
   fi
 
-  export DATABASE_URL="${DATABASE_URL:-postgres://sprout:sprout_dev@localhost:5432/sprout}"
+  # Smooth the local rename path for developers with a pre-Buzz .env copied
+  # from .env.example. Only rewrite the old default values; custom values stay
+  # untouched.
+  if [[ "${DATABASE_URL:-}" == "postgres://sprout:sprout_dev@localhost:5432/sprout" ]]; then
+    warn "Migrating legacy default DATABASE_URL from sprout to buzz for this setup run"
+    DATABASE_URL="postgres://buzz:buzz_dev@localhost:5432/buzz"
+  fi
+  if [[ "${PGUSER:-}" == "sprout" ]]; then PGUSER="buzz"; fi
+  if [[ "${PGPASSWORD:-}" == "sprout_dev" ]]; then PGPASSWORD="buzz_dev"; fi
+  if [[ "${PGDATABASE:-}" == "sprout" ]]; then PGDATABASE="buzz"; fi
+  if [[ "${TYPESENSE_API_KEY:-}" == "sprout_dev_key" ]]; then TYPESENSE_API_KEY="buzz_dev_key"; fi
+
+  export DATABASE_URL="${DATABASE_URL:-postgres://buzz:buzz_dev@localhost:5432/buzz}"
   export PGHOST="${PGHOST:-localhost}"
   export PGPORT="${PGPORT:-5432}"
-  export PGUSER="${PGUSER:-sprout}"
-  export PGPASSWORD="${PGPASSWORD:-sprout_dev}"
-  export PGDATABASE="${PGDATABASE:-sprout}"
+  export PGUSER="${PGUSER:-buzz}"
+  export PGPASSWORD="${PGPASSWORD:-buzz_dev}"
+  export PGDATABASE="${PGDATABASE:-buzz}"
   export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
-  export TYPESENSE_API_KEY="${TYPESENSE_API_KEY:-sprout_dev_key}"
+  export TYPESENSE_API_KEY="${TYPESENSE_API_KEY:-buzz_dev_key}"
   export TYPESENSE_URL="${TYPESENSE_URL:-http://localhost:8108}"
 }
 
+cleanup_legacy_sprout_containers() {
+  local legacy_containers
+  legacy_containers=$(docker ps -a --format '{{.Names}}' | grep -E '^sprout-(postgres|redis|typesense|adminer|keycloak|minio|minio-init|prometheus)$' || true)
+  if [[ -z "${legacy_containers}" ]]; then
+    return
+  fi
+
+  warn "Stopping/removing legacy sprout-* dev containers so buzz-* containers can bind the standard ports"
+  echo "${legacy_containers}" | xargs docker stop >/dev/null 2>&1 || true
+  echo "${legacy_containers}" | xargs docker rm >/dev/null 2>&1 || true
+  success "Legacy sprout-* containers removed (volumes preserved)"
+}
+
+fail_if_local_redis_blocks_compose() {
+  if ! command -v lsof >/dev/null 2>&1; then
+    return
+  fi
+  if docker ps --format '{{.Names}}' | grep -qx 'buzz-redis'; then
+    return
+  fi
+  local redis_pids
+  redis_pids=$(lsof -nP -iTCP:6379 -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 && $1 == "redis-ser" {print $2}' | sort -u | tr '
+' ' ' || true)
+  if [[ -n "${redis_pids}" ]]; then
+    error "Local Redis is already listening on port 6379 (pid(s): ${redis_pids}). Stop it before running setup: brew services stop redis"
+    exit 1
+  fi
+}
+
 postgres_accepting_connections() {
-  docker exec sprout-postgres \
+  docker exec buzz-postgres \
     pg_isready -h localhost -p 5432 -U "${PGUSER}" -d "${PGDATABASE}" \
     >/dev/null 2>&1
 }
 
 load_env
+cleanup_legacy_sprout_containers
+fail_if_local_redis_blocks_compose
 
 # ---- Start services ---------------------------------------------------------
 
@@ -76,59 +119,20 @@ log "Starting services and waiting for health..."
 # ---- Run migrations ---------------------------------------------------------
 
 log "Running database migrations..."
-
-PGSCHEMA="${REPO_ROOT}/bin/pgschema"
-SCHEMA_FILE="${REPO_ROOT}/schema/schema.sql"
-
-if [[ ! -f "${SCHEMA_FILE}" ]]; then
-  warn "No schema.sql found at ${SCHEMA_FILE}. Skipping."
-else
-  if [[ -x "${PGSCHEMA}" ]]; then
-    # pgschema uses CREATE INDEX CONCURRENTLY for new indexes, which Postgres
-    # does not support on partitioned tables. Pre-create any such indexes here
-    # so pgschema sees them as already existing and skips the CONCURRENTLY path.
-    log "Pre-creating indexes on partitioned tables (if needed)..."
-    docker exec sprout-postgres psql -U "${PGUSER}" -d "${PGDATABASE}" -q -c \
-      "CREATE INDEX IF NOT EXISTS idx_events_parameterized ON events (kind, pubkey, d_tag, deleted_at) WHERE d_tag IS NOT NULL;" \
-      2>/dev/null || true
-
-    log "Using pgschema for migrations..."
-    attempts=0
-    max_attempts=10
-    pgschema_output="$(mktemp)"
-    trap 'rm -f "${pgschema_output}"' EXIT
-    until "${PGSCHEMA}" apply --file "${SCHEMA_FILE}" --auto-approve >"${pgschema_output}" 2>&1; do
-      attempts=$((attempts + 1))
-      if postgres_accepting_connections; then
-        error "pgschema failed even though Postgres is accepting connections"
-        cat "${pgschema_output}" >&2
-        exit 1
-      fi
-      if [[ ${attempts} -ge ${max_attempts} ]]; then
-        error "Failed to run migrations after ${max_attempts} attempts"
-        cat "${pgschema_output}" >&2
-        exit 1
-      fi
-      log "Postgres not ready for connections yet, retrying in 2s... (${attempts}/${max_attempts})"
-      sleep 2
-    done
-    success "Migrations applied via pgschema"
-
-    # Run data backfills (idempotent — safe to re-run).
-    BACKFILL_DIR="${REPO_ROOT}/scripts"
-    if [[ -f "${BACKFILL_DIR}/backfill-d-tag.sql" ]]; then
-      log "Running d_tag backfill for NIP-33 events..."
-      if psql "${DATABASE_URL}" -f "${BACKFILL_DIR}/backfill-d-tag.sql" 2>/dev/null; then
-        success "d_tag backfill complete"
-      else
-        warn "d_tag backfill failed (relay startup will retry automatically)"
-      fi
-    fi
-  else
-    error "pgschema not found at ${PGSCHEMA}. Run: ./bin/hermit install pgschema"
+attempts=0
+max_attempts=10
+until postgres_accepting_connections; do
+  attempts=$((attempts + 1))
+  if [[ ${attempts} -ge ${max_attempts} ]]; then
+    error "Postgres did not accept connections after ${max_attempts} attempts"
     exit 1
   fi
-fi
+  log "Postgres not ready for connections yet, retrying in 2s... (${attempts}/${max_attempts})"
+  sleep 2
+done
+
+"${REPO_ROOT}/bin/cargo" run -p buzz-admin -- migrate
+success "Database migrations complete"
 
 # ---- Install desktop dependencies -------------------------------------------
 
@@ -175,7 +179,7 @@ success "Git hooks installed"
 
 echo ""
 echo -e "${GREEN}=======================================================${NC}"
-echo -e "${GREEN}  Sprout dev environment is ready!${NC}"
+echo -e "${GREEN}  Buzz dev environment is ready!${NC}"
 echo -e "${GREEN}=======================================================${NC}"
 echo ""
 echo -e "  ${BLUE}Postgres${NC}    ${DATABASE_URL}"

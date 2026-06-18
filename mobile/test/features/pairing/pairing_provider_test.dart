@@ -2,10 +2,10 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:sprout_mobile/features/pairing/pairing_provider.dart';
-import 'package:sprout_mobile/shared/auth/auth.dart';
+import 'package:buzz/features/pairing/pairing_provider.dart';
+import 'package:buzz/shared/auth/auth.dart';
 
-/// Tests for [PairingNotifier]'s legacy `sprout://` payload parsing and
+/// Tests for [PairingNotifier]'s legacy `buzz://` payload parsing and
 /// SSRF-prevention validation.
 ///
 /// The pairing flow used to validate by calling `GET /api/users/me/profile`
@@ -16,7 +16,7 @@ import 'package:sprout_mobile/shared/auth/auth.dart';
 ///
 /// What we still cover here:
 ///   - Initial state.
-///   - Parsing every documented payload format (raw base64, `sprout://`
+///   - Parsing every documented payload format (raw base64, `buzz://`
 ///     prefix, whitespace).
 ///   - Failure modes that return BEFORE any network call: invalid base64,
 ///     wrong shape (non-object, missing fields, missing nsec), and SSRF
@@ -49,6 +49,18 @@ void main() {
       // Valid payload shape but no nsec — provider should refuse without
       // attempting any network call.
       final code = _encodePairingCode();
+      await container.read(pairingProvider.notifier).pair(code);
+
+      final state = container.read(pairingProvider);
+      expect(state.status, PairingStatus.error);
+      expect(state.errorMessage, contains('missing nsec'));
+      expect(fakeAuth.lastWorkspace, isNull);
+    });
+
+    test('accepts buzz scheme prefix', () async {
+      container = createContainer();
+
+      final code = 'buzz://${_encodePairingCode()}';
       await container.read(pairingProvider.notifier).pair(code);
 
       final state = container.read(pairingProvider);

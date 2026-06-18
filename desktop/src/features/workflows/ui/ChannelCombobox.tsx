@@ -99,7 +99,7 @@ export function ChannelCombobox({
           <span className="truncate">
             {selected ? formatChannelLabel(selected) : "Select a channel..."}
           </span>
-          <ChevronsUpDown className="ml-2 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 text-muted-foreground" />
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -107,10 +107,11 @@ export function ChannelCombobox({
         className="w-(--radix-popover-trigger-width) p-0"
       >
         <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-          <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
           <input
-            autoCapitalize="off"
+            autoCapitalize="none"
             autoComplete="off"
+            autoCorrect="off"
             ref={(el) => el?.focus()}
             className="flex-1 bg-transparent text-sm outline-hidden placeholder:text-muted-foreground"
             onChange={(e) => {
@@ -119,6 +120,7 @@ export function ChannelCombobox({
             }}
             onKeyDown={handleKeyDown}
             placeholder="Search channels..."
+            spellCheck={false}
             value={query}
           />
         </div>
@@ -131,7 +133,7 @@ export function ChannelCombobox({
             filtered.map((channel, index) => (
               <button
                 className={cn(
-                  "flex w-full items-center gap-2 rounded-xs px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
+                  "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent hover:text-accent-foreground",
                   channel.id === value && "bg-accent/50",
                   index === highlightedIndex &&
                     "bg-accent text-accent-foreground",
@@ -142,7 +144,7 @@ export function ChannelCombobox({
               >
                 <Check
                   className={cn(
-                    "h-3.5 w-3.5 shrink-0",
+                    "h-4 w-4 shrink-0",
                     channel.id === value ? "opacity-100" : "opacity-0",
                   )}
                 />

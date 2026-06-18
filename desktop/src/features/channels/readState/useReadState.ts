@@ -1,12 +1,14 @@
 import * as React from "react";
-import { ReadStateManager } from "@/features/channels/readState/readStateManager";
+import {
+  ReadStateManager,
+  type ContextParentResolver,
+} from "@/features/channels/readState/readStateManager";
 import type { RelayClient } from "@/shared/api/relayClientSession";
 
 const noopGetTimestamp = () => null;
 const noopMarkRead = () => {};
-const noopMarkUnread = () => {};
-const noopDrainRollbacks = (): ReadonlySet<string> => new Set<string>();
 const noopDrainAdvances = (): ReadonlySet<string> => new Set<string>();
+const noopSetResolver = () => {};
 
 /**
  * React hook that creates and manages a ReadStateManager instance.
@@ -59,16 +61,16 @@ export function useReadState(
     [],
   );
 
-  const markContextRead = React.useCallback(
-    (contextId: string, unixTimestamp: number): void => {
-      managerRef.current?.markContextRead(contextId, unixTimestamp);
+  const getOwnTimestamp = React.useCallback(
+    (contextId: string): number | null => {
+      return managerRef.current?.getOwnTimestamp(contextId) ?? null;
     },
     [],
   );
 
-  const markContextUnread = React.useCallback(
-    (contextId: string, lastMessageUnix: number): void => {
-      managerRef.current?.markContextUnread(contextId, lastMessageUnix);
+  const markContextRead = React.useCallback(
+    (contextId: string, unixTimestamp: number): void => {
+      managerRef.current?.markContextRead(contextId, unixTimestamp);
     },
     [],
   );
@@ -80,13 +82,16 @@ export function useReadState(
     [],
   );
 
-  const drainSyncedRollbacks = React.useCallback((): ReadonlySet<string> => {
-    return managerRef.current?.drainSyncedRollbacks() ?? new Set<string>();
-  }, []);
-
   const drainSyncedAdvances = React.useCallback((): ReadonlySet<string> => {
     return managerRef.current?.drainSyncedAdvances() ?? new Set<string>();
   }, []);
+
+  const setContextParentResolver = React.useCallback(
+    (resolver: ContextParentResolver | null): void => {
+      managerRef.current?.setContextParentResolver(resolver);
+    },
+    [],
+  );
 
   const isReady = Boolean(
     pubkey && relayClient && initializedPubkey === pubkey,
@@ -97,11 +102,11 @@ export function useReadState(
       getEffectiveTimestamp: noopGetTimestamp,
       isReady: false,
       markContextRead: noopMarkRead,
-      markContextUnread: noopMarkUnread,
       seedContextRead: noopMarkRead,
-      drainSyncedRollbacks: noopDrainRollbacks,
       drainSyncedAdvances: noopDrainAdvances,
+      setContextParentResolver: noopSetResolver,
       readStateVersion: 0,
+      getOwnTimestamp: noopGetTimestamp,
     };
   }
 
@@ -109,10 +114,10 @@ export function useReadState(
     getEffectiveTimestamp,
     isReady,
     markContextRead,
-    markContextUnread,
     seedContextRead,
-    drainSyncedRollbacks,
     drainSyncedAdvances,
+    setContextParentResolver,
     readStateVersion,
+    getOwnTimestamp,
   };
 }

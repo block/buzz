@@ -15,13 +15,17 @@ import {
   type ParsedTeamPreview,
   createTeam as createTeamApi,
   exportTeamToJson,
+  installTeamFromDirectory,
   parseTeamFile,
+  pickTeamDirectory,
+  syncTeamDirectory,
 } from "@/shared/api/tauriTeams";
 import {
   createPersona,
   deletePersona,
   updatePersona,
 } from "@/shared/api/tauriPersonas";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import type {
   AgentPersona,
   AgentTeam,
@@ -207,6 +211,63 @@ export function useTeamActions(
     }
   }
 
+  async function handleInstallFromDirectory() {
+    actions.setActionNoticeMessage(null);
+    actions.setActionErrorMessage(null);
+    try {
+      const path = await pickTeamDirectory();
+      if (!path) return;
+      const team = await installTeamFromDirectory(path, true);
+      actions.setActionNoticeMessage(
+        `Installed team "${team.name}" from directory.`,
+      );
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: teamsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: personasQueryKey }),
+        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+      ]);
+    } catch (err) {
+      actions.setActionErrorMessage(
+        err instanceof Error
+          ? err.message
+          : "Failed to install team from directory.",
+      );
+    }
+  }
+
+  async function handleSyncTeam(team: AgentTeam) {
+    actions.setActionNoticeMessage(null);
+    actions.setActionErrorMessage(null);
+    try {
+      const result = await syncTeamDirectory(team.id);
+      const changes = [
+        result.personas_added.length > 0 &&
+          `${result.personas_added.length} added`,
+        result.personas_updated.length > 0 &&
+          `${result.personas_updated.length} updated`,
+        result.personas_removed.length > 0 &&
+          `${result.personas_removed.length} removed`,
+      ].filter(Boolean);
+      const summary =
+        changes.length > 0 ? changes.join(", ") : "already up to date";
+      actions.setActionNoticeMessage(`Synced "${team.name}": ${summary}.`);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: teamsQueryKey }),
+        queryClient.invalidateQueries({ queryKey: personasQueryKey }),
+        queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
+      ]);
+    } catch (err) {
+      actions.setActionErrorMessage(
+        err instanceof Error ? err.message : "Failed to sync team directory.",
+      );
+    }
+  }
+
+  function handleRevealInFinder(team: AgentTeam) {
+    if (!team.sourceDir) return;
+    void revealItemInDir(team.sourceDir);
+  }
+
   async function handleEditDialogImportUpdateFile(
     teamId: string,
     fileBytes: number[],
@@ -288,7 +349,7 @@ export function useTeamActions(
           displayName: member.imported.display_name,
           systemPrompt: member.imported.system_prompt,
           avatarUrl: member.imported.avatar_url ?? undefined,
-          provider: member.existing.provider ?? undefined,
+          runtime: member.existing.runtime ?? undefined,
           model: member.existing.model ?? undefined,
           namePool: [...member.existing.namePool],
         });
@@ -492,6 +553,9 @@ export function useTeamActions(
     handleTeamDeployed,
     handleExportTeam,
     handleImportFile,
+    handleInstallFromDirectory,
+    handleSyncTeam,
+    handleRevealInFinder,
     handleEditDialogImportUpdateFile,
     handleTeamImportComplete,
     handleTeamImportUpdateApply,

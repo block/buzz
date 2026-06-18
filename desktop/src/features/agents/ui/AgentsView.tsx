@@ -49,6 +49,7 @@ export function AgentsView() {
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}
+              channelIdToName={agents.channelIdToName}
               channelsByPubkey={agents.channelsByPubkey}
               agentsError={
                 agents.managedAgentsQuery.error instanceof Error
@@ -150,6 +151,9 @@ export function AgentsView() {
               onEdit={teamActions.openEditDialog}
               onExport={teamActions.handleExportTeam}
               onImportFile={teamActions.handleImportFile}
+              onInstallFromDirectory={teamActions.handleInstallFromDirectory}
+              onSync={teamActions.handleSyncTeam}
+              onRevealInFinder={teamActions.handleRevealInFinder}
               onAddToChannel={teamActions.setTeamToAddToChannel}
               personas={personas.libraryPersonas}
               teams={teamActions.teams}
@@ -212,8 +216,8 @@ export function AgentsView() {
           personas.createPersonaMutation.isPending ||
           personas.updatePersonaMutation.isPending
         }
-        providers={personas.acpProvidersQuery.data ?? []}
-        providersLoading={personas.acpProvidersQuery.isLoading}
+        runtimes={personas.acpRuntimesQuery.data ?? []}
+        runtimesLoading={personas.acpRuntimesQuery.isLoading}
         onImportUpdateFile={
           personas.personaImportActions.handleEditDialogImportUpdateFile
         }

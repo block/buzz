@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   buildImetaTags,
   buildOutgoingMessage,
+  findSpoileredImetaMediaUrls,
   formatImetaMediaLine,
   imetaMediaFromTags,
   mergeOutgoingTags,
@@ -22,6 +23,31 @@ test("strip: removes trailing image line whose URL is in imetaMedia", () => {
     { url: "https://blossom/abc.png", type: "image/png" },
   ]);
   assert.equal(stripped, "Look at this");
+});
+
+test("strip: removes trailing spoilered image line whose URL is in imetaMedia", () => {
+  const body = "Look at this\n||![image](https://blossom/abc.png)||";
+  const stripped = stripImetaMediaLines(body, [
+    { url: "https://blossom/abc.png", type: "image/png" },
+  ]);
+  assert.equal(stripped, "Look at this");
+});
+
+test("strip: removes trailing block-spoilered image line", () => {
+  const body = "Look at this\n||\n![image](https://blossom/abc.png)\n||";
+  const stripped = stripImetaMediaLines(body, [
+    { url: "https://blossom/abc.png", type: "image/png" },
+  ]);
+  assert.equal(stripped, "Look at this");
+});
+
+test("strip: keeps block spoiler text while stripping imeta media", () => {
+  const body =
+    "Look at this\n||\nsecret\n![image](https://blossom/abc.png)\n||";
+  const stripped = stripImetaMediaLines(body, [
+    { url: "https://blossom/abc.png", type: "image/png" },
+  ]);
+  assert.equal(stripped, body);
 });
 
 test("strip: removes trailing video line", () => {
@@ -81,6 +107,43 @@ test("formatImetaMediaLine: image mime → ![image] line", () => {
   );
 });
 
+test("formatImetaMediaLine: spoilered image mime → wrapped ![image] line", () => {
+  assert.equal(
+    formatImetaMediaLine(
+      { url: "https://b/a.png", type: "image/png" },
+      { spoiler: true },
+    ),
+    "\n||![image](https://b/a.png)||",
+  );
+});
+
+test("buildImetaTags keeps media filenames in imeta", () => {
+  // Filenames are included for every MIME type — the video review dialog
+  // and file cards use them as display titles.
+  assert.deepEqual(
+    buildImetaTags([
+      {
+        url: "https://b/a.png",
+        type: "image/png",
+        sha256: "abc",
+        size: 10,
+        uploaded: 1,
+        filename: "Party Parrot.png",
+      },
+    ]),
+    [
+      [
+        "imeta",
+        "url https://b/a.png",
+        "m image/png",
+        "x abc",
+        "size 10",
+        "filename Party Parrot.png",
+      ],
+    ],
+  );
+});
+
 test("formatImetaMediaLine: video mime → ![video] line (regardless of URL suffix)", () => {
   assert.equal(
     formatImetaMediaLine({ url: "https://cdn/blob/xyz", type: "video/mp4" }),
@@ -95,6 +158,20 @@ test("formatImetaMediaLine: generic mime → [filename](url) link", () => {
       type: "application/pdf",
       filename: "report.pdf",
     }),
+    "\n[report.pdf](https://b/blob)",
+  );
+});
+
+test("formatImetaMediaLine: spoiler option does not wrap generic files", () => {
+  assert.equal(
+    formatImetaMediaLine(
+      {
+        url: "https://b/blob",
+        type: "application/pdf",
+        filename: "report.pdf",
+      },
+      { spoiler: true },
+    ),
     "\n[report.pdf](https://b/blob)",
   );
 });
@@ -120,6 +197,33 @@ test("strip: removes an escaped-bracket generic file line on edit", () => {
     { url, type: "application/pdf" },
   ]);
   assert.equal(stripped, "note");
+});
+
+test("findSpoileredImetaMediaUrls: extracts only spoilered matching media urls", () => {
+  const body = [
+    "note",
+    "||![image](https://b/a.png)||",
+    "![image](https://b/b.png)",
+    "||![video](https://b/c.mp4)||",
+    "||",
+    "![image](https://b/d.png)",
+    "![video](https://b/e.mp4)",
+    "||",
+  ].join("\n");
+  const spoilered = findSpoileredImetaMediaUrls(body, [
+    { url: "https://b/a.png", type: "image/png" },
+    { url: "https://b/b.png", type: "image/png" },
+    { url: "https://b/c.mp4", type: "video/mp4" },
+    { url: "https://b/d.png", type: "image/png" },
+    { url: "https://b/e.mp4", type: "video/mp4" },
+    { url: "https://b/other.png", type: "image/png" },
+  ]);
+  assert.deepEqual([...spoilered].sort(), [
+    "https://b/a.png",
+    "https://b/c.mp4",
+    "https://b/d.png",
+    "https://b/e.mp4",
+  ]);
 });
 
 // ── imetaMediaFromTags (full BlobDescriptor projection) ───────────────
@@ -300,6 +404,33 @@ test("buildOutgoingMessage: appends media markdown line per attachment, in order
   );
 });
 
+test("buildOutgoingMessage: wraps spoilered image and video attachments", () => {
+  const out = buildOutgoingMessage(
+    "hi",
+    [
+      {
+        url: "https://b/a.png",
+        type: "image/png",
+        sha256: "x",
+        size: 1,
+        uploaded: 0,
+      },
+      {
+        url: "https://b/v.mp4",
+        type: "video/mp4",
+        sha256: "y",
+        size: 2,
+        uploaded: 0,
+      },
+    ],
+    new Set(["https://b/a.png", "https://b/v.mp4"]),
+  );
+  assert.equal(
+    out.content,
+    "hi\n||![image](https://b/a.png)||\n||![video](https://b/v.mp4)||",
+  );
+});
+
 test("buildOutgoingMessage: mediaTags mirror buildImetaTags output for non-empty pending", () => {
   const pending = [
     {
@@ -395,38 +526,65 @@ test("round-trip: sparse imeta from legacy tags rebuilds without empty x/size", 
 const IMETA = ["imeta", "url https://blossom/abc.png", "m image/png"];
 const EMOJI_A = ["emoji", "shipit", "https://relay/s.png"];
 const EMOJI_B = ["emoji", "party", "https://relay/p.gif"];
+const MENTION_REF = [
+  "mention",
+  "1111111111111111111111111111111111111111111111111111111111111111",
+];
 
-test("splitOutgoingTags: undefined input yields two empty arrays", () => {
+test("splitOutgoingTags: undefined input yields three empty arrays", () => {
   assert.deepEqual(splitOutgoingTags(undefined), {
     mediaTags: [],
     emojiTags: [],
+    mentionTags: [],
   });
 });
 
 test("splitOutgoingTags: separates emoji tags from imeta tags", () => {
-  const { mediaTags, emojiTags } = splitOutgoingTags([IMETA, EMOJI_A, EMOJI_B]);
+  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([
+    IMETA,
+    EMOJI_A,
+    EMOJI_B,
+  ]);
   assert.deepEqual(mediaTags, [IMETA]);
   assert.deepEqual(emojiTags, [EMOJI_A, EMOJI_B]);
+  assert.deepEqual(mentionTags, []);
 });
 
 test("splitOutgoingTags: emoji-only set leaves mediaTags empty", () => {
-  const { mediaTags, emojiTags } = splitOutgoingTags([EMOJI_A]);
+  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([EMOJI_A]);
   assert.deepEqual(mediaTags, []);
   assert.deepEqual(emojiTags, [EMOJI_A]);
+  assert.deepEqual(mentionTags, []);
+});
+
+test("splitOutgoingTags: separates reference-only mention tags", () => {
+  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([
+    IMETA,
+    MENTION_REF,
+    EMOJI_A,
+  ]);
+  assert.deepEqual(mediaTags, [IMETA]);
+  assert.deepEqual(emojiTags, [EMOJI_A]);
+  assert.deepEqual(mentionTags, [MENTION_REF]);
 });
 
 test("splitOutgoingTags: unknown prefixes stay with mediaTags (injection defense)", () => {
   // A forged ["p", ...] must NOT be misrouted to the emoji channel; it stays on
   // mediaTags where the server-side imeta guard rejects it.
   const forged = ["p", "deadbeef"];
-  const { mediaTags, emojiTags } = splitOutgoingTags([forged, EMOJI_A]);
+  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags([
+    forged,
+    EMOJI_A,
+  ]);
   assert.deepEqual(mediaTags, [forged]);
   assert.deepEqual(emojiTags, [EMOJI_A]);
+  assert.deepEqual(mentionTags, []);
 });
 
 test("splitOutgoingTags is the inverse of mergeOutgoingTags", () => {
   const merged = mergeOutgoingTags([IMETA], [EMOJI_A, EMOJI_B]);
-  const { mediaTags, emojiTags } = splitOutgoingTags(merged);
+  const { mediaTags, emojiTags, mentionTags } = splitOutgoingTags(merged);
   assert.deepEqual(mediaTags, [IMETA]);
   assert.deepEqual(emojiTags, [EMOJI_A, EMOJI_B]);
+  assert.deepEqual(mentionTags, []);
 });

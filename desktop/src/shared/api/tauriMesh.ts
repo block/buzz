@@ -61,7 +61,7 @@ export type MeshNodeStatus = {
 
 export type MeshCallMeNow = {
   v: 1;
-  type: "sprout-iroh-call-me-now";
+  type: "buzz-iroh-call-me-now";
   peer_endpoint_addr: string;
   peer_endpoint_id?: string;
   attempt_id: string;
@@ -100,6 +100,15 @@ export async function meshEnsureClientNode(
       reporterPubkey: target?.reporterPubkey,
       peerEndpointId: target?.endpointId,
     },
+  });
+}
+
+export async function meshPrepareRelayMeshClient(
+  modelId: string,
+  target: MeshServeTarget,
+): Promise<MeshNodeStatus> {
+  return await invokeTauri<MeshNodeStatus>("mesh_prepare_relay_mesh_client", {
+    request: { modelId, target },
   });
 }
 

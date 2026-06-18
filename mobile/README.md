@@ -1,6 +1,6 @@
-# Sprout Mobile
+# Buzz Mobile
 
-Flutter mobile client for Sprout.
+Flutter mobile client for Buzz.
 
 ## Setup
 

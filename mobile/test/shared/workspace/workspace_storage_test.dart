@@ -1,7 +1,7 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sprout_mobile/shared/workspace/workspace.dart';
-import 'package:sprout_mobile/shared/workspace/workspace_storage.dart';
+import 'package:buzz/shared/workspace/workspace.dart';
+import 'package:buzz/shared/workspace/workspace_storage.dart';
 
 /// In-memory fake that extends Fake to satisfy all FlutterSecureStorage
 /// interface methods, but implements the core read/write/delete with real
@@ -165,10 +165,10 @@ void main() {
 
     group('migration', () {
       test('migrates legacy keys to workspace on first load', () async {
-        fakeSecure['sprout_relay_url'] = 'https://legacy.example.com';
-        fakeSecure['sprout_token'] = 'legacy_token';
-        fakeSecure['sprout_pubkey'] = 'legacy_pub';
-        fakeSecure['sprout_nsec'] = 'legacy_nsec';
+        fakeSecure['buzz_relay_url'] = 'https://legacy.example.com';
+        fakeSecure['buzz_token'] = 'legacy_token';
+        fakeSecure['buzz_pubkey'] = 'legacy_pub';
+        fakeSecure['buzz_nsec'] = 'legacy_nsec';
 
         final loaded = await storage.loadAll();
 
@@ -179,10 +179,10 @@ void main() {
         expect(loaded.first.name, isNotEmpty);
 
         // Legacy keys should be deleted.
-        expect(fakeSecure['sprout_relay_url'], isNull);
-        expect(fakeSecure['sprout_token'], isNull);
-        expect(fakeSecure['sprout_pubkey'], isNull);
-        expect(fakeSecure['sprout_nsec'], isNull);
+        expect(fakeSecure['buzz_relay_url'], isNull);
+        expect(fakeSecure['buzz_token'], isNull);
+        expect(fakeSecure['buzz_pubkey'], isNull);
+        expect(fakeSecure['buzz_nsec'], isNull);
 
         // Active ID should be set.
         final activeId = await storage.loadActiveId();
@@ -195,8 +195,8 @@ void main() {
       });
 
       test('does not re-migrate after first load', () async {
-        fakeSecure['sprout_relay_url'] = 'https://legacy.example.com';
-        fakeSecure['sprout_token'] = 'legacy_token';
+        fakeSecure['buzz_relay_url'] = 'https://legacy.example.com';
+        fakeSecure['buzz_token'] = 'legacy_token';
 
         final first = await storage.loadAll();
         expect(first, hasLength(1));
@@ -207,8 +207,8 @@ void main() {
       });
 
       test('migration generates name from localhost URL', () async {
-        fakeSecure['sprout_relay_url'] = 'http://localhost:3000';
-        fakeSecure['sprout_token'] = 'tok';
+        fakeSecure['buzz_relay_url'] = 'http://localhost:3000';
+        fakeSecure['buzz_token'] = 'tok';
 
         final loaded = await storage.loadAll();
         expect(loaded.first.name, 'Local Dev');

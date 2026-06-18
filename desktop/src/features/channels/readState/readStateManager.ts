@@ -20,8 +20,8 @@ import {
   writeStoredReadState,
 } from "@/features/channels/readState/readStateStorage";
 
-const CLIENT_ID_KEY_PREFIX = "sprout.nip-rs.client-id";
-const SLOT_ID_KEY_PREFIX = "sprout.nip-rs.slot-id";
+const CLIENT_ID_KEY_PREFIX = "buzz.nip-rs.client-id";
+const SLOT_ID_KEY_PREFIX = "buzz.nip-rs.slot-id";
 const DEBOUNCE_MS = 5_000;
 
 function generateHex(bytes: number): string {
@@ -47,6 +47,79 @@ function slotIdKey(pubkey: string): string {
   return `${SLOT_ID_KEY_PREFIX}:${pubkey}`;
 }
 
+export type ApplyRemoteContextResult = "unchanged" | "advanced";
+
+export type ContextParentResolver = (contextId: string) => string | null;
+
+/**
+ * NIP-RS Hierarchical Frontier Rule (NIP-RS.md:141-167):
+ * `effective(ctx) = max(merged[ctx], effective(parent(ctx)))`.
+ *
+ * The thread→channel relationship is NOT serialized into the blob
+ * (NIP-RS.md:136-139); it is derived from the event graph at evaluation time
+ * via `parentResolver`. When the resolver yields no parent (channels, or an
+ * unresolvable thread root), the frontier degrades to the context's own merged
+ * value alone (NIP-RS.md:165-167). Returns null when the context has never been
+ * read and no parent term covers it.
+ */
+export function resolveEffectiveTimestamp(args: {
+  effectiveState: Map<string, number>;
+  contextId: string;
+  parentResolver: ContextParentResolver | null;
+}): number | null {
+  const { effectiveState, contextId, parentResolver } = args;
+  const own = effectiveState.get(contextId) ?? null;
+
+  const parentId = parentResolver?.(contextId) ?? null;
+  if (parentId === null) return own;
+
+  const parent = effectiveState.get(parentId) ?? null;
+  if (parent === null) return own;
+  if (own === null) return parent;
+  return Math.max(own, parent);
+}
+
+function resolveRemoteContextTimestamp(args: {
+  current: number;
+  timestamp: number;
+}): { next: number; result: ApplyRemoteContextResult } {
+  const next = Math.max(args.current, args.timestamp);
+  return {
+    next,
+    result: next === args.current ? "unchanged" : "advanced",
+  };
+}
+
+export function applyRemoteContextTimestamp(args: {
+  effectiveState: Map<string, number>;
+  contextSourceCreatedAt: Map<string, number>;
+  contextId: string;
+  timestamp: number;
+  eventCreatedAt: number;
+}): ApplyRemoteContextResult {
+  const {
+    effectiveState,
+    contextSourceCreatedAt,
+    contextId,
+    timestamp,
+    eventCreatedAt,
+  } = args;
+  const sourceCreatedAt = contextSourceCreatedAt.get(contextId) ?? 0;
+  const current = effectiveState.get(contextId) ?? 0;
+  const { next, result } = resolveRemoteContextTimestamp({
+    current,
+    timestamp,
+  });
+
+  if (result === "advanced") {
+    effectiveState.set(contextId, next);
+  }
+  if (eventCreatedAt > sourceCreatedAt) {
+    contextSourceCreatedAt.set(contextId, eventCreatedAt);
+  }
+  return result;
+}
+
 export class ReadStateManager {
   private pubkey: string;
   private relayClient: RelayClient;
@@ -60,11 +133,10 @@ export class ReadStateManager {
   private unsubscribeLive: (() => void) | null = null;
   private initialized = false;
   private maxFetchedCreatedAt = 0;
-  private forcedContexts = new Set<string>();
   private contextSourceCreatedAt = new Map<string, number>();
-  private pendingSyncedRollbacks = new Set<string>();
   private pendingSyncedAdvances = new Set<string>();
   private destroyed = false;
+  private parentResolver: ContextParentResolver | null = null;
 
   constructor(pubkey: string, relayClient: RelayClient) {
     this.pubkey = pubkey;
@@ -101,7 +173,6 @@ export class ReadStateManager {
   }
 
   markContextRead(contextId: string, unixTimestamp: number): void {
-    this.forcedContexts.delete(contextId);
     this.advanceContext(contextId, unixTimestamp, { publishable: true });
     this.contextSourceCreatedAt.set(
       contextId,
@@ -111,16 +182,6 @@ export class ReadStateManager {
 
   seedContextRead(contextId: string, unixTimestamp: number): void {
     this.advanceContext(contextId, unixTimestamp, { publishable: false });
-  }
-
-  markContextUnread(contextId: string, lastMessageUnix: number): void {
-    const rollbackTo = lastMessageUnix - 1;
-    this.effectiveState.set(contextId, rollbackTo);
-    this.publishableContextIds.add(contextId);
-    this.forcedContexts.add(contextId);
-    this.persistLocalState();
-    this.notifyListeners();
-    this.schedulePublish();
   }
 
   private advanceContext(
@@ -152,7 +213,32 @@ export class ReadStateManager {
   }
 
   getEffectiveTimestamp(contextId: string): number | null {
+    return resolveEffectiveTimestamp({
+      effectiveState: this.effectiveState,
+      contextId,
+      parentResolver: this.parentResolver,
+    });
+  }
+
+  /**
+   * The context's OWN merged read marker, WITHOUT the hierarchical parent term.
+   * Callers that evaluate a `thread:<root>` context outside the active channel
+   * (e.g. the sidebar unread scan over background channels) must use this:
+   * getEffectiveTimestamp folds in parentResolver, which is installed by the
+   * active ChannelScreen and maps every thread to the *active* channel — using
+   * it for a background channel's thread would borrow the wrong channel marker.
+   */
+  getOwnTimestamp(contextId: string): number | null {
     return this.effectiveState.get(contextId) ?? null;
+  }
+
+  /**
+   * Inject the thread→channel parent resolver derived from the React event
+   * graph (NIP-RS.md:136-139). The hierarchical max in getEffectiveTimestamp
+   * is a no-op until this is set.
+   */
+  setContextParentResolver(resolver: ContextParentResolver | null): void {
+    this.parentResolver = resolver;
   }
 
   subscribe(listener: () => void): () => void {
@@ -241,16 +327,17 @@ export class ReadStateManager {
       }
 
       for (const [ctx, ts] of Object.entries(blob.contexts)) {
-        if (this.forcedContexts.has(ctx)) continue;
-        const sourceCreatedAt = this.contextSourceCreatedAt.get(ctx) ?? 0;
-        const current = this.effectiveState.get(ctx) ?? 0;
-        if (event.created_at > sourceCreatedAt) {
-          this.effectiveState.set(ctx, ts);
-          this.contextSourceCreatedAt.set(ctx, event.created_at);
-        } else if (event.created_at === sourceCreatedAt && ts !== current) {
-          this.effectiveState.set(ctx, ts);
+        const result = applyRemoteContextTimestamp({
+          effectiveState: this.effectiveState,
+          contextSourceCreatedAt: this.contextSourceCreatedAt,
+          contextId: ctx,
+          timestamp: ts,
+          eventCreatedAt: event.created_at,
+        });
+        if (result !== "unchanged") {
+          this.pendingSyncedAdvances.add(ctx);
+          this.publishableContextIds.add(ctx);
         }
-        this.publishableContextIds.add(ctx);
       }
 
       if (blob.client_id === this.clientId) {
@@ -361,27 +448,15 @@ export class ReadStateManager {
 
     let anyAdvanced = false;
     for (const [ctx, ts] of Object.entries(blob.contexts)) {
-      if (this.forcedContexts.has(ctx)) continue;
-      const sourceCreatedAt = this.contextSourceCreatedAt.get(ctx) ?? 0;
-      const current = this.effectiveState.get(ctx) ?? 0;
-      if (event.created_at > sourceCreatedAt) {
-        if (this.effectiveState.get(ctx) !== ts) {
-          if (ts < current && current > 0) {
-            this.pendingSyncedRollbacks.add(ctx);
-            this.pendingSyncedAdvances.delete(ctx);
-            console.debug(
-              `[ReadStateManager] synced rollback ctx=${ctx.substring(0, 12)}… from=${current} to=${ts}`,
-            );
-          } else if (ts > current) {
-            this.pendingSyncedAdvances.add(ctx);
-            this.pendingSyncedRollbacks.delete(ctx);
-          }
-          this.effectiveState.set(ctx, ts);
-          anyAdvanced = true;
-        }
-        this.contextSourceCreatedAt.set(ctx, event.created_at);
-      } else if (event.created_at === sourceCreatedAt && ts !== current) {
-        this.effectiveState.set(ctx, ts);
+      const result = applyRemoteContextTimestamp({
+        effectiveState: this.effectiveState,
+        contextSourceCreatedAt: this.contextSourceCreatedAt,
+        contextId: ctx,
+        timestamp: ts,
+        eventCreatedAt: event.created_at,
+      });
+      if (result === "advanced") {
+        this.pendingSyncedAdvances.add(ctx);
         anyAdvanced = true;
       }
       if (!this.publishableContextIds.has(ctx)) {
@@ -467,7 +542,6 @@ export class ReadStateManager {
         }
       }
       this.lastPublishedContexts = contexts;
-      this.forcedContexts.clear();
       this.maxFetchedCreatedAt = Math.max(
         this.maxFetchedCreatedAt,
         event.created_at,
@@ -518,6 +592,27 @@ export class ReadStateManager {
       }
       contexts[ctx] = ts;
     }
+
+    // Evict oldest thread:* entries when approaching the MAX_CONTEXTS cap
+    // (10,000). Channel keys are never evicted — only thread read-state keys
+    // are eligible. This prevents silent blob rejection by isValidBlob().
+    const EVICTION_THRESHOLD = 8_000;
+    const contextCount = Object.keys(contexts).length;
+    if (contextCount > EVICTION_THRESHOLD) {
+      const threadEntries: [string, number][] = [];
+      for (const [key, ts] of Object.entries(contexts)) {
+        if (key.startsWith("thread:")) {
+          threadEntries.push([key, ts]);
+        }
+      }
+      // Sort oldest-first (lowest timestamp = oldest)
+      threadEntries.sort((a, b) => a[1] - b[1]);
+      const toEvict = contextCount - EVICTION_THRESHOLD;
+      for (let i = 0; i < Math.min(toEvict, threadEntries.length); i++) {
+        delete contexts[threadEntries[i][0]];
+      }
+    }
+
     return contexts;
   }
 
@@ -542,12 +637,6 @@ export class ReadStateManager {
       this.publishableContextIds,
       this.contextSourceCreatedAt,
     );
-  }
-
-  drainSyncedRollbacks(): ReadonlySet<string> {
-    const drained = this.pendingSyncedRollbacks;
-    this.pendingSyncedRollbacks = new Set<string>();
-    return drained;
   }
 
   drainSyncedAdvances(): ReadonlySet<string> {

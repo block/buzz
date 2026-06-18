@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live e2e test for sprout-proxy — requires relay on :3000 and proxy on :4869
+# Live e2e test for buzz-proxy — requires relay on :3000 and proxy on :4869
 set -euo pipefail
 
 PROXY_URL="ws://0.0.0.0:4869"
@@ -12,13 +12,13 @@ FAIL=0
 ok()   { PASS=$((PASS+1)); echo "  ✅ $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  ❌ $1"; }
 
-echo "═══ sprout-proxy e2e tests ═══"
+echo "═══ buzz-proxy e2e tests ═══"
 echo ""
 
 # ── Test 1: NIP-11 ──────────────────────────────────────────────────────
 echo "1. NIP-11 relay info"
 NIP11=$(curl -sf "$PROXY_HTTP" -H "Accept: application/nostr+json")
-if echo "$NIP11" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['name']=='sprout-proxy'" 2>/dev/null; then
+if echo "$NIP11" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['name']=='buzz-proxy'" 2>/dev/null; then
     ok "NIP-11 returns valid relay info"
 else
     fail "NIP-11 check failed"

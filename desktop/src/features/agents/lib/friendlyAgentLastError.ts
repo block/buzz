@@ -2,10 +2,10 @@
  * Promote certain machine-readable `lastError` strings to user-facing copy.
  *
  * The mesh-llm seam (Max's commit `5196203…`) flows like this:
- *   sprout-agent — gets HTTP 401/403 from the OpenAI-compatible mesh endpoint
+ *   buzz-agent — gets HTTP 401/403 from the OpenAI-compatible mesh endpoint
  *                  → raises `AgentError::LlmAuth("…")` (json_rpc_code `-32001`,
  *                    Display prefix `"llm auth: …"`)
- *   sprout-acp — wraps it as `AcpError::AgentError("Agent reported error: llm auth: …")`
+ *   buzz-acp — wraps it as `AcpError::AgentError("Agent reported error: llm auth: …")`
  *   desktop managed-agent supervisor — on nonzero exit, scans `read_log_tail`
  *                  for `"Agent reported error:"` / `"llm auth:"` and persists
  *                  that line into `ManagedAgent.lastError` instead of the
@@ -44,7 +44,7 @@ export function friendlyAgentLastError(
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
 
-  // Match either the unwrapped sprout-agent prefix or the sprout-acp wrap.
+  // Match either the unwrapped buzz-agent prefix or the buzz-acp wrap.
   // The desktop supervisor recovers whichever appears first in the log tail.
   if (
     trimmed.startsWith("Agent reported error: llm auth:") ||

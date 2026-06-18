@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-String channelStarsKey(String pubkey) => 'sprout.channel-stars.v1:$pubkey';
+String channelStarsKey(String pubkey) => 'buzz.channel-stars.v1:$pubkey';
 
 class ChannelStarEntry {
   final bool starred;

@@ -5,12 +5,11 @@ use super::export_util::save_json_with_dialog;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        encode_persona_json, import_persona_pack, list_installed_packs, load_managed_agents,
-        load_personas, load_teams, parse_json_persona, parse_md_persona, parse_png_persona,
-        parse_zip_personas, save_managed_agents, save_personas, try_regenerate_nest,
-        uninstall_persona_pack as do_uninstall_persona_pack, validate_persona_activation_change,
-        validate_persona_deletion, CreatePersonaRequest, PackSummary, ParsePersonaFilesResult,
-        PersonaRecord, UpdatePersonaRequest,
+        encode_persona_json, load_managed_agents, load_personas, load_teams, parse_json_persona,
+        parse_md_persona, parse_png_persona, parse_zip_personas, save_managed_agents,
+        save_personas, try_regenerate_nest, validate_persona_activation_change,
+        validate_persona_deletion, CreatePersonaRequest, ParsePersonaFilesResult, PersonaRecord,
+        UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -51,8 +50,9 @@ pub fn create_persona(
     let display_name = trim_required(&input.display_name, "Display name")?;
     let system_prompt = trim_required(&input.system_prompt, "System prompt")?;
     let avatar_url = trim_optional(input.avatar_url);
-    let provider = trim_optional(input.provider);
+    let runtime = trim_optional(input.runtime);
     let model = trim_optional(input.model);
+    let provider = trim_optional(input.provider);
     let now = now_iso();
 
     let _store_guard = state
@@ -72,13 +72,14 @@ pub fn create_persona(
         display_name,
         avatar_url,
         system_prompt,
-        provider,
+        runtime,
         model,
+        provider,
         name_pool,
         is_builtin: false,
         is_active: true,
-        source_pack: None,
-        source_pack_persona_slug: None,
+        source_team: None,
+        source_team_persona_slug: None,
         env_vars: input.env_vars,
         created_at: now.clone(),
         updated_at: now,
@@ -98,8 +99,9 @@ pub fn update_persona(
     let display_name = trim_required(&input.display_name, "Display name")?;
     let system_prompt = trim_required(&input.system_prompt, "System prompt")?;
     let avatar_url = trim_optional(input.avatar_url);
-    let provider = trim_optional(input.provider);
+    let runtime = trim_optional(input.runtime);
     let model = trim_optional(input.model);
+    let provider = trim_optional(input.provider);
 
     let _store_guard = state
         .managed_agents_store_lock
@@ -117,8 +119,9 @@ pub fn update_persona(
     persona.display_name = display_name;
     persona.avatar_url = avatar_url;
     persona.system_prompt = system_prompt;
-    persona.provider = provider;
+    persona.runtime = runtime;
     persona.model = model;
+    persona.provider = provider;
     persona.name_pool = input
         .name_pool
         .into_iter()
@@ -335,7 +338,7 @@ pub async fn export_persona_to_json(
     // forked, distributed), and bundling API keys / credentials in them
     // would be a significant footgun. Users who import a card and need
     // credentials must supply them post-import via the persona dialog.
-    let (display_name, system_prompt, avatar_url, provider, model, name_pool) = {
+    let (display_name, system_prompt, avatar_url, runtime, model, provider, name_pool) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -349,8 +352,9 @@ pub async fn export_persona_to_json(
             persona.display_name.clone(),
             persona.system_prompt.clone(),
             persona.avatar_url.clone(),
-            persona.provider.clone(),
+            persona.runtime.clone(),
             persona.model.clone(),
+            persona.provider.clone(),
             persona.name_pool.clone(),
         )
     };
@@ -359,53 +363,13 @@ pub async fn export_persona_to_json(
         &display_name,
         &system_prompt,
         avatar_url.as_deref(),
-        provider.as_deref(),
+        runtime.as_deref(),
         model.as_deref(),
+        provider.as_deref(),
         &name_pool,
     )?;
 
     let slug = crate::util::slugify(&display_name, "persona", 50);
     let filename = format!("{slug}.persona.json");
     save_json_with_dialog(&app, &filename, &json_bytes).await
-}
-
-// ── Pack management commands ──────────────────────────────────────────────────
-
-#[tauri::command]
-pub fn install_persona_pack(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    path: String,
-) -> Result<Vec<PersonaRecord>, String> {
-    let _lock = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let source = std::path::PathBuf::from(&path);
-    if !source.is_dir() {
-        return Err(format!("pack path is not a directory: {path}"));
-    }
-    let result = import_persona_pack(&app, &source)?;
-    try_regenerate_nest(&app);
-    Ok(result)
-}
-
-#[tauri::command]
-pub fn uninstall_persona_pack(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    pack_id: String,
-) -> Result<(), String> {
-    let _lock = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    do_uninstall_persona_pack(&app, &pack_id)?;
-    try_regenerate_nest(&app);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn list_persona_packs(app: AppHandle) -> Result<Vec<PackSummary>, String> {
-    list_installed_packs(&app)
 }

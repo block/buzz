@@ -200,5 +200,5 @@ test("writeChannelSectionsStore: returns false when setItem throws", () => {
 });
 
 test("storageKey: returns expected format with pubkey", () => {
-  assert.equal(storageKey("abc123"), "sprout-channel-sections.v1:abc123");
+  assert.equal(storageKey("abc123"), "buzz-channel-sections.v1:abc123");
 });

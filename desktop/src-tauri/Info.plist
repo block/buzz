@@ -3,10 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDisplayName</key>
-    <string>Sprout</string>
+    <string>Buzz</string>
     <key>CFBundleName</key>
-    <string>Sprout</string>
+    <string>Buzz</string>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Sprout needs microphone access for voice huddles.</string>
+    <string>Buzz needs microphone access for voice huddles.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Buzz needs camera access to record animated avatars.</string>
 </dict>
 </plist>

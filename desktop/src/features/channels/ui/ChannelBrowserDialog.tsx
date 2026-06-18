@@ -1,52 +1,24 @@
 import * as React from "react";
-import {
-  Compass,
-  FileText,
-  Hash,
-  LogIn,
-  Search,
-  Users,
-  type LucideIcon,
-} from "lucide-react";
+import { Compass, Search, X, type LucideIcon } from "lucide-react";
 
 import type { Channel } from "@/shared/api/types";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
 import { Badge } from "@/shared/ui/badge";
-import { Input } from "@/shared/ui/input";
 import { Button } from "@/shared/ui/button";
+import {
+  MODAL_SEARCH_INPUT_CLASS,
+  MODAL_SEARCH_SHELL_CLASS,
+} from "@/shared/ui/modalSearchStyles";
+import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 
 const BROWSE_CHANNELS_SHORTCUT_HINT = "\u21E7\u2318O";
-
-function formatRelativeTime(isoString: string | null) {
-  if (!isoString) {
-    return "No activity";
-  }
-
-  const diff = Math.floor((Date.now() - new Date(isoString).getTime()) / 1_000);
-
-  if (diff < 60) {
-    return "just now";
-  }
-
-  if (diff < 60 * 60) {
-    return `${Math.floor(diff / 60)}m ago`;
-  }
-
-  if (diff < 60 * 60 * 24) {
-    return `${Math.floor(diff / (60 * 60))}h ago`;
-  }
-
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-  }).format(new Date(isoString));
-}
+type BrowserTab = "all" | "joined" | "archived";
 
 function BrowseState({
   icon: Icon,
@@ -60,7 +32,7 @@ function BrowseState({
   return (
     <div className="flex flex-col items-center justify-center px-6 py-16 text-center">
       <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-        <Icon className="h-5 w-5" />
+        <Icon className="h-4 w-4" />
       </div>
       <p className="mt-4 text-base font-semibold tracking-tight">{title}</p>
       <p className="mt-2 max-w-md text-sm text-muted-foreground">
@@ -88,24 +60,34 @@ export function ChannelBrowserDialog({
   onSelectChannel,
 }: ChannelBrowserDialogProps) {
   const [query, setQuery] = React.useState("");
-  const [selectedIndex, setSelectedIndex] = React.useState(0);
+  const [activeTab, setActiveTab] = React.useState<BrowserTab>("all");
+  const [selectedIndex, setSelectedIndex] = React.useState<number | null>(null);
   const [joiningChannelId, setJoiningChannelId] = React.useState<string | null>(
     null,
   );
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const tabListRef = React.useRef<HTMLDivElement>(null);
+  const tabTriggerRefs = React.useRef<
+    Record<BrowserTab, HTMLButtonElement | null>
+  >({
+    all: null,
+    joined: null,
+    archived: null,
+  });
+  const [tabIndicator, setTabIndicator] = React.useState({
+    left: 0,
+    width: 0,
+  });
   const deferredQuery = React.useDeferredValue(query.trim().toLowerCase());
 
   const isForumMode = channelTypeFilter === "forum";
   const browseTitle = isForumMode ? "Browse Forums" : "Browse Channels";
-  const browseDescription = isForumMode
-    ? "Discover and join open forums."
-    : "Discover and join open channels.";
   const searchPlaceholder = isForumMode
     ? "Search forums by name or description"
     : "Search channels by name or description";
   const entityLabel = isForumMode ? "forum" : "channel";
 
-  const browsableChannels = React.useMemo(() => {
+  const matchingChannels = React.useMemo(() => {
     const filtered = channels.filter(
       (channel) =>
         channel.channelType !== "dm" &&
@@ -126,53 +108,114 @@ export function ChannelBrowserDialog({
     );
   }, [channels, channelTypeFilter, deferredQuery]);
 
-  const notJoined = React.useMemo(
-    () => browsableChannels.filter((channel) => !channel.isMember),
-    [browsableChannels],
+  const currentChannels = React.useMemo(
+    () => matchingChannels.filter((channel) => channel.archivedAt === null),
+    [matchingChannels],
   );
 
-  const joined = React.useMemo(
-    () => browsableChannels.filter((channel) => channel.isMember),
-    [browsableChannels],
-  );
-  const hasArchivedJoinedChannels = React.useMemo(
-    () => joined.some((channel) => channel.archivedAt !== null),
-    [joined],
+  const joinedChannels = React.useMemo(
+    () => currentChannels.filter((channel) => channel.isMember),
+    [currentChannels],
   );
 
-  // Flat list for keyboard navigation: not-joined first, then joined
-  const allItems = React.useMemo(
-    () => [...notJoined, ...joined],
-    [notJoined, joined],
+  const archivedChannels = React.useMemo(
+    () => matchingChannels.filter((channel) => channel.archivedAt !== null),
+    [matchingChannels],
   );
+
+  const visibleChannels =
+    activeTab === "archived"
+      ? archivedChannels
+      : activeTab === "joined"
+        ? joinedChannels
+        : matchingChannels;
+
+  const orderedVisibleChannels = React.useMemo(
+    () => [
+      ...visibleChannels.filter((channel) => !channel.isMember),
+      ...visibleChannels.filter((channel) => channel.isMember),
+    ],
+    [visibleChannels],
+  );
+
+  const allTabLabel = isForumMode ? "All forums" : "All channels";
+
+  const updateTabIndicator = React.useCallback(() => {
+    const list = tabListRef.current;
+    const trigger = tabTriggerRefs.current[activeTab];
+
+    if (!open || !list || !trigger) {
+      return;
+    }
+
+    const nextIndicator = {
+      left: trigger.offsetLeft,
+      width: trigger.offsetWidth,
+    };
+
+    setTabIndicator((current) =>
+      Math.abs(current.left - nextIndicator.left) < 0.5 &&
+      Math.abs(current.width - nextIndicator.width) < 0.5
+        ? current
+        : nextIndicator,
+    );
+  }, [activeTab, open]);
+
+  React.useLayoutEffect(() => {
+    updateTabIndicator();
+
+    if (!open) {
+      return;
+    }
+
+    let isCancelled = false;
+    const updateIfActive = () => {
+      if (!isCancelled) {
+        updateTabIndicator();
+      }
+    };
+    const frameId = window.requestAnimationFrame(updateIfActive);
+    const observer = new ResizeObserver(updateTabIndicator);
+    const list = tabListRef.current;
+
+    void document.fonts.ready.then(updateIfActive);
+
+    if (list) {
+      observer.observe(list);
+    }
+
+    for (const trigger of Object.values(tabTriggerRefs.current)) {
+      if (trigger) {
+        observer.observe(trigger);
+      }
+    }
+
+    return () => {
+      isCancelled = true;
+      window.cancelAnimationFrame(frameId);
+      observer.disconnect();
+    };
+  }, [open, updateTabIndicator]);
 
   React.useEffect(() => {
     if (!open) {
       setQuery("");
-      setSelectedIndex(0);
+      setActiveTab("all");
+      setSelectedIndex(null);
       setJoiningChannelId(null);
       return;
     }
-
-    const timeout = window.setTimeout(() => {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }, 0);
-
-    return () => {
-      window.clearTimeout(timeout);
-    };
   }, [open]);
 
   React.useEffect(() => {
     setSelectedIndex((current) => {
-      if (allItems.length === 0) {
-        return 0;
+      if (current === null || orderedVisibleChannels.length === 0) {
+        return null;
       }
 
-      return Math.min(current, allItems.length - 1);
+      return Math.min(current, orderedVisibleChannels.length - 1);
     });
-  }, [allItems]);
+  }, [orderedVisibleChannels]);
 
   async function handleJoin(channelId: string) {
     setJoiningChannelId(channelId);
@@ -191,144 +234,199 @@ export function ChannelBrowserDialog({
     onSelectChannel(channel.id);
   }
 
-  const selectedItem = allItems[selectedIndex];
+  const selectedItem =
+    selectedIndex !== null ? orderedVisibleChannels[selectedIndex] : undefined;
+  const emptyTitle =
+    deferredQuery.length > 0
+      ? `No ${entityLabel}s match your search`
+      : activeTab === "archived"
+        ? `No archived ${entityLabel}s`
+        : activeTab === "joined"
+          ? `No joined ${entityLabel}s`
+          : `No ${entityLabel}s to browse`;
+  const emptyDescription =
+    deferredQuery.length > 0
+      ? "Try a different name or keyword."
+      : activeTab === "archived"
+        ? `Archived ${entityLabel}s you have joined will appear here.`
+        : activeTab === "joined"
+          ? `${entityLabel[0].toUpperCase()}${entityLabel.slice(1)}s you join will appear here.`
+          : `All open ${entityLabel}s are available in the sidebar. Create a new ${entityLabel} to get started.`;
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
       <DialogContent
-        className="gap-0 overflow-hidden p-0"
+        aria-describedby={undefined}
+        className="gap-0 overflow-hidden border-0 px-6 pb-0 pt-6"
         data-testid={
           isForumMode ? "forum-browser-dialog" : "channel-browser-dialog"
         }
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          inputRef.current?.focus({ preventScroll: true });
+        }}
+        showCloseButton={false}
       >
-        <DialogHeader className="border-b border-border/80 px-6 py-5">
-          <DialogTitle className="flex items-center gap-3">
-            <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-xs">
-              <Compass className="h-4 w-4" />
-            </span>
-            {browseTitle}
-          </DialogTitle>
-          <DialogDescription>{browseDescription}</DialogDescription>
-          <div className="mt-4 flex items-center gap-3 rounded-2xl border border-input bg-card px-3 py-3 shadow-xs">
-            <Search className="h-4 w-4 text-muted-foreground" />
-            <Input
-              className="h-auto border-0 bg-transparent px-0 py-0 text-base shadow-none focus-visible:ring-0"
+        <DialogHeader className="space-y-0 pb-5">
+          <div className="flex items-center justify-between gap-4">
+            <DialogTitle>{browseTitle}</DialogTitle>
+            <DialogClose className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors duration-150 ease-out hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus:ring-1 focus:ring-ring">
+              <X className="h-4 w-4" />
+              <span className="sr-only">Close</span>
+            </DialogClose>
+          </div>
+          <label
+            className={MODAL_SEARCH_SHELL_CLASS}
+            htmlFor="channel-browser-search"
+          >
+            <Search className="h-4 w-4 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-hover/search:text-muted-foreground group-focus-within/search:text-foreground" />
+            <input
+              autoCapitalize="none"
+              autoCorrect="off"
+              className={MODAL_SEARCH_INPUT_CLASS}
               data-testid="channel-browser-search"
+              id="channel-browser-search"
               onChange={(event) => {
                 setQuery(event.target.value);
-                setSelectedIndex(0);
+                setSelectedIndex(null);
               }}
               onKeyDown={(event) => {
-                if (event.key === "ArrowDown" && allItems.length > 0) {
+                if (
+                  event.key === "ArrowDown" &&
+                  orderedVisibleChannels.length > 0
+                ) {
                   event.preventDefault();
                   setSelectedIndex((current) =>
-                    Math.min(current + 1, allItems.length - 1),
+                    current === null
+                      ? 0
+                      : Math.min(
+                          current + 1,
+                          orderedVisibleChannels.length - 1,
+                        ),
                   );
                   return;
                 }
 
-                if (event.key === "ArrowUp" && allItems.length > 0) {
+                if (
+                  event.key === "ArrowUp" &&
+                  orderedVisibleChannels.length > 0
+                ) {
                   event.preventDefault();
-                  setSelectedIndex((current) => Math.max(current - 1, 0));
+                  setSelectedIndex((current) =>
+                    current === null
+                      ? orderedVisibleChannels.length - 1
+                      : Math.max(current - 1, 0),
+                  );
                   return;
                 }
 
                 if (
                   event.key === "Enter" &&
                   !event.nativeEvent.isComposing &&
-                  selectedItem
+                  orderedVisibleChannels.length > 0
                 ) {
                   event.preventDefault();
-                  handleSelect(selectedItem);
+                  handleSelect(selectedItem ?? orderedVisibleChannels[0]);
                 }
               }}
               placeholder={searchPlaceholder}
               ref={inputRef}
+              spellCheck={false}
+              type="text"
               value={query}
             />
-            <span className="hidden shrink-0 text-xs text-muted-foreground/50 sm:block">
+            <span
+              className={`hidden shrink-0 text-xs text-muted-foreground/50 transition-opacity duration-150 ease-out group-focus-within/search:opacity-0 sm:block ${
+                query.length > 0 ? "opacity-0" : "opacity-100"
+              }`}
+            >
               {BROWSE_CHANNELS_SHORTCUT_HINT}
             </span>
-          </div>
+          </label>
         </DialogHeader>
 
-        <div className="max-h-[60vh] overflow-y-auto">
-          {browsableChannels.length === 0 ? (
-            deferredQuery.length > 0 ? (
-              <BrowseState
-                description="Try a different name or keyword."
-                icon={Search}
-                title={`No ${entityLabel}s match your search`}
-              />
-            ) : (
-              <BrowseState
-                description={`All open ${entityLabel}s are available in the sidebar. Create a new ${entityLabel} to get started.`}
-                icon={Compass}
-                title={`No ${entityLabel}s to browse`}
-              />
-            )
-          ) : (
-            <div className="p-3">
-              {notJoined.length > 0 ? (
-                <>
-                  <div className="mb-3 flex items-center justify-between px-2 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                    <span>
-                      {notJoined.length} {entityLabel}
-                      {notJoined.length !== 1 ? "s" : ""} to join
-                    </span>
-                    <span>Enter to view</span>
-                  </div>
-                  <div className="space-y-2">
-                    {notJoined.map((channel) => {
-                      const flatIndex = allItems.indexOf(channel);
-                      return (
-                        <ChannelCard
-                          channel={channel}
-                          isJoining={joiningChannelId === channel.id}
-                          isSelected={flatIndex === selectedIndex}
-                          key={channel.id}
-                          onJoin={() => {
-                            void handleJoin(channel.id);
-                          }}
-                          onMouseEnter={() => setSelectedIndex(flatIndex)}
-                          onSelect={() => handleSelect(channel)}
-                        />
-                      );
-                    })}
-                  </div>
-                </>
-              ) : null}
+        <div className="h-[min(60vh,30rem)] overflow-hidden">
+          <div className="flex h-full flex-col">
+            <Tabs
+              className="shrink-0"
+              onValueChange={(value) => {
+                setActiveTab(value as BrowserTab);
+                setSelectedIndex(null);
+              }}
+              value={activeTab}
+            >
+              <TabsList
+                className="relative h-auto w-full justify-start gap-6 rounded-none border-b border-border/70 bg-transparent p-0 text-muted-foreground"
+                ref={tabListRef}
+              >
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute bottom-[-1px] left-0 h-0.5 w-px origin-left rounded-full bg-foreground opacity-0 transition-[transform,opacity] duration-[180ms] ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none data-[ready=true]:opacity-100"
+                  data-ready={tabIndicator.width > 0}
+                  data-testid="channel-browser-tab-indicator"
+                  style={{
+                    transform: `translate3d(${tabIndicator.left}px, 0, 0) scaleX(${tabIndicator.width})`,
+                  }}
+                />
+                <TabsTrigger
+                  className="rounded-none border-b-2 border-transparent bg-transparent px-0 py-2 text-sm font-medium shadow-none transition-colors duration-150 ease-out data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                  ref={(element) => {
+                    tabTriggerRefs.current.all = element;
+                  }}
+                  value="all"
+                >
+                  {allTabLabel}
+                </TabsTrigger>
+                <TabsTrigger
+                  className="rounded-none border-b-2 border-transparent bg-transparent px-0 py-2 text-sm font-medium shadow-none transition-colors duration-150 ease-out data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                  ref={(element) => {
+                    tabTriggerRefs.current.joined = element;
+                  }}
+                  value="joined"
+                >
+                  Joined
+                </TabsTrigger>
+                <TabsTrigger
+                  className="rounded-none border-b-2 border-transparent bg-transparent px-0 py-2 text-sm font-medium shadow-none transition-colors duration-150 ease-out data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none"
+                  ref={(element) => {
+                    tabTriggerRefs.current.archived = element;
+                  }}
+                  value="archived"
+                >
+                  Archived
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
 
-              {joined.length > 0 ? (
-                <>
-                  <div className="mb-3 mt-4 flex items-center px-2 text-xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                    <span>Joined</span>
-                  </div>
-                  <div className="space-y-2">
-                    {joined.map((channel) => {
-                      const flatIndex = allItems.indexOf(channel);
-                      return (
-                        <ChannelCard
-                          channel={channel}
-                          isJoining={false}
-                          isSelected={flatIndex === selectedIndex}
-                          key={channel.id}
-                          onMouseEnter={() => setSelectedIndex(flatIndex)}
-                          onSelect={() => handleSelect(channel)}
-                        />
-                      );
-                    })}
-                  </div>
-                </>
-              ) : null}
+            <div className="min-h-0 flex-1 overflow-y-auto pb-6 pt-4">
+              {orderedVisibleChannels.length === 0 ? (
+                <BrowseState
+                  description={emptyDescription}
+                  icon={deferredQuery.length > 0 ? Search : Compass}
+                  title={emptyTitle}
+                />
+              ) : (
+                <div className="overflow-hidden rounded-xl border border-border/70 bg-background/70 shadow-xs divide-y divide-border/55">
+                  {orderedVisibleChannels.map((channel, index) => (
+                    <ChannelCard
+                      channel={channel}
+                      isJoining={joiningChannelId === channel.id}
+                      isSelected={index === selectedIndex}
+                      key={channel.id}
+                      onJoin={
+                        !channel.isMember
+                          ? () => {
+                              void handleJoin(channel.id);
+                            }
+                          : undefined
+                      }
+                      onSelect={() => handleSelect(channel)}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
-          )}
-        </div>
-
-        <div className="border-t border-border/80 bg-card/50 px-6 py-3 text-xs text-muted-foreground">
-          {hasArchivedJoinedChannels
-            ? `Showing open ${entityLabel}s and your archived ${entityLabel}s. Private ${entityLabel}s require an invite.`
-            : `Showing open ${entityLabel}s. Private ${entityLabel}s require an invite.`}
+          </div>
         </div>
       </DialogContent>
     </Dialog>
@@ -340,80 +438,80 @@ function ChannelCard({
   isJoining,
   isSelected,
   onJoin,
-  onMouseEnter,
   onSelect,
 }: {
   channel: Channel;
   isJoining: boolean;
   isSelected: boolean;
   onJoin?: () => void;
-  onMouseEnter: () => void;
   onSelect: () => void;
 }) {
+  const memberLabel = `${channel.memberCount} ${
+    channel.memberCount === 1 ? "member" : "members"
+  }`;
+
   return (
-    <button
+    <div
       className={
         isSelected
-          ? "w-full rounded-2xl border border-primary/30 bg-primary/10 px-4 py-4 text-left shadow-xs outline-hidden transition-colors"
-          : "w-full rounded-2xl border border-border/80 bg-card/60 px-4 py-4 text-left shadow-xs outline-hidden transition-colors hover:border-primary/20 hover:bg-accent"
+          ? "group/channel-row flex min-h-16 items-center gap-4 bg-muted/40 px-4 py-3 transition-colors duration-150 ease-out"
+          : "group/channel-row flex min-h-16 items-center gap-4 px-4 py-3 transition-colors duration-150 ease-out hover:bg-muted/40"
       }
       data-testid={`browse-channel-${channel.name}`}
-      onClick={onSelect}
-      onMouseEnter={onMouseEnter}
-      type="button"
     >
-      <div className="flex items-start gap-3">
-        <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-secondary text-secondary-foreground">
-          {channel.channelType === "forum" ? (
-            <FileText className="h-4 w-4" />
-          ) : (
-            <Hash className="h-4 w-4" />
-          )}
-        </div>
-
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm font-semibold tracking-tight">
+      <button
+        className="min-w-0 flex-1 border-0 bg-transparent p-0 text-left text-foreground outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+        onClick={(event) => {
+          event.stopPropagation();
+          onSelect();
+        }}
+        type="button"
+      >
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="shrink-0 text-sm font-normal text-muted-foreground">
+              #
+            </span>
+            <p className="min-w-0 truncate text-base font-medium tracking-tight">
               {channel.name}
             </p>
-            <Badge variant="secondary">{channel.channelType}</Badge>
             {channel.archivedAt ? (
-              <Badge variant="warning">archived</Badge>
+              <Badge className="ml-1 shrink-0" variant="warning">
+                archived
+              </Badge>
             ) : null}
-            <div className="ml-auto flex items-center gap-3">
-              <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                <Users className="h-3 w-3" />
-                {channel.memberCount}
-              </span>
-              <span className="text-xs text-muted-foreground">
-                {formatRelativeTime(channel.lastMessageAt)}
-              </span>
-            </div>
           </div>
-          {channel.description ? (
-            <p className="mt-1 text-sm leading-6 text-muted-foreground line-clamp-2">
-              {channel.description}
-            </p>
-          ) : null}
+          <p className="mt-1 truncate text-sm text-muted-foreground">
+            <span>{memberLabel}</span>
+            {channel.description ? (
+              <>
+                <span className="px-1.5">·</span>
+                <span title={channel.description}>{channel.description}</span>
+              </>
+            ) : null}
+          </p>
         </div>
+      </button>
 
-        {!channel.isMember && onJoin ? (
-          <Button
-            className="shrink-0"
-            disabled={isJoining}
-            onClick={(event) => {
-              event.stopPropagation();
-              onJoin();
-            }}
-            size="sm"
-            type="button"
-            variant="default"
-          >
-            <LogIn className="mr-1.5 h-3.5 w-3.5" />
-            {isJoining ? "Joining..." : "Join"}
-          </Button>
-        ) : null}
-      </div>
-    </button>
+      {!channel.isMember && onJoin ? (
+        <Button
+          className={
+            isJoining
+              ? "shrink-0"
+              : "shrink-0 opacity-0 transition-opacity duration-150 ease-out group-hover/channel-row:opacity-100 group-focus-within/channel-row:opacity-100"
+          }
+          disabled={isJoining}
+          onClick={(event) => {
+            event.stopPropagation();
+            onJoin();
+          }}
+          size="sm"
+          type="button"
+          variant="default"
+        >
+          {isJoining ? "Joining..." : "Join"}
+        </Button>
+      ) : null}
+    </div>
   );
 }

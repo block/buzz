@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// Accent colors matching the desktop Sprout app.
+/// Accent colors matching the desktop Buzz app.
 class AccentColor {
   final String name;
   final Color light;

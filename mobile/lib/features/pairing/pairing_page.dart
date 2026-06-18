@@ -67,13 +67,13 @@ class PairingPage extends HookConsumerWidget {
 
                       // Branding
                       Icon(
-                        LucideIcons.sprout,
+                        LucideIcons.hexagon,
                         size: 64,
                         color: context.colors.primary,
                       ),
                       const SizedBox(height: Grid.xs),
                       Text(
-                        'Welcome to Sprout',
+                        'Welcome to Buzz',
                         style: context.textTheme.headlineSmall,
                       ),
                       const SizedBox(height: Grid.xxs),
@@ -123,7 +123,7 @@ class PairingPage extends HookConsumerWidget {
                       TextField(
                         controller: codeController,
                         decoration: const InputDecoration(
-                          hintText: 'nostrpair://... or sprout://...',
+                          hintText: 'nostrpair://... or buzz://...',
                           prefixIcon: Icon(LucideIcons.link),
                           isDense: true,
                         ),
@@ -284,7 +284,7 @@ class _SasVerificationView extends StatelessWidget {
         const SizedBox(height: Grid.lg),
 
         Text(
-          'You are about to transfer your Sprout identity\nto this device. Only confirm if you initiated\nthis pairing from your desktop.',
+          'You are about to transfer your Buzz identity\nto this device. Only confirm if you initiated\nthis pairing from your desktop.',
           textAlign: TextAlign.center,
           style: context.textTheme.bodySmall?.copyWith(
             color: context.colors.onSurfaceVariant,

@@ -6,9 +6,26 @@ const srcRoot = path.resolve(
   "src",
 );
 
+const repoRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
+
 export function resolve(specifier, context, nextResolve) {
+  if (specifier === "@features-manifest") {
+    const resolved = path.join(repoRoot, "preview-features.json");
+    return nextResolve(resolved, context);
+  }
   if (specifier.startsWith("@/")) {
-    const resolved = `${srcRoot}/${specifier.slice(2)}.ts`;
+    const stripped = specifier.slice(2);
+    // Preserve explicit extensions (.mjs, .js, .json, .ts, etc.). The bundler
+    // tolerates extensionless `@/` imports for .ts files; node's ESM resolver
+    // does not, so we only synthesize `.ts` when the specifier has no
+    // extension. Otherwise paths like `@/.../foo.mjs` would be coerced into
+    // `foo.mjs.ts` and fail to resolve.
+    const resolved = path.extname(stripped)
+      ? `${srcRoot}/${stripped}`
+      : `${srcRoot}/${stripped}.ts`;
     return nextResolve(resolved, context);
   }
   // Resolve extensionless relative TS imports (e.g. `./parseImeta`) — the app's

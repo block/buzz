@@ -5,7 +5,10 @@ use sha2::{Digest, Sha256};
 use tauri::State;
 
 use crate::app_state::AppState;
-use crate::relay::relay_api_base_url_with_override;
+use crate::relay::{
+    classify_request_error, parse_json_response, relay_api_base_url_with_override,
+    relay_error_message,
+};
 
 use super::media_transcode::{is_video_file, transcode_and_extract_poster};
 
@@ -25,8 +28,9 @@ pub struct BlobDescriptor {
     /// NIP-71 poster frame URL. `None` for non-video blobs or if extraction failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    /// Original filename, for the generic file-card label. Captured client-side
-    /// (the relay is content-addressed and never learns it). `None` for media.
+    /// Original filename captured client-side (the relay is content-addressed
+    /// and never learns it). Generic files use it for file-card labels; custom
+    /// emoji upload uses it to suggest a shortcode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
 }
@@ -79,7 +83,7 @@ fn fd_real_path(file: &std::fs::File) -> Result<std::path::PathBuf, String> {
     use windows_sys::Win32::Storage::FileSystem::{
         GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED,
     };
-    let handle = file.as_raw_handle() as isize;
+    let handle = file.as_raw_handle() as *mut core::ffi::c_void;
     let mut buf = vec![0u16; 1024];
     let len = unsafe {
         GetFinalPathNameByHandleW(
@@ -172,7 +176,7 @@ fn sign_blossom_upload_auth(
     if let Some(domain) = extract_server_authority(base_url) {
         tags.push(Tag::parse(vec!["server".to_string(), domain]).map_err(|e| e.to_string())?);
     }
-    EventBuilder::new(Kind::from(24242), "Upload sprout-media")
+    EventBuilder::new(Kind::from(24242), "Upload buzz-media")
         .tags(tags)
         .sign_with_keys(keys)
         .map_err(|e| e.to_string())
@@ -187,6 +191,7 @@ async fn do_upload(
     body: Vec<u8>,
     mime: &str,
     state: &State<'_, AppState>,
+    progress: Option<(tauri::AppHandle, String)>,
 ) -> Result<BlobDescriptor, String> {
     let sha256 = hex::encode(Sha256::digest(&body));
 
@@ -215,21 +220,42 @@ async fn do_upload(
         .header("Content-Type", mime)
         .header("X-SHA-256", &sha256);
 
-    let resp = req
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| format!("upload failed: {e}"))?;
+    // With a progress channel, stream the body in chunks and emit a
+    // `media-upload-progress` event as each chunk is handed to the socket,
+    // so the renderer can draw a determinate progress bar.
+    let resp = if let Some((app, progress_id)) = progress {
+        use tauri::Emitter;
+        let total = body.len() as u64;
+        // Ref-counted slices of one buffer — no second copy of the payload.
+        let body = bytes::Bytes::from(body);
+        let chunk_size = 64 * 1024;
+        let chunk_count = body.len().div_ceil(chunk_size);
+        let mut sent: u64 = 0;
+        let stream = futures_util::stream::iter((0..chunk_count).map(move |i| {
+            let start = i * chunk_size;
+            let end = usize::min(start + chunk_size, body.len());
+            let chunk = body.slice(start..end);
+            sent += chunk.len() as u64;
+            let _ = app.emit(
+                "media-upload-progress",
+                serde_json::json!({ "id": progress_id, "sent": sent, "total": total }),
+            );
+            Ok::<bytes::Bytes, std::io::Error>(chunk)
+        }));
+        req.header(reqwest::header::CONTENT_LENGTH, total)
+            .body(reqwest::Body::wrap_stream(stream))
+            .send()
+            .await
+    } else {
+        req.body(body).send().await
+    }
+    .map_err(|e| classify_request_error(&e))?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(format!("upload failed ({status}): {text}"));
+        return Err(relay_error_message(resp).await);
     }
 
-    resp.json::<BlobDescriptor>()
-        .await
-        .map_err(|e| format!("parse failed: {e}"))
+    parse_json_response::<BlobDescriptor>(resp).await
 }
 
 // ── Commands ─────────────────────────────────────────────────────────────────
@@ -266,7 +292,7 @@ pub async fn upload_media(
     }
 
     let mime = detect_and_validate_mime(&body)?;
-    do_upload(body, &mime, &state).await
+    do_upload(body, &mime, &state, None).await
 }
 
 /// Read a picked path through the TOCTOU-safe pipeline (fd pin → sniff →
@@ -315,24 +341,19 @@ async fn process_picked_path(
 
     // Upload video first, then poster (best-effort). If poster upload fails,
     // the video descriptor is returned without an image field.
-    let mut descriptor = do_upload(body, &mime, state).await?;
+    let mut descriptor = do_upload(body, &mime, state, None).await?;
 
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", state).await {
+        match do_upload(poster, "image/jpeg", state, None).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
-            Err(e) => eprintln!("sprout-desktop: poster upload failed (non-fatal): {e}"),
+            Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }
     }
 
-    // Generic files (non-image, non-video) carry their original filename so the
-    // client can render a file card with a real label. Media is identified by
-    // its preview, so no filename is attached.
-    if !mime.starts_with("image/") && !mime.starts_with("video/") {
-        descriptor.filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(sanitize_filename);
-    }
+    descriptor.filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(sanitize_filename);
 
     Ok(descriptor)
 }
@@ -391,6 +412,8 @@ pub async fn pick_and_upload_media(
 pub async fn upload_media_bytes(
     data: Vec<u8>,
     filename: Option<String>,
+    progress_id: Option<String>,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<BlobDescriptor, String> {
     if data.is_empty() {
@@ -402,7 +425,7 @@ pub async fn upload_media_bytes(
         // All blocking I/O runs off the async runtime via spawn_blocking.
         tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, Option<Vec<u8>>), String> {
             let tmp_input =
-                std::env::temp_dir().join(format!("sprout-drop-{}", uuid::Uuid::new_v4()));
+                std::env::temp_dir().join(format!("buzz-drop-{}", uuid::Uuid::new_v4()));
             // Cleanup guard: remove temp file on ALL exit paths (including write failure).
             let result = (|| {
                 std::fs::write(&tmp_input, &data)
@@ -421,20 +444,17 @@ pub async fn upload_media_bytes(
     let mime = detect_and_validate_mime(&body)?;
 
     // Upload video first, then poster (best-effort).
-    let mut descriptor = do_upload(body, &mime, &state).await?;
+    let progress = progress_id.map(|id| (app, id));
+    let mut descriptor = do_upload(body, &mime, &state, progress).await?;
 
     if let Some(poster) = poster_bytes {
-        match do_upload(poster, "image/jpeg", &state).await {
+        match do_upload(poster, "image/jpeg", &state, None).await {
             Ok(poster_desc) => descriptor.image = Some(poster_desc.url),
-            Err(e) => eprintln!("sprout-desktop: poster upload failed (non-fatal): {e}"),
+            Err(e) => eprintln!("buzz-desktop: poster upload failed (non-fatal): {e}"),
         }
     }
 
-    // Attach the original filename for generic files (drag/paste supply it from
-    // the JS File object). Media identifies itself by its preview, so skip it.
-    if !mime.starts_with("image/") && !mime.starts_with("video/") {
-        descriptor.filename = filename.as_deref().map(sanitize_filename);
-    }
+    descriptor.filename = filename.as_deref().map(sanitize_filename);
 
     Ok(descriptor)
 }

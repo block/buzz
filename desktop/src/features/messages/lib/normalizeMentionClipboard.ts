@@ -1,5 +1,5 @@
 /**
- * Detect whether clipboard HTML contains Sprout mention / channel-link
+ * Detect whether clipboard HTML contains Buzz mention / channel-link
  * elements (marked with `data-mention` or `data-channel-link` attributes).
  */
 export function hasMentionClipboardHtml(html: string): boolean {
@@ -7,7 +7,7 @@ export function hasMentionClipboardHtml(html: string): boolean {
 }
 
 /**
- * Normalize clipboard HTML that contains Sprout mention / channel-link
+ * Normalize clipboard HTML that contains Buzz mention / channel-link
  * elements.  Replaces the styled `<span data-mention>` and
  * `<button data-channel-link>` wrappers with unstyled text nodes so
  * TipTap's Bold extension doesn't misinterpret their font-weight as bold.

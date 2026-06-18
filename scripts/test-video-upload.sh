@@ -3,7 +3,7 @@
 #
 # Prerequisites:
 #   - Relay running at $RELAY_URL (default: http://localhost:3000)
-#   - Dev mode (SPROUT_REQUIRE_AUTH_TOKEN=false) or valid API token
+#   - Dev mode (BUZZ_REQUIRE_AUTH_TOKEN=false) or valid API token
 #   - ffmpeg, nak, curl, jq, shasum on PATH
 #
 # Usage:

@@ -231,7 +231,7 @@ export function EditAgentDialog({
               onTurnTimeoutChange={setTurnTimeoutSeconds}
               parallelism={parallelism}
               relayUrl={relayUrl}
-              selectedProviderId="custom"
+              selectedRuntimeId="custom"
               systemPrompt={systemPrompt}
               turnTimeoutSeconds={turnTimeoutSeconds}
             />

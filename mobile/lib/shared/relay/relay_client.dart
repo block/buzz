@@ -1,6 +1,6 @@
 import 'package:http/http.dart' as http;
 
-/// Lightweight HTTP context for talking to the Sprout relay.
+/// Lightweight HTTP context for talking to the Buzz relay.
 ///
 /// In the pure-nostr architecture, all data flow happens over the relay
 /// WebSocket. This client now exists only to provide a base URL (and a

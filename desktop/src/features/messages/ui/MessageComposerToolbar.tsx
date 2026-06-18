@@ -1,14 +1,25 @@
 import * as React from "react";
 import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion } from "motion/react";
-import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
+import {
+  ALargeSmall,
+  ArrowUp,
+  AtSign,
+  HatGlasses,
+  Paperclip,
+  X,
+} from "lucide-react";
 
-import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { Spinner } from "@/shared/ui/spinner";
+import { cn } from "@/shared/lib/cn";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
-import { FormattingToolbar } from "./FormattingToolbar";
+import {
+  FormattingToolbar,
+  isSpoilerFormattingActive,
+  type SpoilerToggleState,
+  toggleSpoilerFormatting,
+} from "./FormattingToolbar";
 
 /** Spring for enter/exit of button groups — all fire simultaneously. */
 const presenceSpring = {
@@ -31,9 +42,12 @@ export const MessageComposerToolbar = React.memo(
     onEmojiPickerOpenChange,
     onEmojiSelect,
     onFormattingToggle,
+    onLinkButton,
     onOpenMentionPicker,
     onPaperclip,
+    onSpoilerToggle,
     sendDisabled,
+    spoilerActive,
   }: {
     composerDisabled: boolean;
     editor: Editor | null;
@@ -47,10 +61,41 @@ export const MessageComposerToolbar = React.memo(
     onEmojiPickerOpenChange: (open: boolean) => void;
     onEmojiSelect: (emoji: string) => void;
     onFormattingToggle: (pressed: boolean) => void;
+    onLinkButton: () => void;
     onOpenMentionPicker: () => void;
     onPaperclip: () => void;
+    onSpoilerToggle?: (state: SpoilerToggleState) => void;
     sendDisabled: boolean;
+    spoilerActive?: boolean;
   }) {
+    const [spoilerFormattingActive, setSpoilerFormattingActive] =
+      React.useState(() =>
+        editor ? isSpoilerFormattingActive(editor) : false,
+      );
+
+    React.useEffect(() => {
+      if (!editor) {
+        setSpoilerFormattingActive(false);
+        return;
+      }
+
+      const update = () => {
+        setSpoilerFormattingActive(isSpoilerFormattingActive(editor));
+      };
+      update();
+      editor.on("transaction", update);
+      return () => {
+        editor.off("transaction", update);
+      };
+    }, [editor]);
+
+    const isSpoilerActive = spoilerFormattingActive || Boolean(spoilerActive);
+
+    const handleSpoilerClick = React.useCallback(() => {
+      if (!editor) return;
+      onSpoilerToggle?.(toggleSpoilerFormatting(editor));
+    }, [editor, onSpoilerToggle]);
+
     return (
       <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-h-10 min-w-0 flex-1 items-center gap-1 py-1">
@@ -84,26 +129,18 @@ export const MessageComposerToolbar = React.memo(
                 >
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <button
-                        type="button"
+                      <Button
                         aria-label="Toggle formatting"
                         aria-pressed={isFormattingOpen}
                         disabled={composerDisabled}
                         onClick={() => onFormattingToggle(!isFormattingOpen)}
                         onMouseDown={onCaptureSelection}
-                        className={cn(
-                          "inline-flex h-8 min-w-8 items-center justify-center rounded-md px-2 text-sm font-medium transition-colors",
-                          "hover:bg-muted hover:text-foreground",
-                          "focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
-                          "disabled:pointer-events-none disabled:opacity-50",
-                          "[&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
-                          isFormattingOpen
-                            ? "bg-primary text-primary-foreground"
-                            : "bg-transparent text-muted-foreground",
-                        )}
+                        size="icon"
+                        type="button"
+                        variant={isFormattingOpen ? "default" : "ghost"}
                       >
-                        <ALargeSmall className="h-4 w-4" />
-                      </button>
+                        <ALargeSmall />
+                      </Button>
                     </TooltipTrigger>
                     <TooltipContent>Formatting</TooltipContent>
                   </Tooltip>
@@ -125,9 +162,9 @@ export const MessageComposerToolbar = React.memo(
                         size="icon"
                         type="button"
                         variant="ghost"
-                        className="h-7 w-7 shrink-0"
+                        className="shrink-0"
                       >
-                        <X className="h-3.5 w-3.5" />
+                        <X />
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent>Close formatting</TooltipContent>
@@ -144,6 +181,7 @@ export const MessageComposerToolbar = React.memo(
                   <FormattingToolbar
                     editor={editor}
                     disabled={formattingDisabled}
+                    onLinkButton={onLinkButton}
                   />
                 </motion.div>
               </motion.div>
@@ -171,7 +209,7 @@ export const MessageComposerToolbar = React.memo(
                       type="button"
                       variant="ghost"
                     >
-                      <AtSign className="h-4 w-4" />
+                      <AtSign />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Mention someone</TooltipContent>
@@ -187,11 +225,7 @@ export const MessageComposerToolbar = React.memo(
                       type="button"
                       variant="ghost"
                     >
-                      {isUploading ? (
-                        <Spinner className="h-4 w-4" />
-                      ) : (
-                        <Paperclip className="h-4 w-4" />
-                      )}
+                      <Paperclip />
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Attach image</TooltipContent>
@@ -203,6 +237,27 @@ export const MessageComposerToolbar = React.memo(
                   onTriggerMouseDown={onCaptureSelection}
                   open={isEmojiPickerOpen}
                 />
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      aria-label="Spoiler"
+                      aria-pressed={isSpoilerActive}
+                      className={cn(
+                        isSpoilerActive &&
+                          "bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground",
+                      )}
+                      disabled={composerDisabled || !editor || isUploading}
+                      onClick={handleSpoilerClick}
+                      onMouseDown={onCaptureSelection}
+                      size="icon"
+                      type="button"
+                      variant={isSpoilerActive ? "default" : "ghost"}
+                    >
+                      <HatGlasses />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Spoiler</TooltipContent>
+                </Tooltip>
                 <motion.div
                   initial={{ x: -8, opacity: 0 }}
                   animate={{ x: 0, opacity: 1 }}
@@ -211,26 +266,18 @@ export const MessageComposerToolbar = React.memo(
                 >
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <button
-                        type="button"
+                      <Button
                         aria-label="Toggle formatting"
                         aria-pressed={isFormattingOpen}
                         disabled={composerDisabled}
                         onClick={() => onFormattingToggle(!isFormattingOpen)}
                         onMouseDown={onCaptureSelection}
-                        className={cn(
-                          "inline-flex h-8 min-w-8 items-center justify-center rounded-md px-2 text-sm font-medium transition-colors",
-                          "hover:bg-muted hover:text-foreground",
-                          "focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
-                          "disabled:pointer-events-none disabled:opacity-50",
-                          "[&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
-                          isFormattingOpen
-                            ? "bg-primary text-primary-foreground"
-                            : "bg-transparent text-muted-foreground",
-                        )}
+                        size="icon"
+                        type="button"
+                        variant={isFormattingOpen ? "default" : "ghost"}
                       >
-                        <ALargeSmall className="h-4 w-4" />
-                      </button>
+                        <ALargeSmall />
+                      </Button>
                     </TooltipTrigger>
                     <TooltipContent>Formatting</TooltipContent>
                   </Tooltip>
@@ -256,7 +303,7 @@ export const MessageComposerToolbar = React.memo(
                 className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"
               />
             ) : (
-              <ArrowUp aria-hidden className="h-4 w-4" />
+              <ArrowUp aria-hidden />
             )}
           </Button>
         </div>

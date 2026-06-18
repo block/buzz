@@ -10,11 +10,11 @@ import 'package:http/testing.dart' as http_testing;
 import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
-import 'package:sprout_mobile/features/channels/channel.dart';
-import 'package:sprout_mobile/features/channels/channel_management_provider.dart';
-import 'package:sprout_mobile/features/channels/compose_bar.dart';
-import 'package:sprout_mobile/shared/relay/relay.dart';
-import 'package:sprout_mobile/shared/theme/theme.dart';
+import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/theme/theme.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -96,7 +96,7 @@ final _apngBytes = Uint8List.fromList([
   0x00,
 ]);
 
-const _mediaUploadPlatformChannel = MethodChannel('sprout/media_upload');
+const _mediaUploadPlatformChannel = MethodChannel('buzz/media_upload');
 
 void _setMockMediaUploadPlatformHandler(
   Future<Object?> Function(MethodCall call)? handler,

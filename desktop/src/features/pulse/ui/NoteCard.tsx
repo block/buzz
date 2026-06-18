@@ -14,6 +14,7 @@ import { useNoteByIdQuery } from "@/features/pulse/hooks";
 import { getReplyParent, noteSnippet } from "@/features/pulse/lib/replies";
 import type { UserNote } from "@/shared/api/socialTypes";
 import type { ChannelMember, UserProfileSummary } from "@/shared/api/types";
+import { AnimatedCount } from "@/shared/ui/AnimatedCount";
 import { Markdown } from "@/shared/ui/markdown";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -82,7 +83,7 @@ function ReplyParentContext({
             >
               <UserAvatar
                 avatarUrl={parentAvatarUrl}
-                className="!h-4 !w-4 shrink-0 rounded-md"
+                className="!h-4 !w-4 shrink-0"
                 displayName={parentDisplayName ?? "Parent note author"}
               />
             </button>
@@ -149,9 +150,7 @@ export function NoteCard({
   const activeActionClass = "text-primary";
   const countPlaceholder = <span aria-hidden className="w-2.5" />;
   const reactionCountLabel =
-    reactionCount > 0 ? (
-      <span className="tabular-nums">{reactionCount}</span>
-    ) : null;
+    reactionCount > 0 ? <AnimatedCount value={reactionCount} /> : null;
   const currentUserAvatarUrl = currentUserProfile?.avatarUrl ?? null;
   const replyParentId = getReplyParent(note);
 
@@ -172,7 +171,7 @@ export function NoteCard({
             displayName={displayName}
           />
           {isAgent ? (
-            <Bot className="absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full bg-background p-0.5 text-muted-foreground" />
+            <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
           ) : null}
         </button>
       </UserProfilePopover>
@@ -192,7 +191,7 @@ export function NoteCard({
             </button>
           </UserProfilePopover>
           {isAgent ? (
-            <span className="inline-flex h-4 items-center rounded bg-muted px-1 text-[10px] font-medium text-muted-foreground">
+            <span className="inline-flex h-4 items-center rounded bg-muted px-1 text-2xs font-medium text-muted-foreground">
               bot
             </span>
           ) : null}
@@ -214,7 +213,7 @@ export function NoteCard({
         ) : null}
 
         <div className="mt-0.5 pb-3 text-sm text-foreground">
-          <Markdown content={note.content} tight />
+          <Markdown content={note.content} />
         </div>
 
         <div className="flex flex-wrap items-center gap-5 text-xs font-medium">
@@ -224,7 +223,7 @@ export function NoteCard({
                 <button
                   aria-label={isUpvoted ? "Unlike" : "Like"}
                   aria-pressed={isUpvoted}
-                  className={`${actionButtonClass} ${isUpvoted ? activeActionClass : ""} disabled:cursor-not-allowed disabled:opacity-45`}
+                  className={`${actionButtonClass} ${isUpvoted ? activeActionClass : ""} disabled:opacity-45`}
                   disabled={isUpvotePending}
                   onClick={() => {
                     if (!isUpvotePending) {

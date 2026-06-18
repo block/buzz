@@ -11,11 +11,11 @@ export function buildCustomEmojiCategory(customEmoji: CustomEmoji[]) {
   if (customEmoji.length === 0) return undefined;
   return [
     {
-      id: "sprout-custom",
+      id: "buzz-custom",
       name: "Custom",
       emojis: customEmoji.map((e) => ({
         id: e.shortcode,
-        name: e.shortcode,
+        name: `:${e.shortcode}:`,
         keywords: [e.shortcode],
         skins: [{ src: rewriteRelayUrl(e.url) }],
       })),

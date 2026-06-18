@@ -2,7 +2,10 @@ import {
   CopyPlus,
   Download,
   Ellipsis,
+  FolderOpen,
+  FolderSync,
   Info,
+  Link,
   Pencil,
   Rocket,
   Trash2,
@@ -41,6 +44,9 @@ type TeamsSectionProps = {
   onDelete: (team: AgentTeam) => void;
   onAddToChannel: (team: AgentTeam) => void;
   onImportFile: (fileBytes: number[], fileName: string) => void;
+  onInstallFromDirectory: () => void;
+  onSync: (team: AgentTeam) => void;
+  onRevealInFinder: (team: AgentTeam) => void;
 };
 
 export function TeamsSection({
@@ -56,6 +62,9 @@ export function TeamsSection({
   onDelete,
   onAddToChannel,
   onImportFile,
+  onInstallFromDirectory,
+  onSync,
+  onRevealInFinder,
 }: TeamsSectionProps) {
   const {
     fileInputRef,
@@ -93,11 +102,21 @@ export function TeamsSection({
           ref={fileInputRef}
           type="file"
         />
-        <CreateNewButton
-          ariaLabel="Create team"
-          label="Team"
-          onClick={onCreate}
-        />
+        <div className="flex items-center gap-2">
+          <button
+            className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            onClick={onInstallFromDirectory}
+            type="button"
+          >
+            <FolderOpen className="h-4 w-4" />
+            Install from directory
+          </button>
+          <CreateNewButton
+            ariaLabel="Create team"
+            label="Team"
+            onClick={onCreate}
+          />
+        </div>
       </div>
 
       {isLoading ? (
@@ -138,6 +157,25 @@ export function TeamsSection({
                       <p className="truncate text-sm font-semibold tracking-tight">
                         {team.name}
                       </p>
+                      {team.isSymlink ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground">
+                              <Link className="h-4 w-4" />
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="bottom" className="max-w-xs">
+                            <p>
+                              Linked from {team.symlinkTarget ?? team.sourceDir}
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      ) : null}
+                      {team.version ? (
+                        <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-2xs font-medium text-muted-foreground">
+                          v{team.version}
+                        </span>
+                      ) : null}
                       {team.description ? (
                         <Tooltip>
                           <TooltipTrigger asChild>
@@ -146,7 +184,7 @@ export function TeamsSection({
                               className="flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground transition-colors hover:text-foreground"
                               type="button"
                             >
-                              <Info className="h-3.5 w-3.5" />
+                              <Info className="h-4 w-4" />
                             </button>
                           </TooltipTrigger>
                           <TooltipContent side="bottom" className="max-w-xs">
@@ -161,13 +199,13 @@ export function TeamsSection({
                         {visible.map((persona) => (
                           <ProfileAvatar
                             avatarUrl={persona.avatarUrl}
-                            className="h-6 w-6 rounded-full border-2 border-card text-[10px]"
+                            className="h-6 w-6 border-2 border-card text-2xs"
                             key={persona.id}
                             label={persona.displayName}
                           />
                         ))}
                         {overflow > 0 ? (
-                          <span className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-card bg-muted text-[10px] font-medium text-muted-foreground">
+                          <span className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-card bg-muted text-2xs font-medium text-muted-foreground">
                             +{overflow}
                           </span>
                         ) : null}
@@ -221,6 +259,24 @@ export function TeamsSection({
                         <Download className="h-4 w-4" />
                         Export
                       </DropdownMenuItem>
+                      {team.sourceDir ? (
+                        <>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            disabled={isPending}
+                            onClick={() => onSync(team)}
+                          >
+                            <FolderSync className="h-4 w-4" />
+                            Sync from directory
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onClick={() => onRevealInFinder(team)}
+                          >
+                            <FolderOpen className="h-4 w-4" />
+                            Reveal in Finder
+                          </DropdownMenuItem>
+                        </>
+                      ) : null}
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
                         className="text-destructive focus:text-destructive"

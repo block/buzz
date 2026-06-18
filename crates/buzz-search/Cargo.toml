@@ -1,0 +1,20 @@
+[package]
+name = "buzz-search"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typesense-backed full-text search for Buzz"
+
+[dependencies]
+buzz-core = { workspace = true }
+reqwest     = { workspace = true }
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+uuid        = { workspace = true }
+chrono      = { workspace = true }
+tracing     = { workspace = true }
+thiserror   = { workspace = true }
+nostr       = { workspace = true }

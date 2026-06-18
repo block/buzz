@@ -5,13 +5,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "All-in-one Sprout ACP harness, agent, and developer MCP"
+description = "All-in-one Buzz ACP harness, agent, and developer MCP"
 
 [[bin]]
 name = "sprig"
 path = "src/main.rs"
 
 [dependencies]
-sprout-acp = { path = "../sprout-acp" }
-sprout-agent = { path = "../sprout-agent" }
-sprout-dev-mcp = { path = "../sprout-dev-mcp" }
+buzz-acp = { path = "../buzz-acp" }
+buzz-agent = { path = "../buzz-agent" }
+buzz-dev-mcp = { path = "../buzz-dev-mcp" }

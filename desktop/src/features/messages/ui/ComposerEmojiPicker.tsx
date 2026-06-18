@@ -35,7 +35,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
               type="button"
               variant="ghost"
             >
-              <SmilePlus className="h-4 w-4" />
+              <SmilePlus />
             </Button>
           </PopoverTrigger>
         </TooltipTrigger>

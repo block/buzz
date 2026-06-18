@@ -49,12 +49,12 @@ function SelectionChipButton({
         <ProfileAvatar
           avatarUrl={avatarUrl}
           className={cn(
-            "h-6 w-6 rounded-full text-[10px]",
+            "h-6 w-6 text-2xs",
             selected
               ? "bg-primary/20 text-primary ring-1 ring-primary/20"
               : "bg-background/80 text-muted-foreground ring-1 ring-border/70",
           )}
-          iconClassName="h-3.5 w-3.5"
+          iconClassName="h-4 w-4"
           label={label}
         />
       ) : null}
@@ -63,8 +63,34 @@ function SelectionChipButton({
   );
 }
 
+function RuntimeBadge({
+  label,
+  isOverridden,
+}: {
+  label: string;
+  isOverridden: boolean;
+}) {
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none",
+        isOverridden
+          ? "bg-warning/15 text-warning"
+          : "bg-muted/60 text-muted-foreground",
+      )}
+    >
+      {label}
+    </span>
+  );
+}
+
 type AddChannelBotPersonasSectionProps = {
   canToggleSelections: boolean;
+  /** Map of personaId → effective runtime label for badge display */
+  effectiveRuntimes?: ReadonlyMap<
+    string,
+    { label: string; isOverridden: boolean }
+  >;
   inChannelPersonaIds?: ReadonlySet<string>;
   includeGeneric: boolean;
   isLoading: boolean;
@@ -78,6 +104,7 @@ type AddChannelBotPersonasSectionProps = {
 
 export function AddChannelBotPersonasSection({
   canToggleSelections,
+  effectiveRuntimes,
   inChannelPersonaIds,
   includeGeneric,
   isLoading,
@@ -128,6 +155,7 @@ export function AddChannelBotPersonasSection({
             {personas.map((persona) => {
               const isSelected = selectedPersonaIds.includes(persona.id);
               const isInChannel = inChannelPersonaIds?.has(persona.id) ?? false;
+              const runtimeBadge = effectiveRuntimes?.get(persona.id);
               return (
                 <Tooltip key={persona.id}>
                   <TooltipTrigger asChild>
@@ -140,16 +168,19 @@ export function AddChannelBotPersonasSection({
                         selected={isSelected}
                       >
                         {persona.displayName}
+                        {runtimeBadge ? (
+                          <RuntimeBadge {...runtimeBadge} />
+                        ) : null}
                         {isInChannel ? (
                           <span
                             className={cn(
-                              "inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-medium leading-none",
+                              "inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none",
                               isSelected
                                 ? "bg-primary/15 text-primary"
                                 : "bg-muted/60 text-muted-foreground",
                             )}
                           >
-                            <Check className="h-2.5 w-2.5" />
+                            <Check className="h-4 w-4" />
                             In channel
                           </span>
                         ) : null}
@@ -161,18 +192,18 @@ export function AddChannelBotPersonasSection({
                       <div className="flex items-center gap-2">
                         <ProfileAvatar
                           avatarUrl={persona.avatarUrl}
-                          className="h-7 w-7 rounded-full text-[10px] bg-primary-foreground/20 text-primary-foreground"
-                          iconClassName="h-3.5 w-3.5"
+                          className="h-7 w-7 text-2xs bg-primary-foreground/20 text-primary-foreground"
+                          iconClassName="h-4 w-4"
                           label={persona.displayName}
                         />
                         <p className="font-medium">{persona.displayName}</p>
                       </div>
                       {isInChannel ? (
-                        <p className="text-[11px] font-medium text-emerald-300">
+                        <p className="text-2xs font-medium text-emerald-300">
                           ✓ Already in this channel
                         </p>
                       ) : null}
-                      <p className="text-[11px] text-primary-foreground">
+                      <p className="text-2xs text-primary-foreground">
                         {promptPreview(persona.systemPrompt)}
                       </p>
                     </div>

@@ -1,5 +1,6 @@
 import {
   Activity,
+  Bot,
   Ellipsis,
   Pencil,
   Play,
@@ -21,6 +22,7 @@ import type {
   ManagedAgent,
   PresenceStatus,
 } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -31,7 +33,6 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
-import { Badge } from "@/shared/ui/badge";
 
 type MembersSidebarMemberCardProps = {
   canChangeRole: boolean;
@@ -46,18 +47,26 @@ type MembersSidebarMemberCardProps = {
   onChangeRole: (member: ChannelMember, role: string) => void;
   onEditRespondTo?: (agent: ManagedAgent) => void;
   onManagedAgentAction: (agent: ManagedAgent) => void;
+  onOpenProfile?: (pubkey: string) => void;
   onRemoveMember: (member: ChannelMember) => void;
   onViewActivity?: (pubkey: string) => void;
   presenceStatus?: PresenceStatus | null;
   profileAvatarUrl?: string | null;
 };
 
+const MEMBER_ROW_INSET_DIVIDER_CLASS =
+  "after:pointer-events-none after:absolute after:bottom-0 after:left-[3.75rem] after:right-0 after:h-px after:bg-border/60 after:content-[''] last:after:hidden";
+
 function formatRoleLabel(member: ChannelMember, memberIsBot: boolean) {
   if (memberIsBot) {
-    return "Bot";
+    return "agent";
   }
 
-  return `${member.role[0]?.toUpperCase() ?? ""}${member.role.slice(1)}`;
+  if (member.role === "owner" || member.role === "admin") {
+    return member.role;
+  }
+
+  return null;
 }
 
 function formatRespondToLabel(agent: ManagedAgent) {
@@ -97,6 +106,7 @@ export function MembersSidebarMemberCard({
   onChangeRole,
   onEditRespondTo,
   onManagedAgentAction,
+  onOpenProfile,
   onRemoveMember,
   onViewActivity,
   presenceStatus,
@@ -112,60 +122,94 @@ export function MembersSidebarMemberCard({
     ? Boolean(managedAgent) || canRemoveMember || canViewActivity
     : canRemoveMember || canChangeRole;
 
-  return (
-    <div
-      className="group flex items-center justify-between gap-3 rounded-lg px-3 py-2 transition-colors hover:bg-muted/40"
-      data-testid={`sidebar-member-${member.pubkey}`}
-    >
-      <div className="flex min-w-0 items-center gap-3">
-        <div className="relative shrink-0">
-          <ProfileAvatar
-            avatarUrl={profileAvatarUrl ?? null}
-            className="h-9 w-9 rounded-full text-[11px] shadow-none"
-            iconClassName="h-4 w-4"
-            label={memberAvatarLabel}
-          />
-          {presenceStatus ? (
-            <span
-              className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-background"
-              data-testid={`sidebar-member-presence-${member.pubkey}`}
-            >
-              <PresenceDot className="h-2 w-2" status={presenceStatus} />
+  const memberIdentity = (
+    <div className="pointer-events-none relative z-10 flex min-w-0 flex-1 items-center gap-3">
+      <div className="relative shrink-0">
+        <ProfileAvatar
+          avatarUrl={profileAvatarUrl ?? null}
+          className="h-8 w-8 text-xs shadow-none"
+          iconClassName="h-4 w-4"
+          label={memberAvatarLabel}
+        />
+        {presenceStatus ? (
+          <span
+            className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-background"
+            data-testid={`sidebar-member-presence-${member.pubkey}`}
+          >
+            <PresenceDot className="h-2 w-2" status={presenceStatus} />
+          </span>
+        ) : null}
+      </div>
+      <div className="min-w-0 flex-1">
+        {memberIsBot ? (
+          <div className="relative min-w-0">
+            <div className="flex min-w-0 items-center gap-2 transition-opacity duration-150 ease-out group-hover/member:opacity-0 group-focus-within/member:opacity-0">
+              <span className="truncate text-sm font-medium tracking-tight">
+                {memberLabel}
+              </span>
+              <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+                <Bot aria-hidden="true" className="h-4 w-4" />
+                {roleLabel}
+              </span>
+            </div>
+            <span className="absolute inset-0 flex items-center opacity-0 transition-opacity duration-150 ease-out group-hover/member:opacity-100 group-focus-within/member:opacity-100">
+              <span className="truncate font-mono text-sm text-muted-foreground">
+                {truncatePubkey(member.pubkey)}
+              </span>
             </span>
-          ) : null}
-        </div>
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
-            <p className="truncate text-sm font-medium leading-5">
+          </div>
+        ) : (
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="truncate text-sm font-medium tracking-tight">
               {memberLabel}
-            </p>
-            <Badge className="shrink-0" variant="secondary">
-              {roleLabel}
-            </Badge>
-            {managedAgent ? (
-              <>
-                <Badge
-                  className="shrink-0"
-                  data-testid={`sidebar-managed-agent-status-${member.pubkey}`}
-                  variant="secondary"
-                >
-                  {formatManagedAgentStatus(managedAgent)}
-                </Badge>
-                <Badge
-                  className="shrink-0"
-                  data-testid={`sidebar-managed-agent-respond-to-${member.pubkey}`}
-                  variant="outline"
-                >
-                  {formatRespondToLabel(managedAgent)}
-                </Badge>
-              </>
+            </span>
+            {roleLabel ? (
+              <span className="inline-flex shrink-0 items-center text-xs text-muted-foreground">
+                {roleLabel}
+              </span>
             ) : null}
           </div>
-          <p className="truncate font-mono text-[10px] text-muted-foreground/50">
-            {truncatePubkey(member.pubkey)}
-          </p>
-        </div>
+        )}
+        {managedAgent ? (
+          <span
+            className="sr-only"
+            data-testid={`sidebar-managed-agent-status-${member.pubkey}`}
+          >
+            {formatManagedAgentStatus(managedAgent)}
+          </span>
+        ) : null}
+        {managedAgent ? (
+          <span
+            className="sr-only"
+            data-testid={`sidebar-managed-agent-respond-to-${member.pubkey}`}
+          >
+            {formatRespondToLabel(managedAgent)}
+          </span>
+        ) : null}
       </div>
+    </div>
+  );
+
+  return (
+    <div
+      className={cn(
+        "group/member relative isolate flex min-h-14 items-center gap-3 px-4 py-3.5 text-left transition-colors duration-150 ease-out hover:bg-muted/40 focus-within:bg-muted/40",
+        MEMBER_ROW_INSET_DIVIDER_CLASS,
+      )}
+      data-testid={`sidebar-member-${member.pubkey}`}
+    >
+      {onOpenProfile ? (
+        <button
+          aria-label={`Open profile for ${memberLabel}`}
+          className="absolute inset-0 z-0 cursor-pointer focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+          data-testid={`sidebar-member-open-profile-${member.pubkey}`}
+          onClick={() => onOpenProfile(member.pubkey)}
+          type="button"
+        />
+      ) : (
+        <span aria-hidden="true" className="absolute inset-0 z-0" />
+      )}
+      {memberIdentity}
       {hasActions ? (
         <MemberActionsMenu
           canChangeRole={canChangeRole}
@@ -222,7 +266,7 @@ function MemberActionsMenu({
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
         <button
-          className="invisible flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground group-hover:visible hover:bg-muted hover:text-foreground data-[state=open]:visible"
+          className="invisible relative z-20 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground group-hover/member:visible hover:bg-muted hover:text-foreground data-[state=open]:visible"
           data-testid={`sidebar-member-menu-${member.pubkey}`}
           type="button"
         >

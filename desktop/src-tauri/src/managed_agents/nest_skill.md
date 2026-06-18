@@ -1,20 +1,20 @@
 ---
-name: sprout-cli
+name: buzz-cli
 description: >
-  Sprout CLI for relay operations: messaging, channels, DMs, users, workflows,
+  Buzz CLI for relay operations: messaging, channels, DMs, users, workflows,
   feed, reactions, canvas, social, repos, uploads, and agent memory.
 version: 1
 ---
 
-# Sprout CLI Skill
+# Buzz CLI Skill
 
 ## Environment
 
-`SPROUT_PRIVATE_KEY` is set by the harness at runtime or by the developer's environment. If missing, tell the user to set it (hex or nsec format). Never read or echo the value.
+`BUZZ_PRIVATE_KEY` is set by the harness at runtime or by the developer's environment. If missing, tell the user to set it (hex or nsec format). Never read or echo the value.
 
-`SPROUT_RELAY_URL` defaults to `http://localhost:3000`. In development, the user may need to set this to a staging or production relay URL.
+`BUZZ_RELAY_URL` defaults to `http://localhost:3000`. In development, the user may need to set this to a staging or production relay URL.
 
-Run `sprout --help` and `sprout <command> <subcommand> --help` to discover all flags, arguments, and usage. This skill documents only what `--help` cannot tell you.
+Run the bundled CLI with `--help` and `<command> <subcommand> --help` to discover all flags, arguments, and usage. This skill documents only what `--help` cannot tell you.
 
 ## Output Contracts
 
@@ -45,13 +45,50 @@ Output varies by command group — `--help` shows flags but not response shapes.
 `--format compact` is a global flag — position it before the subcommand:
 
 ```bash
-sprout --format compact channels list          # [{channel_id, name}]
-sprout --format compact messages get --channel <UUID>  # [{id, content, created_at}]
-sprout --format compact users get              # [{pubkey, display_name}]
-sprout --format compact feed get               # [{id, content, created_at}]
+buzz --format compact channels list          # [{channel_id, name}]
+buzz --format compact messages get --channel <UUID>  # [{id, content, created_at}]
+buzz --format compact users get              # [{pubkey, display_name}]
+buzz --format compact feed get               # [{id, content, created_at}]
 ```
 
 Write commands are unaffected. `--format json` (default) returns full fields.
+
+## Communication Patterns
+
+**Mentions that notify:** Use `@Name` directly in message content — the CLI auto-resolves channel members by name and adds the required p-tags. No `--mention` flag exists or is needed. `nostr:npub1…` inline references are also auto-resolved to p-tags without needing a flag.
+
+```bash
+# ✅ Correct — notification delivered automatically
+buzz messages send --channel <UUID> --content "@Alice check this"
+
+# Multiple mentions — same pattern
+buzz messages send --channel <UUID> --content "@Alice @Bob review please"
+```
+
+## DM Management
+
+`dms hide --channel <UUID>` hides a DM from the agent's DM list. Restore by re-opening with `dms open --pubkey <hex>`.
+
+## Channel Policies
+
+`channels set-add-policy --policy <value>` controls who can add you to channels:
+- `anyone` (default) — any authenticated user can add you to open channels
+- `owner_only` — only your provisioned owner can add you
+- `nobody` — no one can add you; self-join via `channels join`
+
+## Workflow Inputs
+
+`workflows trigger --workflow <UUID> --inputs '<json>'` passes input variables as the trigger event's content. Omit `--inputs` for parameterless workflows.
+
+## Feed Filtering
+
+`feed get --types <comma-separated>` filters by category. Valid types: `mentions`, `needs_action`, `activity`, `agent_activity`. Omit for all categories.
+
+## Pagination
+
+`messages thread --depth-limit <n>` caps reply nesting depth (relay extension hint — may be ignored).
+
+`social notes --before-id <hex64>` enables composite cursor pagination. Use with `--before <timestamp>` to avoid skipping same-second events.
 
 ## Gotchas
 
@@ -61,7 +98,7 @@ Write commands are unaffected. `--format json` (default) returns full fields.
 4. **`dms open` returns `dm_id`** — use this value as `--channel` for subsequent `messages send/get` commands on that DM.
 5. **Content max 65,536 bytes** (exit 1 if exceeded). Diffs auto-truncate at 61,440 bytes at a hunk boundary.
 6. **`users get` always returns an array** — even for a single pubkey lookup. Never expect a bare object.
-7. **All `mem` subcommands accept `--owner <hex-pubkey>`** — for querying or writing memories owned by a different pubkey in multi-agent scenarios. Defaults to the owner from `SPROUT_AUTH_TAG`.
+7. **All `mem` subcommands accept `--owner <hex-pubkey>`** — for querying or writing memories owned by a different pubkey in multi-agent scenarios. Defaults to the owner from `BUZZ_AUTH_TAG`.
 8. **`mem rm` cannot delete `core`** — use `mem set core ''` instead.
 
 ## Forum Posts
@@ -88,9 +125,9 @@ Message content is rendered as GitHub-flavored Markdown on both desktop and mobi
 For safe concurrent writes, use hash-based conflict detection:
 
 ```bash
-HASH=$(sprout mem hash <slug>)                                    # 1. get current SHA-256
+HASH=$(buzz mem hash <slug>)                                    # 1. get current SHA-256
 # ... build unified diff ...
-sprout mem patch <slug> --base-hash "$HASH" --patch-file diff.patch  # 2. apply with check
+buzz mem patch <slug> --base-hash "$HASH" --patch-file diff.patch  # 2. apply with check
 ```
 
 Exit code 5 if the value changed since the hash was read (another agent wrote first). Retry by re-reading, re-diffing, and re-patching.
@@ -101,9 +138,9 @@ Flags: `--dry-run` to preview without writing, `--no-base-hash` to skip conflict
 
 The relay has no push or webhook support. Poll with a `--since` cursor:
 
-1. `sprout messages get --channel <UUID> --limit 50` — note the maximum `created_at` from results
+1. `buzz messages get --channel <UUID> --limit 50` — note the maximum `created_at` from results
 2. Sleep 10-30 seconds
-3. `sprout messages get --channel <UUID> --since <max_created_at> --limit 50`
+3. `buzz messages get --channel <UUID> --since <max_created_at> --limit 50`
 4. Repeat, advancing `--since` each iteration
 
 Minimum interval: 5 seconds (relay rate limiting). Use 10s for low-latency, 30s for background monitoring. `feed get` always returns newest-first regardless of `--since`.

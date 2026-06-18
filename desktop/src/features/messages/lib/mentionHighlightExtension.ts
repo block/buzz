@@ -5,7 +5,7 @@ import { Decoration, DecorationSet } from "@tiptap/pm/view";
 export const mentionHighlightKey = new PluginKey("mentionHighlight");
 
 /**
- * TipTap extension that applies inline `mention-highlight` decorations
+ * TipTap extension that applies inline `mention-chip` decorations
  * to `@Name` and `#channel-name` patterns in the document.
  *
  * Accepts `names` (display names) and `channelNames` storage options.
@@ -17,6 +17,7 @@ export const MentionHighlightExtension = Extension.create({
   addStorage() {
     return {
       names: [] as string[],
+      agentNames: [] as string[],
       channelNames: [] as string[],
     };
   },
@@ -32,6 +33,7 @@ export const MentionHighlightExtension = Extension.create({
             return buildDecorations(
               state.doc,
               extension.storage.names,
+              extension.storage.agentNames,
               extension.storage.channelNames,
             );
           },
@@ -41,6 +43,7 @@ export const MentionHighlightExtension = Extension.create({
               return buildDecorations(
                 tr.doc,
                 extension.storage.names,
+                extension.storage.agentNames,
                 extension.storage.channelNames,
               );
             }
@@ -58,6 +61,7 @@ export const MentionHighlightExtension = Extension.create({
               return buildDecorations(
                 tr.doc,
                 extension.storage.names,
+                extension.storage.agentNames,
                 extension.storage.channelNames,
               );
             }
@@ -68,6 +72,7 @@ export const MentionHighlightExtension = Extension.create({
               return buildDecorations(
                 tr.doc,
                 extension.storage.names,
+                extension.storage.agentNames,
                 extension.storage.channelNames,
               );
             }
@@ -230,30 +235,82 @@ function editIntersectsDecoration(
 function buildDecorations(
   doc: Parameters<typeof DecorationSet.create>[0],
   names: string[],
+  agentNames: string[],
   channelNames: string[],
 ): DecorationSet {
-  if (names.length === 0 && channelNames.length === 0)
+  if (
+    names.length === 0 &&
+    agentNames.length === 0 &&
+    channelNames.length === 0
+  )
     return DecorationSet.empty;
 
   const decorations: Decoration[] = [];
-  const patterns = buildHighlightPatterns(names, channelNames);
+  const agentNameSet = new Set(
+    agentNames.map((name) => name.trim().toLowerCase()).filter(Boolean),
+  );
+  const nonAgentNames = names.filter(
+    (name) => !agentNameSet.has(name.trim().toLowerCase()),
+  );
+  const mentionPatterns = buildHighlightPatterns(nonAgentNames, []);
+  const agentMentionPatterns = buildHighlightPatterns(agentNames, []);
+  const channelPatterns = buildHighlightPatterns([], channelNames);
 
   doc.descendants((node, pos) => {
     if (!node.isText || !node.text) return;
 
-    for (const pattern of patterns) {
-      pattern.lastIndex = 0;
-      let match: RegExpExecArray | null = pattern.exec(node.text);
-      while (match !== null) {
-        const from = pos + match.index;
-        const to = from + match[0].length;
-        decorations.push(
-          Decoration.inline(from, to, { class: "mention-highlight" }),
-        );
-        match = pattern.exec(node.text);
-      }
-    }
+    addMatchesForPatterns(
+      decorations,
+      node.text,
+      pos,
+      mentionPatterns,
+      "mention-chip",
+    );
+    addMatchesForPatterns(
+      decorations,
+      node.text,
+      pos,
+      agentMentionPatterns,
+      "mention-chip agent-mention-highlight",
+      { hideMentionPrefix: true },
+    );
+    addMatchesForPatterns(
+      decorations,
+      node.text,
+      pos,
+      channelPatterns,
+      "mention-chip",
+    );
   });
 
   return DecorationSet.create(doc, decorations);
+}
+
+function addMatchesForPatterns(
+  decorations: Decoration[],
+  text: string,
+  position: number,
+  patterns: RegExp[],
+  className: string,
+  options?: { hideMentionPrefix?: boolean },
+) {
+  for (const pattern of patterns) {
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null = pattern.exec(text);
+    while (match !== null) {
+      const from = position + match.index;
+      const to = from + match[0].length;
+      if (options?.hideMentionPrefix && match[0].startsWith("@")) {
+        decorations.push(
+          Decoration.inline(from, from + 1, {
+            class: "agent-mention-at-hidden",
+          }),
+        );
+        decorations.push(Decoration.inline(from + 1, to, { class: className }));
+      } else {
+        decorations.push(Decoration.inline(from, to, { class: className }));
+      }
+      match = pattern.exec(text);
+    }
+  }
 }

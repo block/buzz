@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sprout_mobile/shared/relay/nostr_models.dart';
+import 'package:buzz/shared/relay/nostr_models.dart';
 
 void main() {
   test('NostrFilter serializes and preserves authors', () {

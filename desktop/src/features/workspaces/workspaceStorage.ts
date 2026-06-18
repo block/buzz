@@ -1,7 +1,7 @@
 import type { Workspace } from "./types";
 
-const WORKSPACES_KEY = "sprout-workspaces";
-const ACTIVE_WORKSPACE_KEY = "sprout-active-workspace-id";
+const WORKSPACES_KEY = "buzz-workspaces";
+const ACTIVE_WORKSPACE_KEY = "buzz-active-workspace-id";
 
 export function loadWorkspaces(): Workspace[] {
   try {
@@ -41,6 +41,11 @@ export function saveWorkspaces(workspaces: Workspace[]): void {
   localStorage.setItem(WORKSPACES_KEY, JSON.stringify(workspaces));
 }
 
+export function clearWorkspaceStorage(): void {
+  localStorage.removeItem(WORKSPACES_KEY);
+  localStorage.removeItem(ACTIVE_WORKSPACE_KEY);
+}
+
 export function loadActiveWorkspaceId(): string | null {
   return localStorage.getItem(ACTIVE_WORKSPACE_KEY);
 }
@@ -66,9 +71,9 @@ export function deriveWorkspaceName(relayUrl: string): string {
       return "Local Dev";
     }
     const parts = host.split(".");
-    // Detect staging environments (e.g. sprout-oss.stage.blox.sqprod.co)
+    // Detect staging environments (e.g. buzz-oss.stage.blox.sqprod.co)
     if (parts.some((p) => p === "stage" || p === "staging")) {
-      return "Sprout (staging)";
+      return "Buzz (staging)";
     }
     // Use the first subdomain segment or the domain itself
     if (parts.length >= 2) {
@@ -83,11 +88,13 @@ export function deriveWorkspaceName(relayUrl: string): string {
 export function initFirstWorkspace(
   relayUrl: string,
   pubkey: string,
+  name?: string,
 ): Workspace {
   const normalizedUrl = normalizeRelayUrl(relayUrl);
+  const trimmedName = name?.trim();
   const workspace: Workspace = {
     id: crypto.randomUUID(),
-    name: deriveWorkspaceName(normalizedUrl),
+    name: trimmedName || deriveWorkspaceName(normalizedUrl),
     relayUrl: normalizedUrl,
     pubkey,
     addedAt: new Date().toISOString(),

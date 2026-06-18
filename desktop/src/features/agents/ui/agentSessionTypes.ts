@@ -60,7 +60,7 @@ export type TranscriptItem =
       type: "tool";
       title: string;
       toolName: string;
-      sproutToolName: string | null;
+      buzzToolName: string | null;
       status: ToolStatus;
       args: Record<string, unknown>;
       result: string;
@@ -76,7 +76,7 @@ export type PromptSection = {
   body: string;
 };
 
-export type SproutToolInfo = {
+export type BuzzToolInfo = {
   icon: LucideIcon;
   label: string;
   tone: "read" | "write" | "admin";

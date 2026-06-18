@@ -1,0 +1,35 @@
+suite: quickstart guards
+# Quickstart autogenerates MinIO/Typesense creds in the chart-managed Secret,
+# so it is mutually exclusive with secrets.existingSecret. Isolated single-
+# template suites so the fail-guard is the only document under assertion.
+tests:
+  - it: minio.enabled is incompatible with existingSecret
+    templates:
+      - templates/quickstart-minio.yaml
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      postgresql.enabled: true
+      typesense.url: http://ts:8108
+      typesense.apiKey: k
+      minio.enabled: true
+      secrets.existingSecret: "buzz-secrets"
+    asserts:
+      - failedTemplate:
+          errorPattern: "incompatible with secrets.existingSecret"
+
+  - it: typesense.enabled is incompatible with existingSecret
+    templates:
+      - templates/quickstart-typesense.yaml
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      postgresql.enabled: true
+      s3.endpoint: http://minio:9000
+      s3.accessKey: a
+      s3.secretKey: s
+      typesense.enabled: true
+      secrets.existingSecret: "buzz-secrets"
+    asserts:
+      - failedTemplate:
+          errorPattern: "incompatible with secrets.existingSecret"

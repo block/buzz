@@ -12,7 +12,7 @@ import { resolve } from "node:path";
 // 2. bundle.createUpdaterArtifacts = true so Tauri produces the .tar.gz
 //    archive and .sig signature during the build.
 // 3. plugins.updater with the public key and endpoint from env vars.
-//    Both SPROUT_UPDATER_PUBLIC_KEY and SPROUT_UPDATER_ENDPOINT are required -
+//    Both BUZZ_UPDATER_PUBLIC_KEY and BUZZ_UPDATER_ENDPOINT are required -
 //    the script fails if either is missing (OSS builds always ship with updater).
 //
 // Apple code signing and notarization happen post-build via
@@ -24,12 +24,12 @@ const outputConfigPath = resolve(
   "src-tauri/tauri.release.conf.json",
 );
 
-const updaterPubkey = process.env.SPROUT_UPDATER_PUBLIC_KEY;
-const updaterEndpoint = process.env.SPROUT_UPDATER_ENDPOINT;
+const updaterPubkey = process.env.BUZZ_UPDATER_PUBLIC_KEY;
+const updaterEndpoint = process.env.BUZZ_UPDATER_ENDPOINT;
 
 const missing = [];
-if (!updaterPubkey) missing.push("SPROUT_UPDATER_PUBLIC_KEY");
-if (!updaterEndpoint) missing.push("SPROUT_UPDATER_ENDPOINT");
+if (!updaterPubkey) missing.push("BUZZ_UPDATER_PUBLIC_KEY");
+if (!updaterEndpoint) missing.push("BUZZ_UPDATER_ENDPOINT");
 if (missing.length > 0) {
   console.error(
     `Error: required environment variable(s) missing: ${missing.join(", ")}`,

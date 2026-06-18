@@ -1,4 +1,4 @@
-# Releasing Sprout Desktop
+# Releasing Buzz Desktop
 
 ## Quick Start
 
@@ -18,11 +18,13 @@ just release 1.0.0
 
 This creates a `version-bump/<version>` PR that bumps all version manifests, regenerates lockfiles, and appends a changelog entry. Merge the PR to trigger the build automatically.
 
+Re-running `just release` with the same version is safe — it detects the existing branch and PR, resets to current `main`, regenerates the changelog with any new commits, and updates the PR in place.
+
 ---
 
 ## How It Works
 
-1. **`just release`** runs locally on `main` — computes the next version, creates a `version-bump/<version>` branch, bumps versions in all manifests, regenerates lockfiles, generates a changelog entry, commits, pushes, and opens a PR.
+1. **`just release`** runs locally on `main` — computes the next version, creates (or reuses) a `version-bump/<version>` branch, bumps versions in all manifests, regenerates lockfiles, generates a changelog entry, commits, pushes, and opens (or updates) a PR.
 
 2. **Merge the PR** — the `auto-tag-on-release-pr-merge` workflow detects the `version-bump/*` branch merge and pushes a `v<version>` tag.
 
@@ -68,19 +70,10 @@ If the automated flow isn't suitable (e.g., building from a non-main ref):
 
 ## Internal Releases
 
-After the OSS release ships, trigger an internal build via the **sprout-releases** Buildkite pipeline:
-
-1. Go to the [sprout-releases pipeline](https://buildkite.com/runway/sprout-releases) and click **New Build**
-2. Fill in the input fields:
-
-   | Field | Value | Notes |
-   |-------|-------|-------|
-   | `version` | `0.3.0` | Semver, no `v` prefix |
-   | `sprout_ref` | `v0.3.0` | The OSS git tag — use the tag, not a branch name |
-   | `relay_url` | *(default)* | Pre-filled with the production relay; usually leave as-is |
-   | `publish_latest` | `true` | Updates `latest.json` on Artifactory so installed apps auto-update. Set to `false` for test builds. |
-
-Internal desktop builds display a `-block` suffix in the version (e.g., `v0.3.0-block` in the Settings panel). This distinguishes them from OSS builds at a glance. iOS builds and GitHub release tags use the clean version (`0.3.0`) since Apple's `CFBundleShortVersionString` rejects pre-release suffixes.
+After the OSS release ships, trigger an internal build via the
+[sprout-releases Buildkite pipeline](https://buildkite.com/runway/sprout-releases).
+See the [buzz-releases README](https://github.com/squareup/buzz-releases#cutting-a-release)
+for the full step-by-step instructions and input field reference.
 
 ---
 
@@ -88,21 +81,34 @@ Internal desktop builds display a `-block` suffix in the version (e.g., `v0.3.0-
 
 Each release produces two GitHub releases:
 
-1. **`v<version>`** — the user-facing release with the `.dmg` installer (macOS) and `.deb`/`.AppImage` (Linux).
+1. **`v<version>`** — the user-facing release with the `.dmg` installer
+   (macOS).
 
-2. **`sprout-desktop-latest`** — a rolling pre-release for the Tauri auto-updater containing `latest.json`, the signed `.tar.gz` archive, and its `.sig` signature.
+2. **`buzz-desktop-latest`** — a rolling pre-release for the Tauri
+   auto-updater containing `latest.json`, the signed `.tar.gz` archive,
+   and its `.sig` signature.
+
+---
+
+## Platform Support
+
+The release workflow builds **two separate macOS DMGs** — Apple
+Silicon (`darwin-aarch64`, the `release` job) and Intel
+(`darwin-x86_64`, the `release-macos-x64` job) — plus Linux `.deb` and
+`.AppImage`. Both macOS DMGs are codesigned, notarized, and attached to
+the same `v<version>` release. Intel users download the `_x64.dmg`.
 
 ---
 
 ## Prerequisites
 
-- **Write access** to the `block/sprout` GitHub repository
+- **Write access** to the `block/buzz` GitHub repository
 - **`gh` CLI** authenticated (`gh auth status`)
 - The following **GitHub Actions secrets** must be configured:
 
   | Secret | Purpose |
   |--------|---------|
-  | `SPROUT_UPDATER_PUBLIC_KEY` | Tauri updater public key (minisign) |
+  | `BUZZ_UPDATER_PUBLIC_KEY` | Tauri updater public key (minisign) |
   | `TAURI_SIGNING_PRIVATE_KEY` | Tauri updater private key |
   | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the private key |
 
@@ -116,8 +122,15 @@ Switch to `main` and pull latest before running `just release`.
 ### `just release` fails with "working tree is dirty"
 Commit or stash your changes before running `just release`.
 
+### New commits merged after creating the release PR
+Re-run `just release` from an up-to-date `main`. It resets the branch to current `main`, regenerates the changelog and PR body to include the new commits, and force-pushes the updated branch.
+
 ### Build fails at "Validate version"
 The version string must be valid semver: `MAJOR.MINOR.PATCH` with an optional pre-release suffix. Do not include a `v` prefix.
 
 ### Auto-updater reports "no update available"
-Verify that the `sprout-desktop-latest` release exists and contains a valid `latest.json`.
+Verify that the `buzz-desktop-latest` release exists and contains a
+valid `latest.json`. The auto-updater manifest currently lists
+`darwin-aarch64` only, so Intel and Linux users do not yet receive
+auto-updates — they download new versions manually from the release
+page. (Adding their entries to `latest.json` is a follow-up.)

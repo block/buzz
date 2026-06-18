@@ -1,6 +1,6 @@
 # git-credential-nostr
 
-NIP-98 credential helper for git — signs HTTP auth events with your Nostr key so git can push/pull from Sprout's git server without passwords.
+NIP-98 credential helper for git — signs HTTP auth events with your Nostr key so git can push/pull from Buzz's git server without passwords.
 
 ## Requirements
 
@@ -40,7 +40,7 @@ git clone https://relay.example.com/git/owner/repo.git
 
 ## How It Works
 
-When a Sprout git server returns `HTTP 401` with a
+When a Buzz git server returns `HTTP 401` with a
 `WWW-Authenticate: Nostr realm="...", method="GET"` header, git calls this
 helper with the request details on stdin. The helper loads your Nostr private
 key, builds a [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md)
@@ -63,7 +63,7 @@ git ──stdin──▶ git-credential-nostr ──stdout──▶ git
 |-------|-------|-----|
 | `no nostr key configured` | Neither `$NOSTR_PRIVATE_KEY` nor `nostr.keyfile` is set | Follow the Setup steps above |
 | `insecure permissions` | Key file is readable by group/others | `chmod 600 ~/.nostr/key` |
-| `method hint` | Server's `WWW-Authenticate` header is missing `method="..."` | Upgrade the Sprout server |
+| `method hint` | Server's `WWW-Authenticate` header is missing `method="..."` | Upgrade the Buzz server |
 | `useHttpPath` | `credential.useHttpPath` is not set | `git config --global credential.useHttpPath true` |
 | Empty output / no auth | git version is older than 2.46 | Upgrade git |
 | `clock skew` / auth rejected | System clock is off by more than 60 s | Sync your system clock (`ntpdate`, `timedatectl`) |

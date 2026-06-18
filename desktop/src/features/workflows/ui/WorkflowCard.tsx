@@ -85,11 +85,11 @@ export function WorkflowCard({
             </span>
             <StatusBadge status={displayStatus} />
           </div>
-          <div className="mt-1.5 flex items-center gap-3 pl-6 text-[11px] text-muted-foreground">
+          <div className="mt-1.5 flex items-center gap-3 pl-6 text-2xs text-muted-foreground">
             {channelName ? <span>{channelName}</span> : null}
             {triggerSummary ? <span>{triggerSummary}</span> : null}
             <span className="flex items-center gap-1">
-              <Clock className="h-3 w-3" />
+              <Clock className="h-4 w-4" />
               {new Date(workflow.updatedAt * 1000).toLocaleDateString()}
             </span>
           </div>

@@ -14,6 +14,12 @@ use serde_json::{json, Value};
 
 use crate::models::*;
 
+mod user_search;
+pub use user_search::{
+    list_user_search_results, rank_user_search_results, search_users_from_events,
+    user_search_result_from_event,
+};
+
 // ── Tag helpers ─────────────────────────────────────────────────────────────
 
 /// Find the first tag whose name matches `name` and return its first value.
@@ -49,6 +55,34 @@ fn tags_named<'a>(event: &'a Event, name: &'a str) -> impl Iterator<Item = &'a [
     })
 }
 
+/// Return true when a kind:0 profile carries a valid NIP-OA owner tag.
+///
+/// NIP-OA marks an agent identity by having the owner sign an `auth` tag for
+/// the agent pubkey. We verify the tag against the profile event author, not
+/// against the owner, so a forged or stale marker does not turn a person into
+/// an agent in mention search.
+pub(crate) fn profile_has_valid_oa_owner(event: &Event) -> bool {
+    let target_hex = event.pubkey.to_hex();
+    let Ok(target_pubkey) = nostr::PublicKey::from_hex(&target_hex) else {
+        return false;
+    };
+
+    for tag in event.tags.iter() {
+        let slice = tag.as_slice();
+        if slice.first().map(String::as_str) != Some("auth") || slice.len() != 4 {
+            continue;
+        }
+        let Ok(json) = serde_json::to_string(slice) else {
+            continue;
+        };
+        if buzz_sdk_pkg::nip_oa::verify_auth_tag(&json, &target_pubkey).is_ok() {
+            return true;
+        }
+    }
+
+    false
+}
+
 // ── kind:39000 / 39002 (NIP-29) ─────────────────────────────────────────────
 
 /// Convert a NIP-29 kind:39000 channel metadata event to [`ChannelInfo`].
@@ -79,11 +113,10 @@ pub fn channel_info_from_event(
                 "stream".to_string()
             }
         });
-    // Prefer explicit ["public"] tag; fall back to NIP-29's absence-of-"private"
-    // convention for relays that don't yet emit the explicit tag.
-    let visibility = if has_tag(event, "public") {
+    let visibility_tag = first_tag_value(event, "visibility");
+    let visibility = if has_tag(event, "public") || visibility_tag == Some("open") {
         "open".to_string()
-    } else if has_tag(event, "private") {
+    } else if has_tag(event, "private") || visibility_tag == Some("private") {
         "private".to_string()
     } else {
         "open".to_string()
@@ -161,10 +194,10 @@ pub fn channel_detail_from_event(event: &Event) -> Result<ChannelDetailInfo, Str
                 "stream".to_string()
             }
         });
-    // Prefer explicit ["public"]; fall back to NIP-29 absence-of-"private".
-    let visibility = if has_tag(event, "public") {
+    let visibility_tag = first_tag_value(event, "visibility");
+    let visibility = if has_tag(event, "public") || visibility_tag == Some("open") {
         "open".to_string()
-    } else if has_tag(event, "private") {
+    } else if has_tag(event, "private") || visibility_tag == Some("private") {
         "private".to_string()
     } else {
         "open".to_string()
@@ -228,6 +261,7 @@ pub fn channel_members_from_event(event: &Event) -> Result<ChannelMembersRespons
             .unwrap_or_else(|| "member".to_string());
         members.push(ChannelMemberInfo {
             pubkey: pubkey.clone(),
+            is_agent: role == "bot",
             role,
             joined_at: None,
             display_name: None,
@@ -300,6 +334,7 @@ pub fn users_batch_from_events(
                 .map(str::to_string),
             avatar_url: v.get("picture").and_then(Value::as_str).map(str::to_string),
             nip05_handle: v.get("nip05").and_then(Value::as_str).map(str::to_string),
+            is_agent: profile_has_valid_oa_owner(ev),
         };
         profiles.insert(pk.clone(), summary);
     }
@@ -311,144 +346,6 @@ pub fn users_batch_from_events(
         .collect();
 
     UsersBatchResponse { profiles, missing }
-}
-
-/// Convert kind:0 events (e.g. from a NIP-50 search) to [`SearchUsersResponse`].
-/// Convert a single kind:0 event to a [`UserSearchResultInfo`].
-pub fn user_search_result_from_event(ev: &Event) -> UserSearchResultInfo {
-    let v: Value = serde_json::from_str(&ev.content).unwrap_or(Value::Null);
-    UserSearchResultInfo {
-        pubkey: ev.pubkey.to_hex(),
-        display_name: v
-            .get("display_name")
-            .and_then(Value::as_str)
-            .or_else(|| v.get("name").and_then(Value::as_str))
-            .map(str::to_string),
-        avatar_url: v.get("picture").and_then(Value::as_str).map(str::to_string),
-        nip05_handle: v.get("nip05").and_then(Value::as_str).map(str::to_string),
-    }
-}
-
-pub fn search_users_from_events(events: &[Event]) -> SearchUsersResponse {
-    let users = events.iter().map(user_search_result_from_event).collect();
-    SearchUsersResponse { users }
-}
-
-/// Rank and truncate kind:0 events from a NIP-50 search response for the
-/// member-picker / DM-recipient autocomplete.
-///
-/// The relay returns results scored by Typesense BM25 against the whole kind:0
-/// JSON content blob. That ranking is fine as a recall mechanism but not as
-/// final ordering — a user whose `display_name` *is* the query should always
-/// rank above someone whose `about` happens to mention it. We re-rank with a
-/// small deterministic scoring function:
-///
-/// - exact match (case-insensitive)   > prefix match > substring match
-/// - field priority: display_name (or name) > nip05 > pubkey hex
-///
-/// `limit` clamps the output. Pubkey de-duplication keeps only the
-/// highest-scoring result per pubkey (Typesense should already return one doc
-/// per event id, and kind:0 is a NIP-16 replaceable event so stale rows are
-/// soft-deleted in the DB and filtered out before reaching us — this is
-/// defense in depth in case both somehow slip through).
-pub fn rank_user_search_results(
-    events: &[Event],
-    query: &str,
-    limit: usize,
-) -> SearchUsersResponse {
-    let q = query.trim().to_lowercase();
-    if q.is_empty() || limit == 0 {
-        return SearchUsersResponse { users: Vec::new() };
-    }
-
-    // (score, input_index) — input index is a stable tiebreaker preserving
-    // the relay's relevance order for ties.
-    let mut scored: Vec<(u32, usize, UserSearchResultInfo)> = Vec::with_capacity(events.len());
-
-    for (idx, ev) in events.iter().enumerate() {
-        // Defensive: NIP-50 may return kinds we didn't expect if the relay
-        // doesn't honor the `kinds` filter under search. Skip non-kind:0.
-        if ev.kind.as_u16() != 0 {
-            continue;
-        }
-
-        let info = user_search_result_from_event(ev);
-        let display = info.display_name.as_deref().unwrap_or("").to_lowercase();
-        let nip05 = info.nip05_handle.as_deref().unwrap_or("").to_lowercase();
-        let pubkey = info.pubkey.to_lowercase();
-
-        let score = match_score(&q, &display, &nip05, &pubkey);
-        if score == 0 {
-            // Typesense returned this as a content-blob match (e.g. `about`).
-            // No useful name/nip05/pubkey hit — drop it from the autocomplete.
-            continue;
-        }
-        scored.push((score, idx, info));
-    }
-
-    // Sort: higher score first; on tie, earlier input index (= higher Typesense relevance) first.
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-
-    // Dedupe by pubkey, keeping the first occurrence (already best-scored).
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut users: Vec<UserSearchResultInfo> = Vec::with_capacity(limit.min(scored.len()));
-    for (_, _, info) in scored {
-        if !seen.insert(info.pubkey.clone()) {
-            continue;
-        }
-        users.push(info);
-        if users.len() >= limit {
-            break;
-        }
-    }
-
-    SearchUsersResponse { users }
-}
-
-/// Score a user against a lowercased query.
-///
-/// Higher is better. Returns 0 if no field matches — caller should drop.
-fn match_score(q: &str, display_name: &str, nip05: &str, pubkey_hex: &str) -> u32 {
-    // Per-field tier scores. We assign large gaps so a substring match on
-    // display_name still beats an exact match on a lower-priority field —
-    // "the user named alice" is the autocomplete answer to "alice", not
-    // "the user with alice@something.com".
-    const DISPLAY_EXACT: u32 = 1000;
-    const DISPLAY_PREFIX: u32 = 900;
-    const DISPLAY_CONTAINS: u32 = 800;
-    const NIP05_EXACT: u32 = 700;
-    const NIP05_PREFIX: u32 = 600;
-    const NIP05_CONTAINS: u32 = 500;
-    const PUBKEY_PREFIX: u32 = 400;
-
-    let score_field = |field: &str, exact: u32, prefix: u32, contains: u32| -> u32 {
-        if field.is_empty() {
-            0
-        } else if field == q {
-            exact
-        } else if field.starts_with(q) {
-            prefix
-        } else if field.contains(q) {
-            contains
-        } else {
-            0
-        }
-    };
-
-    let display_score = score_field(
-        display_name,
-        DISPLAY_EXACT,
-        DISPLAY_PREFIX,
-        DISPLAY_CONTAINS,
-    );
-    let nip05_score = score_field(nip05, NIP05_EXACT, NIP05_PREFIX, NIP05_CONTAINS);
-    let pubkey_score = if !pubkey_hex.is_empty() && pubkey_hex.starts_with(q) {
-        PUBKEY_PREFIX
-    } else {
-        0
-    };
-
-    display_score.max(nip05_score).max(pubkey_score)
 }
 
 // ── kind:1 (notes) ──────────────────────────────────────────────────────────
@@ -541,12 +438,46 @@ pub fn agents_from_events(events: &[Event]) -> Value {
         .iter()
         .map(|ev| {
             let mut v: Value = serde_json::from_str(&ev.content).unwrap_or_else(|_| json!({}));
+            let pubkey = ev.pubkey.to_hex();
+            let short_pubkey = pubkey[..8].to_string();
             // Always overwrite the pubkey with the event author — it's the
             // authoritative source even if the content claims otherwise.
             if let Some(obj) = v.as_object_mut() {
-                obj.insert("pubkey".to_string(), json!(ev.pubkey.to_hex()));
+                obj.insert("pubkey".to_string(), json!(pubkey.clone()));
+                let fallback_name = obj
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| short_pubkey.clone());
+                if !obj.get("name").is_some_and(Value::is_string) {
+                    obj.insert("name".to_string(), json!(fallback_name));
+                }
+                if !obj.get("agent_type").is_some_and(Value::is_string) {
+                    obj.insert("agent_type".to_string(), json!("agent"));
+                }
+                if !obj.get("channels").is_some_and(Value::is_array) {
+                    obj.insert("channels".to_string(), json!([]));
+                }
+                if !obj.get("channel_ids").is_some_and(Value::is_array) {
+                    obj.insert("channel_ids".to_string(), json!([]));
+                }
+                if !obj.get("capabilities").is_some_and(Value::is_array) {
+                    obj.insert("capabilities".to_string(), json!([]));
+                }
+                if !obj.get("status").is_some_and(Value::is_string) {
+                    obj.insert("status".to_string(), json!("offline"));
+                }
             } else {
-                v = json!({ "pubkey": ev.pubkey.to_hex() });
+                v = json!({
+                    "pubkey": pubkey,
+                    "name": short_pubkey,
+                    "agent_type": "agent",
+                    "channels": [],
+                    "channel_ids": [],
+                    "capabilities": [],
+                    "status": "offline",
+                });
             }
             v
         })
@@ -602,7 +533,7 @@ pub fn relay_members_from_event(event: &Event) -> Value {
 // ── Time helpers ────────────────────────────────────────────────────────────
 
 /// Convert a unix-seconds timestamp to a UTC RFC-3339 string.
-fn timestamp_to_iso(secs: u64) -> String {
+pub(crate) fn timestamp_to_iso(secs: u64) -> String {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     let dt = UNIX_EPOCH + Duration::from_secs(secs);
     // Format manually as RFC-3339 — the `time` crate is already a transitive
@@ -654,6 +585,22 @@ mod tests {
             .expect("sign")
     }
 
+    /// Build a kind:0 profile with a valid NIP-OA auth tag.
+    fn oa_profile_event(content: &str) -> Event {
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let agent_pubkey = agent_keys.public_key();
+        let tag_json = buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_keys, &agent_pubkey, "")
+            .expect("compute auth tag");
+        let tag_values: Vec<String> = serde_json::from_str(&tag_json).expect("parse auth tag json");
+        let auth_tag = Tag::parse(tag_values).expect("parse auth tag");
+
+        EventBuilder::new(Kind::Metadata, content)
+            .tags(vec![auth_tag])
+            .sign_with_keys(&agent_keys)
+            .expect("sign")
+    }
+
     #[test]
     fn channel_info_minimal() {
         let e = ev(
@@ -678,8 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn channel_info_private_when_private_tag_present() {
-        // Explicit ["private"] tag → private (NIP-29 convention).
+    fn channel_info_private_when_visibility_tag_present() {
         let e = ev(
             39000,
             "",
@@ -687,12 +633,14 @@ mod tests {
                 vec!["d", "u"],
                 vec!["name", "n"],
                 vec!["t", "forum"],
-                vec!["private"],
+                vec!["visibility", "private"],
+                vec!["ttl", "86400"],
             ],
         );
         let info = channel_info_from_event(&e, None, None).unwrap();
         assert_eq!(info.visibility, "private");
         assert_eq!(info.channel_type, "forum");
+        assert_eq!(info.ttl_seconds, Some(86400));
     }
 
     #[test]
@@ -753,6 +701,9 @@ mod tests {
                 vec!["topic", "tt"],
                 vec!["purpose", "pp"],
                 vec!["t", "dm"],
+                vec!["visibility", "private"],
+                vec!["ttl", "86400"],
+                vec!["ttl_deadline", "2026-06-11T00:00:00Z"],
             ],
         );
         let d = channel_detail_from_event(&e).unwrap();
@@ -760,6 +711,9 @@ mod tests {
         assert_eq!(d.topic.as_deref(), Some("tt"));
         assert_eq!(d.purpose.as_deref(), Some("pp"));
         assert_eq!(d.channel_type, "dm");
+        assert_eq!(d.visibility, "private");
+        assert_eq!(d.ttl_seconds, Some(86400));
+        assert_eq!(d.ttl_deadline.as_deref(), Some("2026-06-11T00:00:00Z"));
         assert!(d.created_at.ends_with("Z"));
         assert_eq!(d.created_by, e.pubkey.to_hex());
     }
@@ -848,152 +802,13 @@ mod tests {
     }
 
     #[test]
-    fn search_users_maps_each_event() {
-        let e1 = ev(0, r#"{"name":"a"}"#, vec![]);
-        let e2 = ev(0, r#"{"display_name":"B"}"#, vec![]);
-        let r = search_users_from_events(&[e1, e2]);
-        assert_eq!(r.users.len(), 2);
-        assert_eq!(r.users[0].display_name.as_deref(), Some("a"));
-        assert_eq!(r.users[1].display_name.as_deref(), Some("B"));
-    }
+    fn users_batch_marks_valid_nip_oa_profiles_as_agents() {
+        let agent = oa_profile_event(r#"{"display_name":"Mira"}"#);
+        let pubkey = agent.pubkey.to_hex();
+        let resp =
+            users_batch_from_events(std::slice::from_ref(&agent), std::slice::from_ref(&pubkey));
 
-    // ── rank_user_search_results ────────────────────────────────────────────
-
-    #[test]
-    fn rank_empty_query_returns_empty() {
-        let e = ev(0, r#"{"display_name":"alice"}"#, vec![]);
-        let r = rank_user_search_results(&[e], "  ", 10);
-        assert!(r.users.is_empty());
-    }
-
-    #[test]
-    fn rank_zero_limit_returns_empty() {
-        let e = ev(0, r#"{"display_name":"alice"}"#, vec![]);
-        let r = rank_user_search_results(&[e], "alice", 0);
-        assert!(r.users.is_empty());
-    }
-
-    #[test]
-    fn rank_skips_non_kind_zero_events() {
-        // Even if a buggy relay returns non-kind:0 hits under a kinds:[0] filter,
-        // we shouldn't surface them as users.
-        let e = ev(1, "alice", vec![]);
-        let r = rank_user_search_results(&[e], "alice", 10);
-        assert!(r.users.is_empty());
-    }
-
-    #[test]
-    fn rank_skips_results_with_no_name_or_nip05_match() {
-        // Typesense matched the kind:0 because "alice" appears in the `about`
-        // field. We don't want that in autocomplete — there's no useful name
-        // to display against the query.
-        let e = ev(
-            0,
-            r#"{"display_name":"Bob","nip05":"bob@example.com","about":"I work with alice"}"#,
-            vec![],
-        );
-        let r = rank_user_search_results(&[e], "alice", 10);
-        assert!(r.users.is_empty());
-    }
-
-    #[test]
-    fn rank_exact_display_name_beats_substring_match() {
-        let exact = ev(0, r#"{"display_name":"alice"}"#, vec![]);
-        let sub = ev(0, r#"{"display_name":"alice-the-second"}"#, vec![]);
-        // Put the substring match first to prove ordering isn't input-driven.
-        let r = rank_user_search_results(&[sub, exact], "alice", 10);
-        assert_eq!(r.users.len(), 2);
-        assert_eq!(r.users[0].display_name.as_deref(), Some("alice"));
-        assert_eq!(r.users[1].display_name.as_deref(), Some("alice-the-second"));
-    }
-
-    #[test]
-    fn rank_display_name_beats_nip05_match_of_same_tier() {
-        // "alice" exact on display_name vs. "alice" prefix on nip05 — display wins.
-        let by_name = ev(0, r#"{"display_name":"alice"}"#, vec![]);
-        let by_nip05 = ev(0, r#"{"display_name":"X","nip05":"alice@x.com"}"#, vec![]);
-        let r = rank_user_search_results(&[by_nip05, by_name], "alice", 10);
-        assert_eq!(r.users[0].display_name.as_deref(), Some("alice"));
-    }
-
-    #[test]
-    fn rank_display_substring_still_beats_nip05_exact() {
-        // Asserts the field-priority gap is large enough that even a display
-        // substring outranks a perfect nip05 hit.
-        let by_name_sub = ev(0, r#"{"display_name":"my-alice-account"}"#, vec![]);
-        let by_nip05_exact = ev(0, r#"{"display_name":"Bob","nip05":"alice"}"#, vec![]);
-        let r = rank_user_search_results(&[by_nip05_exact, by_name_sub], "alice", 10);
-        assert_eq!(r.users[0].display_name.as_deref(), Some("my-alice-account"));
-    }
-
-    #[test]
-    fn rank_pubkey_prefix_match() {
-        // The query is a hex prefix; the kind:0 has no name match at all.
-        // Build the event then read its pubkey hex; use the first 8 chars as
-        // the query so we know the prefix matches.
-        let e = ev(0, r#"{"display_name":"unrelated"}"#, vec![]);
-        let prefix: String = e.pubkey.to_hex().chars().take(8).collect();
-        let r = rank_user_search_results(std::slice::from_ref(&e), &prefix, 10);
-        assert_eq!(r.users.len(), 1);
-        assert_eq!(r.users[0].pubkey, e.pubkey.to_hex());
-    }
-
-    #[test]
-    fn rank_dedupes_by_pubkey() {
-        // Same author publishing two kind:0s (e.g. one stale row slipping
-        // through). Dedupe should keep only one entry — the higher-scored one.
-        let keys = nostr::Keys::generate();
-        let mk = |content: &str| {
-            EventBuilder::new(Kind::from_u16(0), content)
-                .sign_with_keys(&keys)
-                .expect("sign")
-        };
-        // First event is a substring match on display_name; second is an exact match.
-        let weak = mk(r#"{"display_name":"alice-old"}"#);
-        let strong = mk(r#"{"display_name":"alice"}"#);
-        let r = rank_user_search_results(&[weak, strong], "alice", 10);
-        assert_eq!(r.users.len(), 1);
-        assert_eq!(r.users[0].display_name.as_deref(), Some("alice"));
-    }
-
-    #[test]
-    fn rank_respects_limit() {
-        let events: Vec<Event> = (0..5)
-            .map(|i| ev(0, &format!(r#"{{"display_name":"alice{}"}}"#, i), vec![]))
-            .collect();
-        let r = rank_user_search_results(&events, "alice", 3);
-        assert_eq!(r.users.len(), 3);
-    }
-
-    #[test]
-    fn rank_case_insensitive() {
-        let e = ev(0, r#"{"display_name":"AlIcE"}"#, vec![]);
-        let r = rank_user_search_results(&[e], "alice", 10);
-        assert_eq!(r.users.len(), 1);
-        let r =
-            rank_user_search_results(&[ev(0, r#"{"display_name":"alice"}"#, vec![])], "ALICE", 10);
-        assert_eq!(r.users.len(), 1);
-    }
-
-    #[test]
-    fn rank_tiebreak_preserves_relay_relevance_order() {
-        // Two equally-scored matches → first one in input wins.
-        let first = ev(0, r#"{"display_name":"alice"}"#, vec![]);
-        let second = ev(0, r#"{"display_name":"alice"}"#, vec![]);
-        let first_pk = first.pubkey.to_hex();
-        let r = rank_user_search_results(&[first, second], "alice", 10);
-        assert_eq!(r.users.len(), 2);
-        assert_eq!(r.users[0].pubkey, first_pk);
-    }
-
-    #[test]
-    fn rank_falls_back_to_name_when_display_name_absent() {
-        // user_search_result_from_event already prefers display_name then name —
-        // make sure the ranker sees the populated display_name and scores it.
-        let e = ev(0, r#"{"name":"alice"}"#, vec![]);
-        let r = rank_user_search_results(&[e], "alice", 10);
-        assert_eq!(r.users.len(), 1);
-        assert_eq!(r.users[0].display_name.as_deref(), Some("alice"));
+        assert!(resp.profiles[&pubkey].is_agent);
     }
 
     #[test]
@@ -1064,6 +879,43 @@ mod tests {
         assert_eq!(
             arr[0].get("pubkey").and_then(Value::as_str).unwrap(),
             e.pubkey.to_hex()
+        );
+    }
+
+    #[test]
+    fn agents_default_sparse_agent_profiles_for_directory_parse() {
+        let e = ev(
+            10100,
+            r#"{"channel_add_policy":"owner-only","display_name":"Scout"}"#,
+            vec![],
+        );
+        let v = agents_from_events(std::slice::from_ref(&e));
+        let agents = v.get("agents").cloned().unwrap();
+        let parsed: Vec<crate::managed_agents::RelayAgentInfo> =
+            serde_json::from_value(agents).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].pubkey, e.pubkey.to_hex());
+        assert_eq!(parsed[0].name, "Scout");
+        assert_eq!(parsed[0].agent_type, "agent");
+        assert_eq!(parsed[0].channels, Vec::<String>::new());
+        assert_eq!(parsed[0].capabilities, Vec::<String>::new());
+        assert_eq!(parsed[0].status, "offline");
+        assert_eq!(parsed[0].respond_to, None);
+    }
+
+    #[test]
+    fn agents_preserves_public_respond_to_mode_for_directory_parse() {
+        let e = ev(10100, r#"{"name":"Scout","respond_to":"anyone"}"#, vec![]);
+        let v = agents_from_events(std::slice::from_ref(&e));
+        let agents = v.get("agents").cloned().unwrap();
+        let parsed: Vec<crate::managed_agents::RelayAgentInfo> =
+            serde_json::from_value(agents).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].respond_to,
+            Some(crate::managed_agents::RespondTo::Anyone)
         );
     }
 

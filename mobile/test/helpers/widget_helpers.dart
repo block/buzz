@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
-import 'package:sprout_mobile/shared/theme/theme.dart';
+import 'package:buzz/shared/theme/theme.dart';
 
 class WidgetHelpers {
   static Widget testable({

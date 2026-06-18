@@ -4,10 +4,10 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
-import 'package:sprout_mobile/features/channels/agent_activity/observer_models.dart';
-import 'package:sprout_mobile/features/channels/agent_activity/observer_subscription.dart';
-import 'package:sprout_mobile/shared/crypto/nip44.dart';
-import 'package:sprout_mobile/shared/relay/relay.dart';
+import 'package:buzz/features/channels/agent_activity/observer_models.dart';
+import 'package:buzz/features/channels/agent_activity/observer_subscription.dart';
+import 'package:buzz/shared/crypto/nip44.dart';
+import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
   test('provider initializes without circular dependency error', () {

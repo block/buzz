@@ -1,7 +1,54 @@
+# Build outputs
 target/
+**/target/
+desktop/src-tauri/target/
+
+# Native non-relay UI builds (not part of the public image)
 desktop/
+mobile/
+
+# Node artifacts (built inside the image; host outputs would invalidate cache)
+node_modules/
+**/node_modules/
+web/dist/
+
+# VCS, IDE, scratch
 .git/
+.github/
+.gitignore
+.gitattributes
+.vscode/
+.idea/
 .scratch/
-*.md
-!README.md
-.env*
+
+# Local environment / secrets — never want these in the build context
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# CI artifacts and tooling that the image doesn't need
+.cache/
+coverage/
+dist/
+playwright-report/
+test-results/
+bin/
+sidecars/
+
+# Docs the image doesn't ship. examples/ stays — examples/countdown-bot is
+# a Cargo workspace member, so cargo-chef needs its manifest. Markdown files
+# inside crates (Cargo.toml `readme = ...`) likewise need to be present to
+# avoid manifest warnings; the savings from excluding them are negligible.
+docs/
+
+# Old Dockerfile noise (this Dockerfile is THE source of truth now)
+docker-compose.yml
+docker-compose.*.yml
+prometheus.yml

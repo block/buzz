@@ -2,11 +2,11 @@
 
 set -euo pipefail
 
-DB_HOST="${SPROUT_DB_HOST:-127.0.0.1}"
-DB_PORT="${SPROUT_DB_PORT:-5432}"
-DB_USER="${SPROUT_DB_USER:-sprout}"
-DB_PASS="${SPROUT_DB_PASS:-sprout_dev}"
-DB_NAME="${SPROUT_DB_NAME:-sprout}"
+DB_HOST="${BUZZ_DB_HOST:-127.0.0.1}"
+DB_PORT="${BUZZ_DB_PORT:-5432}"
+DB_USER="${BUZZ_DB_USER:-buzz}"
+DB_PASS="${BUZZ_DB_PASS:-buzz_dev}"
+DB_NAME="${BUZZ_DB_NAME:-buzz}"
 
 SYSTEM_PUBKEY="0000000000000000000000000000000000000000000000000000000000000000"
 ALICE_PUBKEY="953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f"
@@ -17,9 +17,9 @@ AGENT_PUBKEY="db0b028cd36f4d3e36c8300cce87252c1f7fc9495ffecc53f393fcac341ffd36"
 
 if command -v psql >/dev/null 2>&1; then
   run_psql() { PGPASSWORD="$DB_PASS" psql -h"$DB_HOST" -p"$DB_PORT" -U"$DB_USER" -d"$DB_NAME" -qtA "$@"; }
-elif docker exec sprout-postgres psql --version >/dev/null 2>&1; then
+elif docker exec buzz-postgres psql --version >/dev/null 2>&1; then
   run_psql() {
-    docker exec -e PGPASSWORD="$DB_PASS" sprout-postgres \
+    docker exec -e PGPASSWORD="$DB_PASS" buzz-postgres \
       psql -U"$DB_USER" -d"$DB_NAME" -qtA "$@"
   }
 else
@@ -43,15 +43,15 @@ PYEOF
 echo "Checking database connection..."
 run_sql "SELECT 1" >/dev/null
 
-UUID_GENERAL=$(uuid5_hex "sprout.channel.general")
-UUID_RANDOM=$(uuid5_hex "sprout.channel.random")
-UUID_ENGINEERING=$(uuid5_hex "sprout.channel.engineering")
-UUID_AGENTS=$(uuid5_hex "sprout.channel.agents")
-UUID_WATERCOOLER=$(uuid5_hex "sprout.channel.watercooler")
-UUID_ANNOUNCEMENTS=$(uuid5_hex "sprout.channel.announcements")
-UUID_DM_ALICE_TYLER=$(uuid5_hex "sprout.channel.dm.alice-tyler")
-UUID_DM_BOB_TYLER=$(uuid5_hex "sprout.channel.dm.bob-tyler")
-UUID_DM_BOB_CHARLIE_TYLER=$(uuid5_hex "sprout.channel.dm.bob-charlie-tyler")
+UUID_GENERAL=$(uuid5_hex "buzz.channel.general")
+UUID_RANDOM=$(uuid5_hex "buzz.channel.random")
+UUID_ENGINEERING=$(uuid5_hex "buzz.channel.engineering")
+UUID_AGENTS=$(uuid5_hex "buzz.channel.agents")
+UUID_WATERCOOLER=$(uuid5_hex "buzz.channel.watercooler")
+UUID_ANNOUNCEMENTS=$(uuid5_hex "buzz.channel.announcements")
+UUID_DM_ALICE_TYLER=$(uuid5_hex "buzz.channel.dm.alice-tyler")
+UUID_DM_BOB_TYLER=$(uuid5_hex "buzz.channel.dm.bob-tyler")
+UUID_DM_BOB_CHARLIE_TYLER=$(uuid5_hex "buzz.channel.dm.bob-charlie-tyler")
 
 run_sql "
 INSERT INTO channels

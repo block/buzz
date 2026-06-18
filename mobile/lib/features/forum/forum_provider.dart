@@ -2,6 +2,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
 import '../channels/channel_management_provider.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
 import 'forum_models.dart';
 
 /// Fetches forum posts (kind:45001) for a channel from the relay.
@@ -79,6 +81,7 @@ Future<void> createForumPost(
       ['h', channelId],
       for (final pk in normalizedMentions) ['p', pk],
       ...mediaTags,
+      ...buildCustomEmojiTags(content, ref.read(customEmojiListProvider)),
     ],
   );
   ref.invalidate(forumPostsProvider(channelId));
@@ -112,6 +115,7 @@ Future<void> createForumReply(
       ['e', parentEventId, '', 'reply'],
       for (final pk in normalizedMentions) ['p', pk],
       ...mediaTags,
+      ...buildCustomEmojiTags(content, ref.read(customEmojiListProvider)),
     ],
   );
   ref.invalidate(forumPostsProvider(channelId));
@@ -128,7 +132,7 @@ Future<void> deleteForumEvent(
   String? rootEventId,
 }) async {
   final actions = ref.read(channelActionsProvider);
-  await actions.deleteMessage(eventId);
+  await actions.deleteMessage(channelId: channelId, eventId: eventId);
   ref.invalidate(forumPostsProvider(channelId));
   if (rootEventId != null) {
     ref.invalidate(

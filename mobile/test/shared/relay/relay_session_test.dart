@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sprout_mobile/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
   test('delivers the same live event to each matching subscription', () async {

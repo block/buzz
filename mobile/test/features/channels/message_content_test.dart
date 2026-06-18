@@ -1,14 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:sprout_mobile/features/channels/message_content.dart';
-import 'package:sprout_mobile/features/channels/media_viewer_page.dart';
-import 'package:sprout_mobile/shared/theme/theme.dart';
+import 'package:buzz/features/channels/message_content.dart';
+import 'package:buzz/features/channels/media_viewer_page.dart';
+import 'package:buzz/shared/theme/theme.dart';
 
-Widget _testable(Widget child) {
-  return MaterialApp(
-    theme: AppTheme.light(),
-    home: Scaffold(body: child),
+Widget _testable(Widget child, {List<Override> overrides = const []}) {
+  return ProviderScope(
+    overrides: overrides,
+    child: MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(body: child),
+    ),
   );
 }
 
@@ -161,6 +166,40 @@ void main() {
       });
     });
 
+    group('custom emoji', () {
+      testWidgets('renders tagged custom emoji as inline image', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(
+            const MessageContent(
+              content: 'Narf :shipit:',
+              tags: [
+                ['emoji', 'shipit', 'https://relay.example/shipit.png'],
+              ],
+            ),
+          ),
+        );
+
+        expect(find.byType(Image), findsOneWidget);
+        final image = tester.widget<Image>(find.byType(Image));
+        expect(image.semanticLabel, ':shipit:');
+        expect(_allRichText(tester), contains('Narf'));
+        expect(_allRichText(tester), isNot(contains(':shipit:')));
+      });
+
+      testWidgets('leaves untagged custom emoji shortcode as text', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          _testable(const MessageContent(content: 'Missing :shipit:')),
+        );
+
+        expect(find.byType(Image), findsNothing);
+        expect(_allRichText(tester), contains(':shipit:'));
+      });
+    });
+
     group('inline formatting', () {
       testWidgets('renders bold text', (tester) async {
         await tester.pumpWidget(
@@ -206,16 +245,14 @@ void main() {
       testWidgets('renders markdown link', (tester) async {
         await tester.pumpWidget(
           _testable(
-            const MessageContent(
-              content: 'Check [Sprout](https://example.com)',
-            ),
+            const MessageContent(content: 'Check [Buzz](https://example.com)'),
           ),
         );
 
         final allText = _allRichText(tester);
-        expect(allText, contains('Sprout'));
+        expect(allText, contains('Buzz'));
         // Should not show raw markdown syntax.
-        expect(allText, isNot(contains('[Sprout]')));
+        expect(allText, isNot(contains('[Buzz]')));
         expect(allText, isNot(contains('(https://example.com)')));
       });
 

@@ -5,7 +5,7 @@ import type {
   TranscriptItem,
 } from "./agentSessionTypes";
 import {
-  findSproutToolName,
+  findBuzzToolName,
   isGenericToolTitle,
   normalizeToolStatus,
 } from "./agentSessionToolCatalog";
@@ -20,6 +20,7 @@ import {
   extractToolIdentity,
   extractToolResult,
   parsePromptText,
+  parseSystemPromptSections,
 } from "./agentSessionTranscriptHelpers";
 
 export { describeRawEvent } from "./agentSessionTranscriptHelpers";
@@ -189,7 +190,7 @@ function upsertTool(
   id: string,
   title: string,
   toolName: string,
-  sproutToolName: string | null,
+  buzzToolName: string | null,
   status: ToolStatus,
   args: Record<string, unknown>,
   result: string,
@@ -198,23 +199,23 @@ function upsertTool(
   channelId: string | null,
 ) {
   const existing = d.itemsById.get(id);
-  const canonicalSproutToolName =
-    sproutToolName ?? findSproutToolName(toolName, true);
+  const canonicalBuzzToolName =
+    buzzToolName ?? findBuzzToolName(toolName, true);
   if (existing?.type === "tool") {
     const updatedTitle = !isGenericToolTitle(title) ? title : existing.title;
     let updatedToolName = existing.toolName;
-    let updatedSproutToolName = existing.sproutToolName;
-    if (canonicalSproutToolName) {
-      updatedSproutToolName = canonicalSproutToolName;
-      updatedToolName = canonicalSproutToolName;
-    } else if (!existing.sproutToolName && !isGenericToolTitle(toolName)) {
+    let updatedBuzzToolName = existing.buzzToolName;
+    if (canonicalBuzzToolName) {
+      updatedBuzzToolName = canonicalBuzzToolName;
+      updatedToolName = canonicalBuzzToolName;
+    } else if (!existing.buzzToolName && !isGenericToolTitle(toolName)) {
       updatedToolName = toolName;
     }
     replaceItem(d, id, {
       ...existing,
       title: updatedTitle,
       toolName: updatedToolName,
-      sproutToolName: updatedSproutToolName,
+      buzzToolName: updatedBuzzToolName,
       status,
       args: Object.keys(args).length > 0 ? args : existing.args,
       result: result || existing.result,
@@ -233,8 +234,8 @@ function upsertTool(
     id,
     type: "tool",
     title,
-    toolName: canonicalSproutToolName ?? toolName,
-    sproutToolName: canonicalSproutToolName,
+    toolName: canonicalBuzzToolName ?? toolName,
+    buzzToolName: canonicalBuzzToolName,
     status,
     args,
     result,
@@ -335,6 +336,27 @@ export function processTranscriptEvent(
           );
         }
       }
+    } else if (event.kind === "acp_write" && method === "session/new") {
+      // The base + persona prompts ride session/new's systemPrompt, framed by
+      // the harness as [Base]/[System]. Surface them as one "System prompt" item
+      // keyed per channel-session — the frame carries no session id (it predates
+      // session creation), and session/new fires once per channel-session, so a
+      // re-created session correctly replaces the prior item.
+      const params = asRecord(payload.params);
+      const systemPrompt = asString(params.systemPrompt);
+      if (systemPrompt) {
+        const sections = parseSystemPromptSections(systemPrompt);
+        if (sections.length > 0) {
+          upsertMetadata(
+            d,
+            `system-prompt:${ch}`,
+            "System prompt",
+            sections,
+            event.timestamp,
+            channelId,
+          );
+        }
+      }
     } else if (event.kind === "acp_read" && method === "session/update") {
       const params = asRecord(payload.params);
       const update = asRecord(params.update);
@@ -380,7 +402,7 @@ export function processTranscriptEvent(
           `tool:${ch}:${toolId}`,
           identity.title,
           identity.toolName,
-          identity.sproutToolName,
+          identity.buzzToolName,
           normalizeToolStatus(asString(update.status) ?? "executing"),
           extractToolArgs(update),
           extractToolResult(update),
@@ -399,7 +421,7 @@ export function processTranscriptEvent(
           `tool:${ch}:${toolId}`,
           identity.title,
           identity.toolName,
-          identity.sproutToolName,
+          identity.buzzToolName,
           status,
           extractToolArgs(update),
           extractToolResult(update),

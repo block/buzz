@@ -8,6 +8,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import { Shimmer } from "@/shared/ui/Shimmer";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name">;
@@ -28,7 +29,7 @@ const HEADLINE_ROTATION_MS = 2200;
 
 function getActivityHeadline(item: TranscriptItem): string | null {
   if (item.type === "tool") {
-    return formatToolTitle(item.sproutToolName ?? item.toolName, item.title);
+    return formatToolTitle(item.buzzToolName ?? item.toolName, item.title);
   }
 
   if (item.type === "message") {
@@ -181,10 +182,10 @@ export function BotActivityComposerAction({
               <UserAvatar
                 avatarUrl={agentAvatarUrl(agent)}
                 className={cn(
-                  "rounded-full border border-background",
+                  "border border-background",
                   isInline
-                    ? "!h-[18px] !w-[18px] shadow-xs ring-1 ring-primary/25 text-[7px]"
-                    : "!h-5 !w-5 text-[8px]",
+                    ? "!h-[18px] !w-[18px] shadow-xs ring-1 ring-primary/25 text-3xs"
+                    : "!h-5 !w-5 text-3xs",
                 )}
                 displayName={agent.name}
                 key={agent.pubkey}
@@ -192,25 +193,21 @@ export function BotActivityComposerAction({
             ))}
           </span>
           {typingAgents.length > 2 ? (
-            <span className="text-[11px] leading-none">
+            <span className="text-2xs leading-none">
               +{typingAgents.length - 2}
             </span>
           ) : null}
-          <span
-            className={cn(
-              isInline ? "agent-activity-shimmer max-w-40 truncate" : "sr-only",
-            )}
-          >
-            {isInline ? visibleStatusLabel : "working"}
+          <span className={cn(isInline ? "max-w-40 truncate" : "sr-only")}>
+            {isInline ? <Shimmer>{visibleStatusLabel}</Shimmer> : "working"}
           </span>
           {isInline ? null : (
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin opacity-70" />
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin opacity-70" />
           )}
         </button>
       </PopoverTrigger>
       <PopoverContent
         align={isInline ? "start" : "end"}
-        className="w-64 p-2"
+        className="w-64 p-1"
         onMouseEnter={keepOpen}
         onMouseLeave={closeWithDelay}
         onOpenAutoFocus={(event) => event.preventDefault()}
@@ -227,7 +224,7 @@ export function BotActivityComposerAction({
             return (
               <button
                 className={cn(
-                  "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                  "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors",
                   isSelected
                     ? "bg-primary/10 text-primary"
                     : "text-foreground hover:bg-accent hover:text-accent-foreground",
@@ -243,11 +240,11 @@ export function BotActivityComposerAction({
               >
                 <UserAvatar
                   avatarUrl={agentAvatarUrl(agent)}
-                  className="!h-6 !w-6 shrink-0 rounded-full text-[9px]"
+                  className="!h-6 !w-6 shrink-0 text-2xs"
                   displayName={agent.name}
                 />
                 <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground/70" />
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground/70" />
               </button>
             );
           })}

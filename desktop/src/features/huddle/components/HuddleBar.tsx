@@ -1,16 +1,27 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Headphones, PhoneOff, Plus } from "lucide-react";
+import { Bot, PhoneOff, SmilePlus } from "lucide-react";
 import * as React from "react";
 
+import { useCustomEmoji } from "@/features/custom-emoji/hooks";
+import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
+import { useProfileQuery } from "@/features/profile/hooks";
+import { reactionEmojiUrl } from "@/shared/api/customEmoji";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { relayClient } from "@/shared/api/relayClient";
+import { signRelayEvent } from "@/shared/api/tauri";
+import type { RelayEvent } from "@/shared/api/types";
+import { KIND_HUDDLE_REACTION } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Button } from "@/shared/ui/button";
+import { useEmojiBurst } from "@/shared/ui/EmojiBurstProvider";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { useHuddle } from "../HuddleContext";
 import { AddAgentDialog, type AgentAddResult } from "./AddAgentDialog";
-import { HeadphonesNotice } from "./HeadphonesNotice";
 import { MicControls, SpeakerControls } from "./MicControls";
-import { ParticipantList } from "./ParticipantList";
+import { HuddleParticipantsControl } from "./ParticipantList";
 
 // Mirrors HuddleState in src-tauri/src/huddle/mod.rs.
 type HuddleState = {
@@ -32,14 +43,86 @@ type HuddleState = {
 
 type HuddleBarProps = {
   className?: string;
+  onVisibilityChange?: (visible: boolean) => void;
 };
 
-export function HuddleBar({ className }: HuddleBarProps) {
+const HUDDLE_DRAWER_EXIT_MS = 260;
+const HUDDLE_REACTION_NAME_MAX = 48;
+
+function isVisibleHuddleState(state: HuddleState | null) {
+  return state?.phase === "active" || state?.phase === "connected";
+}
+
+function firstTagValue(event: RelayEvent, name: string): string | null {
+  return event.tags.find((tag) => tag[0] === name)?.[1] ?? null;
+}
+
+function customEmojiShortcode(emoji: string): string | null {
+  const trimmed = emoji.trim();
+  if (!trimmed.startsWith(":") || !trimmed.endsWith(":")) return null;
+  const shortcode = trimmed.slice(1, -1).trim().toLowerCase();
+  return shortcode.length > 0 ? shortcode : null;
+}
+
+function clampReactionName(name: string): string {
+  const trimmed = name.trim();
+  if (trimmed.length <= HUDDLE_REACTION_NAME_MAX) return trimmed;
+  return `${trimmed.slice(0, HUDDLE_REACTION_NAME_MAX - 1).trimEnd()}…`;
+}
+
+function fallbackNameForPubkey(pubkey?: string | null): string {
+  return pubkey ? `Participant ${pubkey.slice(0, 8)}` : "Someone";
+}
+
+function parseHuddleReactionEvent(event: RelayEvent) {
+  if (event.kind !== KIND_HUDDLE_REACTION) return null;
+
+  const emoji = (firstTagValue(event, "reaction") ?? event.content).trim();
+  if (!emoji) return null;
+
+  const shortcode = customEmojiShortcode(emoji);
+  const emojiUrl =
+    shortcode !== null
+      ? event.tags.find(
+          (tag) =>
+            tag[0] === "emoji" &&
+            tag[1]?.toLowerCase() === shortcode &&
+            typeof tag[2] === "string",
+        )?.[2]
+      : null;
+  const senderName = clampReactionName(
+    firstTagValue(event, "sender_name") ?? fallbackNameForPubkey(event.pubkey),
+  );
+
+  return {
+    emoji,
+    emojiUrl: emojiUrl ? rewriteRelayUrl(emojiUrl) : null,
+    senderName,
+  };
+}
+
+function huddleReactionTags(
+  channelId: string,
+  emoji: string,
+  senderName: string,
+  emojiUrl?: string,
+): string[][] {
+  const tags: string[][] = [
+    ["h", channelId],
+    ["reaction", emoji],
+    ["sender_name", clampReactionName(senderName)],
+  ];
+  const shortcode = customEmojiShortcode(emoji);
+  if (shortcode && emojiUrl) {
+    tags.push(["emoji", shortcode, emojiUrl]);
+  }
+  return tags;
+}
+
+export function HuddleBar({ className, onVisibilityChange }: HuddleBarProps) {
   const {
     localAudioTrack,
     leaveHuddle,
-    endHuddle,
-    isStarting,
     micConnected,
     micLevel,
     pttActive,
@@ -57,40 +140,60 @@ export function HuddleBar({ className }: HuddleBarProps) {
     selectedOutputDevice,
     setSelectedOutputDevice,
   } = useHuddle();
+  const customEmoji = useCustomEmoji();
+  const identityQuery = useIdentityQuery();
+  const profileQuery = useProfileQuery();
+  const { burstHuddleReaction } = useEmojiBurst();
 
   const isPttMode = voiceInputMode === "push_to_talk";
   const [state, setState] = React.useState<HuddleState | null>(null);
+  const [renderedState, setRenderedState] = React.useState<HuddleState | null>(
+    null,
+  );
+  const stateGenerationRef = React.useRef(0);
+  const locallyLeavingChannelRef = React.useRef<string | null>(null);
   const [isMuted, setIsMuted] = React.useState(false);
-  // Session-dismissable "use headphones" notice. The desktop client plays
-  // remote peer audio via native rodio, outside the WebView render graph,
-  // so the browser's echo canceller has no far-end reference to cancel
-  // against. Until the WebAudio AEC follow-up PR lands, two people on
-  // speakers in the same physical room will hear themselves echo. The
-  // banner stays visible across huddle start/stop within a single page
-  // load; it auto-removes when the AEC plumbing lands and the detection
-  // below flips to false.
-  const [headphonesNoticeDismissed, setHeadphonesNoticeDismissed] =
+  const [headphonesHintDismissed, setHeadphonesHintDismissed] =
     React.useState(false);
-  const ttsEnabled = state?.tts_enabled ?? true;
   const [isLeaving, setIsLeaving] = React.useState(false);
   const [showAddAgent, setShowAddAgent] = React.useState(false);
   const [agentAddError, setAgentAddError] = React.useState<string | null>(null);
+  const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
+  const [reactionError, setReactionError] = React.useState<string | null>(null);
   const [modelStatus, setModelStatus] = React.useState<{
     stt: string;
     tts: string;
   } | null>(null);
+  const applyIncomingState = React.useCallback((nextState: HuddleState) => {
+    const leavingChannelId = locallyLeavingChannelRef.current;
+    if (
+      leavingChannelId &&
+      nextState.ephemeral_channel_id === leavingChannelId &&
+      isVisibleHuddleState(nextState)
+    ) {
+      return;
+    }
+
+    if (!isVisibleHuddleState(nextState)) {
+      locallyLeavingChannelRef.current = null;
+    }
+    setState(nextState);
+  }, []);
   // Huddle state: event-driven + 10s fallback poll.
   React.useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
 
     async function fetchState() {
+      const generation = stateGenerationRef.current;
       try {
         const s = await invoke<HuddleState>("get_huddle_state");
-        if (!cancelled) setState(s);
+        if (!cancelled && generation === stateGenerationRef.current) {
+          applyIncomingState(s);
+        }
       } catch {
         // Only clear state if we never had an active huddle.
-        if (!cancelled) {
+        if (!cancelled && generation === stateGenerationRef.current) {
           setState((prev) =>
             prev?.phase === "active" || prev?.phase === "connected"
               ? prev
@@ -105,7 +208,7 @@ export function HuddleBar({ className }: HuddleBarProps) {
 
     // Primary: listen for Rust-emitted state change events
     listen<HuddleState>("huddle-state-changed", (event) => {
-      if (!cancelled) setState(event.payload);
+      if (!cancelled) applyIncomingState(event.payload);
     }).then((fn) => {
       if (cancelled) fn();
       else unlisten = fn;
@@ -119,7 +222,7 @@ export function HuddleBar({ className }: HuddleBarProps) {
       unlisten?.();
       window.clearInterval(id);
     };
-  }, []);
+  }, [applyIncomingState]);
 
   const huddlePhase = state?.phase;
   React.useEffect(() => {
@@ -173,8 +276,136 @@ export function HuddleBar({ className }: HuddleBarProps) {
     }
   }, [isMuted, localAudioTrack]);
 
-  if (!state || (state.phase !== "active" && state.phase !== "connected"))
+  const isHuddleVisible = isVisibleHuddleState(state);
+
+  React.useEffect(() => {
+    onVisibilityChange?.(isHuddleVisible);
+  }, [isHuddleVisible, onVisibilityChange]);
+
+  React.useEffect(() => {
+    if (isHuddleVisible && state) {
+      setRenderedState(state);
+      return;
+    }
+
+    const id = window.setTimeout(
+      () => setRenderedState(null),
+      HUDDLE_DRAWER_EXIT_MS,
+    );
+    return () => window.clearTimeout(id);
+  }, [isHuddleVisible, state]);
+
+  const barState = isHuddleVisible && state ? state : renderedState;
+  const reactionChannelId = barState?.ephemeral_channel_id ?? null;
+  const currentPubkey = identityQuery.data?.pubkey ?? null;
+  const reactionSenderName = React.useMemo(
+    () =>
+      clampReactionName(
+        profileQuery.data?.displayName?.trim() ||
+          identityQuery.data?.displayName?.trim() ||
+          fallbackNameForPubkey(currentPubkey),
+      ),
+    [
+      currentPubkey,
+      identityQuery.data?.displayName,
+      profileQuery.data?.displayName,
+    ],
+  );
+
+  React.useEffect(() => {
+    if (!reactionChannelId) {
+      setIsReactionPickerOpen(false);
+      setReactionError(null);
+      return;
+    }
+
+    let disposed = false;
+    let cleanup: (() => void) | null = null;
+    const seenEventIds = new Set<string>();
+
+    void relayClient
+      .subscribeLive(
+        {
+          kinds: [KIND_HUDDLE_REACTION],
+          "#h": [reactionChannelId],
+          limit: 1000,
+          since: Math.floor(Date.now() / 1_000),
+        },
+        (event) => {
+          if (disposed) return;
+          if (seenEventIds.has(event.id)) return;
+          seenEventIds.add(event.id);
+          if (event.pubkey === currentPubkey) return;
+
+          const reaction = parseHuddleReactionEvent(event);
+          if (!reaction) return;
+          burstHuddleReaction(reaction);
+        },
+      )
+      .then((dispose) => {
+        if (disposed) {
+          void dispose();
+          return;
+        }
+        cleanup = () => void dispose();
+      })
+      .catch((error) => {
+        console.error("[huddle] Failed to subscribe to reactions:", error);
+      });
+
+    return () => {
+      disposed = true;
+      cleanup?.();
+    };
+  }, [burstHuddleReaction, currentPubkey, reactionChannelId]);
+
+  const handleHuddleReactionSelect = React.useCallback(
+    (emoji: string) => {
+      const trimmedEmoji = emoji.trim();
+      if (!reactionChannelId || !trimmedEmoji) return;
+
+      const emojiUrl = reactionEmojiUrl(trimmedEmoji, customEmoji);
+      const displayEmojiUrl = emojiUrl ? rewriteRelayUrl(emojiUrl) : null;
+
+      setIsReactionPickerOpen(false);
+      setReactionError(null);
+      burstHuddleReaction({
+        emoji: trimmedEmoji,
+        emojiUrl: displayEmojiUrl,
+        senderName: reactionSenderName,
+      });
+
+      void (async () => {
+        await relayClient.preconnect();
+        const event = await signRelayEvent({
+          kind: KIND_HUDDLE_REACTION,
+          content: trimmedEmoji,
+          tags: huddleReactionTags(
+            reactionChannelId,
+            trimmedEmoji,
+            reactionSenderName,
+            emojiUrl,
+          ),
+        });
+        await relayClient.publishEvent(
+          event,
+          "Timed out while sending huddle reaction.",
+          "Failed to send huddle reaction.",
+        );
+      })().catch((error) => {
+        setReactionError("Reaction failed");
+        console.error("[huddle] Failed to send reaction:", error);
+      });
+    },
+    [burstHuddleReaction, customEmoji, reactionChannelId, reactionSenderName],
+  );
+
+  if (!barState) {
     return null;
+  }
+
+  const isDrawerClosing = !isHuddleVisible;
+  const ttsEnabled = barState.tts_enabled;
 
   // Self-removing detection: remote-peer audio plays through native rodio
   // today (outside the WebView render graph), so the browser's AEC has no
@@ -184,35 +415,23 @@ export function HuddleBar({ className }: HuddleBarProps) {
 
   async function handleLeave() {
     if (isLeaving) return;
+    const leavingChannelId = barState?.ephemeral_channel_id ?? null;
+    stateGenerationRef.current += 1;
+    locallyLeavingChannelRef.current = leavingChannelId;
     setIsLeaving(true);
     try {
       const backendClean = await leaveHuddle();
       if (backendClean) {
         setState(null);
+      } else {
+        locallyLeavingChannelRef.current = null;
+        stateGenerationRef.current += 1;
       }
       // If cleanup failed, keep the bar visible so the user can retry.
     } catch (e) {
+      locallyLeavingChannelRef.current = null;
+      stateGenerationRef.current += 1;
       console.error("Failed to leave huddle:", e);
-    } finally {
-      setIsLeaving(false);
-    }
-  }
-
-  async function handleEnd() {
-    if (isLeaving) return;
-    const confirmed = window.confirm(
-      "End the huddle for everyone? This will disconnect all participants.",
-    );
-    if (!confirmed) return;
-    setIsLeaving(true);
-    try {
-      const backendClean = await endHuddle();
-      if (backendClean) {
-        setState(null);
-      }
-      // If cleanup failed, keep the bar visible so the user can retry.
-    } catch (e) {
-      console.error("Failed to end huddle:", e);
     } finally {
       setIsLeaving(false);
     }
@@ -220,232 +439,216 @@ export function HuddleBar({ className }: HuddleBarProps) {
 
   return (
     <div
+      aria-hidden={isDrawerClosing}
+      data-state={isDrawerClosing ? "closing" : "open"}
       className={cn(
-        "flex items-center gap-3 border-t bg-background px-4 py-2",
+        "buzz-huddle-drawer grid min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 px-5 py-3 text-foreground",
+        isDrawerClosing && "pointer-events-none",
         className,
       )}
     >
-      {/* Error banner */}
-      {huddleError && (
-        <div
-          role="alert"
-          className="flex items-center gap-1.5 rounded bg-destructive/10 px-2 py-1 text-xs text-destructive"
-        >
-          <span className="max-w-[220px] truncate">{huddleError}</span>
-          <button
-            aria-label="Dismiss error"
-            className="ml-1 opacity-60 hover:opacity-100"
-            onClick={clearHuddleError}
-            type="button"
+      <div className="flex min-w-0 items-center gap-3 overflow-hidden">
+        {/* Error banner */}
+        {huddleError && (
+          <div
+            role="alert"
+            className="flex min-w-0 items-center gap-1.5 rounded bg-destructive/10 px-2 py-1 text-xs text-destructive"
           >
-            ✕
-          </button>
-        </div>
-      )}
-
-      {/* Echo-cancellation pre-PR notice. Removed when AEC plumbing lands. */}
-      {aecMissing && !headphonesNoticeDismissed && (
-        <HeadphonesNotice
-          onDismiss={() => setHeadphonesNoticeDismissed(true)}
-        />
-      )}
-
-      {/* Model download progress */}
-      {modelStatus &&
-        (modelStatus.stt !== "ready" || modelStatus.tts !== "ready") && (
-          <output className="flex items-center gap-1 text-xs text-muted-foreground">
-            <span className="animate-pulse">
-              {modelStatus.stt !== "ready" && modelStatus.tts !== "ready"
-                ? `Voice models: STT ${modelStatus.stt}, TTS ${modelStatus.tts}`
-                : modelStatus.stt !== "ready"
-                  ? `STT model: ${modelStatus.stt}`
-                  : `TTS model: ${modelStatus.tts}`}
-            </span>
-          </output>
+            <span className="max-w-[220px] truncate">{huddleError}</span>
+            <button
+              aria-label="Dismiss error"
+              className="ml-1 opacity-60 hover:opacity-100"
+              onClick={clearHuddleError}
+              type="button"
+            >
+              ✕
+            </button>
+          </div>
         )}
 
-      {/* Participants */}
-      <div className="flex items-center gap-2">
-        <Headphones className="h-4 w-4 text-muted-foreground" />
-        <ParticipantList
-          participants={state.participants}
-          activeSpeakers={activeSpeakers}
-          agentPubkeys={state.agent_pubkeys}
-          onRemoveAgent={async (pubkey) => {
-            if (!state.ephemeral_channel_id) return;
-            const confirmed = window.confirm(
-              "Remove this agent from the huddle?",
-            );
-            if (!confirmed) return;
-            try {
-              await invoke("remove_channel_member", {
-                channelId: state.ephemeral_channel_id,
-                pubkey,
-              });
-              // Optimistically remove from local state — the backend's
-              // 15s membership poll will eventually converge.
-              setState((prev) => {
-                if (!prev) return prev;
-                return {
-                  ...prev,
-                  participants: prev.participants.filter((p) => p !== pubkey),
-                  agent_pubkeys: prev.agent_pubkeys.filter((p) => p !== pubkey),
-                };
-              });
-            } catch (e) {
-              console.error("Failed to remove agent from huddle:", e);
-            }
-          }}
-        />
-        <Button
-          aria-label="Add agent to huddle"
-          className="h-7 w-7"
-          onClick={() => setShowAddAgent(true)}
-          size="icon"
-          variant="ghost"
-        >
-          <Plus className="h-3.5 w-3.5" />
-        </Button>
+        {/* Model download progress */}
+        {modelStatus &&
+          (modelStatus.stt !== "ready" || modelStatus.tts !== "ready") && (
+            <output className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
+              <span className="truncate animate-pulse">
+                {modelStatus.stt !== "ready" && modelStatus.tts !== "ready"
+                  ? `Voice models: STT ${modelStatus.stt}, TTS ${modelStatus.tts}`
+                  : modelStatus.stt !== "ready"
+                    ? `STT model: ${modelStatus.stt}`
+                    : `TTS model: ${modelStatus.tts}`}
+              </span>
+            </output>
+          )}
+
+        {agentAddError && (
+          <span className="max-w-[180px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
+            {agentAddError}
+          </span>
+        )}
+
+        {reactionError && (
+          <span className="max-w-[160px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
+            {reactionError}
+          </span>
+        )}
+
+        {showAddAgent && (
+          <AddAgentDialog
+            currentAgentPubkeys={barState.agent_pubkeys}
+            onClose={() => setShowAddAgent(false)}
+            onAdd={async (pubkey: string): Promise<AgentAddResult> => {
+              setAgentAddError(null);
+              try {
+                const result = await invoke<AgentAddResult>(
+                  "add_agent_to_huddle",
+                  { agentPubkey: pubkey },
+                );
+                // Refresh huddle state so the participant list updates immediately.
+                const s = await invoke<HuddleState>("get_huddle_state");
+                setState(s);
+                return result;
+              } catch (e: unknown) {
+                const msg = e instanceof Error ? e.message : String(e);
+                setAgentAddError(`Failed to add agent: ${msg}`);
+                throw e; // Re-throw so AddAgentDialog shows its inline error.
+              }
+            }}
+          />
+        )}
       </div>
 
-      {/* Voice input mode — single toggle combining indicator + switch */}
-      {micConnected ? (
-        <>
+      <div className="flex items-center gap-5 justify-self-center">
+        <div className="flex items-center gap-2">
+          <MicControls
+            isMuted={isMuted}
+            onToggleMute={() => setIsMuted((m) => !m)}
+            isPttMode={isPttMode}
+            pttActive={pttActive}
+            micConnected={micConnected}
+            micLevel={micLevel}
+            onSelectVoiceInputMode={setVoiceInputMode}
+            audioDevices={audioDevices}
+            selectedDeviceId={selectedDeviceId}
+            onSelectDevice={setSelectedDeviceId}
+            micGain={micGain}
+            onGainChange={setMicGain}
+          />
+
+          <SpeakerControls
+            ttsEnabled={ttsEnabled}
+            showHeadphonesHint={
+              aecMissing && !headphonesHintDismissed && !isDrawerClosing
+            }
+            onHeadphonesHintDismiss={() => setHeadphonesHintDismissed(true)}
+            onToggleTts={async () => {
+              try {
+                await invoke("set_tts_enabled", { enabled: !ttsEnabled });
+                const s = await invoke<HuddleState>("get_huddle_state");
+                setState(s);
+              } catch (e) {
+                console.error("Failed to toggle TTS:", e);
+              }
+            }}
+            outputDevices={outputDevices}
+            selectedOutputDevice={selectedOutputDevice}
+            onSelectOutputDevice={setSelectedOutputDevice}
+          />
+        </div>
+
+        <div className="flex items-center gap-2">
+          <HuddleParticipantsControl
+            participants={barState.participants}
+            activeSpeakers={activeSpeakers}
+            agentPubkeys={barState.agent_pubkeys}
+            onRemoveAgent={async (pubkey) => {
+              if (!barState.ephemeral_channel_id) return;
+              const confirmed = window.confirm(
+                "Remove this agent from the huddle?",
+              );
+              if (!confirmed) return;
+              try {
+                await invoke("remove_channel_member", {
+                  channelId: barState.ephemeral_channel_id,
+                  pubkey,
+                });
+                // Optimistically remove from local state — the backend's
+                // 15s membership poll will eventually converge.
+                setState((prev) => {
+                  if (!prev) return prev;
+                  return {
+                    ...prev,
+                    participants: prev.participants.filter((p) => p !== pubkey),
+                    agent_pubkeys: prev.agent_pubkeys.filter(
+                      (p) => p !== pubkey,
+                    ),
+                  };
+                });
+              } catch (e) {
+                console.error("Failed to remove agent from huddle:", e);
+              }
+            }}
+          />
+
+          <Popover
+            onOpenChange={setIsReactionPickerOpen}
+            open={isReactionPickerOpen}
+          >
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <PopoverTrigger asChild>
+                  <Button
+                    aria-label="Emoji reactions"
+                    aria-pressed={isReactionPickerOpen}
+                    className={cn(
+                      "buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md",
+                      isReactionPickerOpen && "text-foreground",
+                    )}
+                    size="icon"
+                    type="button"
+                    variant="secondary"
+                  >
+                    <SmilePlus className="h-4 w-4" />
+                  </Button>
+                </PopoverTrigger>
+              </TooltipTrigger>
+              <TooltipContent className="buzz-huddle-tooltip" side="top">
+                Emoji reactions
+              </TooltipContent>
+            </Tooltip>
+            <PopoverContent
+              align="center"
+              className="w-auto overflow-hidden rounded-2xl border-0 bg-transparent p-0 shadow-none"
+              side="top"
+              sideOffset={10}
+            >
+              <EmojiPicker autoFocus onSelect={handleHuddleReactionSelect} />
+            </PopoverContent>
+          </Popover>
+
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
-                aria-label={
-                  isPttMode
-                    ? "Push to Talk mode — click to switch to Auto"
-                    : "Auto mode — click to switch to Push to Talk"
-                }
-                className="h-7 gap-1.5 px-2 text-xs"
-                onClick={() =>
-                  void setVoiceInputMode(
-                    isPttMode ? "voice_activity" : "push_to_talk",
-                  )
-                }
-                size="sm"
-                variant="ghost"
+                aria-label="Add agent to huddle"
+                className="buzz-huddle-control-button h-12 w-12 shrink-0 rounded-md"
+                onClick={() => setShowAddAgent(true)}
+                size="icon"
+                type="button"
+                variant="secondary"
               >
-                {isPttMode ? (
-                  <>
-                    <div
-                      className={cn(
-                        "h-2 w-2 rounded-full transition-colors",
-                        pttActive && !isMuted
-                          ? "animate-pulse bg-green-500"
-                          : "bg-zinc-500",
-                      )}
-                    />
-                    Push to Talk
-                  </>
-                ) : (
-                  <>
-                    <div
-                      className="h-2 w-2 rounded-full transition-colors"
-                      style={{
-                        backgroundColor:
-                          micLevel > 0.05
-                            ? `rgba(34, 197, 94, ${0.4 + micLevel * 0.6})`
-                            : "rgba(100, 116, 139, 0.4)",
-                      }}
-                    />
-                    Auto
-                  </>
-                )}
+                <Bot className="h-4 w-4" />
               </Button>
             </TooltipTrigger>
-            <TooltipContent>
-              {isPttMode
-                ? "Push to Talk — hold Ctrl+Space to transmit. Click to switch to Auto."
-                : "Auto — mic is always live. Click to switch to Push to Talk."}
+            <TooltipContent className="buzz-huddle-tooltip" side="top">
+              Add agent
             </TooltipContent>
           </Tooltip>
-          {isPttMode && (
-            <kbd className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-              {navigator.platform?.includes("Mac") ? "⌃Space" : "Ctrl+Space"}
-            </kbd>
-          )}
-        </>
-      ) : (
-        <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <div
-            className={cn(
-              "h-2 w-2 rounded-full",
-              isStarting ? "animate-pulse bg-green-500" : "bg-destructive/70",
-            )}
-          />
-          {isStarting ? "Connecting…" : "No mic"}
-        </span>
-      )}
+        </div>
 
-      {agentAddError && (
-        <span className="max-w-[180px] truncate rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
-          {agentAddError}
-        </span>
-      )}
-
-      {showAddAgent && (
-        <AddAgentDialog
-          currentAgentPubkeys={state?.agent_pubkeys ?? []}
-          onClose={() => setShowAddAgent(false)}
-          onAdd={async (pubkey: string): Promise<AgentAddResult> => {
-            setAgentAddError(null);
-            try {
-              const result = await invoke<AgentAddResult>(
-                "add_agent_to_huddle",
-                { agentPubkey: pubkey },
-              );
-              // Refresh huddle state so the participant list updates immediately.
-              const s = await invoke<HuddleState>("get_huddle_state");
-              setState(s);
-              return result;
-            } catch (e: unknown) {
-              const msg = e instanceof Error ? e.message : String(e);
-              setAgentAddError(`Failed to add agent: ${msg}`);
-              throw e; // Re-throw so AddAgentDialog shows its inline error.
-            }
-          }}
-        />
-      )}
-
-      <MicControls
-        isMuted={isMuted}
-        onToggleMute={() => setIsMuted((m) => !m)}
-        isPttMode={isPttMode}
-        pttActive={pttActive}
-        micConnected={micConnected}
-        audioDevices={audioDevices}
-        selectedDeviceId={selectedDeviceId}
-        onSelectDevice={setSelectedDeviceId}
-        micGain={micGain}
-        onGainChange={setMicGain}
-      />
-
-      <SpeakerControls
-        ttsEnabled={ttsEnabled}
-        onToggleTts={async () => {
-          try {
-            await invoke("set_tts_enabled", { enabled: !ttsEnabled });
-            const s = await invoke<HuddleState>("get_huddle_state");
-            setState(s);
-          } catch (e) {
-            console.error("Failed to toggle TTS:", e);
-          }
-        }}
-        outputDevices={outputDevices}
-        selectedOutputDevice={selectedOutputDevice}
-        onSelectOutputDevice={setSelectedOutputDevice}
-      />
-
-      {/* Leave / End buttons — pushed to the right */}
-      <div className="ml-auto flex items-center gap-2">
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
               aria-label="Leave huddle"
-              className="h-8 gap-1.5 px-3"
+              className="h-12 gap-2 px-4"
               disabled={isLeaving}
               aria-busy={isLeaving}
               onClick={() => void handleLeave()}
@@ -456,27 +659,13 @@ export function HuddleBar({ className }: HuddleBarProps) {
               Leave
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Leave huddle</TooltipContent>
+          <TooltipContent className="buzz-huddle-tooltip">
+            Leave huddle
+          </TooltipContent>
         </Tooltip>
-        {state?.is_creator && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                aria-label="End huddle for everyone"
-                className="h-8 gap-1.5 px-3"
-                disabled={isLeaving}
-                onClick={() => void handleEnd()}
-                size="sm"
-                variant="destructive"
-              >
-                <PhoneOff className="h-4 w-4" />
-                End for all
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>End huddle for everyone</TooltipContent>
-          </Tooltip>
-        )}
       </div>
+
+      <div aria-hidden="true" className="min-w-0" />
 
       {/* Screen reader announcements for huddle state changes */}
       <output aria-live="polite" className="sr-only">

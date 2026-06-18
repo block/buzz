@@ -1,4 +1,4 @@
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::{app_state::AppState, managed_agents::RELAY_MESH_API_BASE_URL, mesh_llm, relay};
 
@@ -19,7 +19,7 @@ pub async fn mesh_availability(
 
 #[tauri::command]
 pub async fn mesh_start_node(
-    _app: AppHandle,
+    app: AppHandle,
     state: State<'_, AppState>,
     request: mesh_llm::StartMeshNodeRequest,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
@@ -36,6 +36,8 @@ pub async fn mesh_start_node(
         .await
         .map_err(|error| format!("mesh node started but status probe failed: {error}"))?;
     *runtime = Some(started);
+    drop(runtime);
+    mesh_llm::publish_current_status_once(&app, "start").await;
     Ok(status)
 }
 
@@ -45,6 +47,118 @@ pub async fn mesh_ensure_client_node(
     request: mesh_llm::EnsureMeshClientRequest,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
     ensure_client_node_for_model(&state, request.model_id, request.endpoint_addr).await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareRelayMeshClientRequest {
+    pub model_id: String,
+    pub target: mesh_llm::MeshServeTarget,
+}
+
+/// Fresh-create preflight for relay-mesh agents. Starts/dials the local mesh
+/// client and sends the paired connect-request through the Rust coordinator so
+/// fresh-created and saved relay-mesh agents use the same signaling path.
+#[tauri::command]
+pub async fn mesh_prepare_relay_mesh_client(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: PrepareRelayMeshClientRequest,
+) -> CmdResult<mesh_llm::MeshNodeStatus> {
+    prepare_relay_mesh_client(&app, &state, &request.model_id, request.target).await
+}
+
+pub(crate) async fn prepare_relay_mesh_client(
+    app: &AppHandle,
+    state: &AppState,
+    model_id: &str,
+    target: mesh_llm::MeshServeTarget,
+) -> CmdResult<mesh_llm::MeshNodeStatus> {
+    let target_pubkey = normalize_pubkey(target.reporter_pubkey.as_deref())
+        .ok_or_else(|| "Selected relay mesh target is missing its reporter pubkey.".to_string())?;
+    let status =
+        ensure_client_node_for_model(state, model_id, Some(target.endpoint_addr.clone())).await?;
+    let self_pubkey = workspace_pubkey(state)?;
+    if self_pubkey == target_pubkey {
+        return Ok(status);
+    }
+    let self_addr = status
+        .invite_token
+        .as_deref()
+        .ok_or_else(|| "Local mesh client did not publish an endpoint address.".to_string())?;
+    crate::mesh_llm::start_client(
+        app,
+        crate::mesh_llm::RelayMeshConnectRequest {
+            target_pubkey: &target_pubkey,
+            peer_endpoint_addr: &target.endpoint_addr,
+            self_endpoint_addr: self_addr,
+            peer_endpoint_id: target.endpoint_id.as_deref(),
+            self_endpoint_id: status.endpoint_id.as_deref(),
+        },
+    )
+    .await?;
+    Ok(status)
+}
+
+fn normalize_pubkey(value: Option<&str>) -> Option<String> {
+    let normalized = value?.trim().to_ascii_lowercase();
+    if normalized.len() == 64 && normalized.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn workspace_pubkey(state: &AppState) -> Result<String, String> {
+    let keys = state.keys.lock().map_err(|e| e.to_string())?;
+    Ok(keys.public_key().to_hex())
+}
+
+/// Join a peer by endpoint addr without naming a model. Used by the runtime
+/// coordinator's call-me-now responder and the initiator's same-attempt dial:
+/// the responder side of a hole-punch just needs both ends dialing, and the
+/// mesh-llm router resolves per-model routability per request afterward.
+///
+/// Dials into the running runtime if one exists; otherwise starts a client
+/// node with the addr as its join token. Model-agnostic on purpose.
+pub(crate) async fn ensure_client_node_for_model_dial_only(
+    state: &AppState,
+    endpoint_addr: &str,
+) -> CmdResult<()> {
+    let addr = endpoint_addr.trim();
+    if addr.is_empty() {
+        return Err("endpoint_addr is required to dial".to_string());
+    }
+    {
+        let runtime = state.mesh_llm_runtime.lock().await;
+        if let Some(runtime) = runtime.as_ref() {
+            return runtime
+                .dial_endpoint_addr(addr)
+                .await
+                .map_err(|error| format!("mesh dial failed: {error}"));
+        }
+    }
+    let start = mesh_llm::StartMeshNodeRequest {
+        mode: mesh_llm::MeshNodeMode::Client,
+        model_id: None,
+        max_vram_gb: None,
+        join_token: Some(addr.to_string()),
+    };
+    let mut runtime = state.mesh_llm_runtime.lock().await;
+    if runtime.is_some() {
+        // Lost a race; dial into the now-present runtime instead.
+        if let Some(runtime) = runtime.as_ref() {
+            return runtime
+                .dial_endpoint_addr(addr)
+                .await
+                .map_err(|error| format!("mesh dial failed: {error}"));
+        }
+    }
+    let started = mesh_llm::DesktopMeshRuntime::start(start)
+        .await
+        .map_err(|error| format!("mesh client failed to start: {error}"))?;
+    *runtime = Some(started);
+    Ok(())
 }
 
 pub(crate) async fn ensure_client_node_for_model(
@@ -138,7 +252,7 @@ pub(crate) async fn ensure_client_node_for_model(
 pub(crate) async fn resolve_mesh_bootstrap_target(
     state: &AppState,
     model_id: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<mesh_llm::MeshServeTarget>, String> {
     let model_id = model_id.trim();
     if model_id.is_empty() {
         return Ok(None);
@@ -151,16 +265,17 @@ pub(crate) async fn resolve_mesh_bootstrap_target(
 }
 
 /// Pure target-selection used by `resolve_mesh_bootstrap_target`: the first
-/// gossiped serve target that hosts `model_id`. Split out so the matching rule
-/// is unit-testable without a relay round-trip.
+/// gossiped serve target that hosts `model_id`. Returns the full target so the
+/// caller has the reporter pubkey (to address the paired connect-request) as
+/// well as the dial pointer. Split out so the matching rule is unit-testable
+/// without a relay round-trip.
 fn pick_serve_target_for_model(
     targets: Vec<mesh_llm::MeshServeTarget>,
     model_id: &str,
-) -> Option<String> {
+) -> Option<mesh_llm::MeshServeTarget> {
     targets
         .into_iter()
         .find(|target| target.model_id == model_id)
-        .map(|target| target.endpoint_addr)
 }
 
 /// Decide whether a relay-mesh agent may start, and bring up its local mesh
@@ -169,34 +284,74 @@ fn pick_serve_target_for_model(
 /// Fresh create (`allow_fresh_create_start`) has just run the client-start flow
 /// from the dialog, so it spawns as-is. For a saved/manual start the serve
 /// target's dial pointer was never persisted (it is live discovery state), so
-/// re-resolve a current bootstrap target from the relay's gossiped targets and
-/// dial it. The two failure modes get distinct, actionable copy: a relay query
-/// failure ("could not refresh targets") is not the same as a relay that
-/// answered with no live target for this model ("peer offline"). Non relay-mesh
-/// records are a no-op.
+/// re-resolve a current bootstrap target from the relay's gossiped targets,
+/// bring up the local client node, then publish a paired connect-request
+/// (kind:24621) through the runtime coordinator so the peer dials back — the
+/// hole-punch needs *both* ends dialing. This is the fix for saved agents
+/// flaking on restart: before, saved-start did a one-sided dial and never told
+/// the peer to dial back. The two failure modes get distinct, actionable copy:
+/// a relay query failure ("could not refresh targets") is not the same as a
+/// relay that answered with no live target for this model ("peer offline").
+/// Non relay-mesh records are a no-op.
 pub(crate) async fn ensure_relay_mesh_for_record(
-    state: &AppState,
+    app: &AppHandle,
     record: &crate::managed_agents::ManagedAgentRecord,
     allow_fresh_create_start: bool,
 ) -> Result<(), String> {
     if allow_fresh_create_start {
         return Ok(());
     }
+    let state = app.state::<AppState>();
     let Some(model_id) = crate::managed_agents::relay_mesh_model_id(record) else {
         return Ok(());
     };
-    match resolve_mesh_bootstrap_target(state, &model_id).await {
-        Ok(Some(endpoint_addr)) => {
-            ensure_client_node_for_model(state, &model_id, Some(endpoint_addr)).await?;
-            Ok(())
+    let target = match resolve_mesh_bootstrap_target(&state, &model_id).await {
+        Ok(Some(target)) => target,
+        Ok(None) => {
+            return Err(format!(
+                "relay mesh agents cannot be started from saved state because no live serve target is available for this model. Start serving on a mesh peer, or create a new agent with Run on relay mesh selected to refresh the target for {RELAY_MESH_API_BASE_URL}."
+            ));
         }
-        Ok(None) => Err(format!(
-            "relay mesh agents cannot be started from saved state because no live serve target is available for this model. Start serving on a mesh peer, or create a new agent with Run on relay mesh selected to refresh the target for {RELAY_MESH_API_BASE_URL}."
-        )),
-        Err(error) => Err(format!(
-            "could not refresh relay mesh serve targets to start this agent: {error}"
-        )),
+        Err(error) => {
+            return Err(format!(
+                "could not refresh relay mesh serve targets to start this agent: {error}"
+            ));
+        }
+    };
+
+    // Bring up the local client node (and dial the peer). Its status carries
+    // our own invite token — the addr we advertise to the peer in the 24621.
+    let status =
+        ensure_client_node_for_model(&state, &model_id, Some(target.endpoint_addr.clone())).await?;
+
+    // Publish the paired connect-request so the peer dials *us* back. Needs the
+    // target's reporter pubkey (whom to address) and our invite token (where to
+    // dial). If either is missing we have already done the one-sided dial above
+    // — no worse than the old behavior — so degrade rather than fail the start.
+    if let (Some(target_pubkey), Some(self_addr)) = (
+        normalize_pubkey(target.reporter_pubkey.as_deref()),
+        status.invite_token.as_deref(),
+    ) {
+        if target_pubkey != workspace_pubkey(&state)? {
+            if let Err(error) = crate::mesh_llm::start_client(
+                app,
+                crate::mesh_llm::RelayMeshConnectRequest {
+                    target_pubkey: &target_pubkey,
+                    peer_endpoint_addr: &target.endpoint_addr,
+                    self_endpoint_addr: self_addr,
+                    peer_endpoint_id: target.endpoint_id.as_deref(),
+                    self_endpoint_id: status.endpoint_id.as_deref(),
+                },
+            )
+            .await
+            {
+                // Non-fatal: the one-sided dial may still punch on a favorable NAT.
+                // Surface the reason without blocking the agent's spawn.
+                eprintln!("buzz-mesh: saved-start connect-request failed: {error}");
+            }
+        }
     }
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -241,11 +396,15 @@ pub async fn mesh_status_report_payload(
 }
 
 #[tauri::command]
-pub async fn mesh_stop_node(state: State<'_, AppState>) -> CmdResult<mesh_llm::MeshNodeStatus> {
+pub async fn mesh_stop_node(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<mesh_llm::MeshNodeStatus> {
     let runtime = state.mesh_llm_runtime.lock().await.take();
     if let Some(runtime) = runtime {
         runtime.stop().await.map_err(|error| error.to_string())?;
     }
+    mesh_llm::publish_stopped_status_once(&app, "stop").await;
     Ok(mesh_llm::stopped_status())
 }
 
@@ -305,9 +464,10 @@ mod tests {
             target("model-b", "addr-b1"),
             target("model-b", "addr-b2"),
         ];
-        // Matches by model id, returns the first such target's dial pointer.
+        // Matches by model id, returns the first such target (full struct, so
+        // the caller has the reporter pubkey as well as the dial pointer).
         assert_eq!(
-            pick_serve_target_for_model(targets, "model-b"),
+            pick_serve_target_for_model(targets, "model-b").map(|t| t.endpoint_addr),
             Some("addr-b1".to_string())
         );
     }
@@ -343,7 +503,7 @@ mod tests {
     /// frontend selected earlier.
     ///
     /// Hardware-gated (`#[ignore]`): loads a real model. Run with:
-    ///   cargo test -p sprout-desktop --features mesh-llm \
+    ///   cargo test -p buzz-desktop --features mesh-llm \
     ///     ensure_serve_runtime_serves_other_model -- --ignored --nocapture
     #[tokio::test]
     #[ignore = "loads a real model; run manually with --ignored"]

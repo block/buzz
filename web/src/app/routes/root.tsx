@@ -13,7 +13,7 @@ function RootLayout() {
           to="/"
           className="text-sm font-semibold tracking-tight text-foreground"
         >
-          Sprout
+          Buzz
         </Link>
         <ThemeToggle />
       </header>

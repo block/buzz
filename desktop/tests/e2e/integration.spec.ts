@@ -41,7 +41,7 @@ async function assertDesktopNotificationsEnabled(
   await expect(page.getByTestId("notifications-desktop-state")).toContainText(
     "On",
   );
-  await page.getByTestId("settings-close").click();
+  await page.getByTestId("settings-back-to-app").click();
 }
 
 async function sendChannelMessage(
@@ -138,13 +138,13 @@ async function joinChannel(
 async function getLoggedNotifications(page: import("@playwright/test").Page) {
   return page.evaluate(() => {
     const win = window as Window & {
-      __SPROUT_E2E_NOTIFICATIONS__?: Array<{
+      __BUZZ_E2E_NOTIFICATIONS__?: Array<{
         body: string | null;
         title: string;
       }>;
     };
 
-    return win.__SPROUT_E2E_NOTIFICATIONS__ ?? [];
+    return win.__BUZZ_E2E_NOTIFICATIONS__ ?? [];
   });
 }
 
@@ -282,7 +282,7 @@ test("live mentions refetch the home feed without waiting for polling", async ({
     expect(notifications).toEqual([
       {
         body: message,
-        title: "@Mention in #general",
+        title: "alice mentioned you in #general",
       },
     ]);
 
@@ -344,7 +344,7 @@ test("live forum mentions refetch the home feed without waiting for polling", as
     expect(notifications).toEqual([
       {
         body: message,
-        title: "@Mention in #watercooler",
+        title: "alice mentioned you in #watercooler",
       },
     ]);
 

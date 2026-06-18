@@ -72,10 +72,10 @@ export function PersonaActionsMenu({
             <Trash2 className="h-4 w-4" />
             Remove from My Agents
           </DropdownMenuItem>
-        ) : persona.sourcePack ? (
+        ) : persona.sourceTeam ? (
           <DropdownMenuItem disabled>
             <Trash2 className="h-4 w-4" />
-            Managed by pack
+            Managed by team
           </DropdownMenuItem>
         ) : (
           <DropdownMenuItem

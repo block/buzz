@@ -14,10 +14,23 @@ import {
 
 import { cn } from "@/shared/lib/cn";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { getEditorSpoilerRangeState } from "@/features/messages/lib/spoilerFormatting";
+import { SPOILER_MARK_NAME } from "@/features/messages/lib/spoilerMark";
 
 type FormattingToolbarProps = {
   editor: Editor | null;
   disabled?: boolean;
+  /**
+   * Opens the link-edit modal for the current selection. When provided, the
+   * link button routes here instead of the legacy `window.prompt` flow
+   * (a no-op in the Tauri WebView).
+   */
+  onLinkButton?: () => void;
+};
+
+export type SpoilerToggleState = {
+  emptySelection: boolean;
+  nextSpoilered?: boolean;
 };
 
 type ActiveStates = {
@@ -46,6 +59,53 @@ function getActiveStates(editor: Editor): ActiveStates {
   };
 }
 
+export function isSpoilerFormattingActive(editor: Editor): boolean {
+  return editor.isActive(SPOILER_MARK_NAME);
+}
+
+function documentRangeForEmptySelection(editor: Editor): {
+  from: number;
+  to: number;
+} | null {
+  const { doc, selection } = editor.state;
+  if (!selection.empty) return null;
+
+  if (doc.textContent.trim().length === 0) return null;
+
+  const from = 1;
+  const to = doc.content.size - 1;
+  return from < to ? { from, to } : null;
+}
+
+export function toggleSpoilerFormatting(editor: Editor): SpoilerToggleState {
+  const emptySelection = editor.state.selection.empty;
+  const range = documentRangeForEmptySelection(editor);
+  if (!range) {
+    editor.chain().focus().toggleMark(SPOILER_MARK_NAME).run();
+    return { emptySelection };
+  }
+
+  const cursorPosition = editor.state.selection.from;
+  const chain = editor.chain().focus().setTextSelection(range);
+  const rangeSpoilerState = getEditorSpoilerRangeState(
+    editor,
+    range.from,
+    range.to,
+  );
+  if (rangeSpoilerState === "no-markable-content") {
+    chain.setTextSelection(cursorPosition).run();
+    return { emptySelection };
+  }
+
+  const nextSpoilered = rangeSpoilerState !== "fully-spoiled";
+  if (nextSpoilered) {
+    chain.setMark(SPOILER_MARK_NAME).setTextSelection(cursorPosition).run();
+  } else {
+    chain.unsetMark(SPOILER_MARK_NAME).setTextSelection(cursorPosition).run();
+  }
+  return { emptySelection, nextSpoilered };
+}
+
 /**
  * Formatting bar shown above the editor when the format toggle is active.
  * Uses plain buttons with explicit active-class toggling instead of
@@ -54,6 +114,7 @@ function getActiveStates(editor: Editor): ActiveStates {
 export const FormattingToolbar = React.memo(function FormattingToolbar({
   editor,
   disabled = false,
+  onLinkButton,
 }: FormattingToolbarProps) {
   const [activeStates, setActiveStates] = React.useState<ActiveStates | null>(
     () => (editor ? getActiveStates(editor) : null),
@@ -98,6 +159,15 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   const toggleLink = React.useCallback(() => {
     if (!editor) return;
 
+    // Preferred path: open the link-edit modal, which handles add, edit, and
+    // remove with proper display-text + URL fields.
+    if (onLinkButton) {
+      onLinkButton();
+      return;
+    }
+
+    // Legacy fallback (no modal wired): the native prompts below are a no-op
+    // in the Tauri WebView, so this path effectively does nothing there.
     if (editor.isActive("link")) {
       editor.chain().focus().unsetLink().run();
       return;
@@ -118,7 +188,7 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
         editor.chain().focus().insertContent(`[${label}](${url})`).run();
       }
     }
-  }, [editor]);
+  }, [editor, onLinkButton]);
 
   const toggleBulletList = React.useCallback(() => {
     editor?.chain().focus().toggleBulletList().run();
@@ -212,13 +282,13 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
                 "hover:bg-muted hover:text-foreground",
                 "focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring",
                 "disabled:pointer-events-none disabled:opacity-50",
-                "[&_svg]:pointer-events-none [&_svg]:size-3.5 [&_svg]:shrink-0",
+                "[&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
                 item.active
                   ? "bg-primary text-primary-foreground"
                   : "bg-transparent text-muted-foreground",
               )}
             >
-              <item.icon className="h-3.5 w-3.5" />
+              <item.icon className="h-4 w-4" />
             </button>
           </TooltipTrigger>
           <TooltipContent>

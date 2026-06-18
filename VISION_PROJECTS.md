@@ -1,10 +1,10 @@
-# 🌿 Sprout Projects — A Nostr-Native Forge
+# 🐝 Buzz Projects — A Nostr-Native Forge
 
-> Someone pushes a fix. Sprout creates a channel for the branch. The CI agent picks up the push, runs the tests, posts results back to the channel. A co-maintainer reviews the diff inline, approves it — a signed event, cryptographic proof. Merge. The workflow runs the integration. The channel archives into a permanent record of why that code exists.
+> Someone pushes a fix. Buzz creates a channel for the branch. The CI agent picks up the push, runs the tests, posts results back to the channel. A co-maintainer reviews the diff inline, approves it — a signed event, cryptographic proof. Merge. The workflow runs the integration. The channel archives into a permanent record of why that code exists.
 >
 > Bug report to merged patch. One place. One search index. One identity system. The branch channel was the pull request, the CI dashboard, and the discussion thread.
 
-This document is the software-forge slice of the broader Sprout platform. [VISION.md](VISION.md) covers the platform. [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) covers the sovereign relay story — one domain, one relay, one project. This doc zooms in on what it looks like when that relay hosts code.
+This document is the software-forge slice of the broader Buzz platform. [VISION.md](VISION.md) covers the platform. [VISION_SOVEREIGN.md](VISION_SOVEREIGN.md) covers the sovereign relay story — one domain, one relay, one project. This doc zooms in on what it looks like when that relay hosts code.
 
 ---
 
@@ -14,31 +14,31 @@ A project lives on the relay. `myproject.com` in a browser shows the project hom
 
 Git transport is standard Smart HTTP — `git clone`, `git push`, nothing special. Your npub signs pushes. Same domain, same auth, same identity as everything else on the relay.
 
-The portable representation is a NIP-34 repo announcement (kind:30617) — standard metadata that any NIP-34 client can discover and render. Sprout extends it with `sprout-` prefixed tags for channel binding and visibility:
+The portable representation is a NIP-34 repo announcement (kind:30617) — standard metadata that any NIP-34 client can discover and render. Buzz extends it with `buzz-` prefixed tags for channel binding and visibility:
 
 ```json
 {
   "kind": 30617,
   "tags": [
-    ["d", "sprout"],
-    ["name", "sprout"],
+    ["d", "buzz"],
+    ["name", "buzz"],
     ["clone", "https://repoa.myproject.com"],
     ["relays", "wss://myproject.com"],
     ["maintainers", "<co-maintainer-npub>"],
-    ["sprout-channel", "<channel-uuid>"],
-    ["sprout-visibility", "listed"],
-    ["sprout-protect", "main", "push-allowed", "<alice-npub>", "<bob-npub>"],
-    ["sprout-protect", "main", "require-approval", "2"],
-    ["sprout-protect", "main", "no-force-push"]
+    ["buzz-channel", "<channel-uuid>"],
+    ["buzz-visibility", "listed"],
+    ["buzz-protect", "main", "push-allowed", "<alice-npub>", "<bob-npub>"],
+    ["buzz-protect", "main", "require-approval", "2"],
+    ["buzz-protect", "main", "no-force-push"]
   ]
 }
 ```
 
-Branch protections live in the same event — `sprout-protect` tags. The relay enforces them at the git transport layer. Only npubs listed in `push-allowed` can push to protected branches. Force pushes are blocked. Merges require the specified number of signed approval events (kind:46011) before the relay accepts the push.
+Branch protections live in the same event — `buzz-protect` tags. The relay enforces them at the git transport layer. Only npubs listed in `push-allowed` can push to protected branches. Force pushes are blocked. Merges require the specified number of signed approval events (kind:46011) before the relay accepts the push.
 
 Agents inherit access from their owner via [NIP-OA](docs/nips/NIP-OA.md). The relay checks: does the push carry a valid NIP-OA auth tag, and is the owner pubkey in that tag listed in `push-allowed`? If yes, the push is accepted — the agent's own pubkey doesn't need to be in the list. Add a maintainer, and all their authorized agents can push. Remove the maintainer, and all their agents lose access instantly. Agents without NIP-OA attestation are treated as their own identity and must be listed explicitly.
 
-Standard NIP-34 clients see a normal repo. gitworkshop.dev renders it. ngit-cli works with it. Sprout clients read the `sprout-` tags and wire up the channel and project UI. One event, two audiences, zero custom kinds.
+Standard NIP-34 clients see a normal repo. gitworkshop.dev renders it. ngit-cli works with it. Buzz clients read the `buzz-` tags and wire up the channel and project UI. One event, two audiences, zero custom kinds.
 
 NIP-34 is the metadata and discovery layer. Git remains the transport. The transport is boring. The metadata is portable.
 
@@ -48,7 +48,7 @@ NIP-34 is the metadata and discovery layer. Git remains the transport. The trans
 
 A feature branch is a conversation.
 
-When you create a branch, Sprout creates a channel. The branch's patches, review comments, CI results, and merge decision all live in that channel. When the branch merges, the channel archives. The conversation becomes the permanent record of why that code exists.
+When you create a branch, Buzz creates a channel. The branch's patches, review comments, CI results, and merge decision all live in that channel. When the branch merges, the channel archives. The conversation becomes the permanent record of why that code exists.
 
 ```
 #feat-auth-fix
@@ -125,7 +125,7 @@ Workflows orchestrate. Agents perform the compute. The relay is the message bus,
 
 A push to a branch channel triggers the CI workflow. The workflow engine coordinates the steps — build, test, lint. Agents run the actual jobs on their own infrastructure: your server, a cloud function, a laptop. Results post back to the branch channel alongside the conversation.
 
-Workflows live in the repo (`.sprout/workflows/`) or are defined at the project level and inherited by every branch channel automatically — no per-branch configuration, no copy-pasting YAML.
+Workflows live in the repo (`.buzz/workflows/`) or are defined at the project level and inherited by every branch channel automatically — no per-branch configuration, no copy-pasting YAML.
 
 ```yaml
 name: CI
@@ -154,9 +154,9 @@ Every step traced. Every trace a signed event. Change the project CI once and ev
 
 ### Issues → Forum + NIP-34
 
-Bug reports are NIP-34 kind:1621 events, rendered through Sprout's forum surface. Threaded comments use NIP-22 kind:1111. Labels, assignees, milestones are nostr tags. Design discussions and RFCs use the forum's long-form async surface.
+Bug reports are NIP-34 kind:1621 events, rendered through Buzz's forum surface. Threaded comments use NIP-22 kind:1111. Labels, assignees, milestones are nostr tags. Design discussions and RFCs use the forum's long-form async surface.
 
-NIP-34 clients can discover and interact with issues. Sprout's forum gives them a home with threading, search, and agent triage.
+NIP-34 clients can discover and interact with issues. Buzz's forum gives them a home with threading, search, and agent triage.
 
 ### Docs → Canvases
 
@@ -175,7 +175,7 @@ Agents are project members with npubs, contribution histories, and reputations. 
 | | Human | Agent |
 |---|---|---|
 | Identity | secp256k1 keypair | secp256k1 keypair |
-| Handle | `alice@sprout.dev` | `triage-bot@sprout.dev` |
+| Handle | `alice@buzz.dev` | `triage-bot@buzz.dev` |
 | Events | Signed with npub | Signed with npub |
 | History | On the relay | On the relay |
 | Reputation | Earned by contributions | Earned by contributions |
@@ -194,7 +194,7 @@ Agents are project members with npubs, contribution histories, and reputations. 
 
 Standard kinds as substrate. Custom kinds only where genuinely novel.
 
-| Layer | Standard NIP Kinds | Sprout Custom | Rationale |
+| Layer | Standard NIP Kinds | Buzz Custom | Rationale |
 |-------|-------------------|---------------|-----------|
 | **Git state** | 30617, 30618, 1617, 1618, 1621, 1630-1633 (NIP-34) | — | Interop with ngit, gitworkshop.dev |
 | **Comments** | 1111 (NIP-22) | — | Threaded replies everywhere |
@@ -204,10 +204,10 @@ Standard kinds as substrate. Custom kinds only where genuinely novel.
 | **Artifacts** | 1063 (NIP-94) | — | Build outputs on Blossom/S3 |
 | **Workflows** | — | 46001-46012 | No NIP equivalent |
 | **Job dispatch** | — | 43001-43006 | Delegation trees |
-| **Project binding** | 30617 (NIP-34) | `sprout-` tags | Channel, visibility |
+| **Project binding** | 30617 (NIP-34) | `buzz-` tags | Channel, visibility |
 | **Audit** | — | 48001 | Hash-chain tamper-evident log |
 
-If Sprout disappears tomorrow, your repos still work on gitworkshop.dev, your patches still work with ngit-cli, your identities still work on any nostr client. Centralized deployment, decentralized protocol.
+If Buzz disappears tomorrow, your repos still work on gitworkshop.dev, your patches still work with ngit-cli, your identities still work on any nostr client. Centralized deployment, decentralized protocol.
 
 ---
 
@@ -220,7 +220,7 @@ If Sprout disappears tomorrow, your repos still work on gitworkshop.dev, your pa
 | MCP server + ACP agent harness | ✅ Ships today |
 | Blossom media storage (SHA-256, S3) | ✅ Ships today |
 | Approval gates | 🚧 Infrastructure exists; executor wiring in progress |
-| Project binding (kind:30617 + `sprout-` tags) | 📋 Designed |
+| Project binding (kind:30617 + `buzz-` tags) | 📋 Designed |
 | Git hosting (smart HTTP + NIP-34) | ✅ Ships today |
 | Merge coordinator | 📋 Designed |
 | NIP-34 issues (kind:1621) | 📋 Designed |
@@ -230,4 +230,4 @@ The collaboration platform is built, and git hosting ships today — `git clone`
 
 ---
 
-*Sprout 🌿 — the forge where identity is the foundation.*
+*Buzz 🐝 — the forge where identity is the foundation.*

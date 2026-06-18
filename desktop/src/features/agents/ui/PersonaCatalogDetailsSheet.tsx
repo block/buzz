@@ -52,7 +52,7 @@ export function PersonaCatalogDetailsSheet({
               <div className="flex items-start gap-3">
                 <ProfileAvatar
                   avatarUrl={persona.avatarUrl}
-                  className="h-12 w-12 rounded-xl text-sm"
+                  className="h-12 w-12 text-sm"
                   label={persona.displayName}
                 />
                 <div className="min-w-0 flex-1">
@@ -138,10 +138,10 @@ export function PersonaCatalogDetailsSheet({
                 </div>
                 <div className="rounded-xl border border-border/70 bg-card/70 p-4 sm:col-span-2">
                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-                    Preferred provider
+                    Preferred runtime
                   </p>
                   <p className="mt-2 text-sm font-medium">
-                    {persona.provider ?? "Use app default"}
+                    {persona.runtime ?? "Use app default"}
                   </p>
                 </div>
               </div>

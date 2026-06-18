@@ -55,3 +55,5 @@ export function useDrafts() {
 
   return { saveDraft, loadDraft, clearDraft, persistDraft };
 }
+
+export type UseDraftsResult = ReturnType<typeof useDrafts>;

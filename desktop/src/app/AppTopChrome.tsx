@@ -1,9 +1,16 @@
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  PanelLeftClose,
+  PanelLeftOpen,
+} from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import type { Channel, SearchHit } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import { SidebarTrigger, useSidebar } from "@/shared/ui/sidebar";
+import { useOptionalSidebar } from "@/shared/ui/sidebar";
+import { Skeleton } from "@/shared/ui/skeleton";
 
 type AppTopChromeProps = {
   canGoBack: boolean;
@@ -14,18 +21,103 @@ type AppTopChromeProps = {
   onGoForward: () => void;
   onOpenChannel: (channelId: string) => void;
   onOpenResult: (hit: SearchHit) => void;
+  searchHidden?: boolean;
   searchFocusRequest: number;
+  searchLoading?: boolean;
 };
 
 function GlobalTopDivider() {
-  const { state } = useSidebar();
+  const sidebar = useOptionalSidebar();
+  const state = sidebar?.state ?? "collapsed";
 
   return (
     <div
       aria-hidden="true"
-      className="pointer-events-none fixed right-0 top-10 z-40 h-px bg-border/35"
-      style={{ left: state === "expanded" ? "var(--sidebar-width)" : 0 }}
+      className="pointer-events-none fixed top-10 z-40 h-px bg-border/35"
+      style={{
+        left: state === "expanded" ? "var(--sidebar-width)" : 0,
+        right: 0,
+      }}
     />
+  );
+}
+
+function CenterColumnTopbarSearch({
+  channels,
+  currentPubkey,
+  onOpenChannel,
+  onOpenResult,
+  searchFocusRequest,
+  searchLoading = false,
+}: Pick<
+  AppTopChromeProps,
+  | "channels"
+  | "currentPubkey"
+  | "onOpenChannel"
+  | "onOpenResult"
+  | "searchFocusRequest"
+  | "searchLoading"
+>) {
+  const sidebar = useOptionalSidebar();
+  const isResizing = sidebar?.isResizing ?? false;
+  const state = sidebar?.state ?? "collapsed";
+  const searchClassName =
+    "pointer-events-auto w-[220px] max-w-full md:w-[300px] lg:w-[360px] xl:w-[420px] 2xl:w-[480px]";
+
+  return (
+    <div
+      className="pointer-events-none fixed top-[7px] z-45 flex justify-center px-24 transition-[left] duration-200 ease-linear data-[resizing=true]:transition-none"
+      data-testid="topbar-search-column"
+      data-resizing={isResizing}
+      style={{
+        left: state === "expanded" ? "var(--sidebar-width)" : 0,
+        right: 0,
+      }}
+    >
+      {searchLoading ? (
+        <div
+          aria-hidden="true"
+          className={cn("h-7", searchClassName)}
+          data-testid="topbar-search-loading"
+        >
+          <Skeleton className="h-full w-full rounded-lg" />
+        </div>
+      ) : (
+        <TopbarSearch
+          channels={channels}
+          className={searchClassName}
+          currentPubkey={currentPubkey}
+          focusRequest={searchFocusRequest}
+          onOpenChannel={onOpenChannel}
+          onOpenResult={onOpenResult}
+        />
+      )}
+    </div>
+  );
+}
+
+const TOP_CHROME_ICON_BUTTON_CLASS =
+  "h-7 w-7 rounded-[4px] text-muted-foreground/70 hover:bg-border/45 hover:text-foreground [&_svg]:size-4";
+
+function TopChromeSidebarTrigger() {
+  const sidebar = useOptionalSidebar();
+
+  return (
+    <Button
+      aria-label="Toggle Sidebar"
+      className={TOP_CHROME_ICON_BUTTON_CLASS}
+      data-sidebar="trigger"
+      disabled={!sidebar}
+      onClick={() => {
+        sidebar?.toggleSidebar();
+      }}
+      size="icon"
+      type="button"
+      variant="ghost"
+    >
+      {sidebar?.open ? <PanelLeftClose /> : <PanelLeftOpen />}
+      <span className="sr-only">Toggle Sidebar</span>
+    </Button>
   );
 }
 
@@ -38,7 +130,9 @@ export function AppTopChrome({
   onGoForward,
   onOpenChannel,
   onOpenResult,
+  searchHidden = false,
   searchFocusRequest,
+  searchLoading = false,
 }: AppTopChromeProps) {
   return (
     <>
@@ -48,39 +142,41 @@ export function AppTopChrome({
         data-tauri-drag-region
       />
       <GlobalTopDivider />
-      <div className="fixed left-[80px] top-[9px] z-[45] flex items-center gap-0.5">
-        <SidebarTrigger className="h-[22px] w-[22px] text-muted-foreground/70 hover:bg-muted/60 hover:text-foreground" />
+      <div className="fixed left-[80px] top-[6px] z-45 flex items-center gap-0.5">
+        <TopChromeSidebarTrigger />
         <Button
           aria-label="Go back"
-          className="h-[22px] w-[22px] text-muted-foreground/70 hover:bg-muted/60 hover:text-foreground"
+          className={TOP_CHROME_ICON_BUTTON_CLASS}
           data-testid="global-back"
           disabled={!canGoBack}
           onClick={onGoBack}
           size="icon"
           variant="ghost"
         >
-          <ChevronLeft className="h-3 w-3" />
+          <ChevronLeft />
         </Button>
         <Button
           aria-label="Go forward"
-          className="h-[22px] w-[22px] text-muted-foreground/70 hover:bg-muted/60 hover:text-foreground"
+          className={TOP_CHROME_ICON_BUTTON_CLASS}
           data-testid="global-forward"
           disabled={!canGoForward}
           onClick={onGoForward}
           size="icon"
           variant="ghost"
         >
-          <ChevronRight className="h-3 w-3" />
+          <ChevronRight />
         </Button>
       </div>
-      <TopbarSearch
-        channels={channels}
-        className="fixed left-1/2 top-[7px] z-[45] block w-[220px] max-w-[calc(100vw-11rem)] -translate-x-1/2 md:w-[300px] md:max-w-[34vw] lg:w-[360px] lg:max-w-[38vw] xl:w-[420px] xl:max-w-[42vw] 2xl:w-[480px] 2xl:max-w-[44vw]"
-        currentPubkey={currentPubkey}
-        focusRequest={searchFocusRequest}
-        onOpenChannel={onOpenChannel}
-        onOpenResult={onOpenResult}
-      />
+      {searchHidden ? null : (
+        <CenterColumnTopbarSearch
+          channels={channels}
+          currentPubkey={currentPubkey}
+          onOpenChannel={onOpenChannel}
+          onOpenResult={onOpenResult}
+          searchFocusRequest={searchFocusRequest}
+          searchLoading={searchLoading}
+        />
+      )}
     </>
   );
 }

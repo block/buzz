@@ -4,11 +4,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   channelMessagesKey,
   dedupeMessagesById,
+  mergeTimelineHistoryMessages,
   normalizeTimelineMessages,
   sortMessages,
 } from "@/features/messages/lib/messageQueryKeys";
 import {
   buildReplyTags,
+  getChannelIdFromTags,
+  getThreadReference,
   normalizeMentionPubkeys,
   resolveReplyRootId,
 } from "@/features/messages/lib/threading";
@@ -41,19 +44,54 @@ type MessageQueryContext = {
 
 const CHANNEL_HISTORY_LIMIT = 200;
 
+function getLocalRenderKey(message: RelayEvent) {
+  return message.localKey ?? message.id;
+}
+
+function isMatchingPendingMessage(pending: RelayEvent, incoming: RelayEvent) {
+  if (
+    !pending.pending ||
+    pending.content !== incoming.content ||
+    pending.kind !== incoming.kind ||
+    pending.pubkey.toLowerCase() !== incoming.pubkey.toLowerCase() ||
+    getChannelIdFromTags(pending.tags) !== getChannelIdFromTags(incoming.tags)
+  ) {
+    return false;
+  }
+
+  const pendingThread = getThreadReference(pending.tags);
+  const incomingThread = getThreadReference(incoming.tags);
+
+  return (
+    pendingThread.parentId === incomingThread.parentId &&
+    pendingThread.rootId === incomingThread.rootId
+  );
+}
+
 function mergeMessagesWithNormalizer(
   current: RelayEvent[],
   incoming: RelayEvent,
   normalize: (messages: RelayEvent[]) => RelayEvent[],
 ): RelayEvent[] {
   const normalizedCurrent = dedupeMessagesById(current);
+  const replacedPending = normalizedCurrent.find((message) =>
+    isMatchingPendingMessage(message, incoming),
+  );
+  const incomingWithLocalKey = replacedPending
+    ? {
+        ...incoming,
+        localKey: replacedPending.localKey ?? replacedPending.id,
+      }
+    : incoming;
+  const incomingLocalKey = getLocalRenderKey(incomingWithLocalKey);
   const deduped = normalizedCurrent.filter(
     (message) =>
       message.id !== incoming.id &&
-      !(message.pending && incoming.content === message.content),
+      getLocalRenderKey(message) !== incomingLocalKey &&
+      !isMatchingPendingMessage(message, incoming),
   );
 
-  return normalize([...deduped, incoming]);
+  return normalize([...deduped, incomingWithLocalKey]);
 }
 
 export function mergeMessages(
@@ -83,6 +121,7 @@ function createOptimisticMessage(
   parentEventId: string | null = null,
   mediaTags: string[][] = [],
 ): RelayEvent {
+  const localKey = `optimistic-${crypto.randomUUID()}`;
   const tags: string[][] = [];
 
   if (parentEventId) {
@@ -111,7 +150,8 @@ function createOptimisticMessage(
   }
 
   return {
-    id: `optimistic-${crypto.randomUUID()}`,
+    id: localKey,
+    localKey,
     pubkey: identity.pubkey,
     created_at: Math.floor(Date.now() / 1_000),
     kind: KIND_STREAM_MESSAGE,
@@ -141,10 +181,10 @@ export function useChannelMessagesQuery(channel: Channel | null) {
       );
       const currentMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-      const mergedHistory = normalizeTimelineMessages([
-        ...currentMessages,
-        ...history,
-      ]);
+      const mergedHistory = mergeTimelineHistoryMessages(
+        currentMessages,
+        history,
+      );
 
       return mergedHistory;
     },
@@ -169,14 +209,7 @@ export function useChannelSubscription(channel: Channel | null) {
 
     queryClient.setQueryData<RelayEvent[]>(
       channelMessagesKey(channelId),
-      (current = []) => {
-        const mergedHistory = normalizeTimelineMessages([
-          ...current,
-          ...history,
-        ]);
-
-        return mergedHistory;
-      },
+      (current = []) => mergeTimelineHistoryMessages(current, history),
     );
   });
 
@@ -304,7 +337,11 @@ export function useSendMessageMutation(
       // emoji). Split it so each kind goes to its own validated Tauri arg —
       // emoji tags must NOT ride the imeta-only `media` channel (that gate
       // rejects any non-imeta prefix, which silently dropped emoji sends).
-      const { mediaTags: imetaTags, emojiTags } = splitOutgoingTags(mediaTags);
+      const {
+        mediaTags: imetaTags,
+        emojiTags,
+        mentionTags,
+      } = splitOutgoingTags(mediaTags);
 
       // Messages carrying media OR custom-emoji tags MUST go through REST so
       // the relay's tag validation runs. The WebSocket path emits no extra
@@ -322,6 +359,7 @@ export function useSendMessageMutation(
           mentionPubkeys,
           undefined,
           emojiTags,
+          mentionTags,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -359,6 +397,7 @@ export function useSendMessageMutation(
               : []),
             ...imetaTags,
             ...emojiTags,
+            ...mentionTags,
           ],
           content: content.trim(),
           sig: "",
@@ -369,7 +408,7 @@ export function useSendMessageMutation(
         channel.id,
         content,
         mentionPubkeys ?? [],
-        [],
+        mentionTags,
       );
     },
     onMutate: async ({ content, mentionPubkeys, parentEventId, mediaTags }) => {
@@ -415,14 +454,11 @@ export function useSendMessageMutation(
         return;
       }
 
-      queryClient.setQueryData<RelayEvent[]>(
-        context.queryKey,
-        (current = []) => {
-          const withoutOptimistic = current.filter(
-            (item) => item.id !== context.optimisticId,
-          );
-          return mergeTimelineCacheMessages(withoutOptimistic, message);
-        },
+      queryClient.setQueryData<RelayEvent[]>(context.queryKey, (current = []) =>
+        mergeTimelineCacheMessages(current, {
+          ...message,
+          localKey: context.optimisticId,
+        }),
       );
     },
   });
@@ -462,7 +498,10 @@ export function useDeleteMessageMutation(channel: Channel | null) {
 
   return useMutation<void, Error, { eventId: string }>({
     mutationFn: async ({ eventId }) => {
-      await deleteMessage(eventId);
+      if (!channel) {
+        throw new Error("No channel selected.");
+      }
+      await deleteMessage(channel.id, eventId);
     },
     onSuccess: (_data, { eventId }) => {
       if (!channel) return;

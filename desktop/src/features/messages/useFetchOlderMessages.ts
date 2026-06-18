@@ -3,7 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 
 import {
   channelMessagesKey,
-  sortMessages,
+  mergeTimelineHistoryMessages,
 } from "@/features/messages/lib/messageQueryKeys";
 import { relayClient } from "@/shared/api/relayClient";
 import type { Channel, RelayEvent } from "@/shared/api/types";
@@ -64,7 +64,7 @@ export function useFetchOlderMessages(channel: Channel | null) {
 
       if (olderMessages.length > 0) {
         queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
-          sortMessages([...current, ...olderMessages]),
+          mergeTimelineHistoryMessages(current, olderMessages),
         );
 
         const updatedMessages =

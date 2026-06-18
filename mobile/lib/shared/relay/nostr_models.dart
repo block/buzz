@@ -11,6 +11,7 @@ abstract final class EventKind {
   static const deletion = 5;
   static const reaction = 7;
   static const streamMessage = 9;
+  static const nip29DeleteEvent = 9005;
   static const presenceUpdate = 20001;
   static const typingIndicator = 20002;
   static const auth = 22242;
@@ -37,6 +38,7 @@ abstract final class EventKind {
   static const channelEventKinds = [
     deletion, // 5
     reaction, // 7
+    nip29DeleteEvent, // 9005 — Buzz-native deletion
     ...channelMessageEventKinds,
     40001, // legacy pre-migration stream messages
     streamMessageEdit, // 40003
@@ -335,7 +337,7 @@ List<MemberEntry> membersFromEvent(NostrEvent event) {
   ];
 }
 
-/// Parse a Sprout command response from the relay's OK message content.
+/// Parse a Buzz command response from the relay's OK message content.
 ///
 /// Command kinds (e.g. 41010, 30620, 46020) return `"response:{...}"` in the
 /// OK message. Returns `null` if the message is not a command response or the

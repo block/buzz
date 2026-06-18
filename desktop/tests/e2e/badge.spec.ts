@@ -16,12 +16,12 @@ async function waitForMockLiveSubscription(
           return (
             (
               window as Window & {
-                __SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+                __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
                   channelName: string;
                   kind?: number;
                 }) => boolean;
               }
-            ).__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
               channelName: currentChannelName,
               kind: k,
             }) ?? false
@@ -36,12 +36,12 @@ async function waitForMockLiveSubscription(
 async function getBadgeState(page: import("@playwright/test").Page) {
   return page.evaluate(() => {
     const w = window as Window & {
-      __SPROUT_E2E_APP_BADGE_STATE__?: string;
-      __SPROUT_E2E_APP_BADGE_COUNT__?: number;
+      __BUZZ_E2E_APP_BADGE_STATE__?: string;
+      __BUZZ_E2E_APP_BADGE_COUNT__?: number;
     };
     return {
-      state: w.__SPROUT_E2E_APP_BADGE_STATE__ ?? "none",
-      count: w.__SPROUT_E2E_APP_BADGE_COUNT__ ?? 0,
+      state: w.__BUZZ_E2E_APP_BADGE_STATE__ ?? "none",
+      count: w.__BUZZ_E2E_APP_BADGE_COUNT__ ?? 0,
     };
   });
 }
@@ -72,7 +72,7 @@ test("dot badge for regular message in inactive channel", async ({ page }) => {
 
   await page.evaluate(
     ({ pubkey }) => {
-      window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "random",
         content: "Regular message, no mention",
         kind: 40002,
@@ -94,7 +94,7 @@ test("numeric badge for @mention in inactive channel", async ({ page }) => {
 
   await page.evaluate(
     ({ pubkey, mentionPubkey }) => {
-      window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "random",
         content: "Hey @tyler check this out",
         kind: 40002,
@@ -119,7 +119,7 @@ test("numeric badge for DM message", async ({ page }) => {
   await waitForMockLiveSubscription(page, "alice-tyler");
 
   await page.evaluate((pubkey) => {
-    window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
       channelName: "alice-tyler",
       content: "Hey, got a minute?",
       pubkey,
@@ -140,7 +140,7 @@ test("numeric badge for broadcast reply in inactive channel", async ({
 
   await page.evaluate(
     ({ pubkey }) => {
-      window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "random",
         content: "Broadcast reply to the channel",
         kind: 40002,
@@ -173,7 +173,7 @@ test("mark-as-read via context menu clears channel unread indicator", async ({
 
   await page.evaluate(
     ({ pubkey }) => {
-      window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "random",
         content: "Message to be marked read",
         kind: 40002,
@@ -206,7 +206,7 @@ test("mark-as-unread via context menu shows dot badge", async ({ page }) => {
   await waitForBadgeState(page, { state: "dot" });
 });
 
-test("synced mark-as-unread from another device shows dot, synced mark-as-read clears it", async ({
+test("remote read-state rollback is ignored while local mark-unread still shows dot", async ({
   page,
 }) => {
   await page.goto("/");
@@ -224,12 +224,12 @@ test("synced mark-as-unread from another device shows dot, synced mark-as-read c
         return (
           (
             window as Window & {
-              __SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
+              __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
                 channelName: string;
                 kind?: number;
               }) => boolean;
             }
-          ).__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+          ).__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
             channelName: "general",
             kind: 30078,
           }) ?? false
@@ -249,14 +249,14 @@ test("synced mark-as-unread from another device shows dot, synced mark-as-read c
     ({ clientId, slotId, channelId, ts }) => {
       (
         window as Window & {
-          __SPROUT_E2E_EMIT_MOCK_READ_STATE__?: (input: {
+          __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
             clientId: string;
             contexts: Record<string, number>;
             createdAt: number;
             slotId: string;
           }) => unknown;
         }
-      ).__SPROUT_E2E_EMIT_MOCK_READ_STATE__?.({
+      ).__BUZZ_E2E_EMIT_MOCK_READ_STATE__?.({
         clientId,
         slotId,
         contexts: { [channelId]: ts },
@@ -271,20 +271,20 @@ test("synced mark-as-unread from another device shows dot, synced mark-as-read c
     },
   );
 
-  // Step 2: rollback — read timestamp drops (another device marks unread).
-  // createdAt must be strictly greater than step 1 to pass LWW gate.
+  // Step 2: a remote rollback carries an older read timestamp in a newer
+  // event. NIP-RS read markers are monotonic, so this must be ignored.
   await page.evaluate(
     ({ clientId, slotId, channelId, ts, createdAt }) => {
       (
         window as Window & {
-          __SPROUT_E2E_EMIT_MOCK_READ_STATE__?: (input: {
+          __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
             clientId: string;
             contexts: Record<string, number>;
             createdAt: number;
             slotId: string;
           }) => unknown;
         }
-      ).__SPROUT_E2E_EMIT_MOCK_READ_STATE__?.({
+      ).__BUZZ_E2E_EMIT_MOCK_READ_STATE__?.({
         clientId,
         slotId,
         contexts: { [channelId]: ts },
@@ -300,22 +300,28 @@ test("synced mark-as-unread from another device shows dot, synced mark-as-read c
     },
   );
 
-  // The unread dot should appear.
-  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 
-  // Step 3: advance — read timestamp moves forward (device marks read).
+  // Local mark-unread remains an in-session affordance and should still show
+  // the dot immediately without publishing a lower read timestamp.
+  await page.getByTestId("channel-random").click({ button: "right" });
+  await page.getByText("Mark unread").click();
+  await expect(page.getByTestId("channel-unread-random")).toBeVisible();
+  await waitForBadgeState(page, { state: "dot" });
+
+  // Step 3: remote advance clears the local forced-unread dot.
   await page.evaluate(
     ({ clientId, slotId, channelId, ts, createdAt }) => {
       (
         window as Window & {
-          __SPROUT_E2E_EMIT_MOCK_READ_STATE__?: (input: {
+          __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
             clientId: string;
             contexts: Record<string, number>;
             createdAt: number;
             slotId: string;
           }) => unknown;
         }
-      ).__SPROUT_E2E_EMIT_MOCK_READ_STATE__?.({
+      ).__BUZZ_E2E_EMIT_MOCK_READ_STATE__?.({
         clientId,
         slotId,
         contexts: { [channelId]: ts },
@@ -326,11 +332,10 @@ test("synced mark-as-unread from another device shows dot, synced mark-as-read c
       clientId: REMOTE_CLIENT_ID,
       slotId: REMOTE_SLOT_ID,
       channelId: RANDOM_CHANNEL_ID,
-      ts: now,
+      ts: now + 10,
       createdAt: now + 10,
     },
   );
 
-  // The unread dot should disappear.
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 });

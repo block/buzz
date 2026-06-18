@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Sprout",
-  "version": "0.3.11",
-  "identifier": "xyz.block.sprout.app",
+  "productName": "Buzz",
+  "version": "0.3.25",
+  "identifier": "xyz.block.buzz.app",
   "build": {
     "beforeDevCommand": {
       "script": "exec ./node_modules/.bin/vite",
@@ -19,6 +19,7 @@
         "title": "",
         "width": 800,
         "height": 600,
+        "maximized": true,
         "visible": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
@@ -42,7 +43,7 @@
     },
     "deep-link": {
       "desktop": {
-        "schemes": ["sprout"]
+        "schemes": ["buzz"]
       }
     }
   },
@@ -50,12 +51,11 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/sprout-acp",
-      "binaries/sprout-mcp-server",
-      "binaries/sprout-agent",
-      "binaries/sprout-dev-mcp",
+      "binaries/buzz-acp",
+      "binaries/buzz-agent",
+      "binaries/buzz-dev-mcp",
       "binaries/git-credential-nostr",
-      "binaries/sprout"
+      "binaries/buzz"
     ],
     "icon": [
       "icons/32x32.png",

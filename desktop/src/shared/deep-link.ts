@@ -14,7 +14,7 @@ export interface DeepLinkDeps {
 }
 
 /**
- * Payload emitted by the Rust deep-link handler for `sprout://message?…`.
+ * Payload emitted by the Rust deep-link handler for `buzz://message?…`.
  * Field names match the JSON shape produced in `desktop/src-tauri/src/lib.rs`.
  */
 export type MessageDeepLinkPayload = {
@@ -26,11 +26,11 @@ export type MessageDeepLinkPayload = {
 /**
  * Register listeners for deep-link events emitted by the Rust backend.
  *
- * When a `sprout://connect?relay=<url>` link is opened, the handler
+ * When a `buzz://connect?relay=<url>` link is opened, the handler
  * adds a workspace for the relay (deduplicating by URL) and switches
  * to it. Returns an unlisten function to tear down all listeners.
  *
- * `sprout://message?…` is handled separately by `listenForMessageDeepLinks`,
+ * `buzz://message?…` is handled separately by `listenForMessageDeepLinks`,
  * because it needs to dispatch into the router which only exists below the
  * `RouterProvider` in the component tree.
  */

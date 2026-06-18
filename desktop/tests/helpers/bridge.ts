@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
 export const TEST_IDENTITIES = {
   tyler: {
@@ -41,16 +42,71 @@ type MockCommandAvailability = {
   resolvedPath?: string | null;
 };
 
+type MockManagedAgentSeed = {
+  pubkey: string;
+  name: string;
+  personaId?: string | null;
+  status?: "running" | "stopped" | "deployed" | "not_deployed";
+  channelNames?: string[];
+  channelIds?: string[];
+  backend?:
+    | { type: "local" }
+    | { type: "provider"; id: string; config: Record<string, unknown> };
+};
+
+type MockSearchProfileSeed = {
+  pubkey: string;
+  displayName: string | null;
+  avatarUrl?: string | null;
+  nip05Handle?: string | null;
+  about?: string | null;
+  isAgent?: boolean;
+};
+
+export type MockEngramEntry = {
+  slug: string;
+  body: string;
+  eventId: string;
+  createdAt: number;
+  outgoingRefs: string[];
+};
+
+export type MockAgentMemoryListing = {
+  core: MockEngramEntry | null;
+  memories: MockEngramEntry[];
+  truncated: boolean;
+  fetchedAt: number;
+};
+
 type MockBridgeOptions = {
-  acpProvidersCatalog?: Record<string, unknown>[];
+  acpRuntimesCatalog?: Record<string, unknown>[];
+  activePersonaIds?: string[];
+  /**
+   * Listing returned by the mocked `get_agent_memory` command. Pass a single
+   * listing for any managed agent, or a pubkey-keyed record for per-agent data.
+   */
+  agentMemory?: MockAgentMemoryListing | Record<string, MockAgentMemoryListing>;
   managedAgentPrereqs?: {
     acp?: MockCommandAvailability;
     mcp?: MockCommandAvailability;
   };
+  managedAgents?: MockManagedAgentSeed[];
+  createManagedAgentDelayMs?: number;
+  channelsReadError?: string;
+  feedReadError?: string;
+  canvasReadError?: string;
+  openDmDelayMs?: number;
   profileReadDelayMs?: number;
   profileReadError?: string;
   profileUpdateError?: string;
+  profileUpdateErrors?: string[];
+  searchProfiles?: MockSearchProfileSeed[];
+  updateAvailable?: boolean;
+  updateChannelDelayMs?: number;
+  updateDownloadDelayMs?: number;
+  updateVersion?: string;
   stallWebsocketSends?: boolean;
+  userSearchDelayMs?: number;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
   // tests/e2e/identity-archive.spec.ts.
   /**
@@ -81,12 +137,18 @@ type MockBridgeOptions = {
    * generic PDF so the file-attachment flow can be exercised by default. An
    * explicit `[]` is honoured (models a picker cancel / no files selected).
    */
+  uploadDelayMs?: number;
   uploadDescriptors?: {
     url: string;
     sha256: string;
     size: number;
     type: string;
     uploaded: number;
+    dim?: string;
+    blurhash?: string;
+    thumb?: string;
+    duration?: number;
+    image?: string;
     filename?: string;
   }[];
 };
@@ -97,26 +159,157 @@ type BridgeOptions = {
   relayHttpUrl?: string;
   relayWsUrl?: string;
   skipOnboardingSeed?: boolean;
+  skipWorkspaceSeed?: boolean;
+  /**
+   * When true (default), seed every preview feature in preview-features.json as
+   * enabled in localStorage so E2E tests can interact with gated UI without
+   * clicking through the Experiments settings panel. Set to false in specs
+   * that exercise the Experiments toggle UI itself.
+   */
+  seedPreviewFeatures?: boolean;
   user?: keyof typeof TEST_IDENTITIES;
 };
 
-const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX =
-  "sprout-onboarding-complete.v1:";
+const WELCOME_CHANNEL_ENSURED_STORAGE_KEY_PREFIX =
+  "buzz-welcome-channel-ensured.v2:";
+const ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX = "buzz-onboarding-complete.v1:";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
 const DEFAULT_RELAY_WS_URL = "ws://localhost:3000";
 
-async function seedOnboardingCompletionForKnownIdentities(page: Page) {
+function cloneEngramEntry(entry: MockEngramEntry): MockEngramEntry {
+  return {
+    ...entry,
+    outgoingRefs: [...entry.outgoingRefs],
+  };
+}
+
+/**
+ * Recreates the old Memories UI development fixture as explicit Playwright
+ * seed data. Use with `installMockBridge(page, { agentMemory: ... })`.
+ */
+export function createMockAgentMemoryListing(
+  overrides: Partial<MockAgentMemoryListing> = {},
+): MockAgentMemoryListing {
+  const listing: MockAgentMemoryListing = {
+    core: {
+      slug: "core",
+      body: `I am a mock agent used to flesh out the Memories panel.
+
+I prefer concise updates, explicit next steps, and visual polish before edge-case handling.
+
+See [[mem/preferences/ui-density]] and [[mem/projects/buzz-memory-viewer]] for details.
+
+A retired launch checklist used to live at [[mem/archive/deleted-launch-checklist]], but that memory was deleted after the plan changed.`,
+      eventId: "mock-core",
+      createdAt: 1_700_000_000,
+      outgoingRefs: [
+        "mem/preferences/ui-density",
+        "mem/projects/buzz-memory-viewer",
+        "mem/archive/deleted-launch-checklist",
+      ],
+    },
+    memories: [
+      {
+        slug: "mem/preferences/ui-density",
+        body: "Prefer compact lists with generous body text when expanded.\n\nNested ref: [[mem/working-style/review-loop]]",
+        eventId: "mock-ui-density",
+        createdAt: 1_700_000_100,
+        outgoingRefs: ["mem/working-style/review-loop"],
+      },
+      {
+        slug: "mem/working-style/review-loop",
+        body: "Ship small slices, screenshot the happy path, then iterate on empty/error states.",
+        eventId: "mock-review-loop",
+        createdAt: 1_700_000_200,
+        outgoingRefs: [],
+      },
+      {
+        slug: "mem/projects/buzz-memory-viewer",
+        body: "Building the IXI-7 read-only memory viewer in the profile panel.\n\nChild memory: [[mem/projects/buzz-memory-viewer/notes]]",
+        eventId: "mock-project",
+        createdAt: 1_700_000_300,
+        outgoingRefs: ["mem/projects/buzz-memory-viewer/notes"],
+      },
+      {
+        slug: "mem/projects/buzz-memory-viewer/notes",
+        body: "Tree should auto-expand core. Everything else collapsed with a one-line preview.",
+        eventId: "mock-project-notes",
+        createdAt: 1_700_000_400,
+        outgoingRefs: [],
+      },
+      {
+        slug: "mem/people/alice",
+        body: "Alice prefers async updates in #design.",
+        eventId: "mock-alice",
+        createdAt: 1_700_000_500,
+        outgoingRefs: [],
+      },
+      {
+        slug: "mem/people/bob",
+        body: "Bob reviews PRs quickly but wants screenshots.",
+        eventId: "mock-bob",
+        createdAt: 1_700_000_600,
+        outgoingRefs: ["mem/people/alice"],
+      },
+      {
+        slug: "mem/scratch/todo",
+        body: "",
+        eventId: "mock-empty",
+        createdAt: 1_700_000_700,
+        outgoingRefs: [],
+      },
+      {
+        slug: "mem/orphan/unreferenced",
+        body: "This orphaned note is not reachable from core. It still points at [[mem/research/old-panel-sketches]], a deleted design scratchpad from an earlier pass.",
+        eventId: "mock-orphan",
+        createdAt: 1_700_000_800,
+        outgoingRefs: ["mem/research/old-panel-sketches"],
+      },
+    ],
+    truncated: true,
+    fetchedAt: Math.floor(Date.now() / 1000),
+  };
+
+  return {
+    core:
+      overrides.core === undefined
+        ? listing.core
+          ? cloneEngramEntry(listing.core)
+          : null
+        : overrides.core
+          ? cloneEngramEntry(overrides.core)
+          : null,
+    memories: (overrides.memories ?? listing.memories).map(cloneEngramEntry),
+    truncated: overrides.truncated ?? listing.truncated,
+    fetchedAt: overrides.fetchedAt ?? listing.fetchedAt,
+  };
+}
+
+async function seedOnboardingCompletionForKnownIdentities(
+  page: Page,
+  relayWsUrl?: string,
+) {
   const pubkeys = [
     DEFAULT_MOCK_PUBKEY,
     ...Object.values(TEST_IDENTITIES).map(({ pubkey }) => pubkey),
   ];
   await page.addInitScript(
-    ({ prefix, pubkeys: pubkeysToSeed }) => {
+    ({ onboardingPrefix, pubkeys: pubkeysToSeed, relayUrl, welcomePrefix }) => {
+      const welcomeScope = encodeURIComponent(relayUrl);
       for (const pubkey of pubkeysToSeed) {
-        window.localStorage.setItem(`${prefix}${pubkey}`, "true");
+        window.localStorage.setItem(`${onboardingPrefix}${pubkey}`, "true");
+        window.localStorage.setItem(
+          `${welcomePrefix}${welcomeScope}:${pubkey}`,
+          "true",
+        );
       }
     },
-    { prefix: ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX, pubkeys },
+    {
+      onboardingPrefix: ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX,
+      pubkeys,
+      relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL,
+      welcomePrefix: WELCOME_CHANNEL_ENSURED_STORAGE_KEY_PREFIX,
+    },
   );
 }
 
@@ -131,12 +324,23 @@ async function seedDefaultWorkspace(page: Page, relayWsUrl?: string) {
         addedAt: new Date().toISOString(),
       };
       window.localStorage.setItem(
-        "sprout-workspaces",
+        "buzz-workspaces",
         JSON.stringify([workspace]),
       );
-      window.localStorage.setItem("sprout-active-workspace-id", workspaceId);
+      window.localStorage.setItem("buzz-active-workspace-id", workspaceId);
     },
     { relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL },
+  );
+}
+
+async function seedPreviewFeaturesEnabled(page: Page) {
+  await page.addInitScript(
+    ({ key, ids }) => {
+      const overrides: Record<string, boolean> = {};
+      for (const id of ids) overrides[id] = true;
+      window.localStorage.setItem(key, JSON.stringify(overrides));
+    },
+    { key: FEATURE_OVERRIDES_STORAGE_KEY, ids: PREVIEW_FEATURE_IDS },
   );
 }
 
@@ -146,11 +350,18 @@ export async function installBridge(page: Page, options: BridgeOptions) {
       ? TEST_IDENTITIES[options.user ?? "tyler"]
       : undefined;
 
-  // Always seed a workspace so useWorkspaceInit doesn't show WelcomeSetup.
+  // Most specs seed a workspace so useWorkspaceInit doesn't show WelcomeSetup.
   // skipOnboardingSeed only controls the onboarding-completion flag.
-  await seedDefaultWorkspace(page, options.relayWsUrl);
+  if (!options.skipWorkspaceSeed) {
+    await seedDefaultWorkspace(page, options.relayWsUrl);
+  }
   if (!options.skipOnboardingSeed) {
-    await seedOnboardingCompletionForKnownIdentities(page);
+    await seedOnboardingCompletionForKnownIdentities(page, options.relayWsUrl);
+  }
+  // Default to opting every preview feature in. Specs that exercise the
+  // Experiments toggle UI itself pass `seedPreviewFeatures: false`.
+  if (options.seedPreviewFeatures !== false) {
+    await seedPreviewFeaturesEnabled(page);
   }
 
   await page.addInitScript(
@@ -193,18 +404,18 @@ export async function installBridge(page: Page, options: BridgeOptions) {
       });
 
       const testWindow = window as Window & {
-        __SPROUT_E2E__?: Record<string, unknown>;
-        __SPROUT_E2E_APP_BADGE_COUNT__?: number;
-        __SPROUT_E2E_APP_BADGE_STATE__?: string;
-        __SPROUT_E2E_CLICK_NOTIFICATION__?: (index: number) => boolean;
-        __SPROUT_E2E_NOTIFICATIONS__?: Array<{
+        __BUZZ_E2E__?: Record<string, unknown>;
+        __BUZZ_E2E_APP_BADGE_COUNT__?: number;
+        __BUZZ_E2E_APP_BADGE_STATE__?: string;
+        __BUZZ_E2E_CLICK_NOTIFICATION__?: (index: number) => boolean;
+        __BUZZ_E2E_NOTIFICATIONS__?: Array<{
           body: string | null;
           title: string;
         }>;
       };
-      const currentConfig = testWindow.__SPROUT_E2E__ ?? {};
+      const currentConfig = testWindow.__BUZZ_E2E__ ?? {};
 
-      testWindow.__SPROUT_E2E__ = {
+      testWindow.__BUZZ_E2E__ = {
         ...currentConfig,
         identity: bridgeIdentity ?? currentConfig.identity,
         mock,
@@ -212,9 +423,9 @@ export async function installBridge(page: Page, options: BridgeOptions) {
         relayHttpUrl: relayHttpUrl ?? currentConfig.relayHttpUrl,
         relayWsUrl: relayWsUrl ?? currentConfig.relayWsUrl,
       };
-      testWindow.__SPROUT_E2E_APP_BADGE_COUNT__ = 0;
-      testWindow.__SPROUT_E2E_APP_BADGE_STATE__ = "none";
-      testWindow.__SPROUT_E2E_CLICK_NOTIFICATION__ = (index: number) => {
+      testWindow.__BUZZ_E2E_APP_BADGE_COUNT__ = 0;
+      testWindow.__BUZZ_E2E_APP_BADGE_STATE__ = "none";
+      testWindow.__BUZZ_E2E_CLICK_NOTIFICATION__ = (index: number) => {
         const notification = notificationInstances[index];
         if (!notification) {
           return false;
@@ -225,7 +436,7 @@ export async function installBridge(page: Page, options: BridgeOptions) {
         notification.onclick?.(event);
         return true;
       };
-      testWindow.__SPROUT_E2E_NOTIFICATIONS__ = notificationLog;
+      testWindow.__BUZZ_E2E_NOTIFICATIONS__ = notificationLog;
     },
     {
       identity,
@@ -240,18 +451,31 @@ export async function installBridge(page: Page, options: BridgeOptions) {
 export async function installMockBridge(
   page: Page,
   mock?: MockBridgeOptions,
-  options?: { skipOnboardingSeed?: boolean },
+  options?: {
+    relayWsUrl?: string;
+    skipOnboardingSeed?: boolean;
+    skipWorkspaceSeed?: boolean;
+    seedPreviewFeatures?: boolean;
+  },
 ) {
   await installBridge(page, {
     mode: "mock",
     mock,
+    relayWsUrl: options?.relayWsUrl,
     skipOnboardingSeed: options?.skipOnboardingSeed,
+    skipWorkspaceSeed: options?.skipWorkspaceSeed,
+    seedPreviewFeatures: options?.seedPreviewFeatures,
   });
 }
 
 export async function installRelayBridge(
   page: Page,
   user: keyof typeof TEST_IDENTITIES = "tyler",
+  options?: { seedPreviewFeatures?: boolean },
 ) {
-  await installBridge(page, { mode: "relay", user });
+  await installBridge(page, {
+    mode: "relay",
+    user,
+    seedPreviewFeatures: options?.seedPreviewFeatures,
+  });
 }

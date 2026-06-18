@@ -1,10 +1,10 @@
-import { Plus, Settings2, Users } from "lucide-react";
+import { EllipsisVertical, Settings2, Users } from "lucide-react";
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useHuddle } from "@/features/huddle";
 import { HuddleIndicator } from "@/features/huddle/components/HuddleIndicator";
 import {
-  useAvailableAcpProviders,
+  useAvailableAcpRuntimes,
   useBackendProvidersQuery,
   useManagedAgentsQuery,
   useRelayAgentsQuery,
@@ -13,26 +13,49 @@ import { useChannelMembersQuery } from "@/features/channels/hooks";
 import type { Channel } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { AddChannelBotDialog } from "./AddChannelBotDialog";
 
 type ChannelMembersBarProps = {
   channel: Channel;
   currentPubkey?: string;
+  isAddBotOpen?: boolean;
+  onAddBotOpenChange?: (open: boolean) => void;
   onManageChannel: () => void;
   onToggleMembers: () => void;
+  variant?: "inline" | "compact";
 };
 
 export function ChannelMembersBar({
   channel,
   currentPubkey,
+  isAddBotOpen: isAddBotOpenProp,
+  onAddBotOpenChange,
   onManageChannel,
   onToggleMembers,
+  variant = "inline",
 }: ChannelMembersBarProps) {
-  const [isAddBotOpen, setIsAddBotOpen] = React.useState(false);
+  const [uncontrolledAddBotOpen, setUncontrolledAddBotOpen] =
+    React.useState(false);
+  const isAddBotOpen = isAddBotOpenProp ?? uncontrolledAddBotOpen;
+  const setIsAddBotOpen = React.useCallback(
+    (open: boolean) => {
+      onAddBotOpenChange?.(open);
+      if (isAddBotOpenProp === undefined) {
+        setUncontrolledAddBotOpen(open);
+      }
+    },
+    [isAddBotOpenProp, onAddBotOpenChange],
+  );
   const { startHuddle, isStarting: isStartingHuddle } = useHuddle();
   const queryClient = useQueryClient();
   const membersQuery = useChannelMembersQuery(channel.id);
-  const providersQuery = useAvailableAcpProviders();
+  const providersQuery = useAvailableAcpRuntimes();
   const backendProvidersQuery = useBackendProvidersQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -58,7 +81,7 @@ export function ChannelMembersBar({
     members.find(
       (member) => normalizePubkey(member.pubkey) === normalizedCurrentPubkey,
     ) ?? null;
-  const canAddAgents =
+  const canStartHuddle =
     channel.channelType !== "dm" &&
     channel.archivedAt === null &&
     (channel.visibility === "open" || selfMember !== null);
@@ -71,7 +94,7 @@ export function ChannelMembersBar({
 
     previousChannelIdRef.current = channel.id;
     setIsAddBotOpen(false);
-  }, [channel.id]);
+  }, [channel.id, setIsAddBotOpen]);
 
   const dialogErrorMessage =
     providersQuery.error instanceof Error
@@ -82,66 +105,93 @@ export function ChannelMembersBar({
           ? relayAgentsQuery.error.message
           : null;
 
-  return (
-    <React.Fragment>
-      <div className="flex items-center gap-1">
-        <Button
-          aria-label="Add agent"
-          className="h-7 w-7 rounded-full"
-          data-testid="channel-add-bot-trigger"
-          disabled={!canAddAgents}
-          onClick={() => {
-            setIsAddBotOpen(true);
-          }}
-          size="icon"
-          type="button"
-          variant="outline"
-        >
-          <Plus className="h-3 w-3" />
-        </Button>
+  const huddleIndicator = (
+    <HuddleIndicator
+      channelId={channel.id}
+      onStart={async () => {
+        try {
+          await startHuddle(channel.id, []);
+          // Refetch channels so the new ephemeral channel appears in the sidebar immediately
+          // (default poll interval is 60s — too slow for huddle UX).
+          void queryClient.invalidateQueries({ queryKey: ["channels"] });
+        } catch (e) {
+          console.error("Failed to start huddle:", e);
+        }
+      }}
+      renderMode={variant === "compact" ? "menu-item" : "button"}
+      startDisabled={!canStartHuddle || isStartingHuddle}
+    />
+  );
 
+  const controls =
+    variant === "compact" ? (
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          <Button
+            aria-label="Channel actions"
+            data-testid="channel-actions-menu-trigger"
+            size="icon"
+            type="button"
+            variant="outline"
+          >
+            <EllipsisVertical />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-48" forceMount>
+          <DropdownMenuItem
+            data-testid="channel-members-trigger"
+            onSelect={onToggleMembers}
+          >
+            <Users />
+            <span>Members</span>
+            <span className="ml-auto text-xs text-muted-foreground">
+              {memberCount}
+            </span>
+          </DropdownMenuItem>
+          {huddleIndicator}
+          <DropdownMenuItem
+            data-testid="channel-management-trigger"
+            onSelect={onManageChannel}
+          >
+            <Settings2 />
+            <span>Manage channel</span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    ) : (
+      <div className="flex items-center gap-[6px]">
         <Button
           aria-label={`View channel members (${memberCount})`}
-          className="h-7 gap-1 rounded-full px-2"
+          className="h-8 px-2.5"
           data-testid="channel-members-trigger"
           onClick={onToggleMembers}
           type="button"
           variant="outline"
         >
-          <Users className="h-3 w-3" />
-          <span className="min-w-[1ch] text-[11px] font-medium tabular-nums">
+          <Users />
+          <span className="min-w-[1ch] text-sm font-medium tabular-nums">
             {memberCount}
           </span>
         </Button>
 
-        <HuddleIndicator
-          className="h-7 w-7"
-          channelId={channel.id}
-          onStart={async () => {
-            try {
-              await startHuddle(channel.id, []);
-              // Refetch channels so the new ephemeral channel appears in the sidebar immediately
-              // (default poll interval is 60s — too slow for huddle UX).
-              void queryClient.invalidateQueries({ queryKey: ["channels"] });
-            } catch (e) {
-              console.error("Failed to start huddle:", e);
-            }
-          }}
-          startDisabled={!canAddAgents || isStartingHuddle}
-        />
+        {huddleIndicator}
 
         <Button
           aria-label="Manage channel"
-          className="h-7 w-7 rounded-full"
           data-testid="channel-management-trigger"
           onClick={onManageChannel}
           size="icon"
           type="button"
           variant="outline"
         >
-          <Settings2 className="h-3 w-3" />
+          <Settings2 />
         </Button>
       </div>
+    );
+
+  return (
+    <React.Fragment>
+      {controls}
 
       <AddChannelBotDialog
         backendProviders={backendProvidersQuery.data ?? []}

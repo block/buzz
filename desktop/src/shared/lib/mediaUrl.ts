@@ -8,11 +8,11 @@
  * For video, the proxy streams via axum — no buffering the entire file.
  * Images and other media also benefit from this path.
  *
- * Only URLs hosted on the Sprout relay are rewritten. External Blossom URLs
+ * Only URLs hosted on the Buzz relay are rewritten. External Blossom URLs
  * (e.g. nostr.build, void.cat) are returned unchanged — they aren't behind
  * Cloudflare Access and can be loaded directly by WKWebView. Without this
  * origin check, external Blossom URLs would be proxied to the wrong server
- * (the Sprout relay), resulting in 404s.
+ * (the Buzz relay), resulting in 404s.
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -26,7 +26,7 @@ const RELAY_MEDIA_RE =
 let cachedPort: number | null = null;
 let portPromise: Promise<number | null> | null = null;
 
-/** Cached relay origin (e.g. "https://sprout-oss.stage.blox.sqprod.co"). */
+/** Cached relay origin (e.g. "https://buzz-oss.stage.blox.sqprod.co"). */
 let cachedRelayOrigin: string | null = null;
 
 const POLL_INTERVAL_MS = 100;
@@ -81,11 +81,11 @@ export function resetMediaCaches(): void {
 }
 
 /**
- * If `url` is a Blossom media URL hosted on the Sprout relay, rewrite it
+ * If `url` is a Blossom media URL hosted on the Buzz relay, rewrite it
  * to go through the localhost streaming proxy. External Blossom URLs and
  * non-Blossom URLs are returned unchanged.
  *
- * Falls back to sprout-media:// if the proxy port isn't available yet.
+ * Falls back to buzz-media:// if the proxy port isn't available yet.
  */
 export function rewriteRelayUrl(url: string): string {
   const m = RELAY_MEDIA_RE.exec(url);
@@ -108,5 +108,5 @@ export function rewriteRelayUrl(url: string): string {
     portPromise = fetchProxyPort();
   }
 
-  return `sprout-media://localhost/media/${m[1]}`;
+  return `buzz-media://localhost/media/${m[1]}`;
 }

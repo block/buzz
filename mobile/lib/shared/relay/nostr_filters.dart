@@ -1,6 +1,6 @@
 import 'nostr_models.dart';
 
-/// Canonical [NostrFilter] constructors for common Sprout queries.
+/// Canonical [NostrFilter] constructors for common Buzz queries.
 ///
 /// Centralising filter shapes keeps relay queries consistent across providers
 /// and makes kind/tag conventions easy to audit.

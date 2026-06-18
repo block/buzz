@@ -1,6 +1,6 @@
 import type { ObserverEvent, PromptSection } from "./agentSessionTypes";
 import {
-  findSproutToolName,
+  findBuzzToolName,
   isGenericToolTitle,
   normalizeToolName,
 } from "./agentSessionToolCatalog";
@@ -29,9 +29,10 @@ export function parsePromptText(text: string): {
     };
   }
 
-  const eventSection = sections.find((section) =>
-    section.title.toLowerCase().startsWith("sprout event"),
-  );
+  const eventSection = sections.find((section) => {
+    const title = section.title.toLowerCase();
+    return title.startsWith("buzz event") || title.startsWith("buzz event");
+  });
   const eventContent = eventSection
     ? extractEventContent(eventSection.body)
     : "";
@@ -43,9 +44,49 @@ export function parsePromptText(text: string): {
   return {
     sections,
     userText: eventContent,
-    userTitle: eventKind ? titleCase(eventKind) : "Sprout event",
+    userTitle: eventKind ? titleCase(eventKind) : "Buzz event",
     userPubkey: eventAuthorPubkey,
   };
+}
+
+/**
+ * Split the framed `session/new` `systemPrompt` into its `Base`/`System`
+ * sub-sections deterministically.
+ *
+ * The harness frames the value as `[Base]\n{base}\n\n[System]\n{persona}`, with
+ * either prompt omitted when absent: base-only is `[Base]\n{base}`, persona-only
+ * is `[System]\n{persona}`. We partition on the FIRST `\n[System]\n` boundary and
+ * read each labeled body literally. Unlike the generic `parsePromptSections`,
+ * embedded `[...]` lines inside a body never start a new section — so a persona
+ * containing a bracketed line, or a mid-string-elided header on an oversize
+ * prompt, can never drop a label or inflate the section count.
+ */
+export function parseSystemPromptSections(
+  systemPrompt: string,
+): PromptSection[] {
+  const sections: PromptSection[] = [];
+
+  // Persona-only frame: no [Base], starts directly with [System].
+  if (systemPrompt.startsWith("[System]\n")) {
+    const body = systemPrompt.slice("[System]\n".length).trim();
+    if (body) sections.push({ title: "System", body });
+    return sections;
+  }
+
+  // Otherwise the head (up to the first [System] boundary, or the whole string)
+  // is the [Base] body.
+  const marker = "\n[System]\n";
+  const at = systemPrompt.indexOf(marker);
+  const head = at === -1 ? systemPrompt : systemPrompt.slice(0, at);
+  const baseBody = head.replace(/^\[Base]\n/, "").trim();
+  if (baseBody) sections.push({ title: "Base", body: baseBody });
+
+  if (at !== -1) {
+    const systemBody = systemPrompt.slice(at + marker.length).trim();
+    sections.push({ title: "System", body: systemBody });
+  }
+
+  return sections;
 }
 
 function parsePromptSections(text: string): PromptSection[] {
@@ -144,14 +185,14 @@ export function extractToolArgs(
 export function extractToolIdentity(update: Record<string, unknown>): {
   title: string;
   toolName: string;
-  sproutToolName: string | null;
+  buzzToolName: string | null;
 } {
   const candidates = collectToolNameCandidates(update);
   const knownName =
     candidates
-      .map((candidate) => findSproutToolName(candidate, true))
+      .map((candidate) => findBuzzToolName(candidate, true))
       .find((candidate): candidate is string => Boolean(candidate)) ??
-    findSproutToolName(JSON.stringify(update), false);
+    findBuzzToolName(JSON.stringify(update), false);
   const firstSpecific = candidates.find(
     (candidate) => !isGenericToolTitle(candidate),
   );
@@ -160,7 +201,7 @@ export function extractToolIdentity(update: Record<string, unknown>): {
   return {
     title,
     toolName: knownName ?? normalizeToolName(firstSpecific ?? title),
-    sproutToolName: knownName,
+    buzzToolName: knownName,
   };
 }
 

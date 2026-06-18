@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 
 // Intentionally not scoped per-pubkey — multi-user desktop is rare and the
 // setting applies to the machine's sleep behavior regardless of account.
-const STORAGE_KEY = "sprout-prevent-sleep";
+const STORAGE_KEY = "buzz-prevent-sleep";
 
 function readPreference(): boolean {
   return window.localStorage.getItem(STORAGE_KEY) === "true";

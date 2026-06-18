@@ -1,12 +1,21 @@
 import type { UserProfileSummary } from "@/shared/api/types";
 
+export const MENTION_REFERENCE_TAG = "mention";
+
+export function getMentionTagPubkey(tag: string[]): string | null {
+  if ((tag[0] !== "p" && tag[0] !== MENTION_REFERENCE_TAG) || !tag[1]) {
+    return null;
+  }
+
+  return tag[1].toLowerCase();
+}
+
 /**
- * Resolves display names for mentioned users from message `p` tags.
+ * Resolves display names for mentioned users from message `p` tags and
+ * non-notifying `mention` reference tags.
  *
- * Extracts pubkeys from `p` tags, looks them up in the profiles map,
- * and returns a deduplicated list of display names. Returns `undefined`
- * when no names can be resolved (so the remark plugin falls back to
- * the generic `@\S+` pattern).
+ * `p` tags drive notification/search semantics. `mention` tags only preserve
+ * render metadata for reference-only mentions.
  */
 export function resolveMentionNames(
   tags: string[][] | undefined,
@@ -19,11 +28,12 @@ export function resolveMentionNames(
   const names = new Set<string>();
 
   for (const tag of tags) {
-    if (tag[0] !== "p" || !tag[1]) {
+    const pubkey = getMentionTagPubkey(tag);
+    if (!pubkey) {
       continue;
     }
 
-    const profile = profiles[tag[1].toLowerCase()];
+    const profile = profiles[pubkey];
     const displayName = profile?.displayName?.trim();
 
     if (displayName) {
@@ -45,11 +55,11 @@ export function resolveMentionPubkeysByName(
   const pubkeysByName: Record<string, string> = {};
 
   for (const tag of tags) {
-    if (tag[0] !== "p" || !tag[1]) {
+    const pubkey = getMentionTagPubkey(tag);
+    if (!pubkey) {
       continue;
     }
 
-    const pubkey = tag[1].toLowerCase();
     const displayName = profiles[pubkey]?.displayName?.trim();
     if (displayName) {
       pubkeysByName[displayName.toLowerCase()] = pubkey;

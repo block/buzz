@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// Standalone Playwright screenshot helper for the Sprout desktop app.
+// Standalone Playwright screenshot helper for the Buzz desktop app.
 //
 // Launches headless Chromium with the E2E mock bridge pre-injected (same
 // setup as installMockBridge in bridge.ts), navigates to a route, optionally
@@ -21,6 +21,7 @@
 //   --viewport <WxH>           Viewport dimensions (default: 1280x720)
 //   --outdir <path>            Output directory (default: test-results/screenshots)
 //   --messages <path>          JSON file with messages to inject before capture
+//   --update-ready             Mock an available update so the sidebar update card renders
 
 import { parseArgs } from "node:util";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
@@ -40,6 +41,7 @@ const { values: args } = parseArgs({
     viewport: { type: "string", default: "1280x720" },
     outdir: { type: "string", default: "test-results/screenshots" },
     messages: { type: "string" },
+    "update-ready": { type: "boolean", default: false },
   },
   strict: true,
 });
@@ -67,7 +69,7 @@ function bail(msg) {
 
 const BASE_URL = "http://127.0.0.1:4173";
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
-const ONBOARDING_PREFIX = "sprout-onboarding-complete.v1:";
+const ONBOARDING_PREFIX = "buzz-onboarding-complete.v1:";
 
 const TEST_PUBKEYS = [
   DEFAULT_MOCK_PUBKEY,
@@ -92,8 +94,8 @@ await page.addInitScript(() => {
     relayUrl: "ws://localhost:3000",
     addedAt: new Date().toISOString(),
   };
-  window.localStorage.setItem("sprout-workspaces", JSON.stringify([workspace]));
-  window.localStorage.setItem("sprout-active-workspace-id", workspaceId);
+  window.localStorage.setItem("buzz-workspaces", JSON.stringify([workspace]));
+  window.localStorage.setItem("buzz-active-workspace-id", workspaceId);
 });
 
 // Seed onboarding completion for all known identities
@@ -107,31 +109,37 @@ await page.addInitScript(
 );
 
 // Install E2E mock bridge config + MockNotification (mirrors installBridge in bridge.ts)
-await page.addInitScript(() => {
-  class MockNotification extends EventTarget {
-    static permission = "granted";
-    static async requestPermission() {
-      return "granted";
+await page.addInitScript(
+  ({ updateReady }) => {
+    class MockNotification extends EventTarget {
+      static permission = "granted";
+      static async requestPermission() {
+        return "granted";
+      }
+      body;
+      onclick = null;
+      title;
+      constructor(title, options) {
+        super();
+        this.title = title;
+        this.body = options?.body ?? null;
+      }
+      close() {}
     }
-    body;
-    onclick = null;
-    title;
-    constructor(title, options) {
-      super();
-      this.title = title;
-      this.body = options?.body ?? null;
-    }
-    close() {}
-  }
-  Object.defineProperty(window, "Notification", {
-    configurable: true,
-    value: MockNotification,
-    writable: true,
-  });
+    Object.defineProperty(window, "Notification", {
+      configurable: true,
+      value: MockNotification,
+      writable: true,
+    });
 
-  window.__SPROUT_E2E__ = { mode: "mock" };
-  window.__SPROUT_E2E_APP_BADGE_COUNT__ = 0;
-});
+    window.__BUZZ_E2E__ = {
+      mode: "mock",
+      ...(updateReady ? { mock: { updateAvailable: true } } : {}),
+    };
+    window.__BUZZ_E2E_APP_BADGE_COUNT__ = 0;
+  },
+  { updateReady: args["update-ready"] },
+);
 
 try {
   if (args.messages) {
@@ -184,7 +192,7 @@ try {
     for (const ch of targetChannels) {
       await page.waitForFunction(
         (name) =>
-          window.__SPROUT_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
             channelName: name,
           }) ?? false,
         ch,
@@ -195,7 +203,7 @@ try {
     for (const msg of messages) {
       await page.evaluate(
         (m) => {
-          window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.(m);
+          window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.(m);
         },
         { ...msg, pubkey: msg.pubkey ?? DEFAULT_MOCK_PUBKEY },
       );
@@ -231,6 +239,13 @@ try {
     await page.click(resolveSelector(rightClick), { button: "right" });
     await page.waitForTimeout(500);
   }
+
+  // Wait for all CSS/Web animations to finish before capturing.
+  // Radix components animate in via CSS — without this, screenshots
+  // are taken mid-transition and appear greyed-out or partially rendered.
+  await page.evaluate(() =>
+    Promise.all(document.getAnimations().map((a) => a.finished)),
+  );
 
   const filepath = join(outdir, `${args.name}.png`);
   const clipOpts = args.clip

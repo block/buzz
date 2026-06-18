@@ -1,6 +1,7 @@
 import * as React from "react";
 import { createFileRoute } from "@tanstack/react-router";
 
+import { usePreviewFeatureWarning } from "@/shared/features";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 export const Route = createFileRoute("/workflows/$workflowId")({
@@ -13,6 +14,7 @@ const WorkflowsRouteScreen = React.lazy(async () => {
 });
 
 function WorkflowDetailRouteComponent() {
+  usePreviewFeatureWarning("workflows");
   const { workflowId } = Route.useParams();
 
   return (

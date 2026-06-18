@@ -7,16 +7,17 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         build_managed_agent_summary, default_agent_workdir, find_managed_agent_mut,
-        load_managed_agents, managed_agent_avatar_url, missing_command_message,
-        normalize_agent_args, resolve_command, save_managed_agents, sync_managed_agent_processes,
+        known_acp_runtime, load_managed_agents, load_personas, managed_agent_avatar_url,
+        missing_command_message, normalize_agent_args, resolve_command,
+        resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
         try_regenerate_nest, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
-        UpdateManagedAgentResponse, DEFAULT_MCP_COMMAND,
+        UpdateManagedAgentResponse,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
 };
 
-/// Query available models from an agent via `sprout-acp models --json`.
+/// Query available models from an agent via `buzz-acp models --json`.
 ///
 /// Spawns a short-lived subprocess (no relay connection needed). The subprocess
 /// starts the agent, queries its model catalog, and exits. ~2-5s total.
@@ -62,7 +63,17 @@ pub async fn get_agent_models(
             crate::managed_agents::resolve_persona_env(&app, record.persona_id.as_deref())?;
         let env = crate::managed_agents::merged_user_env(&persona_env, &record.env_vars);
 
-        (resolved, resolved_agent, args, record.model.clone(), env)
+        // Resolve the effective model from the linked persona so the ModelPicker
+        // dropdown shows the current persona model as selected.
+        let personas = load_personas(&app).unwrap_or_default();
+        let (_prompt, effective_model, _provider) = resolve_effective_prompt_model_provider(
+            record.persona_id.as_deref(),
+            &personas,
+            record.system_prompt.clone(),
+            record.model.clone(),
+        );
+
+        (resolved, resolved_agent, args, effective_model, env)
     }; // store lock released — subprocess runs without holding the lock
 
     // Clone the env map for redaction below — `merged_env` is moved
@@ -83,20 +94,23 @@ pub async fn get_agent_models(
         }
         cmd.arg("models")
             .arg("--json")
-            .env("SPROUT_ACP_AGENT_COMMAND", &agent_command)
-            .env("SPROUT_ACP_AGENT_ARGS", agent_args.join(","))
-            .env(
-                "GOOSE_MODE",
-                std::env::var("GOOSE_MODE").unwrap_or_else(|_| "auto".into()),
-            );
-        // User env layering — written LAST so it overrides any Sprout-set env above.
+            .env("BUZZ_ACP_AGENT_COMMAND", &agent_command)
+            .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
+        if let Some(meta) = known_acp_runtime(&agent_command) {
+            for (key, value) in meta.default_env {
+                if std::env::var(key).is_err() {
+                    cmd.env(key, value);
+                }
+            }
+        }
+        // User env layering — written LAST so it overrides any Buzz-set env above.
         for (k, v) in &merged_env {
             cmd.env(k, v);
         }
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
-            .map_err(|e| format!("failed to spawn sprout-acp models: {e}"))
+            .map_err(|e| format!("failed to spawn buzz-acp models: {e}"))
     })
     .await
     .map_err(|e| format!("model discovery task failed: {e}"))?
@@ -110,7 +124,7 @@ pub async fn get_agent_models(
         let stderr_redacted =
             crate::managed_agents::redact_env_values_in(stderr.as_ref(), &env_for_redaction);
         return Err(format!(
-            "sprout-acp models failed (exit {}): {stderr_redacted}",
+            "buzz-acp models failed (exit {}): {stderr_redacted}",
             output.status.code().unwrap_or(-1)
         ));
     }
@@ -192,11 +206,7 @@ pub async fn update_managed_agent(
             record.agent_args = agent_args;
         }
         if let Some(mcp_command) = input.mcp_command {
-            record.mcp_command = if mcp_command.trim().is_empty() {
-                DEFAULT_MCP_COMMAND.to_string()
-            } else {
-                mcp_command
-            };
+            record.mcp_command = mcp_command;
         }
         if let Some(env_vars) = input.env_vars {
             crate::managed_agents::validate_user_env_keys(&env_vars)?;
@@ -240,14 +250,20 @@ pub async fn update_managed_agent(
                 .map_err(|e| format!("failed to parse agent keys: {e}"))?;
             let relay_url = record.relay_url.clone();
             let display_name = record.name.clone();
-            let avatar_url = managed_agent_avatar_url(&record.agent_command);
+            let avatar_url = record
+                .avatar_url
+                .clone()
+                .or_else(|| managed_agent_avatar_url(&record.agent_command));
             let auth_tag = record.auth_tag.clone();
             Some((agent_keys, relay_url, display_name, avatar_url, auth_tag))
         } else {
             None
         };
 
-        let summary = build_managed_agent_summary(&app, record, &runtimes)?;
+        let summary = {
+            let personas = load_personas(&app).unwrap_or_default();
+            build_managed_agent_summary(&app, record, &runtimes, &personas)?
+        };
         (summary, sync_params)
     }; // lock dropped here
 
@@ -268,7 +284,7 @@ pub async fn update_managed_agent(
             {
                 Ok(()) => None,
                 Err(e) => {
-                    eprintln!("sprout-desktop: relay profile sync failed after rename: {e}");
+                    eprintln!("buzz-desktop: relay profile sync failed after rename: {e}");
                     Some(e)
                 }
             }
@@ -284,7 +300,7 @@ pub async fn update_managed_agent(
 
 // ── Model normalization ───────────────────────────────────────────────────────
 
-/// Normalize raw `sprout-acp models --json` output into a typed DTO for the frontend.
+/// Normalize raw `buzz-acp models --json` output into a typed DTO for the frontend.
 ///
 /// Merges models from both ACP paths (stable configOptions + unstable SessionModelState),
 /// deduplicates by ID (stable takes precedence), and returns a unified list.

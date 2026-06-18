@@ -23,7 +23,7 @@
 //!   in <https://huggingface.co/kyutai/tts-voices>. CC-BY-4.0, base recording
 //!   from the VCTK corpus, enhanced by ai-coustics.
 //!
-//! Sprout ships these files unmodified; see the on-disk `MODEL_LICENSE.txt`
+//! Buzz ships these files unmodified; see the on-disk `MODEL_LICENSE.txt`
 //! sidecar written by `huddle::models` during install for the canonical
 //! CC-BY-4.0 §3(a)(1) attribution block.
 //!
@@ -81,10 +81,17 @@ const VOICE_EMBEDDING_CACHE_CAPACITY: i32 = 16;
 /// synthesis time by ~5× with no audible benefit on this model.
 const SYNTH_NUM_STEPS: i32 = 1;
 
-/// Disable the upstream default 200 ms of pre/post silence padding. We splice
-/// `INTER_SENTENCE_SILENCE` in `tts.rs` ourselves and don't want a double
-/// helping of leading silence on every utterance.
-const SYNTH_SILENCE_SCALE: f32 = 0.0;
+/// Leave the generated audio's silences untouched (1.0 is the identity).
+///
+/// sherpa-onnx's `ScaleSilence` (`offline-tts.cc`) is *not* pre/post padding
+/// control: it finds every interior silence run ≥ 0.2 s (|s| ≤ 0.01) and
+/// multiplies its length by this factor. The previous value of 0.0 — set
+/// under the mistaken belief it disabled lead-in/lead-out padding — deleted
+/// every natural pause inside an utterance: clause breaks, breaths, the gap
+/// after a comma. Words slammed together and endings cut abruptly. The
+/// reference Pocket TTS pipeline does not post-process silence at all;
+/// 1.0 restores parity.
+const SYNTH_SILENCE_SCALE: f32 = 1.0;
 
 /// sherpa-onnx upstream default for `max_frames` (LM steps), in
 /// `offline-tts-pocket-impl.h:Generate`. 500 steps ≈ 40 s of audio at the
@@ -112,60 +119,18 @@ const SHORT_PROMPT_WORD_THRESHOLD: usize = 4;
 
 /// Number of leading spaces prepended to short prompts. The upstream Python
 /// uses exactly 8 — keep parity rather than tuning blindly.
+///
+/// This is upstream's *only* mitigation for the FlowLM cold-start smear on
+/// short utterances (kyutai-labs/pocket-tts #91, #70): the autoregressive
+/// generation has a 2–3 step "settle" period where the first phoneme can be
+/// smeared. A previous revision added a sacrificial `". . "` prefix plus an
+/// amplitude-threshold trim to strip the rendered prefix from the output —
+/// but the trim's absolute threshold (0.02 against raw peaks of ~0.076) sat
+/// in soft-onset territory and could eat real word starts, and its tuning
+/// was calibrated against `silence_scale = 0.0` audio. Deleted in favour of
+/// upstream parity: accept the occasional smeared first syllable rather
+/// than risk trimming real speech.
 const SHORT_PROMPT_PAD_SPACES: usize = 8;
-
-/// Sacrificial cold-start prefix appended *after* the leading space pad for
-/// short prompts. Pocket TTS' FlowLM autoregressive generation has a 2–3
-/// step "settle" period at the start where the first generated phoneme can
-/// be smeared or dropped entirely (see kyutai-labs/pocket-tts #91, #70 and
-/// sherpa-onnx #3180). For short utterances like "I'm happy." the first
-/// phoneme is most of the first word — losing it produces "m happy".
-///
-/// Two periods separated by a space act as a "phantom utterance" that the
-/// model commits to, absorbing the cold-start. The pair (rather than a
-/// single period) was empirically the only variant in our probe — see
-/// `examples/prod_probe.rs` — that produced a usable post-sacrificial
-/// silence gap on every random seed. The resulting leading sacrificial
-/// audio is then stripped from the output by [`trim_leading_cold_start`]
-/// before the buffer is returned to the synth pipeline.
-///
-/// Long prompts (>4 words) don't need this — the first phoneme already has
-/// enough downstream context to avoid the smear, and an early natural pause
-/// (e.g. the comma in "Hello, how can I help you?") could be misdetected as
-/// the trim boundary.
-const SACRIFICIAL_PREFIX: &str = ". . ";
-
-// ── Leading cold-start trim (post-synth) ──────────────────────────────────────
-
-/// Skip this many samples at the start of the synth buffer before looking
-/// for the sacrificial→main silence gap. The Mimi decoder cold-start
-/// produces ~30 ms of low-amplitude noise that we *don't* want to treat as
-/// the gap. 30 ms × 24 kHz = 720 samples.
-const TRIM_SCAN_START_SAMPLES: usize = (SAMPLE_RATE as usize * 30) / 1000;
-
-/// Amplitude threshold below which a sample is considered "silence" for the
-/// purposes of finding the post-sacrificial gap. Tuned empirically against
-/// production-config probe data — the engine's own `ScaleSilence` uses 0.01,
-/// but our boundary detection wants a looser threshold so that the breath /
-/// aspiration of the rendered periods (which sits around 0.005–0.015) is
-/// treated as silence too.
-const TRIM_SILENCE_THRESHOLD: f32 = 0.02;
-
-/// A silence run must be at least this many samples long to be accepted as
-/// the sacrificial→main word boundary. 50 ms is comfortably longer than
-/// inter-syllable silence within a normal word at this speed (typically
-/// 10–30 ms), so this guards against trimming into the middle of the real
-/// utterance. 50 ms × 24 kHz = 1200 samples.
-const TRIM_MIN_GAP_SAMPLES: usize = (SAMPLE_RATE as usize * 50) / 1000;
-
-/// Hard cap on how much audio we'll trim from the start. Production probe
-/// data (with `silence_scale = 0.0`) shows valid trim boundaries land
-/// between 30 ms and ~450 ms; 1.2 s is a wide safety margin. If the
-/// detector finds a "gap" past this point it's almost certainly an interior
-/// pause inside an unusually long short-prompt utterance — bail out and
-/// emit untrimmed audio rather than corrupt it. 1.2 s × 24 kHz = 28800
-/// samples.
-const TRIM_MAX_DROP_SAMPLES: usize = (SAMPLE_RATE as usize * 1200) / 1000;
 
 /// sherpa-onnx's documented `frames_after_eos` default. We deliberately do
 /// *not* override this knob — the previous attempt to bump it for short
@@ -290,20 +255,13 @@ pub fn load_text_to_speech(model_dir: &str) -> Result<PocketTts, String> {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PreparedPrompt {
     /// Text to hand to `OfflineTts::generate_with_config`. Capitalized,
-    /// punctuation-terminated, and (for short inputs) left-padded with spaces
-    /// plus a sacrificial `". . "` cold-start prefix.
+    /// punctuation-terminated, and (for short inputs) left-padded with
+    /// spaces — upstream's mitigation for the FlowLM cold-start smear.
     pub text: String,
     /// Value to pass via `GenerationConfig.extra["max_frames"]`, or `None` to
     /// keep the upstream default of 500 LM steps. We only override on short
     /// padded prompts where we have a tight expectation on output length.
     pub max_frames: Option<i32>,
-    /// `true` iff this prompt received the short-input treatment (leading
-    /// space pad + sacrificial `". . "` prefix). The synth pipeline uses
-    /// this to decide whether to apply [`trim_leading_cold_start`] to the
-    /// output: long prompts have no sacrificial audio to strip, and
-    /// trimming them risks deleting real speech at a natural early pause
-    /// (e.g. the comma in "Hello, how can I help you?").
-    pub is_short: bool,
 }
 
 /// Mirror of the *text-preparation* half of upstream
@@ -318,10 +276,9 @@ pub(crate) struct PreparedPrompt {
 /// 2. Capitalize the first letter.
 /// 3. Append `.` if the text doesn't end in punctuation.
 /// 4. If fewer than five words, prepend `SHORT_PROMPT_PAD_SPACES` spaces
-///    followed by [`SACRIFICIAL_PREFIX`] (a `". . "` cold-start absorber —
-///    see its docstring for the bug it works around), and return a tight
-///    [`SHORT_PROMPT_MAX_FRAMES`] cap so the LM can't run away if EOS
-///    still doesn't fire.
+///    (upstream's cold-start mitigation — see the constant's docstring) and
+///    return a tight [`SHORT_PROMPT_MAX_FRAMES`] cap so the LM can't run
+///    away if EOS still doesn't fire.
 ///
 /// We do **not** override `frames_after_eos` — sherpa-onnx's default of 3
 /// is what we want. An earlier version set it to 1 on long inputs, which
@@ -377,16 +334,12 @@ pub(crate) fn prepare_pocket_prompt(input: &str) -> Option<PreparedPrompt> {
     // Word count of the *cleaned but not padded* text — padding is whitespace
     // only and would just lie to the threshold check below.
     let word_count = cleaned.split_whitespace().count();
-    let is_short = word_count <= SHORT_PROMPT_WORD_THRESHOLD;
 
-    let (final_text, max_frames) = if is_short {
-        let mut padded = String::with_capacity(
-            cleaned.len() + SHORT_PROMPT_PAD_SPACES + SACRIFICIAL_PREFIX.len(),
-        );
+    let (final_text, max_frames) = if word_count <= SHORT_PROMPT_WORD_THRESHOLD {
+        let mut padded = String::with_capacity(cleaned.len() + SHORT_PROMPT_PAD_SPACES);
         for _ in 0..SHORT_PROMPT_PAD_SPACES {
             padded.push(' ');
         }
-        padded.push_str(SACRIFICIAL_PREFIX);
         padded.push_str(&cleaned);
         (padded, Some(SHORT_PROMPT_MAX_FRAMES))
     } else {
@@ -400,68 +353,7 @@ pub(crate) fn prepare_pocket_prompt(input: &str) -> Option<PreparedPrompt> {
     Some(PreparedPrompt {
         text: final_text,
         max_frames,
-        is_short,
     })
-}
-
-/// Strip the leading "sacrificial" audio produced by the `". . "` cold-start
-/// prefix from a short-prompt synthesis result. Only call this when
-/// [`PreparedPrompt::is_short`] is `true` — the trim looks for a long
-/// silence run at the head of the buffer, and an early natural pause inside
-/// a long unsacrificed utterance (e.g. the comma in "Hello, how can I help
-/// you?") would be misclassified as the sacrificial gap.
-///
-/// Algorithm:
-///   1. Skip the first [`TRIM_SCAN_START_SAMPLES`] of the buffer (Mimi
-///      cold-start noise we shouldn't classify as silence).
-///   2. Scan forward for the first run of samples below
-///      [`TRIM_SILENCE_THRESHOLD`] that lasts at least
-///      [`TRIM_MIN_GAP_SAMPLES`] — that's the post-sacrificial boundary.
-///   3. If that boundary lies beyond [`TRIM_MAX_DROP_SAMPLES`], treat it as
-///      "almost certainly an interior pause" and *do not trim* — the safe
-///      fallback is to play the slightly-degraded raw audio rather than
-///      delete real speech.
-///   4. Otherwise, drop the leading samples up to the end of the silence
-///      run. We don't insert a zero lead-in here — `tts.rs` owns playback
-///      cushioning by prepending `SENTENCE_LEAD_IN_SAMPLES` of zeros before
-///      each appended sentence chunk.
-///
-/// If the scan never finds a long-enough gap (≈1% of generations in the
-/// production-config probe), the function is a no-op — the model trajectory
-/// missed the expected sacrificial→main structure and we'd rather play the
-/// raw buffer than emit silence.
-fn trim_leading_cold_start(samples: &mut Vec<f32>) {
-    if samples.len() <= TRIM_SCAN_START_SAMPLES {
-        return;
-    }
-
-    let mut silence_run_start: Option<usize> = None;
-    let mut gap_end: Option<usize> = None;
-    for (i, sample) in samples.iter().enumerate().skip(TRIM_SCAN_START_SAMPLES) {
-        if sample.abs() < TRIM_SILENCE_THRESHOLD {
-            silence_run_start.get_or_insert(i);
-        } else if let Some(start) = silence_run_start {
-            if i - start >= TRIM_MIN_GAP_SAMPLES {
-                gap_end = Some(i);
-                break;
-            }
-            silence_run_start = None;
-        }
-    }
-
-    let Some(end) = gap_end else {
-        // No gap found — model didn't produce the expected sacrificial→main
-        // structure. Bail out and let the caller play the raw buffer.
-        return;
-    };
-    if end > TRIM_MAX_DROP_SAMPLES {
-        // Boundary too far into the audio to plausibly be the sacrificial
-        // gap. Almost certainly an interior pause in the real utterance —
-        // leave the audio alone.
-        return;
-    }
-
-    samples.drain(..end);
 }
 
 /// Build the `GenerationConfig.extra` HashMap from a [`PreparedPrompt`].
@@ -539,21 +431,12 @@ impl PocketTts {
         let sample_rate = audio.sample_rate();
         if sample_rate != SAMPLE_RATE as i32 {
             eprintln!(
-                "sprout-desktop: Pocket TTS returned unexpected sample rate {sample_rate}Hz \
+                "buzz-desktop: Pocket TTS returned unexpected sample rate {sample_rate}Hz \
                  (expected {SAMPLE_RATE}Hz); playback speed may be wrong"
             );
         }
 
-        let mut samples = audio.samples().to_vec();
-        // For short prompts the prepared text includes a sacrificial ". . "
-        // prefix to absorb FlowLM/Mimi cold-start (see `SACRIFICIAL_PREFIX`).
-        // Strip the leading sacrificial audio before returning. Long prompts
-        // are never trimmed — they have no sacrificial audio, and an early
-        // natural pause could be mis-detected as the trim boundary.
-        if prepared.is_short {
-            trim_leading_cold_start(&mut samples);
-        }
-        Ok(samples)
+        Ok(audio.samples().to_vec())
     }
 }
 
@@ -571,23 +454,20 @@ mod tests {
     }
 
     /// Helper: the exact leading sequence prepended to every short prompt —
-    /// 8 spaces of padding followed by the sacrificial `". . "` cold-start
-    /// absorber. Centralising this keeps the assertions readable.
+    /// 8 spaces of padding (upstream's cold-start mitigation).
+    /// Centralising this keeps the assertions readable.
     fn short_prefix() -> String {
-        let mut s = " ".repeat(SHORT_PROMPT_PAD_SPACES);
-        s.push_str(SACRIFICIAL_PREFIX);
-        s
+        " ".repeat(SHORT_PROMPT_PAD_SPACES)
     }
 
     #[test]
     fn prepare_prompt_pads_and_capitalizes_one_word() {
         // The "yep" case Tyler hit in production — bare lowercase one-word
         // utterance with no punctuation. Must be padded with the short-prompt
-        // prefix (8 spaces + ". . " sacrificial), capitalized, terminated,
-        // with a tight `max_frames` cap to bound runaway gen.
+        // space pad, capitalized, terminated, with a tight `max_frames` cap
+        // to bound runaway gen.
         let out = prepare_pocket_prompt("yep").expect("non-empty");
         assert_eq!(out.text, format!("{}Yep.", short_prefix()));
-        assert!(out.is_short, "1-word input is short");
         assert_eq!(out.max_frames, Some(SHORT_PROMPT_MAX_FRAMES));
         const {
             assert!(
@@ -607,30 +487,20 @@ mod tests {
 
     #[test]
     fn prepare_prompt_threshold_is_inclusive_at_four_words() {
-        // 4 words = short (padded + sacrificial + tight max_frames); 5 words
-        // = long (no padding, no sacrificial, no overrides — upstream
-        // defaults stand).
+        // 4 words = short (padded + tight max_frames); 5 words = long
+        // (no padding, no overrides — upstream defaults stand).
         let four = prepare_pocket_prompt("one two three four").expect("non-empty");
-        assert!(four.is_short, "four-word input should be short");
-        assert!(
-            four.text.starts_with(' '),
-            "four-word input should start with the space pad"
-        );
-        assert!(
-            four.text.contains(SACRIFICIAL_PREFIX),
-            "four-word input should contain the sacrificial prefix"
+        assert_eq!(
+            four.text,
+            format!("{}One two three four.", short_prefix()),
+            "four-word input should get exactly the space pad"
         );
         assert_eq!(four.max_frames, Some(SHORT_PROMPT_MAX_FRAMES));
 
         let five = prepare_pocket_prompt("one two three four five").expect("non-empty");
-        assert!(!five.is_short, "five-word input should NOT be short");
         assert!(
             !five.text.starts_with(' '),
             "five-word input should NOT be padded"
-        );
-        assert!(
-            !five.text.contains(SACRIFICIAL_PREFIX),
-            "five-word input must not receive the sacrificial prefix"
         );
         assert_eq!(
             five.max_frames, None,
@@ -642,9 +512,7 @@ mod tests {
     fn prepare_prompt_does_not_pad_long_text() {
         let long = "This is a longer sentence that the model should handle just fine.";
         let out = prepare_pocket_prompt(long).expect("non-empty");
-        assert!(!out.is_short);
         assert!(!out.text.starts_with(' '));
-        assert!(!out.text.contains(SACRIFICIAL_PREFIX));
         assert_eq!(out.max_frames, None);
         assert!(out.text.ends_with('.'));
     }
@@ -652,8 +520,7 @@ mod tests {
     #[test]
     fn prepare_prompt_collapses_whitespace() {
         let out = prepare_pocket_prompt("Hello    world\n\nfriend").expect("non-empty");
-        // 3 words → short → padded + sacrificial. Interior whitespace
-        // collapsed.
+        // 3 words → short → padded. Interior whitespace collapsed.
         assert_eq!(out.text, format!("{}Hello world friend.", short_prefix()));
     }
 
@@ -671,16 +538,22 @@ mod tests {
         assert!(out.text.contains("Дa."));
     }
 
+    /// REGRESSION GUARD: short prompts must receive *only* whitespace
+    /// padding — no sacrificial text. A previous revision prepended a
+    /// `". . "` cold-start absorber and trimmed the rendered audio back out
+    /// with an amplitude threshold that could eat soft word onsets. If
+    /// non-whitespace ever reappears in the pad, the synth output will
+    /// contain audio for text the user never wrote.
     #[test]
-    fn prepare_prompt_inserts_sacrificial_prefix_only_for_short() {
-        // Pinning the exact ordering: pad, then ". . ", then cleaned text.
-        // If this ever flips, the trim algorithm's calibration breaks.
+    fn prepare_prompt_pad_is_whitespace_only() {
         let out = prepare_pocket_prompt("I'm happy.").expect("non-empty");
-        assert!(out.is_short);
-        let pad = " ".repeat(SHORT_PROMPT_PAD_SPACES);
-        let expected = format!("{pad}. . I'm happy.");
-        assert_eq!(out.text, expected);
-        assert_eq!(SACRIFICIAL_PREFIX, ". . ");
+        let pad_len = out.text.len() - "I'm happy.".len();
+        assert!(
+            out.text[..pad_len].chars().all(|c| c == ' '),
+            "short-prompt pad must be spaces only, got {:?}",
+            &out.text[..pad_len]
+        );
+        assert_eq!(out.text, format!("{}I'm happy.", short_prefix()));
     }
 
     // ── build_generation_extra ───────────────────────────────────────────────
@@ -768,111 +641,5 @@ mod tests {
         const {
             assert!(SHORT_PROMPT_MAX_FRAMES >= 50, "would risk truncation");
         }
-    }
-
-    // ── trim_leading_cold_start ──────────────────────────────────────────────
-
-    /// Build a synthetic buffer shaped like a sacrificial-prefixed Pocket TTS
-    /// output: a bit of "sacrificial" energy at the head (modelled as
-    /// alternating ±0.05 — above [`TRIM_SILENCE_THRESHOLD`] so it isn't
-    /// classified as silence, matching what real probe WAVs look like in the
-    /// 0–50 ms window), then a flat silence of `gap_ms` ms, then `tail_ms`
-    /// of "real speech" at peak `tail_peak`.
-    fn synth_buffer(sacrificial_ms: u32, gap_ms: u32, tail_ms: u32, tail_peak: f32) -> Vec<f32> {
-        let sr = SAMPLE_RATE as usize;
-        let mut v = Vec::new();
-        for i in 0..(sr * sacrificial_ms as usize / 1000) {
-            v.push(if i % 2 == 0 { 0.05 } else { -0.05 });
-        }
-        // Silence gap (true zeros — below TRIM_SILENCE_THRESHOLD).
-        v.extend(std::iter::repeat_n(0.0_f32, sr * gap_ms as usize / 1000));
-        // Real speech.
-        for i in 0..(sr * tail_ms as usize / 1000) {
-            v.push(if i % 2 == 0 { tail_peak } else { -tail_peak });
-        }
-        v
-    }
-
-    #[test]
-    fn trim_strips_sacrificial_and_keeps_only_speech() {
-        // 60 ms sacrificial + 100 ms gap + 500 ms speech at peak 0.3.
-        // After trim, the output is just the speech tail.
-        let mut v = synth_buffer(60, 100, 500, 0.3);
-        trim_leading_cold_start(&mut v);
-
-        // First sample should be speech (|s| ≥ 0.2). No zero lead-in here
-        // because tts.rs's `first_append` lead-in handles the device cushion.
-        assert!(
-            v[0].abs() > 0.2,
-            "first sample after trim should be speech, got {}",
-            v[0]
-        );
-        let actual_ms = (v.len() as f32 / SAMPLE_RATE as f32) * 1000.0;
-        assert!(
-            (actual_ms - 500.0).abs() < 5.0,
-            "expected ~500 ms of trimmed audio, got {actual_ms} ms"
-        );
-    }
-
-    #[test]
-    fn trim_is_noop_when_no_long_silence_gap_exists() {
-        // Pure speech: every sample is real (no gap >= 50 ms). Trimmer must
-        // leave the buffer untouched so we don't truncate the utterance.
-        let mut v = synth_buffer(0, 0, 600, 0.3);
-        let before = v.clone();
-        trim_leading_cold_start(&mut v);
-        assert_eq!(v, before, "no gap → no trim");
-    }
-
-    #[test]
-    fn trim_is_noop_when_gap_is_shorter_than_threshold() {
-        // 40 ms gap is below TRIM_MIN_GAP_SAMPLES (50 ms). Must not trigger.
-        let mut v = synth_buffer(60, 40, 600, 0.3);
-        let before = v.clone();
-        trim_leading_cold_start(&mut v);
-        assert_eq!(v, before, "sub-threshold gap → no trim");
-    }
-
-    #[test]
-    fn trim_is_noop_when_gap_is_beyond_max_drop_bound() {
-        // Gap starts at 1500 ms (past TRIM_MAX_DROP_SAMPLES = 1200 ms).
-        // This represents an interior pause inside an unusually long
-        // utterance that slipped past the short-prompt predicate; we must
-        // not chop the first 1.5 s of real audio.
-        let mut v = synth_buffer(1500, 200, 400, 0.3);
-        let before = v.clone();
-        trim_leading_cold_start(&mut v);
-        assert_eq!(v, before, "gap past max-drop bound → no trim");
-    }
-
-    #[test]
-    fn trim_is_noop_on_buffer_smaller_than_scan_start() {
-        // 20 ms buffer is smaller than TRIM_SCAN_START_SAMPLES (30 ms).
-        // Trimmer must early-return without panicking.
-        let mut v = vec![0.5f32; (SAMPLE_RATE as usize * 20) / 1000];
-        let before = v.clone();
-        trim_leading_cold_start(&mut v);
-        assert_eq!(v, before);
-    }
-
-    #[test]
-    fn trim_constants_use_sane_units() {
-        // Pin the constants in milliseconds so anyone tuning later can see
-        // at a glance what they're changing.
-        assert_eq!(
-            TRIM_SCAN_START_SAMPLES,
-            (SAMPLE_RATE as usize * 30) / 1000,
-            "scan-start should be 30 ms"
-        );
-        assert_eq!(
-            TRIM_MIN_GAP_SAMPLES,
-            (SAMPLE_RATE as usize * 50) / 1000,
-            "min-gap should be 50 ms"
-        );
-        assert_eq!(
-            TRIM_MAX_DROP_SAMPLES,
-            (SAMPLE_RATE as usize * 1200) / 1000,
-            "max-drop should be 1.2 s"
-        );
     }
 }

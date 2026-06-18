@@ -197,3 +197,5 @@ export function useChannelLinks() {
     updateChannelQuery,
   };
 }
+
+export type UseChannelLinksResult = ReturnType<typeof useChannelLinks>;

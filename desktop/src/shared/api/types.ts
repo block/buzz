@@ -37,6 +37,7 @@ export type ChannelDetail = Channel & {
 export type ChannelMember = {
   pubkey: string;
   role: ChannelRole;
+  isAgent: boolean;
   joinedAt: string;
   displayName: string | null;
 };
@@ -57,6 +58,9 @@ export type UpdateChannelInput = {
   channelId: string;
   name?: string;
   description?: string;
+  visibility?: ChannelVisibility;
+  /** Omit to leave unchanged, `null` to clear (permanent), or a positive number of seconds to set. */
+  ttlSeconds?: number | null;
 };
 
 export type SetChannelTopicInput = {
@@ -116,6 +120,7 @@ export type UserProfileSummary = {
   displayName: string | null;
   avatarUrl: string | null;
   nip05Handle: string | null;
+  isAgent?: boolean;
 };
 
 export type UsersBatchResponse = {
@@ -128,6 +133,7 @@ export type UserSearchResult = {
   displayName: string | null;
   avatarUrl: string | null;
   nip05Handle: string | null;
+  isAgent: boolean;
 };
 
 export type UpdateProfileInput = {
@@ -149,13 +155,10 @@ export type UserStatus = {
 
 export type UserStatusLookup = Record<string, UserStatus | null>;
 
-export type SetPresenceResult = {
-  status: PresenceStatus;
-  ttlSeconds: number;
-};
-
 export type RelayEvent = {
   id: string;
+  /** Local-only render identity for optimistic events that are later acknowledged. */
+  localKey?: string;
   pubkey: string;
   created_at: number;
   kind: number;
@@ -258,6 +261,7 @@ export type RelayAgent = {
   channelIds: string[];
   capabilities: string[];
   status: "online" | "away" | "offline";
+  respondTo: RespondToMode | null;
 };
 
 export type ManagedAgentBackend =
@@ -294,7 +298,7 @@ export type ManagedAgent = {
   startOnAppLaunch: boolean;
   backend: ManagedAgentBackend;
   backendAgentId: string | null;
-  /** Who the agent should respond to. Maps to `sprout-acp --respond-to`. */
+  /** Who the agent should respond to. Maps to `buzz-acp --respond-to`. */
   respondTo: RespondToMode;
   /**
    * Normalized 64-char lowercase hex pubkeys. Used only when `respondTo` is
@@ -304,7 +308,7 @@ export type ManagedAgent = {
 };
 
 /**
- * Inbound author gate mode. Mirrors `sprout-acp`'s `--respond-to` CLI flag.
+ * Inbound author gate mode. Mirrors `buzz-acp`'s `--respond-to` CLI flag.
  * `"nobody"` is supported by the harness but not surfaced through this API —
  * it's a heartbeat-only mode without a meaningful GUI use case.
  */
@@ -321,6 +325,10 @@ export type BackendProviderProbeResult = {
   version?: string;
   description?: string;
   config_schema?: Record<string, unknown>;
+};
+
+export type RelayMeshConfig = {
+  modelRef: string;
 };
 
 export type CreateManagedAgentInput = {
@@ -350,6 +358,7 @@ export type CreateManagedAgentInput = {
    * normalized server-side (must be 64 hex chars each).
    */
   respondToAllowlist?: string[];
+  relayMesh?: RelayMeshConfig;
 };
 
 export type CreateManagedAgentResponse = {
@@ -374,7 +383,7 @@ export type AcpAvailabilityStatus =
   | "cli_missing"
   | "not_installed";
 
-export type AcpProviderCatalogEntry = {
+export type AcpRuntimeCatalogEntry = {
   id: string;
   label: string;
   avatarUrl: string;
@@ -389,8 +398,8 @@ export type AcpProviderCatalogEntry = {
   underlyingCliPath: string | null;
 };
 
-/** An AcpProviderCatalogEntry that is confirmed available — command and binaryPath are non-null. */
-export type AcpProvider = AcpProviderCatalogEntry & {
+/** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */
+export type AcpRuntime = AcpRuntimeCatalogEntry & {
   availability: "available";
   command: string;
   binaryPath: string;
@@ -462,15 +471,17 @@ export type AgentPersona = {
   displayName: string;
   avatarUrl: string | null;
   systemPrompt: string;
-  /** Preferred ACP provider ID (e.g. "goose", "claude"). */
-  provider: string | null;
-  /** Preferred model ID (e.g. "gpt-4o", "claude-sonnet-4-20250514"). */
+  /** Preferred ACP runtime ID (e.g. "goose", "claude"). */
+  runtime: string | null;
+  /** Opaque, harness-specific model identifier string. Buzz stores and passes through without interpretation. */
   model: string | null;
+  /** LLM inference provider (e.g. "databricks", "anthropic"). Injected as the runtime's provider env var at spawn time. */
+  provider: string | null;
   namePool: string[];
   isBuiltIn: boolean;
   isActive: boolean;
-  /** Pack ID if this persona was imported from a persona pack. Pack personas are non-editable. */
-  sourcePack?: string | null;
+  /** Team ID if this persona was imported from a team directory. Team personas are non-editable. */
+  sourceTeam?: string | null;
   /** Environment variables injected for agents created from this persona.
    * Layered as: desktop parent env < persona envVars < agent envVars. */
   envVars: Record<string, string>;
@@ -482,8 +493,9 @@ export type CreatePersonaInput = {
   displayName: string;
   avatarUrl?: string;
   systemPrompt: string;
-  provider?: string;
+  runtime?: string;
   model?: string;
+  provider?: string;
   namePool?: string[];
   envVars?: Record<string, string>;
 };
@@ -493,8 +505,9 @@ export type UpdatePersonaInput = {
   displayName: string;
   avatarUrl?: string;
   systemPrompt: string;
-  provider?: string;
+  runtime?: string;
   model?: string;
+  provider?: string;
   namePool?: string[];
   envVars?: Record<string, string>;
 };
@@ -506,6 +519,14 @@ export type AgentTeam = {
   description: string | null;
   personaIds: string[];
   isBuiltin: boolean;
+  /** Absolute path to the team's backing directory (if directory-backed). */
+  sourceDir: string | null;
+  /** Whether sourceDir is a symlink to an external directory. */
+  isSymlink: boolean;
+  /** Resolved symlink target path (for display). Only set when isSymlink is true. */
+  symlinkTarget: string | null;
+  /** Version from the team's plugin.json manifest. */
+  version: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -530,7 +551,7 @@ export type TemplateBackend =
 
 export type TemplateAgentEntry = {
   personaId: string;
-  provider: string | null;
+  runtime: string | null;
   model: string | null;
   role: string | null;
   backend: TemplateBackend | null;
@@ -538,7 +559,7 @@ export type TemplateAgentEntry = {
 
 export type TemplateTeamEntry = {
   teamId: string;
-  provider: string | null;
+  runtime: string | null;
   model: string | null;
   backend: TemplateBackend | null;
 };

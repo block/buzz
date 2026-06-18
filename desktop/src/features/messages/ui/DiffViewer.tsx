@@ -36,7 +36,7 @@ function FileChangeBadge({
   return (
     <span
       className={cn(
-        "rounded-md px-1.5 py-0.5 font-mono text-[10px] font-semibold",
+        "rounded-md px-1.5 py-0.5 font-mono text-2xs font-semibold",
         tone === "positive"
           ? "bg-emerald-500/10 text-status-added"
           : "bg-rose-500/10 text-status-deleted",
@@ -75,7 +75,7 @@ export function DiffViewer({
   }
 
   return (
-    <div className={cn("sprout-diff-theme", className)}>
+    <div className={cn("buzz-diff-theme", className)}>
       <div className="space-y-3">
         {files.map((file) => {
           const label = getDiffFileLabel(file, fallbackFilePath);
@@ -97,10 +97,10 @@ export function DiffViewer({
             >
               {showFileHeader ? (
                 <div className="flex items-center gap-2 border-b border-border/60 bg-muted/35 px-3 py-2">
-                  <span className="truncate font-mono text-[11px] text-foreground/85">
+                  <span className="truncate font-mono text-2xs text-foreground/85">
                     {label}
                   </span>
-                  <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                  <span className="rounded-md border border-border/60 px-1.5 py-0.5 text-2xs uppercase tracking-[0.14em] text-muted-foreground">
                     {DIFF_TYPE_LABELS[diffType]}
                   </span>
                   <div className="ml-auto flex items-center gap-1.5">
@@ -123,14 +123,14 @@ export function DiffViewer({
               {file.hunks.length > 0 ? (
                 <Diff
                   className={cn(
-                    "sprout-diff-table",
+                    "buzz-diff-table",
                     viewType === "split" ? "min-w-[780px]" : "w-full",
                   )}
-                  codeClassName="sprout-diff-code"
+                  codeClassName="buzz-diff-code"
                   diffType={diffType}
-                  gutterClassName="sprout-diff-gutter"
+                  gutterClassName="buzz-diff-gutter"
                   hunks={file.hunks}
-                  lineClassName="sprout-diff-line"
+                  lineClassName="buzz-diff-line"
                   viewType={viewType}
                 >
                   {(hunks) =>

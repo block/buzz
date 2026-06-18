@@ -1,0 +1,25 @@
+[package]
+name = "buzz-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Postgres event store and data access layer for Buzz"
+
+[dependencies]
+buzz-core = { workspace = true }
+sqlx        = { workspace = true }
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+uuid        = { workspace = true }
+chrono      = { workspace = true }
+hex         = { workspace = true }
+sha2        = { workspace = true }
+tracing     = { workspace = true }
+thiserror   = { workspace = true }
+nostr       = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

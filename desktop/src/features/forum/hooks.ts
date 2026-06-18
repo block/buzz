@@ -83,7 +83,10 @@ export function useDeleteForumPostMutation(channel: Channel | null) {
 
   return useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
-      await deleteMessage(eventId);
+      if (!channel) {
+        throw new Error("No channel selected.");
+      }
+      await deleteMessage(channel.id, eventId);
     },
     onSuccess: () => {
       if (channel) {
@@ -103,7 +106,10 @@ export function useDeleteForumReplyMutation(
 
   return useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
-      await deleteMessage(eventId);
+      if (!channel) {
+        throw new Error("No channel selected.");
+      }
+      await deleteMessage(channel.id, eventId);
     },
     onSuccess: () => {
       if (channel) {

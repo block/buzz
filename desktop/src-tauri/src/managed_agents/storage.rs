@@ -187,7 +187,7 @@ pub fn read_log_tail(path: &Path, max_lines: usize) -> Result<String, String> {
 
     // Strip ANSI escapes here (not in the harness) so the desktop log view
     // renders cleanly while terminals and other tools still get the colors
-    // sprout-acp emits.
+    // buzz-acp emits.
     let cleaned = strip_ansi_escapes::strip_str(String::from_utf8_lossy(&buf));
     let lines: Vec<&str> = cleaned.lines().collect();
     let start = lines.len().saturating_sub(max_lines);
@@ -249,10 +249,10 @@ mod tests {
 
     #[test]
     fn strips_ansi_from_typical_tracing_line() {
-        let input = "\x1b[2m2026-05-27T15:16:32\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2msprout_acp\x1b[0m\x1b[2m:\x1b[0m starting";
+        let input = "\x1b[2m2026-05-27T15:16:32\x1b[0m \x1b[32m INFO\x1b[0m \x1b[2mbuzz_acp\x1b[0m\x1b[2m:\x1b[0m starting";
         assert_eq!(
             strip_ansi_escapes::strip_str(input),
-            "2026-05-27T15:16:32  INFO sprout_acp: starting"
+            "2026-05-27T15:16:32  INFO buzz_acp: starting"
         );
     }
 }

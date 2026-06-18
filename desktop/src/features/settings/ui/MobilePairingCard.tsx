@@ -26,6 +26,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
+import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 
 type PairingStep =
   | "generating"
@@ -184,7 +185,7 @@ function PairingDialog({
                 ? "Verify the security code matches your mobile device."
                 : step === "done"
                   ? "Your mobile device is now paired."
-                  : "Scan this QR code with the Sprout mobile app to securely pair."}
+                  : "Scan this QR code with the Buzz mobile app to securely pair."}
             </DialogDescription>
           </DialogHeader>
 
@@ -224,7 +225,7 @@ function PairingDialog({
                     type="button"
                   >
                     <code className="min-w-0 flex-1 break-all">{qrUri}</code>
-                    <Copy className="h-3.5 w-3.5 shrink-0" />
+                    <Copy className="h-4 w-4 shrink-0" />
                   </button>
                 </div>
 
@@ -248,7 +249,7 @@ function PairingDialog({
                     </p>
                   </div>
                   <p className="text-center text-xs text-muted-foreground">
-                    You are about to transfer your Sprout identity to another
+                    You are about to transfer your Buzz identity to another
                     device. Only confirm if you initiated this pairing.
                   </p>
                 </div>
@@ -319,33 +320,35 @@ export function MobilePairingCard({
   const [dialogOpen, setDialogOpen] = useState(false);
 
   return (
-    <section className="min-w-0 space-y-3" data-testid="settings-mobile">
-      <div className="space-y-1">
-        <h2 className="text-sm font-semibold tracking-tight">Mobile</h2>
-        <p className="text-sm text-muted-foreground">
-          Connect the Sprout mobile app to this relay by scanning a QR code. The
+    <section className="min-w-0" data-testid="settings-mobile">
+      <div className="mb-12 space-y-1">
+        <h2 className="text-2xl font-semibold tracking-tight">Mobile</h2>
+        <p className="text-base font-normal text-muted-foreground">
+          Connect the Buzz mobile app to this relay by scanning a QR code. The
           connection is secured with end-to-end encryption and a verification
           code.
         </p>
       </div>
 
-      <div className="flex items-center gap-3 rounded-xl border border-border/80 bg-muted/25 px-4 py-3">
-        <Smartphone className="h-5 w-5 text-muted-foreground" />
-        <div className="flex-1">
-          <p className="text-sm font-medium">Pair Mobile Device</p>
-          <p className="text-xs text-muted-foreground">
-            Securely transfer your identity via NIP-AB protocol
-          </p>
-        </div>
-        <Button
-          data-testid="pair-mobile-button"
-          disabled={!currentPubkey}
-          onClick={() => setDialogOpen(true)}
-          size="sm"
-        >
-          Pair
-        </Button>
-      </div>
+      <SettingsOptionGroup>
+        <SettingsOptionRow className="gap-3">
+          <Smartphone className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium">Pair Mobile Device</p>
+            <p className="text-sm font-normal text-muted-foreground">
+              Securely transfer your identity via NIP-AB protocol
+            </p>
+          </div>
+          <Button
+            data-testid="pair-mobile-button"
+            disabled={!currentPubkey}
+            onClick={() => setDialogOpen(true)}
+            size="sm"
+          >
+            Pair
+          </Button>
+        </SettingsOptionRow>
+      </SettingsOptionGroup>
 
       {currentPubkey && (
         <PairingDialog onOpenChange={setDialogOpen} open={dialogOpen} />

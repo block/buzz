@@ -1,0 +1,31 @@
+[package]
+name = "buzz-workflow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "YAML-as-code workflow engine for Buzz"
+
+[dependencies]
+buzz-core = { workspace = true }
+buzz-db   = { workspace = true }
+hex         = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+serde_yaml  = { workspace = true }
+dashmap     = { workspace = true }
+evalexpr    = "11"
+cron        = "0.16"
+uuid        = { workspace = true }
+chrono      = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+thiserror   = { workspace = true }
+reqwest     = { workspace = true, optional = true }
+
+[dev-dependencies]
+nostr = { workspace = true }
+
+[features]
+reqwest = ["dep:reqwest"]

@@ -9,13 +9,13 @@ import { installMockBridge } from "../helpers/bridge";
 // still serializing to `:shortcode:` on send. The message timeline renders the
 // same shortcode as `img[data-custom-emoji]` via remarkCustomEmoji.
 //
-// The `:sprout:` shortcode lives in a member-authored kind:30030 set
-// (d=`sprout:custom-emoji`) served by the mock bridge from two distinct
+// The `:buzz:` shortcode lives in a member-authored kind:30030 set
+// (d=`buzz:custom-emoji`) served by the mock bridge from two distinct
 // pubkeys. `listCustomEmoji` reads every member's set over the relay WS and
 // unions them (deduped by shortcode+url) into the workspace palette — which is
 // live even in mock-bridge mode (the mock only intercepts Tauri commands), so
 // this spec uses the simpler mock-bridge setup like messaging.spec.ts.
-const SHORTCODE = "sprout";
+const SHORTCODE = "buzz";
 
 async function openGeneral(page: import("@playwright/test").Page) {
   await page.goto("/");
@@ -90,8 +90,44 @@ test("custom emoji round-trips through select-all + send to the timeline", async
     .getByTestId("message-timeline")
     .locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`);
   await expect(sentEmoji.last()).toBeVisible();
+  await sentEmoji.last().hover();
+  await expect(page.getByText(`:${SHORTCODE}:`).last()).toBeVisible();
   // The composer clears after send.
   await expect(input.locator("img[data-custom-emoji]")).toHaveCount(0);
+});
+
+test("native emoji-only messages leave space below the author metadata", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  const nativeEmoji = "😜";
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.insertText(nativeEmoji);
+  await page.getByTestId("send-message").click();
+
+  const row = page
+    .getByTestId("message-row")
+    .filter({ hasText: nativeEmoji })
+    .last();
+  await expect(row).toBeVisible();
+
+  const author = row.getByText("npub1mock...", { exact: true });
+  const emojiBody = row.locator(".text-4xl").last();
+  await expect(author).toBeVisible();
+  await expect(emojiBody).toContainText(nativeEmoji);
+  await expect(emojiBody).toBeVisible();
+
+  const authorBox = await author.boundingBox();
+  const emojiBodyBox = await emojiBody.boundingBox();
+  if (!authorBox || !emojiBodyBox) {
+    throw new Error("Expected author and emoji body boxes to be measurable.");
+  }
+
+  expect(
+    emojiBodyBox.y - (authorBox.y + authorBox.height),
+  ).toBeGreaterThanOrEqual(4);
 });
 
 // Regression guard for custom-emoji REACTIONS.
@@ -112,15 +148,71 @@ test("custom emoji round-trips through select-all + send to the timeline", async
 // `:react:` is a relay-hosted fixture emoji (URL on the relay origin matching
 // rewriteRelayUrl()'s /media/{64-hex}.{ext} pattern), and the mock bridge
 // answers get_media_proxy_port with port 54321 so the rewrite resolves to a
-// real localhost URL rather than the sprout-media:// fallback.
+// real localhost URL rather than the buzz-media:// fallback.
 
 const REACTION_SHORTCODE = "react";
 const MOCK_MEDIA_PROXY_PORT = 54321;
+const SELECTED_ACTION_CLASS = /(^|\s)bg-secondary(\s|$)/;
 // A seeded message in `general` with a real 64-hex id — the only reactable
 // target in mock mode (getReactionTargetId() requires a 64-hex `e` tag, which
 // user-sent mock messages don't have). Mirrors REACTION_TARGET_CONTENT in the
 // bridge.
 const REACTION_TARGET_CONTENT = "React to me with a custom emoji";
+
+function reactionTargetRow(page: import("@playwright/test").Page) {
+  return page
+    .getByTestId("message-row")
+    .filter({ hasText: REACTION_TARGET_CONTENT })
+    .last();
+}
+
+function messageActionBar(row: import("@playwright/test").Locator) {
+  return row.locator("[data-testid^='message-action-bar-']");
+}
+
+function messageReactionTrigger(row: import("@playwright/test").Locator) {
+  return row.locator("[data-testid^='react-message-']");
+}
+
+async function quickReactionStorageContains(
+  page: import("@playwright/test").Page,
+  emoji: string,
+) {
+  return page.evaluate((selectedEmoji) => {
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index);
+      if (!key?.startsWith("buzz.quick-reaction-emojis.v1")) continue;
+      if (window.localStorage.getItem(key)?.includes(selectedEmoji)) {
+        return true;
+      }
+    }
+    return false;
+  }, emoji);
+}
+
+test("message quick reaction tray stays neutral after selecting a tray emoji", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  const row = reactionTargetRow(page);
+  await expect(row).toBeVisible();
+  await row.hover();
+
+  const quickReactionButton = row.getByRole("button", {
+    name: "React with :+1:",
+  });
+  await expect(quickReactionButton).toBeVisible();
+  await quickReactionButton.click();
+
+  await expect(row.getByLabel("Toggle 👍 reaction")).toBeVisible();
+  await row.hover();
+  await expect(quickReactionButton).not.toHaveAttribute("aria-pressed", "true");
+  await expect(quickReactionButton).not.toHaveClass(SELECTED_ACTION_CLASS);
+  await expect(messageReactionTrigger(row)).not.toHaveClass(
+    SELECTED_ACTION_CLASS,
+  );
+});
 
 test("reacting with a custom emoji renders via the localhost media proxy", async ({
   page,
@@ -129,10 +221,7 @@ test("reacting with a custom emoji renders via the localhost media proxy", async
 
   // Reveal the hover action bar on the seeded reaction-target message, then
   // open the reaction picker.
-  const row = page
-    .getByTestId("message-row")
-    .filter({ hasText: REACTION_TARGET_CONTENT })
-    .last();
+  const row = reactionTargetRow(page);
   await expect(row).toBeVisible();
   await row.hover();
   await row.getByLabel("Open reactions").click();
@@ -141,13 +230,20 @@ test("reacting with a custom emoji renders via the localhost media proxy", async
   // to surface the custom emoji, then click it.
   const picker = page.locator("em-emoji-picker");
   await picker.locator("input[type='search']").fill(REACTION_SHORTCODE);
-  // Custom emoji buttons carry the shortcode as their `title` (no aria-label).
-  await picker.locator(`button[title='${REACTION_SHORTCODE}']`).first().click();
+  await picker
+    .getByRole("button", { name: `:${REACTION_SHORTCODE}:` })
+    .first()
+    .click();
 
   // The reaction pill renders the custom emoji as an <img alt=":react:">. Its
   // src must be the localhost proxy URL — proving rewriteRelayUrl() ran. A raw
   // relay URL here is the bug.
-  const reactionImg = row.locator(`img[alt=':${REACTION_SHORTCODE}:']`);
+  const reactionPill = row.getByLabel(
+    `Toggle :${REACTION_SHORTCODE}: reaction`,
+  );
+  const reactionImg = reactionPill.locator(
+    `img[alt=':${REACTION_SHORTCODE}:']`,
+  );
   await expect(reactionImg).toBeVisible();
   await expect(reactionImg).toHaveAttribute(
     "src",
@@ -156,12 +252,56 @@ test("reacting with a custom emoji renders via the localhost media proxy", async
     ),
   );
 
+  await expect
+    .poll(() => quickReactionStorageContains(page, `:${REACTION_SHORTCODE}:`))
+    .toBe(true);
+  await expect(
+    messageActionBar(row).locator("button[title=':react:']"),
+  ).toHaveCount(0);
+  await expect(messageReactionTrigger(row)).not.toHaveClass(
+    SELECTED_ACTION_CLASS,
+  );
+
+  const inlineAddReactionButton = row.getByLabel("Add reaction");
+  await expect
+    .poll(() =>
+      inlineAddReactionButton.evaluate((button) => {
+        return getComputedStyle(button).opacity;
+      }),
+    )
+    .toBe("0");
+  await expect
+    .poll(() =>
+      inlineAddReactionButton.evaluate((button) => {
+        const rect = button.getBoundingClientRect();
+        return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
+      }),
+    )
+    .toBe("40x32");
+  await expect
+    .poll(() =>
+      inlineAddReactionButton.evaluate((button) => {
+        return getComputedStyle(button).transitionProperty;
+      }),
+    )
+    .not.toContain("width");
+  await row.hover();
+  await expect(inlineAddReactionButton).toBeVisible();
+  await expect
+    .poll(() =>
+      inlineAddReactionButton.evaluate((button) => {
+        const rect = button.getBoundingClientRect();
+        return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
+      }),
+    )
+    .toBe("40x32");
+
   // Toggle the reaction back off: click the pill, which fires remove_reaction
   // -> emits a kind:5 deletion targeting the reaction event. The pill must
   // disappear. Guards the mock-bridge deletion path: the reaction event needs a
   // 64-hex id, because the timeline only honors deletions whose `e` tag is
   // 64-hex (getDeletionTargets). A 32-hex reaction id leaves a stale pill here.
-  await row.getByLabel(`Toggle :${REACTION_SHORTCODE}: reaction`).click();
+  await reactionPill.click();
   await expect(reactionImg).toHaveCount(0);
 });
 
@@ -220,7 +360,7 @@ test("editing a message with a custom emoji shows the image, not the shortcode (
 
   // Open it for editing. The composer loads via setContent — the path the
   // markdown parse rule fixes. The known shortcode must render as the inline
-  // node, NOT as literal `:sprout:` text.
+  // node, NOT as literal `:buzz:` text.
   await openMessageEditor(page, "edit-bug1");
   await expect(input.locator("img[data-custom-emoji]")).toHaveCount(1);
   await expect(input.locator("img[data-custom-emoji]")).toHaveAttribute(
@@ -258,7 +398,7 @@ test("adding a custom emoji while editing keeps the image after save (Bug 2)", a
 
   // After the edit round-trips through edit_message → kind:40003 (with emoji
   // tags) → applyEditTagOverlay, the timeline must render the emoji as an
-  // <img>, not a bare `:sprout:`. The pre-fix edit path shipped no emoji tags,
+  // <img>, not a bare `:buzz:`. The pre-fix edit path shipped no emoji tags,
   // so this row would show literal text and fail here.
   await expect(
     row.locator(`img[data-custom-emoji][alt=":${SHORTCODE}:"]`),
@@ -281,8 +421,13 @@ test("a system message accepts a custom-emoji reaction", async ({ page }) => {
 
   const picker = page.locator("em-emoji-picker");
   await picker.locator("input[type='search']").fill(REACTION_SHORTCODE);
-  await picker.locator(`button[title='${REACTION_SHORTCODE}']`).first().click();
+  await picker
+    .getByRole("button", { name: `:${REACTION_SHORTCODE}:` })
+    .first()
+    .click();
 
-  const reactionImg = row.locator(`img[alt=':${REACTION_SHORTCODE}:']`);
+  const reactionImg = row
+    .getByLabel(`Toggle :${REACTION_SHORTCODE}: reaction`)
+    .locator(`img[alt=':${REACTION_SHORTCODE}:']`);
   await expect(reactionImg).toBeVisible();
 });

@@ -6,6 +6,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/relay/relay.dart';
 import '../profile/profile_provider.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
 import 'channel.dart';
 import 'channels_provider.dart';
 
@@ -212,6 +214,19 @@ final channelCanvasProvider = FutureProvider.family<ChannelCanvas, String>((
   );
 });
 
+/// Channel-scoped kind:5 deletion tags. The `h` tag lets channel-scoped
+/// subscriptions observe the delete; the `e` tag points at the target event.
+@visibleForTesting
+List<List<String>> buildDeleteMessageTags({
+  required String channelId,
+  required String eventId,
+}) {
+  return [
+    ['h', channelId],
+    ['e', eventId],
+  ];
+}
+
 class ChannelActions {
   final Ref _ref;
   final RelaySessionNotifier _session;
@@ -393,11 +408,18 @@ class ChannelActions {
   }
 
   Future<void> addReaction(String eventId, String emoji) async {
+    final shortcode = normalizeShortcode(emoji);
+    final emojiUrl = reactionEmojiUrl(
+      emoji,
+      _ref.read(customEmojiListProvider),
+    );
     await _signedEventRelay.submit(
       kind: EventKind.reaction,
       content: emoji,
       tags: [
         ['e', eventId],
+        if (shortcode != null && emojiUrl != null)
+          ['emoji', shortcode, emojiUrl],
       ],
     );
   }
@@ -416,6 +438,7 @@ class ChannelActions {
     required String channelId,
     required String eventId,
     required String content,
+    List<List<String>> mediaTags = const [],
   }) async {
     await _signedEventRelay.submit(
       kind: EventKind.streamMessageEdit,
@@ -423,17 +446,19 @@ class ChannelActions {
       tags: [
         ['h', channelId],
         ['e', eventId],
+        ...mediaTags,
       ],
     );
   }
 
-  Future<void> deleteMessage(String eventId) async {
+  Future<void> deleteMessage({
+    required String channelId,
+    required String eventId,
+  }) async {
     await _signedEventRelay.submit(
       kind: EventKind.deletion,
       content: '',
-      tags: [
-        ['e', eventId],
-      ],
+      tags: buildDeleteMessageTags(channelId: channelId, eventId: eventId),
     );
   }
 

@@ -18,7 +18,7 @@ import UserNotifications
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     mediaUploadChannel = FlutterMethodChannel(
-      name: "sprout/media_upload",
+      name: "buzz/media_upload",
       binaryMessenger: engineBridge.applicationRegistrar.messenger()
     )
     mediaUploadChannel?.setMethodCallHandler { [weak self] call, result in

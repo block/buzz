@@ -10,6 +10,16 @@ import {
   type DesktopNotificationPermissionState,
 } from "./lib/desktop";
 import {
+  COMING_SOON_SLOTS,
+  DEFAULT_SLOT_ALERTS_ENABLED,
+  DEFAULT_SLOT_SOUNDS,
+  SOUND_NAMES,
+  SOUND_SLOTS,
+  type SlotSounds,
+  type SoundName,
+  type SoundSlot,
+} from "./lib/sound";
+import {
   readStoredSeenFeedIds,
   useFeedDesktopNotifications,
   writeStoredSeenFeedIds,
@@ -17,24 +27,61 @@ import {
 
 export type { DesktopNotificationPermissionState } from "./lib/desktop";
 
-const NOTIFICATION_SETTINGS_STORAGE_KEY = "sprout-notification-settings.v1";
+// v2: settings model reworked around per-event rows (flutter default sound,
+// slotAlertsEnabled, no singleSound/soundEnabled) — v1 values are abandoned.
+const NOTIFICATION_SETTINGS_STORAGE_KEY = "buzz-notification-settings.v2";
 const HOME_FEED_SEEN_MAX_ITEMS = 500;
 
 export type NotificationSettings = {
   desktopEnabled: boolean;
   homeBadgeEnabled: boolean;
-  mentions: boolean;
-  needsAction: boolean;
-  soundEnabled: boolean;
+  notifyWhileViewing: boolean;
+  sounds: SlotSounds;
+  slotAlertsEnabled: Record<SoundSlot, boolean>;
+  /**
+   * Per-row state captured when the master switch bulk-disables, so turning
+   * it back on restores the user's granular picks instead of enabling all.
+   * Cleared by any individual row toggle.
+   */
+  slotAlertsSnapshot: Record<SoundSlot, boolean> | null;
 };
 
 const DEFAULT_NOTIFICATION_SETTINGS: NotificationSettings = {
   desktopEnabled: true,
   homeBadgeEnabled: true,
-  mentions: true,
-  needsAction: true,
-  soundEnabled: true,
+  notifyWhileViewing: false,
+  sounds: { ...DEFAULT_SLOT_SOUNDS },
+  slotAlertsEnabled: { ...DEFAULT_SLOT_ALERTS_ENABLED },
+  slotAlertsSnapshot: null,
 };
+
+const SOUND_NAME_SET = new Set<SoundName>(SOUND_NAMES);
+
+function sanitizeSoundsMap(value: unknown): SlotSounds {
+  const result = { ...DEFAULT_SLOT_SOUNDS };
+  if (!value || typeof value !== "object") return result;
+  const candidate = value as Partial<Record<SoundSlot, unknown>>;
+  for (const slot of SOUND_SLOTS) {
+    const picked = candidate[slot];
+    if (typeof picked === "string" && SOUND_NAME_SET.has(picked as SoundName)) {
+      result[slot] = picked as SoundName;
+    }
+  }
+  return result;
+}
+
+function sanitizeSlotAlertsEnabled(value: unknown): Record<SoundSlot, boolean> {
+  const result = { ...DEFAULT_SLOT_ALERTS_ENABLED };
+  if (!value || typeof value !== "object") return result;
+  const candidate = value as Partial<Record<SoundSlot, unknown>>;
+  for (const slot of SOUND_SLOTS) {
+    const picked = candidate[slot];
+    if (typeof picked === "boolean") {
+      result[slot] = picked;
+    }
+  }
+  return result;
+}
 
 function notificationSettingsStorageKey(pubkey: string) {
   return `${NOTIFICATION_SETTINGS_STORAGE_KEY}:${pubkey}`;
@@ -55,18 +102,17 @@ function sanitizeNotificationSettings(value: unknown): NotificationSettings {
       typeof candidate.homeBadgeEnabled === "boolean"
         ? candidate.homeBadgeEnabled
         : DEFAULT_NOTIFICATION_SETTINGS.homeBadgeEnabled,
-    mentions:
-      typeof candidate.mentions === "boolean"
-        ? candidate.mentions
-        : DEFAULT_NOTIFICATION_SETTINGS.mentions,
-    needsAction:
-      typeof candidate.needsAction === "boolean"
-        ? candidate.needsAction
-        : DEFAULT_NOTIFICATION_SETTINGS.needsAction,
-    soundEnabled:
-      typeof candidate.soundEnabled === "boolean"
-        ? candidate.soundEnabled
-        : DEFAULT_NOTIFICATION_SETTINGS.soundEnabled,
+    notifyWhileViewing:
+      typeof candidate.notifyWhileViewing === "boolean"
+        ? candidate.notifyWhileViewing
+        : DEFAULT_NOTIFICATION_SETTINGS.notifyWhileViewing,
+    sounds: sanitizeSoundsMap(candidate.sounds),
+    slotAlertsEnabled: sanitizeSlotAlertsEnabled(candidate.slotAlertsEnabled),
+    slotAlertsSnapshot:
+      candidate.slotAlertsSnapshot != null &&
+      typeof candidate.slotAlertsSnapshot === "object"
+        ? sanitizeSlotAlertsEnabled(candidate.slotAlertsSnapshot)
+        : null,
   };
 }
 
@@ -185,7 +231,7 @@ export function useNotificationSettings(pubkey?: string) {
         }));
         setErrorMessage(
           nextPermission === "denied"
-            ? "Desktop notifications are blocked for Sprout. Enable them in system settings to turn alerts on."
+            ? "Desktop notifications are blocked for Buzz. Enable them in system settings to turn alerts on."
             : "Desktop notifications are unavailable in this environment.",
         );
         return false;
@@ -219,26 +265,67 @@ export function useNotificationSettings(pubkey?: string) {
     }));
   }, []);
 
-  const setMentionsEnabled = React.useCallback((enabled: boolean) => {
+  const setNotifyWhileViewing = React.useCallback((enabled: boolean) => {
     setSettings((current) => ({
       ...current,
-      mentions: enabled,
+      notifyWhileViewing: enabled,
     }));
   }, []);
 
-  const setNeedsActionEnabled = React.useCallback((enabled: boolean) => {
-    setSettings((current) => ({
-      ...current,
-      needsAction: enabled,
-    }));
+  const setAllSlotAlertsEnabled = React.useCallback((enabled: boolean) => {
+    setSettings((current) => {
+      const next = { ...current.slotAlertsEnabled };
+      if (!enabled) {
+        // Super-switch off: remember the granular picks, zero the live rows.
+        for (const slot of SOUND_SLOTS) {
+          if (!COMING_SOON_SLOTS.has(slot)) {
+            next[slot] = false;
+          }
+        }
+        return {
+          ...current,
+          slotAlertsEnabled: next,
+          slotAlertsSnapshot: { ...current.slotAlertsEnabled },
+        };
+      }
+      // Super-switch on: restore the snapshot when it has anything on,
+      // otherwise enable every live row.
+      const snapshot = current.slotAlertsSnapshot;
+      const snapshotHasAlerts =
+        snapshot != null &&
+        SOUND_SLOTS.some(
+          (slot) => !COMING_SOON_SLOTS.has(slot) && snapshot[slot],
+        );
+      for (const slot of SOUND_SLOTS) {
+        if (!COMING_SOON_SLOTS.has(slot)) {
+          next[slot] = snapshotHasAlerts ? (snapshot?.[slot] ?? true) : true;
+        }
+      }
+      return { ...current, slotAlertsEnabled: next, slotAlertsSnapshot: null };
+    });
   }, []);
 
-  const setSoundEnabled = React.useCallback((enabled: boolean) => {
-    setSettings((current) => ({
-      ...current,
-      soundEnabled: enabled,
-    }));
-  }, []);
+  const setSlotAlertsEnabled = React.useCallback(
+    (slot: SoundSlot, enabled: boolean) => {
+      setSettings((current) => ({
+        ...current,
+        slotAlertsEnabled: { ...current.slotAlertsEnabled, [slot]: enabled },
+        // A manual row toggle supersedes any pending super-switch snapshot.
+        slotAlertsSnapshot: null,
+      }));
+    },
+    [],
+  );
+
+  const setSoundForSlot = React.useCallback(
+    (slot: SoundSlot, name: SoundName) => {
+      setSettings((current) => ({
+        ...current,
+        sounds: { ...current.sounds, [slot]: name },
+      }));
+    },
+    [],
+  );
 
   return {
     errorMessage,
@@ -246,9 +333,10 @@ export function useNotificationSettings(pubkey?: string) {
     permission,
     setDesktopEnabled,
     setHomeBadgeEnabled,
-    setMentionsEnabled,
-    setNeedsActionEnabled,
-    setSoundEnabled,
+    setAllSlotAlertsEnabled,
+    setNotifyWhileViewing,
+    setSlotAlertsEnabled,
+    setSoundForSlot,
     settings,
   };
 }
@@ -385,12 +473,12 @@ export function useHomeFeedNotifications(pubkey: string | undefined) {
     }
 
     window.addEventListener(
-      "sprout:e2e-home-feed-updated",
+      "buzz:e2e-home-feed-updated",
       handleMockHomeFeedUpdate,
     );
     return () => {
       window.removeEventListener(
-        "sprout:e2e-home-feed-updated",
+        "buzz:e2e-home-feed-updated",
         handleMockHomeFeedUpdate,
       );
     };

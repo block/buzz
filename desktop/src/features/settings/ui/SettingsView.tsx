@@ -1,14 +1,34 @@
 import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { X } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 
 import { useMyRelayMembershipQuery } from "@/features/relay-members/hooks";
+import { getFeature } from "@/shared/features/manifest";
+import {
+  resolveEnabled,
+  useFeatureSnapshot,
+} from "@/shared/features/useFeatureEnabled";
 import { cn } from "@/shared/lib/cn";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarInset,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  useSidebar,
+} from "@/shared/ui/sidebar";
 import {
   renderSettingsSection,
   settingsSections,
   type SettingsPanelProps,
   type SettingsSection,
+  type SettingsSectionDescriptor,
 } from "./SettingsPanels";
 
 export {
@@ -17,49 +37,74 @@ export {
 } from "./SettingsPanels";
 
 type SettingsViewProps = SettingsPanelProps & {
-  mode: "profile" | "preferences";
   onClose: () => void;
   onSectionChange: (section: SettingsSection) => void;
   section: SettingsSection;
 };
 
+const settingsNavGroups: Array<{
+  label: string;
+  sections: SettingsSection[];
+}> = [
+  {
+    label: "Personal",
+    sections: [
+      "profile",
+      "appearance",
+      "notifications",
+      "shortcuts",
+      "custom-emoji",
+    ],
+  },
+  {
+    label: "Workspaces",
+    sections: ["channel-templates", "relay-members"],
+  },
+  {
+    label: "App",
+    sections: [
+      "agents",
+      "compute",
+      "experimental",
+      "mobile",
+      "updates",
+      "doctor",
+    ],
+  },
+];
+
 function SettingsSectionButton({
   active,
-  isLoaded,
   onSelect,
   section,
 }: {
   active: boolean;
-  isLoaded: boolean;
   onSelect: (section: SettingsSection) => void;
   section: (typeof settingsSections)[number];
 }) {
   const Icon = section.icon;
 
   return (
-    <button
-      aria-pressed={active}
-      className={cn(
-        "group inline-flex min-w-fit items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium whitespace-nowrap motion-safe:transition-all motion-safe:duration-200 motion-safe:ease-out focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-        active
-          ? "border-border bg-background text-foreground shadow-xs"
-          : "border-transparent bg-transparent text-muted-foreground hover:bg-background/70 hover:text-foreground",
-        isLoaded ? "opacity-100 translate-x-0" : "opacity-0 -translate-x-2",
-      )}
-      data-testid={`settings-nav-${section.value}`}
-      onClick={() => onSelect(section.value)}
-      type="button"
-    >
-      <Icon
-        className={cn(
-          "h-4 w-4 shrink-0 transition-colors",
-          active
-            ? "text-primary"
-            : "text-muted-foreground group-hover:text-foreground",
-        )}
-      />
-      <span className="truncate">{section.label}</span>
-    </button>
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        aria-pressed={active}
+        data-testid={`settings-nav-${section.value}`}
+        isActive={active}
+        onClick={() => onSelect(section.value)}
+        tooltip={section.label}
+        type="button"
+      >
+        <Icon
+          className={cn(
+            "h-4 w-4 shrink-0 transition-colors",
+            active
+              ? "text-sidebar-active-foreground"
+              : "text-sidebar-foreground/70",
+          )}
+        />
+        <span>{section.label}</span>
+      </SidebarMenuButton>
+    </SidebarMenuItem>
   );
 }
 
@@ -70,23 +115,33 @@ export function SettingsView({
   notificationErrorMessage,
   notificationPermission,
   notificationSettings,
-  mode,
   onClose,
   onSectionChange,
   onSetDesktopNotificationsEnabled,
   onSetHomeBadgeEnabled,
-  onSetMentionNotificationsEnabled,
-  onSetNeedsActionNotificationsEnabled,
-  onSetSoundEnabled,
+  onSetSlotAlertsEnabled,
+  onSetNotifyWhileViewing,
+  onSetAllSlotAlertsEnabled,
+  onSetSoundForSlot,
   section,
 }: SettingsViewProps) {
+  const { isMobile, open: sidebarOpen, setOpen: setSidebarOpen } = useSidebar();
   const myMembershipQuery = useMyRelayMembershipQuery();
+  const featureState = useFeatureSnapshot();
   const visibleSections = React.useMemo(() => {
     const membership = myMembershipQuery.data;
+
     return settingsSections.filter((s) => {
-      if (mode === "preferences" && s.value === "profile") {
-        return false;
+      // Feature gate check. Manifest is preview-only — if the gate id is in
+      // the manifest, it's preview and needs an opt-in; if it's not, it's
+      // stable and renders unconditionally (fail-open).
+      if (s.featureGate) {
+        const feature = getFeature(s.featureGate);
+        if (feature && !resolveEnabled(s.featureGate, featureState)) {
+          return false;
+        }
       }
+      // Relay members requires admin/owner role
       if (s.value === "relay-members") {
         return (
           membership != null &&
@@ -95,32 +150,31 @@ export function SettingsView({
       }
       return true;
     });
-  }, [mode, myMembershipQuery.data]);
+  }, [myMembershipQuery.data, featureState]);
 
   const [isLoaded, setIsLoaded] = React.useState(false);
   const [appVersion, setAppVersion] = React.useState<string | null>(null);
+
   React.useEffect(() => {
     const frameId = window.requestAnimationFrame(() => setIsLoaded(true));
     return () => window.cancelAnimationFrame(frameId);
   }, []);
+
   React.useEffect(() => {
     void getVersion().then(setAppVersion);
   }, []);
 
   React.useEffect(() => {
-    if (mode === "profile") {
-      if (section !== "profile") {
-        onSectionChange("profile");
-      }
-      return;
-    }
-
     if (!visibleSections.some((entry) => entry.value === section)) {
       onSectionChange(visibleSections[0]?.value ?? "appearance");
     }
-  }, [mode, onSectionChange, section, visibleSections]);
+  }, [onSectionChange, section, visibleSections]);
 
-  const showSectionNav = mode === "preferences";
+  React.useEffect(() => {
+    if (!isMobile && !sidebarOpen) {
+      setSidebarOpen(true);
+    }
+  }, [isMobile, setSidebarOpen, sidebarOpen]);
 
   React.useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -134,96 +188,97 @@ export function SettingsView({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
-  return (
-    <div
-      className={cn(
-        "fixed inset-0 z-50 flex items-center justify-center motion-safe:transition-opacity motion-safe:duration-200",
-        isLoaded ? "opacity-100" : "opacity-0",
-      )}
-      data-testid="settings-overlay"
-    >
-      <div
-        aria-hidden="true"
-        className="absolute inset-0 bg-background/80 backdrop-blur-sm"
-        onClick={onClose}
-      />
+  const visibleSectionByValue = React.useMemo(
+    () => new Map(visibleSections.map((entry) => [entry.value, entry])),
+    [visibleSections],
+  );
+  const visibleNavGroups = React.useMemo(
+    () =>
+      settingsNavGroups
+        .map((group) => ({
+          ...group,
+          sections: group.sections
+            .map((value) => visibleSectionByValue.get(value))
+            .filter(
+              (entry): entry is SettingsSectionDescriptor => entry != null,
+            ),
+        }))
+        .filter((group) => group.sections.length > 0),
+    [visibleSectionByValue],
+  );
 
-      {/* biome-ignore lint/a11y/useKeyWithClickEvents: Click stops propagation to backdrop; keyboard dismiss handled by Escape key. */}
-      <div
-        aria-labelledby="settings-title"
-        aria-modal="true"
-        className={cn(
-          "relative mx-auto flex h-[min(600px,calc(100vh-2rem))] w-[calc(100%-4rem)] max-w-3xl flex-col overflow-hidden rounded-xl border border-border bg-background shadow-lg motion-safe:transition-all motion-safe:duration-200 motion-safe:ease-out",
-          isLoaded ? "opacity-100 scale-100" : "opacity-0 scale-95",
-        )}
-        data-testid="settings-view"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
+  return (
+    <>
+      <Sidebar
+        className="!border-r-0"
+        collapsible="offcanvas"
+        data-testid="settings-sidebar"
+        variant="sidebar"
       >
-        <header
-          className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3"
+        <SidebarHeader
+          className="cursor-default select-none pt-11"
           data-tauri-drag-region
         >
-          <h2
-            className="text-base font-semibold"
-            data-testid="settings-title"
-            id="settings-title"
-          >
-            {mode === "profile" ? "Profile" : "Settings"}
-          </h2>
-          <button
-            aria-label="Close settings"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            data-testid="settings-close"
-            onClick={onClose}
-            type="button"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </header>
-
-        <div
-          className={cn(
-            "grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] overflow-hidden md:grid-rows-1",
-            showSectionNav
-              ? "md:grid-cols-[220px_minmax(0,1fr)]"
-              : "md:grid-cols-1",
-          )}
-        >
-          {showSectionNav ? (
-            <aside
-              className={cn(
-                "flex flex-col border-b border-border/70 bg-muted/20 motion-safe:transition-all motion-safe:duration-200 motion-safe:ease-out md:border-b-0 md:border-r",
-                isLoaded
-                  ? "opacity-100 translate-x-0"
-                  : "opacity-0 -translate-x-2",
-              )}
-            >
-              <nav
-                aria-label="Settings sections"
-                className="flex gap-1 overflow-x-auto px-3 py-3 md:flex-1 md:flex-col md:overflow-y-auto md:pt-1"
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                data-testid="settings-back-to-app"
+                onClick={onClose}
+                tooltip="Back to app"
+                type="button"
               >
-                {visibleSections.map((entry) => (
-                  <SettingsSectionButton
-                    active={entry.value === section}
-                    isLoaded={isLoaded}
-                    key={entry.value}
-                    onSelect={onSectionChange}
-                    section={entry}
-                  />
-                ))}
-              </nav>
-              {appVersion ? (
-                <p className="hidden px-3 pb-3 text-xs text-muted-foreground/60 md:block">
-                  v{appVersion}
-                </p>
-              ) : null}
-            </aside>
-          ) : null}
+                <ArrowLeft className="h-4 w-4" />
+                <span>Back to app</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        </SidebarHeader>
 
-          <section className="flex min-h-0 flex-col overflow-y-auto px-4 pt-4 sm:px-6">
+        <SidebarContent>
+          {visibleNavGroups.map((group) => (
+            <SidebarGroup key={group.label}>
+              <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu aria-label={`${group.label} settings sections`}>
+                  {group.sections.map((entry) => (
+                    <SettingsSectionButton
+                      active={entry.value === section}
+                      key={entry.value}
+                      onSelect={onSectionChange}
+                      section={entry}
+                    />
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          ))}
+        </SidebarContent>
+
+        <SidebarFooter>
+          {appVersion ? (
+            <p className="px-2 pb-1 text-xs text-sidebar-foreground/45">
+              v{appVersion}
+            </p>
+          ) : null}
+        </SidebarFooter>
+      </Sidebar>
+
+      <SidebarInset
+        className={cn(
+          "relative min-h-0 min-w-0 overflow-hidden motion-safe:transition-opacity motion-safe:duration-200",
+          isLoaded ? "opacity-100" : "opacity-0",
+        )}
+        data-testid="settings-view"
+      >
+        <div
+          aria-hidden="true"
+          className="absolute inset-x-0 top-0 h-11"
+          data-tauri-drag-region
+        />
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden pt-11">
+          <section className="min-h-0 flex-1 overflow-y-auto px-5 pb-5 pt-4 sm:px-6">
             <div
-              className="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-4"
+              className="mx-auto flex w-full max-w-4xl flex-col gap-4"
               data-testid={`settings-panel-${section}`}
             >
               {renderSettingsSection(section, {
@@ -235,14 +290,15 @@ export function SettingsView({
                 notificationSettings,
                 onSetDesktopNotificationsEnabled,
                 onSetHomeBadgeEnabled,
-                onSetMentionNotificationsEnabled,
-                onSetNeedsActionNotificationsEnabled,
-                onSetSoundEnabled,
+                onSetSlotAlertsEnabled,
+                onSetNotifyWhileViewing,
+                onSetAllSlotAlertsEnabled,
+                onSetSoundForSlot,
               })}
             </div>
           </section>
         </div>
-      </div>
-    </div>
+      </SidebarInset>
+    </>
   );
 }

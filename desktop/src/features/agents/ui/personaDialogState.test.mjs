@@ -17,7 +17,7 @@ test("createPersonaDialogState returns a fresh empty draft", () => {
     displayName: "",
     avatarUrl: "",
     systemPrompt: "",
-    provider: undefined,
+    runtime: undefined,
     model: undefined,
   });
   assert.notStrictEqual(first.initialValues, second.initialValues);
@@ -29,8 +29,9 @@ test("duplicatePersonaDialogState copies persona fields into a new draft", () =>
     displayName: "Solo",
     avatarUrl: "avatar://solo",
     systemPrompt: "Be direct.",
-    provider: "provider-a",
+    runtime: "provider-a",
     model: "model-a",
+    provider: null,
     isBuiltIn: false,
     isActive: true,
     createdAt: "2025-01-01T00:00:00Z",
@@ -41,8 +42,9 @@ test("duplicatePersonaDialogState copies persona fields into a new draft", () =>
     displayName: "Solo copy",
     avatarUrl: "avatar://solo",
     systemPrompt: "Be direct.",
-    provider: "provider-a",
+    runtime: "provider-a",
     model: "model-a",
+    provider: undefined,
     namePool: [],
     envVars: {},
   });
@@ -57,7 +59,7 @@ test("duplicatePersonaDialogState carries envVars and namePool into the duplicat
     displayName: "Coder",
     avatarUrl: null,
     systemPrompt: "Write code.",
-    provider: null,
+    runtime: null,
     model: null,
     isBuiltIn: false,
     isActive: true,
@@ -80,8 +82,9 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
     displayName: "Kit",
     avatarUrl: null,
     systemPrompt: "Keep it weird.",
-    provider: null,
+    runtime: null,
     model: null,
+    provider: null,
     isBuiltIn: true,
     isActive: true,
     createdAt: "2025-01-01T00:00:00Z",
@@ -96,8 +99,9 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
     displayName: "Kit",
     avatarUrl: "",
     systemPrompt: "Keep it weird.",
-    provider: undefined,
+    runtime: undefined,
     model: undefined,
+    provider: undefined,
     namePool: [],
     envVars: {},
   });
@@ -109,7 +113,7 @@ test("editPersonaDialogState seeds envVars and namePool from the persona", () =>
     displayName: "Coder",
     avatarUrl: null,
     systemPrompt: "Write code.",
-    provider: null,
+    runtime: null,
     model: null,
     isBuiltIn: false,
     isActive: true,
@@ -130,8 +134,10 @@ test("importPersonaDialogState maps parsed persona previews into create drafts",
     displayName: "Imported",
     avatarDataUrl: null,
     systemPrompt: "Imported prompt",
-    provider: null,
+    runtime: null,
     model: "model-b",
+    provider: null,
+    namePool: [],
     sourceFile: "import.persona.json",
   });
 
@@ -140,7 +146,85 @@ test("importPersonaDialogState maps parsed persona previews into create drafts",
     displayName: "Imported",
     avatarUrl: "",
     systemPrompt: "Imported prompt",
-    provider: undefined,
+    runtime: undefined,
     model: "model-b",
+    provider: undefined,
   });
+});
+
+// ── Provider round-trip tests ─────────────────────────────────────────────────
+
+test("editPersonaDialogState preserves provider=databricks", () => {
+  const state = editPersonaDialogState({
+    id: "persona-provider",
+    displayName: "DB Agent",
+    avatarUrl: null,
+    systemPrompt: "Use databricks.",
+    runtime: "goose",
+    model: "dbrx",
+    provider: "databricks",
+    isBuiltIn: false,
+    isActive: true,
+    namePool: [],
+    envVars: {},
+    createdAt: "2025-01-01T00:00:00Z",
+    updatedAt: "2025-01-02T00:00:00Z",
+  });
+
+  assert.equal(state.initialValues.provider, "databricks");
+});
+
+test("editPersonaDialogState maps provider=null to undefined", () => {
+  const state = editPersonaDialogState({
+    id: "persona-no-provider",
+    displayName: "Plain",
+    avatarUrl: null,
+    systemPrompt: "No provider.",
+    runtime: null,
+    model: null,
+    provider: null,
+    isBuiltIn: false,
+    isActive: true,
+    namePool: [],
+    envVars: {},
+    createdAt: "2025-01-01T00:00:00Z",
+    updatedAt: "2025-01-02T00:00:00Z",
+  });
+
+  assert.equal(state.initialValues.provider, undefined);
+});
+
+test("duplicatePersonaDialogState preserves provider=databricks", () => {
+  const state = duplicatePersonaDialogState({
+    id: "persona-dup-provider",
+    displayName: "DB Agent",
+    avatarUrl: null,
+    systemPrompt: "Use databricks.",
+    runtime: "goose",
+    model: "dbrx",
+    provider: "databricks",
+    isBuiltIn: false,
+    isActive: true,
+    namePool: [],
+    envVars: {},
+    createdAt: "2025-01-01T00:00:00Z",
+    updatedAt: "2025-01-02T00:00:00Z",
+  });
+
+  assert.equal(state.initialValues.provider, "databricks");
+});
+
+test("importPersonaDialogState preserves provider=anthropic", () => {
+  const state = importPersonaDialogState({
+    displayName: "Imported With Provider",
+    avatarDataUrl: null,
+    systemPrompt: "Anthropic agent.",
+    runtime: "goose",
+    model: "claude-sonnet",
+    provider: "anthropic",
+    namePool: [],
+    sourceFile: "provider-test.persona.json",
+  });
+
+  assert.equal(state.initialValues.provider, "anthropic");
 });

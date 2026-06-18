@@ -10,11 +10,13 @@ import type { ReactNode } from "react";
 
 import type { Workspace } from "./types";
 import {
+  clearWorkspaceStorage,
   loadActiveWorkspaceId,
   loadWorkspaces,
   saveActiveWorkspaceId,
   saveWorkspaces,
 } from "./workspaceStorage";
+import { removeSelfProfileCachesForRelay } from "@/features/profile/lib/selfProfileStorage";
 
 export type UseWorkspacesReturn = {
   workspaces: Workspace[];
@@ -23,6 +25,7 @@ export type UseWorkspacesReturn = {
   reinitKey: number;
   /** Add a workspace, deduplicating by relayUrl. Returns the final ID in the list. */
   addWorkspace: (workspace: Workspace) => string;
+  clearWorkspaces: () => void;
   removeWorkspace: (id: string) => void;
   switchWorkspace: (id: string) => void;
   /** Force the active workspace to re-init (e.g. after a deep-link reconnect). */
@@ -95,8 +98,25 @@ function useWorkspacesInternal(): UseWorkspacesReturn {
     return resolvedId;
   }, []);
 
+  const clearWorkspaces = useCallback(() => {
+    clearWorkspaceStorage();
+    setWorkspacesState([]);
+    setActiveId(null);
+  }, []);
+
   const removeWorkspace = useCallback(
     (id: string) => {
+      // GC self-profile caches for the removed workspace's relay. Mirror the
+      // updater guard (length > 1) so we only GC when removal will actually
+      // proceed. Runs outside the updater — updaters can execute twice under
+      // React StrictMode.
+      if (workspaces.length > 1) {
+        const removed = workspaces.find((w) => w.id === id);
+        if (removed) {
+          removeSelfProfileCachesForRelay(removed.relayUrl);
+        }
+      }
+
       setWorkspacesState((prev) => {
         // Never allow removing the last workspace
         if (prev.length <= 1) {
@@ -114,7 +134,7 @@ function useWorkspacesInternal(): UseWorkspacesReturn {
         return next;
       });
     },
-    [activeId],
+    [activeId, workspaces],
   );
 
   const switchWorkspace = useCallback(
@@ -166,6 +186,7 @@ function useWorkspacesInternal(): UseWorkspacesReturn {
     activeWorkspace,
     reinitKey,
     addWorkspace,
+    clearWorkspaces,
     removeWorkspace,
     switchWorkspace,
     reconnectWorkspace,

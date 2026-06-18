@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sprout_mobile/features/channels/channel_management_provider.dart';
-import 'package:sprout_mobile/shared/relay/relay.dart';
+import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
 
 /// Tests for [channelDetailsFromEvent].
 ///
@@ -83,5 +83,19 @@ void main() {
     expect(details.ttlSeconds, 86400);
     expect(details.ttlDeadline, isNotNull);
     expect(details.ttlDeadline!.isUtc, isTrue);
+  });
+
+  group('buildDeleteMessageTags', () {
+    test('emits both channel h tag and target e tag', () {
+      final tags = buildDeleteMessageTags(
+        channelId: 'c8c629ae-d35c-44fa-bc39-f6c1816756cc',
+        eventId: 'abc123',
+      );
+
+      expect(tags, [
+        ['h', 'c8c629ae-d35c-44fa-bc39-f6c1816756cc'],
+        ['e', 'abc123'],
+      ]);
+    });
   });
 }

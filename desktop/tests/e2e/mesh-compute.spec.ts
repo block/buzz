@@ -5,20 +5,20 @@ import { openSettings } from "../helpers/settings";
 
 // Layer 3 of the mesh e2e: the desktop UI contract for mesh-compute, driven
 // through the real UI + the (mocked) Tauri mesh commands. Asserts the bridge
-// CALL ORDER, not just labels — in particular the ensure-before-spawn
+// CALL ORDER, not just labels — in particular the prepare-before-spawn
 // invariant and the membership-denial copy.
 
 type E2eWindow = Window & {
-  __SPROUT_E2E__?: { mock?: { meshReporterPubkey?: string } };
-  __SPROUT_E2E_INVOKE_MOCK_COMMAND__?: unknown;
+  __BUZZ_E2E__?: { mock?: { meshReporterPubkey?: string } };
+  __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: unknown;
   __TAURI_INTERNALS__?: { invoke?: unknown };
-  __SPROUT_E2E_COMMANDS__?: string[];
-  __SPROUT_E2E_SIGNED_EVENTS__?: Array<{
+  __BUZZ_E2E_COMMANDS__?: string[];
+  __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
     content: string;
     kind: number;
     tags: string[][];
   }>;
-  __SPROUT_E2E_SET_MESH__?: (mesh: {
+  __BUZZ_E2E_SET_MESH__?: (mesh: {
     admitted?: boolean;
     models?: Array<{ id: string; name: string | null }>;
     denyReason?: string;
@@ -29,7 +29,7 @@ async function waitForInvokeBridge(page: import("@playwright/test").Page) {
   await page.waitForFunction(() => {
     const w = window as E2eWindow;
     return (
-      typeof w.__SPROUT_E2E_INVOKE_MOCK_COMMAND__ === "function" ||
+      typeof w.__BUZZ_E2E_INVOKE_MOCK_COMMAND__ === "function" ||
       typeof w.__TAURI_INTERNALS__?.invoke === "function"
     );
   }, null);
@@ -45,15 +45,13 @@ async function gotoApp(page: import("@playwright/test").Page) {
 
 /** Ordered command names the bridge recorded so far. */
 async function commands(page: import("@playwright/test").Page) {
-  return page.evaluate(
-    () => (window as E2eWindow).__SPROUT_E2E_COMMANDS__ ?? [],
-  );
+  return page.evaluate(() => (window as E2eWindow).__BUZZ_E2E_COMMANDS__ ?? []);
 }
 
 /** Signed event templates the bridge recorded so far. */
 async function signedEvents(page: import("@playwright/test").Page) {
   return page.evaluate(
-    () => (window as E2eWindow).__SPROUT_E2E_SIGNED_EVENTS__ ?? [],
+    () => (window as E2eWindow).__BUZZ_E2E_SIGNED_EVENTS__ ?? [],
   );
 }
 
@@ -62,7 +60,7 @@ async function setMesh(
   mesh: { admitted?: boolean; denyReason?: string },
 ) {
   await page.evaluate((m) => {
-    (window as E2eWindow).__SPROUT_E2E_SET_MESH__?.(m);
+    (window as E2eWindow).__BUZZ_E2E_SET_MESH__?.(m);
   }, mesh);
 }
 
@@ -75,6 +73,13 @@ async function openManagedAgentActions(
   await trigger.focus();
   await trigger.press("Enter");
   await expect(trigger).toHaveAttribute("data-state", "open");
+}
+
+async function openNewAgentMenu(page: import("@playwright/test").Page) {
+  await page
+    .getByTestId("agents-library-personas")
+    .getByRole("button", { name: "New", exact: true })
+    .click();
 }
 
 test.beforeEach(async ({ page }) => {
@@ -125,10 +130,12 @@ test("Share compute model draft persists across reload", async ({ page }) => {
   await page.getByTestId("mesh-share-compute-vram").fill("42");
 
   await page.reload({ waitUntil: "domcontentloaded" });
-  await expect(page.getByTestId("open-agents-view")).toBeVisible({
+  // Settings now lives in the history stack (/settings?section=…), so a reload
+  // restores the open section straight from the URL — no need to navigate back
+  // through the app shell.
+  await expect(page.getByTestId("settings-view")).toBeVisible({
     timeout: 10_000,
   });
-  await openSettings(page, "compute");
 
   await expect(page.getByTestId("mesh-share-compute-model")).toHaveValue(
     "unsloth/Qwen3.6-35B-A3B-GGUF@main:UD-Q4_K_S",
@@ -142,7 +149,7 @@ test("Run-on-relay-mesh ensures the client node BEFORE spawning the agent", asyn
 }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await openNewAgentMenu(page);
   await page.getByText("Custom Agent").click();
 
   // Member is admitted -> the relay-mesh toggle becomes enabled (availability
@@ -170,15 +177,15 @@ test("Run-on-relay-mesh ensures the client node BEFORE spawning the agent", asyn
     .poll(async () => (await commands(page)).slice(before))
     .toContain("create_managed_agent");
 
-  // The invariant: within the Create action, ensure runs BEFORE create.
+  // The invariant: within the Create action, prepare runs BEFORE create.
   const slice = (await commands(page)).slice(before);
-  const ensureIdx = slice.indexOf("mesh_ensure_client_node");
+  const prepareIdx = slice.indexOf("mesh_prepare_relay_mesh_client");
   const createIdx = slice.indexOf("create_managed_agent");
   expect(
-    ensureIdx,
-    "ensure must occur in the Create action",
+    prepareIdx,
+    "prepare must occur in the Create action",
   ).toBeGreaterThanOrEqual(0);
-  expect(ensureIdx).toBeLessThan(createIdx);
+  expect(prepareIdx).toBeLessThan(createIdx);
 });
 
 test("Run-on-relay-mesh skips connect signaling for own serve target", async ({
@@ -186,7 +193,7 @@ test("Run-on-relay-mesh skips connect signaling for own serve target", async ({
 }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await openNewAgentMenu(page);
   await page.getByText("Custom Agent").click();
   await page.getByTestId("agent-name-input").fill("Own Mesh Agent");
 
@@ -204,7 +211,7 @@ test("Run-on-relay-mesh skips connect signaling for own serve target", async ({
     .toContain("create_managed_agent");
 
   const slice = (await commands(page)).slice(before);
-  expect(slice).toContain("mesh_ensure_client_node");
+  expect(slice).toContain("mesh_prepare_relay_mesh_client");
   expect(
     (await signedEvents(page)).filter((event) => event.kind === 24621),
   ).toHaveLength(0);
@@ -215,10 +222,10 @@ test("Run-on-relay-mesh canonicalizes the mesh connect #p target", async ({
 }) => {
   await page.addInitScript(() => {
     const w = window as E2eWindow;
-    w.__SPROUT_E2E__ = {
-      ...(w.__SPROUT_E2E__ ?? {}),
+    w.__BUZZ_E2E__ = {
+      ...(w.__BUZZ_E2E__ ?? {}),
       mock: {
-        ...(w.__SPROUT_E2E__?.mock ?? {}),
+        ...(w.__BUZZ_E2E__?.mock ?? {}),
         meshReporterPubkey:
           "  CAFEBABECAFEBABECAFEBABECAFEBABECAFEBABECAFEBABECAFEBABECAFEBABE  ",
       },
@@ -226,7 +233,7 @@ test("Run-on-relay-mesh canonicalizes the mesh connect #p target", async ({
   });
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await openNewAgentMenu(page);
   await page.getByText("Custom Agent").click();
   await page.getByTestId("agent-name-input").fill("Mesh Agent");
 
@@ -264,7 +271,7 @@ test("a non-member cannot enable relay-mesh — membership is the gate", async (
   await setMesh(page, { admitted: false, denyReason: "not a relay member" });
 
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await openNewAgentMenu(page);
   await page.getByText("Custom Agent").click();
 
   // The relay-mesh toggle stays disabled — a non-member cannot even opt into
@@ -278,12 +285,12 @@ test("a non-member cannot enable relay-mesh — membership is the gate", async (
   expect(seq).not.toContain("create_managed_agent");
 });
 
-test("saved relay-mesh agents require a fresh serve target before manual start", async ({
+test("saved relay-mesh agents restart via the backend serve-target preflight", async ({
   page,
 }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await page.getByRole("button", { name: "New" }).click();
+  await openNewAgentMenu(page);
   await page.getByText("Custom Agent").click();
   await page.getByTestId("agent-name-input").fill("Saved relay mesh agent");
 
@@ -301,12 +308,12 @@ test("saved relay-mesh agents require a fresh serve target before manual start",
 
   const agents = await page.evaluate(async () => {
     const w = window as E2eWindow & {
-      __SPROUT_E2E_INVOKE_MOCK_COMMAND__?: (
+      __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
         command: string,
         payload?: Record<string, unknown>,
       ) => Promise<Array<{ name: string; pubkey: string }>>;
     };
-    const invoke = w.__SPROUT_E2E_INVOKE_MOCK_COMMAND__;
+    const invoke = w.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
     if (!invoke) throw new Error("Mock invoke bridge is unavailable.");
     return invoke("list_managed_agents");
   });
@@ -330,23 +337,35 @@ test("saved relay-mesh agents require a fresh serve target before manual start",
     .toContain("stop_managed_agent");
   await expect(row).toContainText("stopped");
 
-  const before = (await commands(page)).length;
+  // With a live serve target for the model, manual restart goes through:
+  // the backend preflight re-resolves the target and the agent starts.
+  await openManagedAgentActions(page, pubkey);
+  await page.getByRole("menuitem", { name: "Spawn" }).click();
+  await expect
+    .poll(async () => await commands(page))
+    .toContain("start_managed_agent");
+  await expect(row).toContainText("running");
+
+  await openManagedAgentActions(page, pubkey);
+  await page.getByRole("menuitem", { name: "Stop" }).click();
+  await expect(row).toContainText("stopped");
+
+  // Without a live serve target, the backend preflight rejects the start
+  // with an actionable error, surfaced as a toast; the agent stays stopped.
+  await setMesh(page, { models: [] });
   await openManagedAgentActions(page, pubkey);
   await page.getByRole("menuitem", { name: "Spawn" }).click();
 
   await expect(
     page
       .locator("[data-sonner-toast]")
-      .filter({ hasText: "Relay-mesh agents need a fresh serve target" }),
+      .filter({ hasText: "no live serve target is available" }),
   ).toBeVisible();
-  expect((await commands(page)).slice(before)).not.toContain(
-    "start_managed_agent",
-  );
   await expect(row).toContainText("stopped");
 
   await expect(
     page.evaluate(async (agentPubkey) => {
-      const invoke = (window as E2eWindow).__SPROUT_E2E_INVOKE_MOCK_COMMAND__ as
+      const invoke = (window as E2eWindow).__BUZZ_E2E_INVOKE_MOCK_COMMAND__ as
         | ((
             command: string,
             payload?: Record<string, unknown>,
@@ -360,6 +379,6 @@ test("saved relay-mesh agents require a fresh serve target before manual start",
         return err instanceof Error ? err.message : String(err);
       }
     }, pubkey),
-  ).resolves.toContain("selected serve target is not persisted");
+  ).resolves.toContain("no live serve target is available");
   await expect(row).toContainText("stopped");
 });

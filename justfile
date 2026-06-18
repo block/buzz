@@ -1,4 +1,4 @@
-# Sprout — development task runner
+# Buzz — development task runner
 
 set dotenv-load := true
 
@@ -53,7 +53,7 @@ build-release:
 # for searchability; new/updated profiles are indexed correctly automatically.
 # Safe to run repeatedly — Typesense upserts.
 reindex-kind0:
-    cargo run --release -p sprout-relay --bin sprout-reindex-kind0
+    cargo run --release -p buzz-relay --bin buzz-reindex-kind0
 
 # Run repo lint and formatting checks
 check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check
@@ -118,7 +118,7 @@ _ensure-sidecar-stubs:
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
-    for bin in sprout-acp sprout-mcp-server sprout-agent sprout-dev-mcp git-credential-nostr sprout; do
+    for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
         touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
 
@@ -126,8 +126,8 @@ _ensure-sidecar-stubs:
 _ensure-services:
     #!/usr/bin/env bash
     set -euo pipefail
-    pg=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' sprout-postgres 2>/dev/null || echo "not_found")
-    redis=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' sprout-redis 2>/dev/null || echo "not_found")
+    pg=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-postgres 2>/dev/null || echo "not_found")
+    redis=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-redis 2>/dev/null || echo "not_found")
     if [[ "$pg" == "healthy" && "$redis" == "healthy" ]]; then
         echo "Services already healthy"
         exit 0
@@ -136,8 +136,8 @@ _ensure-services:
     docker compose up -d || true
     echo -n "Waiting for services"
     for i in $(seq 1 40); do
-        pg=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' sprout-postgres 2>/dev/null || echo "not_found")
-        redis=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' sprout-redis 2>/dev/null || echo "not_found")
+        pg=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-postgres 2>/dev/null || echo "not_found")
+        redis=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-redis 2>/dev/null || echo "not_found")
         if [[ "$pg" == "healthy" && "$redis" == "healthy" ]]; then
             echo " ready"
             exit 0
@@ -148,13 +148,9 @@ _ensure-services:
     echo " timed out"
     exit 1
 
-# Apply database migrations if pgschema is available
+# Apply database migrations if the dev database is running
 _ensure-migrations: _ensure-services
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ -x bin/pgschema && -f schema/schema.sql ]]; then
-        bin/pgschema apply --file schema/schema.sql --auto-approve || true
-    fi
+    cargo run -p buzz-admin -- migrate
 
 # Run clippy on the desktop Tauri Rust crate
 desktop-tauri-clippy: _ensure-sidecar-stubs
@@ -174,12 +170,11 @@ desktop-release-build target="aarch64-apple-darwin":
     set -euo pipefail
     TARGET={{target}}
     mkdir -p desktop/src-tauri/binaries
-    touch "desktop/src-tauri/binaries/sprout-acp-$TARGET"
-    touch "desktop/src-tauri/binaries/sprout-mcp-server-$TARGET"
-    touch "desktop/src-tauri/binaries/sprout-agent-$TARGET"
-    touch "desktop/src-tauri/binaries/sprout-dev-mcp-$TARGET"
+    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
+    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
+    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
     touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
-    touch "desktop/src-tauri/binaries/sprout-$TARGET"
+    touch "desktop/src-tauri/binaries/buzz-$TARGET"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 
@@ -213,12 +208,15 @@ desktop-screenshot *ARGS:
 
 # Mesh-compute e2e: the CI-safe layers (relay mesh signaling invariants + Playwright UI)
 mesh-e2e:
-    cargo test -p sprout-relay mesh_signaling
+    cargo test -p buzz-relay mesh_signaling
     cd {{desktop_dir}} && pnpm test:e2e:integration -- mesh-compute.spec.ts
 
 # Mesh-compute Layer 1: REAL serve->client->inference on this machine (not CI)
 mesh-e2e-hardware:
-    cargo run -p sprout-relay --example mesh_serve_client_smoke
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
+    cargo run -p buzz-relay --example mesh_serve_client_smoke
 
 # Run all checks suitable for CI / pre-push (no infra needed)
 ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
@@ -233,7 +231,7 @@ test:
 test-unit:
     #!/usr/bin/env bash
     if command -v cargo-nextest &>/dev/null; then
-        cargo nextest run -p sprout-core -p sprout-auth --lib
+        cargo nextest run -p buzz-core -p buzz-auth --lib
     else
         ./scripts/run-tests.sh unit
     fi
@@ -246,7 +244,7 @@ test-integration:
 
 # Start the relay server (auto-starts Docker services if needed)
 relay: _ensure-migrations
-    cargo run -p sprout-relay
+    cargo run -p buzz-relay
 
 # Start the relay with the built web UI served from it
 relay-web: _ensure-migrations
@@ -254,45 +252,55 @@ relay-web: _ensure-migrations
     set -euo pipefail
     [[ -d node_modules ]] || pnpm install
     pnpm -C web build
-    SPROUT_WEB_DIR=./web/dist cargo run -p sprout-relay
+    BUZZ_WEB_DIR=./web/dist cargo run -p buzz-relay
 
 # Start the relay server in release mode
 relay-release: _ensure-migrations
-    cargo run -p sprout-relay --release
+    cargo run -p buzz-relay --release
 
-# Start sprout-proxy (dev mode)
+# Start buzz-proxy (dev mode)
 proxy:
-    cargo run -p sprout-proxy
+    cargo run -p buzz-proxy
 
-# Start sprout-proxy (release mode)
+# Start buzz-proxy (release mode)
 proxy-release:
-    cargo run -p sprout-proxy --release
+    cargo run -p buzz-proxy --release
 
 # Run the desktop Tauri app in dev mode (ports and identity derived from worktree)
 dev *ARGS: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
+    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     source ../scripts/instance-env.sh
-    echo "Starting on Vite port ${SPROUT_VITE_PORT}, relay ${SPROUT_RELAY_URL}"
-    pnpm exec tauri dev --features mesh-llm --config "$SPROUT_TAURI_CONFIG" {{ARGS}}
+    # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
+    # agent workers. Reap this instance's agents on exit as a backstop.
+    INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
+    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID"' EXIT
+    echo "Starting on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
+    pnpm exec tauri dev --features mesh-llm --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
 staging *ARGS: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
     pnpm install
-    cargo build --release -p sprout-acp -p sprout-mcp -p sprout-agent -p sprout-dev-mcp -p sprout-cli
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
-    cp target/release/sprout "desktop/src-tauri/binaries/sprout-${TARGET}"
-    chmod +x "desktop/src-tauri/binaries/sprout-${TARGET}"
+    cp target/release/buzz "desktop/src-tauri/binaries/buzz-${TARGET}"
+    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
     cd {{desktop_dir}}
     source ../scripts/instance-env.sh
-    export SPROUT_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
-    echo "Starting staging on Vite port ${SPROUT_VITE_PORT}, relay ${SPROUT_RELAY_URL}"
-    pnpm exec tauri dev --features mesh-llm --config "$SPROUT_TAURI_CONFIG" {{ARGS}}
+    export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
+    # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
+    # agent workers. Reap this instance's agents on exit as a backstop.
+    INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
+    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID"' EXIT
+    echo "Starting staging on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
+    pnpm exec tauri dev --features mesh-llm --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop frontend dev server (port derived from worktree)
 desktop-dev:
@@ -301,8 +309,8 @@ desktop-dev:
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     source ../scripts/instance-env.sh
-    echo "Starting frontend dev server on Vite port ${SPROUT_VITE_PORT}, relay ${SPROUT_RELAY_URL}"
-    pnpm exec vite --port "${SPROUT_VITE_PORT}" --strictPort
+    echo "Starting frontend dev server on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
+    pnpm exec vite --port "${BUZZ_VITE_PORT}" --strictPort
 
 # ─── Web ─────────────────────────────────────────────────────────────────────
 
@@ -312,9 +320,9 @@ web:
     set -euo pipefail
     [[ -d node_modules ]] || pnpm install
     source scripts/instance-env.sh
-    export VITE_PORT=$((SPROUT_VITE_PORT + 100))
-    export VITE_RELAY_URL="${SPROUT_RELAY_URL}"
-    echo "Starting web dev server on port ${VITE_PORT}, relay ${SPROUT_RELAY_URL}"
+    export VITE_PORT=$((BUZZ_VITE_PORT + 100))
+    export VITE_RELAY_URL="${BUZZ_RELAY_URL}"
+    echo "Starting web dev server on port ${VITE_PORT}, relay ${BUZZ_RELAY_URL}"
     cd {{web_dir}}
     pnpm exec vite --port "${VITE_PORT}" --strictPort
 
@@ -376,9 +384,9 @@ mobile-dev:
 
 # ─── Database ─────────────────────────────────────────────────────────────────
 
-# Apply schema migrations via pgschema
+# Apply database migrations
 migrate: _ensure-services
-    ./bin/pgschema apply --file schema/schema.sql --auto-approve
+    cargo run -p buzz-admin -- migrate
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -438,11 +446,11 @@ bump-version version:
     sed -i '' "s/^version: .*/version: {{ version }}+1/" mobile/pubspec.yaml
     # Regenerate lockfiles
     pnpm install --lockfile-only
-    cargo update -p sprout-desktop --manifest-path desktop/src-tauri/Cargo.toml
+    cargo update -p buzz-desktop --manifest-path desktop/src-tauri/Cargo.toml
     (unset GIT_DIR GIT_WORK_TREE; cd mobile && flutter pub get)
     echo "Bumped all manifests to {{ version }} and regenerated lockfiles"
 
-# Create a release PR that bumps version and generates changelog
+# Create or update a release PR that bumps version and generates changelog
 release *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -476,13 +484,39 @@ release *ARGS:
         echo "Error: working tree is dirty. Commit or stash changes first."
         exit 1
     fi
-    # Create version-bump branch
+    # Switch to version-bump branch (create if needed, reset to main if it exists)
     BRANCH="version-bump/${VERSION}"
-    git switch -c "$BRANCH"
+    if git rev-parse --verify "refs/heads/$BRANCH" >/dev/null 2>&1; then
+        echo "Branch '$BRANCH' already exists — resetting to origin/main..."
+        git switch "$BRANCH"
+        git reset --hard origin/main
+    elif git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+        echo "Branch '$BRANCH' exists on remote — checking out and resetting to origin/main..."
+        git switch -c "$BRANCH" --track "origin/$BRANCH"
+        git reset --hard origin/main
+    else
+        git switch -c "$BRANCH"
+    fi
     # Bump versions and lockfiles
     just bump-version "$VERSION"
     # Generate changelog
-    LAST_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo "")
+    LAST_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' 2>/dev/null || echo "")
+    REPO=$(git remote get-url origin | sed -E 's|.*github\.com[:/]||; s|\.git$||')
+    format_log() {
+        local range="$1"
+        git log "$range" --format="%h %H %s" --no-merges | while IFS=' ' read -r short full rest; do
+            local pr subject
+            pr=$(printf '%s' "$rest" | grep -oE '\(#[0-9]+\)$' | grep -oE '[0-9]+')
+            if [[ -n "$pr" ]]; then
+                subject=$(printf '%s' "$rest" | sed -E 's/ \(#[0-9]+\)$//')
+                printf -- '- %s ([#%s](https://github.com/%s/pull/%s)) ([`%s`](https://github.com/%s/commit/%s))\n' \
+                    "$subject" "$pr" "$REPO" "$pr" "$short" "$REPO" "$full"
+            else
+                printf -- '- %s ([`%s`](https://github.com/%s/commit/%s))\n' \
+                    "$rest" "$short" "$REPO" "$full"
+            fi
+        done
+    }
     TMPFILE=$(mktemp)
     {
         echo "# Changelog"
@@ -490,9 +524,9 @@ release *ARGS:
         echo "## v${VERSION}"
         echo ""
         if [[ -n "$LAST_TAG" ]]; then
-            git log "${LAST_TAG}..HEAD" --oneline --no-merges
+            format_log "${LAST_TAG}..HEAD"
         else
-            echo "Initial release"
+            echo "- Initial release"
         fi
         echo ""
         if [[ -f CHANGELOG.md ]]; then
@@ -510,64 +544,77 @@ release *ARGS:
       mobile/pubspec.lock \
       pnpm-lock.yaml \
       CHANGELOG.md
-    git commit -m "chore(release): release version ${VERSION}"
+    RELEASE_MSG="chore(release): release version ${VERSION}"
+    if [[ "$(git log -1 --format='%s' 2>/dev/null)" == "$RELEASE_MSG" ]]; then
+        git commit --amend --no-edit
+    else
+        git commit -m "$RELEASE_MSG"
+    fi
     # Push and open PR
-    git push -u origin "$BRANCH"
+    git push --force-with-lease -u origin "$BRANCH"
     # Build PR body
     PR_BODY="## Release v${VERSION}"$'\n\n'
     if [[ -n "$LAST_TAG" ]]; then
         PR_BODY+="### Changes since ${LAST_TAG}:"$'\n\n'
-        PR_BODY+="$(git log "${LAST_TAG}..HEAD~1" --oneline --no-merges)"$'\n\n'
+        PR_BODY+="$(format_log "${LAST_TAG}..HEAD~1")"$'\n\n'
     else
         PR_BODY+="Initial release."$'\n\n'
     fi
     PR_BODY+="**To release:** merge this PR. The tag and build will happen automatically."
-    PR_URL=$(gh pr create \
-        --title "chore(release): release version ${VERSION}" \
-        --body "$PR_BODY")
-    echo ""
-    echo "Release PR opened: ${PR_URL}"
+    EXISTING_PR=$(gh pr list --head "$BRANCH" --json url --jq '.[0].url' 2>/dev/null || true)
+    if [[ -n "$EXISTING_PR" ]]; then
+        gh pr edit "$BRANCH" \
+            --title "chore(release): release version ${VERSION}" \
+            --body "$PR_BODY"
+        PR_URL="$EXISTING_PR"
+        echo ""
+        echo "Updated existing release PR: ${PR_URL}"
+    else
+        PR_URL=$(gh pr create \
+            --title "chore(release): release version ${VERSION}" \
+            --body "$PR_BODY")
+        echo ""
+        echo "Release PR opened: ${PR_URL}"
+    fi
     echo "Merge it to trigger the release build."
 
 # ─── Agent Harness ────────────────────────────────────────────────────────────
 
-# Run a goose agent connected to a Sprout relay (foreground)
-goose relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$SPROUT_PRIVATE_KEY":
+# Run a goose agent connected to a Buzz relay (foreground)
+goose relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --release -p sprout-acp -p sprout-mcp -p sprout-cli
+    cargo build --release -p buzz-acp -p buzz-cli
     env_args=(
-        SPROUT_RELAY_URL="{{relay}}"
-        SPROUT_PRIVATE_KEY="{{key}}"
-        SPROUT_ACP_AGENT_COMMAND=goose
-        SPROUT_ACP_AGENT_ARGS=acp
-        SPROUT_ACP_MCP_COMMAND=./target/release/sprout-mcp-server
-        SPROUT_ACP_AGENTS="{{agents}}"
+        BUZZ_RELAY_URL="{{relay}}"
+        BUZZ_PRIVATE_KEY="{{key}}"
+        BUZZ_ACP_AGENT_COMMAND=goose
+        BUZZ_ACP_AGENT_ARGS=acp
+        BUZZ_ACP_AGENTS="{{agents}}"
         GOOSE_MODE=auto
     )
-    [[ -n "{{prompt}}" ]] && env_args+=(SPROUT_ACP_SYSTEM_PROMPT="{{prompt}}")
+    [[ -n "{{prompt}}" ]] && env_args+=(BUZZ_ACP_SYSTEM_PROMPT="{{prompt}}")
     if [[ "{{heartbeat}}" != "0" ]]; then
-        env_args+=(SPROUT_ACP_HEARTBEAT_INTERVAL={{heartbeat}})
+        env_args+=(BUZZ_ACP_HEARTBEAT_INTERVAL={{heartbeat}})
     fi
-    exec env "${env_args[@]}" ./target/release/sprout-acp
+    exec env "${env_args[@]}" ./target/release/buzz-acp
 
 # Run a goose agent in the background (screen session named 'goose-agent-N')
-goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$SPROUT_PRIVATE_KEY":
+goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --release -p sprout-acp -p sprout-mcp -p sprout-cli
+    cargo build --release -p buzz-acp -p buzz-cli
     env_args=(
-        SPROUT_RELAY_URL="{{relay}}"
-        SPROUT_PRIVATE_KEY="{{key}}"
-        SPROUT_ACP_AGENT_COMMAND=goose
-        SPROUT_ACP_AGENT_ARGS=acp
-        SPROUT_ACP_MCP_COMMAND=./target/release/sprout-mcp-server
-        SPROUT_ACP_AGENTS="{{agents}}"
+        BUZZ_RELAY_URL="{{relay}}"
+        BUZZ_PRIVATE_KEY="{{key}}"
+        BUZZ_ACP_AGENT_COMMAND=goose
+        BUZZ_ACP_AGENT_ARGS=acp
+        BUZZ_ACP_AGENTS="{{agents}}"
         GOOSE_MODE=auto
     )
-    [[ -n "{{prompt}}" ]] && env_args+=(SPROUT_ACP_SYSTEM_PROMPT="{{prompt}}")
+    [[ -n "{{prompt}}" ]] && env_args+=(BUZZ_ACP_SYSTEM_PROMPT="{{prompt}}")
     if [[ "{{heartbeat}}" != "0" ]]; then
-        env_args+=(SPROUT_ACP_HEARTBEAT_INTERVAL={{heartbeat}})
+        env_args+=(BUZZ_ACP_HEARTBEAT_INTERVAL={{heartbeat}})
     fi
-    screen -dmS goose-agent-{{agents}} bash -c "$(printf '%q ' env "${env_args[@]}") ./target/release/sprout-acp"
+    screen -dmS goose-agent-{{agents}} bash -c "$(printf '%q ' env "${env_args[@]}") ./target/release/buzz-acp"
     echo "Agent running in screen session 'goose-agent-{{agents}}'. Attach with: screen -r goose-agent-{{agents}}"

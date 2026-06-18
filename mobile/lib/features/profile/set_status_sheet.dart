@@ -3,6 +3,10 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
+import '../custom_emoji/custom_emoji.dart';
+import '../custom_emoji/custom_emoji_provider.dart';
+import '../custom_emoji/custom_emoji_render.dart';
+import '../channels/emoji_picker.dart';
 import 'user_status.dart';
 import 'user_status_provider.dart';
 
@@ -59,6 +63,7 @@ class _SetStatusSheet extends HookConsumerWidget {
     final emoji = useState(currentStatus?.emoji ?? '');
     final text = useState(currentStatus?.text ?? '');
     final isSaving = useState(false);
+    final customEmoji = ref.watch(customEmojiListProvider);
 
     useEffect(() {
       void listener() => text.value = textController.text;
@@ -125,10 +130,7 @@ class _SetStatusSheet extends HookConsumerWidget {
                   border: Border.all(color: context.colors.outlineVariant),
                   borderRadius: BorderRadius.circular(Radii.md),
                 ),
-                child: Text(
-                  emoji.value.isNotEmpty ? emoji.value : '\u{1F4AC}',
-                  style: const TextStyle(fontSize: 18),
-                ),
+                child: _StatusEmojiPreview(emoji: emoji.value),
               ),
               const SizedBox(width: Grid.xxs),
               Expanded(
@@ -168,6 +170,14 @@ class _SetStatusSheet extends HookConsumerWidget {
                         ? ''
                         : option.emoji;
                   },
+                ),
+              if (customEmoji.isNotEmpty)
+                _PickCustomEmojiButton(
+                  selected: emoji.value.startsWith(':'),
+                  onTap: () => showEmojiPicker(
+                    context: context,
+                    onSelect: (value) => emoji.value = value,
+                  ),
                 ),
             ],
           ),
@@ -214,6 +224,68 @@ class _SetStatusSheet extends HookConsumerWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _StatusEmojiPreview extends ConsumerWidget {
+  final String emoji;
+
+  const _StatusEmojiPreview({required this.emoji});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (emoji.isEmpty) {
+      return const Text('\u{1F4AC}', style: TextStyle(fontSize: 18));
+    }
+    final palette = ref.watch(customEmojiListProvider);
+    final shortcode = normalizeShortcode(emoji);
+    if (shortcode != null) {
+      for (final entry in palette) {
+        if (entry.shortcode == shortcode) {
+          return CustomEmojiImage(
+            shortcode: shortcode,
+            url: entry.url,
+            size: 22,
+          );
+        }
+      }
+    }
+    return Text(emoji, style: const TextStyle(fontSize: 18));
+  }
+}
+
+class _PickCustomEmojiButton extends StatelessWidget {
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _PickCustomEmojiButton({required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: 'Custom emoji',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(Radii.md),
+        onTap: onTap,
+        child: Container(
+          width: 36,
+          height: 36,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: selected
+                ? context.colors.secondaryContainer
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(Radii.md),
+            border: selected ? Border.all(color: context.colors.outline) : null,
+          ),
+          child: Icon(
+            Icons.add_reaction_outlined,
+            size: 18,
+            color: context.colors.onSurfaceVariant,
+          ),
+        ),
       ),
     );
   }

@@ -23,6 +23,46 @@ test("send a message and see it in timeline", async ({ page }) => {
   );
 });
 
+test("long autolink wraps without widening the timeline", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const longUrl = `https://blocked.teams.cloudflare.com/?${"dependencyconfusionnpm".repeat(18)}`;
+  const message = `Step "adapter" failed: npm error invalid json response body at <${longUrl}> reason: Unexpected token '<'`;
+
+  await page.getByTestId("message-input").fill(message);
+  await page.getByTestId("send-message").click();
+
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText('Step "adapter" failed');
+  await expect
+    .poll(() =>
+      timeline.evaluate((element) => element.scrollWidth - element.clientWidth),
+    )
+    .toBeLessThanOrEqual(1);
+
+  const row = page.getByTestId("message-row").last();
+  await row.hover();
+
+  const actionBar = page.locator('[data-testid^="message-action-bar-"]').last();
+  await expect(actionBar).toHaveCSS("opacity", "1");
+  await expect
+    .poll(async () => {
+      const [barBox, timelineBox] = await Promise.all([
+        actionBar.boundingBox(),
+        timeline.boundingBox(),
+      ]);
+      if (!barBox || !timelineBox) {
+        return Number.POSITIVE_INFINITY;
+      }
+      return barBox.x + barBox.width - (timelineBox.x + timelineBox.width);
+    })
+    .toBeLessThanOrEqual(0);
+});
+
 test("send multiple messages in sequence", async ({ page }) => {
   const ts = Date.now();
   const messages = [
@@ -377,9 +417,10 @@ test("shows your avatar on your own message when profile avatar is set", async (
 
   await page.goto("/");
   await openSettings(page, "profile");
+  await page.getByTestId("profile-avatar-edit").click();
   await page.getByTestId("profile-avatar-url").fill(avatarUrl);
-  await page.getByTestId("profile-save").click();
-  await page.getByTestId("settings-close").click();
+  await page.getByTestId("profile-avatar-done").click();
+  await page.getByTestId("settings-back-to-app").click();
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
@@ -403,6 +444,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   const siblingReply = `Sibling threaded reply ${timestamp}`;
   const nestedReply = `Nested threaded reply ${timestamp}`;
   const nestedReplyFromBob = `Nested reply from Bob ${timestamp}`;
+  const nestedReplyVisibleTopMaxPx = 300;
   const fillerReplies = Array.from(
     { length: 14 },
     (_, index) => `Thread filler reply ${index} ${timestamp}`,
@@ -472,6 +514,68 @@ test("opens a single-level thread panel with inline expansion", async ({
   await expect(
     rootSummaryRow.getByTestId("message-thread-summary-participant"),
   ).toHaveCount(1);
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-participant")
+        .first()
+        .evaluate((wrapper) => {
+          const avatar = wrapper.firstElementChild;
+          if (!(avatar instanceof HTMLElement)) return "missing";
+          const rect = avatar.getBoundingClientRect();
+          return `${Math.round(rect.width)}x${Math.round(rect.height)}`;
+        }),
+    )
+    .toBe("28x28");
+
+  await page.mouse.move(0, 0);
+  const rootSummaryWidthBeforeHover = await rootSummaryRow.evaluate((row) =>
+    Math.round(row.getBoundingClientRect().width),
+  );
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-last-reply")
+        .evaluate((label) =>
+          Number.parseFloat(getComputedStyle(label).opacity),
+        ),
+    )
+    .toBeGreaterThan(0.8);
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-hover-action")
+        .evaluate((label) =>
+          Number.parseFloat(getComputedStyle(label).opacity),
+        ),
+    )
+    .toBeLessThan(0.1);
+  await rootSummaryRow.hover();
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-last-reply")
+        .evaluate((label) =>
+          Number.parseFloat(getComputedStyle(label).opacity),
+        ),
+    )
+    .toBeLessThan(0.1);
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-hover-action")
+        .evaluate((label) =>
+          Number.parseFloat(getComputedStyle(label).opacity),
+        ),
+    )
+    .toBeGreaterThan(0.8);
+  await expect
+    .poll(() =>
+      rootSummaryRow.evaluate((row) =>
+        Math.round(row.getBoundingClientRect().width),
+      ),
+    )
+    .toBe(rootSummaryWidthBeforeHover);
 
   await threadPanel.getByTestId("message-thread-close").click();
   await expect(threadPanel).toBeHidden();
@@ -524,7 +628,7 @@ test("opens a single-level thread panel with inline expansion", async ({
         return rowRect.top - bodyRect.top;
       });
     })
-    .toBeLessThanOrEqual(240);
+    .toBeLessThanOrEqual(nestedReplyVisibleTopMaxPx);
 
   const firstReplyId = await firstReplyRow.getAttribute("data-message-id");
   if (!firstReplyId) {
@@ -533,7 +637,7 @@ test("opens a single-level thread panel with inline expansion", async ({
 
   await page.evaluate(
     ({ content, parentEventId, pubkey }) => {
-      window.__SPROUT_E2E_EMIT_MOCK_MESSAGE__?.({
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         content,
         parentEventId,
@@ -562,6 +666,17 @@ test("opens a single-level thread panel with inline expansion", async ({
   await expect(
     rootSummaryRow.getByTestId("message-thread-summary-participant"),
   ).toHaveCount(2);
+  await expect
+    .poll(() =>
+      rootSummaryRow
+        .getByTestId("message-thread-summary-participant")
+        .evaluateAll((participants) =>
+          participants
+            .map((participant) => getComputedStyle(participant).zIndex)
+            .join(","),
+        ),
+    )
+    .toBe("1,2");
 
   await expect
     .poll(async () => {
@@ -578,7 +693,7 @@ test("opens a single-level thread panel with inline expansion", async ({
         return rowRect.top - bodyRect.top;
       });
     })
-    .toBeLessThanOrEqual(240);
+    .toBeLessThanOrEqual(nestedReplyVisibleTopMaxPx);
 
   await firstReplySummaryRow.click();
   await expect(
@@ -599,7 +714,7 @@ test("thread panel width uses session storage and reset handle", async ({
 
   await page.addInitScript((width) => {
     window.sessionStorage.setItem(
-      "sprout.desktop.thread-panel-width",
+      "buzz.desktop.thread-panel-width",
       String(width),
     );
   }, customWidthPx);
@@ -611,7 +726,9 @@ test("thread panel width uses session storage and reset handle", async ({
   const timeline = page.getByTestId("message-timeline");
   const rootMessage = timeline.getByTestId("message-row").first();
   const threadPanel = page.getByTestId("message-thread-panel");
-  const resizeHandle = threadPanel.getByTestId("message-thread-resize-handle");
+  const resizeHandle = threadPanel.getByTestId(
+    "right-auxiliary-pane-resize-handle",
+  );
 
   await rootMessage.hover();
   await rootMessage.getByRole("button", { name: "Reply" }).click();
@@ -652,6 +769,76 @@ test("thread panel width uses session storage and reset handle", async ({
       });
     })
     .toBe(defaultWidthPx);
+});
+
+test("narrow thread view collapses channel header actions into a menu", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 980, height: 720 });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
+  await expect(page.getByTestId("channel-actions-menu-trigger")).toHaveCount(0);
+
+  const rootMessage = page.locator('[data-message-id="mock-general-alice"]');
+  const threadPanel = page.getByTestId("message-thread-panel");
+
+  await rootMessage.hover();
+  await page.getByTestId("reply-message-mock-general-alice").click();
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("message-thread-back")).toHaveCount(0);
+
+  const menuTrigger = page.getByTestId("channel-actions-menu-trigger");
+  await expect(menuTrigger).toBeVisible();
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
+  await expect(page.getByTestId("channel-members-trigger")).toBeHidden();
+  await expect(page.getByTestId("channel-management-trigger")).toBeHidden();
+
+  const menuBox = await menuTrigger.boundingBox();
+  const threadPanelBox = await threadPanel.boundingBox();
+  if (!menuBox || !threadPanelBox) {
+    throw new Error("Expected header action menu and thread panel bounds");
+  }
+  const menuGapPx = threadPanelBox.x - (menuBox.x + menuBox.width);
+  expect(menuGapPx).toBeGreaterThanOrEqual(18);
+  expect(menuGapPx).toBeLessThanOrEqual(22);
+
+  await menuTrigger.click();
+
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
+  await expect(page.getByTestId("channel-members-trigger")).toBeVisible();
+  await expect(page.getByTestId("channel-start-huddle-trigger")).toBeVisible();
+  await expect(page.getByTestId("channel-management-trigger")).toBeVisible();
+});
+
+test("single-panel thread view hides topbar search and channel actions", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 860, height: 720 });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("open-search")).toBeVisible();
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
+
+  const rootMessage = page.locator('[data-message-id="mock-general-alice"]');
+  const threadPanel = page.getByTestId("message-thread-panel");
+
+  await rootMessage.hover();
+  await page.getByTestId("reply-message-mock-general-alice").click();
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("message-thread-back")).toBeVisible();
+  await expect(page.getByTestId("open-search")).toHaveCount(0);
+  await expect(page.getByTestId("channel-actions-menu-trigger")).toHaveCount(0);
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
+
+  await threadPanel.getByTestId("message-thread-back").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("open-search")).toBeVisible();
+  await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
 });
 
 test("composer is focused after selecting a channel", async ({ page }) => {
@@ -858,4 +1045,51 @@ test("ArrowUp edits your last thread reply right after sending it", async ({
   await expect(editBanner).toBeVisible();
   await expect(editBanner).toContainText(reply);
   await expect(threadInput).toHaveText(reply);
+});
+
+test("action bar stays within the timeline when the thread panel is open", async ({
+  page,
+}) => {
+  // Narrow viewport + open thread panel => the timeline shrinks to a column.
+  // A long unbreakable token must not widen message rows past that column,
+  // or the right-anchored action bar is pushed offscreen (regression: #1081
+  // fixed the wrap but rows still expanded to content min-width).
+  await page.setViewportSize({ width: 1024, height: 800 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const timeline = page.getByTestId("message-timeline");
+  const input = page.getByTestId("message-input").first();
+  const send = page.getByTestId("send-message").first();
+
+  const longUrl = `https://example.com/${"a".repeat(180)}/path`;
+  await input.fill(longUrl);
+  await send.click();
+  await expect(timeline).toContainText("example.com");
+
+  const rootMessage = timeline.getByTestId("message-row").first();
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+
+  const wideRow = timeline.getByTestId("message-row").last();
+  await wideRow.scrollIntoViewIfNeeded();
+  await wideRow.hover();
+  const bar = wideRow.locator('[data-testid^="message-action-bar-"]');
+  await expect(bar).toBeVisible();
+
+  const timelineBox = await timeline.boundingBox();
+  const rowBox = await wideRow.boundingBox();
+  const barBox = await bar.boundingBox();
+  if (!timelineBox || !rowBox || !barBox) {
+    throw new Error("Expected timeline, row, and action bar to have geometry.");
+  }
+
+  expect(rowBox.x + rowBox.width).toBeLessThanOrEqual(
+    timelineBox.x + timelineBox.width + 1,
+  );
+  expect(barBox.x + barBox.width).toBeLessThanOrEqual(
+    timelineBox.x + timelineBox.width + 1,
+  );
 });

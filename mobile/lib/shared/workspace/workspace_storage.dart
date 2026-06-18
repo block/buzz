@@ -5,14 +5,14 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'workspace.dart';
 
 class WorkspaceStorage {
-  static const _keyWorkspaces = 'sprout_workspaces';
-  static const _keyActiveId = 'sprout_active_workspace_id';
+  static const _keyWorkspaces = 'buzz_workspaces';
+  static const _keyActiveId = 'buzz_active_workspace_id';
 
   // Legacy keys for migration.
-  static const _legacyRelayUrl = 'sprout_relay_url';
-  static const _legacyToken = 'sprout_token';
-  static const _legacyPubkey = 'sprout_pubkey';
-  static const _legacyNsec = 'sprout_nsec';
+  static const _legacyRelayUrl = 'buzz_relay_url';
+  static const _legacyToken = 'buzz_token';
+  static const _legacyPubkey = 'buzz_pubkey';
+  static const _legacyNsec = 'buzz_nsec';
 
   final FlutterSecureStorage _secure;
 

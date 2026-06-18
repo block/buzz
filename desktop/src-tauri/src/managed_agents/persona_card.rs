@@ -13,8 +13,9 @@ pub struct ParsedPersonaPreview {
     pub display_name: String,
     pub system_prompt: String,
     pub avatar_data_url: Option<String>,
-    pub provider: Option<String>,
+    pub runtime: Option<String>,
     pub model: Option<String>,
+    pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub name_pool: Vec<String>,
     pub source_file: String,
@@ -50,19 +51,19 @@ pub fn parse_png_persona(png_bytes: &[u8]) -> Result<ParsedPersonaPreview, Strin
         .map_err(|e| format!("Invalid PNG: {e}"))?;
     let info = reader.info();
 
-    let mut sprout_text: Option<&str> = None;
+    let mut buzz_text: Option<&str> = None;
     let mut chara_text: Option<&str> = None;
 
     for chunk in &info.uncompressed_latin1_text {
         match chunk.keyword.as_str() {
-            "sprout_persona" if sprout_text.is_none() => sprout_text = Some(&chunk.text),
+            "buzz_persona_pkg" if buzz_text.is_none() => buzz_text = Some(&chunk.text),
             "chara" | "ccv3" if chara_text.is_none() => chara_text = Some(&chunk.text),
             _ => {}
         }
     }
 
-    let fields = if let Some(text) = sprout_text {
-        parse_sprout_payload(text)?
+    let fields = if let Some(text) = buzz_text {
+        parse_buzz_payload(text)?
     } else if let Some(text) = chara_text {
         parse_chara_payload(text)?
     } else {
@@ -80,8 +81,9 @@ pub fn parse_png_persona(png_bytes: &[u8]) -> Result<ParsedPersonaPreview, Strin
         display_name: fields.display_name,
         system_prompt: fields.system_prompt,
         avatar_data_url,
-        provider: fields.provider,
+        runtime: fields.runtime,
         model: fields.model,
+        provider: fields.provider,
         name_pool: fields.name_pool,
         source_file: String::new(),
     })
@@ -94,19 +96,20 @@ fn decode_b64_json(b64: &str) -> Result<Value, String> {
     serde_json::from_slice(&bytes).map_err(|e| format!("Invalid JSON: {e}"))
 }
 
-/// Extracted fields from a Sprout persona JSON payload.
-struct SproutPersonaFields {
+/// Extracted fields from a Buzz persona JSON payload.
+struct BuzzPersonaFields {
     display_name: String,
     system_prompt: String,
     avatar_url: Option<String>,
-    provider: Option<String>,
+    runtime: Option<String>,
     model: Option<String>,
+    provider: Option<String>,
     name_pool: Vec<String>,
 }
 
-/// Extract and validate fields from a Sprout persona JSON value
+/// Extract and validate fields from a Buzz persona JSON value
 /// (shared by both the PNG tEXt-chunk path and the standalone JSON path).
-fn extract_sprout_fields(v: &Value) -> Result<SproutPersonaFields, String> {
+fn extract_buzz_fields(v: &Value) -> Result<BuzzPersonaFields, String> {
     let version = v.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
     if version != 1 {
         return Err(format!("Unsupported persona version: {version}"));
@@ -135,14 +138,25 @@ fn extract_sprout_fields(v: &Value) -> Result<SproutPersonaFields, String> {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
-    let provider = v
-        .get("provider")
+    // Read "runtime" with backward-compat fallback to legacy "provider" key.
+    let runtime = v
+        .get("runtime")
+        .or_else(|| v.get("provider"))
         .and_then(|v| v.as_str())
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
     let model = v
         .get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    // "llmProvider" is the LLM inference provider (e.g. "databricks", "anthropic").
+    // Distinct from "runtime" (the ACP harness) and from the legacy "provider" key
+    // (which mapped to runtime for backward compat).
+    let provider = v
+        .get("llmProvider")
         .and_then(|v| v.as_str())
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
@@ -158,22 +172,23 @@ fn extract_sprout_fields(v: &Value) -> Result<SproutPersonaFields, String> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(SproutPersonaFields {
+    Ok(BuzzPersonaFields {
         display_name: name,
         system_prompt: prompt,
         avatar_url,
-        provider,
+        runtime,
         model,
+        provider,
         name_pool,
     })
 }
 
-fn parse_sprout_payload(b64: &str) -> Result<SproutPersonaFields, String> {
+fn parse_buzz_payload(b64: &str) -> Result<BuzzPersonaFields, String> {
     let v = decode_b64_json(b64)?;
-    extract_sprout_fields(&v)
+    extract_buzz_fields(&v)
 }
 
-fn parse_chara_payload(b64: &str) -> Result<SproutPersonaFields, String> {
+fn parse_chara_payload(b64: &str) -> Result<BuzzPersonaFields, String> {
     let v = decode_b64_json(b64)?;
     let data = v.get("data").ok_or("Missing 'data' in chara payload")?;
     let name = data
@@ -202,12 +217,13 @@ fn parse_chara_payload(b64: &str) -> Result<SproutPersonaFields, String> {
     if prompt.is_empty() {
         return Err("Chara card has no system_prompt or description".to_string());
     }
-    Ok(SproutPersonaFields {
+    Ok(BuzzPersonaFields {
         display_name: name,
         system_prompt: prompt,
         avatar_url: None,
-        provider: None,
+        runtime: None,
         model: None,
+        provider: None,
         name_pool: Vec::new(),
     })
 }
@@ -218,14 +234,15 @@ fn parse_chara_payload(b64: &str) -> Result<SproutPersonaFields, String> {
 
 pub fn parse_json_persona(json_bytes: &[u8]) -> Result<ParsedPersonaPreview, String> {
     let v: Value = serde_json::from_slice(json_bytes).map_err(|e| format!("Invalid JSON: {e}"))?;
-    let fields = extract_sprout_fields(&v)?;
+    let fields = extract_buzz_fields(&v)?;
 
     Ok(ParsedPersonaPreview {
         display_name: fields.display_name,
         system_prompt: fields.system_prompt,
         avatar_data_url: fields.avatar_url,
-        provider: fields.provider,
+        runtime: fields.runtime,
         model: fields.model,
+        provider: fields.provider,
         name_pool: fields.name_pool,
         source_file: String::new(),
     })
@@ -235,8 +252,9 @@ pub fn encode_persona_json(
     display_name: &str,
     system_prompt: &str,
     avatar_url: Option<&str>,
-    provider: Option<&str>,
+    runtime: Option<&str>,
     model: Option<&str>,
+    provider: Option<&str>,
     name_pool: &[String],
 ) -> Result<Vec<u8>, String> {
     let mut map = serde_json::Map::new();
@@ -246,11 +264,14 @@ pub fn encode_persona_json(
     if let Some(url) = avatar_url {
         map.insert("avatarUrl".to_string(), serde_json::json!(url));
     }
-    if let Some(p) = provider {
-        map.insert("provider".to_string(), serde_json::json!(p));
+    if let Some(r) = runtime {
+        map.insert("runtime".to_string(), serde_json::json!(r));
     }
     if let Some(m) = model {
         map.insert("model".to_string(), serde_json::json!(m));
+    }
+    if let Some(p) = provider {
+        map.insert("llmProvider".to_string(), serde_json::json!(p));
     }
     if !name_pool.is_empty() {
         map.insert("namePool".to_string(), serde_json::json!(name_pool));
@@ -267,24 +288,25 @@ pub fn encode_persona_json(
 pub fn parse_md_persona(md_bytes: &[u8]) -> Result<ParsedPersonaPreview, String> {
     let content =
         std::str::from_utf8(md_bytes).map_err(|e| format!("Invalid UTF-8 in .persona.md: {e}"))?;
-    let config = sprout_persona::persona::parse_persona_md(content)
+    let config = buzz_persona_pkg::persona::parse_persona_md(content)
         .map_err(|e| format!("Failed to parse .persona.md: {e}"))?;
 
     // Split "provider:model" into separate fields for the preview.
-    let (provider, model) = match config.model.as_deref() {
+    let model = match config.model.as_deref() {
         Some(s) if !s.is_empty() => {
-            let (prov, id) = sprout_persona::persona::split_model(s);
-            (prov.map(str::to_owned), Some(id.to_owned()))
+            let (_prov, id) = buzz_persona_pkg::persona::split_model(s);
+            Some(id.to_owned())
         }
-        _ => (None, None),
+        _ => None,
     };
 
     Ok(ParsedPersonaPreview {
         display_name: config.display_name,
         system_prompt: config.prompt,
         avatar_data_url: None, // .persona.md avatars are paths, not data URIs
-        provider,
+        runtime: config.runtime,
         model,
+        provider: None, // .persona.md format does not carry llmProvider
         name_pool: Vec::new(),
         source_file: String::new(),
     })
@@ -373,7 +395,7 @@ pub fn parse_zip_pack(zip_bytes: &[u8]) -> Result<ParsePersonaFilesResult, Strin
     })?;
 
     // Resolve the pack from the extracted directory.
-    let resolved = sprout_persona::resolve::resolve_pack(&pack_root)
+    let resolved = buzz_persona_pkg::resolve::resolve_pack(&pack_root)
         .map_err(|e| format!("Pack validation failed: {e}"))?;
 
     let personas: Vec<ParsedPersonaPreview> = resolved
@@ -383,8 +405,9 @@ pub fn parse_zip_pack(zip_bytes: &[u8]) -> Result<ParsePersonaFilesResult, Strin
             display_name: p.display_name.clone(),
             system_prompt: p.system_prompt.clone(),
             avatar_data_url: None,
-            provider: p.provider.clone(),
+            runtime: p.runtime.clone(),
             model: p.model.clone(),
+            provider: None, // persona packs do not carry llmProvider
             name_pool: Vec::new(),
             source_file: format!("{} ({})", p.name, resolved.name),
         })
@@ -549,7 +572,7 @@ mod tests {
         buf
     }
 
-    /// Helper: build a PNG with a sprout_persona tEXt chunk for the given name/prompt.
+    /// Helper: build a PNG with a buzz_persona_pkg tEXt chunk for the given name/prompt.
     fn make_test_persona_png(name: &str, prompt: &str) -> Vec<u8> {
         let payload = serde_json::json!({
             "version": 1,
@@ -557,7 +580,7 @@ mod tests {
             "systemPrompt": prompt,
         });
         let b64 = STANDARD.encode(payload.to_string().as_bytes());
-        make_png_with_text("sprout_persona", &b64)
+        make_png_with_text("buzz_persona_pkg", &b64)
     }
 
     /// Helper: build a plain PNG with no metadata.
@@ -609,14 +632,14 @@ mod tests {
     fn parse_png_unknown_version() {
         let payload = serde_json::json!({"version": 99, "displayName": "X", "systemPrompt": "Y"});
         let b64 = STANDARD.encode(payload.to_string().as_bytes());
-        let png = make_png_with_text("sprout_persona", &b64);
+        let png = make_png_with_text("buzz_persona_pkg", &b64);
         let err = parse_png_persona(&png).unwrap_err();
         assert!(err.contains("Unsupported persona version"));
     }
 
     #[test]
     fn parse_png_malformed_base64() {
-        let png = make_png_with_text("sprout_persona", "!!!not-base64!!!");
+        let png = make_png_with_text("buzz_persona_pkg", "!!!not-base64!!!");
         let err = parse_png_persona(&png).unwrap_err();
         assert!(err.contains("Invalid base64"));
     }
@@ -624,7 +647,7 @@ mod tests {
     #[test]
     fn parse_png_malformed_json() {
         let b64 = STANDARD.encode(b"not json at all");
-        let png = make_png_with_text("sprout_persona", &b64);
+        let png = make_png_with_text("buzz_persona_pkg", &b64);
         let err = parse_png_persona(&png).unwrap_err();
         assert!(err.contains("Invalid JSON"));
     }
@@ -633,7 +656,7 @@ mod tests {
     fn parse_png_empty_fields() {
         let payload = serde_json::json!({"version": 1, "displayName": "", "systemPrompt": "Y"});
         let b64 = STANDARD.encode(payload.to_string().as_bytes());
-        let png = make_png_with_text("sprout_persona", &b64);
+        let png = make_png_with_text("buzz_persona_pkg", &b64);
         let err = parse_png_persona(&png).unwrap_err();
         assert!(err.contains("displayName is empty"));
     }
@@ -657,14 +680,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_png_chara_ignored_when_sprout_present() {
-        // Build a PNG with both sprout_persona and chara chunks.
-        let sprout = serde_json::json!({"version": 1, "displayName": "Sprout Name", "systemPrompt": "Sprout prompt"});
+    fn parse_png_chara_ignored_when_buzz_present() {
+        // Build a PNG with both buzz_persona_pkg and chara chunks.
+        let buzz = serde_json::json!({"version": 1, "displayName": "Buzz Name", "systemPrompt": "Buzz prompt"});
         let chara = serde_json::json!({
             "spec": "chara_card_v2", "spec_version": "2.0",
             "data": {"name": "Chara Name", "system_prompt": "Chara prompt", "description": ""}
         });
-        let sprout_b64 = STANDARD.encode(sprout.to_string().as_bytes());
+        let buzz_b64 = STANDARD.encode(buzz.to_string().as_bytes());
         let chara_b64 = STANDARD.encode(chara.to_string().as_bytes());
 
         let mut buf = Vec::new();
@@ -672,7 +695,7 @@ mod tests {
             let mut enc = Encoder::new(Cursor::new(&mut buf), 1, 1);
             enc.set_color(ColorType::Rgba);
             enc.set_depth(BitDepth::Eight);
-            enc.add_text_chunk("sprout_persona".to_string(), sprout_b64)
+            enc.add_text_chunk("buzz_persona_pkg".to_string(), buzz_b64)
                 .unwrap();
             enc.add_text_chunk("chara".to_string(), chara_b64).unwrap();
             let mut w = enc.write_header().unwrap();
@@ -680,8 +703,8 @@ mod tests {
         }
 
         let result = parse_png_persona(&buf).unwrap();
-        assert_eq!(result.display_name, "Sprout Name");
-        assert_eq!(result.system_prompt, "Sprout prompt");
+        assert_eq!(result.display_name, "Buzz Name");
+        assert_eq!(result.system_prompt, "Buzz prompt");
     }
 
     #[test]
@@ -744,7 +767,7 @@ mod tests {
 
     #[test]
     fn parse_png_duplicate_chunks() {
-        // Two sprout_persona chunks — should use the first and ignore the second.
+        // Two buzz_persona_pkg chunks — should use the first and ignore the second.
         let payload1 =
             serde_json::json!({"version": 1, "displayName": "First", "systemPrompt": "Prompt 1"});
         let payload2 =
@@ -757,9 +780,9 @@ mod tests {
             let mut enc = Encoder::new(Cursor::new(&mut buf), 1, 1);
             enc.set_color(ColorType::Rgba);
             enc.set_depth(BitDepth::Eight);
-            enc.add_text_chunk("sprout_persona".to_string(), b64_1)
+            enc.add_text_chunk("buzz_persona_pkg".to_string(), b64_1)
                 .unwrap();
-            enc.add_text_chunk("sprout_persona".to_string(), b64_2)
+            enc.add_text_chunk("buzz_persona_pkg".to_string(), b64_2)
                 .unwrap();
             let mut w = enc.write_header().unwrap();
             w.write_image_data(&[0, 0, 0, 255]).unwrap();
@@ -789,14 +812,13 @@ mod tests {
         assert!(err.contains("exceeds 100MB"));
     }
 
-    // --- JSON persona tests ---
-
     #[test]
     fn parse_json_round_trip() {
         let bytes = encode_persona_json(
             "Ada Lovelace",
             "You are Ada.",
             Some("https://example.com/ada.png"),
+            None,
             None,
             None,
             &[],
@@ -814,7 +836,8 @@ mod tests {
 
     #[test]
     fn parse_json_round_trip_no_avatar() {
-        let bytes = encode_persona_json("Bob", "You are Bob.", None, None, None, &[]).unwrap();
+        let bytes =
+            encode_persona_json("Bob", "You are Bob.", None, None, None, None, &[]).unwrap();
         let result = parse_json_persona(&bytes).unwrap();
         assert_eq!(result.display_name, "Bob");
         assert_eq!(result.system_prompt, "You are Bob.");
@@ -824,21 +847,30 @@ mod tests {
     #[test]
     fn parse_json_round_trip_data_uri_avatar() {
         let data_uri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
-        let bytes = encode_persona_json("Carol", "You are Carol.", Some(data_uri), None, None, &[])
-            .unwrap();
+        let bytes = encode_persona_json(
+            "Carol",
+            "You are Carol.",
+            Some(data_uri),
+            None,
+            None,
+            None,
+            &[],
+        )
+        .unwrap();
         let result = parse_json_persona(&bytes).unwrap();
         assert_eq!(result.display_name, "Carol");
         assert_eq!(result.avatar_data_url.as_deref(), Some(data_uri));
     }
 
     #[test]
-    fn parse_json_round_trip_with_provider_and_model() {
+    fn parse_json_round_trip_with_runtime_and_model() {
         let bytes = encode_persona_json(
             "Agent Smith",
             "You are an agent.",
             None,
             Some("goose"),
             Some("claude-sonnet-4"),
+            None,
             &[],
         )
         .unwrap();
@@ -846,22 +878,23 @@ mod tests {
         assert_eq!(result.display_name, "Agent Smith");
         assert_eq!(result.system_prompt, "You are an agent.");
         assert!(result.avatar_data_url.is_none());
-        assert_eq!(result.provider.as_deref(), Some("goose"));
+        assert_eq!(result.runtime.as_deref(), Some("goose"));
         assert_eq!(result.model.as_deref(), Some("claude-sonnet-4"));
     }
 
     #[test]
-    fn parse_json_round_trip_without_provider_and_model() {
-        let bytes = encode_persona_json("Bob", "You are Bob.", None, None, None, &[]).unwrap();
+    fn parse_json_round_trip_without_runtime_and_model() {
+        let bytes =
+            encode_persona_json("Bob", "You are Bob.", None, None, None, None, &[]).unwrap();
         let result = parse_json_persona(&bytes).unwrap();
         assert_eq!(result.display_name, "Bob");
-        assert!(result.provider.is_none());
+        assert!(result.runtime.is_none());
         assert!(result.model.is_none());
     }
 
     #[test]
-    fn parse_json_backward_compat_no_provider_model_fields() {
-        // Simulate a legacy persona JSON without provider/model fields
+    fn parse_json_backward_compat_no_runtime_model_fields() {
+        // Simulate a legacy persona JSON without runtime/model fields
         let json = serde_json::json!({
             "version": 1,
             "displayName": "Legacy Persona",
@@ -871,8 +904,22 @@ mod tests {
         let result = parse_json_persona(&bytes).unwrap();
         assert_eq!(result.display_name, "Legacy Persona");
         assert_eq!(result.system_prompt, "Old school prompt");
-        assert!(result.provider.is_none());
+        assert!(result.runtime.is_none());
         assert!(result.model.is_none());
+    }
+
+    #[test]
+    fn parse_json_backward_compat_legacy_provider_key() {
+        // A JSON card written with the old "provider" key should still parse.
+        let json = serde_json::json!({
+            "version": 1,
+            "displayName": "Legacy Agent",
+            "systemPrompt": "Old prompt",
+            "provider": "goose"
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+        let result = parse_json_persona(&bytes).unwrap();
+        assert_eq!(result.runtime.as_deref(), Some("goose"));
     }
 
     #[test]
@@ -914,8 +961,8 @@ mod tests {
 
     #[test]
     fn parse_zip_with_json() {
-        let j1 = encode_persona_json("Alice", "Prompt A", None, None, None, &[]).unwrap();
-        let j2 = encode_persona_json("Bob", "Prompt B", None, None, None, &[]).unwrap();
+        let j1 = encode_persona_json("Alice", "Prompt A", None, None, None, None, &[]).unwrap();
+        let j2 = encode_persona_json("Bob", "Prompt B", None, None, None, None, &[]).unwrap();
         let zip = make_test_zip(&[("alice.persona.json", &j1), ("bob.persona.json", &j2)]);
         let result = parse_zip_personas(&zip).unwrap();
         assert_eq!(result.personas.len(), 2);
@@ -928,7 +975,7 @@ mod tests {
     fn parse_zip_mixed_png_and_json() {
         let png = make_test_persona_png("PngPersona", "PNG prompt");
         let json =
-            encode_persona_json("JsonPersona", "JSON prompt", None, None, None, &[]).unwrap();
+            encode_persona_json("JsonPersona", "JSON prompt", None, None, None, None, &[]).unwrap();
         let zip = make_test_zip(&[
             ("persona.png", &png),
             ("persona.json", &json),
@@ -945,8 +992,10 @@ mod tests {
 
     #[test]
     fn parse_zip_ignores_macos_resource_forks() {
-        let j1 = encode_persona_json("Frank", "You are Frank.", None, None, None, &[]).unwrap();
-        let j2 = encode_persona_json("Jackie", "You are Jackie.", None, None, None, &[]).unwrap();
+        let j1 =
+            encode_persona_json("Frank", "You are Frank.", None, None, None, None, &[]).unwrap();
+        let j2 =
+            encode_persona_json("Jackie", "You are Jackie.", None, None, None, None, &[]).unwrap();
         let zip = make_test_zip(&[
             ("frank-costanza.persona.json", &j1),
             ("jackie-chiles.persona.json", &j2),

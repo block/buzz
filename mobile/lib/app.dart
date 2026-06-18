@@ -59,7 +59,7 @@ class App extends HookConsumerWidget {
     });
 
     return MaterialApp(
-      title: 'Sprout',
+      title: 'Buzz',
       theme: AppTheme.light(colorScheme: lightScheme),
       darkTheme: AppTheme.dark(colorScheme: darkScheme),
       themeMode: effectiveMode,

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Sprout-agent supports lifecycle hooks — MCP tools that the agent calls at
+Buzz-agent supports lifecycle hooks — MCP tools that the agent calls at
 defined points in its execution loop. Any MCP server can participate by
 exposing tools with the `_` prefix. Hooks are invisible to the LLM, advisory
 to the agent, and operator-configured.
@@ -60,8 +60,8 @@ These constraints ensure a buggy or malicious hook cannot trap the agent.
 | Env Var | Default | Description |
 |---|---|---|
 | `MCP_HOOK_SERVERS` | (unset = no hooks) | Allowlist: `*` for all servers, or comma-separated names |
-| `SPROUT_AGENT_HOOK_TIMEOUT_MS` | 2500 | Per-hook call timeout in milliseconds |
-| `SPROUT_AGENT_STOP_MAX_REJECTIONS` | 3 | Session-wide `_Stop` budget (0 = disable) |
+| `BUZZ_AGENT_HOOK_TIMEOUT_MS` | 2500 | Per-hook call timeout in milliseconds |
+| `BUZZ_AGENT_STOP_MAX_REJECTIONS` | 3 | Session-wide `_Stop` budget (0 = disable) |
 
 Hooks are **off by default**. The operator must explicitly opt in via
 `MCP_HOOK_SERVERS`.

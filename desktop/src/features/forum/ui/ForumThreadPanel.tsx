@@ -8,6 +8,7 @@ import {
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import type { ForumThreadResponse, ThreadReply } from "@/shared/api/types";
+import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
@@ -74,7 +75,10 @@ function ReplyRow({
   const replyMentionNames = resolveMentionNames(reply.tags, profiles);
 
   return (
-    <div className="group px-4 py-3" data-forum-event-id={reply.eventId}>
+    <div
+      className="group content-visibility-auto px-4 py-3"
+      data-forum-event-id={reply.eventId}
+    >
       <div className="flex items-center gap-2">
         <UserProfilePopover pubkey={reply.pubkey}>
           <button
@@ -106,7 +110,7 @@ function ReplyRow({
       <div className="mt-1.5 pl-8">
         <Markdown
           channelNames={channelNames}
-          compact
+          className="text-sm"
           content={reply.content}
           imetaByUrl={parseImetaTags(reply.tags)}
           mentionNames={replyMentionNames}
@@ -158,7 +162,7 @@ export function ForumThreadPanel({
 
   if (isLoading || !thread) {
     return (
-      <div className="flex h-full flex-col">
+      <div className={cn("flex h-full flex-col", channelChrome.contentPadding)}>
         <div className="border-b border-border/60 px-4 py-3">
           <Button
             className="gap-1.5 text-muted-foreground"
@@ -191,7 +195,7 @@ export function ForumThreadPanel({
     profiles?.[post.pubkey.toLowerCase()]?.avatarUrl ?? null;
 
   return (
-    <div className="flex h-full flex-col">
+    <div className={cn("flex h-full flex-col", channelChrome.contentPadding)}>
       <div className="border-b border-border/60 px-4 py-3">
         <Button
           className="gap-1.5 text-muted-foreground"
@@ -246,6 +250,7 @@ export function ForumThreadPanel({
           <div className="mt-3">
             <Markdown
               channelNames={channelNames}
+              className="text-sm"
               content={post.content}
               imetaByUrl={parseImetaTags(post.tags)}
               mentionNames={postMentionNames}

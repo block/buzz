@@ -14,6 +14,7 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import { getMentionTagPubkey } from "@/shared/lib/resolveMentionNames";
 import {
   KIND_JOB_ACCEPTED,
   KIND_JOB_CANCEL,
@@ -22,6 +23,7 @@ import {
   KIND_JOB_REQUEST,
   KIND_JOB_RESULT,
   KIND_DELETION,
+  KIND_NIP29_DELETE_EVENT,
   KIND_REACTION,
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_V2,
@@ -150,7 +152,11 @@ export function formatTimelineMessages(
   }
   const deletedEventIds = new Set<string>();
   for (const event of events) {
-    if (event.kind !== KIND_DELETION) {
+    // Both kind:5 and kind:9005 are deletion markers; mirror the relay.
+    if (
+      event.kind !== KIND_DELETION &&
+      event.kind !== KIND_NIP29_DELETE_EVENT
+    ) {
       continue;
     }
 
@@ -262,9 +268,11 @@ export function formatTimelineMessages(
 
     const profile = profiles?.[actorPubkey];
     const displayName =
-      profile?.displayName?.trim() ||
-      profile?.nip05Handle?.trim() ||
-      `${actorPubkey.slice(0, 8)}…`;
+      currentPubkeyLower && actorPubkey === currentPubkeyLower
+        ? "You"
+        : profile?.displayName?.trim() ||
+          profile?.nip05Handle?.trim() ||
+          `${actorPubkey.slice(0, 8)}…`;
     existing.users.push({
       pubkey: actorPubkey,
       displayName,
@@ -345,6 +353,7 @@ export function formatTimelineMessages(
     const role = roleByPubkey.get(authorPubkey.toLowerCase());
     return {
       id: event.id,
+      renderKey: event.localKey ?? event.id,
       createdAt: event.created_at,
       pubkey: authorPubkey,
       author,
@@ -426,6 +435,23 @@ export function collectMessageAuthorPubkeys(events: RelayEvent[]) {
           requireChannelTagForPTags: true,
         }).toLowerCase(),
       );
+    }
+  }
+
+  return [...pubkeys];
+}
+
+export function collectMessageMentionPubkeys(
+  events: Array<{ tags?: string[][] }>,
+) {
+  const pubkeys = new Set<string>();
+
+  for (const event of events) {
+    for (const tag of event.tags ?? []) {
+      const pubkey = getMentionTagPubkey(tag);
+      if (pubkey) {
+        pubkeys.add(pubkey);
+      }
     }
   }
 

@@ -1,4 +1,5 @@
 import * as React from "react";
+import { flushSync } from "react-dom";
 
 import { uploadMediaBytes } from "@/shared/api/tauri";
 
@@ -19,6 +20,7 @@ type UseAvatarUploadReturn = {
   errorMessage: string | null;
   clearError: () => void;
   openPicker: () => void;
+  uploadFile: (file: File) => Promise<void>;
   handleFileChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
 };
 
@@ -37,22 +39,17 @@ export function useAvatarUpload({
     inputRef.current?.click();
   }, []);
 
-  const handleFileChange = React.useCallback(
-    async (event: React.ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
-      event.target.value = "";
-
-      if (!file) {
-        return;
-      }
-
+  const uploadFile = React.useCallback(
+    async (file: File) => {
       if (!AVATAR_IMAGE_TYPES.includes(file.type)) {
         setErrorMessage("Choose a PNG, JPG, GIF, or WebP image.");
         return;
       }
 
-      setIsUploading(true);
-      setErrorMessage(null);
+      flushSync(() => {
+        setIsUploading(true);
+        setErrorMessage(null);
+      });
 
       try {
         const buffer = await file.arrayBuffer();
@@ -79,12 +76,27 @@ export function useAvatarUpload({
     [onUploadSuccess],
   );
 
+  const handleFileChange = React.useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+
+      if (!file) {
+        return;
+      }
+
+      void uploadFile(file);
+    },
+    [uploadFile],
+  );
+
   return {
     inputRef,
     isUploading,
     errorMessage,
     clearError,
     openPicker,
+    uploadFile,
     handleFileChange,
   };
 }

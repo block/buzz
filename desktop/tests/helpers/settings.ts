@@ -21,14 +21,10 @@ export async function openProfileMenu(page: Page) {
 
 export async function openSettings(page: Page, section?: SettingsSection) {
   await openProfileMenu(page);
-  if (section === "profile") {
-    await page.getByTestId("profile-popover-profile").click();
-  } else {
-    await page.getByTestId("profile-popover-settings").click();
-  }
+  await page.getByTestId("profile-popover-settings").click();
   await expect(page.getByTestId("settings-view")).toBeVisible();
 
-  if (section && section !== "profile") {
+  if (section) {
     await page.getByTestId(`settings-nav-${section}`).click();
   }
 }

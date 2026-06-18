@@ -8,7 +8,7 @@ const MIN_ZOOM_FACTOR = 0.75;
 const MAX_ZOOM_FACTOR = 1.5;
 const ZOOM_STEP = 0.1;
 const BASE_FONT_SIZE_PX = 16;
-const TEXT_SCALE_STORAGE_KEY = "sprout:text-scale";
+const TEXT_SCALE_STORAGE_KEY = "buzz:text-scale";
 
 type ZoomAction = "increase" | "decrease" | "reset";
 

@@ -33,7 +33,7 @@ export function notificationBody(item: FeedItem) {
   const fallback =
     item.kind === 46010
       ? "A workflow is waiting for your approval."
-      : "Something in Sprout needs your attention.";
+      : "Something in Buzz needs your attention.";
   const body = content.length > 0 ? content : fallback;
 
   if (body.length <= FEED_NOTIFICATION_BODY_MAX_LENGTH) {

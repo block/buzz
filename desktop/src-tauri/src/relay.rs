@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-// nostr 0.36 alias — required for cross-version bridging with sprout-sdk.
+// nostr 0.36 alias — required for cross-version bridging with buzz-sdk.
 
 use crate::app_state::AppState;
 
@@ -19,8 +19,8 @@ fn configured_env_var(name: &str) -> Option<String> {
 }
 
 pub fn relay_ws_url() -> String {
-    configured_env_var("SPROUT_RELAY_URL")
-        .or_else(|| option_env!("SPROUT_DESKTOP_BUILD_RELAY_URL").map(str::to_string))
+    configured_env_var("BUZZ_RELAY_URL")
+        .or_else(|| option_env!("BUZZ_DESKTOP_BUILD_RELAY_URL").map(str::to_string))
         .unwrap_or_else(|| DEFAULT_RELAY_WS_URL.to_string())
 }
 
@@ -53,22 +53,36 @@ pub fn relay_http_base_url(relay_url: &str) -> String {
     let trimmed = relay_url.trim().trim_end_matches('/');
 
     if let Some(suffix) = trimmed.strip_prefix("wss://") {
-        return format!("https://{suffix}");
+        return format!("https://{}", normalize_loopback_host(suffix));
     }
 
     if let Some(suffix) = trimmed.strip_prefix("ws://") {
-        return format!("http://{suffix}");
+        return format!("http://{}", normalize_loopback_host(suffix));
     }
 
     trimmed.to_string()
 }
 
+/// Rewrite an exact `localhost` host to `127.0.0.1`, preserving port and path.
+///
+/// macOS resolves `localhost` to both `::1` and `127.0.0.1`; reqwest's
+/// happy-eyeballs may try `::1` first, which fails when the relay binds IPv4
+/// only (`0.0.0.0`). Forcing the IPv4 literal makes every HTTP write connect on
+/// the first attempt. Exact-match only — `localhost.evil.com` is untouched.
+fn normalize_loopback_host(authority: &str) -> String {
+    let host_len = authority.find([':', '/']).unwrap_or(authority.len());
+    if &authority[..host_len] == "localhost" {
+        return format!("127.0.0.1{}", &authority[host_len..]);
+    }
+    authority.to_string()
+}
+
 pub fn relay_api_base_url() -> String {
-    if let Some(base) = configured_env_var("SPROUT_RELAY_HTTP") {
+    if let Some(base) = configured_env_var("BUZZ_RELAY_HTTP") {
         return base.trim_end_matches('/').to_string();
     }
 
-    if let Some(base) = option_env!("SPROUT_DESKTOP_BUILD_RELAY_HTTP") {
+    if let Some(base) = option_env!("BUZZ_DESKTOP_BUILD_RELAY_HTTP") {
         return base.trim().trim_end_matches('/').to_string();
     }
 
@@ -123,8 +137,104 @@ pub fn build_nip98_auth_header_for_keys(
 
 // ── Error handling ──────────────────────────────────────────────────────────
 
+/// Classify a `send()` failure into a stable, URL-free error string.
+///
+/// The returned string always starts with `"relay unreachable:"` so the
+/// frontend connectivity classifier can detect it with a simple prefix check.
+pub(crate) fn classify_request_error(e: &reqwest::Error) -> String {
+    let display = e.to_string().to_lowercase();
+    if e.is_timeout() {
+        "relay unreachable: request timed out".to_string()
+    } else if e.is_connect() {
+        "relay unreachable: could not connect to relay".to_string()
+    } else if display.contains("dns") || display.contains("failed to lookup") {
+        "relay unreachable: relay host not found".to_string()
+    } else {
+        "relay unreachable: network error".to_string()
+    }
+}
+
+/// Detect responses that were intercepted by a captive portal or auth proxy.
+///
+/// Returns `Some(msg)` when the response clearly did not come from the relay:
+/// - Cloudflare Access redirect (final URL on `*.cloudflareaccess.com`)
+/// - Any other HTML response (proxy login page, captive portal, etc.)
+///
+/// Pure function: takes the already-extracted host and content-type strings so
+/// it can be unit-tested without constructing a real `reqwest::Response`.
+fn classify_intercepted_response(final_host: &str, content_type: &str) -> Option<String> {
+    let host = final_host.to_lowercase();
+    let ct = content_type.to_lowercase();
+
+    // Cloudflare Access intercepts requests and redirects to its own domain.
+    // Label-boundary check prevents `notcloudflareaccess.com.evil.example` from
+    // matching.
+    if host == "cloudflareaccess.com" || host.ends_with(".cloudflareaccess.com") {
+        return Some(
+            "relay unreachable: network sign-in required (Cloudflare Access / VPN) \
+             — re-authenticate and reconnect"
+                .to_string(),
+        );
+    }
+
+    // Generic HTML body from any other proxy or captive portal.
+    if ct.contains("text/html") {
+        return Some(
+            "relay unreachable: relay returned an unexpected HTML page \
+             (VPN or proxy sign-in?)"
+                .to_string(),
+        );
+    }
+
+    None
+}
+
+/// Deserialize a successful response as JSON, guarding against intercepted pages.
+///
+/// Extracts the final URL host and `Content-Type` header before consuming the
+/// response body. If the response looks like a captive-portal page, returns the
+/// appropriate `"relay unreachable:"` message instead of attempting JSON parsing.
+/// URL details are deliberately omitted from error strings so raw URLs are never
+/// surfaced in the UI.
+pub(crate) async fn parse_json_response<T: DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T, String> {
+    let final_host = response.url().host_str().unwrap_or("").to_string();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    if let Some(msg) = classify_intercepted_response(&final_host, &content_type) {
+        return Err(msg);
+    }
+
+    // Drop the reqwest error detail — it contains the raw URL.
+    response
+        .json::<T>()
+        .await
+        .map_err(|_| "relay unreachable: response was not valid JSON".to_string())
+}
+
 pub async fn relay_error_message(response: reqwest::Response) -> String {
     let status = response.status();
+
+    // Check for intercepted/proxy responses before reading the body.
+    let final_host = response.url().host_str().unwrap_or("").to_string();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    if let Some(msg) = classify_intercepted_response(&final_host, &content_type) {
+        return msg;
+    }
+
+    // Real relay error: extract the structured message field if available.
     let body = response.text().await.unwrap_or_default();
 
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
@@ -137,7 +247,8 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
         }
     }
 
-    format!("relay returned {status}: {body}")
+    // Non-JSON, non-HTML body: emit status only — no raw body in the UI.
+    format!("relay returned {status}")
 }
 
 // ── HTTP bridge: POST /query ────────────────────────────────────────────────
@@ -151,7 +262,18 @@ pub async fn query_relay(
     state: &AppState,
     filters: &[serde_json::Value],
 ) -> Result<Vec<nostr::Event>, String> {
-    let url = format!("{}/query", relay_api_base_url_with_override(state));
+    query_relay_at(state, &relay_api_base_url_with_override(state), filters).await
+}
+
+/// Like [`query_relay`] but targets an explicit HTTP API base URL instead of
+/// the workspace override. Used when a query must hit a specific relay (e.g.
+/// reconciling an agent's profile on the relay where it was published).
+pub async fn query_relay_at(
+    state: &AppState,
+    api_base_url: &str,
+    filters: &[serde_json::Value],
+) -> Result<Vec<nostr::Event>, String> {
+    let url = format!("{}/query", api_base_url);
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
@@ -164,23 +286,20 @@ pub async fn query_relay(
         .body(body_bytes)
         .send()
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| classify_request_error(&e))?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
     }
 
-    response
-        .json::<Vec<nostr::Event>>()
-        .await
-        .map_err(|e| format!("failed to parse query response: {e}"))
+    parse_json_response(response).await
 }
 
 // ── Command response parsing ────────────────────────────────────────────────
 
 /// Parse a command-event OK message of the form `"response:<json>"`.
 ///
-/// Sprout's command kinds (e.g. 41010, 30620, 46020) acknowledge writes via
+/// Buzz's command kinds (e.g. 41010, 30620, 46020) acknowledge writes via
 /// relay OK messages whose payload is a `response:`-prefixed JSON document.
 /// This helper strips the prefix and deserializes the remainder as `T`.
 pub fn parse_command_response<T: DeserializeOwned>(message: &str) -> Result<T, String> {
@@ -200,7 +319,7 @@ pub fn parse_command_response<T: DeserializeOwned>(message: &str) -> Result<T, S
 /// This is a pure function (no I/O) extracted from `sync_managed_agent_profile` so that
 /// the event-building and auth-tag-injection logic can be unit tested without HTTP calls.
 ///
-/// `sprout-sdk` uses `nostr 0.36` while the desktop crate uses `nostr 0.37`. Cross-version
+/// `buzz-sdk` uses `nostr 0.36` while the desktop crate uses `nostr 0.37`. Cross-version
 /// bridging is done via hex-encoded public keys and raw tag slices — both versions share the
 /// same wire format.
 fn build_profile_event(
@@ -218,11 +337,11 @@ fn build_profile_event(
             .map_err(|e| format!("failed to convert agent pubkey for auth verification: {e}"))?;
 
         // Verify Schnorr signature before injecting into profile event.
-        sprout_sdk::nip_oa::verify_auth_tag(tag_json, &compat_pubkey)
+        buzz_sdk_pkg::nip_oa::verify_auth_tag(tag_json, &compat_pubkey)
             .map_err(|e| format!("auth tag verification failed for profile event: {e}"))?;
 
         // parse_auth_tag returns a nostr 0.36 Tag; bridge to nostr 0.37 via raw slice.
-        let compat_tag = sprout_sdk::nip_oa::parse_auth_tag(tag_json)
+        let compat_tag = buzz_sdk_pkg::nip_oa::parse_auth_tag(tag_json)
             .map_err(|e| format!("failed to parse verified auth tag: {e}"))?;
         let tag = nostr::Tag::parse(compat_tag.as_slice())
             .map_err(|e| format!("failed to convert auth tag to nostr 0.37: {e}"))?;
@@ -270,7 +389,7 @@ pub async fn sync_managed_agent_profile(
         .body(body_bytes)
         .send()
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| classify_request_error(&e))?;
 
     if !response.status().is_success() {
         let msg = relay_error_message(response).await;
@@ -280,6 +399,56 @@ pub async fn sync_managed_agent_profile(
     }
 
     Ok(())
+}
+
+// ── Agent profile query ─────────────────────────────────────────────────────
+
+/// Query the relay for an agent's kind:0 profile event.
+///
+/// Queries the relay identified by `relay_url` (typically the agent's stored
+/// `relay_url`) so the query targets the same host the profile is published to,
+/// even when a workspace relay override is active.
+///
+/// Returns the parsed profile content (display_name, picture) if a kind:0 event
+/// exists for the given pubkey, or `None` if no profile is published.
+pub async fn query_agent_profile(
+    state: &AppState,
+    relay_url: &str,
+    agent_pubkey: &str,
+) -> Result<Option<AgentProfileInfo>, String> {
+    let filter = serde_json::json!({
+        "authors": [agent_pubkey],
+        "kinds": [0],
+        "limit": 1
+    });
+
+    let events = query_relay_at(state, &relay_http_base_url(relay_url), &[filter]).await?;
+
+    let Some(event) = events.first() else {
+        return Ok(None);
+    };
+
+    let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) else {
+        return Ok(None);
+    };
+
+    Ok(Some(AgentProfileInfo {
+        display_name: content
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        picture: content
+            .get("picture")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    }))
+}
+
+/// Parsed fields from a kind:0 profile event.
+#[derive(Debug, Clone)]
+pub struct AgentProfileInfo {
+    pub display_name: Option<String>,
+    pub picture: Option<String>,
 }
 
 // ── Signed-event submission ─────────────────────────────────────────────────
@@ -319,16 +488,59 @@ pub async fn submit_event(
         .body(body_bytes)
         .send()
         .await
-        .map_err(|e| format!("request failed: {e}"))?;
+        .map_err(|e| classify_request_error(&e))?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
     }
 
-    let result: SubmitEventResponse = response
-        .json()
+    let result: SubmitEventResponse = parse_json_response(response).await?;
+
+    if !result.accepted {
+        return Err(format!("relay rejected event: {}", result.message));
+    }
+
+    Ok(result)
+}
+
+/// Sign an event with explicit keys and POST it to `/events` with NIP-98 auth.
+///
+/// Managed-agent flows use this to publish as the agent itself while still
+/// including the stored NIP-OA auth tag when the relay requires owner-backed
+/// membership.
+pub async fn submit_event_with_keys(
+    builder: nostr::EventBuilder,
+    state: &AppState,
+    keys: &Keys,
+    auth_tag: Option<&str>,
+) -> Result<SubmitEventResponse, String> {
+    let url = format!("{}/events", relay_api_base_url_with_override(state));
+    let event = builder
+        .sign_with_keys(keys)
+        .map_err(|e| format!("failed to sign event: {e}"))?;
+    let body_bytes = event.as_json().into_bytes();
+    let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
+
+    let mut request = state
+        .http_client
+        .post(&url)
+        .header("Authorization", auth_header)
+        .header("Content-Type", "application/json");
+    if let Some(tag) = auth_tag {
+        request = request.header("x-auth-tag", tag);
+    }
+
+    let response = request
+        .body(body_bytes)
+        .send()
         .await
-        .map_err(|e| format!("failed to parse response: {e}"))?;
+        .map_err(|e| classify_request_error(&e))?;
+
+    if !response.status().is_success() {
+        return Err(relay_error_message(response).await);
+    }
+
+    let result: SubmitEventResponse = parse_json_response(response).await?;
 
     if !result.accepted {
         return Err(format!("relay rejected event: {}", result.message));
@@ -341,8 +553,128 @@ pub async fn submit_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_profile_event, parse_command_response};
+    use super::{
+        build_profile_event, classify_intercepted_response, parse_command_response,
+        relay_http_base_url,
+    };
     use serde::Deserialize;
+
+    // ── relay_http_base_url loopback normalization ───────────────────────────
+
+    #[test]
+    fn loopback_ws_localhost_rewritten_to_ipv4() {
+        assert_eq!(
+            relay_http_base_url("ws://localhost:3000"),
+            "http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
+    fn loopback_trailing_slash_rewritten_to_ipv4() {
+        assert_eq!(
+            relay_http_base_url("ws://localhost:3000/"),
+            "http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
+    fn remote_wss_host_unchanged() {
+        assert_eq!(
+            relay_http_base_url("wss://relay.example.com"),
+            "https://relay.example.com"
+        );
+    }
+
+    #[test]
+    fn loopback_ipv4_literal_unchanged() {
+        assert_eq!(
+            relay_http_base_url("ws://127.0.0.1:3000"),
+            "http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
+    fn localhost_substring_host_not_rewritten() {
+        // Exact-match only: a host that merely starts with "localhost" must NOT
+        // be rewritten, or a malicious host could hijack the loopback path.
+        assert_eq!(
+            relay_http_base_url("ws://localhost.evil.com:3000"),
+            "http://localhost.evil.com:3000"
+        );
+    }
+
+    #[test]
+    fn loopback_wss_localhost_rewritten_to_ipv4() {
+        // The wss:// dev arm normalizes identically to ws://.
+        assert_eq!(
+            relay_http_base_url("wss://localhost:3000"),
+            "https://127.0.0.1:3000"
+        );
+    }
+
+    // ── classify_intercepted_response ────────────────────────────────────────
+
+    #[test]
+    fn intercepted_cloudflare_host_returns_some() {
+        let result = classify_intercepted_response("sqprod.cloudflareaccess.com", "text/html");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(
+            msg.starts_with("relay unreachable:"),
+            "should have unreachable prefix"
+        );
+        assert!(msg.contains("Cloudflare"), "should mention Cloudflare");
+    }
+
+    #[test]
+    fn intercepted_cloudflare_apex_host_returns_some() {
+        // The apex domain itself should also match.
+        let result = classify_intercepted_response("cloudflareaccess.com", "application/json");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.starts_with("relay unreachable:"));
+        assert!(msg.contains("Cloudflare"));
+    }
+
+    #[test]
+    fn intercepted_non_cloudflare_html_returns_some() {
+        let result =
+            classify_intercepted_response("proxy.corporate.example", "text/html; charset=utf-8");
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.starts_with("relay unreachable:"));
+    }
+
+    #[test]
+    fn normal_relay_json_returns_none() {
+        let result = classify_intercepted_response("relay.myapp.example.com", "application/json");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn content_type_case_insensitive() {
+        // Uppercase content-type must still be detected.
+        let result = classify_intercepted_response("proxy.example.com", "TEXT/HTML");
+        assert!(result.is_some());
+        assert!(result.unwrap().starts_with("relay unreachable:"));
+    }
+
+    #[test]
+    fn evil_suffix_does_not_match_cloudflare() {
+        // A host whose suffix happens to contain the Cloudflare string but is
+        // not actually a subdomain must NOT match.
+        let result = classify_intercepted_response(
+            "notcloudflareaccess.com.evil.example",
+            "application/json",
+        );
+        assert!(
+            result.is_none(),
+            "false suffix match should not trigger Cloudflare branch"
+        );
+    }
+
+    // classify_request_error requires a real reqwest::Error (not publicly
+    // constructable) — tested indirectly through integration; skipped here.
 
     // ── parse_command_response ───────────────────────────────────────────────
 
@@ -397,14 +729,14 @@ mod tests {
     /// and addressed to `agent_keys`.
     ///
     /// Uses `nostr_compat` (nostr 0.36) for the owner keys because
-    /// `sprout_sdk::nip_oa::compute_auth_tag` expects nostr 0.36 types.
+    /// `buzz_sdk_pkg::nip_oa::compute_auth_tag` expects nostr 0.36 types.
     /// The agent pubkey is bridged via hex encoding.
     fn make_valid_auth_tag(agent_keys: &nostr::Keys) -> String {
         let owner_keys = nostr::Keys::generate();
         let agent_pubkey_hex = agent_keys.public_key().to_hex();
         let agent_compat_pubkey =
             nostr::PublicKey::from_hex(&agent_pubkey_hex).expect("valid hex pubkey should parse");
-        sprout_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_compat_pubkey, "")
+        buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_keys, &agent_compat_pubkey, "")
             .expect("compute_auth_tag should not fail with distinct keys")
     }
 

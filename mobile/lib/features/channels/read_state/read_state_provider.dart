@@ -13,14 +13,14 @@ class ReadStateState {
   final String? pubkey;
   final Map<String, int> contexts;
   final int version;
-  final Set<String> syncedForcedChannelIds;
+  final Set<String> locallyForcedChannelIds;
 
   const ReadStateState({
     required this.isReady,
     required this.pubkey,
     required this.contexts,
     required this.version,
-    this.syncedForcedChannelIds = const {},
+    this.locallyForcedChannelIds = const {},
   });
 
   const ReadStateState.inert()
@@ -28,7 +28,7 @@ class ReadStateState {
       pubkey = null,
       contexts = const {},
       version = 0,
-      syncedForcedChannelIds = const {};
+      locallyForcedChannelIds = const {};
 
   int? effectiveTimestamp(String contextId) => contexts[contextId];
 
@@ -43,7 +43,7 @@ class ReadStateState {
       pubkey: pubkey,
       contexts: Map.unmodifiable({...contexts, contextId: timestamp}),
       version: version + 1,
-      syncedForcedChannelIds: syncedForcedChannelIds,
+      locallyForcedChannelIds: locallyForcedChannelIds,
     );
   }
 }
@@ -51,14 +51,14 @@ class ReadStateState {
 class ReadStateNotifier extends Notifier<ReadStateState> {
   ReadStateManager? _manager;
   bool _isInitialized = false;
-  final Set<String> _syncedForcedChannelIds = {};
+  final Set<String> _locallyForcedChannelIds = {};
 
   @override
   ReadStateState build() {
     _manager?.dispose(flushPending: false);
     _manager = null;
     _isInitialized = false;
-    _syncedForcedChannelIds.clear();
+    _locallyForcedChannelIds.clear();
 
     final relayConfig = ref.watch(relayConfigProvider);
     ref.watch(relaySessionProvider);
@@ -131,12 +131,19 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
   }
 
   void markContextRead(String contextId, int unixTimestamp) {
-    _syncedForcedChannelIds.remove(contextId);
+    _locallyForcedChannelIds.remove(contextId);
     _manager?.markContextRead(contextId, unixTimestamp);
   }
 
-  void markContextUnread(String contextId, int lastMessageTimestamp) {
-    _manager?.markContextUnread(contextId, lastMessageTimestamp);
+  void markContextUnread(String contextId) {
+    final manager = _manager;
+    if (manager == null) return;
+    _locallyForcedChannelIds.add(contextId);
+    state = _stateFromManager(
+      manager,
+      isReady: _isInitialized,
+      previousVersion: state.version,
+    );
   }
 
   void seedContextRead(String contextId, int unixTimestamp) {
@@ -145,10 +152,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
 
   void _emitManagerState(ReadStateManager manager) {
     if (_manager != manager) return;
-    final rollbacks = manager.drainSyncedRollbacks();
     final advances = manager.drainSyncedAdvances();
-    _syncedForcedChannelIds.addAll(rollbacks);
-    _syncedForcedChannelIds.removeAll(advances);
+    _locallyForcedChannelIds.removeAll(advances);
     state = _stateFromManager(
       manager,
       isReady: _isInitialized,
@@ -166,8 +171,8 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       pubkey: manager.pubkey,
       contexts: manager.effectiveContexts,
       version: (previousVersion ?? 0) + 1,
-      syncedForcedChannelIds: Set.unmodifiable(
-        Set<String>.from(_syncedForcedChannelIds),
+      locallyForcedChannelIds: Set.unmodifiable(
+        Set<String>.from(_locallyForcedChannelIds),
       ),
     );
   }

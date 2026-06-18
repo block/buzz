@@ -21,9 +21,116 @@ type UploadState = {
   message?: string;
 };
 
+export type UploadingAttachmentPreview = {
+  id: number;
+  dim?: string;
+  filename?: string;
+  posterUrl?: string;
+  /** Upload progress 0–100, or null while no byte counts exist yet
+   * (e.g. video transcoding before the HTTP upload starts). */
+  progress?: number | null;
+  slotIndex?: number;
+  type?: string;
+};
+
+/** Correlation id for the Rust `media-upload-progress` events. */
+function uploadProgressId(previewId: number): string {
+  return `composer-upload-${previewId}`;
+}
+
 /** True when the drag payload contains files (not plain text or URLs). */
-function isFileDrag(event: React.DragEvent): boolean {
+function isFileDrag(event: React.DragEvent<HTMLElement>): boolean {
   return event.dataTransfer?.types.includes("Files") ?? false;
+}
+
+function waitForMediaEvent(
+  element: HTMLMediaElement,
+  eventName: string,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for ${eventName}`));
+    }, timeoutMs);
+
+    function cleanup() {
+      window.clearTimeout(timeoutId);
+      element.removeEventListener(eventName, onEvent);
+      element.removeEventListener("error", onError);
+    }
+
+    function onEvent() {
+      cleanup();
+      resolve();
+    }
+
+    function onError() {
+      cleanup();
+      reject(new Error(`Could not load media for ${eventName}`));
+    }
+
+    element.addEventListener(eventName, onEvent, { once: true });
+    element.addEventListener("error", onError, { once: true });
+  });
+}
+
+type CapturedVideoPoster = {
+  dim: string;
+  posterUrl: string;
+};
+
+async function captureVideoPosterFrame(
+  file: File,
+): Promise<CapturedVideoPoster | null> {
+  if (!file.type.startsWith("video/")) return null;
+
+  const objectUrl = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = "metadata";
+
+  try {
+    video.src = objectUrl;
+    await waitForMediaEvent(video, "loadedmetadata", 3_000);
+
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const seekTime = duration > 0.2 ? 0.1 : 0;
+    if (seekTime > 0) {
+      const seeked = waitForMediaEvent(video, "seeked", 2_000);
+      video.currentTime = seekTime;
+      await seeked.catch(() => undefined);
+    } else if (video.readyState < 2) {
+      await waitForMediaEvent(video, "loadeddata", 2_000).catch(
+        () => undefined,
+      );
+    }
+
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    if (video.videoWidth === 0 || video.videoHeight === 0) return null;
+
+    const maxWidth = 640;
+    const scale = Math.min(1, maxWidth / video.videoWidth);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+
+    const context = canvas.getContext("2d");
+    if (!context) return null;
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return {
+      dim: `${video.videoWidth}x${video.videoHeight}`,
+      posterUrl: canvas.toDataURL("image/jpeg", 0.82),
+    };
+  } catch {
+    return null;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+    video.removeAttribute("src");
+    video.load();
+  }
 }
 
 export function useMediaUpload() {
@@ -32,6 +139,49 @@ export function useMediaUpload() {
   });
   /** Number of files currently in-flight. */
   const [uploadingCount, setUploadingCount] = React.useState(0);
+  const [uploadingPreviews, setUploadingPreviews] = React.useState<
+    UploadingAttachmentPreview[]
+  >([]);
+  const uploadingPreviewsRef = React.useRef(uploadingPreviews);
+  uploadingPreviewsRef.current = uploadingPreviews;
+  React.useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const dispose = await listen<{
+          id: string;
+          sent: number;
+          total: number;
+        }>("media-upload-progress", (event) => {
+          const { id, sent, total } = event.payload;
+          if (total <= 0) return;
+          const progress = Math.min(100, Math.round((sent / total) * 100));
+          setUploadingPreviews((current) =>
+            current.map((preview) =>
+              uploadProgressId(preview.id) === id
+                ? { ...preview, progress }
+                : preview,
+            ),
+          );
+        });
+        if (cancelled) {
+          dispose();
+        } else {
+          unlisten = dispose;
+        }
+      } catch {
+        // Non-Tauri runtime (web dev, e2e mock) — no byte-level progress.
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+  const activeUploadingPreviewIdsRef = React.useRef(new Set<number>());
+  const canceledUploadingPreviewIdsRef = React.useRef(new Set<number>());
 
   // ── Drag-over visual indicator state ───────────────────────────────
   const [isDragOver, setIsDragOver] = React.useState(false);
@@ -58,6 +208,75 @@ export function useMediaUpload() {
   /** Monotonic slot counter — ensures each batch gets unique indices even
    *  before React flushes the state update. */
   const nextSlotRef = React.useRef(0);
+  const nextUploadingPreviewIdRef = React.useRef(0);
+
+  const isUploadCanceled = React.useCallback(
+    (previewId?: number) =>
+      previewId !== undefined &&
+      canceledUploadingPreviewIdsRef.current.has(previewId),
+    [],
+  );
+
+  const removeUploadingPreview = React.useCallback((id: number) => {
+    setUploadingPreviews((prev) => prev.filter((preview) => preview.id !== id));
+  }, []);
+
+  const reserveUploadingPreview = React.useCallback(
+    (file?: File, slotIndex?: number): number => {
+      const id = nextUploadingPreviewIdRef.current;
+      nextUploadingPreviewIdRef.current += 1;
+      activeUploadingPreviewIdsRef.current.add(id);
+
+      setUploadingPreviews((prev) => [
+        ...prev,
+        { id, filename: file?.name, slotIndex, type: file?.type },
+      ]);
+
+      if (file?.type.startsWith("video/")) {
+        void captureVideoPosterFrame(file).then((poster) => {
+          if (!poster || isUploadCanceled(id)) return;
+          setUploadingPreviews((prev) =>
+            prev.map((preview) =>
+              preview.id === id ? { ...preview, ...poster } : preview,
+            ),
+          );
+        });
+      }
+
+      return id;
+    },
+    [isUploadCanceled],
+  );
+
+  const finishUpload = React.useCallback(
+    (previewId?: number) => {
+      if (previewId !== undefined) {
+        if (!activeUploadingPreviewIdsRef.current.delete(previewId)) return;
+        removeUploadingPreview(previewId);
+      }
+      setUploadingCount((c) => Math.max(0, c - 1));
+    },
+    [removeUploadingPreview],
+  );
+
+  const cancelUpload = React.useCallback(
+    (previewId: number) => {
+      canceledUploadingPreviewIdsRef.current.add(previewId);
+      const slotIndex = uploadingPreviewsRef.current.find(
+        (preview) => preview.id === previewId,
+      )?.slotIndex;
+      if (slotIndex !== undefined) {
+        setImetaSlots((prev) => {
+          if (slotIndex >= prev.length) return prev;
+          const next = [...prev];
+          next[slotIndex] = null;
+          return next;
+        });
+      }
+      finishUpload(previewId);
+    },
+    [finishUpload],
+  );
 
   /** Reserve `count` null slots at the end; returns the starting index. */
   const reserveSlots = React.useCallback((count: number): number => {
@@ -76,49 +295,61 @@ export function useMediaUpload() {
 
   /** Fill a previously-reserved slot by index. */
   const fillSlot = React.useCallback(
-    (index: number, descriptor: BlobDescriptor) => {
+    (index: number, descriptor: BlobDescriptor, previewId?: number) => {
+      if (isUploadCanceled(previewId)) return;
       setImetaSlots((prev) => {
         const next = [...prev];
         next[index] = descriptor;
         return next;
       });
-      setUploadingCount((c) => Math.max(0, c - 1));
+      finishUpload(previewId);
     },
-    [],
+    [finishUpload, isUploadCanceled],
   );
 
   /** Append a single descriptor (no pre-reserved slot). */
-  const onUploaded = React.useCallback((descriptor: BlobDescriptor) => {
-    nextSlotRef.current += 1;
-    setImetaSlots((prev) => [...prev, descriptor]);
-    setUploadingCount((c) => Math.max(0, c - 1));
-  }, []);
+  const onUploaded = React.useCallback(
+    (descriptor: BlobDescriptor, previewId?: number) => {
+      if (isUploadCanceled(previewId)) return;
+      nextSlotRef.current += 1;
+      setImetaSlots((prev) => [...prev, descriptor]);
+      finishUpload(previewId);
+    },
+    [finishUpload, isUploadCanceled],
+  );
 
-  const onUploadError = React.useCallback((err: unknown) => {
-    setUploadingCount((c) => Math.max(0, c - 1));
-    setUploadState({ status: "error", message: String(err) });
-  }, []);
+  const onUploadError = React.useCallback(
+    (err: unknown, previewId?: number) => {
+      if (isUploadCanceled(previewId)) return;
+      finishUpload(previewId);
+      setUploadState({ status: "error", message: String(err) });
+    },
+    [finishUpload, isUploadCanceled],
+  );
 
   const handlePaperclip = React.useCallback(async () => {
     // Hold a single pending tick while the native picker is open + uploads
     // run in Rust. We don't know the file count until the dialog returns,
     // and uploads are already complete by then, so we just append each
     // descriptor when we get them back.
+    const previewId = reserveUploadingPreview();
     setUploadingCount((c) => c + 1);
     try {
       const descriptors = await pickAndUploadMedia();
-      setUploadingCount((c) => Math.max(0, c - 1));
+      if (isUploadCanceled(previewId)) return;
+      finishUpload(previewId);
       for (const descriptor of descriptors) {
         nextSlotRef.current += 1;
         setImetaSlots((prev) => [...prev, descriptor]);
       }
     } catch (err) {
-      onUploadError(err);
+      if (isUploadCanceled(previewId)) return;
+      onUploadError(err, previewId);
     }
-  }, [onUploadError]);
+  }, [finishUpload, isUploadCanceled, onUploadError, reserveUploadingPreview]);
 
   const handleDrop = React.useCallback(
-    async (event: React.DragEvent<HTMLFormElement>) => {
+    async (event: React.DragEvent<HTMLElement>) => {
       event.preventDefault();
       dragDepthRef.current = 0;
       setIsDragOver(false);
@@ -135,26 +366,35 @@ export function useMediaUpload() {
       for (let i = 0; i < validFiles.length; i++) {
         const file = validFiles[i];
         const slotIndex = baseIndex + i;
+        const previewId = reserveUploadingPreview(file, slotIndex);
         // Fire-and-forget each upload concurrently — slot preserves order
         (async () => {
           try {
             const buffer = await file.arrayBuffer();
+            if (isUploadCanceled(previewId)) return;
             const descriptor = await uploadMediaBytes(
               [...new Uint8Array(buffer)],
               file.name,
+              uploadProgressId(previewId),
             );
-            fillSlot(slotIndex, descriptor);
+            fillSlot(slotIndex, descriptor, previewId);
           } catch (err) {
-            onUploadError(err);
+            onUploadError(err, previewId);
           }
         })();
       }
     },
-    [reserveSlots, fillSlot, onUploadError],
+    [
+      reserveSlots,
+      fillSlot,
+      isUploadCanceled,
+      onUploadError,
+      reserveUploadingPreview,
+    ],
   );
 
   const handleDragEnter = React.useCallback(
-    (event: React.DragEvent<HTMLFormElement>) => {
+    (event: React.DragEvent<HTMLElement>) => {
       if (!isFileDrag(event)) return;
       event.preventDefault();
       dragDepthRef.current += 1;
@@ -166,7 +406,7 @@ export function useMediaUpload() {
   );
 
   const handleDragLeave = React.useCallback(
-    (event: React.DragEvent<HTMLFormElement>) => {
+    (event: React.DragEvent<HTMLElement>) => {
       if (!isFileDrag(event)) return;
       event.preventDefault();
       dragDepthRef.current -= 1;
@@ -179,7 +419,7 @@ export function useMediaUpload() {
   );
 
   const handleDragOver = React.useCallback(
-    (event: React.DragEvent<HTMLFormElement>) => {
+    (event: React.DragEvent<HTMLElement>) => {
       event.preventDefault();
     },
     [],
@@ -224,39 +464,51 @@ export function useMediaUpload() {
       for (let i = 0; i < mediaFiles.length; i++) {
         const file = mediaFiles[i];
         const slotIndex = baseIndex + i;
+        const previewId = reserveUploadingPreview(file, slotIndex);
         (async () => {
           try {
             const buffer = await file.arrayBuffer();
+            if (isUploadCanceled(previewId)) return;
             const descriptor = await uploadMediaBytes(
               [...new Uint8Array(buffer)],
               file.name,
+              uploadProgressId(previewId),
             );
-            fillSlot(slotIndex, descriptor);
+            fillSlot(slotIndex, descriptor, previewId);
           } catch (err) {
-            onUploadError(err);
+            onUploadError(err, previewId);
           }
         })();
       }
     },
-    [reserveSlots, fillSlot, onUploadError],
+    [
+      reserveSlots,
+      fillSlot,
+      isUploadCanceled,
+      onUploadError,
+      reserveUploadingPreview,
+    ],
   );
 
   /** Upload a File directly — used by Tiptap's editorProps.handlePaste. */
   const uploadFile = React.useCallback(
     async (file: File) => {
+      const previewId = reserveUploadingPreview(file);
       setUploadingCount((c) => c + 1);
       try {
         const buffer = await file.arrayBuffer();
+        if (isUploadCanceled(previewId)) return;
         const descriptor = await uploadMediaBytes(
           [...new Uint8Array(buffer)],
           file.name,
+          uploadProgressId(previewId),
         );
-        onUploaded(descriptor);
+        onUploaded(descriptor, previewId);
       } catch (err) {
-        onUploadError(err);
+        onUploadError(err, previewId);
       }
     },
-    [onUploaded, onUploadError],
+    [isUploadCanceled, onUploaded, onUploadError, reserveUploadingPreview],
   );
 
   const removeAttachment = React.useCallback((url: string) => {
@@ -279,6 +531,7 @@ export function useMediaUpload() {
   const isUploading = uploadingCount > 0;
 
   return {
+    cancelUpload,
     handleDragEnter,
     handleDragLeave,
     handleDragOver,
@@ -294,6 +547,9 @@ export function useMediaUpload() {
     setUploadState,
     uploadFile,
     uploadingCount,
+    uploadingPreviews,
     uploadState,
   };
 }
+
+export type MediaUploadController = ReturnType<typeof useMediaUpload>;

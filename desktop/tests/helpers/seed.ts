@@ -3,18 +3,17 @@ import { request } from "@playwright/test";
 const tylerPubkey =
   "e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34";
 const isCi = Boolean(process.env.CI);
-const relayBaseUrl =
-  process.env.SPROUT_E2E_RELAY_URL ?? "http://127.0.0.1:3000";
+const relayBaseUrl = process.env.BUZZ_E2E_RELAY_URL ?? "http://127.0.0.1:3000";
 const seedTimeoutMs = Number.parseInt(
-  process.env.SPROUT_E2E_SEED_TIMEOUT_MS ?? (isCi ? "60000" : "25000"),
+  process.env.BUZZ_E2E_SEED_TIMEOUT_MS ?? (isCi ? "60000" : "25000"),
   10,
 );
 const requestTimeoutMs = Number.parseInt(
-  process.env.SPROUT_E2E_SEED_REQUEST_TIMEOUT_MS ?? (isCi ? "5000" : "2000"),
+  process.env.BUZZ_E2E_SEED_REQUEST_TIMEOUT_MS ?? (isCi ? "5000" : "2000"),
   10,
 );
 const retryDelayMs = Number.parseInt(
-  process.env.SPROUT_E2E_SEED_RETRY_DELAY_MS ?? "1000",
+  process.env.BUZZ_E2E_SEED_RETRY_DELAY_MS ?? "1000",
   10,
 );
 

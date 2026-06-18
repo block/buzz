@@ -1,48 +1,51 @@
-import { Loader2, RefreshCcw, RotateCw } from "lucide-react";
+import type { ComponentType } from "react";
+import { RefreshCcw, RotateCw } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
+import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
 import type { UpdateStatus } from "./hooks/use-updater";
 
 const indicatorButtonClass =
-  "relative h-8 w-8 text-muted-foreground/80 hover:bg-muted/60 hover:text-foreground";
+  "relative text-muted-foreground/80 hover:bg-muted/60 hover:text-foreground";
 
-const iconClass = "h-4 w-4";
+type IndicatorIcon = ComponentType<{
+  "aria-hidden"?: boolean;
+  className?: string;
+}>;
 
 const variants: Record<
   "available" | "downloading" | "installing" | "ready",
   {
-    Icon: typeof RefreshCcw;
+    Icon: IndicatorIcon;
+    iconClassName?: string;
     label: string;
     badgeColor: string;
-    iconClass: string;
   }
 > = {
   available: {
     Icon: RefreshCcw,
     label: "Update available",
     badgeColor: "bg-primary",
-    iconClass: iconClass,
   },
   downloading: {
-    Icon: Loader2,
+    Icon: Spinner,
+    iconClassName: "h-4 w-4 border-2",
     label: "Downloading update\u2026",
     badgeColor: "bg-primary",
-    iconClass: `${iconClass} animate-spin`,
   },
   installing: {
-    Icon: Loader2,
+    Icon: Spinner,
+    iconClassName: "h-4 w-4 border-2",
     label: "Installing update\u2026",
     badgeColor: "bg-primary",
-    iconClass: `${iconClass} animate-spin`,
   },
   ready: {
     Icon: RotateCw,
     label: "Restart to update",
     badgeColor: "bg-emerald-500",
-    iconClass: iconClass,
   },
 };
 
@@ -66,7 +69,7 @@ export function UpdateIndicator({ className }: { className?: string }) {
     return null;
   }
 
-  const { Icon, label, badgeColor, iconClass: variantIconClass } = variant;
+  const { Icon, iconClassName = "h-4 w-4", label, badgeColor } = variant;
   const isActionable = status.state === "available" || status.state === "ready";
   const handleClick =
     status.state === "ready"
@@ -91,7 +94,7 @@ export function UpdateIndicator({ className }: { className?: string }) {
           type="button"
           variant="ghost"
         >
-          <Icon className={variantIconClass} />
+          <Icon aria-hidden className={iconClassName} />
           <span
             className={`absolute right-1 top-1 h-1.5 w-1.5 rounded-full ${badgeColor} animate-pulse`}
           />

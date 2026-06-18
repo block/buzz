@@ -34,25 +34,25 @@ fn model_ref_is_family_agnostic() {
 }
 
 #[test]
-fn agent_preset_runs_on_sprout_agent_not_goose() {
+fn agent_preset_runs_on_buzz_agent_not_goose() {
     // Regression (Tyler): the relay-mesh preset used to hand the agent the
     // global default runtime (goose), which ignores the OpenAI-compat env
     // vars and falls back to its own provider. Mesh agents must run on
-    // sprout-agent, which reads those vars.
+    // buzz-agent, which reads those vars.
     let preset = super::agent_preset(super::MeshAgentPresetRequest {
         model_id: "Qwen3-8B-Q4_K_M".to_string(),
     })
     .expect("preset for a valid model id");
 
-    assert_eq!(preset.agent_command, "sprout-agent");
+    assert_eq!(preset.agent_command, "buzz-agent");
     assert_ne!(preset.agent_command, "goose");
-    assert_eq!(preset.mcp_command, "sprout-dev-mcp");
+    assert_eq!(preset.mcp_command, "buzz-dev-mcp");
 
-    // The env vars sprout-agent's config layer reads (crates/sprout-agent).
+    // The env vars buzz-agent's config layer reads (crates/buzz-agent).
     assert_eq!(
         preset
             .env_vars
-            .get("SPROUT_AGENT_PROVIDER")
+            .get("BUZZ_AGENT_PROVIDER")
             .map(String::as_str),
         Some("openai")
     );

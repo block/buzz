@@ -323,7 +323,7 @@ export function RepoDetailPage() {
       {/* Sidebar */}
       <aside className="hidden w-72 shrink-0 border-l border-border pl-8 lg:block">
         <div className="space-y-6">
-          {/* Open in Sprout */}
+          {/* Open in Buzz */}
           <ConnectButton className="w-full" />
 
           {/* People */}

@@ -5,11 +5,14 @@ mod nest;
 mod persona_avatars;
 mod persona_card;
 mod personas;
+#[cfg(windows)]
+mod process_lifecycle;
 #[cfg(feature = "mesh-llm")]
 mod relay_mesh;
 mod restore;
 mod runtime;
 mod storage;
+mod team_repair;
 mod teams;
 mod types;
 
@@ -19,20 +22,23 @@ pub use env_vars::*;
 pub use nest::*;
 pub use persona_card::*;
 pub use personas::*;
+#[cfg(windows)]
+pub use process_lifecycle::*;
 #[cfg(feature = "mesh-llm")]
 pub use relay_mesh::*;
 pub use restore::*;
 pub use runtime::*;
 pub use storage::*;
+pub use team_repair::sync_team_personas;
 pub use teams::*;
 pub use types::*;
 
-/// Returns the Sprout nest directory (`~/.sprout`) if it exists as a real
+/// Returns the Buzz nest directory (`~/.buzz`) if it exists as a real
 /// directory (not a symlink), falling back to the user's home directory.
 ///
 /// Used as the default working directory for spawned agent processes.
 /// `ensure_nest()` must be called during app setup before this is first
-/// invoked, so that `~/.sprout` exists and gets cached.
+/// invoked, so that `~/.buzz` exists and gets cached.
 ///
 /// Cached for the process lifetime via `OnceLock`.
 /// Returns `None` in sandboxed/containerized environments where `$HOME` is
@@ -43,7 +49,7 @@ pub fn default_agent_workdir() -> Option<std::path::PathBuf> {
     static WORKDIR: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     WORKDIR
         .get_or_init(|| {
-            // Prefer ~/.sprout if it exists (created by ensure_nest()).
+            // Prefer ~/.buzz if it exists (created by ensure_nest()).
             // Reject symlinks to prevent redirect attacks — is_dir()
             // follows symlinks, so check symlink_metadata() first.
             // Fall back to $HOME for resilience.

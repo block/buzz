@@ -249,3 +249,7 @@ export function useEmojiAutocomplete(customEmoji: CustomEmoji[] = []) {
     updateEmojiQuery,
   };
 }
+
+export type UseEmojiAutocompleteResult = ReturnType<
+  typeof useEmojiAutocomplete
+>;
