@@ -523,11 +523,14 @@ struct KillGroup {
 // `CloseHandle` are thread-safe, and Rust's `&self`/`&mut self` borrows still
 // serialize access to the field. Moving or sharing it across threads is sound.
 #[cfg(windows)]
+#[allow(unsafe_code)]
 unsafe impl Send for KillGroup {}
 #[cfg(windows)]
+#[allow(unsafe_code)]
 unsafe impl Sync for KillGroup {}
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 impl KillGroup {
     fn new(child: &tokio::process::Child, _pid: Option<u32>) -> Self {
         use std::mem::{size_of, zeroed};
@@ -596,6 +599,7 @@ impl KillGroup {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 impl Drop for KillGroup {
     fn drop(&mut self) {
         use windows_sys::Win32::Foundation::CloseHandle;
