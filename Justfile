@@ -266,18 +266,22 @@ proxy:
 proxy-release:
     cargo run -p buzz-proxy --release
 
-# Run the desktop Tauri app in dev mode (ports and identity derived from worktree)
-dev *ARGS: _ensure-sidecar-stubs
+# Run the desktop Tauri app in dev mode with a local relay (ports and identity derived from worktree)
+dev *ARGS: _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    RELAY_LOG=$(mktemp /tmp/buzz-relay.XXXXXX.log)
+    echo "Starting local relay (logs: ${RELAY_LOG})"
+    cargo run -p buzz-relay >"$RELAY_LOG" 2>&1 &
+    RELAY_PID=$!
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     source ../scripts/instance-env.sh
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
-    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID"' EXIT
+    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID"; kill "$RELAY_PID" 2>/dev/null || true' EXIT
     echo "Starting on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
     pnpm exec tauri dev --features mesh-llm --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
@@ -293,8 +297,8 @@ staging *ARGS: _ensure-sidecar-stubs
     cp target/release/buzz "desktop/src-tauri/binaries/buzz-${TARGET}"
     chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
     cd {{desktop_dir}}
-    source ../scripts/instance-env.sh
     export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
+    source ../scripts/instance-env.sh
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
