@@ -688,6 +688,26 @@ jobs:
         run: cargo clippy --workspace --all-targets --target $env:TARGET -- -D warnings
       - name: Check (workspace)
         run: cargo check --workspace --all-targets --target $env:TARGET
+      - name: Test (buzz-dev-mcp)
+        # The Windows-only bash resolver lives in buzz-dev-mcp; its unit tests
+        # only gate if this crate is tested ON Windows.
+        run: cargo test -p buzz-dev-mcp --target $env:TARGET
+      # The bundled-bash staging (PortableGit download, SFX extract, mingw64 drop)
+      # runs only in release.yml on tag — so without this step the agent's only
+      # Windows transport would ship UNEXERCISED until a tagged release hits users.
+      # Stage the tree and spawn the staged bash on a real coreutils pipeline: this
+      # gates the SFX `-o` POSIX-path extraction, that bash.exe still spawns after
+      # mingw64/ is dropped, and that the lazily-loaded MSYS DLL closure (msys-2.0.dll,
+      # coreutils) survives — the exact behaviors unconfirmable off a non-Windows host.
+      - name: Smoke-test bundled bash staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage_dir="$RUNNER_TEMP/git-bash"
+          scripts/stage-windows-bash.sh "$stage_dir"
+          out=$("$stage_dir/bin/bash.exe" -c 'echo hello | rev')
+          [[ "$out" == "olleh" ]] || { echo "staged bash pipeline failed: got '$out'" >&2; exit 1; }
+          echo "staged bash spawned and ran a coreutils pipeline"
       - name: Check (Tauri crate)
         run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
         env:

@@ -143,7 +143,11 @@ pub async fn run(
         ));
     }
 
-    let mut cmd = Command::new("bash");
+    let bash = match resolve_bash(&state.shim.path_env) {
+        Ok(path) => path,
+        Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+    };
+    let mut cmd = Command::new(&bash);
     cmd.arg("-c").arg(&p.command);
     cmd.current_dir(&workdir);
     cmd.env("PATH", &state.shim.path_env);
@@ -310,6 +314,137 @@ pub async fn run(
     let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".into());
     pgid_guard.0 = None;
     Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
+/// The bundled bash subtree's directory name under the install root, and the
+/// relative path to its `bash.exe`. This is the THREE-FILE PATH CONTRACT — it must
+/// stay byte-identical with:
+///   1. `scripts/bundle-sidecars.sh`  — stages the bash tree to
+///      `desktop/src-tauri/binaries/git-bash/` (the bundle-source dir).
+///   2. `desktop/scripts/build-release-config.mjs` — emits the Windows-only
+///      `bundle.resources` Map `{ "binaries/git-bash": "git-bash" }`, whose TARGET
+///      (`git-bash`) is what Tauri's NSIS/MSI installer stages next to the exe.
+///   3. this resolver — joins `current_exe().parent()` + `git-bash\bin\bash.exe`.
+/// Drift between (2)'s target and this string ships a working bundle but a broken
+/// runtime path. Keep all three in lockstep.
+#[cfg(windows)]
+const BUNDLED_BASH_REL: &str = r"git-bash\bin\bash.exe";
+
+/// Resolve a genuine, non-WSL bash to an absolute path so we spawn it directly
+/// instead of letting `Command::new("bash")` re-enter PATH search — on Windows
+/// that search finds `System32\bash.exe` (the WSL launcher), which fails at spawn
+/// with `0x8007072c` and can never run the agent's POSIX commands.
+///
+/// On Unix, bare `bash` resolved via PATH is correct and was never broken, so the
+/// resolver is a no-op there. The probe logic is Windows-only.
+#[cfg(not(windows))]
+fn resolve_bash(_path_env: &str) -> Result<PathBuf, String> {
+    Ok(PathBuf::from("bash"))
+}
+
+/// Windows bash resolution. Probe order (first hit wins):
+///   1. `GIT_BASH` env override (escape hatch / explicit operator choice).
+///   2. Installed Git for Windows (fast path when the user has Git).
+///   3. The bundled bash staged next to our exe (guaranteed target — this
+///      is what makes a bare, Git-less host work since the app is self-contained).
+///   4. PATH scan, EXCLUDING System32 (so we never resolve WSL's `bash.exe`).
+/// No bash found -> actionable error returned BEFORE spawn.
+#[cfg(windows)]
+fn resolve_bash(path_env: &str) -> Result<PathBuf, String> {
+    if let Some(p) = std::env::var_os("GIT_BASH").map(PathBuf::from) {
+        if p.is_file() {
+            return Ok(p);
+        }
+    }
+
+    for root in ["ProgramFiles", "LocalAppData"] {
+        if let Some(base) = std::env::var_os(root) {
+            let candidate = match root {
+                "LocalAppData" => PathBuf::from(&base).join("Programs").join("Git"),
+                _ => PathBuf::from(&base).join("Git"),
+            }
+            .join("bin")
+            .join("bash.exe");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    // Bundled bash, located relative to OUR OWN executable. On Windows, Tauri
+    // stages `bundle.resources` flat in the directory that contains the exe
+    // (tauri 2.11.2 `resource_dir()` == exe parent on Windows), and every sidecar
+    // — including this one — lives in that same dir. This relative-to-self resolution
+    // is Windows-ONLY: macOS stages resources to `../Resources` and Linux to
+    // `usr/lib/<app>`, so a cross-platform "resource relative to exe" helper would
+    // be wrong on those platforms.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some(p) = bundled_bash(dir) {
+                return Ok(p);
+            }
+        }
+    }
+
+    if let Some(p) = scan_path_for_bash(path_env, std::env::var_os("SystemRoot").map(PathBuf::from))
+    {
+        return Ok(p);
+    }
+
+    Err("no bash found: install Git for Windows, or set GIT_BASH to a bash.exe path".into())
+}
+
+/// Compute the bundled bash path relative to the install dir (the exe's parent),
+/// `is_file`-gated so dev/CI builds without a staged resource return None and let
+/// the caller fall through cleanly — never returning a non-existent path that
+/// would fail later at spawn with a worse message.
+#[cfg(windows)]
+fn bundled_bash(install_dir: &Path) -> Option<PathBuf> {
+    let bundled = install_dir.join(BUNDLED_BASH_REL);
+    bundled.is_file().then_some(bundled)
+}
+
+/// True if `dir` is `root` or lives under it, comparing path components
+/// case-INsensitively. Windows paths are case-insensitive, but `Path::starts_with`
+/// compares components case-sensitively on every platform — so a PATH entry spelled
+/// `C:\WINDOWS\System32` would slip past a `%SystemRoot%`=`C:\Windows` prefix test
+/// and let WSL's `System32\bash.exe` be resolved, reintroducing the `0x8007072c`
+/// spawn failure. Component-wise comparison (not a lowercased substring match) avoids
+/// a false hit on a sibling like `C:\Windows2`.
+#[cfg(windows)]
+fn is_under_dir(dir: &Path, root: &Path) -> bool {
+    let mut dir_components = dir.components();
+    for root_component in root.components() {
+        match dir_components.next() {
+            Some(d)
+                if d.as_os_str()
+                    .eq_ignore_ascii_case(root_component.as_os_str()) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Scan the child's PATH for `bash.exe`, skipping the Windows system directory
+/// (`system_root`, normally `%SystemRoot%`) so we never resolve WSL's
+/// `System32\bash.exe`. PATH is parsed with `std::env::split_paths` (never a
+/// hand-split on ';') so it matches exactly what the spawned child would see.
+#[cfg(windows)]
+fn scan_path_for_bash(path_env: &str, system_root: Option<PathBuf>) -> Option<PathBuf> {
+    for dir in std::env::split_paths(path_env) {
+        if let Some(ref root) = system_root {
+            // Skip System32 (and any other dir under %SystemRoot%) — that's where
+            // WSL's bash.exe lives.
+            if is_under_dir(&dir, root) {
+                continue;
+            }
+        }
+        let candidate = dir.join("bash.exe");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[cfg(unix)]
@@ -560,6 +695,99 @@ mod tests {
                 .ends_with(sub_canon.to_string_lossy().as_ref())
                 || stdout.contains(sub.file_name().unwrap().to_str().unwrap()),
             "stdout: {stdout}"
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_resolver_tests {
+    use super::*;
+    use std::env;
+    use tempfile::tempdir;
+
+    fn touch(path: &Path) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(path, b"").expect("touch");
+    }
+
+    #[test]
+    fn bundled_branch_returns_none_when_path_absent() {
+        // Dev/CI: no staged resource next to the exe -> the bundled branch must
+        // yield None so the resolver falls through instead of returning a
+        // non-existent path that would fail at spawn.
+        let dir = tempdir().expect("tempdir");
+        assert!(bundled_bash(dir.path()).is_none());
+    }
+
+    #[test]
+    fn bundled_branch_returns_absolute_path_when_staged() {
+        // A staged PortableGit bash runtime next to the exe resolves to the absolute bash path.
+        let dir = tempdir().expect("tempdir");
+        let bash = dir.path().join(BUNDLED_BASH_REL);
+        touch(&bash);
+        let resolved = bundled_bash(dir.path()).expect("bundled bash");
+        assert!(resolved.is_absolute());
+        assert_eq!(resolved, bash);
+    }
+
+    #[test]
+    fn path_scan_skips_system32_and_returns_absolute() {
+        // A bash.exe under %SystemRoot% (where WSL's launcher lives) must be
+        // skipped; a bash.exe elsewhere on PATH is returned as an absolute path.
+        let sys_root = tempdir().expect("sysroot");
+        let real = tempdir().expect("real");
+        touch(&sys_root.path().join("System32").join("bash.exe"));
+        let real_bash = real.path().join("bash.exe");
+        touch(&real_bash);
+
+        let path_env =
+            env::join_paths([sys_root.path().join("System32"), real.path().to_path_buf()])
+                .expect("join");
+
+        let found = scan_path_for_bash(
+            path_env.to_str().expect("utf8"),
+            Some(sys_root.path().to_path_buf()),
+        )
+        .expect("bash found outside System32");
+        assert!(found.is_absolute());
+        assert!(!found.starts_with(sys_root.path()));
+        assert_eq!(found, real_bash);
+    }
+
+    #[test]
+    fn path_scan_returns_none_when_only_system32_has_bash() {
+        // If the ONLY bash.exe on PATH is under System32, the scan finds nothing.
+        let sys_root = tempdir().expect("sysroot");
+        touch(&sys_root.path().join("System32").join("bash.exe"));
+        let path_env = env::join_paths([sys_root.path().join("System32")]).expect("join");
+
+        let found = scan_path_for_bash(
+            path_env.to_str().expect("utf8"),
+            Some(sys_root.path().to_path_buf()),
+        );
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn path_scan_skips_system32_when_path_case_differs_from_root() {
+        // Windows paths are case-insensitive; a PATH entry spelled differently from
+        // %SystemRoot% (e.g. `...\WINDOWS\System32` vs root `...\Windows`) must STILL
+        // be excluded, or WSL's bash.exe leaks through. Build the System32 dir under a
+        // genuinely upper-cased sibling component so the exclusion can only pass via a
+        // case-insensitive compare, not a literal `starts_with`.
+        let base = tempdir().expect("base");
+        let root = base.path().join("Windows");
+        let upper = base.path().join("WINDOWS");
+        let sys32 = upper.join("System32");
+        touch(&sys32.join("bash.exe"));
+
+        let path_env = env::join_paths([sys32]).expect("join");
+        let found = scan_path_for_bash(path_env.to_str().expect("utf8"), Some(root));
+        assert!(
+            found.is_none(),
+            "case-divergent System32 must still be excluded"
         );
     }
 }
