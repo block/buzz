@@ -911,16 +911,13 @@ test.describe("thread unread indicator screenshots", () => {
     await expect(badge).toBeVisible();
     await expect(badge).toContainText("2");
 
-    // Clearing a NESTED unread mirrors the channel-open read model: opening the
-    // thread consumes only the visible direct replies (A), so the badge drops
-    // to "1" — the mention reply B stays unread inside A's collapsed branch.
+    // Opening a notified thread advances the frontier to the full subtree max,
+    // so it consumes the direct reply A AND the nested mention B at once — the
+    // badge clears to 0 in place without drilling into A's collapsed branch.
     await aliceSummary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await expect(badge).toContainText("1");
+    await expect(badge).toHaveCount(0);
 
-    // Drilling into A's branch advances the frontier over B, the deepest reply,
-    // and the badge clears in place. Stays in general — no channel switch.
-    await expandReply(page, replyA?.id ?? "");
     await page.getByTestId("message-thread-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
