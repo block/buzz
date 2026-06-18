@@ -174,15 +174,11 @@ pub async fn run(
 
     let pid = child.id();
 
-    struct PgidGuard(Option<u32>);
-    impl Drop for PgidGuard {
-        fn drop(&mut self) {
-            if let Some(pid) = self.0 {
-                kill_process_group_immediate(pid as i32);
-            }
-        }
-    }
-    let mut pgid_guard = PgidGuard(pid);
+    // KillGroup ties the spawned bash and all its descendants to a single kill
+    // primitive (Unix process group / Windows Job Object). Built from the live
+    // child so the Windows job can take the process handle, which only exists
+    // after spawn. Held for the whole run; its Drop is the last-resort reaper.
+    let mut kill_group = KillGroup::new(&child, pid);
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -206,19 +202,17 @@ pub async fn run(
         biased;
         _ = ct.cancelled() => {
             // Kill process group, reap child, abort reader tasks.
-            if let Some(pid) = pid {
-                kill_process_group_immediate(pid as i32);
-            }
+            kill_group.kill_immediate();
             // Bounded reap so we don't leak zombies. If reap times out,
-            // PgidGuard drop will SIGKILL again as a last resort.
+            // KillGroup drop will kill again as a last resort.
             match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
-                Ok(Ok(_)) => { pgid_guard.0 = None; } // reaped; disarm guard
+                Ok(Ok(_)) => { kill_group.disarm(); } // reaped; disarm guard
                 Ok(Err(e)) => {
                     tracing::debug!("cancel: child wait error: {e}");
-                    // Leave pgid_guard armed for drop-kill.
+                    // Leave kill_group armed for drop-kill.
                 }
                 Err(_) => {
-                    tracing::debug!("cancel: child reap timed out; guard will SIGKILL on drop");
+                    tracing::debug!("cancel: child reap timed out; guard will kill on drop");
                 }
             }
             stdout_handle.abort();
@@ -233,9 +227,7 @@ pub async fn run(
         }
         Err(_) => {
             // Kill process group — this closes the pipes, causing reads to EOF.
-            if let Some(pid) = pid {
-                kill_process_group_graceful(pid as i32).await;
-            }
+            kill_group.kill_graceful().await;
             // Reap the child so it doesn't become a zombie.
             let deadline = Instant::now() + Duration::from_secs(2);
             loop {
@@ -265,9 +257,7 @@ pub async fn run(
     };
 
     if !timed_out {
-        if let Some(pid) = pid {
-            kill_process_group_graceful(pid as i32).await;
-        }
+        kill_group.kill_graceful().await;
     }
 
     let stdout_cap = match tokio::time::timeout(Duration::from_secs(5), &mut stdout_handle).await {
@@ -312,7 +302,7 @@ pub async fn run(
         "notes": notes,
     });
     let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".into());
-    pgid_guard.0 = None;
+    kill_group.disarm();
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
@@ -465,31 +455,167 @@ fn set_process_group(cmd: &mut Command) {
 #[cfg(not(unix))]
 fn set_process_group(_cmd: &mut Command) {}
 
-/// Immediate SIGKILL of the process group. Sync; safe to call from Drop.
-/// No grace period — used when the parent task is being torn down.
+/// Kill primitive covering the spawned bash AND every descendant it forks,
+/// mirroring the same guarantee across platforms.
+///
+/// - Unix: the child's process group (set via [`set_process_group`]); kills go
+///   to the whole group via `killpg`.
+/// - Windows: a Job Object the child is assigned to at construction. A bare
+///   `TerminateProcess` on bash leaves MSYS-forked grandchildren (e.g. `sleep`)
+///   running — they hold the stdout/stderr pipes open, so the reap blocks until
+///   they self-exit. Terminating the job kills the entire tree atomically.
+///
+/// Held for the whole `run`; `Drop` is the last-resort reaper if an explicit
+/// kill was skipped or failed.
 #[cfg(unix)]
-fn kill_process_group_immediate(pid: i32) {
-    use nix::sys::signal::{killpg, Signal};
-    use nix::unistd::Pid;
-    let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+struct KillGroup(Option<i32>);
+
+#[cfg(unix)]
+impl KillGroup {
+    fn new(_child: &tokio::process::Child, pid: Option<u32>) -> Self {
+        Self(pid.map(|p| p as i32))
+    }
+
+    /// Immediate SIGKILL of the process group. Sync; safe to call from Drop.
+    /// No grace period — used when the parent task is being torn down.
+    fn kill_immediate(&self) {
+        use nix::sys::signal::{killpg, Signal};
+        use nix::unistd::Pid;
+        if let Some(pid) = self.0 {
+            let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
+        }
+    }
+
+    /// Graceful SIGTERM → 200ms async sleep → SIGKILL. Async; never blocks the runtime.
+    async fn kill_graceful(&self) {
+        use nix::sys::signal::{killpg, Signal};
+        use nix::unistd::Pid;
+        if let Some(pid) = self.0 {
+            let pgid = Pid::from_raw(pid);
+            let _ = killpg(pgid, Signal::SIGTERM);
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = killpg(pgid, Signal::SIGKILL);
+        }
+    }
+
+    /// Disarm the Drop-time kill once the child has been reaped explicitly.
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
 }
 
-#[cfg(not(unix))]
-fn kill_process_group_immediate(_pid: i32) {}
-
-/// Graceful SIGTERM → 200ms async sleep → SIGKILL. Async; never blocks the runtime.
 #[cfg(unix)]
-async fn kill_process_group_graceful(pid: i32) {
-    use nix::sys::signal::{killpg, Signal};
-    use nix::unistd::Pid;
-    let pgid = Pid::from_raw(pid);
-    let _ = killpg(pgid, Signal::SIGTERM);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let _ = killpg(pgid, Signal::SIGKILL);
+impl Drop for KillGroup {
+    fn drop(&mut self) {
+        self.kill_immediate();
+    }
 }
 
-#[cfg(not(unix))]
-async fn kill_process_group_graceful(_pid: i32) {}
+#[cfg(windows)]
+struct KillGroup {
+    job: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl KillGroup {
+    fn new(child: &tokio::process::Child, _pid: Option<u32>) -> Self {
+        use std::mem::{size_of, zeroed};
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+
+        // SAFETY: each call is a documented Win32 FFI call with arguments that
+        // satisfy its contract — a null SECURITY_ATTRIBUTES/name for an
+        // anonymous job, a zeroed #[repr(C)] info struct sized by size_of, and
+        // the live process handle from `child` (valid while it is running).
+        // A null job HANDLE on failure makes every later call a harmless no-op.
+        let job = unsafe {
+            let job: HANDLE = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if !job.is_null() {
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+                // KILL_ON_JOB_CLOSE: when the LAST handle to the job closes,
+                // Windows kills every process still in it. This is both the
+                // explicit-kill mechanism and the Drop-time safety net — and the
+                // reason the job HANDLE must outlive the child (see Drop).
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::addr_of!(info).cast(),
+                    size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+                if let Some(handle) = child.raw_handle() {
+                    AssignProcessToJobObject(job, handle as HANDLE);
+                }
+            }
+            job
+        };
+        Self { job }
+    }
+
+    fn kill_immediate(&self) {
+        self.terminate();
+    }
+
+    async fn kill_graceful(&self) {
+        // A Job Object has no SIGTERM analogue; termination is atomic, so the
+        // graceful path is the same single terminate as the immediate path.
+        self.terminate();
+    }
+
+    fn terminate(&self) {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        if !self.job.is_null() {
+            // SAFETY: `self.job` is a valid job HANDLE for this struct's
+            // lifetime; exit code 137 mirrors the SIGKILL (128+9) we report on
+            // Unix.
+            unsafe {
+                TerminateJobObject(self.job, 137);
+            }
+        }
+    }
+
+    /// No-op on Windows: the job is terminated explicitly, and closing the
+    /// handle on Drop with no live processes left is harmless. Kept for a
+    /// uniform call shape with the Unix guard.
+    fn disarm(&mut self) {}
+}
+
+#[cfg(windows)]
+impl Drop for KillGroup {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        if !self.job.is_null() {
+            // Closing the last job handle triggers KILL_ON_JOB_CLOSE, killing any
+            // process still in the job — the last-resort reaper. The handle is
+            // held until here precisely so this fires no earlier than run end.
+            // SAFETY: `self.job` is a valid HANDLE created in `new` and closed
+            // exactly once here.
+            unsafe {
+                CloseHandle(self.job);
+            }
+        }
+    }
+}
+
+// Fallback for targets that are neither unix nor windows: no process-tree kill
+// primitive is wired up, so timeouts rely on the cross-platform start_kill in
+// `run`. Keeps the crate compiling everywhere.
+#[cfg(not(any(unix, windows)))]
+struct KillGroup;
+
+#[cfg(not(any(unix, windows)))]
+impl KillGroup {
+    fn new(_child: &tokio::process::Child, _pid: Option<u32>) -> Self {
+        Self
+    }
+    fn kill_immediate(&self) {}
+    async fn kill_graceful(&self) {}
+    fn disarm(&mut self) {}
+}
 
 #[derive(Default)]
 struct CapturedStream {
@@ -665,7 +791,12 @@ mod tests {
         let r = run(
             &state,
             ShellParams {
-                command: "sleep 999".into(),
+                // Short sleep, not 999: the kill path must actually terminate
+                // the process tree on timeout. If a regression leaves the child
+                // (or an MSYS grandchild) orphaned, the test stalls until this
+                // brief sleep self-exits — ~5s, not ~16min — so the failure
+                // stays visible instead of hiding behind a 999s sleep.
+                command: "sleep 5".into(),
                 workdir: None,
                 timeout_ms: Some(150),
             },
