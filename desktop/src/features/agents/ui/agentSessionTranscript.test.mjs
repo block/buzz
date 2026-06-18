@@ -51,7 +51,7 @@ test("buildTranscript renders Prompt context + user message for a multi-block se
           { type: "text", text: "[Context]\nScope: thread" },
           {
             type: "text",
-            text: "[Buzz event: @mention]\nFrom: x (hex: " + "a".repeat(64) + ")\nContent: hello",
+            text: `[Buzz event: @mention]\nFrom: x (hex: ${"a".repeat(64)})\nContent: hello`,
           },
         ],
       },
