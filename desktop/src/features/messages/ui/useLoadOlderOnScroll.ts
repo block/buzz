@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { CONVERGENCE_FRAME_CAP } from "@/features/messages/lib/scrollConvergence";
 import type { ListVirtualizer } from "@/shared/ui/VirtualizedList";
 
 type UseLoadOlderOnScrollOptions = {
@@ -10,13 +11,15 @@ type UseLoadOlderOnScrollOptions = {
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   sentinelRef: React.RefObject<HTMLDivElement | null>;
   /**
-   * When the timeline is virtualized, prepended rows shift every index and are
-   * mounted at an estimate (80px) before they measure, so the `scrollHeight`
-   * delta anchor drifts. Supplying the virtualizer switches to an index anchor:
-   * we hold the first-visible item across the prepend by its NEW index.
+   * When the timeline is virtualized, a prepend shifts every index and a large
+   * one pushes the anchored row out of the window before it can be re-measured.
+   * Supplying the virtualizer switches to an index anchor: we hold the
+   * first-visible row across the prepend by re-aiming `scrollToIndex` at its new
+   * index (resolved from `indexByMessageId`) until the library settles it.
    */
   virtualizer?: {
     getVirtualizer: () => ListVirtualizer | null;
+    indexByMessageId: Map<string, number>;
     itemCount: number;
   } | null;
 };
@@ -75,53 +78,113 @@ export function useLoadOlderOnScroll({
 
           const virt = virtualizerRef.current;
           if (virt) {
-            // Index anchor: hold the first rendered item across the prepend.
-            // Capture its index + the gap between its top and the viewport top
-            // BEFORE the fetch; after the prepend shifts indices by N, re-aim at
-            // `oldIndex + N` and restore that same intra-row gap. This is immune
-            // to the estimate->measured height churn that makes a scrollHeight
-            // delta drift.
+            // Hold the first VISIBLE row across the prepend. After N older rows
+            // are prepended the anchored row's INDEX shifts by N and — with
+            // scrollTop unchanged near the top — it's pushed below the window
+            // and recycled out of the DOM, so a pure DOM re-read can't find it.
+            // We therefore drive the virtualizer: capture the row's id + its top
+            // offset in the viewport now, and after the prepend re-aim
+            // `scrollToIndex(newIndex, "start")` each frame (re-issued only when
+            // the resolved index moves, so the library's internal settle loop is
+            // never reset — same single-issue discipline as the convergence
+            // adapter). `scrollToIndex` re-aims internally as rows mount and
+            // measure, landing the row's TOP at the viewport top; once it settles
+            // we apply the captured intra-viewport gap with ONE scrollTop write.
+            // Single writer throughout: one mechanism re-aims, the gap is a final
+            // one-shot, never an overlapping second target.
             const instance = virt.getVirtualizer();
-            const firstVisible = instance?.getVirtualItems()[0];
+            const container = scrollContainerRef.current;
             const previousCount = virt.itemCount;
-            const anchorIndex = firstVisible?.index ?? null;
-            const anchorOffsetIntoRow =
-              firstVisible && instance
-                ? (instance.scrollOffset ?? 0) - firstVisible.start
-                : 0;
 
             void fetchOlder().then(() => {
-              requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                  const after = virtualizerRef.current?.getVirtualizer();
-                  const prepended =
-                    (virtualizerRef.current?.itemCount ?? previousCount) -
-                    previousCount;
-                  if (after && anchorIndex !== null && prepended > 0) {
-                    // Restore by scrollTop ONLY — a single writer. Compute the
-                    // anchored row's top via getOffsetForIndex (a pure read of
-                    // the measurement cache, no scrollState) and add back the
-                    // captured intra-row gap. Calling scrollToIndex here too
-                    // would set the library's scrollState aiming at the row TOP
-                    // while this restore aims at row top + gap; the two write
-                    // scrollTop to different values on overlapping rAF frames,
-                    // so the library's reconcile never reaches approxEqual,
-                    // never re-scrolls (its target is unchanged), and spins one
-                    // rAF/frame for the full 5s MAX_RECONCILE_MS valve on every
-                    // prepend. One mechanism, no fight.
-                    const target = after.getOffsetForIndex(
-                      anchorIndex + prepended,
-                      "start",
+              // Capture the anchor at fetch-RESOLVE time, not sentinel-fire
+              // time: the history request can be in flight for a while and the
+              // user may keep scrolling during it (the e2e scrolls further down
+              // mid-fetch). The row+offset we must preserve is wherever the
+              // reader actually is the instant before the prepend commits, read
+              // from the live DOM here while every visible row is still mounted.
+              const containerRect = container?.getBoundingClientRect();
+              const containerTop = containerRect?.top ?? 0;
+              const containerBottom = containerRect?.bottom ?? 0;
+              // First row intersecting the viewport — the reader's eye-line row.
+              // Geometry matches the test's getFirstVisibleMessage exactly: its
+              // bottom is below the viewport top and its top is above the
+              // viewport bottom.
+              const anchorRow = container
+                ? Array.from(
+                    container.querySelectorAll<HTMLElement>(
+                      "[data-message-id]",
+                    ),
+                  ).find((row) => {
+                    const rect = row.getBoundingClientRect();
+                    return (
+                      rect.bottom > containerTop && rect.top < containerBottom
                     );
-                    if (target !== undefined) {
-                      restoreScrollPositionRef.current(
-                        target[0] + anchorOffsetIntoRow,
-                      );
+                  })
+                : undefined;
+              const anchorId = anchorRow?.dataset.messageId ?? null;
+              // The anchored row's top relative to the viewport top — held
+              // constant across the prepend.
+              const anchorTop = anchorRow
+                ? anchorRow.getBoundingClientRect().top - containerTop
+                : 0;
+
+              // The timeline drives its rows off a `useDeferredValue` of the
+              // message list, so the prepended items commit on a LOW-priority
+              // render that can land several frames after `fetchOlder` resolves.
+              // Poll rAF until the live id->index map actually shifts the anchor
+              // (the prepend is observable), capped so an empty fetch can't spin.
+              const maxFrames = CONVERGENCE_FRAME_CAP;
+              let frame = 0;
+              let lastTarget: number | null = null;
+              let stableFrames = 0;
+              const waitForPrepend = () => {
+                const after = virtualizerRef.current;
+                const grew =
+                  (after?.itemCount ?? previousCount) > previousCount;
+                const newIndex =
+                  anchorId !== null
+                    ? after?.indexByMessageId.get(anchorId)
+                    : undefined;
+                if (instance && grew && newIndex !== undefined) {
+                  // Target offset that puts the anchored row back at its captured
+                  // viewport gap: the row's start (top at viewport top) minus the
+                  // gap that was above it. We drive `scrollToOffset` — NOT
+                  // `scrollToIndex` — so the library's reconcile holds a FIXED
+                  // offset (`scrollState.index` is null) instead of re-resolving
+                  // the index to row-top each frame and overwriting our gap. As
+                  // the prepended rows measure, `getOffsetForIndex` grows and we
+                  // recompute the target and re-issue. Re-issue ONLY when the
+                  // target moves — re-issuing an unchanged offset resets the
+                  // library's stable-frame counter and spins. Same single-issue
+                  // discipline as the convergence adapter; one mechanism.
+                  const start = instance.getOffsetForIndex(newIndex, "start");
+                  if (start !== undefined) {
+                    const target = start[0] - anchorTop;
+                    if (target !== lastTarget) {
+                      instance.scrollToOffset(target, { align: "start" });
+                      lastTarget = target;
+                      stableFrames = 0;
+                    } else if ((instance.scrollOffset ?? 0) === target) {
+                      // The offset reached its target and the target stopped
+                      // moving (measurement settled). Two stable frames guards
+                      // against ending before the last row measures.
+                      stableFrames += 1;
+                      if (stableFrames >= 2) {
+                        observe();
+                        return;
+                      }
                     }
                   }
+                }
+                frame += 1;
+                if (frame >= maxFrames) {
                   observe();
-                });
-              });
+                  return;
+                }
+                requestAnimationFrame(waitForPrepend);
+              };
+              requestAnimationFrame(waitForPrepend);
             });
             return;
           }

@@ -523,28 +523,75 @@ test("deep-link to a message in older history scrolls and highlights it", async 
   const targetRow = timeline.locator(`[data-message-id="${targetId}"]`);
   await expect(targetRow).toBeVisible({ timeout: 5_000 });
 
-  // (b) Geometry: target row sits inside the timeline viewport AND near
-  // the vertical center. "Near center" is defined as within one row-height
-  // worth of slack of half the timeline's clientHeight -- generous enough
-  // to tolerate centering implementation choices but tight enough to catch
-  // "row is technically visible but at the top edge" regressions.
+  // (b)/(c) Geometry + highlight. The convergence adapter re-aims the
+  // virtualizer across several frames (scrollToIndex on an estimated index,
+  // then re-resolved once rows measure), and only applies the highlight on
+  // the settled frame via `onConverged`. The row therefore becomes DOM-
+  // visible (passing `toBeVisible` above) at an intermediate overshoot
+  // position one or more frames before it is centered and highlighted. We
+  // poll the row's placement until it satisfies the full settled contract --
+  // centered AND carrying the highlight class -- inside the 2s highlight-fade
+  // window. A single synchronous read here would race the convergence loop.
   const placement = await timeline.evaluate((timelineEl, id) => {
     const t = timelineEl as HTMLDivElement;
-    const row = t.querySelector<HTMLElement>(
-      `[data-message-id="${CSS.escape(id)}"]`,
-    );
-    if (!row) {
-      return null;
-    }
-    const tRect = t.getBoundingClientRect();
-    const rRect = row.getBoundingClientRect();
-    return {
-      rowTopRelative: rRect.top - tRect.top,
-      rowBottomRelative: rRect.bottom - tRect.top,
-      timelineHeight: tRect.height,
-      rowHeight: rRect.height,
-      className: row.className,
-    };
+    return new Promise<{
+      rowTopRelative: number;
+      rowBottomRelative: number;
+      timelineHeight: number;
+      rowHeight: number;
+      className: string;
+    } | null>((resolve) => {
+      const deadline = performance.now() + 3_000;
+      const tick = () => {
+        const row = t.querySelector<HTMLElement>(
+          `[data-message-id="${CSS.escape(id)}"]`,
+        );
+        if (row) {
+          const tRect = t.getBoundingClientRect();
+          const rRect = row.getBoundingClientRect();
+          const result = {
+            rowTopRelative: rRect.top - tRect.top,
+            rowBottomRelative: rRect.bottom - tRect.top,
+            timelineHeight: tRect.height,
+            rowHeight: rRect.height,
+            className: row.className,
+          };
+          const centered =
+            Math.abs(
+              (result.rowTopRelative + result.rowBottomRelative) / 2 -
+                result.timelineHeight / 2,
+            ) <=
+            result.timelineHeight / 2;
+          if (
+            centered &&
+            result.className.includes("route-target-highlight-fade")
+          ) {
+            resolve(result);
+            return;
+          }
+        }
+        if (performance.now() > deadline) {
+          resolve(
+            row
+              ? {
+                  rowTopRelative:
+                    row.getBoundingClientRect().top -
+                    t.getBoundingClientRect().top,
+                  rowBottomRelative:
+                    row.getBoundingClientRect().bottom -
+                    t.getBoundingClientRect().top,
+                  timelineHeight: t.getBoundingClientRect().height,
+                  rowHeight: row.getBoundingClientRect().height,
+                  className: row.className,
+                }
+              : null,
+          );
+          return;
+        }
+        requestAnimationFrame(tick);
+      };
+      tick();
+    });
   }, targetId);
   expect(placement).not.toBeNull();
   const p = placement as NonNullable<typeof placement>;

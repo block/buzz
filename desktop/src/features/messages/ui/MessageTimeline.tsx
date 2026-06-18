@@ -20,6 +20,8 @@ import type { ListVirtualizer } from "@/shared/ui/VirtualizedList";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import { useAnchoredScroll } from "./useAnchoredScroll";
+import { useConvergentScrollToMessage } from "./useConvergentScrollToMessage";
+import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
 
 export type MessageTimelineHandle = {
   scrollToBottomOnNextUpdate: () => void;
@@ -109,6 +111,10 @@ type ChannelIntro = {
  *  message list. Must be module-level so its identity never changes. */
 const EMPTY_MESSAGES: TimelineMessage[] = [];
 
+/** Stable empty id->index map for the convergence adapter before the first
+ *  item stream arrives. Module-level so its identity never changes. */
+const EMPTY_INDEX_MAP: Map<string, number> = new Map();
+
 type DirectMessageIntroParticipant = {
   avatarUrl: string | null;
   displayName: string;
@@ -164,6 +170,17 @@ const MessageTimelineBase = React.forwardRef<
   const scrollContainerRef = externalScrollRef ?? internalScrollRef;
   const contentRef = React.useRef<HTMLDivElement>(null);
   const topSentinelRef = React.useRef<HTMLDivElement>(null);
+
+  // The convergence fallback for a windowed-out deep-link target. It's defined
+  // below (it depends on the anchored-scroll result), so `useAnchoredScroll`
+  // reads it through a ref via a stable wrapper — letting the hook stay
+  // virtualizer-agnostic while the consumer owns the convergence machinery.
+  const convergeToTargetRef = React.useRef<(messageId: string) => boolean>(
+    () => false,
+  );
+  const convergeToTarget = React.useCallback((messageId: string) => {
+    return convergeToTargetRef.current(messageId);
+  }, []);
 
   // The virtualizer instance and the flattened item stream are owned by the
   // child TimelineMessageList (which mounts the VirtualizedList) and reported
@@ -237,22 +254,19 @@ const MessageTimelineBase = React.forwardRef<
     isAtBottom,
     newMessageCount,
     onScroll,
+    restoreScrollPosition,
     scrollToBottom,
     scrollToBottomOnNextUpdate,
     scrollToMessage,
   } = useAnchoredScroll({
     channelId,
     contentRef,
-    fetchOlder,
-    hasOlderMessages,
-    isFetchingOlder,
+    convergeToTarget,
     isLoading: showTimelineSkeleton,
     messages: deferredMessages,
     onTargetReached,
     scrollContainerRef,
-    sentinelRef: topSentinelRef,
     targetMessageId,
-    virtualizer: virtualizerOption,
   });
 
   React.useImperativeHandle(
@@ -262,6 +276,48 @@ const MessageTimelineBase = React.forwardRef<
     }),
     [scrollToBottomOnNextUpdate],
   );
+
+  // Role 3 — jump-to-message into windowed-out history. The DOM-based
+  // `scrollToMessage` no-ops when the target row isn't mounted (virtualized
+  // out), so when it fails and the timeline is virtualized we drive the
+  // convergence adapter: it scrolls the virtualizer to the target index,
+  // re-aiming each frame as rows mount and measure, then on settle the row is
+  // in the DOM and `scrollToMessage` centers + highlights it. When there's no
+  // virtualizer (e.g. the thread panel), there's nothing to converge — the DOM
+  // path is the whole story and a missing row simply isn't reachable.
+  const { scrollToMessage: convergeToMessage, cancel: cancelConvergence } =
+    useConvergentScrollToMessage(getVirtualizer, {
+      indexByMessageId: timelineItems?.indexByMessageId ?? EMPTY_INDEX_MAP,
+      align: "center",
+      onConverged: (messageId) => {
+        scrollToMessage(messageId, { highlight: true });
+        onTargetReached?.(messageId);
+      },
+    });
+  const jumpToMessage = React.useCallback(
+    (messageId: string, options?: { behavior?: ScrollBehavior }) => {
+      if (scrollToMessage(messageId, { highlight: true, ...options })) {
+        return;
+      }
+      if (virtualizerOption) {
+        convergeToMessage(messageId);
+      }
+    },
+    [convergeToMessage, scrollToMessage, virtualizerOption],
+  );
+  // Feed the windowed-out deep-link fallback back into `useAnchoredScroll`,
+  // which calls it when a target row isn't in the DOM. Gated on the virtualizer
+  // so the thread panel (no virtualizer) never converges. Assigned in an effect
+  // because `useAnchoredScroll` reads it asynchronously from a post-mount effect.
+  React.useEffect(() => {
+    convergeToTargetRef.current = virtualizerOption
+      ? convergeToMessage
+      : () => false;
+  }, [convergeToMessage, virtualizerOption]);
+  // Abandon any in-flight convergence on channel switch so a stale loop can't
+  // hijack the new channel's scroll position.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: cancel on channel switch only
+  React.useEffect(() => cancelConvergence, [channelId, cancelConvergence]);
 
   // The unread pill is a transient, per-open affordance: dismiss it once the
   // user acts on it (jumps to the oldest unread) or catches up by reaching the
@@ -292,14 +348,14 @@ const MessageTimelineBase = React.forwardRef<
   const handleJumpToOldestUnread = React.useCallback(() => {
     setIsUnreadPillDismissed(true);
     if (firstUnreadMessageId) {
-      scrollToMessage(firstUnreadMessageId);
+      jumpToMessage(firstUnreadMessageId);
     }
-  }, [firstUnreadMessageId, scrollToMessage]);
+  }, [firstUnreadMessageId, jumpToMessage]);
 
-  // Scroll to the active search match when it changes. `scrollToMessage`
-  // updates the scroll anchor (so the post-commit restore won't yank the view
-  // back off the match) and, when virtualized, resolves the target through the
-  // index model — the row may be windowed out of the DOM.
+  // Scroll to the active search match when it changes. `jumpToMessage` updates
+  // the scroll anchor (so the post-commit restore won't yank the view back off
+  // the match) and, when virtualized, converges on the target through the index
+  // model — the row may be windowed out of the DOM.
   const prevSearchActiveRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (showTimelineSkeleton) return;
@@ -311,8 +367,8 @@ const MessageTimelineBase = React.forwardRef<
       return;
     }
     prevSearchActiveRef.current = searchActiveMessageId;
-    scrollToMessage(searchActiveMessageId, { behavior: "smooth" });
-  }, [scrollToMessage, searchActiveMessageId, showTimelineSkeleton]);
+    jumpToMessage(searchActiveMessageId, { behavior: "smooth" });
+  }, [jumpToMessage, searchActiveMessageId, showTimelineSkeleton]);
 
   useLoadOlderOnScroll({
     fetchOlder,
@@ -368,11 +424,17 @@ const MessageTimelineBase = React.forwardRef<
           >
             <div ref={topSentinelRef} aria-hidden className="h-px" />
 
-            {isFetchingOlder ? (
-              <div className="flex justify-center py-2">
+            {/* Fixed-height slot: an always-mounted height keeps the virtual
+                spacer's offset stable across the load-older fetch toggle, so
+                `scrollMargin` doesn't shift mid-fetch and yank the restore. */}
+            <div
+              aria-hidden={!isFetchingOlder}
+              className="flex h-8 items-center justify-center"
+            >
+              {isFetchingOlder ? (
                 <Spinner className="h-4 w-4 border-2 text-muted-foreground" />
-              </div>
-            ) : null}
+              ) : null}
+            </div>
 
             <div
               className={cn(

@@ -9,6 +9,7 @@ function input(overrides) {
     indexByMessageId: new Map([["target", 100]]),
     lastIssuedIndex: null,
     librarySettled: false,
+    stalledOffTarget: false,
     framesUsed: 0,
     ...overrides,
   };
@@ -88,8 +89,57 @@ test("convergenceStep: aiming at current but not yet settled keeps waiting", () 
     input({ lastIssuedIndex: 100, librarySettled: false }),
   );
   assert.equal(step.nextIndex, 100);
+  assert.equal(step.reissue, false);
   assert.equal(step.done, false);
   assert.equal(step.converged, false);
+});
+
+// --- off-target stall (liveness) ---------------------------------------------
+
+test("convergenceStep: stalled off-target while aiming at current re-issues same index", () => {
+  // The library's offset stopped moving but never reached the current index's
+  // target (its internal reconcile deadlocked after rows re-measured). The
+  // reducer signals a same-index re-issue to kick it — the loop continues.
+  const step = convergenceStep(
+    input({ lastIssuedIndex: 100, stalledOffTarget: true }),
+  );
+  assert.equal(step.nextIndex, 100);
+  assert.equal(step.reissue, true);
+  assert.equal(step.done, false);
+  assert.equal(step.converged, false);
+});
+
+test("convergenceStep: a stall reported WHILE re-aiming does not re-issue", () => {
+  // The index just moved (105) but the library reports a stall on the OLD index
+  // (100). The reducer re-aims at the new index normally; the stale stall must
+  // NOT trigger a same-index kick (there is no current-index stall to kick).
+  const step = convergenceStep(
+    input({
+      indexByMessageId: new Map([["target", 105]]),
+      lastIssuedIndex: 100,
+      stalledOffTarget: true,
+    }),
+  );
+  assert.equal(step.nextIndex, 105);
+  assert.equal(step.reissue, false);
+  assert.equal(step.done, false);
+  assert.equal(step.converged, false);
+});
+
+test("convergenceStep: a settle takes priority over a concurrent stall flag", () => {
+  // Defensive: the adapter computes settle and stall as mutually exclusive, but
+  // if both arrive, a genuine settle must win (converge) rather than spin on a
+  // pointless re-issue.
+  const step = convergenceStep(
+    input({
+      lastIssuedIndex: 100,
+      librarySettled: true,
+      stalledOffTarget: true,
+    }),
+  );
+  assert.equal(step.done, true);
+  assert.equal(step.converged, true);
+  assert.equal(step.reissue, false);
 });
 
 // --- frame cap ---------------------------------------------------------------

@@ -307,10 +307,6 @@ export function MessageThreadPanel({
 }: MessageThreadPanelProps) {
   const threadBodyRef = React.useRef<HTMLDivElement>(null);
   const threadContentRef = React.useRef<HTMLDivElement>(null);
-  // Threads don't paginate older history, so this sentinel is never observed
-  // (the hook's older-history effect bails without a `fetchOlder`). It exists
-  // only to satisfy the hook's required ref contract.
-  const threadTopSentinelRef = React.useRef<HTMLDivElement>(null);
   const threadComposerWrapperRef = React.useRef<HTMLDivElement>(null);
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
@@ -372,7 +368,6 @@ export function MessageThreadPanel({
       messages: threadMessages,
       onTargetReached: onScrollTargetResolved,
       scrollContainerRef: threadBodyRef,
-      sentinelRef: threadTopSentinelRef,
       targetMessageId: scrollTargetId,
     });
 
@@ -392,7 +387,6 @@ export function MessageThreadPanel({
       ref={threadBodyRef}
     >
       <div ref={threadContentRef}>
-        <div ref={threadTopSentinelRef} aria-hidden className="h-px" />
         <div className="px-3 pb-1 pt-0" data-testid="message-thread-head">
           <div className="rounded-2xl">
             <MessageRow

@@ -20,9 +20,6 @@ type UseAnchoredScrollOptions = {
   /** Inner content element — must wrap every renderable row, including the
    *  sentinel and bottom anchor. Used to schedule layout work on resize. */
   contentRef: React.RefObject<HTMLDivElement | null>;
-  /** Small zero-height element near the very top of the content. When it
-   *  intersects the viewport (with some rootMargin) we trigger fetchOlder. */
-  sentinelRef: React.RefObject<HTMLDivElement | null>;
   /** Resets when changed; lets us drop anchor + scroll state across channels. */
   channelId?: string | null;
   /** Suppresses initial scroll-to-bottom while a skeleton is showing. */
@@ -30,20 +27,17 @@ type UseAnchoredScrollOptions = {
   /** Source of truth for the rendered list. Used to detect new-at-bottom
    *  arrivals and to seed/refresh the anchor pre-render. */
   messages: TimelineMessage[];
-  /** Optional callback to fetch older history. The hook handles intersection,
-   *  debouncing, and post-prepend scroll restoration via the anchor. */
-  fetchOlder?: () => Promise<void>;
-  hasOlderMessages?: boolean;
-  /** True while an older-history fetch is in flight. The fetch spinner renders
-   *  above the anchor, so toggling it shifts every row below it. The spinner
-   *  toggles on its own commit (no message change), so without this signal the
-   *  restoration effect — keyed on `messages` — wouldn't re-run to correct the
-   *  shift, leaving a visible one-frame jump. Threading it through makes the
-   *  anchor the single owner of every layout change above the reader's eye. */
-  isFetchingOlder?: boolean;
   /** When set, scroll to and highlight this message on mount and on change. */
   targetMessageId?: string | null;
   onTargetReached?: (messageId: string) => void;
+  /** Optional convergence fallback for a `targetMessageId` whose row is not in
+   *  the DOM (windowed out of a virtualized list). When the DOM lookup fails,
+   *  the hook delegates to this instead of waiting for a later commit that may
+   *  never render the row. The consumer drives the virtualizer to the target,
+   *  warming up if it's still being fetched, and fires `onTargetReached` itself
+   *  on settle. Returns `true` once it owns the target (the hook marks it
+   *  handled, no further dispatch). Absent (thread panel) → DOM-only retry. */
+  convergeToTarget?: (messageId: string) => boolean;
 };
 
 type UseAnchoredScrollResult = {
@@ -67,6 +61,11 @@ type UseAnchoredScrollResult = {
     messageId: string,
     options?: { highlight?: boolean; behavior?: ScrollBehavior },
   ) => boolean;
+  /** Single-writer scroll restore for the load-older index path. Sets
+   *  `scrollTop` directly (no scroll event fires for a programmatic write),
+   *  then re-seats the anchor + at-bottom bookkeeping so the next passive
+   *  restore and `isAtBottom` read agree with where we put the scroll. */
+  restoreScrollPosition: (scrollTop: number) => void;
 };
 
 function isAtBottomNow(container: HTMLDivElement) {
@@ -208,15 +207,12 @@ function restoreAnchorToMessage(
 export function useAnchoredScroll({
   scrollContainerRef,
   contentRef,
-  sentinelRef,
   channelId,
   isLoading,
   messages,
-  fetchOlder,
-  hasOlderMessages = false,
-  isFetchingOlder = false,
   targetMessageId = null,
   onTargetReached,
+  convergeToTarget,
 }: UseAnchoredScrollOptions): UseAnchoredScrollResult {
   // Anchor lives in a ref because it must survive renders and is updated
   // both on scroll (commit-time read) and in the layout effect (post-render
@@ -234,10 +230,24 @@ export function useAnchoredScroll({
   >(null);
 
   const hasInitializedRef = React.useRef(false);
+  // Mirror the convergence fallback into a ref so the target effects read the
+  // live callback without re-subscribing on every consumer render.
+  const convergeToTargetRef = React.useRef(convergeToTarget);
+  convergeToTargetRef.current = convergeToTarget;
   const prevLastMessageIdRef = React.useRef<string | undefined>(undefined);
+  // Tracks the FRONT (oldest) rendered id so the restore effect can detect a
+  // load-older prepend (front changed, tail unchanged) and cede it to the
+  // index path — see IMPORTANT #1 in the restore effect below.
+  const prevFirstMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevMessageCountRef = React.useRef(0);
-  const fetchingOlderRef = React.useRef(false);
   const handledTargetIdRef = React.useRef<string | null>(null);
+  // Set while a convergence loop owns the scroll position (jump-to-message into
+  // windowed-out history). The library's reconcile loop is the sole writer
+  // during convergence, so the anchored restore below must cede — otherwise its
+  // at-bottom `scrollTo` would yank the view back as the target row splices in,
+  // the same two-writer contention the prepend bail prevents. Cleared when the
+  // target settles (consumer clears the route param → `targetMessageId` null).
+  const convergingTargetIdRef = React.useRef<string | null>(null);
   const highlightTimeoutRef = React.useRef<number | null>(null);
   // One-shot: the consumer calls `scrollToBottomOnNextUpdate()` right before
   // it sends a message (see ChannelPane). When the user's own message then
@@ -256,9 +266,10 @@ export function useAnchoredScroll({
     setHighlightedMessageId(null);
     hasInitializedRef.current = false;
     prevLastMessageIdRef.current = undefined;
+    prevFirstMessageIdRef.current = undefined;
     prevMessageCountRef.current = 0;
-    fetchingOlderRef.current = false;
     handledTargetIdRef.current = null;
+    convergingTargetIdRef.current = null;
     forceBottomOnNextAppendRef.current = false;
     if (highlightTimeoutRef.current !== null) {
       window.clearTimeout(highlightTimeoutRef.current);
@@ -330,6 +341,36 @@ export function useAnchoredScroll({
     [scrollContainerRef],
   );
 
+  // Re-seat the anchor + at-bottom bookkeeping after a programmatic scrollTop
+  // write. A programmatic write fires no scroll event, so `onScroll` won't run
+  // to refresh `anchorRef`/`isAtBottom` — we run the same derivation here so
+  // the next passive restore and at-bottom read agree with the new position.
+  // We deliberately do NOT touch `newMessageCount`: a load-older restore keeps
+  // the reader mid-history, so the unread-count affordance must be untouched.
+  const syncAnchorAfterProgrammaticScroll = React.useCallback(
+    (container: HTMLDivElement) => {
+      anchorRef.current = computeAnchor(container);
+      const atBottom = anchorRef.current.kind === "at-bottom";
+      setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
+    },
+    [],
+  );
+
+  // Single-writer restore for the load-older index path (IMPORTANT #2). The
+  // index path resolves the exact target `scrollTop` off the virtualizer's
+  // settled measurement cache (`getOffsetForIndex`), so a bare assignment is
+  // correct on the first write — no rAF re-assert loop, no manager scroll-state
+  // machine. Re-seating the anchor afterwards keeps this the sole owner.
+  const restoreScrollPosition = React.useCallback(
+    (scrollTop: number) => {
+      const container = scrollContainerRef.current;
+      if (!container) return;
+      container.scrollTop = scrollTop;
+      syncAnchorAfterProgrammaticScroll(container);
+    },
+    [scrollContainerRef, syncAnchorAfterProgrammaticScroll],
+  );
+
   // Scroll handler: recompute anchor + bottom state from the current
   // scroll position. Cheap enough to run on every scroll event — a single
   // `getBoundingClientRect` walk plus rect reads.
@@ -347,10 +388,11 @@ export function useAnchoredScroll({
   // ---------------------------------------------------------------------------
   // Anchor restoration: after every render, if the anchor was a message,
   // realign so that message sits at the same top-relative offset it had
-  // before the render. This is the single mechanism for keeping scroll
-  // stable across prepends, appends, image loads, embed expansions, etc.
+  // before the render. This keeps scroll stable across appends, image loads,
+  // and embed expansions. Load-older prepends are NOT handled here — they are
+  // ceded to `useLoadOlderOnScroll`'s index anchor (see the prepend bail
+  // below) so a single writer owns `scrollTop` on the prepend commit.
   // ---------------------------------------------------------------------------
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `isFetchingOlder` is an intentional re-run trigger, not a read — the fetch spinner renders above the anchor on its own commit (with `messages` unchanged), so we re-run restoration on its toggle to correct the spinner-induced shift via the existing anchor.
   React.useLayoutEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -387,16 +429,49 @@ export function useAnchoredScroll({
       }
       hasInitializedRef.current = true;
       prevLastMessageIdRef.current = messages[messages.length - 1]?.id;
+      prevFirstMessageIdRef.current = messages[0]?.id;
       prevMessageCountRef.current = messages.length;
       return;
     }
 
     const anchor = anchorRef.current;
     const lastMessage = messages[messages.length - 1];
+    const firstMessage = messages[0];
     const prevLastId = prevLastMessageIdRef.current;
+    const prevFirstId = prevFirstMessageIdRef.current;
     const prevCount = prevMessageCountRef.current;
     const newLatestArrived =
       lastMessage !== undefined && lastMessage.id !== prevLastId;
+    // A convergence loop owns the scroll position while jumping to a windowed-out
+    // target (its library reconcile is the sole writer). Cede every restore
+    // branch to it — an at-bottom `scrollTo` here would chase the view back to
+    // the bottom as the target's neighbours splice into the window mid-converge.
+    // Refresh the tracked refs so the first post-settle commit isn't misread as
+    // a prepend/append. Cleared when the target settles (targetMessageId null).
+    if (convergingTargetIdRef.current !== null) {
+      prevLastMessageIdRef.current = lastMessage?.id;
+      prevFirstMessageIdRef.current = firstMessage?.id;
+      prevMessageCountRef.current = messages.length;
+      return;
+    }
+    // A load-older prepend grows the list at the FRONT while the tail is
+    // unchanged. `useLoadOlderOnScroll` owns the prepend restore via its index
+    // anchor (the single `scrollTop` writer). If this restore effect also ran
+    // its anchored `scrollBy` on the same commit, two writers would fight over
+    // `scrollTop`. So cede the prepend to the index path: refresh the tracked
+    // refs and bail before the anchored branch. (Append and in-window reflow
+    // leave the front id unchanged, so they fall through as before.)
+    const isPrepend =
+      firstMessage !== undefined &&
+      prevFirstId !== undefined &&
+      firstMessage.id !== prevFirstId &&
+      !newLatestArrived;
+    if (isPrepend) {
+      prevLastMessageIdRef.current = lastMessage?.id;
+      prevFirstMessageIdRef.current = firstMessage.id;
+      prevMessageCountRef.current = messages.length;
+      return;
+    }
 
     // One-shot: an outbound send armed `scrollToBottomOnNextUpdate`. When the
     // resulting append lands, snap to bottom regardless of the current anchor,
@@ -409,6 +484,7 @@ export function useAnchoredScroll({
       setIsAtBottom(true);
       setNewMessageCount(0);
       prevLastMessageIdRef.current = lastMessage?.id;
+      prevFirstMessageIdRef.current = firstMessage?.id;
       prevMessageCountRef.current = messages.length;
       return;
     }
@@ -435,9 +511,9 @@ export function useAnchoredScroll({
     }
 
     prevLastMessageIdRef.current = lastMessage?.id;
+    prevFirstMessageIdRef.current = firstMessage?.id;
     prevMessageCountRef.current = messages.length;
   }, [
-    isFetchingOlder,
     isLoading,
     messages,
     onTargetReached,
@@ -445,71 +521,6 @@ export function useAnchoredScroll({
     scrollToBottomImperative,
     scrollToMessageImperative,
     targetMessageId,
-  ]);
-
-  // ---------------------------------------------------------------------------
-  // Older-history loader. IntersectionObserver on the top sentinel; when it
-  // crosses into view (with a 200px rootMargin so we preload a bit early)
-  // we fire `fetchOlder`. The anchor restoration above handles the prepend
-  // — we don't need to compute or apply a scrollHeight delta ourselves.
-  // ---------------------------------------------------------------------------
-  React.useEffect(() => {
-    const sentinel = sentinelRef.current;
-    const container = scrollContainerRef.current;
-    if (
-      !sentinel ||
-      !container ||
-      !fetchOlder ||
-      isLoading ||
-      !hasOlderMessages
-    ) {
-      return;
-    }
-
-    let disposed = false;
-    let observer: IntersectionObserver | null = null;
-
-    const start = () => {
-      if (disposed) return;
-      observer = new IntersectionObserver(
-        ([entry]) => {
-          if (!entry?.isIntersecting || disposed || fetchingOlderRef.current) {
-            return;
-          }
-          fetchingOlderRef.current = true;
-          observer?.disconnect();
-
-          // Before the fetch, capture the anchor from the current scroll
-          // position. The layout effect after re-render will use it.
-          anchorRef.current = computeAnchor(container);
-
-          void fetchOlder()
-            .catch(() => {
-              // Swallow; the next intersection will retry. We don't want
-              // to crash the observer chain on a transient relay error.
-            })
-            .finally(() => {
-              fetchingOlderRef.current = false;
-              // Re-observe in case there's more history to load.
-              start();
-            });
-        },
-        { root: container, rootMargin: "200px 0px 0px 0px" },
-      );
-      observer.observe(sentinel);
-    };
-
-    start();
-    return () => {
-      disposed = true;
-      observer?.disconnect();
-    };
-  }, [
-    fetchOlder,
-    hasOlderMessages,
-    isLoading,
-    scrollContainerRef,
-    sentinelRef,
   ]);
 
   // ---------------------------------------------------------------------------
@@ -532,7 +543,17 @@ export function useAnchoredScroll({
       if (!container) return;
       const anchor = anchorRef.current;
       if (anchor.kind === "at-bottom") {
-        container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+        // Pin to bottom only when the viewport is GENUINELY at the bottom
+        // right now — read live geometry, don't trust the cached anchor kind.
+        // After a programmatic jump into windowed-out history, the virtualizer
+        // needs a frame to render rows at the new offset; in that gap
+        // `computeAnchor` finds no crossing row and falls back to `at-bottom`,
+        // which would make this observer yank a mid-history restore down to
+        // the floor as the prepended rows measure. `isAtBottomNow` is the
+        // authoritative read; when it disagrees we leave the scroll alone.
+        if (isAtBottomNow(container)) {
+          container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
+        }
         return;
       }
       // Use the same restore primitive as the layout effect so the
@@ -567,6 +588,7 @@ export function useAnchoredScroll({
   React.useEffect(() => {
     if (!targetMessageId) {
       handledTargetIdRef.current = null;
+      convergingTargetIdRef.current = null;
       return;
     }
     if (handledTargetIdRef.current === targetMessageId || isLoading) return;
@@ -577,7 +599,23 @@ export function useAnchoredScroll({
     const el = container.querySelector<HTMLElement>(
       `[data-message-id="${targetMessageId}"]`,
     );
-    if (!el) return; // Row not rendered yet; a later `messages` commit retries.
+    if (!el) {
+      // Row not in the DOM. In a virtualized list it may be windowed out and
+      // never render from a passive commit, so delegate to the convergence
+      // fallback: it drives the virtualizer to the target (warming up if a
+      // deep-link target is still being fetched in) and, on settle, centers +
+      // highlights it and fires `onTargetReached`. We mark the target handled
+      // here so this effect stops re-dispatching, but deliberately do NOT fire
+      // `onTargetReached` yet — clearing the route param now would cancel the
+      // in-flight target fetch the loop is waiting on. Without a fallback
+      // (thread panel), leave the target for a later `messages` commit.
+      const converge = convergeToTargetRef.current;
+      if (converge?.(targetMessageId)) {
+        handledTargetIdRef.current = targetMessageId;
+        convergingTargetIdRef.current = targetMessageId;
+      }
+      return;
+    }
     handledTargetIdRef.current = targetMessageId;
     scrollToMessageImperative(targetMessageId, { highlight: true });
     onTargetReached?.(targetMessageId);
@@ -606,5 +644,6 @@ export function useAnchoredScroll({
     scrollToBottom: scrollToBottomImperative,
     scrollToBottomOnNextUpdate,
     scrollToMessage: scrollToMessageImperative,
+    restoreScrollPosition,
   };
 }
