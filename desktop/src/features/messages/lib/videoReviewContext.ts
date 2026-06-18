@@ -61,6 +61,38 @@ export function buildVideoReviewCommentsByRootId(
   return commentsByRootId;
 }
 
+export function buildVideoReviewCommentsForRoot(
+  messages: TimelineMessage[],
+  rootId: string,
+): TimelineMessage[] {
+  const messageById = new Map(messages.map((message) => [message.id, message]));
+  const comments: TimelineMessage[] = [];
+
+  for (const message of messages) {
+    let ancestorId = message.parentId ?? null;
+    let hops = 0;
+    const maxHops = messages.length + 1;
+
+    while (ancestorId && hops < maxHops) {
+      if (ancestorId === rootId) {
+        comments.push(message);
+        break;
+      }
+      ancestorId = messageById.get(ancestorId)?.parentId ?? null;
+      hops += 1;
+    }
+  }
+
+  comments.sort((left, right) => {
+    if (left.createdAt !== right.createdAt) {
+      return left.createdAt - right.createdAt;
+    }
+    return left.id.localeCompare(right.id);
+  });
+
+  return comments;
+}
+
 export function buildVideoReviewContextForMessage({
   channelId,
   channelName,

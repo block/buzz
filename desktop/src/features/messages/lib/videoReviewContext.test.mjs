@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildVideoReviewCommentsByRootId,
+  buildVideoReviewCommentsForRoot,
   buildVideoReviewContextForMessage,
   hasVideoAttachment,
 } from "./videoReviewContext.ts";
@@ -95,6 +96,64 @@ test("buildVideoReviewCommentsByRootId includes nested descendants", () => {
 
   assert.deepEqual(
     commentsByRootId.get("video")?.map((comment) => comment.id),
+    ["earlier-comment", "first-comment", "nested-reply"],
+  );
+});
+
+test("buildVideoReviewCommentsForRoot returns descendants for one root", () => {
+  const video = message({
+    id: "video",
+    body: "![video](https://relay/media/a.mp4)",
+    createdAt: 1,
+  });
+  const otherVideo = message({
+    id: "other-video",
+    body: "![video](https://relay/media/b.mp4)",
+    createdAt: 2,
+  });
+  const firstComment = message({
+    id: "first-comment",
+    body: "[00:01] tighten this",
+    createdAt: 4,
+    parentId: "video",
+    rootId: "video",
+  });
+  const nestedReply = message({
+    id: "nested-reply",
+    body: "agreed",
+    createdAt: 5,
+    parentId: "first-comment",
+    rootId: "video",
+  });
+  const earlierComment = message({
+    id: "earlier-comment",
+    body: "[00:00] opener",
+    createdAt: 3,
+    parentId: "video",
+    rootId: "video",
+  });
+  const otherComment = message({
+    id: "other-comment",
+    body: "different root",
+    createdAt: 6,
+    parentId: "other-video",
+    rootId: "other-video",
+  });
+
+  const comments = buildVideoReviewCommentsForRoot(
+    [
+      video,
+      otherVideo,
+      firstComment,
+      nestedReply,
+      earlierComment,
+      otherComment,
+    ],
+    "video",
+  );
+
+  assert.deepEqual(
+    comments.map((comment) => comment.id),
     ["earlier-comment", "first-comment", "nested-reply"],
   );
 });
