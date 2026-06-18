@@ -687,13 +687,18 @@ mod tests {
     #[tokio::test]
     async fn allows_path_outside_workspace() {
         let dir = tempdir().unwrap();
+        // A real non-image file in a SECOND tempdir, genuinely outside the
+        // workspace root — we expect a format error, not a path-escape error,
+        // proving the traversal limit is gone. Avoids the Unix-only /etc/hosts
+        // assumption (C:\etc\hosts does not exist on Windows).
+        let outside = tempdir().unwrap();
+        let target = outside.path().join("outside.txt");
+        fs::write(&target, b"not an image").unwrap();
         let state = make_state(dir.path());
-        // /etc/hosts exists but is not an image — we expect a format error,
-        // not a path-escape error, proving the traversal limit is gone.
         let res = run(
             &state,
             ViewImageParams {
-                source: "/etc/hosts".into(),
+                source: target.display().to_string(),
                 max_dim: None,
                 workdir: Some(dir.path().display().to_string()),
             },
