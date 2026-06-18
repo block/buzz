@@ -55,8 +55,11 @@ pinning. Activate it once per shell session:
 . ./bin/activate-hermit
 ```
 
-Hermit pins Rust, `just`, and other tools to the versions in `bin/`. If you
-don't use Hermit, make sure your Rust toolchain meets the minimum version.
+Hermit pins Rust, `just`, Node, pnpm, and other tools to the versions in
+`bin/`. Each tool is downloaded on first use. You can also run `just bootstrap`
+(which `just setup` calls automatically) to pre-download all required tools
+upfront. If you don't use Hermit, ensure your toolchain meets the minimum
+versions in the table above.
 
 ### First-Time Setup
 
@@ -68,30 +71,40 @@ cd sprout
 # 2. Activate Hermit (optional but recommended)
 . ./bin/activate-hermit
 
-# 3. Copy environment config
-cp .env.example .env
-
-# 4. Start infrastructure + run migrations
+# 3. Bootstrap tools + infrastructure
 just setup
 
-# 5. Install Git hooks (optional, recommended)
-lefthook install
+# 4. Install Git hooks (optional, recommended)
+just hooks
 ```
 
-`just setup` starts Docker services (Postgres on `:5432`, Redis on `:6379`,
+`just setup` runs `just bootstrap` first — it copies `.env.example` to `.env`
+if it doesn't already exist, and invokes `cargo`, `node`, and `pnpm` to trigger
+Hermit's lazy tool download (each tool is fetched once on first invocation and
+cached thereafter). You can also run `just bootstrap` independently at any time;
+it is safe to re-run.
+
+`just setup` then starts Docker services (Postgres on `:5432`, Redis on `:6379`,
 Typesense on `:8108`, Adminer on `:8082`, Keycloak on `:8180` for local
 OAuth/OIDC testing, MinIO on `:9000` for media storage, and Prometheus on
 `:9090` for metrics) and runs all pending database migrations.
 
-### Running the Relay
+### Running the Relay and Desktop App
 
 ```bash
-just relay
-# or: cargo run -p buzz-relay
+just dev   # starts the relay + desktop app in one command
 ```
 
-The relay listens on `ws://localhost:3000` by default. You should see log
-output confirming the WebSocket server is up and migrations have run.
+`just dev` builds all agent tools, starts the relay (`ws://localhost:3000`) in
+the background, and launches the Tauri desktop app. The relay process is
+automatically killed when you quit the app or press Ctrl+C.
+
+For a split-terminal workflow (relay logs visible separately from Vite output):
+
+```bash
+just relay        # terminal 1 — relay on ws://localhost:3000
+just desktop-dev  # terminal 2 — Vite dev server only (no Tauri shell)
+```
 
 ### Stopping / Resetting
 
