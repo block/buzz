@@ -40,6 +40,7 @@ import {
   countDueReminders,
   useRemindersQuery,
 } from "@/features/reminders/hooks";
+import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
 import type { HomeFeedResponse } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
@@ -108,6 +109,7 @@ export function HomeView({
   );
   const [isDeletingMessage, setIsDeletingMessage] = React.useState(false);
   const [isSendingReply, setIsSendingReply] = React.useState(false);
+  const { activeReminderEventIds, openReminder } = useRemindLater();
   const [localRepliesByItemId, setLocalRepliesByItemId] = React.useState<
     Record<string, InboxReply[]>
   >({});
@@ -421,6 +423,7 @@ export function HomeView({
       >
         {showListPane ? (
           <InboxListPane
+            activeReminderEventIds={activeReminderEventIds}
             doneSet={effectiveDoneSet}
             dueReminderCount={dueReminderCount}
             filter={filter}
@@ -428,6 +431,25 @@ export function HomeView({
             onFilterChange={setFilter}
             onMarkRead={markItemRead}
             onMarkUnread={markItemUnread}
+            onOpenDirect={(item) => {
+              const channelId = item.item.channelId;
+              if (!channelId) {
+                return;
+              }
+              onOpenContext(channelId, item.id);
+            }}
+            onRemindLater={(item) => {
+              const channelId = item.item.channelId;
+              if (!channelId) {
+                return;
+              }
+              openReminder({
+                authorPubkey: item.item.pubkey,
+                channelId,
+                eventId: item.id,
+                preview: item.preview.slice(0, 100),
+              });
+            }}
             onSelect={(itemId) => {
               handleUserSelectItem(itemId);
               markItemRead(itemId);
