@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   channelMessagesKey,
   dedupeMessagesById,
+  mergeTimelineHistoryMessages,
   normalizeTimelineMessages,
   sortMessages,
 } from "@/features/messages/lib/messageQueryKeys";
@@ -180,10 +181,10 @@ export function useChannelMessagesQuery(channel: Channel | null) {
       );
       const currentMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-      const mergedHistory = normalizeTimelineMessages([
-        ...currentMessages,
-        ...history,
-      ]);
+      const mergedHistory = mergeTimelineHistoryMessages(
+        currentMessages,
+        history,
+      );
 
       return mergedHistory;
     },
@@ -208,14 +209,7 @@ export function useChannelSubscription(channel: Channel | null) {
 
     queryClient.setQueryData<RelayEvent[]>(
       channelMessagesKey(channelId),
-      (current = []) => {
-        const mergedHistory = normalizeTimelineMessages([
-          ...current,
-          ...history,
-        ]);
-
-        return mergedHistory;
-      },
+      (current = []) => mergeTimelineHistoryMessages(current, history),
     );
   });
 

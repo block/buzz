@@ -21,6 +21,7 @@ import {
   type RelaySubscription,
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
+import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
 import {
   shouldRefuseConnect,
@@ -31,7 +32,6 @@ import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
 const RECONNECT_BASE_DELAY_MS = 1_000,
   RECONNECT_MAX_DELAY_MS = 30_000,
-  RECONNECT_REPLAY_SKEW_SECS = 5,
   EVENT_BATCH_MS = 16;
 
 /**
@@ -165,7 +165,10 @@ export class RelayClient {
 
   private async fetchHistory(filter: RelaySubscriptionFilter) {
     await this.ensureConnected();
+    return this.requestHistory(filter);
+  }
 
+  private requestHistory(filter: RelaySubscriptionFilter) {
     return new Promise<RelayEvent[]>((resolve, reject) => {
       const subId = `history-${crypto.randomUUID()}`;
       const timeout = window.setTimeout(() => {
@@ -860,45 +863,20 @@ export class RelayClient {
     return false;
   }
 
-  private buildReplayFilter(filter: RelaySubscriptionFilter, since?: number) {
-    if (since === undefined) {
-      return filter;
-    }
-
-    return {
-      ...filter,
-      since: filter.since === undefined ? since : Math.max(filter.since, since),
-    };
-  }
-
   private async replayLiveSubscriptions() {
-    for (const [subId, subscription] of this.subscriptions) {
-      if (subscription.mode !== "live") {
-        continue;
-      }
-
-      const replaySince =
-        subscription.lastSeenCreatedAt === undefined
-          ? undefined
-          : Math.max(
-              0,
-              subscription.lastSeenCreatedAt - RECONNECT_REPLAY_SKEW_SECS,
-            );
-
-      try {
-        await this.sendRaw([
-          "REQ",
-          subId,
-          this.buildReplayFilter(subscription.filter, replaySince),
-        ]);
-      } catch (error) {
-        const reconnectError =
-          error instanceof Error
-            ? error
-            : new Error("Failed to restore relay subscriptions.");
-        this.resetConnection(reconnectError);
-        throw reconnectError;
-      }
+    try {
+      await replayLiveSubscriptions({
+        subscriptions: this.subscriptions,
+        sendRaw: (payload) => this.sendRaw(payload),
+        requestHistory: (filter) => this.requestHistory(filter),
+      });
+    } catch (error) {
+      const reconnectError =
+        error instanceof Error
+          ? error
+          : new Error("Failed to restore relay subscriptions.");
+      this.resetConnection(reconnectError);
+      throw reconnectError;
     }
   }
 
