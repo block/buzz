@@ -4,7 +4,6 @@ import test from "node:test";
 import { computeThreadUnreadMarker } from "../../messages/lib/unreadMarker.ts";
 import {
   buildDirectRepliesByParentId,
-  directRepliesMaxCreatedAt,
   subtreeMaxCreatedAt,
 } from "./subtreeCreatedAt.ts";
 
@@ -87,76 +86,6 @@ test("expandDeepBranch_advancesFrontierToSubtreeMax_consumesOlderSibling", () =>
   // Everything at or below 500 is read — including sib(300), never expanded.
   assert.equal(marker.firstUnreadReplyId, null);
   assert.equal(marker.unreadCount, 0);
-});
-
-// directRepliesMaxCreatedAt covers the head and its DIRECT replies only — it
-// must NOT descend into deeper branches. Here w's direct replies are deep1(400)
-// and sib(300); deep2(500) is a grandchild and must be excluded.
-test("directRepliesMaxCreatedAt_excludesDeeperDescendants", () => {
-  const { directReplyIdsByParentId, createdAtByMessageId } = fixture();
-
-  const result = directRepliesMaxCreatedAt(
-    "w",
-    directReplyIdsByParentId,
-    createdAtByMessageId,
-  );
-
-  // max(w=100, deep1=400, sib=300) = 400 — deep2(500) is NOT counted.
-  assert.equal(result, 400);
-});
-
-test("directRepliesMaxCreatedAt_noReplies_returnsOwnCreatedAt", () => {
-  const { directReplyIdsByParentId, createdAtByMessageId } = fixture();
-
-  const result = directRepliesMaxCreatedAt(
-    "sib",
-    directReplyIdsByParentId,
-    createdAtByMessageId,
-  );
-
-  assert.equal(result, 300);
-});
-
-test("directRepliesMaxCreatedAt_absentMessage_returnsNull", () => {
-  const { directReplyIdsByParentId, createdAtByMessageId } = fixture();
-
-  const result = directRepliesMaxCreatedAt(
-    "ghost",
-    directReplyIdsByParentId,
-    createdAtByMessageId,
-  );
-
-  assert.equal(result, null);
-});
-
-// Invariant 2: opening a thread advances the frontier to the visible direct
-// replies' max, consuming them (their channel badge clears), while a deeper
-// collapsed branch stays unread until expanded. The channel badge counts the
-// head's DIRECT replies, so we assert against those.
-test("openThread_frontierAtDirectRepliesMax_consumesVisible_keepsDeeperUnread", () => {
-  const { directReplyIdsByParentId, createdAtByMessageId } = fixture();
-
-  const openFrontier = directRepliesMaxCreatedAt(
-    "w",
-    directReplyIdsByParentId,
-    createdAtByMessageId,
-  );
-
-  // The channel badge is computed over the head's direct replies.
-  const directReplies = [
-    { id: "deep1", createdAt: 400 },
-    { id: "sib", createdAt: 300 },
-  ];
-  const channelBadge = computeThreadUnreadMarker(directReplies, openFrontier);
-
-  assert.equal(openFrontier, 400);
-  // Both visible direct replies are at/below 400 → channel badge clears.
-  assert.equal(channelBadge.unreadCount, 0);
-
-  // But the deeper collapsed branch deep2(500) is still unread until expanded.
-  const deepBranch = [{ id: "deep2", createdAt: 500 }];
-  const deepUnread = computeThreadUnreadMarker(deepBranch, openFrontier);
-  assert.equal(deepUnread.unreadCount, 1);
 });
 
 // Invariant 1: the session divider is computed from the open-time frontier

@@ -191,6 +191,6 @@ just reset          # ⚠️  Wipe data + recreate
 ---
 
 <p align="center">
-  <sub>Buzz 🐝 — where humans and agents are just colleagues.</sub><br>
+  <sub>Buzz 🐝</sub><br>
   <sub>Apache 2.0 · Built by <a href="https://block.xyz">Block, Inc.</a></sub>
 </p>

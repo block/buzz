@@ -567,14 +567,31 @@ pub fn extract_p_tags(event: &serde_json::Value) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-/// Print a create-command response, injecting the generated entity ID.
-pub fn print_create_response(resp: &str, id_key: &str, id_val: &str) {
+/// Return a create-command response with an entity ID injected.
+pub fn create_response_with_id(resp: &str, id_key: &str, id_val: &str) -> String {
     let mut v: serde_json::Value = serde_json::from_str(resp).unwrap_or(serde_json::json!({}));
     v[id_key] = serde_json::json!(id_val);
     if v.get("accepted").is_none() {
         v["accepted"] = serde_json::json!(true);
     }
-    println!("{v}");
+    v.to_string()
+}
+
+/// Print a create-command response, injecting the generated entity ID.
+pub fn print_create_response(resp: &str, id_key: &str, id_val: &str) {
+    println!("{}", create_response_with_id(resp, id_key, id_val));
+}
+
+/// Extract a JSON field from relay write response messages shaped as
+/// `response:{...}`.
+pub fn extract_relay_response_field(resp: &str, field: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(resp)
+        .ok()?
+        .get("message")?
+        .as_str()?
+        .strip_prefix("response:")
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+        .and_then(|v| v.get(field)?.as_str().map(str::to_string))
 }
 
 /// Normalize a relay write-response into a consistent JSON object.
@@ -592,4 +609,34 @@ pub fn normalize_write_response(raw: &str) -> String {
         }
     }
     raw.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{create_response_with_id, extract_relay_response_field};
+
+    #[test]
+    fn extract_relay_response_field_reads_response_message_json() {
+        let raw = r#"{"event_id":"abc","accepted":true,"message":"response:{\"workflow_id\":\"relay-id\",\"created\":true}"}"#;
+        assert_eq!(
+            extract_relay_response_field(raw, "workflow_id").as_deref(),
+            Some("relay-id")
+        );
+    }
+
+    #[test]
+    fn extract_relay_response_field_returns_none_for_non_response_message() {
+        let raw = r#"{"event_id":"abc","accepted":true,"message":""}"#;
+        assert!(extract_relay_response_field(raw, "workflow_id").is_none());
+    }
+
+    #[test]
+    fn create_response_with_id_overrides_local_id_with_relay_id() {
+        let raw = r#"{"event_id":"abc","accepted":true,"message":"response:{\"workflow_id\":\"relay-id\"}"}"#;
+        let out = create_response_with_id(raw, "workflow_id", "relay-id");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["workflow_id"].as_str(), Some("relay-id"));
+        assert_eq!(v["event_id"].as_str(), Some("abc"));
+        assert_eq!(v["accepted"].as_bool(), Some(true));
+    }
 }

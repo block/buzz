@@ -1077,11 +1077,14 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> String 
     }
 
     // NIP-AE agent core memory (rendered by `engram_fetch::build_core_section`).
-    // agent_core is always in user messages because it is resolved per-channel
-    // after session creation. A future session/update mechanism could move it
-    // to the system role.
-    if let Some(core) = args.agent_core {
-        sections.push(core.to_string());
+    // For modern agents (protocol_version >= 2), core is delivered via the
+    // system role in session/new, so it is omitted here to avoid duplication.
+    // Legacy agents have no system role, so core rides in the user message
+    // alongside `[Base]`/`[System]`.
+    if !args.has_system_prompt_support {
+        if let Some(core) = args.agent_core {
+            sections.push(core.to_string());
+        }
     }
 
     // 2. Context hints (with reply instruction for thread replies).
@@ -1551,6 +1554,37 @@ mod tests {
             prompt.starts_with("[Agent Memory — core]\nbe helpful\n\n[Context]"),
             "expected core block first, then [Context]; got: {prompt}"
         );
+    }
+
+    #[test]
+    fn test_format_prompt_modern_agent_omits_core_from_user_message() {
+        // Modern agents (protocol_version >= 2) receive core via the system
+        // role in session/new, so format_prompt must NOT also emit it in the
+        // user message — otherwise core would double-render.
+        let ch = Uuid::new_v4();
+        let event = make_event("hi");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                agent_core: Some("[Agent Memory — core]\nbe helpful"),
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        );
+        assert!(
+            !prompt.contains("[Agent Memory — core]"),
+            "modern agents must not get core in the user message; got: {prompt}"
+        );
+        assert!(prompt.starts_with("[Context]"));
     }
 
     #[test]

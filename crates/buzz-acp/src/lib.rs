@@ -186,6 +186,29 @@ async fn is_owner_or_sibling(
     is_sibling
 }
 
+/// Inbound author gate decision: does this author's event fire a turn?
+///
+/// Coarse security policy applied before subscription rules. Both `OwnerOnly`
+/// and `Allowlist` accept the owner and same-owner siblings; `Allowlist`
+/// additionally accepts the explicit external pubkey list.
+async fn author_allowed(
+    respond_to: &RespondTo,
+    allowlist: &HashSet<String>,
+    author: &str,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> bool {
+    match respond_to {
+        RespondTo::Anyone => true,
+        RespondTo::Nobody => false,
+        RespondTo::OwnerOnly => is_owner_or_sibling(author, owner_cache, rest_client).await,
+        RespondTo::Allowlist => {
+            allowlist.contains(author)
+                || is_owner_or_sibling(author, owner_cache, rest_client).await
+        }
+    }
+}
+
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
 /// proves the same owner as us.
 async fn check_sibling_via_profile(
@@ -1758,25 +1781,22 @@ async fn tokio_main() -> Result<()> {
                             // agent. Must be AFTER !shutdown (owner can always
                             // shut down regardless of gate mode).
                             //
-                            // OwnerOnly also accepts events from "siblings" —
-                            // pubkeys whose agent_owner_pubkey matches this
-                            // agent's owner (e.g. other bots launched by the
-                            // same human). Allowlist is unchanged: owner +
-                            // explicit pubkey list only.
+                            // Both OwnerOnly and Allowlist accept events from
+                            // "siblings" — pubkeys whose agent_owner_pubkey
+                            // matches this agent's owner (e.g. other bots
+                            // launched by the same human). Allowlist adds the
+                            // explicit pubkey list on top, for external people;
+                            // it never revokes same-owner team bots.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
-                                let allowed = match &config.respond_to {
-                                    RespondTo::Anyone => true,
-                                    RespondTo::Nobody => false,
-                                    RespondTo::OwnerOnly => {
-                                        is_owner_or_sibling(&author, &owner_cache, &ctx.rest_client).await
-                                    }
-                                    RespondTo::Allowlist => {
-                                        let owner = owner_cache.get();
-                                        config.respond_to_allowlist.contains(&author)
-                                            || owner == Some(author.as_str())
-                                    }
-                                };
+                                let allowed = author_allowed(
+                                    &config.respond_to,
+                                    &config.respond_to_allowlist,
+                                    &author,
+                                    &owner_cache,
+                                    &ctx.rest_client,
+                                )
+                                .await;
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
@@ -3052,6 +3072,104 @@ mod owner_cache_tests {
     fn get_returns_cached_value() {
         let cache = OwnerCache::new(Some("ab".repeat(32)));
         assert_eq!(cache.get(), Some("ab".repeat(32)).as_deref());
+    }
+}
+
+#[cfg(test)]
+mod author_gate_tests {
+    use super::*;
+
+    /// A `RestClient` for tests. The author-gate decisions exercised here all
+    /// resolve from the owner pubkey or sibling cache before any HTTP call, so
+    /// this client is never actually used to make a request.
+    fn dummy_rest_client() -> relay::RestClient {
+        relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: "http://localhost:0".into(),
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        }
+    }
+
+    const OWNER: &str = "00";
+    const SIBLING: &str = "11";
+    const EXTERNAL: &str = "22";
+    const STRANGER: &str = "33";
+
+    /// Owner + a known sibling, none of them on the explicit allowlist.
+    fn cache_with_sibling() -> OwnerCache {
+        let cache = OwnerCache::new(Some(OWNER.into()));
+        cache.cache_sibling(SIBLING.into(), true);
+        cache.cache_sibling(STRANGER.into(), false);
+        cache
+    }
+
+    #[tokio::test]
+    async fn test_allowlist_accepts_sibling_not_in_allowlist() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                SIBLING,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "a same-owner sibling must fire a turn under Allowlist even when not listed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowlist_accepts_explicit_external_pubkey() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                EXTERNAL,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "an explicitly allowlisted external pubkey must still be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowlist_rejects_non_sibling_not_in_allowlist() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            !author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                STRANGER,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "a non-sibling absent from the allowlist must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_allowlist_accepts_owner() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::new();
+        assert!(
+            author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                OWNER,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "the owner must always be accepted under Allowlist"
+        );
     }
 }
 

@@ -64,3 +64,6 @@ identity.key
 
 # mesh-llm build cache
 .cache/
+
+# Helm dependency tarballs — regenerable from Chart.lock via `helm dependency build`
+deploy/charts/*/charts/*.tgz

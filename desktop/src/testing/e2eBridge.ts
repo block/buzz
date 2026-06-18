@@ -466,6 +466,9 @@ type MockFilter = {
   "#h"?: string[];
   authors?: string[];
   kinds?: number[];
+  limit?: number;
+  since?: number;
+  until?: number;
 };
 
 type MockSocket = {
@@ -606,6 +609,7 @@ declare global {
     }>;
     __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: ConnectionState) => void;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
+    __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
@@ -2263,8 +2267,29 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
   return seeded;
 }
 
-function emitMockHistory(socket: MockSocket, subId: string, channelId: string) {
-  const events = getMockMessageStore(channelId);
+function emitMockHistory(
+  socket: MockSocket,
+  subId: string,
+  channelId: string,
+  filter: MockFilter,
+) {
+  const events = getMockMessageStore(channelId)
+    .filter((event) => {
+      if (filter.kinds && !filter.kinds.includes(event.kind)) {
+        return false;
+      }
+      if (filter.since !== undefined && event.created_at < filter.since) {
+        return false;
+      }
+      if (filter.until !== undefined && event.created_at > filter.until) {
+        return false;
+      }
+      return true;
+    })
+    .sort((left, right) => right.created_at - left.created_at)
+    .slice(0, filter.limit ?? 50)
+    .sort((left, right) => left.created_at - right.created_at);
+
   for (const event of events) {
     sendWsText(socket.handler, ["EVENT", subId, event]);
   }
@@ -5847,7 +5872,7 @@ function sendToMockSocket(args: {
       return;
     }
 
-    emitMockHistory(socket, subId, channelId);
+    emitMockHistory(socket, subId, channelId, filter);
     return;
   }
 
@@ -6099,6 +6124,11 @@ export function maybeInstallE2eTauriMocks() {
     if (!config?.mock) return;
     config.mock.stallWebsocketSends = stall;
     if (!stall) mockWebsocketSendMutexWedged = false;
+  };
+  window.__BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__ = () => {
+    const socketIds = [...mockSockets.keys()];
+    for (const socketId of socketIds) disconnectMockSocket(socketId);
+    return socketIds.length;
   };
   // Tests flip `admitted` to exercise the denial path: mesh_ensure_client_node
   // rejects when not admitted, which proves relay membership is the gate and

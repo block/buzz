@@ -1,0 +1,275 @@
+# Default values for buzz.
+#
+# Two supported tiers:
+#
+#   PRODUCTION (default) — external Postgres/Redis/Typesense/S3, existingSecret
+#   refs everywhere, no chart-side autogeneration, GitOps-safe (ArgoCD/Flux).
+#   HA-ready: replicaCount >= 2 (requires Redis and RWX storage for git).
+#
+#   QUICKSTART — bundles in-cluster Postgres + Redis + MinIO + Typesense and
+#   auto-generates relay secrets via the `lookup` pattern (NOT GitOps-safe —
+#   see README), single replica, evaluation only. Opt in by enabling each
+#   bundled service: postgresql.enabled, redis.enabled, minio.enabled,
+#   typesense.enabled. See ci/quickstart-values.yaml and the README.
+#
+# See examples/argocd-app.yaml and examples/flux-helmrelease.yaml for the
+# canonical GitOps configurations.
+
+# Intent marker for the evaluation profile, surfaced in NOTES.txt. It does NOT
+# by itself enable any bundled service — set the per-service .enabled flags
+# (postgresql / redis / minio / typesense) to bring them up in-cluster.
+quickstart: false
+
+# ── Image ────────────────────────────────────────────────────────────────────
+image:
+  repository: ghcr.io/block/buzz
+  tag: ""                        # empty → .Chart.AppVersion
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+# ── Topology ────────────────────────────────────────────────────────────────
+# replicaCount > 1 hard-requires:
+#   - Redis for buzz-pubsub (in-cluster or external)
+#   - ReadWriteMany storage for the git PVC (or shared FS via existingClaim)
+replicaCount: 1
+
+# ── Public URL ───────────────────────────────────────────────────────────────
+# Required. The wss:// URL clients use to connect. Drives:
+#   - RELAY_URL env (relay-side)
+#   - Default mediaBaseUrl (https://<host>/media)
+#   - Default ingress host
+relayUrl: ""
+mediaBaseUrl: ""
+
+# ── Owner ────────────────────────────────────────────────────────────────────
+# 64-char lowercase hex Nostr pubkey of the relay operator. Required when
+# relay.requireRelayMembership=true (the production default).
+ownerPubkey: ""
+
+# ── Chart-managed secrets ────────────────────────────────────────────────────
+# Production / GitOps path: create a Secret out-of-band with these keys and
+# point `secrets.existingSecret` at it. Any key omitted from the existing
+# Secret falls back to chart-side autogen (only effective at first install).
+#
+# Expected keys (all optional unless required by relay config):
+#   BUZZ_RELAY_PRIVATE_KEY        — 64-char hex; relay identity (rotation = identity change)
+#   BUZZ_GIT_HOOK_HMAC_SECRET     — 32+ chars; required when replicaCount > 1
+#   DATABASE_URL                  — full Postgres URL (preferred over externalPostgresql.url)
+#   REDIS_URL                     — full Redis URL with auth
+#   TYPESENSE_URL                 — Typesense base URL
+#   TYPESENSE_API_KEY             — Typesense API key
+#   BUZZ_S3_ACCESS_KEY            — S3 access key
+#   BUZZ_S3_SECRET_KEY            — S3 secret key
+secrets:
+  existingSecret: ""
+  # Inline overrides (NOT recommended for production; they land in values).
+  relayPrivateKey: ""
+  gitHookHmacSecret: ""
+
+# ── Relay behavior ───────────────────────────────────────────────────────────
+relay:
+  bindAddr: "0.0.0.0:3000"
+  maxConnections: 10000
+  maxConcurrentHandlers: 1024
+  sendBuffer: 1000
+  requireAuthToken: true
+  requireRelayMembership: true
+  allowNipOaAuth: true
+  pubkeyAllowlist: false
+  corsOrigins: []
+  ephemeralTtlOverride: 0
+
+  livenessProbe:
+    httpGet:
+      path: /_liveness
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readinessProbe:
+    httpGet:
+      path: /_readiness
+      port: health
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startupProbe:
+    httpGet:
+      path: /_liveness
+      port: health
+    failureThreshold: 60
+    periodSeconds: 2
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+
+  podAnnotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  topologySpreadConstraints: []
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+    readOnlyRootFilesystem: false  # git writes need a writable repo path
+  terminationGracePeriodSeconds: 60
+
+  extraEnv: []
+  extraEnvFrom: []
+
+# ── Service ──────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 3000
+  healthPort: 8080
+  metricsPort: 9102
+  annotations: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: ""
+
+# ── Ingress (classic) ────────────────────────────────────────────────────────
+# Mutually exclusive with httproute.enabled.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []                      # empty → derived from relayUrl
+  tls: []                        # [{hosts: [...], secretName: "..."}]
+
+# ── Gateway API (HTTPRoute) ──────────────────────────────────────────────────
+httproute:
+  enabled: false
+  parentRefs: []
+  hostnames: []
+  rules: []                      # empty → default match-all → service
+
+# ── Git on-disk state ────────────────────────────────────────────────────────
+persistence:
+  git:
+    enabled: true
+    mountPath: /var/lib/buzz/git
+    storageClass: ""
+    accessMode: ReadWriteOnce    # MUST be ReadWriteMany if replicaCount > 1
+    size: 10Gi
+    annotations: {}
+    existingClaim: ""
+
+# ── Postgres ─────────────────────────────────────────────────────────────────
+# Eval-only CloudPirates subchart. The relay's DATABASE_URL is composed in the
+# chart-managed Secret with a chart-generated password; auth.existingSecret
+# points this subchart at that same Secret/key so server and client agree.
+postgresql:
+  enabled: false
+  auth:
+    database: buzz
+    username: buzz
+    existingSecret: '{{ if contains "buzz" .Release.Name }}{{ .Release.Name }}-relay{{ else }}{{ .Release.Name }}-buzz-relay{{ end }}'
+    secretKeys:
+      adminPasswordKey: postgres-password
+  persistence:
+    enabled: true
+    size: 10Gi
+externalPostgresql:
+  url: ""                        # postgres://user:pass@host:5432/db
+
+# ── Redis ────────────────────────────────────────────────────────────────────
+# Eval-only CloudPirates subchart (standalone). REDIS_URL is composed in the
+# chart-managed Secret; auth.existingSecret points the subchart at that Secret
+# so the server password matches the URL the relay dials.
+redis:
+  enabled: false
+  auth:
+    existingSecret: '{{ if contains "buzz" .Release.Name }}{{ .Release.Name }}-relay{{ else }}{{ .Release.Name }}-buzz-relay{{ end }}'
+    existingSecretPasswordKey: redis-password
+  persistence:
+    enabled: true
+    size: 4Gi
+externalRedis:
+  url: ""                        # redis://:pass@host:6379
+
+# ── Typesense ────────────────────────────────────────────────────────────────
+# Production: point url/apiKey at an external Typesense service (or supply
+# TYPESENSE_URL/TYPESENSE_API_KEY via secrets.existingSecret).
+# Quickstart (`enabled: true`): the chart runs an in-cluster, eval-only
+# Typesense Deployment and composes TYPESENSE_URL with an autogenerated key.
+typesense:
+  enabled: false                 # quickstart: set true for bundled in-cluster Typesense
+  url: ""
+  apiKey: ""
+  image: typesense/typesense:30.2
+  persistence:
+    enabled: true
+    size: 4Gi
+
+# ── S3 / object storage (media) ──────────────────────────────────────────────
+# Production: point endpoint/bucket at an external S3-compatible service and
+# supply credentials (inline below or via secrets.existingSecret).
+# Quickstart (`minio.enabled: true`): the chart runs an in-cluster, eval-only
+# MinIO Deployment, creates the bucket via a post-install Job, and composes
+# the endpoint + autogenerated credentials automatically.
+s3:
+  endpoint: ""
+  bucket: "buzz-media"
+  accessKey: ""
+  secretKey: ""
+
+# In-cluster MinIO for the quickstart profile only. Production deploys leave
+# this disabled and use s3.* (or secrets.existingSecret) against managed S3.
+minio:
+  enabled: false                 # quickstart: set true for bundled in-cluster MinIO
+  image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+  mcImage: minio/mc:RELEASE.2025-08-13T08-35-41Z
+  persistence:
+    enabled: true
+    size: 10Gi
+
+# ── Git server config ────────────────────────────────────────────────────────
+git:
+  maxPackBytes: 524288000        # 500 MiB
+  maxReposPerPubkey: 100
+  maxConcurrentOps: 20
+
+# ── Migrations ───────────────────────────────────────────────────────────────
+# Relay runs sqlx migrations at startup via BUZZ_AUTO_MIGRATE=true.
+migrate:
+  autoMigrate: true
+  preUpgradeJob:
+    enabled: false
+    resources: {}
+    backoffLimit: 3
+    activeDeadlineSeconds: 600
+
+# ── Monitoring ───────────────────────────────────────────────────────────────
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+# ── Free-form extra manifests ────────────────────────────────────────────────
+extraManifests: []

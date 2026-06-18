@@ -105,6 +105,9 @@ export function MembersSidebar({
   const [inviteSubmissionErrors, setInviteSubmissionErrors] = React.useState<
     AddChannelMembersResult["errors"]
   >([]);
+  const [addingMemberPubkeys, setAddingMemberPubkeys] = React.useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const membersQuery = useChannelMembersQuery(channelId, open);
   const addMembersMutation = useAddChannelMembersMutation(channelId);
   const changeRoleMutation = useMutation({
@@ -410,6 +413,7 @@ export function MembersSidebar({
     if (!open) {
       setSearchQuery("");
       setInviteSubmissionErrors([]);
+      setAddingMemberPubkeys(new Set());
       return;
     }
 
@@ -421,13 +425,25 @@ export function MembersSidebar({
   }
 
   async function handleAddSearchResult(user: UserSearchResult) {
-    setInviteSubmissionErrors([]);
+    if (addingMemberPubkeys.has(user.pubkey)) {
+      return;
+    }
 
-    const result = await addMembersMutation.mutateAsync({
-      pubkeys: [user.pubkey],
-      role: user.isAgent ? "bot" : "member",
-    });
-    setInviteSubmissionErrors(result.errors);
+    setAddingMemberPubkeys((prev) => new Set(prev).add(user.pubkey));
+
+    try {
+      const result = await addMembersMutation.mutateAsync({
+        pubkeys: [user.pubkey],
+        role: user.isAgent ? "bot" : "member",
+      });
+      setInviteSubmissionErrors((prev) => [...prev, ...result.errors]);
+    } finally {
+      setAddingMemberPubkeys((prev) => {
+        const next = new Set(prev);
+        next.delete(user.pubkey);
+        return next;
+      });
+    }
   }
 
   function renderMemberCard(member: ChannelMember, memberIsBot: boolean) {
@@ -507,7 +523,7 @@ export function MembersSidebar({
                 autoCorrect="off"
                 className={MODAL_SEARCH_INPUT_CLASS}
                 data-testid="channel-management-search-users"
-                disabled={addMembersMutation.isPending || isArchived}
+                disabled={isArchived}
                 id="channel-management-search-users"
                 onChange={(event) => {
                   setSearchQuery(event.target.value);
@@ -559,7 +575,7 @@ export function MembersSidebar({
                         {addSearchResults.map((user) => (
                           <AddMemberSearchResultRow
                             disabled={
-                              addMembersMutation.isPending || isArchived
+                              addingMemberPubkeys.has(user.pubkey) || isArchived
                             }
                             key={user.pubkey}
                             onSelect={(selectedUser) => {

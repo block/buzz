@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ArrowDown, ArrowUp, Hash } from "lucide-react";
+import { Hash } from "lucide-react";
 
 import {
   selectTimelineBodySurface,
@@ -11,14 +11,18 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
-import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import { TooltipProvider } from "@/shared/ui/tooltip";
+import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
 import { useTimelineScrollManager } from "./useTimelineScrollManager";
+
+export type MessageTimelineHandle = {
+  scrollToBottomOnNextUpdate: () => void;
+};
 
 type MessageTimelineProps = {
   agentPubkeys?: ReadonlySet<string>;
@@ -110,45 +114,51 @@ type DirectMessageIntroParticipant = {
   pubkey: string;
 };
 
-export const MessageTimeline = React.memo(function MessageTimeline({
-  agentPubkeys,
-  channelId,
-  channelIntro = null,
-  directMessageIntro = null,
-  messages,
-  isLoading = false,
-  emptyTitle = "No messages yet",
-  emptyDescription = "Send the first message to start the thread.",
-  currentPubkey,
-  fetchOlder,
-  hasComposerOverlay = true,
-  hasOlderMessages = true,
-  isFetchingOlder = false,
-  followThreadById,
-  isFollowingThreadById,
-  messageFooters,
-  personaLookup,
-  profiles,
-  onDelete,
-  onEdit,
-  onMarkUnread,
-  onReply,
-  channelName,
-  channelType,
-  isSendingVideoReviewComment = false,
-  onSendVideoReviewComment,
-  onToggleReaction,
-  unfollowThreadById,
-  scrollContainerRef: externalScrollRef,
-  searchActiveMessageId = null,
-  searchMatchingMessageIds,
-  searchQuery,
-  targetMessageId = null,
-  onTargetReached,
-  firstUnreadMessageId = null,
-  unreadCount = 0,
-  threadUnreadCounts,
-}: MessageTimelineProps) {
+const MessageTimelineBase = React.forwardRef<
+  MessageTimelineHandle,
+  MessageTimelineProps
+>(function MessageTimeline(
+  {
+    agentPubkeys,
+    channelId,
+    channelIntro = null,
+    directMessageIntro = null,
+    messages,
+    isLoading = false,
+    emptyTitle = "No messages yet",
+    emptyDescription = "Send the first message to start the thread.",
+    currentPubkey,
+    fetchOlder,
+    hasComposerOverlay = true,
+    hasOlderMessages = true,
+    isFetchingOlder = false,
+    followThreadById,
+    isFollowingThreadById,
+    messageFooters,
+    personaLookup,
+    profiles,
+    onDelete,
+    onEdit,
+    onMarkUnread,
+    onReply,
+    channelName,
+    channelType,
+    isSendingVideoReviewComment = false,
+    onSendVideoReviewComment,
+    onToggleReaction,
+    unfollowThreadById,
+    scrollContainerRef: externalScrollRef,
+    searchActiveMessageId = null,
+    searchMatchingMessageIds,
+    searchQuery,
+    targetMessageId = null,
+    onTargetReached,
+    firstUnreadMessageId = null,
+    unreadCount = 0,
+    threadUnreadCounts,
+  }: MessageTimelineProps,
+  ref,
+) {
   const internalScrollRef = React.useRef<HTMLDivElement>(null);
   const scrollContainerRef = externalScrollRef ?? internalScrollRef;
   const topSentinelRef = React.useRef<HTMLDivElement>(null);
@@ -200,6 +210,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     newMessageCount,
     restoreScrollPosition,
     scrollToBottom,
+    scrollToBottomOnNextUpdate,
     scrollToMessage,
     syncScrollState,
   } = useTimelineScrollManager({
@@ -210,6 +221,14 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     scrollContainerRef,
     targetMessageId,
   });
+
+  React.useImperativeHandle(
+    ref,
+    () => ({
+      scrollToBottomOnNextUpdate,
+    }),
+    [scrollToBottomOnNextUpdate],
+  );
 
   // The unread pill is a transient, per-open affordance: dismiss it once the
   // user acts on it (jumps to the oldest unread) or catches up by reaching the
@@ -294,17 +313,12 @@ export const MessageTimeline = React.memo(function MessageTimeline({
               channelChrome.top,
             )}
           >
-            <Button
-              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-primary/40 bg-primary/10 px-2.5 text-2xs font-medium text-primary shadow-xs backdrop-blur-sm hover:bg-primary/20 [&_svg]:size-4"
-              data-testid="message-unread-pill"
+            <UnreadPill
+              direction="up"
+              label={unreadCountLabel(unreadCount)}
               onClick={handleJumpToOldestUnread}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              <ArrowUp aria-hidden />
-              {`${unreadCount} new message${unreadCount === 1 ? "" : "s"}`}
-            </Button>
+              testId="message-unread-pill"
+            />
           </div>
         ) : null}
         <div
@@ -518,27 +532,26 @@ export const MessageTimeline = React.memo(function MessageTimeline({
               hasComposerOverlay ? "bottom-36" : "bottom-4",
             )}
           >
-            <Button
-              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-2xs font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
-              data-testid="message-scroll-to-latest"
+            <UnreadPill
+              direction="down"
+              label={
+                newMessageCount > 0
+                  ? unreadCountLabel(newMessageCount)
+                  : "Jump to latest"
+              }
               onClick={() => {
                 scrollToBottom("smooth");
               }}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              <ArrowDown aria-hidden />
-              {newMessageCount > 0
-                ? `${newMessageCount} new message${newMessageCount === 1 ? "" : "s"}`
-                : "Jump to latest"}
-            </Button>
+              testId="message-scroll-to-latest"
+            />
           </div>
         ) : null}
       </div>
     </TooltipProvider>
   );
 });
+
+export const MessageTimeline = React.memo(MessageTimelineBase);
 
 function DirectMessageIntroAvatarStack({
   participants,

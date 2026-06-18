@@ -8,7 +8,10 @@ import {
   MessageThreadPanel,
   MessageThreadPanelSkeleton,
 } from "@/features/messages/ui/MessageThreadPanel";
-import { MessageTimeline } from "@/features/messages/ui/MessageTimeline";
+import {
+  MessageTimeline,
+  type MessageTimelineHandle,
+} from "@/features/messages/ui/MessageTimeline";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { buildDirectMessageIntro } from "@/features/channels/lib/dmParticipantDisplay";
 import {
@@ -239,6 +242,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   typingPubkeys,
 }: ChannelPaneProps) {
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
+  const messageTimelineRef = React.useRef<MessageTimelineHandle>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
   const completedWelcomeBannerChannelIdsRef = React.useRef(new Set<string>());
   const welcomeComposerDismissTimerRef = React.useRef<number | null>(null);
@@ -414,6 +418,7 @@ export const ChannelPane = React.memo(function ChannelPane({
         (containsWelcomePersonaMention(content) ||
           mentionsKnownAgent(mentionPubkeys, knownAgentPubkeys));
 
+      messageTimelineRef.current?.scrollToBottomOnNextUpdate();
       await onSendMessage(content, mentionPubkeys, mediaTags);
 
       if (shouldCompleteWelcomeBanner) {
@@ -636,6 +641,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             </div>
           ) : null}
           <MessageTimeline
+            ref={messageTimelineRef}
             agentPubkeys={agentPubkeys}
             channelId={activeChannel?.id}
             channelIntro={channelIntro}

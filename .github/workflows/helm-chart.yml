@@ -1,0 +1,97 @@
+name: helm chart
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/charts/buzz/**"
+      - ".github/workflows/helm-chart.yml"
+      - "ct.yaml"
+  pull_request:
+    paths:
+      - "deploy/charts/buzz/**"
+      - ".github/workflows/helm-chart.yml"
+      - "ct.yaml"
+
+jobs:
+  lint-and-unittest:
+    name: lint + unittest + render matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: v3.16.4
+
+      - name: Install helm-unittest plugin
+        run: helm plugin install --version 0.8.2 https://github.com/helm-unittest/helm-unittest
+
+      - name: Set up Python (for chart-testing)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up chart-testing
+        uses: helm/chart-testing-action@0d28d3144d3a25ea2cc349d6e59901c4ff469b3b  # v2.7.0
+
+      - name: Build chart dependencies
+        run: helm dependency build deploy/charts/buzz
+
+      - name: ct lint
+        run: ct lint --config ct.yaml --all
+
+      - name: helm-unittest
+        run: helm unittest deploy/charts/buzz
+
+      - name: helm template (render every fixture)
+        run: |
+          set -euo pipefail
+          for f in deploy/charts/buzz/ci/*-values.yaml deploy/charts/buzz/tests/fixtures/*-values.yaml; do
+            echo "::group::render $f"
+            helm template buzz deploy/charts/buzz -f "$f"
+            echo "::endgroup::"
+          done
+
+  install-on-kind:
+    # Full end-to-end install requires the public ghcr.io/block/buzz image to
+    # exist and to embed Max's startup migrations. Runs only after Sami's
+    # image PR merges (`workflow_dispatch`) or on a schedule once main carries
+    # both prerequisites. Render/lint above is the per-PR signal.
+    name: install on kind (gated)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: lint-and-unittest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
+        with:
+          version: v3.16.4
+
+      - name: Set up Python (for chart-testing)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up chart-testing
+        uses: helm/chart-testing-action@0d28d3144d3a25ea2cc349d6e59901c4ff469b3b  # v2.7.0
+
+      - name: Create kind cluster
+        uses: helm/kind-action@0025e74a8c7512023d06dc019c617aa3cf561fde  # v1.10.0
+        with:
+          version: v0.24.0
+          node_image: kindest/node:v1.31.0
+
+      - name: Build chart dependencies
+        run: helm dependency build deploy/charts/buzz
+
+      - name: ct install (quickstart profile)
+        run: ct install --config ct.yaml --charts deploy/charts/buzz --helm-extra-args "--timeout 600s"

@@ -1,0 +1,69 @@
+# Ingress + automatic TLS via cert-manager (Let's Encrypt HTTP-01).
+#
+# This file is BOTH:
+#   1. A values fragment for the chart (the `ingress:` block) — pass with `-f`.
+#   2. A ClusterIssuer manifest at the bottom — apply ONCE per cluster with
+#      `kubectl apply -f`. The chart does not manage it.
+#
+# Helm's value-file parser reads ONLY the first YAML document; the second
+# document (the ClusterIssuer) is ignored by Helm. That is intentional — the
+# ClusterIssuer is cluster-scoped and outlives any single release.
+#
+# Prerequisite: cert-manager installed in the cluster. The chart does not
+# depend on it — that is a cluster operator decision.
+#
+#   helm install cert-manager cert-manager \
+#     --repo https://charts.jetstack.io \
+#     --namespace cert-manager --create-namespace \
+#     --set crds.enabled=true
+#
+# Apply this file in two passes:
+#
+#   # 1. Install the cluster-scoped ClusterIssuer (idempotent):
+#   kubectl apply -f deploy/charts/buzz/examples/ingress-cert-manager.yaml
+#
+#   # 2. Install/upgrade the chart with the values fragment:
+#   helm upgrade --install buzz ./deploy/charts/buzz \
+#     -f values-production.yaml \
+#     -f deploy/charts/buzz/examples/ingress-cert-manager.yaml \
+#     --set relayUrl=wss://buzz.example.com
+#
+# Why HTTP-01: works for any public-DNS host without DNS-API credentials.
+# Switch to DNS-01 if your relay is on a private/split-DNS host or you want
+# wildcard certs.
+
+# ── Values fragment (Helm reads this document) ───────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Long-lived WebSocket connections — generous timeouts.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  hosts:
+    - host: buzz.example.com         # replace; must match relayUrl host
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - hosts:
+        - buzz.example.com           # replace
+      secretName: buzz-tls           # cert-manager creates this Secret
+
+---
+# ── ClusterIssuer (kubectl apply, NOT consumed by Helm) ──────────────────────
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: ops@example.com           # replace
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx             # match your ingress controller's ingressClass

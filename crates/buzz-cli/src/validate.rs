@@ -178,6 +178,25 @@ pub fn read_or_stdin(value: &str) -> Result<String, CliError> {
     }
 }
 
+/// Read content from a file path, or stdin if the value is "-".
+///
+/// Unlike [`read_or_stdin`], `value` is never treated as literal content —
+/// it always names a file (or `-` for stdin). Use this for flags like
+/// `--patch-file` where the argument is a path, not the content itself.
+pub fn read_file_or_stdin(value: &str) -> Result<String, CliError> {
+    if value == "-" {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| CliError::Other(format!("failed to read stdin: {e}")))?;
+        Ok(buf)
+    } else {
+        std::fs::read_to_string(value)
+            .map_err(|e| CliError::Usage(format!("failed to read {value:?}: {e}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +476,33 @@ mod tests {
     #[test]
     fn read_or_stdin_passthrough_empty_string() {
         assert_eq!(super::read_or_stdin("").unwrap(), "");
+    }
+
+    // --- read_file_or_stdin ---
+
+    #[test]
+    fn read_file_or_stdin_reads_file_contents() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "buzz-cli-test-{}-{}.patch",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "diff --git a/x b/x\n").unwrap();
+        let got = super::read_file_or_stdin(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(got, "diff --git a/x b/x\n");
+    }
+
+    #[test]
+    fn read_file_or_stdin_does_not_treat_path_as_literal_content() {
+        // Regression for the bug where `read_or_stdin` was used for
+        // `--patch-file`: a nonexistent path must error, not be returned
+        // verbatim as if it were the patch content.
+        let err = super::read_file_or_stdin("0001-does-not-exist.patch").unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
     }
 }

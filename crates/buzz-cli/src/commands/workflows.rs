@@ -1,6 +1,9 @@
 use sha2::{Digest, Sha256};
 
-use crate::client::{extract_d_tag, normalize_write_response, print_create_response, BuzzClient};
+use crate::client::{
+    extract_d_tag, extract_relay_response_field, normalize_write_response, print_create_response,
+    BuzzClient,
+};
 use crate::error::CliError;
 use crate::validate::{parse_uuid, read_or_stdin, sdk_err, validate_uuid};
 
@@ -114,7 +117,9 @@ pub async fn cmd_create_workflow(
     let event = client.sign_event(builder)?;
 
     let resp = client.submit_event(event).await?;
-    print_create_response(&resp, "workflow_id", &workflow_id.to_string());
+    let final_workflow_id = extract_relay_response_field(&resp, "workflow_id")
+        .unwrap_or_else(|| workflow_id.to_string());
+    print_create_response(&resp, "workflow_id", &final_workflow_id);
     Ok(())
 }
 
