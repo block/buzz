@@ -557,19 +557,22 @@ export function useAnchoredScroll({
     const observer = new ResizeObserver(() => {
       const container = scrollContainerRef.current;
       if (!container) return;
+      // Cede entirely while a convergence loop owns scroll (jump to a
+      // windowed-out target). Mid-jump the anchor is transiently `at-bottom`
+      // — `computeAnchor` finds no crossing row until the virtualizer renders
+      // rows at the new offset — so an unconditional re-pin here would yank
+      // the in-flight jump down to the floor as rows measure. The convergence
+      // loop is the sole writer until it settles (mirrors the layout effect's
+      // `convergingTargetIdRef` bail).
+      if (convergingTargetIdRef.current !== null) return;
       const anchor = anchorRef.current;
       if (anchor.kind === "at-bottom") {
-        // Pin to bottom only when the viewport is GENUINELY at the bottom
-        // right now — read live geometry, don't trust the cached anchor kind.
-        // After a programmatic jump into windowed-out history, the virtualizer
-        // needs a frame to render rows at the new offset; in that gap
-        // `computeAnchor` finds no crossing row and falls back to `at-bottom`,
-        // which would make this observer yank a mid-history restore down to
-        // the floor as the prepended rows measure. `isAtBottomNow` is the
-        // authoritative read; when it disagrees we leave the scroll alone.
-        if (isAtBottomNow(container)) {
-          container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
-        }
+        // Stuck to bottom: re-pin to the new floor. Virtualizer measurement
+        // grows `scrollHeight` after the initial pin (rows below the fold
+        // measure a frame or two late) without any `messages` change to drive
+        // the layout effect, so this observer is the only thing that keeps the
+        // view glued to the bottom as content settles.
+        container.scrollTo({ top: container.scrollHeight, behavior: "auto" });
         return;
       }
       // Use the same restore primitive as the layout effect so the
