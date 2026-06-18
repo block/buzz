@@ -270,16 +270,17 @@ proxy-release:
 dev *ARGS: _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
-    cargo run -p buzz-relay &
+    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
+    ./target/debug/buzz-relay &
     RELAY_PID=$!
+    trap 'kill "$RELAY_PID" 2>/dev/null || true' EXIT
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     source ../scripts/instance-env.sh
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
-    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID"; kill "$RELAY_PID" 2>/dev/null || true' EXIT
+    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true; kill "$RELAY_PID" 2>/dev/null || true' EXIT
     echo "Starting on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
     pnpm exec tauri dev --features mesh-llm --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
