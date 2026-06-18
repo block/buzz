@@ -430,12 +430,19 @@ const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
+    agent_core: Option<&str>,
 ) -> Result<String, AcpError> {
-    // Combine base_prompt + system_prompt into a single systemPrompt value
-    // for the session/new request. Only sent when the agent declares protocol
-    // version >= 2 (supports systemPrompt); legacy agents ignore it.
+    // Combine base_prompt + system_prompt + agent core into a single
+    // systemPrompt value for the session/new request. Only sent when the agent
+    // declares protocol version >= 2 (supports systemPrompt); legacy agents
+    // ignore it and receive the same content as user-message sections via
+    // `format_prompt`. Core already carries its own `[Agent Memory — core]`
+    // header from `engram_fetch::build_core_section`, so we just append it.
     let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
-        framed_system_prompt(ctx.base_prompt, ctx.system_prompt.as_deref())
+        with_core(
+            framed_system_prompt(ctx.base_prompt, ctx.system_prompt.as_deref()),
+            agent_core,
+        )
     } else {
         None
     };
@@ -675,6 +682,20 @@ fn framed_system_prompt(base_prompt: Option<&str>, system_prompt: Option<&str>) 
     }
 }
 
+/// Append the agent's core memory section onto the framed system prompt.
+///
+/// Core already carries its own `[Agent Memory — core]` header from
+/// `engram_fetch::build_core_section`, so it is joined with a blank-line
+/// separator and never re-labeled. Either side may be absent.
+fn with_core(framed: Option<String>, core: Option<&str>) -> Option<String> {
+    match (framed, core) {
+        (Some(framed), Some(core)) => Some(format!("{framed}\n\n{core}")),
+        (Some(framed), None) => Some(framed),
+        (None, Some(core)) => Some(core.to_string()),
+        (None, None) => None,
+    }
+}
+
 /// Core async function spawned for each prompt.
 ///
 /// Lifecycle:
@@ -747,13 +768,86 @@ pub async fn run_prompt_task(
         turn_id.clone(),
     );
 
+    // ── NIP-AE: fetch core engram before session creation ───────────────
+    //
+    // Core memory is delivered inside the system prompt the harness already
+    // builds (system role for protocol >= 2, the `[System]` user-message
+    // section for legacy agents). To put it on the wire at `session/new` for
+    // modern agents, the fetch must run *before* the session is created — so
+    // we do it here and cache the rendered section in `state.core_sections`.
+    //
+    // Core is keyed by (agent_keys, owner) — both fixed for the process — so
+    // it is identical across channels; the per-channel cache just avoids a
+    // re-fetch on each new session and is cleared on session invalidation.
+    //
+    // Failure modes (all fail open — no crash, no block):
+    //   * no owner configured → skip (no NIP-AE namespace exists)
+    //   * confirmed absence → cache the onboarding nudge so the agent
+    //     learns how to bootstrap itself.
+    //   * transport / decrypt / parse error → inject nothing. We never
+    //     mistake "relay slow or broken" for "no core" — that would invite
+    //     the agent to overwrite real, just-unreachable memory.
+    //   * fetch exceeds CORE_FETCH_TIMEOUT → inject nothing, same reason.
+    //
+    // Per Tyler's locked spec: NO mid-session refreshes. Re-fetch only
+    // happens when a session is invalidated and recreated (see
+    // `SessionState::invalidate_channel`).
+    //
+    // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` skips the fetch.
+    if ctx.memory_enabled {
+        if let (PromptSource::Channel(cid), Some(owner_pk)) =
+            (&source, ctx.agent_owner_pubkey.as_ref())
+        {
+            let is_new_channel_session = !agent.state.sessions.contains_key(cid);
+            if is_new_channel_session && !agent.state.core_sections.contains_key(cid) {
+                // Bounded — we'd rather start the session with no core hint
+                // than block session creation on a stalled relay.
+                const CORE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+                let fetch = crate::engram_fetch::build_core_section(
+                    &ctx.rest_client,
+                    &ctx.agent_keys,
+                    owner_pk,
+                );
+                let section = match tokio::time::timeout(CORE_FETCH_TIMEOUT, fetch).await {
+                    Ok(s) => s,
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "engram::core",
+                            channel = %cid,
+                            timeout_ms = CORE_FETCH_TIMEOUT.as_millis() as u64,
+                            "core fetch timed out — emitting no section"
+                        );
+                        None
+                    }
+                };
+                if let Some(rendered) = section {
+                    tracing::info!(
+                        target: "engram::core",
+                        channel = %cid,
+                        section_len = rendered.len(),
+                        "injected NIP-AE core section into system prompt"
+                    );
+                    agent.state.core_sections.insert(*cid, rendered);
+                }
+            }
+        }
+    }
+
+    // The core section to fold into the system prompt for this turn's session.
+    // Channel-scoped; heartbeats carry no owner core.
+    let agent_core: Option<String> = match &source {
+        PromptSource::Channel(cid) => agent.state.core_sections.get(cid).cloned(),
+        PromptSource::Heartbeat => None,
+    };
+
     let (session_id, is_new_session) = match &source {
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false)
             } else {
                 // Create new session with model application.
-                match create_session_and_apply_model(&mut agent, &ctx).await {
+                match create_session_and_apply_model(&mut agent, &ctx, agent_core.as_deref()).await
+                {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
@@ -788,7 +882,7 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx).await {
+                match create_session_and_apply_model(&mut agent, &ctx, None).await {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
@@ -833,68 +927,6 @@ pub async fn run_prompt_task(
             "isNewSession": is_new_session,
         }),
     );
-
-    // ── NIP-AE: fetch core engram on new channel sessions ────────────────
-    //
-    // Fire one synchronous fetch + decrypt + render right after the session
-    // is born; cache the rendered section in `state.core_sections` keyed by
-    // channel id. Subsequent turns in the same session reuse the cached
-    // section. `format_prompt` reads it from the per-channel cache.
-    //
-    // Failure modes (all fail open — no crash, no block):
-    //   * no owner configured → skip (no NIP-AE namespace exists)
-    //   * confirmed absence → cache the onboarding nudge so the agent
-    //     learns how to bootstrap itself.
-    //   * transport / decrypt / parse error → inject nothing. We never
-    //     mistake "relay slow or broken" for "no core" — that would invite
-    //     the agent to overwrite real, just-unreachable memory.
-    //   * fetch exceeds CORE_FETCH_TIMEOUT → inject nothing, same reason.
-    //
-    // Per Tyler's locked spec: NO mid-session refreshes. Re-fetch only
-    // happens when a session is invalidated and recreated (see
-    // `SessionState::invalidate_channel`).
-    //
-    // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` disables the
-    // NIP-AE injection path. By default we run the fetch and populate
-    // `state.core_sections`, so `format_prompt` renders the core section.
-    // When disabled we skip the fetch outright and leave `core_sections`
-    // empty. The `buzz mem` CLI and the relay's acceptance of
-    // kind:30174 engrams are unaffected.
-    if is_new_session && ctx.memory_enabled {
-        if let (PromptSource::Channel(cid), Some(owner_pk)) =
-            (&source, ctx.agent_owner_pubkey.as_ref())
-        {
-            // Bounded — we'd rather start the session with no core hint
-            // than block prompt formatting on a stalled relay.
-            const CORE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-            let fetch = crate::engram_fetch::build_core_section(
-                &ctx.rest_client,
-                &ctx.agent_keys,
-                owner_pk,
-            );
-            let section = match tokio::time::timeout(CORE_FETCH_TIMEOUT, fetch).await {
-                Ok(s) => s,
-                Err(_) => {
-                    tracing::warn!(
-                        target: "engram::core",
-                        channel = %cid,
-                        timeout_ms = CORE_FETCH_TIMEOUT.as_millis() as u64,
-                        "core fetch timed out — emitting no section"
-                    );
-                    None
-                }
-            };
-            if let Some(rendered) = section {
-                tracing::info!(
-                    target: "engram::core",
-                    channel = %cid,
-                    section_len = rendered.len(),
-                    "injected NIP-AE core section"
-                );
-                agent.state.core_sections.insert(*cid, rendered);
-            }
-        }
-    }
 
     // ── Send initial_message on new channel sessions ──────────────────────
 
@@ -1057,11 +1089,10 @@ pub async fn run_prompt_task(
             );
         }
 
-        let agent_core_section = agent.state.core_sections.get(&b.channel_id).cloned();
         crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
-                agent_core: agent_core_section.as_deref(),
+                agent_core: agent_core.as_deref(),
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
                 profile_lookup: profile_lookup.as_ref(),
@@ -2379,6 +2410,40 @@ mod tests {
     #[test]
     fn test_framed_system_prompt_neither_is_none() {
         assert!(framed_system_prompt(None, None).is_none());
+    }
+
+    // ── with_core tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_with_core_appends_below_framed() {
+        let framed = with_core(
+            Some("[System]\npersona".to_string()),
+            Some("[Agent Memory — core]\nbe helpful"),
+        )
+        .expect("both present yields Some");
+        assert_eq!(
+            framed,
+            "[System]\npersona\n\n[Agent Memory — core]\nbe helpful"
+        );
+    }
+
+    #[test]
+    fn test_with_core_framed_only_passes_through() {
+        let framed = with_core(Some("[System]\npersona".to_string()), None)
+            .expect("framed-only yields Some");
+        assert_eq!(framed, "[System]\npersona");
+    }
+
+    #[test]
+    fn test_with_core_core_only_is_just_core() {
+        let framed = with_core(None, Some("[Agent Memory — core]\nbe helpful"))
+            .expect("core-only yields Some");
+        assert_eq!(framed, "[Agent Memory — core]\nbe helpful");
+    }
+
+    #[test]
+    fn test_with_core_neither_is_none() {
+        assert!(with_core(None, None).is_none());
     }
 
     // ── parse_thread_response tests ──────────────────────────────────────────
