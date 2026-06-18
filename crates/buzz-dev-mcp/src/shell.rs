@@ -325,6 +325,7 @@ pub async fn run(
 ///      `bundle.resources` Map `{ "binaries/git-bash": "git-bash" }`, whose TARGET
 ///      (`git-bash`) is what Tauri's NSIS/MSI installer stages next to the exe.
 ///   3. this resolver — joins `current_exe().parent()` + `git-bash\bin\bash.exe`.
+///
 /// Drift between (2)'s target and this string ships a working bundle but a broken
 /// runtime path. Keep all three in lockstep.
 #[cfg(windows)]
@@ -348,6 +349,7 @@ fn resolve_bash(_path_env: &str) -> Result<PathBuf, String> {
 ///   3. The bundled bash staged next to our exe (guaranteed target — this
 ///      is what makes a bare, Git-less host work since the app is self-contained).
 ///   4. PATH scan, EXCLUDING System32 (so we never resolve WSL's `bash.exe`).
+///
 /// No bash found -> actionable error returned BEFORE spawn.
 #[cfg(windows)]
 fn resolve_bash(path_env: &str) -> Result<PathBuf, String> {
