@@ -271,9 +271,7 @@ dev *ARGS: _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
-    RELAY_LOG=$(mktemp /tmp/buzz-relay.XXXXXX.log)
-    echo "Starting local relay (logs: ${RELAY_LOG})"
-    cargo run -p buzz-relay >"$RELAY_LOG" 2>&1 &
+    cargo run -p buzz-relay &
     RELAY_PID=$!
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
