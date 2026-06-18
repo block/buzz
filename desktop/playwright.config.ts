@@ -33,6 +33,7 @@ export default defineConfig({
         "**/channel-controls-screenshots.spec.ts",
         "**/team-management-screenshots.spec.ts",
         "**/active-turn-screenshots.spec.ts",
+        "**/active-turn-resilience-screenshots.spec.ts",
         "**/profile-active-turn-screenshots.spec.ts",
         "**/file-attachment.spec.ts",
         "**/video-attachment.spec.ts",
