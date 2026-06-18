@@ -20,6 +20,10 @@ import { TimelineMessageList } from "./TimelineMessageList";
 import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
 import { useTimelineScrollManager } from "./useTimelineScrollManager";
 
+export type MessageTimelineHandle = {
+  scrollToBottomOnNextUpdate: () => void;
+};
+
 type MessageTimelineProps = {
   agentPubkeys?: ReadonlySet<string>;
   channelId?: string | null;
@@ -110,45 +114,51 @@ type DirectMessageIntroParticipant = {
   pubkey: string;
 };
 
-export const MessageTimeline = React.memo(function MessageTimeline({
-  agentPubkeys,
-  channelId,
-  channelIntro = null,
-  directMessageIntro = null,
-  messages,
-  isLoading = false,
-  emptyTitle = "No messages yet",
-  emptyDescription = "Send the first message to start the thread.",
-  currentPubkey,
-  fetchOlder,
-  hasComposerOverlay = true,
-  hasOlderMessages = true,
-  isFetchingOlder = false,
-  followThreadById,
-  isFollowingThreadById,
-  messageFooters,
-  personaLookup,
-  profiles,
-  onDelete,
-  onEdit,
-  onMarkUnread,
-  onReply,
-  channelName,
-  channelType,
-  isSendingVideoReviewComment = false,
-  onSendVideoReviewComment,
-  onToggleReaction,
-  unfollowThreadById,
-  scrollContainerRef: externalScrollRef,
-  searchActiveMessageId = null,
-  searchMatchingMessageIds,
-  searchQuery,
-  targetMessageId = null,
-  onTargetReached,
-  firstUnreadMessageId = null,
-  unreadCount = 0,
-  threadUnreadCounts,
-}: MessageTimelineProps) {
+const MessageTimelineBase = React.forwardRef<
+  MessageTimelineHandle,
+  MessageTimelineProps
+>(function MessageTimeline(
+  {
+    agentPubkeys,
+    channelId,
+    channelIntro = null,
+    directMessageIntro = null,
+    messages,
+    isLoading = false,
+    emptyTitle = "No messages yet",
+    emptyDescription = "Send the first message to start the thread.",
+    currentPubkey,
+    fetchOlder,
+    hasComposerOverlay = true,
+    hasOlderMessages = true,
+    isFetchingOlder = false,
+    followThreadById,
+    isFollowingThreadById,
+    messageFooters,
+    personaLookup,
+    profiles,
+    onDelete,
+    onEdit,
+    onMarkUnread,
+    onReply,
+    channelName,
+    channelType,
+    isSendingVideoReviewComment = false,
+    onSendVideoReviewComment,
+    onToggleReaction,
+    unfollowThreadById,
+    scrollContainerRef: externalScrollRef,
+    searchActiveMessageId = null,
+    searchMatchingMessageIds,
+    searchQuery,
+    targetMessageId = null,
+    onTargetReached,
+    firstUnreadMessageId = null,
+    unreadCount = 0,
+    threadUnreadCounts,
+  }: MessageTimelineProps,
+  ref,
+) {
   const internalScrollRef = React.useRef<HTMLDivElement>(null);
   const scrollContainerRef = externalScrollRef ?? internalScrollRef;
   const topSentinelRef = React.useRef<HTMLDivElement>(null);
@@ -200,6 +210,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     newMessageCount,
     restoreScrollPosition,
     scrollToBottom,
+    scrollToBottomOnNextUpdate,
     scrollToMessage,
     syncScrollState,
   } = useTimelineScrollManager({
@@ -210,6 +221,14 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     scrollContainerRef,
     targetMessageId,
   });
+
+  React.useImperativeHandle(
+    ref,
+    () => ({
+      scrollToBottomOnNextUpdate,
+    }),
+    [scrollToBottomOnNextUpdate],
+  );
 
   // The unread pill is a transient, per-open affordance: dismiss it once the
   // user acts on it (jumps to the oldest unread) or catches up by reaching the
@@ -539,6 +558,8 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     </TooltipProvider>
   );
 });
+
+export const MessageTimeline = React.memo(MessageTimelineBase);
 
 function DirectMessageIntroAvatarStack({
   participants,

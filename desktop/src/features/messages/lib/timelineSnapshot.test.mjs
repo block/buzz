@@ -7,6 +7,7 @@ import {
   isNearBottomMetrics,
   resolveDeepLinkTarget,
   selectDeferredListRenderState,
+  selectLatestMessageAutoScrollBehavior,
   selectLatestMessageKey,
   selectTimelineBodySurface,
   selectTimelineIntroSurface,
@@ -100,6 +101,63 @@ test("selectLatestMessageKey: detects a newly arrived latest message", () => {
   assert.notEqual(
     selectLatestMessageKey(before),
     selectLatestMessageKey(after),
+  );
+});
+
+test("selectLatestMessageAutoScrollBehavior: keeps sticky timelines pinned automatically", () => {
+  assert.equal(
+    selectLatestMessageAutoScrollBehavior({
+      hasExplicitBottomRequest: false,
+      isAtBottom: false,
+      shouldStickToBottom: true,
+      targetMessageId: null,
+    }),
+    "auto",
+  );
+  assert.equal(
+    selectLatestMessageAutoScrollBehavior({
+      hasExplicitBottomRequest: false,
+      isAtBottom: true,
+      shouldStickToBottom: false,
+      targetMessageId: null,
+    }),
+    "auto",
+  );
+});
+
+test("selectLatestMessageAutoScrollBehavior: explicit send requests smooth bottom scroll", () => {
+  assert.equal(
+    selectLatestMessageAutoScrollBehavior({
+      hasExplicitBottomRequest: true,
+      isAtBottom: false,
+      shouldStickToBottom: false,
+      targetMessageId: null,
+    }),
+    "smooth",
+  );
+});
+
+test("selectLatestMessageAutoScrollBehavior: self-authored inserts do not imply scroll", () => {
+  assert.equal(
+    selectLatestMessageAutoScrollBehavior({
+      hasExplicitBottomRequest: false,
+      isAtBottom: false,
+      shouldStickToBottom: false,
+      targetMessageId: null,
+    }),
+    null,
+  );
+});
+
+test("selectLatestMessageAutoScrollBehavior: target navigation suppresses latest-message autoscroll", () => {
+  assert.equal(
+    selectLatestMessageAutoScrollBehavior({
+      hasExplicitBottomRequest: true,
+      isAtBottom: true,
+      shouldStickToBottom: true,
+      targetMessageId: "message-a",
+    }),
+    null,
   );
 });
 

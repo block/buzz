@@ -3,6 +3,7 @@ import * as React from "react";
 import {
   isNearBottom,
   resolveDeepLinkTarget,
+  selectLatestMessageAutoScrollBehavior,
   selectLatestMessageKey,
 } from "@/features/messages/lib/timelineSnapshot";
 import type { TimelineMessage } from "@/features/messages/types";
@@ -41,6 +42,7 @@ export function useTimelineScrollManager({
   const previousLastMessageKeyRef = React.useRef<string | undefined>(undefined);
   const previousMessageCountRef = React.useRef(0);
   const handledTargetMessageIdRef = React.useRef<string | null>(null);
+  const scrollToBottomOnNextUpdateRef = React.useRef(false);
   // Mirror isLoading into a ref so the ResizeObservers (which subscribe once)
   // can skip reacting while the skeleton is up — reacting to height churn under
   // a streaming-in list is what makes the timeline thrash on entry.
@@ -63,6 +65,7 @@ export function useTimelineScrollManager({
     previousLastMessageKeyRef.current = undefined;
     previousMessageCountRef.current = 0;
     handledTargetMessageIdRef.current = null;
+    scrollToBottomOnNextUpdateRef.current = false;
     setIsAtBottom(true);
     setHighlightedMessageId(null);
     setNewMessageCount(0);
@@ -107,6 +110,10 @@ export function useTimelineScrollManager({
   const latestMessage =
     messages.length > 0 ? messages[messages.length - 1] : undefined;
   const latestMessageKey = selectLatestMessageKey(messages);
+
+  const scrollToBottomOnNextUpdate = React.useCallback(() => {
+    scrollToBottomOnNextUpdateRef.current = true;
+  }, []);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: timelineRef is a stable React ref passed from the parent — its identity never changes
   const syncScrollState = React.useCallback(() => {
@@ -330,13 +337,19 @@ export function useTimelineScrollManager({
       return;
     }
 
-    if (
-      !targetMessageId &&
-      (shouldStickToBottomRef.current ||
-        isAtBottomRef.current ||
-        latestMessage.accent)
-    ) {
-      scrollToBottom(latestMessage.accent ? "smooth" : "auto");
+    const shouldHonorExplicitBottomRequest =
+      scrollToBottomOnNextUpdateRef.current;
+    scrollToBottomOnNextUpdateRef.current = false;
+
+    const autoScrollBehavior = selectLatestMessageAutoScrollBehavior({
+      hasExplicitBottomRequest: shouldHonorExplicitBottomRequest,
+      isAtBottom: isAtBottomRef.current,
+      shouldStickToBottom: shouldStickToBottomRef.current,
+      targetMessageId,
+    });
+
+    if (autoScrollBehavior) {
+      scrollToBottom(autoScrollBehavior);
     } else {
       setNewMessageCount((current) => {
         const addedMessages = Math.max(
@@ -444,6 +457,7 @@ export function useTimelineScrollManager({
     newMessageCount,
     restoreScrollPosition,
     scrollToBottom,
+    scrollToBottomOnNextUpdate,
     scrollToMessage,
     syncScrollState,
   };
