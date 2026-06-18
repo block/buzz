@@ -1286,6 +1286,121 @@ function buildMockConfigSurface(pubkey: string): {
     },
   };
 
+  // Live runtime override — a persona-linked agent whose session model was
+  // switched at runtime. The live model rides over the persona baseline as a
+  // secondary value WITHOUT strikethrough (the headline runtimeOverride render).
+  const runtimeOverrideSurface = {
+    runtimeId: "goose",
+    runtimeLabel: "Goose",
+    isPreSpawn: false,
+    normalized: {
+      model: {
+        value: "claude-opus-4-20250514",
+        origin: "runtimeOverride",
+        isWritable: true,
+        writeVia: { type: "acpSetSessionModel" },
+        overriddenValue: "gpt-4o",
+        overriddenOrigin: "personaDefault",
+      },
+      provider: {
+        value: "anthropic",
+        origin: "acpConfigOption",
+        isWritable: false,
+        writeVia: { type: "readOnly" },
+        overriddenValue: null,
+        overriddenOrigin: null,
+      },
+      mode: {
+        value: "auto",
+        origin: "envVar",
+        isWritable: true,
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
+        overriddenValue: null,
+        overriddenOrigin: null,
+      },
+      thinkingEffort: {
+        value: "high",
+        origin: "configFile",
+        isWritable: true,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "GOOSE_THINKING_EFFORT",
+        },
+        overriddenValue: null,
+        overriddenOrigin: null,
+      },
+      maxOutputTokens: null,
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [],
+    sources: {
+      acpNative: "available",
+      acpConfigOptions: "available",
+      envVars: "available",
+      configFile: "available",
+      configFilePath: "~/.config/goose/config.yaml",
+    },
+  };
+
+  // Mixed-provenance showcase — every top-level row carries a DIFFERENT origin
+  // so the panel witnesses four distinct provenance sentences in one frame:
+  // "Set in Buzz", "Inherited from persona", "From config file (...)", and
+  // "From environment variable (...)".
+  const multiOriginSurface = {
+    runtimeId: "goose",
+    runtimeLabel: "Goose",
+    isPreSpawn: false,
+    normalized: {
+      model: {
+        value: "gpt-4o",
+        origin: "buzzExplicit",
+        isWritable: true,
+        writeVia: { type: "acpSetSessionModel" },
+        overriddenValue: null,
+        overriddenOrigin: null,
+      },
+      provider: {
+        value: "openai",
+        origin: "personaDefault",
+        isWritable: false,
+        writeVia: { type: "readOnly" },
+        overriddenValue: null,
+        overriddenOrigin: null,
+      },
+      mode: {
+        value: "auto",
+        origin: "envVar",
+        isWritable: true,
+        writeVia: { type: "respawnWithEnvVar", envKey: "GOOSE_MODE" },
+        overriddenValue: null,
+        overriddenOrigin: null,
+      },
+      thinkingEffort: {
+        value: "medium",
+        origin: "configFile",
+        isWritable: true,
+        writeVia: {
+          type: "gooseNativeConfigWrite",
+          configKey: "GOOSE_THINKING_EFFORT",
+        },
+        overriddenValue: null,
+        overriddenOrigin: null,
+      },
+      maxOutputTokens: null,
+      contextLimit: null,
+      systemPrompt: null,
+    },
+    advanced: [],
+    sources: {
+      acpNative: "available",
+      acpConfigOptions: "available",
+      envVars: "available",
+      configFile: "available",
+      configFilePath: "~/.config/goose/config.yaml",
+    },
+  };
+
   // Map well-known test pubkeys to specific fixtures
   const PUBKEY_CLAUDE =
     "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
@@ -1293,6 +1408,11 @@ function buildMockConfigSurface(pubkey: string): {
     "bb22a5299220cad76ffd46190ccbeede8ab5dc260faa28b6e5a2cb31b9aff260";
   const PUBKEY_CODEX =
     "554cef57437abac34522ac2c9f0490d685b72c80478cf9f7ed6f9570ee8624ea";
+  const PUBKEY_RUNTIME_OVERRIDE =
+    "df8e91b86fda13a9a67896df77232f7bdab2ba9c3e165378e1ba3d24c13a328e";
+  // Synthetic agent for the multi-origin provenance showcase (not a TEST_IDENTITY).
+  const PUBKEY_MULTI_ORIGIN =
+    "abc1230000000000000000000000000000000000000000000000000000000def";
 
   switch (pubkey) {
     case PUBKEY_CLAUDE:
@@ -1301,6 +1421,10 @@ function buildMockConfigSurface(pubkey: string): {
       return preSpawnSurface;
     case PUBKEY_CODEX:
       return codexSurface;
+    case PUBKEY_RUNTIME_OVERRIDE:
+      return runtimeOverrideSurface;
+    case PUBKEY_MULTI_ORIGIN:
+      return multiOriginSurface;
     default:
       return gooseSurface;
   }
