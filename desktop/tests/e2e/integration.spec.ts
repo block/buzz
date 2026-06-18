@@ -1,6 +1,10 @@
 import { expect, test, type Browser } from "@playwright/test";
 
-import { installRelayBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  installRelayBridge,
+  openChannelBrowser,
+  TEST_IDENTITIES,
+} from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 import { assertRelaySeeded } from "../helpers/seed";
 
@@ -194,7 +198,7 @@ test("two users see the same channel", async ({
     await expect(pageOne.getByTestId("stream-list")).toContainText(channelName);
 
     await pageTwo.goto("/");
-    await pageTwo.getByTestId("browse-channels").click();
+    await openChannelBrowser(pageTwo);
     await expect(pageTwo.getByTestId("channel-browser-dialog")).toBeVisible();
     await pageTwo
       .getByTestId(`browse-channel-${channelName}`)
@@ -531,7 +535,7 @@ test("manage sheet archive and unarchive survives a reload through the relay", a
   await page.reload();
 
   await expect(page.getByTestId("stream-list")).not.toContainText(channelName);
-  await page.getByTestId("browse-channels").click();
+  await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
   await expect(page.getByTestId(`browse-channel-${channelName}`)).toContainText(
     "archived",

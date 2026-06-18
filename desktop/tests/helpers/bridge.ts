@@ -479,3 +479,26 @@ export async function installRelayBridge(
     seedPreviewFeatures: options?.seedPreviewFeatures,
   });
 }
+
+// The sidebar no longer renders a "browse channels" icon button; the channel
+// browser is opened via the primary-modifier + Shift + O keyboard shortcut.
+export async function openChannelBrowser(page: Page) {
+  const isMacBrowser = await page.evaluate(() =>
+    /mac|iphone|ipad|ipod/i.test(navigator.platform),
+  );
+  if (isMacBrowser) {
+    await page.evaluate(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "O",
+          metaKey: true,
+          shiftKey: true,
+        }),
+      );
+    });
+  } else {
+    await page.keyboard.press("Control+Shift+O");
+  }
+}
