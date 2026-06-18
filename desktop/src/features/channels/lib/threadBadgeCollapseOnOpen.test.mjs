@@ -7,7 +7,6 @@ import {
   buildCreatedAtByMessageId,
   buildDirectRepliesByParentId,
   buildDirectReplyIdsByParentId,
-  directRepliesMaxCreatedAt,
   subtreeMaxCreatedAt,
 } from "./subtreeCreatedAt.ts";
 
@@ -17,9 +16,10 @@ import {
 // advanceContext), the badge frontier snapshot then advances toward that live
 // marker (seedThreadBadgeFrontiers -> nextThreadBadgeFrontier), and the
 // summary badge counts the whole subtree against that snapshot
-// (computeThreadBadgeCounts). The fix changed the ceiling from
-// directRepliesMaxCreatedAt to subtreeMaxCreatedAt; these tests pin that the
-// badge collapses to 0 on open whether or not the OWN marker actually advances.
+// (computeThreadBadgeCounts). The fix changed the open ceiling from the
+// direct-replies max (head + direct children) to the full-subtree max
+// (subtreeMaxCreatedAt); these tests pin that the badge collapses to 0 on open
+// whether or not the OWN marker actually advances.
 
 const msg = (id, parentId, createdAt, pubkey = "author") => ({
   id,
@@ -62,7 +62,8 @@ const badgeAfterOpen = (rootId, messages, priorOwnMarker, currentPubkey) => {
 
 test("openThreadWithUnreadNestedReply_advancesFrontierToSubtreeMax", () => {
   // root -> a(100) -> b(200): the unread lives in nested reply b.
-  // Direct-replies-max stops at a (100); only subtree-max reaches b (200).
+  // The OLD direct-replies ceiling stopped at a(100) (b is a grandchild, not a
+  // direct reply of root); only subtree-max reaches the nested b(200).
   const messages = [
     msg("root", null, 50),
     msg("a", "root", 100),
@@ -70,7 +71,6 @@ test("openThreadWithUnreadNestedReply_advancesFrontierToSubtreeMax", () => {
   ];
   const ids = buildDirectReplyIdsByParentId(messages);
   const createdAt = buildCreatedAtByMessageId(messages);
-  assert.equal(directRepliesMaxCreatedAt("root", ids, createdAt), 100);
   assert.equal(subtreeMaxCreatedAt("root", ids, createdAt), 200);
 });
 
@@ -87,17 +87,19 @@ test("openThreadWithUnreadNestedReply_collapsesBadgeToZero", () => {
 });
 
 test("openThreadWithUnreadNestedReply_oldDirectCeilingLeftBadgeLit", () => {
-  // Regression guard: the OLD direct-replies ceiling does NOT clear the badge,
-  // proving the test exercises the exact gap the fix closes.
+  // Regression guard: the OLD behavior advanced the frontier only to the
+  // direct-replies ceiling — max over root(50) and its DIRECT reply a(100),
+  // i.e. 100. The nested grandchild b(200) was excluded, so the badge stayed
+  // lit (count=1). This pins the exact gap the fix closes: had the fix been
+  // reverted to that ceiling, the badge would NOT clear. The subtree-max
+  // ceiling (200) is asserted to clear the badge in the test above.
   const messages = [
     msg("root", null, 50),
     msg("a", "root", 100),
     msg("b", "a", 200),
   ];
-  const ids = buildDirectReplyIdsByParentId(messages);
-  const createdAt = buildCreatedAtByMessageId(messages);
-  const oldCeiling = directRepliesMaxCreatedAt("root", ids, createdAt);
-  const frontier = nextThreadBadgeFrontier(undefined, oldCeiling);
+  const oldDirectCeiling = 100;
+  const frontier = nextThreadBadgeFrontier(undefined, oldDirectCeiling);
   const count = computeThreadBadgeCounts(
     messages,
     buildDirectRepliesByParentId(messages),
