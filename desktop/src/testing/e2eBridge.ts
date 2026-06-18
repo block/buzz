@@ -80,6 +80,12 @@ type E2eConfig = {
     updateAvailable?: boolean;
     updateChannelDelayMs?: number;
     updateDownloadDelayMs?: number;
+    // Delay applied to older-history fetches (`REQ` with `until`) so the
+    // anchor-invariant test in `messaging.spec.ts` has a deterministic
+    // window to snapshot the visible row before the prepend commits.
+    // Only affects history-paging requests; the initial channel load is
+    // not delayed.
+    historyDelayMs?: number;
     restartDelayMs?: number;
     updateVersion?: string;
     stallWebsocketSends?: boolean;
@@ -1495,6 +1501,35 @@ const mockChannels: MockChannel[] = [
       createMockMember(MOCK_IDENTITY_PUBKEY, "member", 700),
     ],
   }),
+  // Long-history fixture for the scroll-anchor invariant test in
+  // `messaging.spec.ts`. Seeded in `getMockMessageStore` with enough
+  // messages to force at least one older-fetch round-trip past the
+  // initial 200-msg load.
+  createMockChannel({
+    id: "1f0d9f7a-c2ad-5b23-b35f-17ed1bb10930",
+    name: "history-jump",
+    channel_type: "stream",
+    visibility: "open",
+    description: "Long history fixture for scroll anchoring tests",
+    topic: null,
+    purpose: null,
+    last_message_at: isoMinutesAgo(1),
+    archived_at: null,
+    created_by: MOCK_IDENTITY_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: null,
+    nip29_group_id: null,
+    created_minutes_ago: 1440,
+    updated_minutes_ago: 1,
+    members: [
+      createMockMember(MOCK_IDENTITY_PUBKEY, "owner", 1440),
+      createMockMember(ALICE_PUBKEY, "member", 1200),
+    ],
+  }),
 ];
 
 const mockMessages = new Map<string, RelayEvent[]>();
@@ -2261,7 +2296,22 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
                 sig: "mocksig".repeat(20).slice(0, 128),
               },
             ]
-          : [];
+          : channelId === "1f0d9f7a-c2ad-5b23-b35f-17ed1bb10930"
+            ? // History-jump fixture: 240 sequential messages spaced 1 minute
+              // apart so the initial 200-msg load doesn't cover the full
+              // history and `useLoadOlderOnScroll` has to page back. Numbered
+              // bottom-up (001 = oldest, 240 = newest) so the test can assert
+              // anchor stability against a known message number.
+              Array.from({ length: 240 }, (_, index) => ({
+                id: `mock-history-jump-${String(index + 1).padStart(3, "0")}`,
+                pubkey: ALICE_PUBKEY,
+                created_at: Math.floor(Date.now() / 1000) - (240 - index) * 60,
+                kind: 9,
+                tags: [["h", channelId]],
+                content: `History jump fixture message ${String(index + 1).padStart(3, "0")}`,
+                sig: "mocksig".repeat(20).slice(0, 128),
+              }))
+            : [];
 
   mockMessages.set(channelId, seeded);
   return seeded;
@@ -5869,6 +5919,21 @@ function sendToMockSocket(args: {
     const channelId = filter["#h"]?.[0];
     if (!channelId) {
       sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
+    // Older-history paging uses `until` to bound the fetch above the oldest
+    // currently-rendered message. Delay only that path when the test asks for
+    // it — initial loads stay snappy.
+    const historyDelayMs = getConfig()?.mock?.historyDelayMs;
+    if (
+      filter.until !== undefined &&
+      historyDelayMs !== undefined &&
+      historyDelayMs > 0
+    ) {
+      setTimeout(() => {
+        emitMockHistory(socket, subId, channelId, filter);
+      }, historyDelayMs);
       return;
     }
 

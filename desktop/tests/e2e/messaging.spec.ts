@@ -1,7 +1,112 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
+
+const SCROLL_PREPEND_ANCHOR_DRIFT_TOLERANCE_PX = 4;
+
+type TimelineAnchorSnapshot = {
+  anchors: Array<{ id: string; top: number; visible: boolean }>;
+  firstMessageId: string | null;
+  messageCount: number;
+  metrics: {
+    clientHeight: number;
+    scrollHeight: number;
+    scrollTop: number;
+  };
+};
+
+async function snapshotRenderedAnchors(
+  page: Page,
+): Promise<TimelineAnchorSnapshot | null> {
+  return page.evaluate(() => {
+    const timeline = document.querySelector(
+      '[data-testid="message-timeline"]',
+    ) as HTMLElement | null;
+    if (!timeline) return null;
+
+    const containerRect = timeline.getBoundingClientRect();
+    const rows = Array.from(
+      timeline.querySelectorAll<HTMLElement>("[data-message-id]"),
+    );
+
+    return {
+      messageCount: rows.length,
+      firstMessageId: rows[0]?.dataset.messageId ?? null,
+      metrics: {
+        clientHeight: timeline.clientHeight,
+        scrollHeight: timeline.scrollHeight,
+        scrollTop: timeline.scrollTop,
+      },
+      anchors: rows.map((row) => {
+        const rect = row.getBoundingClientRect();
+        return {
+          id: row.dataset.messageId ?? "",
+          top: rect.top - containerRect.top,
+          visible:
+            rect.bottom > containerRect.top && rect.top < containerRect.bottom,
+        };
+      }),
+    };
+  });
+}
+
+async function findVisibleTimelineAnchor(page: Page) {
+  return page.evaluate(() => {
+    const timeline = document.querySelector(
+      '[data-testid="message-timeline"]',
+    ) as HTMLElement | null;
+    if (!timeline) return null;
+
+    const rect = timeline.getBoundingClientRect();
+    const preferredTop = rect.height / 3;
+    let best: { distance: number; id: string; top: number } | null = null;
+
+    for (const row of Array.from(
+      timeline.querySelectorAll<HTMLElement>("[data-message-id]"),
+    )) {
+      const rowRect = row.getBoundingClientRect();
+      if (rowRect.bottom <= rect.top || rowRect.top >= rect.bottom) {
+        continue;
+      }
+
+      const top = rowRect.top - rect.top;
+      const distance = Math.abs(top - preferredTop);
+      if (!best || distance < best.distance) {
+        best = { distance, id: row.dataset.messageId ?? "", top };
+      }
+    }
+
+    return best ? { id: best.id, top: best.top } : null;
+  });
+}
+
+async function waitForPrependCommit(
+  page: Page,
+  previousFirstMessageId: string | null,
+  previousCount: number,
+  timeoutMs = 5_000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const snap = await snapshotRenderedAnchors(page);
+    if (
+      snap &&
+      snap.firstMessageId !== previousFirstMessageId &&
+      snap.messageCount > previousCount
+    ) {
+      return snap;
+    }
+    await page.waitForTimeout(50);
+  }
+
+  const finalSnap = await snapshotRenderedAnchors(page);
+  throw new Error(
+    `Prepend did not commit within ${timeoutMs}ms. Final snapshot: ${JSON.stringify(
+      finalSnap,
+    )}`,
+  );
+}
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
@@ -61,6 +166,115 @@ test("long autolink wraps without widening the timeline", async ({ page }) => {
       return barBox.x + barBox.width - (timelineBox.x + timelineBox.width);
     })
     .toBeLessThanOrEqual(0);
+});
+
+test("older-history prepend keeps the visible row pinned", async ({ page }) => {
+  // Override only this spec's mock config with a delayed older-history response.
+  // The delay gives the test a deterministic window to snapshot the anchor after
+  // the sentinel fires but before the prepended rows commit.
+  await installMockBridge(page, { historyDelayMs: 250 });
+
+  await page.goto("/");
+  await page.getByTestId("channel-history-jump").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("history-jump");
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "History jump fixture message 240",
+  );
+
+  await expect
+    .poll(async () => {
+      const snap = await snapshotRenderedAnchors(page);
+      return snap?.messageCount ?? 0;
+    })
+    .toBeGreaterThan(150);
+
+  const timeline = page.getByTestId("message-timeline");
+  await timeline.hover();
+
+  // Move close enough that one more wheel tick enters the 200px top rootMargin,
+  // but stop before the sentinel can fire. Capturing the anchor before the
+  // loading spinner appears keeps the assertion tied to the row the user was
+  // actually reading when the older fetch started.
+  let before: TimelineAnchorSnapshot | null = null;
+  for (let attempts = 0; attempts < 80; attempts += 1) {
+    before = await snapshotRenderedAnchors(page);
+    if (!before) throw new Error("Timeline disappeared while scrolling.");
+    if (before.metrics.scrollTop < 700) break;
+    await page.mouse.wheel(0, -600);
+    await page.waitForTimeout(20);
+  }
+  for (let attempts = 0; attempts < 20; attempts += 1) {
+    before = await snapshotRenderedAnchors(page);
+    if (!before) throw new Error("Timeline disappeared while positioning.");
+    if (before.metrics.scrollTop <= 300) break;
+    await page.mouse.wheel(0, -80);
+    await page.waitForTimeout(20);
+  }
+
+  before = await snapshotRenderedAnchors(page);
+  if (!before) throw new Error("Timeline disappeared before prepend.");
+  expect(
+    before.metrics.scrollTop,
+    `test must snapshot before the top sentinel fires; got ${JSON.stringify(
+      before.metrics,
+    )}`,
+  ).toBeGreaterThan(200);
+
+  const anchorBefore = await findVisibleTimelineAnchor(page);
+  if (!anchorBefore) {
+    throw new Error(
+      `Could not find visible anchor before prepend. Snapshot: ${JSON.stringify(
+        await snapshotRenderedAnchors(page),
+      )}`,
+    );
+  }
+
+  before = await snapshotRenderedAnchors(page);
+  if (!before) throw new Error("Timeline disappeared before prepend.");
+
+  await page.mouse.wheel(0, -160);
+  await expect(page.getByTestId("message-fetching-older")).toHaveCount(1);
+
+  const triggerSnapshot = await snapshotRenderedAnchors(page);
+  if (!triggerSnapshot) throw new Error("Timeline disappeared after trigger.");
+  const expectedAnchorTop =
+    anchorBefore.top +
+    (before.metrics.scrollTop - triggerSnapshot.metrics.scrollTop);
+
+  const after = await waitForPrependCommit(
+    page,
+    before.firstMessageId,
+    before.messageCount,
+  );
+  expect(after.firstMessageId).toBe("mock-history-jump-001");
+
+  // Let the layout-effect restore and scroll manager settle.
+  await page.waitForTimeout(80);
+
+  const livePosition = await page.evaluate((id) => {
+    const timeline = document.querySelector(
+      '[data-testid="message-timeline"]',
+    ) as HTMLElement | null;
+    if (!timeline) return null;
+
+    const row = timeline.querySelector<HTMLElement>(
+      `[data-message-id="${CSS.escape(id)}"]`,
+    );
+    if (!row) return null;
+
+    return (
+      row.getBoundingClientRect().top - timeline.getBoundingClientRect().top
+    );
+  }, anchorBefore.id);
+
+  expect(livePosition, "anchor row missing after prepend").not.toBeNull();
+  const drift = Math.abs((livePosition ?? 0) - expectedAnchorTop);
+  expect(
+    drift,
+    `anchor row "${anchorBefore.id}" drifted ${drift.toFixed(2)}px ` +
+      `(was ${expectedAnchorTop.toFixed(2)}px at prepend start, now ${(livePosition ?? 0).toFixed(2)}px). ` +
+      `Tolerance is ${SCROLL_PREPEND_ANCHOR_DRIFT_TOLERANCE_PX}px.`,
+  ).toBeLessThanOrEqual(SCROLL_PREPEND_ANCHOR_DRIFT_TOLERANCE_PX);
 });
 
 test("send multiple messages in sequence", async ({ page }) => {

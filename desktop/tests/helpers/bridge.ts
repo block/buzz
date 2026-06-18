@@ -104,6 +104,13 @@ type MockBridgeOptions = {
   updateAvailable?: boolean;
   updateChannelDelayMs?: number;
   updateDownloadDelayMs?: number;
+  /**
+   * Delay (ms) applied to older-history fetches in the mock relay so the
+   * scroll-anchor invariant test can snapshot the visible row before the
+   * prepend commits. Only affects older-paging requests (those with `until`
+   * set); the initial channel load is unaffected.
+   */
+  historyDelayMs?: number;
   updateVersion?: string;
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
