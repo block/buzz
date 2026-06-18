@@ -1,6 +1,10 @@
 import * as React from "react";
 import { ArrowDown, ArrowUp, Hash } from "lucide-react";
 
+import {
+  selectTimelineBodySurface,
+  selectTimelineIntroSurface,
+} from "@/features/messages/lib/timelineSnapshot";
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -9,7 +13,6 @@ import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
-import { SkeletonReveal } from "@/shared/ui/skeleton";
 import { TooltipProvider } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
@@ -167,6 +170,28 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     ? `message-timeline:${channelId ?? "none"}:target:${targetMessageId}`
     : `message-timeline:${channelId ?? "none"}`;
 
+  const timelineBodySurface = selectTimelineBodySurface({
+    deferredCount: deferredMessages.length,
+    isLoading,
+    liveCount: messages.length,
+  });
+  const showTimelineSkeleton = timelineBodySurface === "skeleton";
+  const timelineIntroSurface = selectTimelineIntroSurface({
+    hasChannelIntro: channelIntro !== null && directMessageIntro === null,
+    hasDirectMessageIntro: directMessageIntro !== null,
+    isSkeletonVisible: showTimelineSkeleton,
+  });
+  const showDirectMessageIntro =
+    timelineIntroSurface === "direct-message-intro";
+  const showChannelIntro = timelineIntroSurface === "channel-intro";
+  const activeDirectMessageIntro = showDirectMessageIntro
+    ? directMessageIntro
+    : null;
+  const activeChannelIntro = showChannelIntro ? channelIntro : null;
+  const showIntro = showDirectMessageIntro || showChannelIntro;
+  const showGenericEmpty = timelineBodySurface === "empty" && !showIntro;
+  const showMessageList = timelineBodySurface === "list";
+
   const {
     bottomAnchorRef,
     contentRef,
@@ -179,7 +204,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     syncScrollState,
   } = useTimelineScrollManager({
     channelId,
-    isLoading,
+    isLoading: showTimelineSkeleton,
     messages: deferredMessages,
     onTargetReached,
     scrollContainerRef,
@@ -210,7 +235,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     !isUnreadPillDismissed &&
     unreadCount > 0 &&
     firstUnreadMessageId !== null &&
-    !isLoading;
+    !showTimelineSkeleton;
   if (showUnreadPill) hasShownPillRef.current = true;
   const handleJumpToOldestUnread = React.useCallback(() => {
     setIsUnreadPillDismissed(true);
@@ -223,6 +248,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
   const prevSearchActiveRef = React.useRef<string | null>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: scrollContainerRef is a stable React ref
   React.useEffect(() => {
+    if (showTimelineSkeleton) return;
     if (
       !searchActiveMessageId ||
       searchActiveMessageId === prevSearchActiveRef.current
@@ -241,31 +267,21 @@ export const MessageTimeline = React.memo(function MessageTimeline({
     if (el) {
       el.scrollIntoView({ block: "center", behavior: "smooth" });
     }
-  }, [searchActiveMessageId]);
+  }, [searchActiveMessageId, showTimelineSkeleton]);
 
   useLoadOlderOnScroll({
     fetchOlder,
     hasOlderMessages,
-    isLoading,
+    isLoading: showTimelineSkeleton,
     restoreScrollPosition,
     scrollContainerRef,
     sentinelRef: topSentinelRef,
   });
 
-  const showDirectMessageIntro = !isLoading && directMessageIntro !== null;
-  const showChannelIntro =
-    !isLoading && channelIntro !== null && directMessageIntro === null;
-  const showIntro = showDirectMessageIntro || showChannelIntro;
-  const showGenericEmpty =
-    !isLoading &&
-    deferredMessages.length === 0 &&
-    directMessageIntro === null &&
-    channelIntro === null;
-  const showMessageList = !isLoading && deferredMessages.length > 0;
   const timelineSkeletonRows = useTimelineSkeletonRows({
     channelId,
-    isLoading,
-    messages,
+    isLoading: showTimelineSkeleton,
+    messages: showTimelineSkeleton ? EMPTY_MESSAGES : deferredMessages,
   });
 
   return (
@@ -274,12 +290,12 @@ export const MessageTimeline = React.memo(function MessageTimeline({
         {showUnreadPill ? (
           <div
             className={cn(
-              "pointer-events-none absolute inset-x-0 z-20 flex justify-center px-4",
+              "pointer-events-none absolute inset-x-0 z-20 flex translate-y-3 justify-center px-4",
               channelChrome.top,
             )}
           >
             <Button
-              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-primary/40 bg-primary/10 px-2.5 text-2xs font-medium text-primary shadow-xs backdrop-blur-sm hover:bg-primary/20 [&_svg]:size-3.5"
+              className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-primary/40 bg-primary/10 px-2.5 text-2xs font-medium text-primary shadow-xs backdrop-blur-sm hover:bg-primary/20 [&_svg]:size-4"
               data-testid="message-unread-pill"
               onClick={handleJumpToOldestUnread}
               size="sm"
@@ -317,41 +333,38 @@ export const MessageTimeline = React.memo(function MessageTimeline({
               </div>
             ) : null}
 
-            <SkeletonReveal
+            <div
               className={cn(
-                "min-h-[18rem]",
+                "flex min-h-[18rem] min-w-0 flex-col gap-2",
                 (showIntro || showGenericEmpty) && "min-h-full",
                 showMessageList && !showIntro && "mt-auto",
               )}
-              contentClassName={cn(
-                "flex flex-col gap-2",
-                (showIntro || showGenericEmpty) && "min-h-full",
-              )}
-              loading={isLoading}
-              skeleton={<TimelineSkeleton rows={timelineSkeletonRows} />}
             >
-              {showDirectMessageIntro ? (
+              {showTimelineSkeleton ? (
+                <TimelineSkeleton rows={timelineSkeletonRows} />
+              ) : null}
+              {activeDirectMessageIntro ? (
                 <div
                   className="mb-0.5 mt-auto flex w-full flex-col items-start px-3 py-2 text-left"
                   data-testid="message-dm-intro"
                 >
                   <DirectMessageIntroAvatarStack
-                    participants={directMessageIntro.participants}
+                    participants={activeDirectMessageIntro.participants}
                   />
                   <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
-                    {directMessageIntro.displayName}
+                    {activeDirectMessageIntro.displayName}
                   </p>
                   <p className="mt-1 max-w-full truncate whitespace-nowrap text-sm leading-5 text-muted-foreground">
                     This is the beginning of your direct message with{" "}
                     <span className="font-medium text-foreground">
-                      {directMessageIntro.displayName}
+                      {activeDirectMessageIntro.displayName}
                     </span>
                     .
                   </p>
                 </div>
               ) : null}
 
-              {showChannelIntro ? (
+              {activeChannelIntro ? (
                 <div
                   className="mb-0.5 mt-auto flex w-full max-w-2xl flex-col items-start px-3 py-2 text-left"
                   data-testid="message-channel-intro"
@@ -360,28 +373,28 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                     className="flex h-[60px] w-[60px] items-center justify-center rounded-2xl border border-border/70 bg-muted/40 text-muted-foreground"
                     data-testid="message-channel-intro-icon"
                   >
-                    {channelIntro.icon ?? (
+                    {activeChannelIntro.icon ?? (
                       <Hash aria-hidden className="h-7 w-7" />
                     )}
                   </div>
                   <p className="mt-4 max-w-full truncate text-xl font-semibold leading-7 tracking-tight text-foreground">
-                    #{channelIntro.channelName}
+                    #{activeChannelIntro.channelName}
                   </p>
                   <p className="mt-1 max-w-full text-sm leading-5 text-muted-foreground">
                     This is the beginning of the{" "}
                     <span className="font-medium text-foreground">
-                      {channelIntro.channelKindLabel}
+                      {activeChannelIntro.channelKindLabel}
                     </span>
                     .
                   </p>
-                  {channelIntro.description ? (
+                  {activeChannelIntro.description ? (
                     <p className="mt-2 max-w-xl text-sm leading-5 text-muted-foreground">
-                      {channelIntro.description}
+                      {activeChannelIntro.description}
                     </p>
                   ) : null}
-                  {channelIntro.actions?.length ? (
+                  {activeChannelIntro.actions?.length ? (
                     <div className="mt-4 flex max-w-full flex-nowrap gap-3 overflow-x-auto pb-1">
-                      {channelIntro.actions.map((action) => {
+                      {activeChannelIntro.actions.map((action) => {
                         const hasDescription = Boolean(action.description);
 
                         return (
@@ -402,7 +415,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                                 "flex shrink-0 items-center justify-center rounded-full bg-muted/70 text-muted-foreground",
                                 hasDescription
                                   ? "h-12 w-12 [&_svg]:h-6 [&_svg]:w-6"
-                                  : "h-10 w-10 [&_svg]:h-5 [&_svg]:w-5",
+                                  : "h-10 w-10 [&_svg]:h-4 [&_svg]:w-4",
                               )}
                               data-testid={
                                 action.testId
@@ -460,14 +473,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
 
               {showMessageList ? (
                 <div
-                  className={cn(
-                    "flex flex-col gap-2",
-                    !showIntro && "mt-auto",
-                    // While a deferred render is in flight the painted
-                    // list lags the latest `messages`. Dim it slightly so the
-                    // streaming-in feels intentional instead of frozen.
-                    isRenderPending && "opacity-60 transition-opacity",
-                  )}
+                  className={cn("flex flex-col gap-2", !showIntro && "mt-auto")}
                   data-render-pending={isRenderPending ? "true" : undefined}
                 >
                   <TimelineMessageList
@@ -499,7 +505,7 @@ export const MessageTimeline = React.memo(function MessageTimeline({
                   />
                 </div>
               ) : null}
-            </SkeletonReveal>
+            </div>
 
             <div aria-hidden className="h-px" ref={bottomAnchorRef} />
           </div>

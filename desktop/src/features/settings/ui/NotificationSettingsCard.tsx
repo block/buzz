@@ -232,7 +232,7 @@ export function NotificationSettingsCard({
                       </>
                     ) : (
                       <>
-                        <ChevronDown className="h-3.5 w-3.5" />
+                        <ChevronDown className="h-4 w-4" />
                         View all
                       </>
                     )}

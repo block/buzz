@@ -143,7 +143,7 @@ export function FeedSection({
   return (
     <section>
       <div className="flex items-center gap-2 pb-2">
-        <Icon className="h-3.5 w-3.5 text-muted-foreground" />
+        <Icon className="h-4 w-4 text-muted-foreground" />
         <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           {title}
         </h2>

@@ -1046,3 +1046,50 @@ test("ArrowUp edits your last thread reply right after sending it", async ({
   await expect(editBanner).toContainText(reply);
   await expect(threadInput).toHaveText(reply);
 });
+
+test("action bar stays within the timeline when the thread panel is open", async ({
+  page,
+}) => {
+  // Narrow viewport + open thread panel => the timeline shrinks to a column.
+  // A long unbreakable token must not widen message rows past that column,
+  // or the right-anchored action bar is pushed offscreen (regression: #1081
+  // fixed the wrap but rows still expanded to content min-width).
+  await page.setViewportSize({ width: 1024, height: 800 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const timeline = page.getByTestId("message-timeline");
+  const input = page.getByTestId("message-input").first();
+  const send = page.getByTestId("send-message").first();
+
+  const longUrl = `https://example.com/${"a".repeat(180)}/path`;
+  await input.fill(longUrl);
+  await send.click();
+  await expect(timeline).toContainText("example.com");
+
+  const rootMessage = timeline.getByTestId("message-row").first();
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+
+  const wideRow = timeline.getByTestId("message-row").last();
+  await wideRow.scrollIntoViewIfNeeded();
+  await wideRow.hover();
+  const bar = wideRow.locator('[data-testid^="message-action-bar-"]');
+  await expect(bar).toBeVisible();
+
+  const timelineBox = await timeline.boundingBox();
+  const rowBox = await wideRow.boundingBox();
+  const barBox = await bar.boundingBox();
+  if (!timelineBox || !rowBox || !barBox) {
+    throw new Error("Expected timeline, row, and action bar to have geometry.");
+  }
+
+  expect(rowBox.x + rowBox.width).toBeLessThanOrEqual(
+    timelineBox.x + timelineBox.width + 1,
+  );
+  expect(barBox.x + barBox.width).toBeLessThanOrEqual(
+    timelineBox.x + timelineBox.width + 1,
+  );
+});

@@ -117,7 +117,7 @@ export function HuddleParticipantsControl({
                     type="button"
                     variant="ghost"
                   >
-                    <X className="h-3.5 w-3.5" />
+                    <X className="h-4 w-4" />
                   </Button>
                 )}
               </li>
@@ -159,7 +159,7 @@ function HexAvatar({
         color: "#fff",
       }}
     >
-      {size === "lg" ? shortId : <UsersRound className="h-3.5 w-3.5" />}
+      {size === "lg" ? shortId : <UsersRound className="h-4 w-4" />}
     </div>
   );
 }

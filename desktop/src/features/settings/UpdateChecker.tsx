@@ -59,6 +59,21 @@ export function UpdateChecker() {
           </SettingsOptionRow>
         )}
 
+        {status.state === "unavailable" && (
+          <SettingsOptionRow>
+            <div className="min-w-0">
+              <p className="text-sm font-medium">Update status</p>
+              <p className="text-sm font-normal text-muted-foreground">
+                Automatic updates aren't available on this build. Download the
+                latest release manually.
+              </p>
+            </div>
+            <Button variant="outline" size="sm" onClick={checkForUpdate}>
+              Check Again
+            </Button>
+          </SettingsOptionRow>
+        )}
+
         {status.state === "available" && (
           <SettingsOptionRow>
             <div className="min-w-0">

@@ -435,12 +435,7 @@ async fn create_session_and_apply_model(
     // for the session/new request. Only sent when the agent declares protocol
     // version >= 2 (supports systemPrompt); legacy agents ignore it.
     let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
-        match (ctx.base_prompt, ctx.system_prompt.as_deref()) {
-            (Some(bp), Some(sp)) => Some(format!("{}\n\n{sp}", bp.trim_end())),
-            (Some(bp), None) => Some(bp.trim_end().to_string()),
-            (None, Some(sp)) => Some(sp.to_string()),
-            (None, None) => None,
-        }
+        framed_system_prompt(ctx.base_prompt, ctx.system_prompt.as_deref())
     } else {
         None
     };
@@ -657,6 +652,26 @@ pub(crate) fn prepend_base_for_legacy(
             format!("{}\n\n{body}", crate::queue::base_section(bp))
         }
         _ => body.to_string(),
+    }
+}
+
+/// Frame the `session/new` `systemPrompt` so each present prompt carries its own
+/// header, keeping the base/persona boundary recoverable downstream.
+///
+/// The header framing matches the legacy per-turn path (`queue::base_section`
+/// for `[Base]`, `[System]\n{...}` for the persona) so the desktop observer can
+/// split the combined value into labeled sub-sections. Each prompt is wrapped
+/// only when present, so a persona-only agent yields `[System]\n{persona}`
+/// rather than an unlabeled blob that would be mislabeled as `[Base]`.
+fn framed_system_prompt(base_prompt: Option<&str>, system_prompt: Option<&str>) -> Option<String> {
+    match (base_prompt, system_prompt) {
+        (Some(bp), Some(sp)) => Some(format!(
+            "{}\n\n[System]\n{sp}",
+            crate::queue::base_section(bp)
+        )),
+        (Some(bp), None) => Some(crate::queue::base_section(bp)),
+        (None, Some(sp)) => Some(format!("[System]\n{sp}")),
+        (None, None) => None,
     }
 }
 
@@ -2334,6 +2349,36 @@ mod tests {
         // No base_prompt configured: nothing to prepend regardless of version.
         let composed = prepend_base_for_legacy(1, None, "hello channel");
         assert_eq!(composed, "hello channel");
+    }
+
+    // ── framed_system_prompt tests ───────────────────────────────────────────
+    // Pin the session/new systemPrompt framing: each present prompt carries its
+    // own header so the desktop observer can split into labeled sub-sections.
+
+    #[test]
+    fn test_framed_system_prompt_both_present_carries_both_headers() {
+        let framed = framed_system_prompt(Some("base text"), Some("persona text"))
+            .expect("both present yields Some");
+        assert_eq!(framed, "[Base]\nbase text\n\n[System]\npersona text");
+    }
+
+    #[test]
+    fn test_framed_system_prompt_base_only_labels_base() {
+        let framed = framed_system_prompt(Some("base text"), None).expect("base yields Some");
+        assert_eq!(framed, "[Base]\nbase text");
+    }
+
+    #[test]
+    fn test_framed_system_prompt_persona_only_labels_system() {
+        // A bare persona would be mislabeled "Base" downstream — it must carry
+        // its own [System] header even when no base prompt exists.
+        let framed = framed_system_prompt(None, Some("persona text")).expect("persona yields Some");
+        assert_eq!(framed, "[System]\npersona text");
+    }
+
+    #[test]
+    fn test_framed_system_prompt_neither_is_none() {
+        assert!(framed_system_prompt(None, None).is_none());
     }
 
     // ── parse_thread_response tests ──────────────────────────────────────────

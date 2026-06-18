@@ -237,3 +237,24 @@ test("computeThreadUnreadMarker_noPubkey_countsNormally", () => {
   assert.equal(marker.firstUnreadReplyId, "r1");
   assert.equal(marker.unreadCount, 2);
 });
+
+test("computeChannelUnreadMarker_selfAuthoredMixedCase_skipsOwnMessages", () => {
+  // Identity and signer pubkeys differing only in hex case must still match.
+  const messages = [
+    { ...topLevel("a", 10), pubkey: "ABCDEF" },
+    { ...topLevel("b", 20), pubkey: "other" },
+  ];
+  const marker = computeChannelUnreadMarker(messages, 5, false, "abcdef");
+  assert.equal(marker.firstUnreadMessageId, "b");
+  assert.equal(marker.unreadCount, 1);
+});
+
+test("computeThreadUnreadMarker_selfAuthoredMixedCase_skipsOwnReplies", () => {
+  const replies = [
+    { id: "r1", createdAt: 10, pubkey: "ABCDEF" },
+    { id: "r2", createdAt: 20, pubkey: "other" },
+  ];
+  const marker = computeThreadUnreadMarker(replies, 5, "abcdef");
+  assert.equal(marker.firstUnreadReplyId, "r2");
+  assert.equal(marker.unreadCount, 1);
+});

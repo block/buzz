@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { computeThreadUnreadMarker } from "../../messages/lib/unreadMarker.ts";
 import {
+  buildDirectRepliesByParentId,
   directRepliesMaxCreatedAt,
   subtreeMaxCreatedAt,
 } from "./subtreeCreatedAt.ts";
@@ -185,4 +186,30 @@ test("expandAfterOpen_dividerFromSnapshot_holds_whileLiveFrontierConsumes", () =
   assert.equal(dividerFromSnapshot.unreadCount, 3);
   // ...even though the live frontier has consumed the whole branch.
   assert.equal(consumeFromLive.firstUnreadReplyId, null);
+});
+
+test("buildDirectRepliesByParentId_groupsDirectRepliesByParent_inOrder", () => {
+  const messages = [
+    { id: "root", parentId: null, createdAt: 100 },
+    { id: "r1", parentId: "root", createdAt: 200 },
+    { id: "deep", parentId: "r1", createdAt: 300 },
+    { id: "r2", parentId: "root", createdAt: 250 },
+  ];
+  const index = buildDirectRepliesByParentId(messages);
+  // Only DIRECT children, in timeline order — not transitive descendants.
+  assert.deepEqual(
+    index.get("root")?.map((m) => m.id),
+    ["r1", "r2"],
+  );
+  assert.deepEqual(
+    index.get("r1")?.map((m) => m.id),
+    ["deep"],
+  );
+  // A top-level message with no replies is absent (the seed/count guard).
+  assert.equal(index.has("r2"), false);
+});
+
+test("buildDirectRepliesByParentId_topLevelOnly_returnsEmpty", () => {
+  const messages = [{ id: "root", parentId: null, createdAt: 100 }];
+  assert.equal(buildDirectRepliesByParentId(messages).size, 0);
 });

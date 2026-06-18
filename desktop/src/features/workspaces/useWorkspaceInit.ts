@@ -10,6 +10,7 @@ import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
 import { clearAllDrafts } from "@/features/messages/lib/useDrafts";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
+import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
 import { initFirstWorkspace } from "./workspaceStorage";
@@ -25,6 +26,7 @@ import type { Workspace } from "./types";
 function resetWorkspaceState(): void {
   relayClient.disconnect();
   resetAgentObserverStore();
+  resetSidebarRelayConnectionCardState();
   resetMediaCaches();
   resetVideoPlayerState();
   clearSearchHitEventCache();

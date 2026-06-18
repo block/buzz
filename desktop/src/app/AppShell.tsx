@@ -66,6 +66,7 @@ import {
 } from "@/features/settings/ui/SettingsPanels";
 import { HuddleBar, HuddleProvider } from "@/features/huddle";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
+import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
@@ -115,7 +116,6 @@ export function AppShell() {
     goChannel,
     goHome,
     goProjects,
-    goReminders,
     goPulse,
     goSettings,
     goWorkflows,
@@ -163,6 +163,10 @@ export function AppShell() {
   const setUserStatusMutation = useSetUserStatusMutation(deferredPubkey);
   const { feedProfilesQuery, homeFeedQuery, notificationSettings } =
     useHomeFeedNotifications(identityQuery.data?.pubkey);
+  useReminderNotifications(
+    identityQuery.data?.pubkey,
+    notificationSettings.settings,
+  );
   const refetchHomeFeedOnLiveMention = React.useEffectEvent(() => {
     void homeFeedQuery.refetch();
   });
@@ -219,6 +223,10 @@ export function AppShell() {
   const channelsQuery = useChannelsQuery();
   const { refetch: refetchChannels } = channelsQuery;
   const channels = channelsQuery.data ?? [];
+  const channelsErrorMessage =
+    channelsQuery.error instanceof Error
+      ? channelsQuery.error.message
+      : undefined;
   const memberChannels = React.useMemo(
     () => channels.filter((channel) => channel.isMember),
     [channels],
@@ -305,6 +313,7 @@ export function AppShell() {
     setContextParentResolver,
     participatedRootIds,
     authoredRootIds,
+    mentionedRootIds,
     threadActivityItems,
     mutedRootIds,
     muteThread,
@@ -361,8 +370,15 @@ export function AppShell() {
       !mutedRootIds.has(rootId) &&
       (followedRootIds.has(rootId) ||
         participatedRootIds.has(rootId) ||
-        authoredRootIds.has(rootId)),
-    [followedRootIds, mutedRootIds, participatedRootIds, authoredRootIds],
+        authoredRootIds.has(rootId) ||
+        mentionedRootIds.has(rootId)),
+    [
+      followedRootIds,
+      mutedRootIds,
+      participatedRootIds,
+      authoredRootIds,
+      mentionedRootIds,
+    ],
   );
 
   const handleFollowThread = React.useCallback(
@@ -699,7 +715,7 @@ export function AppShell() {
           }}
         >
           <HuddleProvider>
-            <RemindMeLaterProvider>
+            <RemindMeLaterProvider pubkey={identityQuery.data?.pubkey}>
               <div
                 className="buzz-huddle-shell relative h-dvh overflow-hidden overscroll-none"
                 data-huddle-open={isHuddleDrawerOpen}
@@ -772,11 +788,7 @@ export function AppShell() {
                           activeWorkspace={workspacesHook.activeWorkspace}
                           channels={sidebarChannels}
                           currentPubkey={identityQuery.data?.pubkey}
-                          errorMessage={
-                            channelsQuery.error instanceof Error
-                              ? channelsQuery.error.message
-                              : undefined
-                          }
+                          errorMessage={channelsErrorMessage}
                           fallbackDisplayName={identityQuery.data?.displayName}
                           homeBadgeCount={homeBadgeCount}
                           isAddWorkspaceOpen={isAddWorkspaceOpen}
@@ -866,7 +878,6 @@ export function AppShell() {
                           onSelectHome={() => void goHome()}
                           onSelectProjects={() => void goProjects()}
                           onSelectPulse={() => void goPulse()}
-                          onSelectReminders={() => void goReminders()}
                           onSelectSettings={handleOpenSettings}
                           onSelectWorkflows={() => void goWorkflows()}
                           onSetPresenceStatus={(status) =>
@@ -907,7 +918,9 @@ export function AppShell() {
                             className="min-h-0 min-w-0 overflow-hidden"
                             style={chromeCssVarDefaults}
                           >
-                            <ConnectionBanner />
+                            <ConnectionBanner
+                              errorMessage={channelsErrorMessage}
+                            />
                             <Outlet />
                           </SidebarInset>
                         </MainInsetProvider>

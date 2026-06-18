@@ -1,6 +1,10 @@
 import * as React from "react";
+import { toast } from "sonner";
 
+import { SidebarRelayConnectionCompactCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
+import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { cn } from "@/shared/lib/cn";
+import { isRelayUnreachableError } from "@/shared/lib/relayError";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
 import {
@@ -17,9 +21,129 @@ type ProfileStepProps = {
   state: ProfileStepState;
 };
 
-function ErrorBanner({ message }: { message: string | null }) {
+const ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 2_500;
+
+function OnboardingRelayConnectionErrorCard({
+  isSaving,
+  message,
+}: {
+  isSaving: boolean;
+  message: string;
+}) {
+  const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
+  const [dismissedErrorMessage, setDismissedErrorMessage] = React.useState<
+    string | null
+  >(null);
+  const [isReconnectActionPending, setIsReconnectActionPending] =
+    React.useState(false);
+  const [hasSuccess, setHasSuccess] = React.useState(false);
+  const reconnectActionPendingRef = React.useRef(false);
+  const successTimeoutRef = React.useRef<number | null>(null);
+  const wasSavingRef = React.useRef(isSaving);
+  const isActionPending = isReconnectActionPending || isReconnectPending;
+
+  React.useEffect(() => {
+    return () => {
+      if (successTimeoutRef.current !== null) {
+        window.clearTimeout(successTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (isSaving && !wasSavingRef.current) {
+      if (successTimeoutRef.current !== null) {
+        window.clearTimeout(successTimeoutRef.current);
+        successTimeoutRef.current = null;
+      }
+      setDismissedErrorMessage(null);
+      setHasSuccess(false);
+    }
+    wasSavingRef.current = isSaving;
+  }, [isSaving]);
+
+  const markSuccess = React.useCallback(() => {
+    setHasSuccess(true);
+    if (successTimeoutRef.current !== null) {
+      window.clearTimeout(successTimeoutRef.current);
+    }
+    successTimeoutRef.current = window.setTimeout(() => {
+      successTimeoutRef.current = null;
+      setDismissedErrorMessage(message);
+    }, ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS);
+  }, [message]);
+
+  const runConnectivityAction = React.useCallback(
+    (runAction: () => Promise<boolean | undefined>) => {
+      if (reconnectActionPendingRef.current) {
+        return;
+      }
+
+      reconnectActionPendingRef.current = true;
+      setIsReconnectActionPending(true);
+      setHasSuccess(false);
+      void Promise.resolve()
+        .then(runAction)
+        .then((didReconnect) => {
+          if (didReconnect !== false) {
+            markSuccess();
+          }
+        })
+        .catch((error) => {
+          const detail = error instanceof Error ? error.message : String(error);
+          toast.error(`Could not reconnect to the relay. ${detail}`);
+        })
+        .finally(() => {
+          reconnectActionPendingRef.current = false;
+          setIsReconnectActionPending(false);
+        });
+    },
+    [markSuccess],
+  );
+
+  const handleReconnectRelay = React.useCallback(() => {
+    runConnectivityAction(reconnect);
+  }, [reconnect, runConnectivityAction]);
+
+  if (dismissedErrorMessage === message) {
+    return null;
+  }
+
+  return (
+    <div className="fixed bottom-4 left-4 z-50 w-[calc(100vw-2rem)] text-left sm:bottom-6 sm:left-6 sm:w-[22rem]">
+      <SidebarRelayConnectionCompactCard
+        actionTestId="onboarding-reconnect-relay"
+        isActionDisabled={isActionPending}
+        isConnected={hasSuccess}
+        isReconnectPending={isActionPending}
+        onDismiss={() => setDismissedErrorMessage(message)}
+        onReconnect={handleReconnectRelay}
+        surface="secondary"
+        testId="onboarding-relay-reconnect-card"
+      />
+    </div>
+  );
+}
+
+function ErrorBanner({
+  isSaving,
+  message,
+}: {
+  isSaving: boolean;
+  message: string | null;
+}) {
   if (!message) {
     return null;
+  }
+
+  if (isRelayUnreachableError(message)) {
+    return (
+      <OnboardingRelayConnectionErrorCard
+        isSaving={isSaving}
+        key={message}
+        message={message}
+      />
+    );
   }
 
   return (
@@ -117,7 +241,7 @@ export function ProfileStep({
       </label>
 
       {saveRecovery.errorMessage ? (
-        <ErrorBanner message={saveRecovery.errorMessage} />
+        <ErrorBanner isSaving={isSaving} message={saveRecovery.errorMessage} />
       ) : null}
 
       <div className="mt-12 flex w-full max-w-[500px] flex-col gap-3">

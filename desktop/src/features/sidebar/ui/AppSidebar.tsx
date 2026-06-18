@@ -3,23 +3,14 @@ import {
   Activity,
   ArrowDown,
   ArrowUp,
-  Bell,
   Bot,
   FolderGit2,
   Home,
   Plus,
   Zap,
 } from "lucide-react";
-import {
-  isRelayConnectionDegraded,
-  useRelayConnection,
-} from "@/shared/api/useRelayConnection";
-import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
-import {
-  isRelayUnreachableError,
-  RELAY_UNREACHABLE_SHORT,
-} from "@/shared/lib/relayError";
 import * as React from "react";
+import { AnimatePresence } from "motion/react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
@@ -47,6 +38,8 @@ import {
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { NewDirectMessageDialog } from "@/features/sidebar/ui/NewDirectMessageDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
+import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
+import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import {
   SidebarLoadingContent,
   useSidebarLoadingShape,
@@ -55,6 +48,9 @@ import {
   SECTION_ACTION_VISIBILITY_CLASS,
   SECTION_ICON_BUTTON_CLASS,
 } from "@/features/sidebar/ui/sidebarSectionStyles";
+import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
+import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
+import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCardVisibility";
 import type {
   Channel,
   ChannelVisibility,
@@ -105,7 +101,6 @@ type AppSidebarProps = {
     | "home"
     | "channel"
     | "agents"
-    | "reminders"
     | "workflows"
     | "pulse"
     | "projects";
@@ -145,7 +140,6 @@ type AppSidebarProps = {
   onSelectAgents: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
-  onSelectReminders: () => void;
   onSelectWorkflows: () => void;
   onSelectHome: () => void;
   onSelectChannel: (channelId: string) => void;
@@ -206,7 +200,6 @@ export function AppSidebar({
   onSelectAgents,
   onSelectProjects,
   onSelectPulse,
-  onSelectReminders,
   onSelectWorkflows,
   onSelectHome,
   onSelectChannel,
@@ -228,6 +221,25 @@ export function AppSidebar({
   onStarChannel,
   onUnstarChannel,
 }: AppSidebarProps) {
+  const { status: updateStatus } = useUpdaterContext();
+  const canShowSidebarUpdateCard = shouldShowSidebarUpdateCard(updateStatus);
+  const sidebarRelayConnectionCard = useSidebarRelayConnectionCard(
+    errorMessage,
+    activeWorkspace?.relayUrl,
+  );
+  const [isSidebarUpdateCardDismissed, setIsSidebarUpdateCardDismissed] =
+    React.useState(false);
+  const showSidebarUpdateCard =
+    canShowSidebarUpdateCard && !isSidebarUpdateCardDismissed;
+  const sidebarFooterCardCount =
+    (sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? 1 : 0) +
+    (showSidebarUpdateCard ? 1 : 0);
+  const unreadBelowBottomClass =
+    sidebarFooterCardCount >= 2
+      ? "bottom-56"
+      : sidebarFooterCardCount >= 1
+        ? "bottom-44"
+        : "bottom-24";
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
@@ -274,6 +286,12 @@ export function AppSidebar({
 
   const [createDialogKind, setCreateDialogKind] =
     React.useState<CreateChannelKind | null>(null);
+
+  React.useEffect(() => {
+    if (!canShowSidebarUpdateCard) {
+      setIsSidebarUpdateCardDismissed(false);
+    }
+  }, [canShowSidebarUpdateCard]);
 
   // Allow the create-channel dialog to be opened from outside (e.g. the
   // ⌘⇧N global shortcut in AppShell), mirroring the controlled new-DM lift.
@@ -326,20 +344,6 @@ export function AppSidebar({
     assignChannel,
     unassignChannel,
   } = useChannelSections(currentPubkey);
-
-  const { isPending: isReconnectPending, reconnect } = useReconnectRelay();
-
-  // The sidebar reconnect prompt must surface the moment the relay drops, not
-  // only after `channelsQuery` finally errors (it has a 60s staleTime +
-  // refetchInterval, so the error lags 60-120s behind a dropped socket).
-  // OR-in the live, debounced connection state — same signal that drives
-  // ConnectionBanner — so the prompt flips within ~2s of degradation.
-  const relayConnectionState = useRelayConnection();
-  const hasRelayUnreachableError = errorMessage
-    ? isRelayUnreachableError(errorMessage)
-    : false;
-  const isRelayConnectionDegradedNow =
-    hasRelayUnreachableError || isRelayConnectionDegraded(relayConnectionState);
 
   const [createSectionState, setCreateSectionState] = React.useState<{
     open: boolean;
@@ -559,18 +563,6 @@ export function AppSidebar({
                   <span>Agents</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  data-testid="open-reminders-view"
-                  isActive={selectedView === "reminders"}
-                  onClick={onSelectReminders}
-                  tooltip="Reminders"
-                  type="button"
-                >
-                  <Bell className="h-4 w-4" />
-                  <span>Reminders</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
               <FeatureGate feature="workflows">
                 <SidebarMenuItem>
                   <SidebarMenuButton
@@ -776,25 +768,8 @@ export function AppSidebar({
             </>
           ) : null}
 
-          {isRelayConnectionDegradedNow ? (
-            <div
-              className="px-3 py-2 text-sm"
-              data-testid="sidebar-relay-unreachable"
-            >
-              <span className="text-muted-foreground">
-                {RELAY_UNREACHABLE_SHORT}{" "}
-              </span>
-              <button
-                className="text-primary hover:underline disabled:opacity-50"
-                data-testid="sidebar-reconnect"
-                disabled={isReconnectPending}
-                onClick={() => void reconnect()}
-                type="button"
-              >
-                {isReconnectPending ? "Reconnecting…" : "Reconnect"}
-              </button>
-            </div>
-          ) : errorMessage ? (
+          {errorMessage &&
+          !sidebarRelayConnectionCard.hasRelayUnreachableError ? (
             <div className="px-3 py-2 text-sm text-destructive">
               {errorMessage}
             </div>
@@ -803,7 +778,7 @@ export function AppSidebar({
 
         {unreadBelowCount > 0 ? (
           <MoreUnreadButton
-            bottomClassName="bottom-28"
+            bottomClassName={unreadBelowBottomClass}
             count={unreadBelowCount}
             icon={<ArrowDown />}
             onClick={scrollToNextBelow}
@@ -813,6 +788,31 @@ export function AppSidebar({
         ) : null}
 
         <SidebarFooter className="z-30 shrink-0 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
+          <AnimatePresence>
+            {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
+              <SidebarRelayConnectionCard
+                className="mb-2 group-data-[collapsible=icon]:hidden"
+                isConnected={
+                  sidebarRelayConnectionCard.isRelayConnectionSuccess
+                }
+                isReconnectPending={
+                  sidebarRelayConnectionCard.isRelayReconnectPending
+                }
+                onDismiss={
+                  sidebarRelayConnectionCard.onDismissRelayConnectionCard
+                }
+                onReconnect={sidebarRelayConnectionCard.onReconnectRelay}
+                key="sidebar-relay-connection-card"
+              />
+            ) : null}
+          </AnimatePresence>
+          {showSidebarUpdateCard ? (
+            <div className="mb-2 group-data-[collapsible=icon]:hidden">
+              <SidebarUpdateCard
+                onDismiss={() => setIsSidebarUpdateCardDismissed(true)}
+              />
+            </div>
+          ) : null}
           <SidebarMenu>
             <SidebarMenuItem>
               <SidebarProfileCard

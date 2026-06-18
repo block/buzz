@@ -48,6 +48,7 @@ export default defineConfig({
         "**/thread-unread-screenshots.spec.ts",
         "**/animated-avatar-screenshots.spec.ts",
         "**/reminders-screenshots.spec.ts",
+        "**/virtualization-screenshots.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],
@@ -62,6 +63,7 @@ export default defineConfig({
         "**/integration.spec.ts",
         "**/profile.spec.ts",
         "**/sidebar.spec.ts",
+        "**/sidebar-relay-card.spec.ts",
         "**/tokens.spec.ts",
         "**/persona-env-vars.spec.ts",
         "**/mesh-compute.spec.ts",

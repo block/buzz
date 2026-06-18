@@ -53,14 +53,28 @@ pub fn relay_http_base_url(relay_url: &str) -> String {
     let trimmed = relay_url.trim().trim_end_matches('/');
 
     if let Some(suffix) = trimmed.strip_prefix("wss://") {
-        return format!("https://{suffix}");
+        return format!("https://{}", normalize_loopback_host(suffix));
     }
 
     if let Some(suffix) = trimmed.strip_prefix("ws://") {
-        return format!("http://{suffix}");
+        return format!("http://{}", normalize_loopback_host(suffix));
     }
 
     trimmed.to_string()
+}
+
+/// Rewrite an exact `localhost` host to `127.0.0.1`, preserving port and path.
+///
+/// macOS resolves `localhost` to both `::1` and `127.0.0.1`; reqwest's
+/// happy-eyeballs may try `::1` first, which fails when the relay binds IPv4
+/// only (`0.0.0.0`). Forcing the IPv4 literal makes every HTTP write connect on
+/// the first attempt. Exact-match only — `localhost.evil.com` is untouched.
+fn normalize_loopback_host(authority: &str) -> String {
+    let host_len = authority.find([':', '/']).unwrap_or(authority.len());
+    if &authority[..host_len] == "localhost" {
+        return format!("127.0.0.1{}", &authority[host_len..]);
+    }
+    authority.to_string()
 }
 
 pub fn relay_api_base_url() -> String {
@@ -539,8 +553,64 @@ pub async fn submit_event_with_keys(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_profile_event, classify_intercepted_response, parse_command_response};
+    use super::{
+        build_profile_event, classify_intercepted_response, parse_command_response,
+        relay_http_base_url,
+    };
     use serde::Deserialize;
+
+    // ── relay_http_base_url loopback normalization ───────────────────────────
+
+    #[test]
+    fn loopback_ws_localhost_rewritten_to_ipv4() {
+        assert_eq!(
+            relay_http_base_url("ws://localhost:3000"),
+            "http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
+    fn loopback_trailing_slash_rewritten_to_ipv4() {
+        assert_eq!(
+            relay_http_base_url("ws://localhost:3000/"),
+            "http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
+    fn remote_wss_host_unchanged() {
+        assert_eq!(
+            relay_http_base_url("wss://relay.example.com"),
+            "https://relay.example.com"
+        );
+    }
+
+    #[test]
+    fn loopback_ipv4_literal_unchanged() {
+        assert_eq!(
+            relay_http_base_url("ws://127.0.0.1:3000"),
+            "http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
+    fn localhost_substring_host_not_rewritten() {
+        // Exact-match only: a host that merely starts with "localhost" must NOT
+        // be rewritten, or a malicious host could hijack the loopback path.
+        assert_eq!(
+            relay_http_base_url("ws://localhost.evil.com:3000"),
+            "http://localhost.evil.com:3000"
+        );
+    }
+
+    #[test]
+    fn loopback_wss_localhost_rewritten_to_ipv4() {
+        // The wss:// dev arm normalizes identically to ws://.
+        assert_eq!(
+            relay_http_base_url("wss://localhost:3000"),
+            "https://127.0.0.1:3000"
+        );
+    }
 
     // ── classify_intercepted_response ────────────────────────────────────────
 

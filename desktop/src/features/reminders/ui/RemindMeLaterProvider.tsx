@@ -1,14 +1,18 @@
 import * as React from "react";
 
+import { useRemindersQuery } from "@/features/reminders/hooks";
 import type { ReminderTarget } from "@/features/reminders/lib/reminderTypes";
 import { RemindMeLaterDialog } from "./RemindMeLaterDialog";
 
 type RemindMeLaterContextValue = {
   openReminder: (target: ReminderTarget) => void;
+  /** Event IDs of messages with a pending reminder, for channel tinting. */
+  activeReminderEventIds: ReadonlySet<string>;
 };
 
 const RemindMeLaterContext = React.createContext<RemindMeLaterContextValue>({
   openReminder: () => {},
+  activeReminderEventIds: new Set(),
 });
 
 export function useRemindLater() {
@@ -16,8 +20,10 @@ export function useRemindLater() {
 }
 
 export function RemindMeLaterProvider({
+  pubkey,
   children,
 }: {
+  pubkey?: string;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = React.useState(false);
@@ -28,7 +34,25 @@ export function RemindMeLaterProvider({
     setOpen(true);
   }, []);
 
-  const contextValue = React.useMemo(() => ({ openReminder }), [openReminder]);
+  const remindersQuery = useRemindersQuery(pubkey);
+  const reminders = remindersQuery.data;
+  const activeReminderEventIds = React.useMemo(() => {
+    const ids = new Set<string>();
+    for (const reminder of reminders ?? []) {
+      if (
+        reminder.content.status === "pending" &&
+        reminder.content.target?.eventId
+      ) {
+        ids.add(reminder.content.target.eventId);
+      }
+    }
+    return ids;
+  }, [reminders]);
+
+  const contextValue = React.useMemo(
+    () => ({ openReminder, activeReminderEventIds }),
+    [openReminder, activeReminderEventIds],
+  );
 
   return (
     <RemindMeLaterContext.Provider value={contextValue}>

@@ -148,3 +148,51 @@ export function selectDeferredListRenderState(
   }
   return "pending";
 }
+
+export type TimelineBodySurface = "skeleton" | "empty" | "list";
+
+export function selectTimelineBodySurface({
+  deferredCount,
+  isLoading,
+  liveCount,
+}: {
+  deferredCount: number;
+  isLoading: boolean;
+  liveCount: number;
+}): TimelineBodySurface {
+  if (isLoading) {
+    return "skeleton";
+  }
+
+  const renderState = selectDeferredListRenderState(deferredCount, liveCount);
+  if (renderState === "pending") {
+    return "skeleton";
+  }
+  return renderState;
+}
+
+export type TimelineIntroSurface =
+  | "direct-message-intro"
+  | "channel-intro"
+  | null;
+
+export function selectTimelineIntroSurface({
+  hasChannelIntro,
+  hasDirectMessageIntro,
+  isSkeletonVisible,
+}: {
+  hasChannelIntro: boolean;
+  hasDirectMessageIntro: boolean;
+  isSkeletonVisible: boolean;
+}): TimelineIntroSurface {
+  if (isSkeletonVisible) {
+    return null;
+  }
+  if (hasDirectMessageIntro) {
+    return "direct-message-intro";
+  }
+  if (hasChannelIntro) {
+    return "channel-intro";
+  }
+  return null;
+}

@@ -699,6 +699,49 @@ test("system add and remove rows use agent mention styling for managed agents", 
   ).toHaveText("portal");
 });
 
+test("system member-joined rows render the joined person as a mention chip", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
+
+  await page.evaluate(
+    ({ kind, pubkey }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: JSON.stringify({
+          type: "member_joined",
+          actor: pubkey,
+          target: pubkey,
+        }),
+        kind,
+      });
+    },
+    { kind: SYSTEM_MESSAGE_KIND, pubkey: TEST_IDENTITIES.bob.pubkey },
+  );
+  await waitForTimelineSettled(page);
+
+  const joinedRow = page
+    .getByTestId("system-message-row")
+    .filter({ hasText: "bob" })
+    .filter({ hasText: "joined the channel" });
+  const joinedPersonChip = joinedRow.locator("[data-mention].mention-chip", {
+    hasText: "bob",
+  });
+
+  await expect(joinedPersonChip).toBeVisible();
+  await expect(joinedPersonChip).toHaveCSS("display", /^(inline-)?flex$/);
+  await expect(joinedPersonChip).not.toHaveCSS(
+    "background-color",
+    "rgba(0, 0, 0, 0)",
+  );
+  await expect(joinedPersonChip.locator(".mention-chip-prefix")).toHaveText(
+    "@",
+  );
+});
+
 test("selecting a non-member agent from a DM inserts @Name into input", async ({
   page,
 }) => {
@@ -988,7 +1031,7 @@ test("Escape dismisses autocomplete dropdown", async ({ page }) => {
 });
 
 test("mention text is highlighted in sent messages", async ({ page }) => {
-  const suffix = `check this out ${Date.now()}`;
+  const suffix = ` check this out ${Date.now()}`;
 
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -997,6 +1040,7 @@ test("mention text is highlighted in sent messages", async ({ page }) => {
   const input = page.getByTestId("message-input");
   await input.fill("Hey @bo");
   await autocomplete(page).getByText("bob").click();
+  await expect(input).toHaveText("Hey @bob ");
   await page.keyboard.type(suffix);
   await page.getByTestId("send-message").click();
 
@@ -1005,8 +1049,9 @@ test("mention text is highlighted in sent messages", async ({ page }) => {
   const mentionChip = page
     .getByTestId("message-row")
     .last()
-    .locator("[data-mention]", { hasText: "@bob" });
+    .locator("[data-mention].mention-chip", { hasText: "bob" });
   await expect(mentionChip).toBeVisible();
+  await expect(mentionChip.locator(".mention-chip-prefix")).toHaveText("@");
   await expect(mentionChip.locator("svg")).toHaveCount(0);
 });
 

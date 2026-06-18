@@ -2,7 +2,7 @@
 
 [package]
 name = "buzz-desktop"
-version = "0.3.24"
+version = "0.3.25"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -33,7 +33,7 @@ ctrlc = { version = "3", features = ["termination"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHapticFeedback"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Foundation"] }
 
 [dependencies]
 atomic-write-file = "0.3"

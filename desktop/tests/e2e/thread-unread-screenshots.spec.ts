@@ -4,6 +4,12 @@ import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/thread-unread";
 
+type MockMessageEvent = {
+  id: string;
+  created_at: number;
+  pubkey: string;
+};
+
 async function waitForMockLiveSubscription(
   page: import("@playwright/test").Page,
   channelName: string,
@@ -26,7 +32,7 @@ async function waitForMockLiveSubscription(
     .toBe(true);
 }
 
-function emitMockMessage(
+async function emitMockMessage(
   page: import("@playwright/test").Page,
   channelName: string,
   content: string,
@@ -36,8 +42,8 @@ function emitMockMessage(
     createdAt?: number;
     mentionPubkeys?: string[];
   },
-) {
-  return page.evaluate(
+): Promise<MockMessageEvent> {
+  const event = await page.evaluate(
     ({ ch, msg, parentEventId, pubkey, ts, mentionPubkeys }) => {
       return (
         window as Window & {
@@ -68,6 +74,10 @@ function emitMockMessage(
       mentionPubkeys: options?.mentionPubkeys,
     },
   );
+  if (!event) {
+    throw new Error("Mock message emitter is not installed");
+  }
+  return event;
 }
 
 // Unread thread replies must be dated strictly after the read frontier captured
@@ -231,7 +241,7 @@ test.describe("thread unread indicator screenshots", () => {
     const base = unreadTimestamp();
     for (let i = 0; i < 2; i++) {
       await emitMockMessage(page, "general", `Bob chimes in ${i + 1}`, {
-        parentEventId: rootEvent!.id,
+        parentEventId: rootEvent.id,
         pubkey: TEST_IDENTITIES.bob.pubkey,
         createdAt: base + i,
       });
@@ -278,19 +288,19 @@ test.describe("thread unread indicator screenshots", () => {
       "general",
       "Replying one level down",
       {
-        parentEventId: r1!.id,
+        parentEventId: r1.id,
         pubkey: TEST_IDENTITIES.bob.pubkey,
         createdAt: past + 1,
       },
     );
     // A sibling at r1's level so the tree reads as a branching discussion.
     await emitMockMessage(page, "general", "Separate angle on the same point", {
-      parentEventId: r1!.id,
+      parentEventId: r1.id,
       pubkey: TEST_IDENTITIES.charlie.pubkey,
       createdAt: past + 2,
     });
     const r3 = await emitMockMessage(page, "general", "Going deeper still", {
-      parentEventId: r2!.id,
+      parentEventId: r2.id,
       pubkey: TEST_IDENTITIES.alice.pubkey,
       createdAt: past + 3,
     });
@@ -302,8 +312,8 @@ test.describe("thread unread indicator screenshots", () => {
     await expect(summary).toBeVisible();
     await summary.click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await expandReply(page, r1!.id);
-    await expandReply(page, r2!.id);
+    await expandReply(page, r1.id);
+    await expandReply(page, r2.id);
     await page.getByTestId("message-thread-close").click();
     await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
 
@@ -314,12 +324,12 @@ test.describe("thread unread indicator screenshots", () => {
 
     const base = unreadTimestamp();
     const r4 = await emitMockMessage(page, "general", "New nested follow-up", {
-      parentEventId: r3!.id,
+      parentEventId: r3.id,
       pubkey: TEST_IDENTITIES.bob.pubkey,
       createdAt: base,
     });
     await emitMockMessage(page, "general", "Deepest unread reply", {
-      parentEventId: r4!.id,
+      parentEventId: r4.id,
       pubkey: TEST_IDENTITIES.alice.pubkey,
       createdAt: base + 1,
     });
@@ -331,10 +341,10 @@ test.describe("thread unread indicator screenshots", () => {
     await expect(page.getByTestId("chat-title")).toHaveText("general");
     await page.getByTestId("message-thread-summary").first().click();
     await expect(page.getByTestId("message-thread-panel")).toBeVisible();
-    await expandReply(page, r1!.id);
-    await expandReply(page, r2!.id);
-    await expandReply(page, r3!.id);
-    await expandReply(page, r4!.id);
+    await expandReply(page, r1.id);
+    await expandReply(page, r2.id);
+    await expandReply(page, r3.id);
+    await expandReply(page, r4.id);
 
     // Fully expanded: r1, r2, sibling, r3, r4, r5 — six rendered replies.
     const replies = page
@@ -371,7 +381,7 @@ test.describe("thread unread indicator screenshots", () => {
       createdAt: past,
     });
     const c = await emitMockMessage(page, "general", "Child of branch parent", {
-      parentEventId: p!.id,
+      parentEventId: p.id,
       pubkey: TEST_IDENTITIES.bob.pubkey,
       createdAt: past + 1,
     });
@@ -402,13 +412,13 @@ test.describe("thread unread indicator screenshots", () => {
       "general",
       "Unread under the branch",
       {
-        parentEventId: c!.id,
+        parentEventId: c.id,
         pubkey: TEST_IDENTITIES.alice.pubkey,
         createdAt: base,
       },
     );
     await emitMockMessage(page, "general", "Another unread under the branch", {
-      parentEventId: c2!.id,
+      parentEventId: c2.id,
       pubkey: TEST_IDENTITIES.bob.pubkey,
       createdAt: base + 1,
     });
@@ -444,7 +454,7 @@ test.describe("thread unread indicator screenshots", () => {
 
     // Expanding p marks its whole subtree read; the descendant-inclusive gate
     // (Phase 2.5) drops the badge from p and every revealed row beneath it.
-    await expandReply(page, p!.id);
+    await expandReply(page, p.id);
     await expect(inPanelBadge).toHaveCount(0);
 
     await page.screenshot({
@@ -469,7 +479,7 @@ test.describe("thread unread indicator screenshots", () => {
       createdAt: past,
     });
     const c = await emitMockMessage(page, "general", "Child of branch parent", {
-      parentEventId: p!.id,
+      parentEventId: p.id,
       pubkey: TEST_IDENTITIES.bob.pubkey,
       createdAt: past + 1,
     });
@@ -486,7 +496,7 @@ test.describe("thread unread indicator screenshots", () => {
 
     const base = unreadTimestamp();
     await emitMockMessage(page, "general", "First unread under branch", {
-      parentEventId: c!.id,
+      parentEventId: c.id,
       pubkey: TEST_IDENTITIES.alice.pubkey,
       createdAt: base,
     });
@@ -508,7 +518,7 @@ test.describe("thread unread indicator screenshots", () => {
     // the badge must bump to 2 on the same tick — readStateVersion-driven
     // recompute is what makes this fire live rather than on a later re-render.
     await emitMockMessage(page, "general", "Second unread under branch", {
-      parentEventId: c!.id,
+      parentEventId: c.id,
       pubkey: TEST_IDENTITIES.bob.pubkey,
       createdAt: base + 1,
     });
@@ -538,7 +548,7 @@ test.describe("thread unread indicator screenshots", () => {
       createdAt: past,
     });
     const oldChild = await emitMockMessage(page, "general", "Old child", {
-      parentEventId: branchOld!.id,
+      parentEventId: branchOld.id,
       pubkey: TEST_IDENTITIES.bob.pubkey,
       createdAt: past + 1,
     });
@@ -548,7 +558,7 @@ test.describe("thread unread indicator screenshots", () => {
       createdAt: past + 2,
     });
     const newChild = await emitMockMessage(page, "general", "New child", {
-      parentEventId: branchNew!.id,
+      parentEventId: branchNew.id,
       pubkey: TEST_IDENTITIES.alice.pubkey,
       createdAt: past + 3,
     });
@@ -570,12 +580,12 @@ test.describe("thread unread indicator screenshots", () => {
     // sibling's badge survives until that branch is expanded too.
     const base = unreadTimestamp();
     await emitMockMessage(page, "general", "Unread in older branch", {
-      parentEventId: oldChild!.id,
+      parentEventId: oldChild.id,
       pubkey: TEST_IDENTITIES.alice.pubkey,
       createdAt: base,
     });
     await emitMockMessage(page, "general", "Unread in newer branch", {
-      parentEventId: newChild!.id,
+      parentEventId: newChild.id,
       pubkey: TEST_IDENTITIES.bob.pubkey,
       createdAt: base + 30,
     });
@@ -599,7 +609,7 @@ test.describe("thread unread indicator screenshots", () => {
     // `expandedSubtreeReplyIds` gate against the frozen open-time frontier.
     // The older sibling's badge SURVIVES — the design does not sweep across
     // branches off a live marker.
-    await expandReply(page, branchNew!.id);
+    await expandReply(page, branchNew.id);
     await expect(inPanelBadges).toHaveCount(1);
 
     await page.screenshot({
@@ -607,7 +617,7 @@ test.describe("thread unread indicator screenshots", () => {
     });
 
     // Expanding the older branch clears the last remaining badge.
-    await expandReply(page, branchOld!.id);
+    await expandReply(page, branchOld.id);
     await expect(inPanelBadges).toHaveCount(0);
 
     await page.screenshot({
@@ -772,5 +782,149 @@ test.describe("thread unread indicator screenshots", () => {
     await page.screenshot({
       path: `${SHOTS}/12-sidebar-dot-all-replies.png`,
     });
+  });
+
+  // Regression guard for BUG-2 (clear-on-read): opening an unread thread marks
+  // its visible direct replies read, and the depth-0 badge must clear to zero
+  // IN PLACE — without leaving and re-entering the channel. Every other test
+  // re-enters the channel to refresh the badge; none asserts that reading the
+  // thread alone clears it. The mechanism: the mark-read effect advances the
+  // thread frontier over the head + direct replies on open, bumping
+  // readStateVersion, which recomputes computeThreadBadgeCounts against the
+  // now-advanced snapshot. Before the fix the badge read a frozen open-time
+  // snapshot that mark-read never invalidated, so it persisted until channel
+  // re-entry. This walks badge=3 -> open thread -> close -> badge gone, all
+  // while staying in general.
+  test("13-thread-badge-clears-on-read-without-reentry", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+
+    // Read frontier over an initial reply, then close the thread (same setup as
+    // test 01) so the subsequent replies land strictly past the frontier.
+    await emitMockMessage(page, "general", "First reply to welcome", {
+      parentEventId: "mock-general-welcome",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: Math.floor(Date.now() / 1000) - 10,
+    });
+    const threadSummary = page.getByTestId("message-thread-summary").first();
+    await expect(threadSummary).toBeVisible();
+    await threadSummary.click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await page.getByTestId("message-thread-close").click();
+    await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+
+    // Leave, emit unread replies, return — badge appears (same as test 01).
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+    const base = unreadTimestamp();
+    for (let i = 0; i < 3; i++) {
+      await emitMockMessage(page, "general", `Unread reply ${i + 1}`, {
+        parentEventId: "mock-general-welcome",
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        createdAt: base + i,
+      });
+    }
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    const badge = page.getByTestId("thread-unread-badge");
+    await expect(badge).toBeVisible();
+    await expect(badge).toContainText("3");
+
+    await page.screenshot({
+      path: `${SHOTS}/13-thread-badge-before-read.png`,
+    });
+
+    // The crux: open the thread (mark-read advances the frontier past all three
+    // direct replies), then close it. Stay in general the entire time — no
+    // channel switch. The badge must clear to zero off the readStateVersion
+    // recompute alone. Before the BUG-2 fix it would persist at 3 here.
+    await page.getByTestId("message-thread-summary").first().click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await page.getByTestId("message-thread-close").click();
+    await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await expect(badge).toHaveCount(0);
+
+    await page.screenshot({
+      path: `${SHOTS}/13-thread-badge-clears-on-read.png`,
+    });
+  });
+
+  // Regression guard for the mention-gate + subtree-count fixes. The viewer is
+  // a pure MENTION RECIPIENT of a nested reply in a thread they never authored,
+  // participated in, or followed: root `mock-general-alice` (Alice-authored) ->
+  // reply A (Alice) -> reply B (Alice, @-mentions self). This fails pre-fix on
+  // TWO independent defects:
+  //   1. The badge gate `isNotifiedForThread` had no mention term, so a
+  //      recipient who never participated/authored/followed gated false and the
+  //      badge never appeared at all.
+  //   2. `computeThreadBadgeCounts` counted only the root's DIRECT children, so
+  //      the nested mention reply B (under A) was never tallied toward the root.
+  // After the gate fix the badge appears but undercounts (1, missing B); only
+  // after the subtree-count fix does it reach 2. Asserting `2` gates both.
+  test("14-mention-only-nested-thread-badge", async ({ page }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await waitForMockLiveSubscription(page, "general");
+
+    // The viewer never replies, authors, or follows Alice's thread — they are a
+    // pure mention recipient. Leave general so it goes inactive, then emit the
+    // unread chain on a thread that was never read: reply A (direct child of
+    // the root) and reply B (nested under A) that @-mentions the viewer. With
+    // no prior read the root's frontier seeds to null, so the whole subtree
+    // counts unread — A + B = 2. The emitter derives B's true rootId from A's
+    // stored thread reference, so B lands in Alice's thread at depth 2.
+    const aliceSummary = page.locator(
+      '[data-thread-head-id="mock-general-alice"]',
+    );
+    await page.getByTestId("channel-random").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("random");
+    const base = unreadTimestamp();
+    const replyA = await emitMockMessage(page, "general", "Reply A (depth 1)", {
+      parentEventId: "mock-general-alice",
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      createdAt: base,
+    });
+    await emitMockMessage(page, "general", "Reply B mentioning you (depth 2)", {
+      parentEventId: replyA?.id,
+      pubkey: TEST_IDENTITIES.alice.pubkey,
+      mentionPubkeys: [SELF_PUBKEY],
+      createdAt: base + 1,
+    });
+
+    // Return to general. The mention on the nested reply must surface a badge on
+    // Alice's root — proving the gate now honors mentions — and the count must
+    // span the subtree (A + B = 2), proving the count walks past direct
+    // children. Pre-fix: no badge; post-gate-only: badge "1"; both fixes: "2".
+    await page.getByTestId("channel-general").click();
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+    const badge = aliceSummary.getByTestId("thread-unread-badge");
+    await expect(badge).toBeVisible();
+    await expect(badge).toContainText("2");
+
+    // Clearing a NESTED unread mirrors the channel-open read model: opening the
+    // thread consumes only the visible direct replies (A), so the badge drops
+    // to "1" — the mention reply B stays unread inside A's collapsed branch.
+    await aliceSummary.click();
+    await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+    await expect(badge).toContainText("1");
+
+    // Drilling into A's branch advances the frontier over B, the deepest reply,
+    // and the badge clears in place. Stays in general — no channel switch.
+    await expandReply(page, replyA?.id ?? "");
+    await page.getByTestId("message-thread-close").click();
+    await expect(page.getByTestId("message-thread-panel")).not.toBeVisible();
+
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await expect(badge).toHaveCount(0);
   });
 });

@@ -74,6 +74,24 @@ export function buildDirectReplyIdsByParentId(
   return map;
 }
 
+/**
+ * Maps each parent message id to its direct-reply objects in timeline order.
+ * Built once so per-thread badge consumers resolve direct replies in O(1)
+ * instead of re-scanning the whole timeline per top-level message.
+ */
+export function buildDirectRepliesByParentId<T extends ReplyGraphMessage>(
+  messages: readonly T[],
+): Map<string, T[]> {
+  const map = new Map<string, T[]>();
+  for (const message of messages) {
+    if (!message.parentId) continue;
+    const currentReplies = map.get(message.parentId) ?? [];
+    currentReplies.push(message);
+    map.set(message.parentId, currentReplies);
+  }
+  return map;
+}
+
 /** Maps each message id to its `createdAt`. */
 export function buildCreatedAtByMessageId(
   messages: readonly ReplyGraphMessage[],

@@ -43,6 +43,10 @@ export function computeChannelUnreadMarker(
     return EMPTY_MARKER;
   }
 
+  // Normalize once: signer-emitted and identity pubkeys are both lowercase hex
+  // today, but a case mismatch would otherwise miscount a self-post as unread.
+  const normalizedPubkey = currentPubkey?.toLowerCase();
+
   let firstUnreadMessageId: string | null = null;
   let unreadCount = 0;
 
@@ -50,7 +54,10 @@ export function computeChannelUnreadMarker(
     if (message.parentId) {
       continue;
     }
-    if (currentPubkey && message.pubkey === currentPubkey) {
+    if (
+      normalizedPubkey &&
+      message.pubkey?.toLowerCase() === normalizedPubkey
+    ) {
       continue;
     }
     const isUnread =
@@ -101,11 +108,14 @@ export function computeThreadUnreadMarker(
   frontierSeconds: number | null,
   currentPubkey?: string,
 ): ThreadUnreadMarker {
+  // Normalize once: see computeChannelUnreadMarker for the case-mismatch guard.
+  const normalizedPubkey = currentPubkey?.toLowerCase();
+
   let firstUnreadReplyId: string | null = null;
   let unreadCount = 0;
 
   for (const reply of replies) {
-    if (currentPubkey && reply.pubkey === currentPubkey) {
+    if (normalizedPubkey && reply.pubkey?.toLowerCase() === normalizedPubkey) {
       continue;
     }
     const isUnread =
