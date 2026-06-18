@@ -335,7 +335,7 @@ test("sidebar shows all channel types", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
-  await expect(page.getByTestId("sidebar-agents-count")).toHaveText("0");
+  await expect(page.getByTestId("sidebar-agents-count")).toHaveCount(0);
 
   // Streams
   const streamList = page.getByTestId("stream-list");

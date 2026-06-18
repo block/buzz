@@ -483,22 +483,20 @@ export async function installRelayBridge(
 // The sidebar no longer renders a "browse channels" icon button; the channel
 // browser is opened via the primary-modifier + Shift + O keyboard shortcut.
 export async function openChannelBrowser(page: Page) {
+  await page.getByTestId("app-sidebar").waitFor({ state: "visible" });
   const isMacBrowser = await page.evaluate(() =>
     /mac|iphone|ipad|ipod/i.test(navigator.platform),
   );
-  if (isMacBrowser) {
-    await page.evaluate(() => {
-      window.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          bubbles: true,
-          cancelable: true,
-          key: "O",
-          metaKey: true,
-          shiftKey: true,
-        }),
-      );
-    });
-  } else {
-    await page.keyboard.press("Control+Shift+O");
-  }
+  await page.evaluate((isMac) => {
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: !isMac,
+        key: "O",
+        metaKey: isMac,
+        shiftKey: true,
+      }),
+    );
+  }, isMacBrowser);
 }
