@@ -1,10 +1,4 @@
-import {
-  CheckCircle2,
-  ChevronDown,
-  CircleDot,
-  Clock,
-  ExternalLink,
-} from "lucide-react";
+import { ChevronDown, Clock, ExternalLink, MailOpen } from "lucide-react";
 import * as React from "react";
 
 import {
@@ -213,14 +207,14 @@ export function InboxListPane({
               label="Mark unread"
               onClick={() => onMarkUnread(item.id)}
             >
-              <CircleDot className="h-3.5 w-3.5" />
+              <MailOpen className="h-3.5 w-3.5" />
             </InboxRowActionButton>
           ) : (
             <InboxRowActionButton
               label="Mark as read"
               onClick={() => onMarkRead(item.id)}
             >
-              <CheckCircle2 className="h-3.5 w-3.5" />
+              <MailOpen className="h-3.5 w-3.5" />
             </InboxRowActionButton>
           )}
           <InboxRowActionButton
@@ -254,12 +248,12 @@ export function InboxListPane({
         <ContextMenuContent>
           {isDone ? (
             <ContextMenuItem onClick={() => onMarkUnread(item.id)}>
-              <CircleDot className="h-4 w-4" />
+              <MailOpen className="h-4 w-4" />
               Mark unread
             </ContextMenuItem>
           ) : (
             <ContextMenuItem onClick={() => onMarkRead(item.id)}>
-              <CheckCircle2 className="h-4 w-4" />
+              <MailOpen className="h-4 w-4" />
               Mark as read
             </ContextMenuItem>
           )}
