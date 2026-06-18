@@ -30,6 +30,7 @@ export function isRelayConnectionDegraded(state: ConnectionState): boolean {
 }
 
 export type RelaySubscriptionFilter = {
+  ids?: string[];
   kinds: number[];
   limit: number;
   authors?: string[];

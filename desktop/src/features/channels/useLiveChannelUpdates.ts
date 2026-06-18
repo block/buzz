@@ -6,8 +6,7 @@ import { mergeTimelineCacheMessages } from "@/features/messages/hooks";
 import { channelMessagesKey } from "@/features/messages/lib/messageQueryKeys";
 import {
   getChannelIdFromTags,
-  getThreadReference,
-  isBroadcastReply,
+  isThreadReply,
 } from "@/features/messages/lib/threading";
 import { shouldNotifyForEvent } from "@/features/notifications/lib/shouldNotify";
 import { relayClient } from "@/shared/api/relayClient";
@@ -29,13 +28,23 @@ export type UseLiveChannelUpdatesOptions = {
   onDmMessage?: (event: RelayEvent, channel: Channel) => void;
   onLiveMention?: () => void;
   /**
-   * Fired for live "new content" events in a member channel (chat messages,
-   * forum posts/comments) authored by someone other than the current user.
+   * Fired for live main-channel "new content" events in a member channel
+   * authored by someone other than the current user. Thread replies are
+   * routed through onThreadReplyNotification instead.
    * Used to drive the in-session "latest message at" map that powers sidebar
    * unread badges. See `UNREAD_TRIGGER_KINDS` for the exact kind set.
    */
   onChannelMessage?: (channelId: string, event: RelayEvent) => void;
+  /**
+   * Fired for thread replies that should be surfaced as Home inbox activity.
+   */
   onThreadReplyNotification?: (channelId: string, event: RelayEvent) => void;
+  /**
+   * Fired for external thread replies that do not match the locally-known
+   * interest sets. Callers can perform an async backfill and then decide
+   * whether to surface the event.
+   */
+  onThreadReplyCandidate?: (channelId: string, event: RelayEvent) => void;
   /**
    * Fired for replies in threads the user authored, participated in, or
    * follows (non-DM channels only — the DM path owns those). Follows the DM
@@ -196,27 +205,37 @@ export function useLiveChannelUpdates(
     // and to events authored by someone other than the current user — your
     // own outgoing messages should never make a channel unread, and
     // reactions / edits / system messages aren't "new content".
-    if (
+    const isExternalTriggerEvent =
       UNREAD_TRIGGER_KINDS.has(event.kind) &&
       (normalizedCurrentPubkey.length === 0 ||
-        event.pubkey.toLowerCase() !== normalizedCurrentPubkey) &&
-      shouldNotifyForEvent(event, normalizedCurrentPubkey, {
-        participatedRootIds: options.participatedRootIds ?? EMPTY_SET,
-        followedRootIds: options.followedRootIds ?? EMPTY_SET,
-        authoredRootIds: options.authoredRootIds ?? EMPTY_SET,
-        mutedRootIds: options.mutedRootIds ?? EMPTY_SET,
-        mutedChannelIds: options.mutedChannelIds ?? EMPTY_SET,
-        channelId,
-      })
-    ) {
-      options.onChannelMessage?.(channelId, event);
-      const ref = getThreadReference(event.tags);
-      const isThreadReply =
-        ref.parentId !== null && !isBroadcastReply(event.tags);
-      if (isThreadReply) {
-        if (channelId !== activeChannelId) {
-          options.onThreadReplyNotification?.(channelId, event);
+        event.pubkey.toLowerCase() !== normalizedCurrentPubkey);
+    const isThreadedReply = isThreadReply(event.tags);
+
+    if (isExternalTriggerEvent) {
+      const shouldNotify = shouldNotifyForEvent(
+        event,
+        normalizedCurrentPubkey,
+        {
+          participatedRootIds: options.participatedRootIds ?? EMPTY_SET,
+          followedRootIds: options.followedRootIds ?? EMPTY_SET,
+          authoredRootIds: options.authoredRootIds ?? EMPTY_SET,
+          mutedRootIds: options.mutedRootIds ?? EMPTY_SET,
+          mutedChannelIds: options.mutedChannelIds ?? EMPTY_SET,
+          channelId,
+        },
+      );
+
+      if (!shouldNotify) {
+        if (isThreadedReply) {
+          options.onThreadReplyCandidate?.(channelId, event);
         }
+      } else if (!isThreadedReply) {
+        options.onChannelMessage?.(channelId, event);
+      } else {
+        options.onThreadReplyNotification?.(channelId, event);
+      }
+
+      if (shouldNotify && isThreadedReply) {
         if (
           !dmChannelMap.has(channelId) &&
           (channelId !== activeChannelId || options.notifyForActiveChannel)

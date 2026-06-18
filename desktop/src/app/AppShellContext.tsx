@@ -1,6 +1,9 @@
 import * as React from "react";
 import type { ContextParentResolver } from "@/features/channels/readState/readStateManager";
 import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
+import type { FeedItemState } from "@/features/home/useFeedItemState";
+
+const EMPTY_SET = new Set<string>();
 
 type AppShellContextValue = {
   markAllChannelsRead: () => void;
@@ -34,6 +37,7 @@ type AppShellContextValue = {
   setTopbarSearchHidden: (hidden: boolean) => void;
   setTopbarSearchLoading: (loading: boolean) => void;
   threadActivityItems: ThreadActivityItem[];
+  feedItemState: FeedItemState;
 };
 
 const AppShellContext = React.createContext<AppShellContextValue>({
@@ -54,6 +58,14 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   setTopbarSearchHidden: () => {},
   setTopbarSearchLoading: () => {},
   threadActivityItems: [],
+  feedItemState: {
+    doneSet: EMPTY_SET,
+    markDone: () => {},
+    markUnread: () => {},
+    undoDone: () => {},
+    undoUnread: () => {},
+    unreadSet: EMPTY_SET,
+  },
 });
 
 export function AppShellProvider({

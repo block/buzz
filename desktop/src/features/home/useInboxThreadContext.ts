@@ -1,10 +1,8 @@
 import * as React from "react";
 
+import { isInboxThreadContextEvent } from "@/features/home/lib/inboxViewHelpers";
 import { relayEventFromFeedItem } from "@/features/home/lib/inbox";
-import {
-  getChannelIdFromTags,
-  getThreadReference,
-} from "@/features/messages/lib/threading";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { relayClient } from "@/shared/api/relayClient";
 import { getEventById } from "@/shared/api/tauri";
 import type { FeedItem, RelayEvent } from "@/shared/api/types";
@@ -28,13 +26,6 @@ function dedupeEvents(events: RelayEvent[]): RelayEvent[] {
 function getThreadRootId(event: RelayEvent): string {
   const thread = getThreadReference(event.tags);
   return thread.rootId ?? thread.parentId ?? event.id;
-}
-
-function isSameChannel(event: RelayEvent, channelId: string | null): boolean {
-  if (!channelId) {
-    return true;
-  }
-  return getChannelIdFromTags(event.tags) === channelId;
 }
 
 export function useInboxThreadContext(
@@ -78,12 +69,18 @@ export function useInboxThreadContext(
       setIsLoading(true);
 
       try {
+        const selection = {
+          selectedChannelId,
+          selectedEventId: targetEvent.id,
+          selectedParentId,
+          selectedThreadRootId: threadRootId,
+        };
         const eventIds = new Set<string>([threadRootId]);
         if (selectedParentId) {
           eventIds.add(selectedParentId);
         }
 
-        const ancestorEvents = await Promise.all(
+        const ancestorEventsPromise = Promise.all(
           [...eventIds]
             .filter((eventId) => eventId !== targetEvent.id)
             .map(async (eventId) => {
@@ -95,9 +92,9 @@ export function useInboxThreadContext(
             }),
         );
 
-        const descendantEvents =
+        const descendantEventsPromise =
           selectedChannelId && threadRootId
-            ? await relayClient
+            ? relayClient
                 .fetchEvents({
                   "#e": [threadRootId],
                   "#h": [selectedChannelId],
@@ -105,7 +102,11 @@ export function useInboxThreadContext(
                   limit: THREAD_CONTEXT_LIMIT,
                 })
                 .catch(() => [])
-            : [];
+            : Promise.resolve([]);
+        const [ancestorEvents, descendantEvents] = await Promise.all([
+          ancestorEventsPromise,
+          descendantEventsPromise,
+        ]);
 
         if (isCancelled) {
           return;
@@ -115,7 +116,7 @@ export function useInboxThreadContext(
           dedupeEvents(
             [...ancestorEvents, ...descendantEvents].filter(
               (event): event is RelayEvent =>
-                event !== null && isSameChannel(event, selectedChannelId),
+                event !== null && isInboxThreadContextEvent(event, selection),
             ),
           ),
         );
@@ -144,25 +145,28 @@ export function useInboxThreadContext(
     }
 
     const localContext = (channelMessages ?? []).filter((event) => {
-      if (!isSameChannel(event, selectedChannelId)) {
-        return false;
-      }
-
-      if (event.id === selectedEvent.id) {
-        return true;
-      }
-
-      const thread = getThreadReference(event.tags);
-      return (
-        event.id === selectedThreadRootId ||
-        event.id === selectedParentId ||
-        thread.rootId === selectedThreadRootId ||
-        thread.parentId === selectedThreadRootId ||
-        thread.parentId === selectedEvent.id
-      );
+      return isInboxThreadContextEvent(event, {
+        selectedChannelId,
+        selectedEventId: selectedEvent.id,
+        selectedParentId,
+        selectedThreadRootId,
+      });
     });
 
-    return dedupeEvents([selectedEvent, ...fetchedEvents, ...localContext]);
+    const currentFetchedEvents = fetchedEvents.filter((event) =>
+      isInboxThreadContextEvent(event, {
+        selectedChannelId,
+        selectedEventId: selectedEvent.id,
+        selectedParentId,
+        selectedThreadRootId,
+      }),
+    );
+
+    return dedupeEvents([
+      selectedEvent,
+      ...currentFetchedEvents,
+      ...localContext,
+    ]);
   }, [
     channelMessages,
     fetchedEvents,

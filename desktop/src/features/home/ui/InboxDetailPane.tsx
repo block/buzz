@@ -310,13 +310,11 @@ export function InboxDetailPane({
           </div>
         </TopChromeInsetHeader>
 
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32">
+        <div
+          aria-busy={isThreadContextLoading}
+          className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32"
+        >
           <div>
-            {isThreadContextLoading ? (
-              <div className="px-6 pb-3 text-2xs text-muted-foreground">
-                Loading context...
-              </div>
-            ) : null}
             {displayMessages.map((message, index) => (
               <React.Fragment key={message.id}>
                 {index === 1 ? (

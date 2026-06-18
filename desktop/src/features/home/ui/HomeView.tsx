@@ -15,7 +15,6 @@ import {
   getReactionTargetId,
   matchesInboxFilter,
 } from "@/features/home/lib/inboxViewHelpers";
-import { useFeedItemState } from "@/features/home/useFeedItemState";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
 import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
 import {
@@ -79,6 +78,7 @@ export function HomeView({
     homeInboxWidthPx > 0 &&
     homeInboxWidthPx < INBOX_SINGLE_COLUMN_BREAKPOINT_PX;
   const [filter, setFilter] = React.useState<InboxFilter>("all");
+  const [unreadOnly, setUnreadOnly] = React.useState(false);
   // Explicit selections are mirrored to the URL (`?item=`), so back/forward
   // restores the detail pane each history entry was showing and reloads
   // restore it from the URL. Default/automatic selection stays local-only —
@@ -117,13 +117,16 @@ export function HomeView({
     handleInboxListWidthReset,
     inboxListWidthPx,
   } = useResizableInboxListWidth();
-  const { doneSet, markDone, undoDone } = useFeedItemState(currentPubkey);
   const {
     getChannelReadAt,
+    getThreadReadAt,
+    feedItemState,
     markChannelRead,
-    markChannelUnread,
+    markThreadRead,
     readStateVersion,
   } = useAppShell();
+  const { doneSet, markDone, markUnread, undoDone, undoUnread, unreadSet } =
+    feedItemState;
   const feedItems = React.useMemo(
     () =>
       feed
@@ -182,26 +185,37 @@ export function HomeView({
   const inboxItems = React.useMemo(
     () =>
       buildInboxItems({
+        channels,
         currentPubkey,
         feed,
         profiles: feedProfiles,
       }),
-    [currentPubkey, feed, feedProfiles],
+    [channels, currentPubkey, feed, feedProfiles],
   );
   const { effectiveDoneSet, markItemRead, markItemUnread } =
     useHomeInboxReadState({
       items: inboxItems,
       getChannelReadAt,
+      getThreadReadAt,
       readStateVersion,
       localDoneSet: doneSet,
+      localUnreadSet: unreadSet,
       markChannelRead,
-      markChannelUnread,
+      markThreadRead,
       markDoneLocal: markDone,
+      markUnreadLocal: markUnread,
       undoDoneLocal: undoDone,
+      undoUnreadLocal: undoUnread,
     });
   const filteredItems = React.useMemo(() => {
-    return inboxItems.filter((item) => matchesInboxFilter(item, filter));
-  }, [filter, inboxItems]);
+    return inboxItems.filter(
+      (item) =>
+        matchesInboxFilter(item, filter) &&
+        (!unreadOnly ||
+          !effectiveDoneSet.has(item.id) ||
+          item.id === selectedItemId),
+    );
+  }, [effectiveDoneSet, filter, inboxItems, selectedItemId, unreadOnly]);
   const selectedItem =
     filteredItems.find((item) => item.id === selectedItemId) ?? null;
   const contextMessages = React.useMemo<InboxContextMessage[]>(() => {
@@ -412,13 +426,17 @@ export function HomeView({
             filter={filter}
             items={filteredItems}
             onFilterChange={setFilter}
+            onMarkRead={markItemRead}
+            onMarkUnread={markItemUnread}
             onSelect={(itemId) => {
               handleUserSelectItem(itemId);
               markItemRead(itemId);
             }}
+            onUnreadOnlyChange={setUnreadOnly}
             reminderPubkey={currentPubkey}
             selectedId={selectedItemId}
             showRightDivider={showListPane && showDetailPane}
+            unreadOnly={unreadOnly}
           />
         ) : null}
 

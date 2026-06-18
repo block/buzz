@@ -1,10 +1,15 @@
 import * as React from "react";
 
 const DONE_STORAGE_KEY = "buzz-home-feed-done.v1";
+const UNREAD_STORAGE_KEY = "buzz-home-feed-unread.v1";
 const MAX_ITEMS = 500;
 
 function doneStorageKey(pubkey: string) {
   return `${DONE_STORAGE_KEY}:${pubkey}`;
+}
+
+function unreadStorageKey(pubkey: string) {
+  return `${UNREAD_STORAGE_KEY}:${pubkey}`;
 }
 
 function readStoredIds(key: string): string[] {
@@ -35,24 +40,45 @@ export function useFeedItemState(pubkey: string | undefined) {
   const [doneIds, setDoneIds] = React.useState<string[]>(() =>
     readStoredIds(key),
   );
+  const [unreadIds, setUnreadIds] = React.useState<string[]>(() =>
+    readStoredIds(unreadStorageKey(normalizedPubkey)),
+  );
 
   React.useEffect(() => {
     setDoneIds(readStoredIds(doneStorageKey(normalizedPubkey)));
+    setUnreadIds(readStoredIds(unreadStorageKey(normalizedPubkey)));
   }, [normalizedPubkey]);
 
   React.useEffect(() => {
     writeStoredIds(doneStorageKey(normalizedPubkey), doneIds);
   }, [normalizedPubkey, doneIds]);
 
+  React.useEffect(() => {
+    writeStoredIds(unreadStorageKey(normalizedPubkey), unreadIds);
+  }, [normalizedPubkey, unreadIds]);
+
   const doneSet = React.useMemo(() => new Set(doneIds), [doneIds]);
+  const unreadSet = React.useMemo(() => new Set(unreadIds), [unreadIds]);
 
   const markDone = React.useCallback((id: string) => {
     setDoneIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+    setUnreadIds((prev) => prev.filter((v) => v !== id));
   }, []);
 
   const undoDone = React.useCallback((id: string) => {
     setDoneIds((prev) => prev.filter((v) => v !== id));
   }, []);
 
-  return { doneSet, markDone, undoDone };
+  const markUnread = React.useCallback((id: string) => {
+    setDoneIds((prev) => prev.filter((v) => v !== id));
+    setUnreadIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  }, []);
+
+  const undoUnread = React.useCallback((id: string) => {
+    setUnreadIds((prev) => prev.filter((v) => v !== id));
+  }, []);
+
+  return { doneSet, markDone, markUnread, undoDone, undoUnread, unreadSet };
 }
+
+export type FeedItemState = ReturnType<typeof useFeedItemState>;

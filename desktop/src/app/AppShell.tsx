@@ -28,6 +28,7 @@ import {
 } from "@/features/channels/hooks";
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
+import { useFeedItemState } from "@/features/home/useFeedItemState";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
@@ -77,15 +78,23 @@ import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
 import { joinChannel } from "@/shared/api/tauri";
-import type { Channel, RelayEvent, SearchHit } from "@/shared/api/types";
+import type {
+  Channel,
+  FeedItem,
+  RelayEvent,
+  SearchHit,
+} from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
 import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
+import { KIND_APPROVAL_REQUEST, KIND_REMINDER } from "@/shared/constants/kinds";
 import { ConnectionBanner } from "@/shared/ui/ConnectionBanner";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
+
+const HOME_FEED_ACTION_KINDS = [KIND_APPROVAL_REQUEST, KIND_REMINDER] as const;
 
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
@@ -163,13 +172,53 @@ export function AppShell() {
   const setUserStatusMutation = useSetUserStatusMutation(deferredPubkey);
   const { feedProfilesQuery, homeFeedQuery, notificationSettings } =
     useHomeFeedNotifications(identityQuery.data?.pubkey);
+  const feedItemState = useFeedItemState(identityQuery.data?.pubkey);
   useReminderNotifications(
     identityQuery.data?.pubkey,
     notificationSettings.settings,
   );
-  const refetchHomeFeedOnLiveMention = React.useEffectEvent(() => {
+  const refetchHomeFeedFromLiveSignal = React.useEffectEvent(() => {
     void homeFeedQuery.refetch();
   });
+  React.useEffect(() => {
+    const pubkey = identityQuery.data?.pubkey?.trim().toLowerCase() ?? "";
+    if (!pubkey) {
+      return;
+    }
+
+    let isCancelled = false;
+    let dispose: (() => Promise<void>) | null = null;
+
+    void relayClient
+      .subscribeLive(
+        {
+          kinds: [...HOME_FEED_ACTION_KINDS],
+          "#p": [pubkey],
+          limit: 50,
+          since: Math.floor(Date.now() / 1_000),
+        },
+        () => {
+          refetchHomeFeedFromLiveSignal();
+        },
+      )
+      .then((nextDispose) => {
+        if (isCancelled) {
+          void nextDispose().catch(() => {});
+          return;
+        }
+        dispose = nextDispose;
+      })
+      .catch((error) => {
+        console.error("Failed to subscribe to live home feed actions", error);
+      });
+
+    return () => {
+      isCancelled = true;
+      if (dispose) {
+        void dispose().catch(() => {});
+      }
+    };
+  }, [identityQuery.data?.pubkey]);
   const handleChannelNotification = React.useEffectEvent(
     (_channelId: string, _event: RelayEvent) => {
       if (!notificationSettings.settings.desktopEnabled) return;
@@ -307,6 +356,7 @@ export function AppShell() {
     markChannelUnread,
     unreadChannelIds,
     highPriorityUnreadChannelIds,
+    unreadChannelNotificationCount,
     getEffectiveTimestamp: getChannelReadAt,
     readStateVersion,
     setContextParentResolver,
@@ -325,7 +375,7 @@ export function AppShell() {
     notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
     onChannelMessage: handleChannelNotification,
     onDmMessage: handleDmNotification,
-    onLiveMention: refetchHomeFeedOnLiveMention,
+    onLiveMention: refetchHomeFeedFromLiveSignal,
     onThreadReplyDesktopNotification: handleThreadReplyDesktopNotification,
     followedRootIds,
   });
@@ -343,6 +393,22 @@ export function AppShell() {
       );
     },
     [markChannelRead],
+  );
+  const threadActivityFeedItems = React.useMemo<FeedItem[]>(
+    () =>
+      threadActivityItems.map((item) => ({
+        id: item.id,
+        kind: item.kind,
+        pubkey: item.pubkey,
+        content: item.content,
+        createdAt: item.createdAt,
+        channelId: item.channelId,
+        channelName: item.channelName,
+        channelType: undefined,
+        tags: item.tags,
+        category: "activity" as const,
+      })),
+    [threadActivityItems],
   );
 
   // Badge count is computed here (rather than inside useHomeFeedNotifications)
@@ -362,6 +428,9 @@ export function AppShell() {
       highPriorityUnreadChannelIds,
       feedProfilesQuery.data?.profiles,
       mutedChannelIds,
+      feedItemState.unreadSet,
+      threadActivityFeedItems,
+      getThreadReadAt,
     );
 
   const isNotifiedForThread = React.useCallback(
@@ -542,19 +611,13 @@ export function AppShell() {
 
   React.useEffect(() => {
     const numericCount =
-      highPriorityUnreadChannelIds.size + homeBadgeCountExcludingHighPriority;
+      unreadChannelNotificationCount + homeBadgeCountExcludingHighPriority;
     if (numericCount > 0) {
       void setDesktopAppBadge({ kind: "count", count: numericCount });
-    } else if (unreadChannelIds.size > 0) {
-      void setDesktopAppBadge({ kind: "dot" });
     } else {
       void setDesktopAppBadge({ kind: "none" });
     }
-  }, [
-    homeBadgeCountExcludingHighPriority,
-    highPriorityUnreadChannelIds.size,
-    unreadChannelIds.size,
-  ]);
+  }, [homeBadgeCountExcludingHighPriority, unreadChannelNotificationCount]);
 
   // Dispatch `buzz://message` deep links into the router.
   useMessageDeepLinks();
@@ -715,6 +778,7 @@ export function AppShell() {
             setTopbarSearchHidden,
             setTopbarSearchLoading,
             threadActivityItems,
+            feedItemState,
           }}
         >
           <HuddleProvider>
