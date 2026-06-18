@@ -20,7 +20,9 @@ set -euo pipefail
 # automated gate on this logic before it ships to users.
 #
 # Single arg: the destination dir for the staged tree (bash lands at
-# <dest>/bin/bash.exe). Idempotent: skips the download if already staged.
+# <dest>/bin/bash.exe). Idempotent: a `.stage-complete` marker, written last,
+# proves a whole prior stage and skips the re-download; a partial stage lacks it
+# and re-extracts cleanly.
 #
 # PATH CONTRACT (keep byte-identical across three files):
 #   - dest `git-bash` (== desktop/src-tauri/binaries/git-bash) is the
@@ -35,7 +37,8 @@ PORTABLEGIT_TAG="v${PORTABLEGIT_VERSION}.windows.1"
 PORTABLEGIT_EXE="PortableGit-${PORTABLEGIT_VERSION}-64-bit.7z.exe"
 PORTABLEGIT_URL="https://github.com/git-for-windows/git/releases/download/${PORTABLEGIT_TAG}/${PORTABLEGIT_EXE}"
 
-if [[ -f "$GIT_BASH_DIR/bin/bash.exe" ]]; then
+STAGE_MARKER="$GIT_BASH_DIR/.stage-complete"
+if [[ -f "$STAGE_MARKER" ]]; then
     echo "PortableGit bash already staged at $GIT_BASH_DIR"
     exit 0
 fi
@@ -63,4 +66,8 @@ trap - EXIT
     echo "Error: PortableGit extracted but $GIT_BASH_DIR/bin/bash.exe is missing" >&2
     exit 1
 }
+# Written last, only after cp -a and the integrity check both succeed, so it is
+# positive proof the whole tree landed. An interrupted stage never writes it, so
+# the idempotency skip falls through to a clean re-extract.
+touch "$STAGE_MARKER"
 echo "PortableGit bash staged at $GIT_BASH_DIR (mingw64/ dropped)"
