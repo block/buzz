@@ -15,14 +15,15 @@ use buzz_core::kind::{
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_APPROVAL_DENY,
     KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_CANVAS,
     KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST,
-    KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE,
-    KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED,
-    KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED,
-    KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT,
-    KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS,
-    KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
+    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
+    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
+    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
+    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
+    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
+    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS, KIND_MUTE_LIST,
+    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
     KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
     KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
     KIND_NIP65_RELAY_LIST_METADATA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE, KIND_PROFILE,
@@ -152,9 +153,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
     match kind {
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
-        KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM => {
-            Ok(Scope::UsersWrite)
-        }
+        KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
+        | KIND_EVENT_REMINDER => Ok(Scope::UsersWrite),
         // NIP-51 standard lists and NIP-65 relay list — user-owned global state,
         // same ownership shape as kind:3 (contacts) and kind:0 (profile).
         KIND_MUTE_LIST
@@ -340,6 +340,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_EMOJI_LIST
             // NIP-AE agent engrams are addressed by (pubkey_a, kind, d_tag); never channel-scoped.
             | KIND_AGENT_ENGRAM
+            // NIP-ER event reminders are addressed by (pubkey, kind, d_tag); never channel-scoped.
+            | KIND_EVENT_REMINDER
             // Agent profile (10100): user-owned replaceable, keyed by pubkey.
             | KIND_AGENT_PROFILE
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
@@ -954,6 +956,113 @@ fn validate_engram_nip44_content(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Parse a NIP-ER `not_before` tag value into a Unix timestamp.
+///
+/// The value MUST be a decimal integer string containing only ASCII digits, with
+/// no sign, whitespace, decimal point, or leading zero (except the literal `"0"`),
+/// and MUST be in the range 0..=9007199254740991 (`Number.MAX_SAFE_INTEGER`, the
+/// interoperable JSON integer bound the spec mandates). Parsing is exact integer
+/// parsing — never lossy floating-point — so values that overflow are malformed.
+fn validate_not_before(tag_value: &str) -> Result<u64, &'static str> {
+    const MAX_NOT_BEFORE: u64 = 9_007_199_254_740_991;
+
+    if tag_value.is_empty() || !tag_value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err("malformed not_before");
+    }
+    // Reject leading zeros (e.g. "007") so each timestamp has one canonical form.
+    // "0" itself is the only value allowed to begin with '0'.
+    if tag_value.len() > 1 && tag_value.starts_with('0') {
+        return Err("malformed not_before");
+    }
+    // Exact integer parse — `u64::from_str` rejects overflow rather than rounding,
+    // so values that would lose precision as f64 are caught before the range check.
+    let value: u64 = tag_value.parse().map_err(|_| "malformed not_before")?;
+    if value > MAX_NOT_BEFORE {
+        return Err("malformed not_before");
+    }
+    Ok(value)
+}
+
+/// Validate the public tag envelope of a NIP-ER `kind:30300` event before it
+/// reaches NIP-33 parameterized replacement.
+///
+/// The relay never decrypts the reminder; it only enforces the public schedule
+/// tags. A reminder carries at most one `not_before` (omitted on terminal
+/// states), and — when both `not_before` and an optional NIP-40 `expiration`
+/// are present — `expiration` MUST be strictly after `not_before` (an
+/// `expiration <= not_before` window would expire the reminder before it ever
+/// became due).
+fn validate_event_reminder(event: &Event) -> Result<(), &'static str> {
+    let mut not_before: Option<u64> = None;
+    let mut expiration: Option<&str> = None;
+    let mut d_count = 0u8;
+    let mut d_empty = false;
+
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() < 2 {
+            continue;
+        }
+        match parts[0].as_str() {
+            "not_before" => {
+                // Spec (NIP-ER line 60) collapses invalid and duplicate
+                // `not_before` into one wire string clients may match on.
+                if not_before.is_some() {
+                    return Err("malformed not_before");
+                }
+                not_before = Some(validate_not_before(&parts[1])?);
+            }
+            "expiration" => expiration = Some(&parts[1]),
+            "d" => {
+                d_count = d_count.saturating_add(1);
+                if parts[1].is_empty() {
+                    d_empty = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // d-tag: must have exactly one, non-empty
+    if d_count == 0 {
+        return Err("missing d tag");
+    }
+    if d_count > 1 {
+        return Err("duplicate d tag");
+    }
+    if d_empty {
+        return Err("empty d tag");
+    }
+
+    // `not_before` is optional — terminal states (done/cancelled) and bookmarks
+    // omit it. The ordering check only applies when both are present.
+    if let Some(nb) = not_before {
+        // Reject reminders scheduled beyond the configured horizon. The same
+        // SPROUT_MAX_NOT_BEFORE_DELTA env var is advertised in NIP-11.
+        let max_delta: u64 = std::env::var("SPROUT_MAX_NOT_BEFORE_DELTA")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(31_536_000); // 1 year default
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if nb > now + max_delta {
+            return Err("not_before too far in future");
+        }
+
+        if let Some(exp) = expiration {
+            if let Ok(exp) = exp.parse::<u64>() {
+                if exp <= nb {
+                    return Err("expiration before not_before");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // ── The pipeline ─────────────────────────────────────────────────────────────
 
 /// Ingest a signed Nostr event through the full validation pipeline.
@@ -1365,6 +1474,12 @@ pub async fn ingest_event(
     // ── 15a. Agent engram envelope (kind:30174) ──────────────────────────
     if kind_u32 == KIND_AGENT_ENGRAM {
         validate_engram_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    // ── 15b. Event reminder schedule tags (kind:30300) ───────────────────
+    if kind_u32 == KIND_EVENT_REMINDER {
+        validate_event_reminder(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
@@ -2265,5 +2380,206 @@ mod tests {
         let ev = make_engram(&[&["d", &d], &["p", &p]], &bad);
         let err = validate_engram_envelope(&ev).unwrap_err();
         assert!(err.contains("base64"), "got: {err}");
+    }
+
+    // ── NIP-ER not_before validation ─────────────────────────────────────
+
+    #[test]
+    fn not_before_accepts_zero() {
+        assert_eq!(validate_not_before("0"), Ok(0));
+    }
+
+    #[test]
+    fn not_before_accepts_typical_timestamp() {
+        assert_eq!(validate_not_before("1717000000"), Ok(1_717_000_000));
+    }
+
+    #[test]
+    fn not_before_accepts_max_safe_integer() {
+        assert_eq!(
+            validate_not_before("9007199254740991"),
+            Ok(9_007_199_254_740_991)
+        );
+    }
+
+    #[test]
+    fn not_before_rejects_above_max_safe_integer() {
+        assert_eq!(
+            validate_not_before("9007199254740992"),
+            Err("malformed not_before")
+        );
+    }
+
+    #[test]
+    fn not_before_rejects_leading_zero() {
+        assert_eq!(validate_not_before("007"), Err("malformed not_before"));
+    }
+
+    #[test]
+    fn not_before_rejects_empty() {
+        assert_eq!(validate_not_before(""), Err("malformed not_before"));
+    }
+
+    #[test]
+    fn not_before_rejects_non_digits() {
+        // Sign, whitespace, decimal point, and non-decimal forms are all
+        // rejected — only ASCII decimal digits are valid.
+        for value in ["-1", "+1", " 1", "1 ", "1.0", "1e3", "0x10", "abc"] {
+            assert_eq!(
+                validate_not_before(value),
+                Err("malformed not_before"),
+                "value {value:?} should be malformed"
+            );
+        }
+    }
+
+    #[test]
+    fn not_before_rejects_u64_overflow() {
+        // Exceeds u64::MAX — `from_str` errors rather than wrapping, so the
+        // value is malformed (not a lossy round-trip).
+        assert_eq!(
+            validate_not_before("99999999999999999999999999"),
+            Err("malformed not_before")
+        );
+    }
+
+    // ── NIP-ER reminder envelope validation ──────────────────────────────
+
+    fn make_reminder(tags: &[&[&str]]) -> Event {
+        make_event_with_tags(KIND_EVENT_REMINDER, "ciphertext", tags)
+    }
+
+    #[test]
+    fn reminder_accepts_single_valid_not_before() {
+        let ev = make_reminder(&[&["d", "abc"], &["not_before", "1717000000"]]);
+        assert!(validate_event_reminder(&ev).is_ok());
+    }
+
+    #[test]
+    fn reminder_accepts_expiration_after_not_before() {
+        let ev = make_reminder(&[
+            &["d", "abc"],
+            &["not_before", "1717000000"],
+            &["expiration", "1717000001"],
+        ]);
+        assert!(validate_event_reminder(&ev).is_ok());
+    }
+
+    #[test]
+    fn reminder_accepts_missing_not_before() {
+        // Terminal states (done/cancelled) and bookmarks omit not_before
+        let ev = make_reminder(&[&["d", "abc"]]);
+        assert!(validate_event_reminder(&ev).is_ok());
+    }
+
+    #[test]
+    fn reminder_rejects_not_before_too_far_in_future() {
+        // `not_before` beyond the max horizon (default 1 year) is rejected.
+        let far_future = (chrono::Utc::now().timestamp() as u64) + 63_072_000; // ~2 years
+        let ev = make_reminder(&[&["d", "abc"], &["not_before", &far_future.to_string()]]);
+        assert_eq!(
+            validate_event_reminder(&ev),
+            Err("not_before too far in future")
+        );
+    }
+
+    #[test]
+    fn reminder_rejects_duplicate_not_before() {
+        let ev = make_reminder(&[
+            &["d", "abc"],
+            &["not_before", "1717000000"],
+            &["not_before", "1717000005"],
+        ]);
+        assert_eq!(validate_event_reminder(&ev), Err("malformed not_before"));
+    }
+
+    #[test]
+    fn reminder_rejects_malformed_not_before() {
+        let ev = make_reminder(&[&["d", "abc"], &["not_before", "007"]]);
+        assert_eq!(validate_event_reminder(&ev), Err("malformed not_before"));
+    }
+
+    #[test]
+    fn reminder_rejects_expiration_equal_to_not_before() {
+        let ev = make_reminder(&[
+            &["d", "abc"],
+            &["not_before", "1717000000"],
+            &["expiration", "1717000000"],
+        ]);
+        assert_eq!(
+            validate_event_reminder(&ev),
+            Err("expiration before not_before")
+        );
+    }
+
+    #[test]
+    fn reminder_rejects_expiration_before_not_before() {
+        let ev = make_reminder(&[
+            &["d", "abc"],
+            &["not_before", "1717000000"],
+            &["expiration", "1716000000"],
+        ]);
+        assert_eq!(
+            validate_event_reminder(&ev),
+            Err("expiration before not_before")
+        );
+    }
+
+    #[test]
+    fn reminder_ignores_malformed_expiration() {
+        // A malformed `expiration` is NIP-40's concern, not this validator's:
+        // the ordering check runs only when `expiration` parses, so a valid
+        // `not_before` with an unparseable expiration is accepted here.
+        let ev = make_reminder(&[
+            &["d", "abc"],
+            &["not_before", "1717000000"],
+            &["expiration", "notanumber"],
+        ]);
+        assert!(validate_event_reminder(&ev).is_ok());
+    }
+
+    #[test]
+    fn event_reminder_is_global_only_and_param_replaceable() {
+        assert!(is_global_only_kind(KIND_EVENT_REMINDER));
+        assert!(!requires_h_channel_scope(KIND_EVENT_REMINDER));
+        assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER));
+    }
+
+    #[test]
+    fn reminder_accepts_expiration_without_not_before() {
+        // A terminal/bookmark with expiration but no not_before is valid —
+        // no ordering check applies when not_before is absent.
+        let ev = make_reminder(&[&["d", "abc"], &["expiration", "1777542730"]]);
+        assert!(validate_event_reminder(&ev).is_ok());
+    }
+
+    #[test]
+    fn reminder_rejects_missing_d_tag() {
+        let ev = make_event_with_tags(
+            KIND_EVENT_REMINDER,
+            "ciphertext",
+            &[&["not_before", "1717000000"]],
+        );
+        assert_eq!(validate_event_reminder(&ev), Err("missing d tag"));
+    }
+
+    #[test]
+    fn reminder_rejects_empty_d_tag() {
+        let ev = make_event_with_tags(
+            KIND_EVENT_REMINDER,
+            "ciphertext",
+            &[&["d", ""], &["not_before", "1717000000"]],
+        );
+        assert_eq!(validate_event_reminder(&ev), Err("empty d tag"));
+    }
+
+    #[test]
+    fn reminder_rejects_duplicate_d_tag() {
+        let ev = make_event_with_tags(
+            KIND_EVENT_REMINDER,
+            "ciphertext",
+            &[&["d", "abc"], &["d", "def"], &["not_before", "1717000000"]],
+        );
+        assert_eq!(validate_event_reminder(&ev), Err("duplicate d tag"));
     }
 }

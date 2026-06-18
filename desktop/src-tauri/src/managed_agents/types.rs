@@ -207,6 +207,12 @@ pub struct RelayMeshConfig {
 pub struct ManagedAgentProcess {
     pub child: Child,
     pub log_path: PathBuf,
+    /// Win32 Job Object owning the harness + its entire process tree. Closing
+    /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
+    /// tree — the Windows mirror of the Unix process-group teardown. `None`
+    /// if job creation/assignment failed (we fall back to `Child::kill()`).
+    #[cfg(windows)]
+    pub job: Option<crate::managed_agents::JobHandle>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -545,7 +551,6 @@ pub struct MigrationReport {
 }
 
 pub const DEFAULT_ACP_COMMAND: &str = "buzz-acp";
-pub const DEFAULT_AGENT_COMMAND: &str = "goose";
 /// ~5 min (320s) — matches the CLI harness default (BUZZ_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
 /// 1 hour — absolute wall-clock safety cap per turn.

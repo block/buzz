@@ -10,6 +10,7 @@ import {
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 import {
+  hasMentionForEvent,
   isHighPriorityEventForUser,
   shouldNotifyForEvent,
 } from "@/features/notifications/lib/shouldNotify";
@@ -30,121 +31,48 @@ type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
 // per-channel limit elsewhere in the app.
 const CATCH_UP_LIMIT = 1000;
 
-const PARTICIPATION_STORAGE_PREFIX = "buzz-thread-participation.v1";
-const MAX_PARTICIPATION_ENTRIES = 1000;
-
-function participationStorageKey(pubkey: string): string {
-  return `${PARTICIPATION_STORAGE_PREFIX}:${pubkey}`;
+// All four thread root-id sets (participation, authored, mentioned, muted)
+// share the same localStorage shape: a per-pubkey JSON array of ids, capped to
+// the newest N entries on write and tolerant of malformed/absent data on read.
+// One factory yields the read/write pair for each so the only difference is the
+// key prefix. The closures capture the prefix lexically (no `this`), so a
+// caller can alias one store's `write` into a variable and call it bare.
+function makeRootIdStore(prefix: string, maxEntries = 1000) {
+  const storageKey = (pubkey: string) => `${prefix}:${pubkey}`;
+  return {
+    read(pubkey: string): Set<string> {
+      try {
+        const raw = window.localStorage.getItem(storageKey(pubkey));
+        if (!raw) return new Set();
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return new Set();
+        return new Set(
+          parsed.filter((id): id is string => typeof id === "string"),
+        );
+      } catch {
+        return new Set();
+      }
+    },
+    write(pubkey: string, rootIds: Set<string>): void {
+      try {
+        const arr = [...rootIds];
+        const capped =
+          arr.length > maxEntries ? arr.slice(arr.length - maxEntries) : arr;
+        window.localStorage.setItem(storageKey(pubkey), JSON.stringify(capped));
+      } catch {
+        // Ignore storage errors (private browsing, quota exceeded).
+      }
+    },
+  };
 }
 
-function readParticipationFromStorage(pubkey: string): Set<string> {
-  try {
-    const raw = window.localStorage.getItem(participationStorageKey(pubkey));
-    if (!raw) {
-      return new Set();
-    }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return new Set();
-    }
-    return new Set(parsed.filter((id): id is string => typeof id === "string"));
-  } catch {
-    return new Set();
-  }
-}
-
-function writeParticipationToStorage(
-  pubkey: string,
-  rootIds: Set<string>,
-): void {
-  try {
-    const arr = [...rootIds];
-    const capped =
-      arr.length > MAX_PARTICIPATION_ENTRIES
-        ? arr.slice(arr.length - MAX_PARTICIPATION_ENTRIES)
-        : arr;
-    window.localStorage.setItem(
-      participationStorageKey(pubkey),
-      JSON.stringify(capped),
-    );
-  } catch {
-    // Ignore storage errors (private browsing, quota exceeded).
-  }
-}
-
-const AUTHORED_STORAGE_PREFIX = "buzz-thread-authored.v1";
-const MAX_AUTHORED_ENTRIES = 1000;
-
-function authoredStorageKey(pubkey: string): string {
-  return `${AUTHORED_STORAGE_PREFIX}:${pubkey}`;
-}
-
-function readAuthoredFromStorage(pubkey: string): Set<string> {
-  try {
-    const raw = window.localStorage.getItem(authoredStorageKey(pubkey));
-    if (!raw) {
-      return new Set();
-    }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return new Set();
-    }
-    return new Set(parsed.filter((id): id is string => typeof id === "string"));
-  } catch {
-    return new Set();
-  }
-}
-
-function writeAuthoredToStorage(pubkey: string, rootIds: Set<string>): void {
-  try {
-    const arr = [...rootIds];
-    const capped =
-      arr.length > MAX_AUTHORED_ENTRIES
-        ? arr.slice(arr.length - MAX_AUTHORED_ENTRIES)
-        : arr;
-    window.localStorage.setItem(
-      authoredStorageKey(pubkey),
-      JSON.stringify(capped),
-    );
-  } catch {
-    // Ignore storage errors (private browsing, quota exceeded).
-  }
-}
-
-const MUTED_STORAGE_PREFIX = "buzz-thread-muted.v1";
-const MAX_MUTED_ENTRIES = 1000;
-
-function mutedStorageKey(pubkey: string): string {
-  return `${MUTED_STORAGE_PREFIX}:${pubkey}`;
-}
-
-function readMutedFromStorage(pubkey: string): Set<string> {
-  try {
-    const raw = window.localStorage.getItem(mutedStorageKey(pubkey));
-    if (!raw) return new Set();
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return new Set();
-    return new Set(parsed.filter((id): id is string => typeof id === "string"));
-  } catch {
-    return new Set();
-  }
-}
-
-function writeMutedToStorage(pubkey: string, rootIds: Set<string>): void {
-  try {
-    const arr = [...rootIds];
-    const capped =
-      arr.length > MAX_MUTED_ENTRIES
-        ? arr.slice(arr.length - MAX_MUTED_ENTRIES)
-        : arr;
-    window.localStorage.setItem(
-      mutedStorageKey(pubkey),
-      JSON.stringify(capped),
-    );
-  } catch {
-    // Ignore storage errors (private browsing, quota exceeded).
-  }
-}
+const participationStore = makeRootIdStore("buzz-thread-participation.v1");
+const authoredStore = makeRootIdStore("buzz-thread-authored.v1");
+// Thread roots where an external message @-mentioned the current user. The
+// badge gate ORs this in so a mention recipient who never participated,
+// authored, or followed still gets the thread-unread badge.
+const mentionedStore = makeRootIdStore("buzz-thread-mentioned.v1");
+const mutedStore = makeRootIdStore("buzz-thread-muted.v1");
 
 export type ThreadActivityItem = {
   id: string;
@@ -359,6 +287,11 @@ export function useUnreadChannels(
   // Used to notify the author when someone replies to their posts.
   const authoredRootIdsRef = React.useRef(new Set<string>());
 
+  // Root event IDs of threads where an external message @-mentioned the user.
+  // ORed into the badge gate so a mention recipient who never participated,
+  // authored, or followed the thread still gets the thread-unread badge.
+  const mentionedRootIdsRef = React.useRef(new Set<string>());
+
   // Root event IDs of threads the user has explicitly muted. Takes precedence
   // over participation, follow, and authorship for notification suppression.
   const mutedRootIdsRef = React.useRef(new Set<string>());
@@ -382,6 +315,15 @@ export function useUnreadChannels(
     0,
   );
 
+  // Version signal bumped only when the participated/authored/mentioned
+  // root-id sets change, so the gate snapshots (re-derived below) don't
+  // re-allocate on every observed external message the way reusing
+  // latestVersion would.
+  const [membershipVersion, bumpMembershipVersion] = React.useReducer(
+    (x: number) => x + 1,
+    0,
+  );
+
   // Reset all in-session state when the identity or relay changes. Unread
   // tracking depends only on NIP-RS read markers + observed relay events for
   // this user; nothing here is persisted across restarts.
@@ -392,14 +334,18 @@ export function useUnreadChannels(
     forcedUnreadRef.current = new Set();
     caughtUpChannelsRef.current = new Set();
     participatedRootIdsRef.current = pubkey
-      ? readParticipationFromStorage(pubkey)
+      ? participationStore.read(pubkey)
       : new Set();
     authoredRootIdsRef.current = pubkey
-      ? readAuthoredFromStorage(pubkey)
+      ? authoredStore.read(pubkey)
       : new Set();
-    mutedRootIdsRef.current = pubkey ? readMutedFromStorage(pubkey) : new Set();
+    mentionedRootIdsRef.current = pubkey
+      ? mentionedStore.read(pubkey)
+      : new Set();
+    mutedRootIdsRef.current = pubkey ? mutedStore.read(pubkey) : new Set();
     threadActivityRef.current = pubkey ? readActivityFromStorage(pubkey) : [];
     bumpLatestVersion();
+    bumpMembershipVersion();
   }, [pubkey, relayClient]);
 
   // `topLevelOnly` is the passive channel-open path (NIP-RS Option 1): the
@@ -454,6 +400,28 @@ export function useUnreadChannels(
     }
   }, []);
 
+  // Record the thread root of an EXTERNAL message that @-mentioned the user.
+  // Keyed on the thread root so the badge gate trips for a mention recipient
+  // who never participated/authored/followed. Top-level mentions (no rootId)
+  // are ignored — thread badges only exist for replies. Returns true when the
+  // set actually grew so callers can decide whether to bump the gate snapshot.
+  const recordMentionedRoot = React.useCallback(
+    (event: RelayEvent): boolean => {
+      if (normalizedPubkey === null) return false;
+      if (event.pubkey.toLowerCase() === normalizedPubkey) return false;
+      if (!hasMentionForEvent(event, normalizedPubkey)) return false;
+      const { rootId } = getThreadReference(event.tags);
+      if (rootId === null) return false;
+      const target = mentionedRootIdsRef.current;
+      const sizeBefore = target.size;
+      target.add(rootId);
+      if (target.size === sizeBefore) return false;
+      mentionedStore.write(normalizedPubkey, target);
+      return true;
+    },
+    [normalizedPubkey],
+  );
+
   // Feed the in-session "latest external trigger" map from live channel
   // events. Composes with any caller-supplied onChannelMessage handler.
   // useLiveChannelUpdates already filters this callback to trigger kinds
@@ -466,6 +434,12 @@ export function useUnreadChannels(
       if (event.created_at > current) {
         latestByChannelRef.current.set(channelId, event.created_at);
         bumpLatestVersion();
+      }
+
+      // A mention on a reply makes its thread badge-eligible even when the
+      // user never participated/authored/followed (the gate's missing term).
+      if (recordMentionedRoot(event)) {
+        bumpMembershipVersion();
       }
 
       // Track high-priority events (DMs, mentions, broadcasts) separately.
@@ -488,25 +462,31 @@ export function useUnreadChannels(
 
       callerOnChannelMessage?.(channelId, event);
     },
-    [callerOnChannelMessage, normalizedPubkey],
+    [callerOnChannelMessage, normalizedPubkey, recordMentionedRoot],
   );
 
   const handleSelfChannelMessage = React.useCallback(
     (event: RelayEvent) => {
       const ref = getThreadReference(event.tags);
-      if (ref.rootId !== null) {
-        participatedRootIdsRef.current.add(ref.rootId);
-        if (normalizedPubkey !== null) {
-          writeParticipationToStorage(
-            normalizedPubkey,
-            participatedRootIdsRef.current,
-          );
-        }
-      } else {
-        authoredRootIdsRef.current.add(event.id);
-        if (normalizedPubkey !== null) {
-          writeAuthoredToStorage(normalizedPubkey, authoredRootIdsRef.current);
-        }
+      // Participation roots key on the thread root; authored roots (no thread
+      // ref) key on the event id itself.
+      const isParticipation = ref.rootId !== null;
+      const targetSet = isParticipation
+        ? participatedRootIdsRef.current
+        : authoredRootIdsRef.current;
+      const sizeBefore = targetSet.size;
+      targetSet.add(ref.rootId ?? event.id);
+      if (normalizedPubkey !== null) {
+        const write = isParticipation
+          ? participationStore.write
+          : authoredStore.write;
+        write(normalizedPubkey, targetSet);
+      }
+      // Only re-derive the gate snapshot when the set actually grew; a self-post
+      // to an already-tracked root is a no-op for the notify gate, so skipping
+      // the bump avoids a wasted snapshot re-allocation + gate recompute.
+      if (targetSet.size !== sizeBefore) {
+        bumpMembershipVersion();
       }
       bumpLatestVersion();
     },
@@ -547,7 +527,7 @@ export function useUnreadChannels(
     (rootId: string) => {
       mutedRootIdsRef.current.add(rootId);
       if (normalizedPubkey !== null) {
-        writeMutedToStorage(normalizedPubkey, mutedRootIdsRef.current);
+        mutedStore.write(normalizedPubkey, mutedRootIdsRef.current);
       }
       bumpLatestVersion();
     },
@@ -558,7 +538,7 @@ export function useUnreadChannels(
     (rootId: string) => {
       mutedRootIdsRef.current.delete(rootId);
       if (normalizedPubkey !== null) {
-        writeMutedToStorage(normalizedPubkey, mutedRootIdsRef.current);
+        mutedStore.write(normalizedPubkey, mutedRootIdsRef.current);
       }
       bumpLatestVersion();
     },
@@ -612,6 +592,15 @@ export function useUnreadChannels(
 
     let isCancelled = false;
 
+    // Snapshot membership sizes so the `.then` can detect whether the catch-up
+    // discovered new participated/authored/mentioned roots (pass 1 mutates the
+    // refs in place). A pure-participation or pure-mention discovery produces no
+    // maxExternal advance, so without this the notify gate would never
+    // invalidate to surface the badge.
+    const participatedSizeBefore = participatedRootIdsRef.current.size;
+    const authoredSizeBefore = authoredRootIdsRef.current.size;
+    const mentionedSizeBefore = mentionedRootIdsRef.current.size;
+
     type CatchUpResult =
       | {
           channelId: string;
@@ -638,31 +627,31 @@ export function useUnreadChannels(
             limit: CATCH_UP_LIMIT,
           });
 
-          // Pass 1: build participation from self-authored thread replies
-          // and track self-authored top-level messages for author notifications
+          // Pass 1: build participation from self-authored thread replies,
+          // track self-authored top-level messages for author notifications,
+          // and capture external mentions so their threads gate a badge.
           for (const event of events) {
-            if (
+            const isSelf =
               normalizedPubkey !== null &&
-              event.pubkey.toLowerCase() === normalizedPubkey
-            ) {
+              event.pubkey.toLowerCase() === normalizedPubkey;
+            if (isSelf) {
               const ref = getThreadReference(event.tags);
               if (ref.rootId !== null) {
                 participatedRootIdsRef.current.add(ref.rootId);
               } else {
                 authoredRootIdsRef.current.add(event.id);
               }
+            } else {
+              recordMentionedRoot(event);
             }
           }
 
           if (normalizedPubkey !== null) {
-            writeParticipationToStorage(
+            participationStore.write(
               normalizedPubkey,
               participatedRootIdsRef.current,
             );
-            writeAuthoredToStorage(
-              normalizedPubkey,
-              authoredRootIdsRef.current,
-            );
+            authoredStore.write(normalizedPubkey, authoredRootIdsRef.current);
           }
 
           // Pass 2: compute maxExternal and collect thread reply activity,
@@ -792,6 +781,13 @@ export function useUnreadChannels(
         }
       }
       if (didAdvance) bumpLatestVersion();
+      if (
+        participatedRootIdsRef.current.size !== participatedSizeBefore ||
+        authoredRootIdsRef.current.size !== authoredSizeBefore ||
+        mentionedRootIdsRef.current.size !== mentionedSizeBefore
+      ) {
+        bumpMembershipVersion();
+      }
     });
 
     return () => {
@@ -933,6 +929,26 @@ export function useUnreadChannels(
     bumpLatestVersion();
   }, [getEffectiveTimestamp, markContextRead]);
 
+  // Identity-stable snapshots of the membership sets for the notify gate.
+  // Re-derived only when membershipVersion bumps (a set actually changed), so
+  // `isNotifiedForThread`'s useCallback deps invalidate on async discovery
+  // while live consumers keep reading the mutable refs directly.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: membershipVersion is the intentional re-derivation signal
+  const participatedRootIds = React.useMemo(
+    () => new Set(participatedRootIdsRef.current) as ReadonlySet<string>,
+    [membershipVersion],
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: membershipVersion is the intentional re-derivation signal
+  const authoredRootIds = React.useMemo(
+    () => new Set(authoredRootIdsRef.current) as ReadonlySet<string>,
+    [membershipVersion],
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: membershipVersion is the intentional re-derivation signal
+  const mentionedRootIds = React.useMemo(
+    () => new Set(mentionedRootIdsRef.current) as ReadonlySet<string>,
+    [membershipVersion],
+  );
+
   return {
     unreadChannelIds,
     highPriorityUnreadChannelIds,
@@ -946,8 +962,9 @@ export function useUnreadChannels(
     getEffectiveTimestamp,
     readStateVersion,
     setContextParentResolver,
-    participatedRootIds: participatedRootIdsRef.current as ReadonlySet<string>,
-    authoredRootIds: authoredRootIdsRef.current as ReadonlySet<string>,
+    participatedRootIds,
+    authoredRootIds,
+    mentionedRootIds,
     threadActivityItems: threadActivityRef.current,
     mutedRootIds: mutedRootIdsRef.current as ReadonlySet<string>,
     muteThread,

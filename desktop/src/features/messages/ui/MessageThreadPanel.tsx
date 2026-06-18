@@ -368,7 +368,8 @@ export function MessageThreadPanel({
     syncScrollState,
   } = useTimelineScrollManager({
     channelId: threadHeadId,
-    isLoading: false,
+    // Wait for deferred replies to commit before scroll-init (else rows mount un-scrolled).
+    isLoading: repliesRenderState === "pending",
     messages: threadMessages,
     onTargetReached: onScrollTargetResolved,
     scrollContainerRef: threadBodyRef,
@@ -427,14 +428,7 @@ export function MessageThreadPanel({
         <div className="px-3 pb-3 pt-1" data-testid="message-thread-replies">
           {repliesRenderState === "list" ? (
             <div
-              className={cn(
-                "space-y-2.5",
-                // While a deferred render is in flight the painted reply list
-                // lags the latest `threadReplies`. Dim it slightly so the
-                // streaming-in reads as intentional instead of frozen — mirrors
-                // the main timeline.
-                isRepliesPending && "opacity-60 transition-opacity",
-              )}
+              className="space-y-2.5"
               data-render-pending={isRepliesPending ? "true" : undefined}
             >
               {deferredThreadReplies.map((entry, index) => {
@@ -514,7 +508,7 @@ export function MessageThreadPanel({
       {!isAtBottom ? (
         <div className="pointer-events-none absolute inset-x-0 bottom-36 z-20 flex justify-center px-4">
           <Button
-            className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-2xs font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-3.5"
+            className="pointer-events-auto h-7 min-h-7 gap-1.5 rounded-full border-border/50 bg-background/85 px-2.5 text-2xs font-medium text-muted-foreground shadow-xs backdrop-blur-sm hover:bg-muted/70 hover:text-foreground [&_svg]:size-4"
             data-testid="thread-scroll-to-latest"
             onClick={() => scrollToBottom("smooth")}
             size="sm"

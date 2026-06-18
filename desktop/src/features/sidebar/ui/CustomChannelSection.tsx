@@ -363,7 +363,7 @@ export function ChannelGroupSection({
         {items.map((channel) => (
           <ContextMenu key={channel.id}>
             <ContextMenuTrigger asChild>
-              <SidebarMenuItem>
+              <SidebarMenuItem className="content-visibility-auto-row">
                 {draggable ? (
                   <DraggableChannelRow channelId={channel.id}>
                     <ChannelMenuButton

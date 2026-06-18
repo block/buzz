@@ -42,6 +42,7 @@ export const MessageComposerToolbar = React.memo(
     onEmojiPickerOpenChange,
     onEmojiSelect,
     onFormattingToggle,
+    onLinkButton,
     onOpenMentionPicker,
     onPaperclip,
     onSpoilerToggle,
@@ -60,6 +61,7 @@ export const MessageComposerToolbar = React.memo(
     onEmojiPickerOpenChange: (open: boolean) => void;
     onEmojiSelect: (emoji: string) => void;
     onFormattingToggle: (pressed: boolean) => void;
+    onLinkButton: () => void;
     onOpenMentionPicker: () => void;
     onPaperclip: () => void;
     onSpoilerToggle?: (state: SpoilerToggleState) => void;
@@ -179,6 +181,7 @@ export const MessageComposerToolbar = React.memo(
                   <FormattingToolbar
                     editor={editor}
                     disabled={formattingDisabled}
+                    onLinkButton={onLinkButton}
                   />
                 </motion.div>
               </motion.div>

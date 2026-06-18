@@ -33,6 +33,7 @@ export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_MESH_STATUS_REPORT = 24620;
 export const KIND_MESH_CONNECT_REQUEST = 24621;
 export const KIND_MESH_CALL_ME_NOW = 24622;
+export const KIND_EVENT_REMINDER = 30300;
 export const KIND_REPO_ANNOUNCEMENT = 30617;
 // NIP-DV: relay-signed per-viewer DM visibility snapshot (d=viewer pubkey,
 // h-tags = currently-hidden DM channel ids).
@@ -63,3 +64,25 @@ export const CHANNEL_EVENT_KINDS = [
   KIND_STREAM_MESSAGE_DIFF, // 40008 — message diffs
   KIND_SYSTEM_MESSAGE, // 40099 — system messages (join, leave, etc.)
 ] as const;
+
+// Timeline kinds that are NOT conversational: relay-signed system rows
+// (channel-created, member-joined) and job-lifecycle events. These render in
+// the timeline but must not count toward the channel's unread pill — a freshly
+// created channel carries one channel_created + N member_joined system rows
+// that would otherwise show as phantom unreads ("4 unread, 1 message").
+const NON_CONVERSATIONAL_UNREAD_KINDS: ReadonlySet<number> = new Set([
+  KIND_SYSTEM_MESSAGE, // 40099
+  KIND_JOB_REQUEST, // 43001
+  KIND_JOB_ACCEPTED, // 43002
+  KIND_JOB_PROGRESS, // 43003
+  KIND_JOB_RESULT, // 43004
+  KIND_JOB_CANCEL, // 43005
+  KIND_JOB_ERROR, // 43006
+]);
+
+// Whether a timeline message kind should count toward unread tallies. An
+// undefined kind (optimistic/pending rows whose kind has not populated) is
+// treated as conversational so a legitimately unread message is never dropped.
+export function isConversationalUnreadKind(kind: number | undefined): boolean {
+  return kind === undefined || !NON_CONVERSATIONAL_UNREAD_KINDS.has(kind);
+}

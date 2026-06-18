@@ -37,6 +37,10 @@ import {
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
+import {
+  countDueReminders,
+  useRemindersQuery,
+} from "@/features/reminders/hooks";
 import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
 import type { HomeFeedResponse } from "@/shared/api/types";
 import { KIND_REACTION } from "@/shared/constants/kinds";
@@ -92,7 +96,14 @@ export function HomeView({
   // background data loads must never trigger navigations.
   const { applyPatch: applyInboxSearchPatch, values: inboxSearchValues } =
     useHistorySearchState(INBOX_SEARCH_KEYS);
-  const urlSelectedItemId = inboxSearchValues.item;
+  const isReminders = filter === "reminders";
+  const isMessagesMode = !isReminders;
+  const remindersQuery = useRemindersQuery(currentPubkey);
+  const dueReminderCount = countDueReminders(remindersQuery.data ?? []);
+  // `?item=` is Messages-mode-only machinery: a reminder never enters the
+  // FeedItem selection model, so reload while in Reminders mode keeps a stale
+  // `?item=` unconsumed and does not snap back to a feed-item detail view.
+  const urlSelectedItemId = isMessagesMode ? inboxSearchValues.item : null;
   const [selectedItemId, setSelectedItemId] = React.useState<string | null>(
     urlSelectedItemId,
   );
@@ -262,6 +273,14 @@ export function HomeView({
     return localReplies.filter((reply) => !contextIds.has(reply.id));
   }, [contextMessages, localRepliesByItemId, selectedItem]);
   React.useEffect(() => {
+    // Auto-selection is Messages-mode-only: in Reminders mode no FeedItem is
+    // ever selected, so default-selecting one behind the reminders list would
+    // be wasted work and could drive narrow-viewport detail off a stale feed
+    // selection.
+    if (!isMessagesMode) {
+      return;
+    }
+
     // While the feed is loading (e.g. a reload restoring `?item=` from the
     // URL) the selected item simply hasn't arrived yet — don't clobber it.
     if (isLoading || !feed) {
@@ -289,6 +308,7 @@ export function HomeView({
     filteredItems,
     homeInboxWidthPx,
     isLoading,
+    isMessagesMode,
     isNarrowHomeViewport,
     selectedItemId,
   ]);
@@ -358,8 +378,12 @@ export function HomeView({
       selectedItem.item.pubkey.trim().toLowerCase();
   const isSinglePanelDetailView =
     isNarrowHomeViewport && selectedItemId !== null;
+  // Reminders mode is single-pane: the reminders list renders inline row
+  // actions and never drives the FeedItem detail pane, so the detail column is
+  // not rendered at all (no empty pane on wide viewports).
   const showListPane = !isSinglePanelDetailView;
-  const showDetailPane = !isNarrowHomeViewport || isSinglePanelDetailView;
+  const showDetailPane =
+    isMessagesMode && (!isNarrowHomeViewport || isSinglePanelDetailView);
   const maxEffectiveInboxListWidthPx =
     homeInboxWidthPx > 0
       ? Math.max(
@@ -397,6 +421,7 @@ export function HomeView({
         {showListPane ? (
           <InboxListPane
             doneSet={effectiveDoneSet}
+            dueReminderCount={dueReminderCount}
             filter={filter}
             headerChromeRef={headerChromeRef}
             items={filteredItems}
@@ -405,6 +430,7 @@ export function HomeView({
               handleUserSelectItem(itemId);
               markItemRead(itemId);
             }}
+            reminderPubkey={currentPubkey}
             selectedId={selectedItemId}
             showRightDivider={showListPane && showDetailPane}
           />

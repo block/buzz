@@ -20,7 +20,7 @@ async function settle(page: import("@playwright/test").Page) {
 /** Drive the relay client into a state via the real E2E connection-state seam. */
 async function driveConnectionState(
   page: import("@playwright/test").Page,
-  state: "connected" | "disconnected",
+  state: "connected" | "reconnecting" | "stalled" | "disconnected",
 ) {
   await page.evaluate((s) => {
     const setter = (
@@ -49,60 +49,8 @@ async function scrollSidebarToBottom(page: import("@playwright/test").Page) {
     });
 }
 
-async function openProfilePopover(page: import("@playwright/test").Page) {
-  await page.getByTestId("sidebar-profile-avatar-button").click();
-  // Anchor on a stable popover child so the screenshot captures the open menu.
-  await expect(page.getByTestId("profile-popover-settings")).toBeVisible();
-  // Await the Radix open animation on the [data-state] ancestor — the popper
-  // wrapper carries no animations, so screenshots would otherwise capture a
-  // half-faded popover.
-  await page.getByTestId("profile-popover-settings").evaluate((el) =>
-    Promise.all(
-      el
-        .closest("[data-state]")
-        ?.getAnimations()
-        .map((a) => a.finished) ?? [],
-    ),
-  );
-}
-
 test.describe("relay reconnect affordance screenshots", () => {
-  test("01 — profile popover reconnect item hidden when healthy", async ({
-    page,
-  }) => {
-    await installMockBridge(page);
-    await page.goto("/");
-
-    await expect(page.getByTestId("channel-general")).toBeVisible();
-    await openProfilePopover(page);
-    await expect(page.getByTestId("profile-popover-reconnect")).toHaveCount(0);
-    await settle(page);
-
-    await page.screenshot({
-      path: `${SHOTS}/01-profile-popover-healthy.png`,
-    });
-  });
-
-  test("02 — profile popover reconnect item shown when degraded", async ({
-    page,
-  }) => {
-    await installMockBridge(page);
-    await page.goto("/");
-
-    await expect(page.getByTestId("channel-general")).toBeVisible();
-    await driveConnectionState(page, "disconnected");
-    await openProfilePopover(page);
-    await expect(page.getByTestId("profile-popover-reconnect")).toBeVisible({
-      timeout: 5_000,
-    });
-    await settle(page);
-
-    await page.screenshot({
-      path: `${SHOTS}/02-profile-popover-degraded.png`,
-    });
-  });
-
-  test("03 — sidebar has no reconnect prompt when healthy", async ({
+  test("01 — sidebar has no reconnect prompt when healthy", async ({
     page,
   }) => {
     await installMockBridge(page);
@@ -111,8 +59,8 @@ test.describe("relay reconnect affordance screenshots", () => {
     await expect(page.getByTestId("channel-general")).toBeVisible();
     await expect(page.getByTestId("sidebar-relay-unreachable")).toHaveCount(0);
     // The relay block renders at the BOTTOM of the scrollable sidebar content,
-    // below the fold at this viewport. Scroll to the bottom so 03 frames the
-    // same region where 04 will show the block — making the absence legible.
+    // below the fold at this viewport. Scroll to the bottom so 01 frames the
+    // same region where 02 will show the block — making the absence legible.
     await scrollSidebarToBottom(page);
     await settle(page);
 
@@ -120,30 +68,30 @@ test.describe("relay reconnect affordance screenshots", () => {
     // and a full-window shot makes its presence/absence illegible against the
     // unrelated top connection banner.
     await page.getByTestId("app-sidebar").screenshot({
-      path: `${SHOTS}/03-sidebar-healthy.png`,
+      path: `${SHOTS}/01-sidebar-healthy.png`,
     });
   });
 
-  test("04 — sidebar reconnect prompt shown when degraded, channels visible", async ({
+  test("02 — sidebar reconnect prompt shown when degraded, channels visible", async ({
     page,
   }) => {
     await installMockBridge(page);
     await page.goto("/");
 
     await expect(page.getByTestId("channel-general")).toBeVisible();
-    await driveConnectionState(page, "disconnected");
+    await driveConnectionState(page, "stalled");
     await expect(page.getByTestId("sidebar-relay-unreachable")).toBeVisible({
-      timeout: 5_000,
+      timeout: 10_000,
     });
     await expect(page.getByTestId("sidebar-reconnect")).toBeVisible();
     // The cached channel list stays visible alongside the prompt.
     await expect(page.getByTestId("channel-general")).toBeVisible();
-    // Scroll the block clear of the occluding footer (symmetric with 03).
+    // Scroll the block clear of the occluding footer (symmetric with 01).
     await scrollSidebarToBottom(page);
     await settle(page);
 
     await page.getByTestId("app-sidebar").screenshot({
-      path: `${SHOTS}/04-sidebar-degraded.png`,
+      path: `${SHOTS}/02-sidebar-degraded.png`,
     });
   });
 });

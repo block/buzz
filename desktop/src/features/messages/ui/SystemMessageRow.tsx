@@ -16,6 +16,8 @@ import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
 import {
   MENTION_CHIP_BASE_CLASSES,
   MENTION_CHIP_HOVER_CLASSES,
+  MENTION_CHIP_PREFIX_CLASS,
+  MESSAGE_MARKDOWN_CLASS,
 } from "@/shared/ui/mentionChip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
@@ -91,7 +93,9 @@ function ProfileName({
           : "rounded-xs transition-colors hover:text-foreground",
       )}
     >
-      {highlight && !isAgentMention ? "@" : null}
+      {highlight && !isAgentMention ? (
+        <span className={MENTION_CHIP_PREFIX_CLASS}>@</span>
+      ) : null}
       {children}
     </span>
   );
@@ -343,7 +347,7 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
           profiles={profiles}
           targetPubkey={payload.target}
         />
-        <div className="min-w-0 flex-1">
+        <div className={cn(MESSAGE_MARKDOWN_CLASS, "min-w-0 flex-1")}>
           <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
             <div className="truncate text-sm font-semibold leading-none tracking-tight text-foreground">
               {description.title}

@@ -105,6 +105,9 @@ export function MembersSidebar({
   const [inviteSubmissionErrors, setInviteSubmissionErrors] = React.useState<
     AddChannelMembersResult["errors"]
   >([]);
+  const [addingMemberPubkeys, setAddingMemberPubkeys] = React.useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const membersQuery = useChannelMembersQuery(channelId, open);
   const addMembersMutation = useAddChannelMembersMutation(channelId);
   const changeRoleMutation = useMutation({
@@ -410,6 +413,7 @@ export function MembersSidebar({
     if (!open) {
       setSearchQuery("");
       setInviteSubmissionErrors([]);
+      setAddingMemberPubkeys(new Set());
       return;
     }
 
@@ -421,57 +425,70 @@ export function MembersSidebar({
   }
 
   async function handleAddSearchResult(user: UserSearchResult) {
-    setInviteSubmissionErrors([]);
+    if (addingMemberPubkeys.has(user.pubkey)) {
+      return;
+    }
 
-    const result = await addMembersMutation.mutateAsync({
-      pubkeys: [user.pubkey],
-      role: user.isAgent ? "bot" : "member",
-    });
-    setInviteSubmissionErrors(result.errors);
+    setAddingMemberPubkeys((prev) => new Set(prev).add(user.pubkey));
+
+    try {
+      const result = await addMembersMutation.mutateAsync({
+        pubkeys: [user.pubkey],
+        role: user.isAgent ? "bot" : "member",
+      });
+      setInviteSubmissionErrors((prev) => [...prev, ...result.errors]);
+    } finally {
+      setAddingMemberPubkeys((prev) => {
+        const next = new Set(prev);
+        next.delete(user.pubkey);
+        return next;
+      });
+    }
   }
 
   function renderMemberCard(member: ChannelMember, memberIsBot: boolean) {
     return (
-      <MembersSidebarMemberCard
-        canChangeRole={canManageMembers && member.pubkey !== currentPubkey}
-        canRemoveMember={canRemoveMember(member)}
-        isActionPending={isActionPending || changeRoleMutation.isPending}
-        isArchived={isArchived}
-        key={member.pubkey}
-        managedAgent={
-          memberIsBot
-            ? managedAgentByPubkey.get(normalizePubkey(member.pubkey))
-            : undefined
-        }
-        member={member}
-        memberIsBot={memberIsBot}
-        memberAvatarLabel={member.displayName ?? formatPubkey(member.pubkey)}
-        memberLabel={formatMemberName(member, currentPubkey)}
-        onChangeRole={(m, role) => {
-          void changeRoleMutation.mutateAsync({ pubkey: m.pubkey, role });
-        }}
-        onEditRespondTo={memberIsBot ? setEditRespondToAgent : undefined}
-        onManagedAgentAction={(agent) => {
-          void handleAgentLifecycleAction(agent);
-        }}
-        onOpenProfile={handleOpenProfile}
-        onRemoveMember={handleRemoveMember}
-        onViewActivity={
-          onViewActivity
-            ? (pubkey: string) => {
-                onOpenChange(false);
-                onViewActivity(pubkey);
-              }
-            : undefined
-        }
-        presenceStatus={
-          memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
-        }
-        profileAvatarUrl={
-          memberProfilesQuery.data?.profiles[member.pubkey.toLowerCase()]
-            ?.avatarUrl ?? null
-        }
-      />
+      <div className="content-visibility-auto" key={member.pubkey}>
+        <MembersSidebarMemberCard
+          canChangeRole={canManageMembers && member.pubkey !== currentPubkey}
+          canRemoveMember={canRemoveMember(member)}
+          isActionPending={isActionPending || changeRoleMutation.isPending}
+          isArchived={isArchived}
+          managedAgent={
+            memberIsBot
+              ? managedAgentByPubkey.get(normalizePubkey(member.pubkey))
+              : undefined
+          }
+          member={member}
+          memberIsBot={memberIsBot}
+          memberAvatarLabel={member.displayName ?? formatPubkey(member.pubkey)}
+          memberLabel={formatMemberName(member, currentPubkey)}
+          onChangeRole={(m, role) => {
+            void changeRoleMutation.mutateAsync({ pubkey: m.pubkey, role });
+          }}
+          onEditRespondTo={memberIsBot ? setEditRespondToAgent : undefined}
+          onManagedAgentAction={(agent) => {
+            void handleAgentLifecycleAction(agent);
+          }}
+          onOpenProfile={handleOpenProfile}
+          onRemoveMember={handleRemoveMember}
+          onViewActivity={
+            onViewActivity
+              ? (pubkey: string) => {
+                  onOpenChange(false);
+                  onViewActivity(pubkey);
+                }
+              : undefined
+          }
+          presenceStatus={
+            memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
+          }
+          profileAvatarUrl={
+            memberProfilesQuery.data?.profiles[member.pubkey.toLowerCase()]
+              ?.avatarUrl ?? null
+          }
+        />
+      </div>
     );
   }
 
@@ -506,7 +523,7 @@ export function MembersSidebar({
                 autoCorrect="off"
                 className={MODAL_SEARCH_INPUT_CLASS}
                 data-testid="channel-management-search-users"
-                disabled={addMembersMutation.isPending || isArchived}
+                disabled={isArchived}
                 id="channel-management-search-users"
                 onChange={(event) => {
                   setSearchQuery(event.target.value);
@@ -558,7 +575,7 @@ export function MembersSidebar({
                         {addSearchResults.map((user) => (
                           <AddMemberSearchResultRow
                             disabled={
-                              addMembersMutation.isPending || isArchived
+                              addingMemberPubkeys.has(user.pubkey) || isArchived
                             }
                             key={user.pubkey}
                             onSelect={(selectedUser) => {
@@ -730,7 +747,7 @@ function AddMemberSearchResultRow({
               {formatAddCandidateName(user)}
             </span>
             <span className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
-              <Bot aria-hidden="true" className="h-3 w-3" />
+              <Bot aria-hidden="true" className="h-4 w-4" />
               agent
             </span>
           </div>

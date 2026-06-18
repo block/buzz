@@ -12,8 +12,7 @@ use crate::{
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
         BackendProviderInfo, CreateManagedAgentRequest, CreateManagedAgentResponse,
         ManagedAgentLogResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
-        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_COMMAND, DEFAULT_AGENT_PARALLELISM,
-        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -456,8 +455,8 @@ pub async fn create_managed_agent(
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or(DEFAULT_AGENT_COMMAND)
-            .to_string();
+            .map(str::to_string)
+            .unwrap_or_else(crate::managed_agents::default_agent_command);
         let agent_args = normalize_agent_args(
             &agent_command,
             input

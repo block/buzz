@@ -355,7 +355,22 @@ subscription. Navigate to the channel first (triggers subscription), then away
 (so unread indicators appear), then inject.
 
 **Animation timing:** Radix components animate in via CSS. `toBeVisible()`
-resolves mid-animation — wait for completion before screenshotting:
+resolves mid-animation — wait for completion before screenshotting. Use the
+shared helper (mandatory before any `page.screenshot()` or
+`locator.screenshot()` in specs):
+
+```ts
+import { waitForAnimations } from "../helpers/animations";
+
+// ... after the element is visible but before capturing:
+await waitForAnimations(page);
+await page.screenshot({ path: "...", clip: { ... } });
+```
+
+The `just desktop-screenshot` path (`screenshot.mjs`) calls
+`waitForAnimations` automatically — no manual step needed there.
+
+For per-element waits (rare — prefer the page-level helper above):
 
 ```ts
 await menuItem.evaluate((el) =>

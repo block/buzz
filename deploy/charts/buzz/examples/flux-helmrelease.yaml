@@ -1,0 +1,64 @@
+# Flux HelmRelease — GitOps-safe Buzz install.
+#
+# Prerequisite: a Secret named `buzz-secrets` in namespace `buzz`. See
+# `secret-sample.yaml`. Flux renders the chart server-side via the
+# helm-controller, which (like ArgoCD) treats chart-side `randAlphaNum`
+# autogen as non-idempotent. `existingSecret` is the only safe path.
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: buzz
+  namespace: buzz
+spec:
+  type: oci
+  url: oci://ghcr.io/block/buzz/charts
+  interval: 10m
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: buzz
+  namespace: buzz
+spec:
+  interval: 10m
+  chart:
+    spec:
+      chart: buzz
+      version: "0.1.0"
+      sourceRef:
+        kind: HelmRepository
+        name: buzz
+  values:
+    relayUrl: wss://buzz.example.com
+    ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"  # replace
+    replicaCount: 3
+
+    secrets:
+      existingSecret: buzz-secrets
+
+    typesense:
+      url: "http://typesense.buzz.svc.cluster.local:8108"
+      # apiKey lives in buzz-secrets
+
+    s3:
+      endpoint: "https://s3.us-east-1.amazonaws.com"
+      bucket: "buzz-media"
+
+    persistence:
+      git:
+        enabled: true
+        accessMode: ReadWriteMany
+        storageClass: efs-sc
+        size: 50Gi
+
+    ingress:
+      enabled: true
+      className: nginx
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-prod
+        nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+        nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+      tls:
+        - hosts: [buzz.example.com]
+          secretName: buzz-tls

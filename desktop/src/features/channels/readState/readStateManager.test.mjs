@@ -6,7 +6,7 @@ import {
   resolveEffectiveTimestamp,
 } from "./readStateManager.ts";
 
-const threadKey = "thread:" + "a".repeat(64);
+const threadKey = `thread:${"a".repeat(64)}`;
 const channelKey = "channel-1";
 const channelResolver = (ctx) =>
   ctx.startsWith("thread:") ? channelKey : null;

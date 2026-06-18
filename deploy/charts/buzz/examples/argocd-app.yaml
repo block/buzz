@@ -1,0 +1,76 @@
+# ArgoCD Application — GitOps-safe Buzz install.
+#
+# Prerequisite: a Secret named `buzz-secrets` in namespace `buzz` containing
+# (any subset of) the keys consumed by `secrets.existingSecret`. See
+# `secret-sample.yaml` for the schema.
+#
+# Why `existingSecret` and not chart autogen: ArgoCD renders manifests with
+# `helm template`, in which mode Helm's `lookup` function returns empty and
+# any chart-side `randAlphaNum` call regenerates on every sync. The
+# chart-managed Secret path is for `helm install` / `helm upgrade` only.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: buzz
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: oci://ghcr.io/block/buzz/charts
+    chart: buzz
+    targetRevision: 0.1.0
+    helm:
+      releaseName: buzz
+      values: |
+        relayUrl: wss://buzz.example.com
+        ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"  # replace
+        replicaCount: 3
+
+        secrets:
+          existingSecret: buzz-secrets
+
+        externalPostgresql:
+          # DATABASE_URL also lives in buzz-secrets; this is here only if you
+          # prefer the URL stored in values vs. the Secret. Pick one.
+          url: ""
+
+        externalRedis:
+          url: ""
+
+        typesense:
+          url: "http://typesense.buzz.svc.cluster.local:8108"
+          # apiKey lives in buzz-secrets
+
+        s3:
+          endpoint: "https://s3.us-east-1.amazonaws.com"
+          bucket: "buzz-media"
+          # accessKey / secretKey live in buzz-secrets
+
+        persistence:
+          git:
+            enabled: true
+            accessMode: ReadWriteMany     # required: replicaCount > 1
+            storageClass: efs-sc           # provider-specific RWX class
+            size: 50Gi
+
+        ingress:
+          enabled: true
+          className: nginx
+          annotations:
+            cert-manager.io/cluster-issuer: letsencrypt-prod
+            # WebSocket: long-lived; raise proxy timeouts.
+            nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+            nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+          tls:
+            - hosts: [buzz.example.com]
+              secretName: buzz-tls
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: buzz
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

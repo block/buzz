@@ -125,10 +125,10 @@ mod tests {
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
 
     #[test]
-    fn embedded_migrator_contains_initial_schema_and_d_tag_backfill() {
+    fn embedded_migrator_contains_all_schema_migrations() {
         let migrations: Vec<_> = MIGRATOR.iter().collect();
 
-        assert_eq!(migrations.len(), 2);
+        assert_eq!(migrations.len(), 3);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(
@@ -148,6 +148,17 @@ mod tests {
         assert!(
             migrations[1].sql.as_str().contains("UPDATE events"),
             "second migration should backfill existing event rows"
+        );
+
+        assert_eq!(migrations[2].version, 3);
+        assert_eq!(&*migrations[2].description, "event reminders");
+        assert!(
+            migrations[2]
+                .sql
+                .as_str()
+                .contains("ADD COLUMN not_before BIGINT")
+                && migrations[2].sql.as_str().contains("idx_events_not_before"),
+            "third migration should add the NIP-ER reminder columns and index"
         );
     }
 
@@ -181,6 +192,26 @@ mod tests {
         .expect("read applied migrations")
     }
 
+    /// Returns `schema/schema.sql` with the NIP-ER reminder DDL removed, so it
+    /// models a pre-stack deployment whose `events` table lacks the reminder
+    /// columns and index. The strip is asserted: if the snapshot text drifts so
+    /// these fragments no longer match, the test fails loudly rather than
+    /// silently loading a snapshot that already carries the reminder columns
+    /// (which would make migration 0003 collide on re-add).
+    fn pre_reminder_schema_snapshot() -> String {
+        const REMINDER_COLUMNS: &str = "    not_before  BIGINT,\n    delivered_at BIGINT,\n";
+        const REMINDER_INDEX: &str = "CREATE INDEX idx_events_not_before ON events (not_before)\n    WHERE not_before IS NOT NULL AND deleted_at IS NULL AND delivered_at IS NULL;\n";
+
+        assert!(
+            SCHEMA_SQL.contains(REMINDER_COLUMNS) && SCHEMA_SQL.contains(REMINDER_INDEX),
+            "schema.sql reminder DDL drifted; update pre_reminder_schema_snapshot to match"
+        );
+
+        SCHEMA_SQL
+            .replace(REMINDER_COLUMNS, "")
+            .replace(REMINDER_INDEX, "")
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn run_migrations_applies_embedded_versions_on_fresh_database() {
@@ -189,7 +220,7 @@ mod tests {
 
         run_migrations(&pool).await.expect("run migrations");
 
-        assert_eq!(applied_versions(&pool).await, vec![1, 2]);
+        assert_eq!(applied_versions(&pool).await, vec![1, 2, 3]);
         let events_exists = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'events')",
         )
@@ -204,7 +235,11 @@ mod tests {
     async fn run_migrations_baselines_existing_schema_and_preserves_allowlist_backfill_path() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
-        sqlx::raw_sql(SCHEMA_SQL)
+        // Load a pre-stack snapshot (without the NIP-ER reminder DDL) so the
+        // events table matches a real pre-SQLx deployment, which never had the
+        // reminder columns. Migration 0003 must then add them — proving the
+        // genuine prod-upgrade path, not a snapshot that already carries them.
+        sqlx::raw_sql(sqlx::AssertSqlSafe(pre_reminder_schema_snapshot()))
             .execute(&pool)
             .await
             .expect("load pre-SQLx schema snapshot");
@@ -218,7 +253,7 @@ mod tests {
 
         run_migrations(&pool).await.expect("baseline migrations");
 
-        assert_eq!(applied_versions(&pool).await, vec![1, 2]);
+        assert_eq!(applied_versions(&pool).await, vec![1, 2, 3]);
         let allowlist_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pubkey_allowlist")
             .fetch_one(&pool)
             .await

@@ -31,8 +31,10 @@ import {
 import { CUSTOM_EMOJI_NODE_NAME } from "@/features/messages/lib/customEmojiNode";
 import {
   type AutocompleteEdit,
+  type LinkSelectionInfo,
   useRichTextEditor,
 } from "@/features/messages/lib/useRichTextEditor";
+import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
 import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposerSpoilerParticles";
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
@@ -196,6 +198,16 @@ export function MessageComposer({
   const submitMessageRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
 
+  // Set after `useLinkEditor` exists below; the editor's link-click handler
+  // delegates through this ref to break the hook ordering cycle (the editor
+  // needs `onEditLink`, but the link editor needs the editor's `richText`).
+  const onEditLinkRef = React.useRef<
+    ((info: LinkSelectionInfo) => void) | null
+  >(null);
+  const onLinkSelectionChangeRef = React.useRef<
+    ((info: LinkSelectionInfo | null) => void) | null
+  >(null);
+
   const scrollComposerToBottom = React.useCallback(() => {
     window.requestAnimationFrame(() => {
       const scrollElement = composerScrollRef.current;
@@ -227,6 +239,8 @@ export function MessageComposer({
       return handler ? handler() : false;
     },
     isAutocompleteOpen: isAutocompleteOpenRef,
+    onEditLink: (info) => onEditLinkRef.current?.(info),
+    onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
     onUpdate: ({ markdown, text }) => {
       setContent(markdown);
       contentRef.current = markdown;
@@ -245,6 +259,9 @@ export function MessageComposer({
     },
   });
 
+  const linkEditor = useLinkEditor(richText);
+  onEditLinkRef.current = linkEditor.openFromClick;
+  onLinkSelectionChangeRef.current = linkEditor.showFromCursor;
   useComposerSpoilerParticles(richText.editor, composerScrollRef);
 
   const mentionSendFlow = useMentionSendFlow({
@@ -619,6 +636,14 @@ export function MessageComposer({
         return;
       }
 
+      if (event.key === "Tab" && !event.shiftKey && linkEditor.isCardOpen) {
+        event.preventDefault();
+        if (!linkEditor.focusCardFirstControl()) {
+          requestAnimationFrame(linkEditor.focusCardFirstControl);
+        }
+        return;
+      }
+
       // Escape in edit mode
       if (event.key === "Escape" && editTargetRef.current && onCancelEdit) {
         event.preventDefault();
@@ -633,6 +658,8 @@ export function MessageComposer({
       applyChannelInsert,
       mentions.handleMentionKeyDown,
       applyMentionInsert,
+      linkEditor.isCardOpen,
+      linkEditor.focusCardFirstControl,
       onCancelEdit,
     ],
   );
@@ -944,6 +971,7 @@ export function MessageComposer({
               onEmojiPickerOpenChange={setIsEmojiPickerOpen}
               onEmojiSelect={insertEmoji}
               onFormattingToggle={handleFormattingToggle}
+              onLinkButton={linkEditor.openFromToolbar}
               onOpenMentionPicker={openMentionPicker}
               onPaperclip={handlePaperclipClick}
               onSpoilerToggle={handleComposerSpoilerToggle}
@@ -963,6 +991,9 @@ export function MessageComposer({
         onInvite={mentionSendFlow.inviteNonMembers}
         open={mentionSendFlow.pendingNonMemberSend !== null}
       />
+
+      {linkEditor.card}
+      {linkEditor.dialog}
     </>
   );
 }

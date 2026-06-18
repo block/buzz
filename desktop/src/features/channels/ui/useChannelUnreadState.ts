@@ -2,12 +2,15 @@ import * as React from "react";
 
 import {
   buildCreatedAtByMessageId,
+  buildDirectRepliesByParentId,
   buildDirectReplyIdsByParentId,
   collectReplyDescendantIds,
   directRepliesMaxCreatedAt,
   subtreeMaxCreatedAt,
 } from "@/features/channels/lib/subtreeCreatedAt";
 import { computeThreadReplyUnreadCounts } from "@/features/channels/lib/threadReplyUnreadCounts";
+import { computeThreadBadgeCounts } from "@/features/channels/lib/threadBadgeCounts";
+import { seedThreadBadgeFrontiers } from "@/features/channels/lib/threadBadgeFrontier";
 import {
   buildThreadPanelDataFromIndex,
   buildThreadPanelIndex,
@@ -17,6 +20,7 @@ import {
   computeThreadUnreadMarker,
 } from "@/features/messages/lib/unreadMarker";
 import type { TimelineMessage } from "@/features/messages/types";
+import { isConversationalUnreadKind } from "@/shared/constants/kinds";
 
 import { useWelcomeInitialUnreadSuppression } from "./useWelcomeInitialUnreadSuppression";
 
@@ -33,6 +37,7 @@ type UseChannelUnreadStateOptions = {
   markChannelUnread: (channelId: string) => void;
   markThreadRead: (rootId: string, timestamp: number) => void;
   isNotifiedForThread: (rootId: string) => boolean;
+  readStateVersion: number;
 };
 
 /**
@@ -60,6 +65,7 @@ export function useChannelUnreadState({
   markChannelUnread,
   markThreadRead,
   isNotifiedForThread,
+  readStateVersion,
 }: UseChannelUnreadStateOptions) {
   // Capture the read frontier as it stood the instant this channel was opened,
   // BEFORE the mark-read effect (in ChannelScreen) advances it to latest.
@@ -115,6 +121,10 @@ export function useChannelUnreadState({
     () => buildDirectReplyIdsByParentId(timelineMessages),
     [timelineMessages],
   );
+  const directRepliesByParentId = React.useMemo(
+    () => buildDirectRepliesByParentId(timelineMessages),
+    [timelineMessages],
+  );
   const getFirstReplyIdForMessage = React.useCallback(
     (messageId: string) => directReplyIdsByParentId.get(messageId)?.[0] ?? null,
     [directReplyIdsByParentId],
@@ -166,10 +176,14 @@ export function useChannelUnreadState({
 
   // Oldest unread top-level message + count from the open-time frontier.
   // Keyed per channel so the pill/divider survive the mark-read effect.
+  // Non-conversational kinds (system rows, job-lifecycle events) are filtered
+  // out first so they don't inflate the pill; see isConversationalUnreadKind.
   const { firstUnreadMessageId, unreadCount } = React.useMemo(
     () =>
       computeChannelUnreadMarker(
-        timelineMessages,
+        timelineMessages.filter((message) =>
+          isConversationalUnreadKind(message.kind),
+        ),
         openFrontierSeconds,
         isActiveChannelForcedUnread || isActiveWelcomeInitialUnreadSuppressed,
         currentPubkey,
@@ -300,17 +314,13 @@ export function useChannelUnreadState({
       channelFrontiers = new Map();
       threadBadgeFrontiersRef.current.set(activeChannelId, channelFrontiers);
     }
-    for (const message of timelineMessages) {
-      if (message.parentId) continue;
-      if (!isNotifiedForThread(message.id)) continue;
-      if (channelFrontiers.has(message.id)) continue;
-      // Only capture for messages that have thread replies
-      const hasReplies = timelineMessages.some(
-        (m) => m.parentId === message.id,
-      );
-      if (!hasReplies) continue;
-      channelFrontiers.set(message.id, getThreadReadAt(message.id));
-    }
+    seedThreadBadgeFrontiers(
+      channelFrontiers,
+      timelineMessages,
+      directRepliesByParentId,
+      isNotifiedForThread,
+      getThreadReadAt,
+    );
   }
   // Clear the thread badge frontiers on channel leave (same cleanup as
   // openFrontierRef) so re-visiting captures fresh snapshots.
@@ -321,36 +331,31 @@ export function useChannelUnreadState({
       threadBadgeFrontiersRef.current.delete(channelId);
     };
   }, [activeChannelId]);
-  // Compute per-thread unread counts for summary rows in the main timeline.
-  // Only compute for threads the user has notification interest in — this
-  // aligns the badge display with the read-state write path. Uses the
-  // snapshotted frontier (threadBadgeFrontiersRef) so badges are stable for
-  // the session and don't flash when markChannelRead advances the channel
-  // marker.
-  const threadUnreadCounts = React.useMemo(() => {
-    const counts = new Map<string, number>();
-    const channelFrontiers = activeChannelId
-      ? threadBadgeFrontiersRef.current.get(activeChannelId)
-      : undefined;
-    for (const message of timelineMessages) {
-      if (message.parentId) continue;
-      if (!isNotifiedForThread(message.id)) continue;
-      const directReplies = timelineMessages.filter(
-        (m) => m.parentId === message.id,
-      );
-      if (directReplies.length === 0) continue;
-      const frontier = channelFrontiers?.get(message.id) ?? null;
-      const { unreadCount } = computeThreadUnreadMarker(
-        directReplies,
-        frontier,
+  // Per-thread unread counts for the main-timeline summary rows. Pure logic
+  // lives in computeThreadBadgeCounts; readStateVersion is an intentional
+  // recompute trigger so the badge re-reads the snapshot the seed block above
+  // advanced toward the live marker on mark-read.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion is the intentional recompute trigger
+  const threadUnreadCounts = React.useMemo(
+    () =>
+      computeThreadBadgeCounts(
+        timelineMessages,
+        directRepliesByParentId,
+        activeChannelId
+          ? threadBadgeFrontiersRef.current.get(activeChannelId)
+          : undefined,
+        isNotifiedForThread,
         currentPubkey,
-      );
-      if (unreadCount > 0) {
-        counts.set(message.id, unreadCount);
-      }
-    }
-    return counts;
-  }, [activeChannelId, currentPubkey, timelineMessages, isNotifiedForThread]);
+      ),
+    [
+      activeChannelId,
+      currentPubkey,
+      timelineMessages,
+      directRepliesByParentId,
+      isNotifiedForThread,
+      readStateVersion,
+    ],
+  );
 
   const handleMarkUnread = React.useCallback(() => {
     if (!activeChannelId) return;

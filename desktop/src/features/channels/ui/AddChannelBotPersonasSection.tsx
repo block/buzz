@@ -180,7 +180,7 @@ export function AddChannelBotPersonasSection({
                                 : "bg-muted/60 text-muted-foreground",
                             )}
                           >
-                            <Check className="h-2.5 w-2.5" />
+                            <Check className="h-4 w-4" />
                             In channel
                           </span>
                         ) : null}

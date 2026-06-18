@@ -1,0 +1,251 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Buzz Helm chart values",
+  "description": "Schema for values.yaml. Catches misconfiguration at `helm install` time before _validate.tpl runtime fails. Both layers are intentional: schema rejects malformed inputs; templates reject inconsistent combinations.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "quickstart": {
+      "type": "boolean",
+      "description": "Master toggle for evaluation profile (enables postgresql + redis subcharts and chart-side autogen). Not GitOps-safe."
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+        "pullSecrets": {
+          "type": "array",
+          "items": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" } } }
+        }
+      },
+      "required": ["repository", "pullPolicy"]
+    },
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Replica count for the relay Deployment. replicaCount > 1 requires Redis (for buzz-pubsub) and ReadWriteMany git storage — enforced by _validate.tpl."
+    },
+    "relayUrl": {
+      "type": "string",
+      "pattern": "^(wss?://.+)?$",
+      "description": "Public wss:// URL clients connect to. Required (validated by _validate.tpl). Drives RELAY_URL, default mediaBaseUrl, default ingress host."
+    },
+    "mediaBaseUrl": {
+      "type": "string",
+      "pattern": "^(https?://.+)?$"
+    },
+    "ownerPubkey": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{64})?$",
+      "description": "64-char lowercase hex Nostr pubkey of the relay operator. Required when relay.requireRelayMembership=true."
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": { "type": "string", "description": "Name of an externally managed Secret. Production / GitOps path." },
+        "relayPrivateKey": { "type": "string" },
+        "gitHookHmacSecret": { "type": "string" }
+      }
+    },
+    "relay": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "bindAddr": { "type": "string", "minLength": 1 },
+        "maxConnections": { "type": "integer", "minimum": 1 },
+        "maxConcurrentHandlers": { "type": "integer", "minimum": 1 },
+        "sendBuffer": { "type": "integer", "minimum": 1 },
+        "requireAuthToken": { "type": "boolean" },
+        "requireRelayMembership": { "type": "boolean" },
+        "allowNipOaAuth": { "type": "boolean" },
+        "pubkeyAllowlist": { "type": "boolean" },
+        "corsOrigins": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "ephemeralTtlOverride": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "type": { "type": "string", "enum": ["ClusterIP", "NodePort", "LoadBalancer"] },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "healthPort": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "metricsPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" },
+        "name": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "podDisruptionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minAvailable": { "oneOf": [{ "type": "integer" }, { "type": "string" }] },
+        "maxUnavailable": { "oneOf": [{ "type": "integer" }, { "type": "string" }] }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "annotations": { "type": "object" },
+        "hosts": { "type": "array" },
+        "tls": { "type": "array" }
+      }
+    },
+    "httproute": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "parentRefs": { "type": "array" },
+        "hostnames": { "type": "array", "items": { "type": "string" } },
+        "rules": { "type": "array" }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "git": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "mountPath": { "type": "string", "minLength": 1 },
+            "storageClass": { "type": "string" },
+            "accessMode": { "type": "string", "enum": ["ReadWriteOnce", "ReadWriteMany", "ReadOnlyMany", "ReadWriteOncePod"] },
+            "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$" },
+            "annotations": { "type": "object" },
+            "existingClaim": { "type": "string" }
+          }
+        }
+      }
+    },
+    "postgresql": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "externalPostgresql": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string", "pattern": "^(postgres(ql)?://.+)?$" }
+      }
+    },
+    "redis": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "externalRedis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string", "pattern": "^(rediss?://.+)?$" }
+      }
+    },
+    "typesense": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "url": { "type": "string", "pattern": "^(https?://.+)?$" },
+        "apiKey": { "type": "string" },
+        "image": { "type": "string", "minLength": 1 },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$" }
+          }
+        }
+      }
+    },
+    "s3": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": { "type": "string", "pattern": "^(https?://.+)?$" },
+        "bucket": { "type": "string", "minLength": 1 },
+        "accessKey": { "type": "string" },
+        "secretKey": { "type": "string" }
+      }
+    },
+    "minio": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "image": { "type": "string", "minLength": 1 },
+        "mcImage": { "type": "string", "minLength": 1 },
+        "persistence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "size": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(E|P|T|G|M|K|Ei|Pi|Ti|Gi|Mi|Ki)?$" }
+          }
+        }
+      }
+    },
+    "git": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxPackBytes": { "type": "integer", "minimum": 1 },
+        "maxReposPerPubkey": { "type": "integer", "minimum": 1 },
+        "maxConcurrentOps": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "migrate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "autoMigrate": { "type": "boolean" },
+        "preUpgradeJob": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "resources": { "type": "object" },
+            "backoffLimit": { "type": "integer", "minimum": 0 },
+            "activeDeadlineSeconds": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "serviceMonitor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "namespace": { "type": "string" },
+        "interval": { "type": "string" },
+        "scrapeTimeout": { "type": "string" },
+        "labels": { "type": "object" }
+      }
+    },
+    "extraManifests": {
+      "type": "array"
+    }
+  }
+}

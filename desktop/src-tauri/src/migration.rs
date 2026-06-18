@@ -361,7 +361,11 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
 }
 
 fn reconcile_team_dirs_in_file(path: &Path, target_dir: &Path) {
-    let target_teams = target_dir.join("agents/teams");
+    // Build per-component so the persisted value uses native separators on
+    // every platform, matching fresh writes (agents.rs builds the same path as
+    // base.join("teams").join(id)). A single join("agents/teams") would embed a
+    // literal '/' on Windows, persisting a mixed-separator path into the store.
+    let target_teams = target_dir.join("agents").join("teams");
     patch_json_records(path, |obj| {
         // Handle both old field name and new field name
         let field_name = if obj.contains_key("persona_team_dir") {

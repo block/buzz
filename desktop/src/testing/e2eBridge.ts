@@ -14,6 +14,7 @@ import {
 } from "@/shared/api/customEmoji";
 import {
   KIND_DM_VISIBILITY,
+  KIND_EVENT_REMINDER,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
   KIND_USER_STATUS,
@@ -74,8 +75,13 @@ type E2eConfig = {
     profileReadDelayMs?: number;
     profileReadError?: string;
     profileUpdateError?: string;
+    profileUpdateErrors?: string[];
     searchProfiles?: MockSearchProfileSeed[];
+    updateAvailable?: boolean;
     updateChannelDelayMs?: number;
+    updateDownloadDelayMs?: number;
+    restartDelayMs?: number;
+    updateVersion?: string;
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -616,6 +622,10 @@ declare global {
       createdAt: number;
       slotId: string;
     }) => unknown;
+    __BUZZ_E2E_SEED_MOCK_REMINDERS__?: (reminders: RelayEvent[]) => void;
+    __BUZZ_E2E_QUERY_CLIENT__?: {
+      invalidateQueries: (filters: { queryKey: readonly unknown[] }) => unknown;
+    };
   }
 }
 
@@ -1485,6 +1495,7 @@ const mockChannels: MockChannel[] = [
 
 const mockMessages = new Map<string, RelayEvent[]>();
 const mockUserStatuses: RelayEvent[] = [];
+const mockReminderEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketSendMutexWedged = false;
@@ -2203,6 +2214,31 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
               content: "Looks good to me. We should ship it.",
               sig: "mocksig".repeat(20).slice(0, 128),
             },
+            // Filler replies so the thread overflows the panel viewport — the
+            // deep-link target (mock-forum-release-deeplink) sits below the fold
+            // at open, proving scrollIntoView lands an offscreen content-
+            // visibility row. Named IDs above are untouched.
+            ...Array.from({ length: 24 }, (_, index) => ({
+              id:
+                index === 23
+                  ? "mock-forum-release-deeplink"
+                  : `mock-forum-release-filler-${index}`,
+              pubkey: ALICE_PUBKEY,
+              created_at: Math.floor(Date.now() / 1000) - (79 - index) * 60,
+              kind: 45003,
+              tags: buildReplyMessageTags(
+                channelId,
+                ALICE_PUBKEY,
+                "mock-forum-release-thread",
+                "mock-forum-release-thread",
+                undefined,
+              ),
+              content:
+                index === 23
+                  ? "Deep-link target: confirmed the rollout plan end to end."
+                  : `Follow-up note #${index + 1} on the release checklist.`,
+              sig: "mocksig".repeat(20).slice(0, 128),
+            })),
           ]
         : channelId === "94a444a4-c0a3-5966-ab05-530c6ddc2301"
           ? [
@@ -2514,7 +2550,9 @@ function getMockUserNotes(pubkey: string): RawUserNote[] {
   const now = Math.floor(Date.now() / 1000);
 
   if (pubkey === DEFAULT_MOCK_IDENTITY.pubkey) {
-    return [
+    // Two named notes plus generated filler so the Pulse feed overflows the
+    // viewport — required to exercise windowed scroll + sticky-composer offset.
+    const named: RawUserNote[] = [
       {
         id: "mock-note-launch",
         pubkey,
@@ -2530,6 +2568,14 @@ function getMockUserNotes(pubkey: string): RawUserNote[] {
         tags: [],
       },
     ];
+    const filler: RawUserNote[] = Array.from({ length: 28 }, (_, index) => ({
+      id: `mock-note-filler-${index}`,
+      pubkey,
+      created_at: now - (4 + index) * 60 * 60,
+      content: `Pulse update #${index + 1}: tracking virtualization rollout across desktop surfaces.`,
+      tags: [],
+    }));
+    return [...named, ...filler];
   }
 
   if (pubkey === ALICE_PUBKEY) {
@@ -2935,6 +2981,12 @@ async function handleUpdateProfile(
   const identity = getIdentity(config);
   if (!identity) {
     const profileUpdateError = config?.mock?.profileUpdateError;
+    const profileUpdateErrors = config?.mock?.profileUpdateErrors;
+    const nextProfileUpdateError = profileUpdateErrors?.shift();
+    if (nextProfileUpdateError) {
+      throw new Error(nextProfileUpdateError);
+    }
+
     if (profileUpdateError) {
       if (config?.mock) {
         config.mock.profileUpdateError = undefined;
@@ -3672,6 +3724,56 @@ async function handleSetChannelPurpose(
       ["purpose", args.purpose],
     ],
   });
+}
+
+type MockUpdaterChannel = {
+  onmessage?: (event: { event: "Finished" }) => void;
+};
+
+function notifyUpdaterFinished(payload: unknown) {
+  const channel = (payload as { onEvent?: MockUpdaterChannel } | null)?.onEvent;
+  channel?.onmessage?.({ event: "Finished" });
+}
+
+function handleUpdaterCheck(config: E2eConfig | undefined) {
+  if (!config?.mock?.updateAvailable) {
+    return null;
+  }
+
+  const version = config.mock.updateVersion ?? "0.3.18";
+
+  return {
+    rid: 42,
+    currentVersion: "0.3.17",
+    version,
+    date: "2026-06-12T00:00:00Z",
+    body: `Mock update ${version}`,
+    rawJson: null,
+  };
+}
+
+async function handleUpdaterDownloadAndInstall(
+  payload: unknown,
+  config: E2eConfig | undefined,
+) {
+  const delayMs = config?.mock?.updateDownloadDelayMs ?? 0;
+
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
+  notifyUpdaterFinished(payload);
+  return null;
+}
+
+async function handleRestart(config: E2eConfig | undefined) {
+  const delayMs = config?.mock?.restartDelayMs ?? 0;
+
+  if (delayMs > 0) {
+    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  }
+
+  return null;
 }
 
 async function handleArchiveChannel(
@@ -5729,6 +5831,16 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (filter.kinds?.includes(KIND_EVENT_REMINDER)) {
+      const authors = filter.authors?.map((a) => a.toLowerCase());
+      for (const event of mockReminderEvents) {
+        if (authors && !authors.includes(event.pubkey.toLowerCase())) continue;
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
     const channelId = filter["#h"]?.[0];
     if (!channelId) {
       sendWsText(socket.handler, ["EOSE", subId]);
@@ -5782,6 +5894,22 @@ function sendToMockSocket(args: {
     }
 
     if (event.kind === 30078) {
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
+    if (event.kind === KIND_EVENT_REMINDER) {
+      // Upsert by d-tag (replaceable event)
+      const dTag = event.tags.find((t) => t[0] === "d")?.[1];
+      if (dTag) {
+        const idx = mockReminderEvents.findIndex(
+          (e) =>
+            e.pubkey.toLowerCase() === event.pubkey.toLowerCase() &&
+            e.tags.some((t) => t[0] === "d" && t[1] === dTag),
+        );
+        if (idx >= 0) mockReminderEvents.splice(idx, 1);
+      }
+      mockReminderEvents.push(event);
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }
@@ -5948,7 +6076,7 @@ export function maybeInstallE2eTauriMocks() {
   };
   window.__BUZZ_E2E_SET_RELAY_CONNECTION_STATE__ = (state) => {
     // Directly emit a connection state change on the relay client singleton,
-    // for tests that need to drive ConnectionBanner without waiting for the
+    // for tests that need to drive degraded relay UI without waiting for the
     // real auth-timeout + reconnect-debounce cycle (~10 s). Reaches the
     // TS-private emitter via a cast so the production class carries no
     // test-only seam.
@@ -5957,6 +6085,13 @@ export function maybeInstallE2eTauriMocks() {
         connectionStateEmitter: { set: (s: ConnectionState) => void };
       }
     ).connectionStateEmitter.set(state);
+  };
+
+  window.__BUZZ_E2E_SEED_MOCK_REMINDERS__ = (reminders) => {
+    mockReminderEvents.length = 0;
+    for (const r of reminders) {
+      mockReminderEvents.push(r);
+    }
   };
 
   window.__BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__ = (stall) => {
@@ -6567,6 +6702,16 @@ export function maybeInstallE2eTauriMocks() {
       case "plugin:window|set_badge_count":
       case "plugin:window|set_badge_label":
         return null;
+      case "plugin:updater|check":
+        return handleUpdaterCheck(activeConfig);
+      case "plugin:updater|download_and_install":
+        return handleUpdaterDownloadAndInstall(payload, activeConfig);
+      case "relay_reconnect_hook":
+        return null;
+      case "plugin:resources|close":
+        return null;
+      case "plugin:process|restart":
+        return handleRestart(activeConfig);
       case "get_channel_workflows":
         return handleGetChannelWorkflows(
           payload as Parameters<typeof handleGetChannelWorkflows>[0],

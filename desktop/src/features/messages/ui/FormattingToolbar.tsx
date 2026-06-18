@@ -20,6 +20,12 @@ import { SPOILER_MARK_NAME } from "@/features/messages/lib/spoilerMark";
 type FormattingToolbarProps = {
   editor: Editor | null;
   disabled?: boolean;
+  /**
+   * Opens the link-edit modal for the current selection. When provided, the
+   * link button routes here instead of the legacy `window.prompt` flow
+   * (a no-op in the Tauri WebView).
+   */
+  onLinkButton?: () => void;
 };
 
 export type SpoilerToggleState = {
@@ -108,6 +114,7 @@ export function toggleSpoilerFormatting(editor: Editor): SpoilerToggleState {
 export const FormattingToolbar = React.memo(function FormattingToolbar({
   editor,
   disabled = false,
+  onLinkButton,
 }: FormattingToolbarProps) {
   const [activeStates, setActiveStates] = React.useState<ActiveStates | null>(
     () => (editor ? getActiveStates(editor) : null),
@@ -152,6 +159,15 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
   const toggleLink = React.useCallback(() => {
     if (!editor) return;
 
+    // Preferred path: open the link-edit modal, which handles add, edit, and
+    // remove with proper display-text + URL fields.
+    if (onLinkButton) {
+      onLinkButton();
+      return;
+    }
+
+    // Legacy fallback (no modal wired): the native prompts below are a no-op
+    // in the Tauri WebView, so this path effectively does nothing there.
     if (editor.isActive("link")) {
       editor.chain().focus().unsetLink().run();
       return;
@@ -172,7 +188,7 @@ export const FormattingToolbar = React.memo(function FormattingToolbar({
         editor.chain().focus().insertContent(`[${label}](${url})`).run();
       }
     }
-  }, [editor]);
+  }, [editor, onLinkButton]);
 
   const toggleBulletList = React.useCallback(() => {
     editor?.chain().focus().toggleBulletList().run();

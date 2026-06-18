@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use buzz_audit::AuditService;
@@ -404,6 +404,86 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // NIP-ER reminder scheduler — polls for due reminders and publishes them
+    // to Redis pub/sub for cross-pod fan-out. Each pod's existing
+    // subscribe_local consumer picks them up and applies the author-only gate.
+    // Mirrors the channel reaper pattern. Cross-pod dedup via `delivered_at`
+    // column: only the pod that wins the atomic claim publishes.
+    {
+        let scheduler_state = Arc::clone(&state);
+        let scheduler_interval_secs: u64 = std::env::var("SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let scheduler_batch_limit: i64 = std::env::var("SPROUT_REMINDER_SCHEDULER_BATCH_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(100);
+        tokio::spawn(async move {
+            info!(
+                interval_secs = scheduler_interval_secs,
+                batch_limit = scheduler_batch_limit,
+                "NIP-ER reminder scheduler started"
+            );
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(scheduler_interval_secs)).await;
+
+                let now_secs = chrono::Utc::now().timestamp();
+                let due = match scheduler_state
+                    .db
+                    .query_due_reminders(now_secs, scheduler_batch_limit)
+                    .await
+                {
+                    Ok(reminders) => reminders,
+                    Err(e) => {
+                        error!("Reminder scheduler tick failed: {e}");
+                        continue;
+                    }
+                };
+
+                if due.is_empty() {
+                    continue;
+                }
+
+                info!(count = due.len(), "Reminder scheduler: due reminders found");
+
+                for reminder in due {
+                    // Publish first, then claim. If publish fails the reminder
+                    // stays unclaimed and will be retried next tick. If claim
+                    // fails after a successful publish, duplicate fan-out on the
+                    // next tick is harmless (subscribers dedup by event ID).
+                    if let Err(e) = scheduler_state
+                        .pubsub
+                        .publish_event(uuid::Uuid::nil(), &reminder_to_event(&reminder))
+                        .await
+                    {
+                        error!(
+                            event_id = hex::encode(&reminder.id),
+                            "Reminder scheduler: Redis publish failed, skipping claim: {e}"
+                        );
+                        continue;
+                    }
+
+                    // Atomic cross-pod claim — only the winner marks it delivered.
+                    match scheduler_state
+                        .db
+                        .claim_due_reminder(&reminder.id, reminder.created_at)
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {} // Another pod claimed it; duplicate publish is harmless.
+                        Err(e) => {
+                            warn!(
+                                event_id = hex::encode(&reminder.id),
+                                "Reminder scheduler: claim failed after publish (duplicate delivery possible): {e}"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // Multi-node fan-out consumer: receive events from Redis pub/sub
     // (published by other relay instances) and fan out to local WS subscribers.
     {
@@ -635,6 +715,21 @@ async fn shutdown_signal() {
         tokio::signal::ctrl_c().await.ok();
     }
 }
+/// Reconstruct a `nostr::Event` from a [`DueReminder`] row for Redis pub/sub.
+fn reminder_to_event(reminder: &buzz_db::event::DueReminder) -> nostr::Event {
+    let event_json = serde_json::json!({
+        "id": hex::encode(&reminder.id),
+        "pubkey": hex::encode(&reminder.pubkey),
+        "created_at": reminder.created_at.timestamp(),
+        "kind": reminder.kind as u16,
+        "tags": reminder.tags,
+        "content": reminder.content,
+        "sig": hex::encode(&reminder.sig),
+    });
+
+    serde_json::from_value(event_json).expect("valid event JSON from DB row")
+}
+
 #[cfg(test)]
 mod tests {
     use super::buzz_auto_migrate_enabled;

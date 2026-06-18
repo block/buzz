@@ -58,6 +58,34 @@ export function selectLatestMessageKey(
   return latest.renderKey ?? latest.id;
 }
 
+export type LatestMessageAutoScrollBehavior = "auto" | "smooth" | null;
+
+export function selectLatestMessageAutoScrollBehavior({
+  hasExplicitBottomRequest,
+  isAtBottom,
+  shouldStickToBottom,
+  targetMessageId,
+}: {
+  hasExplicitBottomRequest: boolean;
+  isAtBottom: boolean;
+  shouldStickToBottom: boolean;
+  targetMessageId?: string | null;
+}): LatestMessageAutoScrollBehavior {
+  if (targetMessageId) {
+    return null;
+  }
+
+  if (hasExplicitBottomRequest) {
+    return "smooth";
+  }
+
+  if (shouldStickToBottom || isAtBottom) {
+    return "auto";
+  }
+
+  return null;
+}
+
 /** A single day boundary in the timeline: where it starts and how many messages it covers. */
 export type DayGroupBoundary = {
   /** Stable key for the day section. */
@@ -147,4 +175,52 @@ export function selectDeferredListRenderState(
     return "empty";
   }
   return "pending";
+}
+
+export type TimelineBodySurface = "skeleton" | "empty" | "list";
+
+export function selectTimelineBodySurface({
+  deferredCount,
+  isLoading,
+  liveCount,
+}: {
+  deferredCount: number;
+  isLoading: boolean;
+  liveCount: number;
+}): TimelineBodySurface {
+  if (isLoading) {
+    return "skeleton";
+  }
+
+  const renderState = selectDeferredListRenderState(deferredCount, liveCount);
+  if (renderState === "pending") {
+    return "skeleton";
+  }
+  return renderState;
+}
+
+export type TimelineIntroSurface =
+  | "direct-message-intro"
+  | "channel-intro"
+  | null;
+
+export function selectTimelineIntroSurface({
+  hasChannelIntro,
+  hasDirectMessageIntro,
+  isSkeletonVisible,
+}: {
+  hasChannelIntro: boolean;
+  hasDirectMessageIntro: boolean;
+  isSkeletonVisible: boolean;
+}): TimelineIntroSurface {
+  if (isSkeletonVisible) {
+    return null;
+  }
+  if (hasDirectMessageIntro) {
+    return "direct-message-intro";
+  }
+  if (hasChannelIntro) {
+    return "channel-intro";
+  }
+  return null;
 }

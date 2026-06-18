@@ -42,7 +42,7 @@ export function AgentSessionTranscriptList({
       role="log"
     >
       {items.map((item) => (
-        <div className="mt-4 first:mt-0" key={item.id}>
+        <div className="mt-4 first:mt-0 content-visibility-auto" key={item.id}>
           <TranscriptItemView
             agentName={agentName}
             item={item}

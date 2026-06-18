@@ -1141,6 +1141,112 @@ test("failed first profile saves can be skipped for the current session", async 
   await expectHomeView(page);
 });
 
+test("generic relay save failures use the generic reconnect card", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError: "relay unreachable: could not connect to relay",
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toContainText("Can't reach the relay");
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toContainText("Click to connect");
+});
+
+test("custom relay proxy sign-in failures use the generic reconnect card", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError:
+        "relay unreachable: relay returned an unexpected HTML page (network sign-in?)",
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toContainText("Can't reach the relay");
+});
+
+test("relay access failures use the generic reconnect card", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateError: "relay unreachable: 403 Forbidden",
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toContainText("Can't reach the relay");
+});
+
+test("dismissed relay save failures reappear on retry", async ({ page }) => {
+  const relayError = "relay unreachable: could not connect to relay";
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await installMockBridge(
+    page,
+    {
+      profileUpdateErrors: [relayError, relayError],
+    },
+    { skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("onboarding-display-name").fill("Morty QA");
+  await page.getByTestId("onboarding-next").click();
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toBeVisible();
+
+  await page.getByTestId("onboarding-relay-reconnect-card").hover();
+  await page.getByTestId("onboarding-relay-reconnect-card-dismiss").click();
+  await expect(page.getByTestId("onboarding-relay-reconnect-card")).toHaveCount(
+    0,
+  );
+
+  await page.getByTestId("onboarding-next").click();
+  await expect(
+    page.getByTestId("onboarding-relay-reconnect-card"),
+  ).toBeVisible();
+});
+
 test("existing relay profile with display name auto-completes onboarding", async ({
   page,
 }) => {

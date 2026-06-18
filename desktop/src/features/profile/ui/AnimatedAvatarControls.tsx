@@ -313,7 +313,7 @@ export function AvatarOutlineToggle({
       title={enabled ? "Outline on" : "Outline off"}
       type="button"
     >
-      <Icon aria-hidden="true" className="h-5 w-5" />
+      <Icon aria-hidden="true" className="h-4 w-4" />
     </button>
   );
 }
