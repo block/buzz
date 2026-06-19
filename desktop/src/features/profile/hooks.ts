@@ -1,5 +1,10 @@
 import * as React from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import {
   getProfile,
@@ -281,6 +286,10 @@ export function useUsersBatchQuery(
     enabled,
     queryKey: ["users-batch", ...normalizedPubkeys],
     queryFn: () => getUsersBatch(normalizedPubkeys),
+    // Loading older messages grows the pubkey set, which changes this query's
+    // key entirely. Without this, already-resolved authors would flash back
+    // to their raw pubkey while the larger batch refetches.
+    placeholderData: keepPreviousData,
     staleTime: 60_000,
     gcTime: 5 * 60 * 1_000,
   });

@@ -474,14 +474,16 @@ export function AppSidebar({
       data-testid="app-sidebar"
       variant="sidebar"
     >
-      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div
+        className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+        data-testid="app-sidebar-scroll-anchor"
+      >
         {unreadAboveCount > 0 ? (
           <MoreUnreadButton
             count={unreadAboveCount}
             onClick={scrollToNextAbove}
             position="top"
             testId="sidebar-more-unread-above"
-            topClassName="top-(--buzz-top-chrome-height,2.5rem)"
           />
         ) : null}
         <SidebarContent

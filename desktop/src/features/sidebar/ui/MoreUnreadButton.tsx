@@ -1,3 +1,4 @@
+import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
 
 export function MoreUnreadButton({
@@ -6,16 +7,15 @@ export function MoreUnreadButton({
   onClick,
   position,
   testId,
-  topClassName = "top-0",
 }: {
   bottomClassName?: string;
   count: number;
   onClick: () => void;
   position: "top" | "bottom";
   testId: string;
-  topClassName?: string;
 }) {
-  const positionClassName = position === "top" ? topClassName : bottomClassName;
+  const positionClassName =
+    position === "top" ? topChromeInset.top : bottomClassName;
 
   return (
     <div
