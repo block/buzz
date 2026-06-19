@@ -83,6 +83,14 @@ function isAtTopNow(container: HTMLDivElement) {
   return container.scrollTop <= AT_TOP_THRESHOLD_PX;
 }
 
+function isAtTimelineStartNow(container: HTMLDivElement) {
+  const scrollableDistance = Math.max(
+    0,
+    container.scrollHeight - container.clientHeight,
+  );
+  return scrollableDistance <= AT_TOP_THRESHOLD_PX || isAtTopNow(container);
+}
+
 /**
  * Pick an anchor for the current scroll position.
  *
@@ -364,9 +372,7 @@ export function useAnchoredScroll({
     anchorRef.current = computeAnchor(container);
     const atBottom = anchorRef.current.kind === "at-bottom";
     setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
-    setHasReachedTop(
-      (current) => current || (!atBottom && isAtTopNow(container)),
-    );
+    setHasReachedTop((current) => current || isAtTimelineStartNow(container));
     if (atBottom) {
       setNewMessageCount(0);
     }
@@ -414,6 +420,7 @@ export function useAnchoredScroll({
         scrollToBottomImperative("auto");
       }
       hasInitializedRef.current = true;
+      setHasReachedTop((current) => current || isAtTimelineStartNow(container));
       prevLastMessageIdRef.current = messages[messages.length - 1]?.id;
       prevMessageCountRef.current = messages.length;
       return;
@@ -464,6 +471,7 @@ export function useAnchoredScroll({
 
     prevLastMessageIdRef.current = lastMessage?.id;
     prevMessageCountRef.current = messages.length;
+    setHasReachedTop((current) => current || isAtTimelineStartNow(container));
   }, [
     isFetchingOlder,
     isLoading,
