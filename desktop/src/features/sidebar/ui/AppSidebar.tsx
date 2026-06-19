@@ -229,20 +229,33 @@ export function AppSidebar({
     React.useState(false);
   const showSidebarUpdateCard =
     canShowSidebarUpdateCard && !isSidebarUpdateCardDismissed;
-  const sidebarFooterCardCount =
-    (sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? 1 : 0) +
-    (showSidebarUpdateCard ? 1 : 0);
-  const unreadBelowBottomClass =
-    sidebarFooterCardCount >= 2
-      ? "bottom-56"
-      : sidebarFooterCardCount >= 1
-        ? "bottom-44"
-        : "bottom-24";
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const sidebarFooterRef = React.useRef<HTMLDivElement>(null);
+  const [sidebarFooterHeight, setSidebarFooterHeight] = React.useState<
+    number | null
+  >(null);
   useSidebarScrollLock(scrollRef);
+
+  React.useLayoutEffect(() => {
+    const sidebarFooter = sidebarFooterRef.current;
+    if (!sidebarFooter) {
+      return;
+    }
+
+    const updateFooterHeight = () => {
+      setSidebarFooterHeight(sidebarFooter.getBoundingClientRect().height);
+    };
+
+    updateFooterHeight();
+
+    const resizeObserver = new ResizeObserver(updateFooterHeight);
+    resizeObserver.observe(sidebarFooter);
+
+    return () => resizeObserver.disconnect();
+  }, []);
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -483,7 +496,16 @@ export function AppSidebar({
       data-testid="app-sidebar"
       variant="sidebar"
     >
-      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div
+        className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+        style={
+          sidebarFooterHeight === null
+            ? undefined
+            : ({
+                "--buzz-sidebar-footer-height": `${sidebarFooterHeight}px`,
+              } as React.CSSProperties)
+        }
+      >
         {unreadAboveCount > 0 ? (
           <MoreUnreadButton
             count={unreadAboveCount}
@@ -776,7 +798,7 @@ export function AppSidebar({
 
         {unreadBelowCount > 0 ? (
           <MoreUnreadButton
-            bottomClassName={unreadBelowBottomClass}
+            bottomClassName="bottom-(--buzz-sidebar-footer-height,6rem)"
             count={unreadBelowCount}
             onClick={scrollToNextBelow}
             position="bottom"
@@ -784,7 +806,10 @@ export function AppSidebar({
           />
         ) : null}
 
-        <SidebarFooter className="z-30 shrink-0 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
+        <SidebarFooter
+          className="z-30 shrink-0 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35"
+          ref={sidebarFooterRef}
+        >
           <AnimatePresence>
             {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
               <SidebarRelayConnectionCard
