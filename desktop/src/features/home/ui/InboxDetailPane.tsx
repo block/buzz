@@ -41,6 +41,16 @@ import {
   TooltipTrigger,
 } from "@/shared/ui/tooltip";
 
+const ChannelManagementSheet = React.lazy(async () => {
+  const module = await import("@/features/channels/ui/ChannelManagementSheet");
+  return { default: module.ChannelManagementSheet };
+});
+
+const MembersSidebar = React.lazy(async () => {
+  const module = await import("@/features/channels/ui/MembersSidebar");
+  return { default: module.MembersSidebar };
+});
+
 type InboxDetailPaneProps = {
   canDelete: boolean;
   canOpenChannel: boolean;
@@ -59,7 +69,6 @@ type InboxDetailPaneProps = {
   currentPubkey?: string;
   onBack?: () => void;
   onDelete: () => void;
-  onOpenChannel: (channelId: string) => void;
   onOpenContext?: (channelId: string, messageId: string) => void;
   onSendReply: (input: {
     content: string;
@@ -93,7 +102,6 @@ export function InboxDetailPane({
   currentPubkey,
   onBack,
   onDelete,
-  onOpenChannel,
   onOpenContext,
   onSendReply,
   onToggleReaction,
@@ -103,7 +111,11 @@ export function InboxDetailPane({
   const [replyTargetId, setReplyTargetId] = React.useState<string | null>(null);
   const [isFocusHighlightVisible, setIsFocusHighlightVisible] =
     React.useState(true);
+  const [isMembersSidebarOpen, setIsMembersSidebarOpen] = React.useState(false);
+  const [isChannelManagementOpen, setIsChannelManagementOpen] =
+    React.useState(false);
   const selectedItemId = item?.id ?? null;
+  const selectedChannelId = item?.item.channelId ?? null;
   const selectedMessageScrollKey = React.useMemo(() => {
     if (!selectedItemId) {
       return null;
@@ -129,6 +141,12 @@ export function InboxDetailPane({
     void selectedItemId;
     setReplyTargetId(null);
   }, [selectedItemId]);
+
+  React.useEffect(() => {
+    void selectedChannelId;
+    setIsMembersSidebarOpen(false);
+    setIsChannelManagementOpen(false);
+  }, [selectedChannelId]);
 
   React.useEffect(() => {
     void selectedItemId;
@@ -293,8 +311,10 @@ export function InboxDetailPane({
                     <ChannelMembersBar
                       channel={channel}
                       currentPubkey={currentPubkey}
-                      onManageChannel={() => onOpenChannel(channel.id)}
-                      onToggleMembers={() => onOpenChannel(channel.id)}
+                      onManageChannel={() => setIsChannelManagementOpen(true)}
+                      onToggleMembers={() =>
+                        setIsMembersSidebarOpen((open) => !open)
+                      }
                     />
                   ) : null}
                   <HeaderMoreMenu
@@ -365,6 +385,24 @@ export function InboxDetailPane({
           </div>
         </div>
       </div>
+
+      {channel ? (
+        <React.Suspense fallback={null}>
+          <MembersSidebar
+            channel={channel}
+            currentPubkey={currentPubkey}
+            onOpenChange={setIsMembersSidebarOpen}
+            open={isMembersSidebarOpen}
+          />
+          <ChannelManagementSheet
+            channel={channel}
+            currentPubkey={currentPubkey}
+            onDeleted={() => setIsChannelManagementOpen(false)}
+            onOpenChange={setIsChannelManagementOpen}
+            open={isChannelManagementOpen}
+          />
+        </React.Suspense>
+      ) : null}
     </section>
   );
 }

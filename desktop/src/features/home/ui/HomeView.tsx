@@ -59,7 +59,6 @@ type HomeViewProps = {
   errorMessage?: string;
   currentPubkey?: string;
   availableChannelIds: ReadonlySet<string>;
-  onOpenChannel: (channelId: string) => void;
   onOpenContext: (channelId: string, messageId: string) => void;
   onRefresh: () => void;
 };
@@ -70,7 +69,6 @@ export function HomeView({
   errorMessage,
   currentPubkey,
   availableChannelIds,
-  onOpenChannel,
   onOpenContext,
   onRefresh,
 }: HomeViewProps) {
@@ -531,7 +529,6 @@ export function HomeView({
                   setIsDeletingMessage(false);
                 });
             }}
-            onOpenChannel={onOpenChannel}
             onOpenContext={onOpenContext}
             onSendReply={async ({
               content,

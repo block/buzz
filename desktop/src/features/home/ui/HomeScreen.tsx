@@ -13,14 +13,12 @@ import {
 type HomeScreenProps = {
   availableChannelIds: ReadonlySet<string>;
   currentPubkey?: string;
-  onOpenChannel: (channelId: string) => void;
   onOpenContext: (channelId: string, messageId: string) => void;
 };
 
 export function HomeScreen({
   availableChannelIds,
   currentPubkey,
-  onOpenChannel,
   onOpenContext,
 }: HomeScreenProps) {
   const homeFeedQuery = useHomeFeedQuery();
@@ -72,7 +70,6 @@ export function HomeScreen({
         }
         feed={augmentedFeed}
         isLoading={homeFeedQuery.isLoading}
-        onOpenChannel={onOpenChannel}
         onOpenContext={onOpenContext}
         onRefresh={() => {
           void homeFeedQuery.refetch();
