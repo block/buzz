@@ -203,6 +203,20 @@ export function selectTimelineBodySurface({
   return renderState;
 }
 
+export type TimelineSnapshotIdentity = {
+  channelId: string | null;
+};
+
+export function isDeferredTimelineSnapshotStale({
+  deferredSnapshot,
+  liveSnapshot,
+}: {
+  deferredSnapshot: TimelineSnapshotIdentity;
+  liveSnapshot: TimelineSnapshotIdentity;
+}): boolean {
+  return deferredSnapshot.channelId !== liveSnapshot.channelId;
+}
+
 export type TimelineIntroSurface =
   | "direct-message-intro"
   | "channel-intro"

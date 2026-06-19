@@ -2,6 +2,7 @@ import * as React from "react";
 import { Hash } from "lucide-react";
 
 import {
+  isDeferredTimelineSnapshotStale,
   selectTimelineBodySurface,
   selectTimelineIntroSurface,
 } from "@/features/messages/lib/timelineSnapshot";
@@ -113,6 +114,16 @@ type DirectMessageIntroParticipant = {
   pubkey: string;
 };
 
+type TimelineSnapshot = {
+  channelId: string | null;
+  messages: TimelineMessage[];
+};
+
+const EMPTY_TIMELINE_SNAPSHOT: TimelineSnapshot = {
+  channelId: null,
+  messages: EMPTY_MESSAGES,
+};
+
 const MessageTimelineBase = React.forwardRef<
   MessageTimelineHandle,
   MessageTimelineProps
@@ -174,15 +185,30 @@ const MessageTimelineBase = React.forwardRef<
   // scroll/autoscroll/deep-link logic reads the DOM (`scrollIntoView`,
   // ResizeObserver on the content), so it must stay consistent with what's
   // actually painted. You can't scroll to a row that hasn't committed yet.
-  const deferredMessages = React.useDeferredValue(messages, EMPTY_MESSAGES);
-  const isRenderPending = deferredMessages !== messages;
+  // Channel id travels with the deferred message snapshot. Without that guard, a
+  // route change can paint the previous channel's deferred rows for a frame even
+  // though the sidebar/header already moved to the new channel.
+  const liveSnapshot = React.useMemo<TimelineSnapshot>(
+    () => ({ channelId: channelId ?? null, messages }),
+    [channelId, messages],
+  );
+  const deferredSnapshot = React.useDeferredValue(
+    liveSnapshot,
+    EMPTY_TIMELINE_SNAPSHOT,
+  );
+  const deferredMessages = deferredSnapshot.messages;
+  const isDeferredSnapshotStale = isDeferredTimelineSnapshotStale({
+    deferredSnapshot,
+    liveSnapshot,
+  });
+  const isRenderPending = deferredSnapshot !== liveSnapshot;
   const scrollRestorationId = targetMessageId
     ? `message-timeline:${channelId ?? "none"}:target:${targetMessageId}`
     : `message-timeline:${channelId ?? "none"}`;
 
   const timelineBodySurface = selectTimelineBodySurface({
     deferredCount: deferredMessages.length,
-    isLoading,
+    isLoading: isLoading || isDeferredSnapshotStale,
     liveCount: messages.length,
   });
   const showTimelineSkeleton = timelineBodySurface === "skeleton";

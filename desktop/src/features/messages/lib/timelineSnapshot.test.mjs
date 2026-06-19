@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   BOTTOM_THRESHOLD_PX,
   buildDayGroupBoundaries,
+  isDeferredTimelineSnapshotStale,
   isNearBottomMetrics,
   resolveDeepLinkTarget,
   selectDeferredListRenderState,
@@ -411,6 +412,42 @@ test("timeline-body-surface: empty only when live and deferred rows are empty", 
       liveCount: 0,
     }),
     "empty",
+  );
+});
+
+test("deferred-snapshot: stale when channel ids diverge during channel switch", () => {
+  assert.equal(
+    isDeferredTimelineSnapshotStale({
+      deferredSnapshot: { channelId: "chan-a" },
+      liveSnapshot: { channelId: "chan-b" },
+    }),
+    true,
+  );
+});
+
+test("deferred-snapshot: fresh when channel ids match", () => {
+  assert.equal(
+    isDeferredTimelineSnapshotStale({
+      deferredSnapshot: { channelId: "chan-a" },
+      liveSnapshot: { channelId: "chan-a" },
+    }),
+    false,
+  );
+});
+
+test("timeline-body-surface: stale deferred channel snapshot paints skeleton instead of old list", () => {
+  const isStale = isDeferredTimelineSnapshotStale({
+    deferredSnapshot: { channelId: "chan-a" },
+    liveSnapshot: { channelId: "chan-b" },
+  });
+
+  assert.equal(
+    selectTimelineBodySurface({
+      deferredCount: 4,
+      isLoading: isStale,
+      liveCount: 0,
+    }),
+    "skeleton",
   );
 });
 
