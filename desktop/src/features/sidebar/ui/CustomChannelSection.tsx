@@ -261,10 +261,7 @@ function SectionHeaderActions({
       {onBrowseClick ? (
         <button
           aria-label={browseAriaLabel}
-          className={cn(
-            SECTION_ICON_BUTTON_CLASS,
-            SECTION_ACTION_VISIBILITY_CLASS,
-          )}
+          className={SECTION_ICON_BUTTON_CLASS}
           onClick={onBrowseClick}
           title={browseAriaLabel}
           type="button"
@@ -275,10 +272,7 @@ function SectionHeaderActions({
       {onCreateClick ? (
         <button
           aria-label={createAriaLabel}
-          className={cn(
-            SECTION_ICON_BUTTON_CLASS,
-            SECTION_ACTION_VISIBILITY_CLASS,
-          )}
+          className={SECTION_ICON_BUTTON_CLASS}
           onClick={onCreateClick}
           type="button"
         >
