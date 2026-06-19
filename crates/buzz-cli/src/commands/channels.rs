@@ -297,6 +297,7 @@ pub async fn cmd_create_channel(
     channel_type: &str,
     visibility: &str,
     description: Option<&str>,
+    ttl: Option<i64>,
 ) -> Result<(), CliError> {
     match channel_type {
         "stream" | "forum" => {}
@@ -315,6 +316,8 @@ pub async fn cmd_create_channel(
         }
     }
 
+    let ttl = ttl.map(validate_ttl_seconds).transpose()?;
+
     let channel_uuid = Uuid::new_v4();
 
     let vis = match visibility {
@@ -328,7 +331,7 @@ pub async fn cmd_create_channel(
         _ => unreachable!(),
     };
     let builder =
-        buzz_sdk::build_create_channel(channel_uuid, name, Some(vis), Some(ct), description)
+        buzz_sdk::build_create_channel(channel_uuid, name, Some(vis), Some(ct), description, ttl)
             .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
@@ -337,20 +340,42 @@ pub async fn cmd_create_channel(
     Ok(())
 }
 
+/// Validate a user-supplied TTL (in seconds): must be a positive value that
+/// fits in the relay's `i32` column.
+fn validate_ttl_seconds(secs: i64) -> Result<i32, CliError> {
+    if secs <= 0 {
+        return Err(CliError::Usage(format!(
+            "--ttl must be a positive number of seconds (got: {secs})"
+        )));
+    }
+    i32::try_from(secs)
+        .map_err(|_| CliError::Usage(format!("--ttl is too large (max {} seconds)", i32::MAX)))
+}
+
 pub async fn cmd_update_channel(
     client: &BuzzClient,
     channel_id: &str,
     name: Option<&str>,
     description: Option<&str>,
+    ttl: Option<i64>,
+    no_ttl: bool,
 ) -> Result<(), CliError> {
-    if name.is_none() && description.is_none() {
+    // Outer Option: None leaves TTL unchanged. Inner: Some(secs) sets it,
+    // None (from --no-ttl) clears it, making the channel permanent.
+    let ttl_change: Option<Option<i32>> = match (ttl, no_ttl) {
+        (Some(secs), _) => Some(Some(validate_ttl_seconds(secs)?)),
+        (None, true) => Some(None),
+        (None, false) => None,
+    };
+
+    if name.is_none() && description.is_none() && ttl_change.is_none() {
         return Err(CliError::Usage(
-            "at least one field required (--name, --description)".into(),
+            "at least one field required (--name, --description, --ttl, --no-ttl)".into(),
         ));
     }
     let channel_uuid = parse_uuid(channel_id)?;
 
-    let builder = buzz_sdk::build_update_channel(channel_uuid, name, description, None, None)
+    let builder = buzz_sdk::build_update_channel(channel_uuid, name, description, None, ttl_change)
         .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
 
     let event = client.sign_event(builder)?;
@@ -572,6 +597,7 @@ pub async fn dispatch(
             channel_type,
             visibility,
             description,
+            ttl,
         } => {
             cmd_create_channel(
                 client,
@@ -579,6 +605,7 @@ pub async fn dispatch(
                 &channel_type.to_string(),
                 &visibility.to_string(),
                 description.as_deref(),
+                ttl,
             )
             .await
         }
@@ -586,7 +613,19 @@ pub async fn dispatch(
             channel,
             name,
             description,
-        } => cmd_update_channel(client, &channel, name.as_deref(), description.as_deref()).await,
+            ttl,
+            no_ttl,
+        } => {
+            cmd_update_channel(
+                client,
+                &channel,
+                name.as_deref(),
+                description.as_deref(),
+                ttl,
+                no_ttl,
+            )
+            .await
+        }
         ChannelsCmd::Topic { channel, topic } => {
             cmd_set_channel_topic(client, &channel, &topic).await
         }
@@ -621,7 +660,7 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::{name_matches, ChannelSummary};
+    use super::{name_matches, validate_ttl_seconds, ChannelSummary};
     use serde_json::json;
 
     fn event(tags: serde_json::Value) -> serde_json::Value {
@@ -710,5 +749,23 @@ mod tests {
     fn name_matches_exact_case_insensitive() {
         assert!(name_matches("Buzz", "buzz", true));
         assert!(!name_matches("Buzz-Chat", "buzz", true));
+    }
+
+    #[test]
+    fn validate_ttl_accepts_positive() {
+        assert_eq!(validate_ttl_seconds(3600).unwrap(), 3600);
+        assert_eq!(validate_ttl_seconds(1).unwrap(), 1);
+        assert_eq!(validate_ttl_seconds(i32::MAX as i64).unwrap(), i32::MAX);
+    }
+
+    #[test]
+    fn validate_ttl_rejects_zero_and_negative() {
+        assert!(validate_ttl_seconds(0).is_err());
+        assert!(validate_ttl_seconds(-1).is_err());
+    }
+
+    #[test]
+    fn validate_ttl_rejects_overflow() {
+        assert!(validate_ttl_seconds(i32::MAX as i64 + 1).is_err());
     }
 }

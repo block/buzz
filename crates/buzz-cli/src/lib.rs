@@ -411,7 +411,7 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\""
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle"
     )]
     Create {
         /// Channel name
@@ -426,8 +426,12 @@ pub enum ChannelsCmd {
         /// Channel description
         #[arg(long)]
         description: Option<String>,
+        /// Make the channel ephemeral: lifetime in seconds. The relay archives
+        /// it once this many seconds pass without a new message.
+        #[arg(long, value_name = "SECONDS")]
+        ttl: Option<i64>,
     },
-    /// Update channel name or description
+    /// Update channel name, description, or ephemeral TTL
     Update {
         /// Channel UUID
         #[arg(long)]
@@ -438,6 +442,13 @@ pub enum ChannelsCmd {
         /// New channel description
         #[arg(long)]
         description: Option<String>,
+        /// Make the channel ephemeral (or change its lifetime): seconds until
+        /// the relay archives it after the last message. Conflicts with --no-ttl.
+        #[arg(long, value_name = "SECONDS", conflicts_with = "no_ttl")]
+        ttl: Option<i64>,
+        /// Clear an existing TTL, making the channel permanent.
+        #[arg(long)]
+        no_ttl: bool,
     },
     /// Set the channel topic
     Topic {

@@ -670,12 +670,17 @@ pub fn build_set_purpose(channel_id: Uuid, purpose: &str) -> Result<EventBuilder
 // ── Builder 19: build_create_channel ─────────────────────────────────────────
 
 /// Build a NIP-29 create-group event (kind 9007).
+///
+/// `ttl`: `Some(secs)` makes the channel ephemeral with that lifetime in
+/// seconds (the relay archives it once the deadline passes without activity);
+/// `None` leaves it permanent.
 pub fn build_create_channel(
     channel_id: Uuid,
     name: &str,
     visibility: Option<Visibility>,
     channel_type: Option<ChannelKind>,
     about: Option<&str>,
+    ttl: Option<i32>,
 ) -> Result<EventBuilder, SdkError> {
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["name", name])?];
     if let Some(v) = visibility {
@@ -686,6 +691,9 @@ pub fn build_create_channel(
     }
     if let Some(a) = about {
         tags.push(tag(&["about", a])?);
+    }
+    if let Some(secs) = ttl {
+        tags.push(tag(&["ttl", &secs.to_string()])?);
     }
     Ok(EventBuilder::new(Kind::Custom(9007), "").tags(tags))
 }
@@ -2078,6 +2086,7 @@ mod tests {
                 Some(Visibility::Open),
                 Some(ChannelKind::Stream),
                 Some("General chat"),
+                None,
             )
             .unwrap(),
         );
@@ -2092,11 +2101,36 @@ mod tests {
     fn create_channel_minimal() {
         let cid = uuid();
         let ev = sign(
-            build_create_channel(cid, "dev", None::<Visibility>, None::<ChannelKind>, None)
-                .unwrap(),
+            build_create_channel(
+                cid,
+                "dev",
+                None::<Visibility>,
+                None::<ChannelKind>,
+                None,
+                None,
+            )
+            .unwrap(),
         );
         assert_eq!(ev.kind.as_u16(), 9007);
         assert!(has_tag(&ev, "name", "dev"));
+    }
+
+    #[test]
+    fn create_channel_ephemeral_emits_ttl() {
+        let cid = uuid();
+        let ev = sign(
+            build_create_channel(
+                cid,
+                "standup",
+                Some(Visibility::Open),
+                Some(ChannelKind::Stream),
+                None,
+                Some(3600),
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 9007);
+        assert!(has_tag(&ev, "ttl", "3600"));
     }
 
     // ── build_join ───────────────────────────────────────────────────────────
