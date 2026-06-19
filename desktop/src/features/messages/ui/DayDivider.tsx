@@ -2,7 +2,7 @@ export function DayDivider({ label }: { label: string }) {
   return (
     <section
       aria-label={label}
-      className="sticky top-[92px] z-[5] flex justify-center py-1 before:absolute before:inset-x-0 before:top-1/2 before:h-px before:-translate-y-1/2 before:bg-border/35 before:content-['']"
+      className="sticky top-(--buzz-channel-content-top-padding,5.75rem) z-[5] flex justify-center"
       data-testid="message-timeline-day-divider"
       data-day-label={label}
     >
