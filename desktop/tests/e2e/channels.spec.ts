@@ -1,7 +1,11 @@
 import { expect, test } from "@playwright/test";
 
 import { KIND_TYPING_INDICATOR } from "../../src/shared/constants/kinds";
-import { TEST_IDENTITIES, installMockBridge } from "../helpers/bridge";
+import {
+  TEST_IDENTITIES,
+  installMockBridge,
+  openChannelBrowser,
+} from "../helpers/bridge";
 
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
 
@@ -331,7 +335,7 @@ test("sidebar shows all channel types", async ({ page }) => {
   await page.goto("/");
 
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
-  await expect(page.getByTestId("sidebar-agents-count")).toHaveText("0");
+  await expect(page.getByTestId("sidebar-agents-count")).toHaveCount(0);
 
   // Streams
   const streamList = page.getByTestId("stream-list");
@@ -1536,7 +1540,7 @@ test("bulk remove stays hidden when row-level remove is not allowed", async ({
 
   // Join the "design" channel (unjoined by default) via the channel browser.
   // The user becomes a regular member — not admin/owner.
-  await page.getByTestId("browse-channels").click();
+  await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
   await page
     .getByTestId("browse-channel-design")
@@ -1565,7 +1569,7 @@ test("open channel management supports join and leave", async ({ page }) => {
   await page.goto("/");
 
   // Navigate to "design" (an unjoined channel) via the channel browser
-  await page.getByTestId("browse-channels").click();
+  await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
   await page
     .getByTestId("browse-channel-design")
@@ -1592,7 +1596,7 @@ test("open channel management supports join and leave", async ({ page }) => {
   await expect(page.getByTestId("channel-management-sheet")).not.toBeVisible();
 
   // After leaving, the app navigates away — re-open browser and find design
-  await page.getByTestId("browse-channels").click();
+  await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
 
   // "design" should be back in the unjoined section with a Join button
@@ -1618,7 +1622,7 @@ test("manage channel can archive and unarchive a stream", async ({ page }) => {
   );
   await expect(page.getByTestId("send-message")).toBeDisabled();
 
-  await page.getByTestId("browse-channels").click();
+  await openChannelBrowser(page);
   await expect(page.getByTestId("channel-browser-dialog")).toBeVisible();
   await expect(page.getByTestId("browse-channel-general")).toContainText(
     "archived",

@@ -257,12 +257,17 @@ mod tests {
     #[test]
     fn run_allows_path_outside_workspace() {
         let dir = tempdir().expect("tempdir");
+        // A real file in a SECOND tempdir, genuinely outside the workspace
+        // root, that does NOT contain our old_str — we expect a "not found"
+        // error (proving the path resolved), not a path-escape error. Avoids
+        // the Unix-only /etc/hosts assumption (C:\etc\hosts does not exist).
+        let outside = tempdir().expect("tempdir");
+        let target = outside.path().join("outside.txt");
+        fs::write(&target, b"some content").expect("write");
         let state = make_state(dir.path());
-        // /etc/hosts is readable but won't contain our old_str — we expect
-        // a "not found" error, not a path-escape error.
         let p = StrReplaceParams {
-            path: "/etc/hosts".into(),
-            old_str: "UNIQUE_STRING_NOT_IN_HOSTS_FILE_abc123".into(),
+            path: target.display().to_string(),
+            old_str: "UNIQUE_STRING_NOT_IN_FILE_abc123".into(),
             new_str: "y".into(),
             replace_all: false,
             workdir: Some(dir.path().display().to_string()),

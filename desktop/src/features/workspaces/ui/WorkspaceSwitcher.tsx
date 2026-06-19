@@ -52,6 +52,14 @@ type WorkspaceSwitcherProps = {
   onRemoveWorkspace: (id: string) => void;
 };
 
+function WorkspaceEmojiIcon({ className }: { className: string }) {
+  return (
+    <span aria-hidden="true" className={className}>
+      <span className="-translate-y-px leading-normal">🐝</span>
+    </span>
+  );
+}
+
 export function WorkspaceSwitcher({
   activeWorkspace,
   workspaces,
@@ -129,15 +137,13 @@ export function WorkspaceSwitcher({
           </TooltipContent>
         </Tooltip>
       ) : (
-        <span
+        <WorkspaceEmojiIcon
           className={
             isProfileVariant
-              ? "flex h-5 w-5 shrink-0 items-center justify-center rounded-md border border-sidebar-border/70 bg-sidebar-accent/40 text-2xs leading-none"
-              : "flex h-5 w-5 shrink-0 items-center justify-center text-xs leading-none"
+              ? "flex w-5 shrink-0 items-center justify-center rounded-md border border-sidebar-border/70 bg-sidebar-accent/40 text-2xs"
+              : "flex w-5 shrink-0 items-center justify-center text-xs"
           }
-        >
-          🐝
-        </span>
+        />
       )}
       <span
         className={

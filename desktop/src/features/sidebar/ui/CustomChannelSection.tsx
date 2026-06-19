@@ -11,7 +11,6 @@ import {
   GripVertical,
   Pencil,
   Plus,
-  Search,
   Star,
   StarOff,
   Trash2,
@@ -56,7 +55,9 @@ import { cn } from "@/shared/lib/cn";
 const SECTION_LABEL_BUTTON_CLASS =
   "group/section-label flex w-fit max-w-[calc(100%-3rem)] cursor-pointer appearance-none items-center gap-1 text-left transition-colors hover:text-sidebar-foreground focus-visible:text-sidebar-foreground";
 const SECTION_LABEL_CHEVRON_CLASS =
-  "h-2.5 w-2.5 shrink-0 opacity-0 text-sidebar-foreground/45 transition-[color,opacity,transform] group-hover/section-label:opacity-100 group-hover/section-label:text-sidebar-foreground group-focus-visible/section-label:opacity-100 group-focus-visible/section-label:text-sidebar-foreground";
+  "relative size-2.5 shrink-0 opacity-0 text-sidebar-foreground/45 transition-[color,opacity] group-hover/sidebar-section:opacity-100 group-hover/sidebar-section:text-sidebar-foreground group-hover/section-label:opacity-100 group-hover/section-label:text-sidebar-foreground group-focus-within/sidebar-section:opacity-100 group-focus-within/sidebar-section:text-sidebar-foreground group-focus-visible/section-label:opacity-100 group-focus-visible/section-label:text-sidebar-foreground";
+const SECTION_LABEL_CHEVRON_ICON_CLASS =
+  "absolute left-1/2 top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2";
 
 // ---------------------------------------------------------------------------
 // MoveToSectionSubmenu — internal helper
@@ -222,23 +223,17 @@ export function ChannelContextMenuItems({
 }
 
 // ---------------------------------------------------------------------------
-// SectionHeaderActions — browse + create icon buttons for section headers
+// SectionHeaderActions — create and read-state icon buttons for section headers
 // ---------------------------------------------------------------------------
 
 function SectionHeaderActions({
-  browseAriaLabel,
-  browseTestId,
   createAriaLabel,
   hasUnread,
-  onBrowse,
   onCreateClick,
   onMarkAllRead,
 }: {
-  browseAriaLabel: string;
-  browseTestId?: string;
   createAriaLabel: string;
   hasUnread?: boolean;
-  onBrowse?: () => void;
   onCreateClick?: () => void;
   onMarkAllRead?: () => void;
 }) {
@@ -258,21 +253,13 @@ function SectionHeaderActions({
           <CheckCheck className="h-4 w-4" />
         </button>
       ) : null}
-      {onBrowse ? (
-        <button
-          aria-label={browseAriaLabel}
-          className={SECTION_ICON_BUTTON_CLASS}
-          data-testid={browseTestId}
-          onClick={onBrowse}
-          type="button"
-        >
-          <Search className="h-4 w-4" />
-        </button>
-      ) : null}
       {onCreateClick ? (
         <button
           aria-label={createAriaLabel}
-          className={SECTION_ICON_BUTTON_CLASS}
+          className={cn(
+            SECTION_ICON_BUTTON_CLASS,
+            SECTION_ACTION_VISIBILITY_CLASS,
+          )}
           onClick={onCreateClick}
           type="button"
         >
@@ -288,8 +275,6 @@ function SectionHeaderActions({
 // ---------------------------------------------------------------------------
 
 export function ChannelGroupSection({
-  browseAriaLabel,
-  browseTestId,
   createAriaLabel,
   draggable,
   groupClassName,
@@ -298,7 +283,6 @@ export function ChannelGroupSection({
   isActiveChannel,
   items,
   listTestId,
-  onBrowse,
   onCreateClick,
   onMarkAllRead,
   onMarkChannelRead,
@@ -307,6 +291,7 @@ export function ChannelGroupSection({
   onToggleCollapsed,
   selectedChannelId,
   title,
+  unreadChannelCounts,
   unreadChannelIds,
   sections,
   assignments,
@@ -320,8 +305,6 @@ export function ChannelGroupSection({
   onStarChannel,
   onUnstarChannel,
 }: {
-  browseAriaLabel: string;
-  browseTestId?: string;
   createAriaLabel: string;
   draggable?: boolean;
   groupClassName?: string;
@@ -329,7 +312,6 @@ export function ChannelGroupSection({
   isActiveChannel: boolean;
   items: Channel[];
   listTestId: string;
-  onBrowse?: () => void;
   onCreateClick?: () => void;
   onMarkChannelRead: (
     channelId: string,
@@ -340,6 +322,7 @@ export function ChannelGroupSection({
   onToggleCollapsed: () => void;
   selectedChannelId: string | null;
   title: string;
+  unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   hasUnread?: boolean;
   onMarkAllRead?: () => void;
@@ -369,6 +352,7 @@ export function ChannelGroupSection({
                     <ChannelMenuButton
                       channel={channel}
                       hasUnread={unreadChannelIds.has(channel.id)}
+                      unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                       isMuted={mutedChannelIds?.has(channel.id)}
                       isActive={
                         isActiveChannel && selectedChannelId === channel.id
@@ -380,6 +364,7 @@ export function ChannelGroupSection({
                   <ChannelMenuButton
                     channel={channel}
                     hasUnread={unreadChannelIds.has(channel.id)}
+                    unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                     isMuted={mutedChannelIds?.has(channel.id)}
                     isActive={
                       isActiveChannel && selectedChannelId === channel.id
@@ -425,21 +410,19 @@ export function ChannelGroupSection({
             type="button"
           >
             <span>{title}</span>
-            <ChevronDown
-              aria-hidden="true"
-              className={cn(
-                SECTION_LABEL_CHEVRON_CLASS,
-                isCollapsed ? "-rotate-90" : "rotate-0",
-              )}
-            />
+            <span aria-hidden="true" className={SECTION_LABEL_CHEVRON_CLASS}>
+              <ChevronDown
+                className={cn(
+                  SECTION_LABEL_CHEVRON_ICON_CLASS,
+                  isCollapsed ? "-rotate-90" : "rotate-0",
+                )}
+              />
+            </span>
           </button>
         </SidebarGroupLabel>
         <SectionHeaderActions
-          browseAriaLabel={browseAriaLabel}
-          browseTestId={browseTestId}
           createAriaLabel={createAriaLabel}
           hasUnread={hasUnread}
-          onBrowse={onBrowse}
           onCreateClick={onCreateClick}
           onMarkAllRead={onMarkAllRead}
         />
@@ -468,6 +451,7 @@ export function CustomChannelSection({
   isCollapsed,
   isActiveChannel,
   selectedChannelId,
+  unreadChannelCounts,
   unreadChannelIds,
   sections,
   assignments,
@@ -498,6 +482,7 @@ export function CustomChannelSection({
   isCollapsed: boolean;
   isActiveChannel: boolean;
   selectedChannelId: string | null;
+  unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   sections: ChannelSection[];
   assignments: Record<string, string>;
@@ -643,6 +628,9 @@ export function CustomChannelSection({
                               <ChannelMenuButton
                                 channel={channel}
                                 hasUnread={unreadChannelIds.has(channel.id)}
+                                unreadCount={
+                                  unreadChannelCounts.get(channel.id) ?? 0
+                                }
                                 isMuted={mutedChannelIds?.has(channel.id)}
                                 isActive={
                                   isActiveChannel &&

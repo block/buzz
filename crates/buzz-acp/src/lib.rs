@@ -3647,6 +3647,77 @@ mod observer_payload_trim_tests {
     }
 
     #[test]
+    fn test_multi_block_prompt_retains_every_section_header_after_elision() {
+        // The real session/prompt fix: format_prompt now emits one block per
+        // section, so the observer payload is params.prompt = [{text: "[Base]…"},
+        // {text: "[Agent Memory — core]…"}, … {text: "[Buzz event: …]…<huge>"}].
+        // An oversized section is its own leaf, so eliding its body keeps the
+        // leaf's head-3000 (which begins with the section's [Header] line) — every
+        // header survives, so the desktop "Prompt context" panel counts them all.
+        // This is the regression the single-fat-leaf shape caused (the trailing
+        // [Buzz event] header fell into the elided middle and the count collapsed
+        // to 1).
+        let sections = [
+            "[Base]\nyou are a helpful agent".to_string(),
+            "[System]\npersona text".to_string(),
+            "[Agent Memory — core]\nremember this".to_string(),
+            "[Context]\nScope: thread".to_string(),
+            // The triggering event body, oversized on its own.
+            format!("[Buzz event: @mention]\nContent: {}", "E".repeat(90_000)),
+        ];
+        let block_refs: Vec<&str> = sections.iter().map(String::as_str).collect();
+        // Mirror the wire shape build_prompt_params produces: each block is its
+        // own {type:"text", text} leaf under params.prompt.
+        let prompt_blocks: Vec<serde_json::Value> = block_refs
+            .iter()
+            .map(|text| serde_json::json!({ "type": "text", "text": text }))
+            .collect();
+        let mut event = event_with_payload(
+            "acp_write",
+            serde_json::json!({
+                "method": "session/prompt",
+                "params": { "sessionId": "sess-1", "prompt": prompt_blocks },
+            }),
+        );
+        assert!(
+            serialized(&event).len() > OBSERVER_MAX_PLAINTEXT_LEN,
+            "precondition: oversized event body pushes the frame over the cap"
+        );
+
+        fit_observer_event_to_budget(&mut event);
+
+        assert!(
+            serialized(&event).len() <= OBSERVER_MAX_PLAINTEXT_LEN,
+            "frame must fit after trimming"
+        );
+        let blocks = event.payload["params"]["prompt"]
+            .as_array()
+            .expect("prompt array survives");
+        let texts: Vec<&str> = blocks.iter().map(|b| b["text"].as_str().unwrap()).collect();
+        for header in [
+            "[Base]",
+            "[System]",
+            "[Agent Memory — core]",
+            "[Context]",
+            "[Buzz event: @mention]",
+        ] {
+            assert!(
+                texts.iter().any(|t| t.starts_with(header)),
+                "section header {header} must survive at the head of its own block"
+            );
+        }
+        // The oversized event body was elided in place (header kept, middle cut).
+        let event_block = texts
+            .iter()
+            .find(|t| t.starts_with("[Buzz event: @mention]"))
+            .unwrap();
+        assert!(
+            event_block.contains("…[elided"),
+            "the oversized event body is elided, not dropped"
+        );
+    }
+
+    #[test]
     fn test_multi_leaf_elides_largest_shrinkable_first_and_stops_when_it_fits() {
         // One leaf alone over the cap; a second smaller-but-still-large leaf.
         // Eliding the biggest should suffice, leaving the smaller intact.

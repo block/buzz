@@ -3,6 +3,10 @@ import test from "node:test";
 
 import { computeChannelUnreadMarker } from "../messages/lib/unreadMarker.ts";
 import { isThreadReply } from "../messages/lib/threading.ts";
+import {
+  buildChannelThreadRoots,
+  channelUnreadFrontier,
+} from "./unreadChannelCounts.ts";
 import { resolveChannelReadMarker } from "./useUnreadChannels.ts";
 
 function topLevel(id, createdAt) {
@@ -98,4 +102,96 @@ test("isThreadReply treats top-level and broadcast replies as channel activity",
     ]),
     false,
   );
+});
+
+// --- Sidebar dot routing: per-thread read markers fold into the channel frontier ---
+
+function replyItem(channelId, rootId) {
+  return {
+    id: `${channelId}:${rootId}:${Math.random()}`,
+    channelId,
+    tags: [["e", rootId, "", "root"]],
+  };
+}
+
+// rootId for these fixtures is the "root"-marked e-tag.
+const getRootId = (tags) =>
+  tags.find((tag) => tag[0] === "e" && tag[3] === "root")?.[1] ?? null;
+
+test("buildChannelThreadRoots_groupsRootsByChannel", () => {
+  const items = [
+    replyItem("chan-a", "root-1"),
+    replyItem("chan-a", "root-1"), // dedup within a channel
+    replyItem("chan-a", "root-2"),
+    replyItem("chan-b", "root-3"),
+  ];
+  const map = buildChannelThreadRoots(items, getRootId);
+
+  assert.deepEqual([...(map.get("chan-a") ?? [])].sort(), ["root-1", "root-2"]);
+  assert.deepEqual([...(map.get("chan-b") ?? [])], ["root-3"]);
+  assert.equal(map.has("chan-c"), false);
+});
+
+test("buildChannelThreadRoots_skipsItemsWithNoRoot", () => {
+  const items = [{ id: "x", channelId: "chan-a", tags: [["p", "someone"]] }];
+  const map = buildChannelThreadRoots(items, getRootId);
+
+  assert.equal(map.size, 0);
+});
+
+test("channelUnreadFrontier_unopenedThreadReply_dotPersists", () => {
+  const channelMarker = 300;
+  const threadRoots = new Set(["root-1"]);
+  const getThreadOwnMarker = () => null;
+
+  const frontier = channelUnreadFrontier(
+    channelMarker,
+    threadRoots,
+    getThreadOwnMarker,
+  );
+
+  const latest = 500;
+  assert.equal(frontier, 300);
+  assert.equal(latest > frontier, true);
+});
+
+test("channelUnreadFrontier_openedThreadReply_dotClears", () => {
+  const channelMarker = 300;
+  const threadRoots = new Set(["root-1"]);
+  const getThreadOwnMarker = (rootId) => (rootId === "root-1" ? 500 : null);
+
+  const frontier = channelUnreadFrontier(
+    channelMarker,
+    threadRoots,
+    getThreadOwnMarker,
+  );
+
+  const latest = 500;
+  assert.equal(frontier, 500);
+  assert.equal(latest > frontier, false);
+});
+
+test("channelUnreadFrontier_noThreadRoots_usesChannelMarker", () => {
+  assert.equal(
+    channelUnreadFrontier(300, undefined, () => null),
+    300,
+  );
+  assert.equal(
+    channelUnreadFrontier(null, undefined, () => null),
+    null,
+  );
+});
+
+test("channelUnreadFrontier_nullChannelMarker_threadMarkerGoverns", () => {
+  const frontier = channelUnreadFrontier(null, new Set(["root-1"]), () => 500);
+  assert.equal(frontier, 500);
+});
+
+test("channelUnreadFrontier_takesMaxAcrossMultipleThreads", () => {
+  const frontier = channelUnreadFrontier(
+    100,
+    new Set(["root-1", "root-2"]),
+    (rootId) => (rootId === "root-1" ? 400 : 700),
+  );
+  assert.equal(frontier, 700);
 });

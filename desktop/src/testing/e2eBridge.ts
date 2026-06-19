@@ -72,6 +72,9 @@ type E2eConfig = {
     feedReadError?: string;
     canvasReadError?: string;
     openDmDelayMs?: number;
+    /** Delay (ms) applied to older-history (`history-` subId) fetches so e2e
+     *  tests can observe the in-flight prepend window. 0/undefined = instant. */
+    historyDelayMs?: number;
     profileReadDelayMs?: number;
     profileReadError?: string;
     profileUpdateError?: string;
@@ -466,6 +469,9 @@ type MockFilter = {
   "#h"?: string[];
   authors?: string[];
   kinds?: number[];
+  limit?: number;
+  since?: number;
+  until?: number;
 };
 
 type MockSocket = {
@@ -590,6 +596,17 @@ declare global {
       extraTags?: string[][];
       createdAt?: number;
     }) => RelayEvent;
+    /** Prepend `count` synthetic older messages to a channel's mock store so
+     *  an older-history fetch has something to paginate. Mirrors how the real
+     *  relay backfills history. Returns the created events. */
+    __BUZZ_E2E_PREPEND_MOCK_HISTORY__?: (input: {
+      channelName: string;
+      count: number;
+      startIndex?: number;
+      lineCount?: number;
+      createdAtStart?: number;
+      emit?: boolean;
+    }) => RelayEvent[];
     __BUZZ_E2E_EMIT_MOCK_TYPING__?: (input: {
       channelName: string;
       pubkey?: string;
@@ -606,6 +623,7 @@ declare global {
     }>;
     __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: ConnectionState) => void;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
+    __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
@@ -2263,12 +2281,101 @@ function getMockMessageStore(channelId: string): RelayEvent[] {
   return seeded;
 }
 
-function emitMockHistory(socket: MockSocket, subId: string, channelId: string) {
-  const events = getMockMessageStore(channelId);
-  for (const event of events) {
-    sendWsText(socket.handler, ["EVENT", subId, event]);
+function prependMockHistory(input: {
+  channelName: string;
+  count: number;
+  startIndex?: number;
+  lineCount?: number;
+  createdAtStart?: number;
+  emit?: boolean;
+}) {
+  const channel = mockChannels.find(
+    (candidate) => candidate.name === input.channelName,
+  );
+  if (!channel) {
+    throw new Error(`Unknown mock channel: ${input.channelName}`);
   }
-  sendWsText(socket.handler, ["EOSE", subId]);
+
+  const store = getMockMessageStore(channel.id);
+  const earliestCreatedAt = store.reduce(
+    (earliest, event) => Math.min(earliest, event.created_at),
+    Math.floor(Date.now() / 1000),
+  );
+  const createdAtStart =
+    input.createdAtStart ?? earliestCreatedAt - input.count - 1;
+  const startIndex = input.startIndex ?? 0;
+  const lineCount = input.lineCount ?? 1;
+
+  const events = Array.from({ length: input.count }, (_, offset) => {
+    const index = startIndex + offset;
+    const body = Array.from(
+      { length: lineCount },
+      (_unused, lineIndex) => `mock older ${index} line ${lineIndex + 1}`,
+    ).join("\n");
+
+    return createMockEvent(
+      9,
+      body,
+      [["h", channel.id]],
+      ALICE_PUBKEY,
+      createdAtStart + offset,
+      `mock-older-${channel.name}-${index}`.replace(/[^a-zA-Z0-9]/g, ""),
+    );
+  });
+
+  store.unshift(...events);
+  store.sort((left, right) => left.created_at - right.created_at);
+
+  if (input.emit) {
+    for (const event of events) {
+      emitMockLiveEvent(channel.id, event);
+    }
+  }
+
+  return events;
+}
+
+function emitMockHistory(
+  socket: MockSocket,
+  subId: string,
+  channelId: string,
+  filter: MockFilter,
+) {
+  const events = getMockMessageStore(channelId)
+    .filter((event) => {
+      if (filter.kinds && !filter.kinds.includes(event.kind)) {
+        return false;
+      }
+      if (filter.since !== undefined && event.created_at < filter.since) {
+        return false;
+      }
+      if (filter.until !== undefined && event.created_at > filter.until) {
+        return false;
+      }
+      return true;
+    })
+    .sort((left, right) => right.created_at - left.created_at)
+    .slice(0, filter.limit ?? 50)
+    .sort((left, right) => left.created_at - right.created_at);
+
+  const emit = () => {
+    for (const event of events) {
+      sendWsText(socket.handler, ["EVENT", subId, event]);
+    }
+    sendWsText(socket.handler, ["EOSE", subId]);
+  };
+
+  // Optionally pace older-history fetches so e2e tests can observe the
+  // in-flight prepend window (scroll up, abandon, etc.). Scoped to
+  // `history-` subscriptions — the prefix `relayClientSession` uses for
+  // older-message pagination — so live/initial subscriptions stay instant.
+  const delayMs = getConfig()?.mock?.historyDelayMs ?? 0;
+  if (delayMs > 0 && subId.startsWith("history-")) {
+    window.setTimeout(emit, delayMs);
+    return;
+  }
+
+  emit();
 }
 
 function emitMockLiveEvent(channelId: string, event: RelayEvent) {
@@ -5603,7 +5710,7 @@ async function handleGetEvent(
           "bb22a5299220cad76ffd46190ccbeede8ab5dc260faa28b6e5a2cb31b9aff260",
         created_at: Math.floor(Date.now() / 1000) - 42 * 60,
         kind: 9,
-        tags: [["e", "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9"]],
+        tags: [["h", "1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9"]],
         content: "Engineering shipped the desktop build.",
         sig: "mocksig".repeat(20).slice(0, 128),
       },
@@ -5847,7 +5954,7 @@ function sendToMockSocket(args: {
       return;
     }
 
-    emitMockHistory(socket, subId, channelId);
+    emitMockHistory(socket, subId, channelId, filter);
     return;
   }
 
@@ -6024,6 +6131,7 @@ export function maybeInstallE2eTauriMocks() {
       createdAt,
     );
   };
+  window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ = prependMockHistory;
   window.__BUZZ_E2E_EMIT_MOCK_TYPING__ = ({ channelName, pubkey }) => {
     const channel = mockChannels.find(
       (candidate) => candidate.name === channelName,
@@ -6099,6 +6207,11 @@ export function maybeInstallE2eTauriMocks() {
     if (!config?.mock) return;
     config.mock.stallWebsocketSends = stall;
     if (!stall) mockWebsocketSendMutexWedged = false;
+  };
+  window.__BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__ = () => {
+    const socketIds = [...mockSockets.keys()];
+    for (const socketId of socketIds) disconnectMockSocket(socketId);
+    return socketIds.length;
   };
   // Tests flip `admitted` to exercise the denial path: mesh_ensure_client_node
   // rejects when not admitted, which proves relay membership is the gate and

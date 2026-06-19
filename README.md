@@ -84,17 +84,20 @@ You'll need [Docker](https://docs.docker.com/get-docker/) and [Hermit](https://c
 **Once:**
 ```bash
 git clone https://github.com/block/sprout.git && cd sprout
-. ./bin/activate-hermit                   # pinned toolchain
-cp .env.example .env && just setup && just build
+. ./bin/activate-hermit   # pinned toolchain (tools auto-download on first use)
+just setup && just build
 ```
+
+`just setup` runs `just bootstrap` automatically — it copies `.env.example` to `.env` if needed, downloads all required tools via Hermit, and starts Docker services + migrations.
 
 **Every day:**
 ```bash
-just relay   # terminal 1
-just dev     # terminal 2 — desktop app opens automatically
+just dev   # starts the relay + desktop app together
 ```
 
 Relay on `ws://localhost:3000`. Desktop app pops up. You're in.
+
+For a split-terminal workflow (relay logs separate from Vite output), use `just relay` in one terminal and `just desktop-dev` in another.
 
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
 

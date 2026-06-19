@@ -643,51 +643,133 @@ describe("activeAgentTurnsStore", () => {
       );
     });
 
-    it("prunes a turn that receives no activity past the bound", () => {
+    it("prunes a dead turn at the bound while a live sibling keeps the stream fresh", () => {
+      // The no-regression case for the all-stale pause: a turn dies (no more
+      // liveness) but ANOTHER turn keeps refreshing. The pause gates on the MAX
+      // lastActivityAt, so the live sibling keeps it fresh and the dead turn
+      // still prunes at 25s — the pause only engages when EVERY turn is stale.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          turnId: "dead",
+          channelId: "c1",
+          timestamp: at(0),
+        }),
+        makeEvent({
+          seq: 2,
+          turnId: "live",
+          channelId: "c2",
+          timestamp: at(0),
+        }),
+      ]);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 2);
+
+      // Keep the live turn fresh across the dead turn's bound: ping every 10s.
+      for (let t = 10_000; t <= 30_000; t += 10_000) {
+        mock.timers.tick(10_000);
+        syncAgentTurnsFromEvents(AGENT, [
+          makeEvent({
+            seq: 2 + t / 10_000,
+            kind: "turn_liveness",
+            turnId: "live",
+            channelId: "c2",
+            timestamp: at(t),
+          }),
+        ]);
+      }
+
+      const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
+      assert.ok(!channels.has("c1"), "the dead turn must prune at the bound");
+      assert.ok(channels.has("c2"), "the live sibling must survive");
+    });
+
+    it("pauses pruning when EVERY tracked turn goes stale at once (relay drop)", () => {
+      // The "all at once" drop signature: all liveness stops simultaneously.
+      // No turn refreshes the max, so the pause engages before the 25s prune
+      // and the badges stay visible through the transient drop.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+        makeEvent({ seq: 2, turnId: "t2", channelId: "c2", timestamp: at(0) }),
+      ]);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 2);
+
+      // Silence past the bound — the pause must hold both badges.
+      mock.timers.tick(REMOVE_AFTER_MS + PRUNE_INTERVAL_MS);
+
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        2,
+        "all-stale-at-once must pause the prune so badges survive a drop",
+      );
+    });
+
+    it("holds a lone silent turn past the bound until the next frame (residual)", () => {
+      // The accepted residual: a single turn whose host dies (kill -9) under a
+      // HEALTHY relay is indistinguishable from a drop with one live turn, so
+      // its badge lingers past 25s. It clears the instant any frame arrives.
       syncAgentTurnsFromEvents(AGENT, [
         makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
       ]);
       assert.equal(getActiveTurnsForAgent(AGENT).length, 1);
 
-      // No liveness pings — the host died without unwinding. Advance past the
-      // 25s bound; the next prune sweep evicts the silent turn.
       mock.timers.tick(REMOVE_AFTER_MS + PRUNE_INTERVAL_MS);
 
       assert.equal(
         getActiveTurnsForAgent(AGENT).length,
-        0,
-        "a turn with no activity past the bound must be pruned",
+        1,
+        "a lone silent turn lingers (pause engages) — accepted residual",
       );
     });
 
     it("treats a turn_liveness with a null turnId as a no-op", () => {
+      // A null-turnId liveness must refresh NOTHING. With a live sibling
+      // keeping the max fresh, the dead turn still prunes at the bound — so if
+      // the null ping wrongly refreshed the dead turn it would survive here.
       syncAgentTurnsFromEvents(AGENT, [
-        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+        makeEvent({
+          seq: 1,
+          turnId: "dead",
+          channelId: "c1",
+          timestamp: at(0),
+        }),
+        makeEvent({
+          seq: 2,
+          turnId: "live",
+          channelId: "c2",
+          timestamp: at(0),
+        }),
       ]);
 
-      // A liveness ping with no turnId must refresh nothing (recordActivity
-      // no-ops on null). If it wrongly refreshed, the turn would survive the
-      // bound below — so the prune is the observable proof of the no-op, and
-      // the missing turnId must not throw.
-      mock.timers.tick(20_000);
+      // A null-turnId liveness for the dead turn must not refresh it. Keep the
+      // live sibling pinging so the pause never engages.
       assert.doesNotThrow(() => {
-        syncAgentTurnsFromEvents(AGENT, [
-          makeEvent({
-            seq: 2,
-            kind: "turn_liveness",
-            turnId: null,
-            channelId: "c1",
-            timestamp: at(20_000),
-          }),
-        ]);
+        for (let t = 10_000; t <= 30_000; t += 10_000) {
+          mock.timers.tick(10_000);
+          syncAgentTurnsFromEvents(AGENT, [
+            makeEvent({
+              seq: 100 + t,
+              kind: "turn_liveness",
+              turnId: null,
+              channelId: "c1",
+              timestamp: at(t),
+            }),
+            makeEvent({
+              seq: 200 + t,
+              kind: "turn_liveness",
+              turnId: "live",
+              channelId: "c2",
+              timestamp: at(t),
+            }),
+          ]);
+        }
       });
-      mock.timers.tick(REMOVE_AFTER_MS + PRUNE_INTERVAL_MS);
 
-      assert.equal(
-        getActiveTurnsForAgent(AGENT).length,
-        0,
-        "a null-turnId liveness must not refresh activity, so the turn still prunes",
+      const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
+      assert.ok(
+        !channels.has("c1"),
+        "a null-turnId liveness must not refresh the dead turn, so it prunes",
       );
+      assert.ok(channels.has("c2"), "the live sibling must survive");
     });
   });
 
@@ -829,6 +911,256 @@ describe("activeAgentTurnsStore", () => {
         tightAnchor - looseAnchor,
         -5_000,
         "a tighter offset must shift the live turn's read-time anchor earlier by the tightening delta",
+      );
+    });
+  });
+
+  describe("resurrection after a prune (A) gated by completion (C)", () => {
+    const EPOCH = Date.parse("2024-01-01T00:00:00Z");
+    const at = (ms) => new Date(EPOCH + ms).toISOString();
+    const REMOVE_AFTER_MS = 25_000;
+    const PRUNE_INTERVAL_MS = 5_000;
+
+    let unsubscribe;
+
+    beforeEach(() => {
+      mock.timers.enable({ apis: ["setInterval", "Date"], now: EPOCH });
+      unsubscribe = subscribeActiveAgentTurns(() => {});
+    });
+
+    afterEach(() => {
+      unsubscribe();
+      mock.timers.reset();
+    });
+
+    it("resurrects a lone turn pruned out from under a still-running host", () => {
+      // The lone-crash residual self-heals: the badge is pruned during silence,
+      // then a recovered liveness frame for the same turn revives it.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      ]);
+      mock.timers.tick(REMOVE_AFTER_MS + PRUNE_INTERVAL_MS);
+
+      // A live sibling appears, which lets the prune fire and clear the lone
+      // stale turn; then a recovered liveness for t1 must revive its badge.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 2,
+          turnId: "t2",
+          channelId: "c2",
+          timestamp: at(40_000),
+        }),
+      ]);
+      mock.timers.tick(PRUNE_INTERVAL_MS);
+      assert.ok(
+        !channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c1"),
+        "the stale lone turn must prune once a live sibling unblocks the sweep",
+      );
+
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 3,
+          kind: "turn_liveness",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(45_000),
+        }),
+      ]);
+      assert.ok(
+        channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c1"),
+        "a recovered liveness must resurrect the pruned turn's badge",
+      );
+    });
+
+    it("does NOT resurrect a turn whose liveness is older than its completion", () => {
+      // Bound-proving (stale side): a turn completes, then a liveness frame
+      // arrives carrying a timestamp BEFORE the completion. It must not revive.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_completed",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(10_000),
+        }),
+      ]);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+
+      // A liveness stamped at 5s (before the 10s completion) but delivered with
+      // a later seq so it clears the watermark on seq. It is stale relative to
+      // the completion and must NOT resurrect.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 3,
+          kind: "turn_liveness",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(5_000),
+        }),
+      ]);
+      assert.equal(
+        getActiveTurnsForAgent(AGENT).length,
+        0,
+        "a liveness older than the recorded completion must not resurrect the turn",
+      );
+    });
+
+    it("DOES resurrect a turn whose liveness is strictly newer than its completion", () => {
+      // Bound-proving (live side): the same completed turn, but a liveness frame
+      // strictly NEWER than the completion (a genuine restart of the same id)
+      // must revive — the completion only blocks stale frames, not new work.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_completed",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(10_000),
+        }),
+      ]);
+      assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 3,
+          kind: "turn_liveness",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(20_000),
+        }),
+      ]);
+      assert.ok(
+        channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c1"),
+        "a liveness strictly newer than the completion must resurrect the turn",
+      );
+    });
+
+    it("does NOT resurrect from a liveness frame with no channelId", () => {
+      // A pruned turn cannot be rebuilt without a channelId to anchor the badge.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+        makeEvent({
+          seq: 2,
+          turnId: "t2",
+          channelId: "c2",
+          timestamp: at(0),
+        }),
+      ]);
+      // Drop t1 by ending it, then send a channelId-less liveness for it.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 3,
+          kind: "turn_completed",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(5_000),
+        }),
+        makeEvent({
+          seq: 4,
+          kind: "turn_liveness",
+          turnId: "t1",
+          channelId: null,
+          timestamp: at(10_000),
+        }),
+      ]);
+      assert.ok(
+        !channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c1"),
+        "a channelId-less liveness cannot resurrect a badge",
+      );
+    });
+
+    it("clears completion tombstones on reset so a later turn can run", () => {
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+        makeEvent({
+          seq: 2,
+          kind: "turn_completed",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(10_000),
+        }),
+      ]);
+
+      resetActiveAgentTurnsStore();
+
+      // After reset, an OLD-stamped liveness for the same id must resurrect,
+      // proving the tombstone (which would otherwise block it) was cleared.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: 1,
+          kind: "turn_liveness",
+          turnId: "t1",
+          channelId: "c1",
+          timestamp: at(1_000),
+        }),
+      ]);
+      assert.ok(
+        channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c1"),
+        "reset must clear terminal tombstones so they do not leak across reset",
+      );
+    });
+
+    it("evicts the oldest tombstone once past the cap so the map stays bounded", () => {
+      // The tombstone map is capped at MAX_TERMINAL_TOMBSTONES (16). Complete
+      // 18 distinct turns so eviction fires twice, dropping the two oldest by
+      // insertion order (t0, t1). Probe via the ONE behavior a tombstone gates
+      // that a strictly-newer frame cannot mask: an EQUAL-timestamp liveness
+      // (frameAt == terminalAt). All completions share timestamp T with rising
+      // seq, so the probe clears the per-agent watermark on the seq tiebreak
+      // (compareObserverEvents is timestamp-primary, seq-secondary) yet stays
+      // equal to the recorded terminal — reaching resurrectTurn's tombstone
+      // check rather than being shadowed by the watermark.
+      const CAP = 16;
+      const TOTAL = CAP + 2;
+      const T = at(0);
+      const completions = [];
+      for (let i = 0; i < TOTAL; i++) {
+        completions.push(
+          makeEvent({
+            seq: i + 1,
+            kind: "turn_completed",
+            turnId: `t${i}`,
+            channelId: `c${i}`,
+            timestamp: T,
+          }),
+        );
+      }
+      syncAgentTurnsFromEvents(AGENT, completions);
+
+      // A surviving tombstone (t2, third-completed) still blocks an
+      // equal-timestamp liveness — proves the tombstone is present and doing
+      // the work the watermark cannot.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: TOTAL + 1,
+          kind: "turn_liveness",
+          turnId: "t2",
+          channelId: "c2",
+          timestamp: T,
+        }),
+      ]);
+      assert.ok(
+        !channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c2"),
+        "a surviving tombstone must still block an equal-timestamp liveness",
+      );
+
+      // The oldest tombstone (t0) was evicted, so the same equal-timestamp
+      // liveness now resurrects — proving the cap fired AND evicted the
+      // oldest-by-insertion entry, not an arbitrary one.
+      syncAgentTurnsFromEvents(AGENT, [
+        makeEvent({
+          seq: TOTAL + 2,
+          kind: "turn_liveness",
+          turnId: "t0",
+          channelId: "c0",
+          timestamp: T,
+        }),
+      ]);
+      assert.ok(
+        channelIdsOf(getActiveTurnsForAgent(AGENT)).has("c0"),
+        "the oldest tombstone must be evicted once past the cap",
       );
     });
   });

@@ -33,6 +33,7 @@ export default defineConfig({
         "**/channel-controls-screenshots.spec.ts",
         "**/team-management-screenshots.spec.ts",
         "**/active-turn-screenshots.spec.ts",
+        "**/active-turn-resilience-screenshots.spec.ts",
         "**/profile-active-turn-screenshots.spec.ts",
         "**/file-attachment.spec.ts",
         "**/video-attachment.spec.ts",
@@ -49,6 +50,7 @@ export default defineConfig({
         "**/animated-avatar-screenshots.spec.ts",
         "**/reminders-screenshots.spec.ts",
         "**/virtualization-screenshots.spec.ts",
+        "**/scroll-history.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],

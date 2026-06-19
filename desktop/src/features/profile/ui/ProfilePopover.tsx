@@ -184,7 +184,7 @@ export function ProfilePopover({
                   <span className="flex min-w-0 flex-1 items-center gap-1 truncate text-popover-foreground">
                     {userStatusEmoji ? (
                       <StatusEmoji
-                        className="h-3.5 w-3.5 shrink-0"
+                        className="w-5 shrink-0 text-base"
                         value={userStatusEmoji}
                       />
                     ) : null}

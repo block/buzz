@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   channelMessagesKey,
   dedupeMessagesById,
+  mergeTimelineHistoryMessages,
   normalizeTimelineMessages,
   sortMessages,
 } from "@/features/messages/lib/messageQueryKeys";
@@ -180,10 +181,10 @@ export function useChannelMessagesQuery(channel: Channel | null) {
       );
       const currentMessages =
         queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-      const mergedHistory = normalizeTimelineMessages([
-        ...currentMessages,
-        ...history,
-      ]);
+      const mergedHistory = mergeTimelineHistoryMessages(
+        currentMessages,
+        history,
+      );
 
       return mergedHistory;
     },
@@ -208,14 +209,7 @@ export function useChannelSubscription(channel: Channel | null) {
 
     queryClient.setQueryData<RelayEvent[]>(
       channelMessagesKey(channelId),
-      (current = []) => {
-        const mergedHistory = normalizeTimelineMessages([
-          ...current,
-          ...history,
-        ]);
-
-        return mergedHistory;
-      },
+      (current = []) => mergeTimelineHistoryMessages(current, history),
     );
   });
 
@@ -283,16 +277,15 @@ export function useChannelSubscription(channel: Channel | null) {
         }
 
         cleanup = dispose;
-
-        void syncLatestHistory().catch((error) => {
-          if (!isDisposed) {
-            console.error(
-              "Failed to refresh channel history after subscribing",
-              channelId,
-              error,
-            );
-          }
-        });
+        // No post-subscribe history refetch: useChannelMessagesQuery already
+        // loaded the latest CHANNEL_HISTORY_LIMIT (200) events, and the live
+        // subscription itself backfills up to 50 most-recent events via its
+        // initial REQ (buildChannelFilter(id, 50)). Both write into the same
+        // channelMessagesKey cache, so any window between the two REQs is
+        // covered by the live sub's overlap unless >50 messages land in
+        // <1s — vanishingly rare in practice. The reconnect listener above
+        // still bridges gaps from connection drops, where the gap *is*
+        // unbounded.
       })
       .catch((error) => {
         console.error("Failed to subscribe to channel", channelId, error);

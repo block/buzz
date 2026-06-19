@@ -73,8 +73,11 @@ export function SidebarProfileCard({
   const workspaceLabel = activeWorkspace?.name ?? "No workspace";
   const readonlyWorkspaceLabel = (
     <span className="flex min-w-0 cursor-pointer items-center gap-1 text-xs leading-snug text-sidebar-foreground/70">
-      <span aria-hidden="true" className="shrink-0 text-2xs leading-none">
-        🐝
+      <span
+        aria-hidden="true"
+        className="flex w-3.5 shrink-0 items-center justify-center text-2xs"
+      >
+        <span className="-translate-y-px leading-normal">🐝</span>
       </span>
       <span className="truncate">{workspaceLabel}</span>
     </span>
@@ -180,7 +183,7 @@ export function SidebarProfileCard({
               >
                 {selfUserStatus?.emoji ? (
                   <StatusEmoji
-                    className="mr-1 h-3.5 w-3.5"
+                    className="mr-1 w-4 shrink-0 text-xs"
                     value={selfUserStatus.emoji}
                   />
                 ) : null}

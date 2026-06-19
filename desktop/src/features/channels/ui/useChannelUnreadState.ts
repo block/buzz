@@ -5,7 +5,6 @@ import {
   buildDirectRepliesByParentId,
   buildDirectReplyIdsByParentId,
   collectReplyDescendantIds,
-  directRepliesMaxCreatedAt,
   subtreeMaxCreatedAt,
 } from "@/features/channels/lib/subtreeCreatedAt";
 import { computeThreadReplyUnreadCounts } from "@/features/channels/lib/threadReplyUnreadCounts";
@@ -222,27 +221,27 @@ export function useChannelUnreadState({
     };
   }, [openThreadHeadId]);
   // Mark thread read when the panel opens, advancing the frontier to the max
-  // createdAt over the head and its DIRECT replies — the content visible
-  // without expanding anything. This mirrors channel-open parity: opening
-  // consumes what you can see, clearing the channel-level badge for unread that
-  // lived in the visible direct replies, while deeper collapsed branches stay
-  // unread until drilled into (expand advances the frontier further from here).
+  // createdAt over the head and its ENTIRE subtree — every reply, including
+  // ones nested in collapsed branches. Opening a notified thread means engaging
+  // with it, so the badge must collapse the instant the panel opens (not wait
+  // for a channel change or for each branch to be expanded). The badge counts
+  // the whole subtree (computeThreadBadgeCounts), so marking only the visible
+  // direct replies would leave it lit whenever the unread lives in a nested
+  // reply — the reported bug. Consuming collapsed branches here is not lossy:
+  // a NEWER reply re-raises the badge, because the unread comparison is strictly
+  // `createdAt > frontier` (computeThreadUnreadMarker) and the badge snapshot
+  // advances toward the live marker (nextThreadBadgeFrontier).
   // Only persist read state for threads the user has notification interest in
   // (participated, authored, or followed) to avoid bloating the context blob.
   React.useEffect(() => {
     if (!openThreadHeadId) return;
     if (!isNotifiedForCurrentThread) return;
-    const openReadCeiling = directRepliesMaxCreatedAt(
-      openThreadHeadId,
-      directReplyIdsByParentId,
-      createdAtByMessageId,
-    );
+    const openReadCeiling = getSubtreeMaxCreatedAt(openThreadHeadId);
     if (openReadCeiling === null) return;
     markThreadRead(openThreadHeadId, openReadCeiling);
   }, [
     openThreadHeadId,
-    directReplyIdsByParentId,
-    createdAtByMessageId,
+    getSubtreeMaxCreatedAt,
     markThreadRead,
     isNotifiedForCurrentThread,
   ]);

@@ -1032,7 +1032,7 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
     format!("[Base]\n{}", base_prompt.trim_end())
 }
 
-/// Format a [`FlushBatch`] into a prompt string for the agent.
+/// Format a [`FlushBatch`] into the per-section prompt blocks for the agent.
 ///
 /// Produces a stable prompt with these sections (in order):
 /// 0. `[Base]` — base prompt (only for legacy agents without systemPrompt support)
@@ -1042,9 +1042,17 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
 /// 4. `[Thread Context]` or `[Conversation Context]` — if fetched
 /// 5. `[Event]` / `[Buzz events]` — the triggering event(s)
 ///
+/// Each section is returned as its own block rather than one joined string so
+/// the observer frame's size trimmer (`fit_observer_event_to_budget`) elides
+/// the body of an oversized section in place, leaving every `[Header]` line at
+/// the head of its own leaf — so the desktop "Prompt context" panel always
+/// counts every section. The receiving agent reconstructs the full prompt by
+/// joining the blocks (legacy agents see a single `\n` between sections rather
+/// than a blank line; sections self-delimit with their `[Header]` line).
+///
 /// For agents with `protocol_version >= 2`, base_prompt and system_prompt are
 /// delivered via the system role in `session/new` and omitted from this message.
-pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> String {
+pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<String> {
     // Scope is always derived from the LAST event in the batch — that's the
     // one the agent is responding to. Thread/DM context is supplementary info
     // included alongside, not a scope override. This prevents mixed batches
@@ -1053,7 +1061,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> String 
         Some(e) => e,
         None => {
             tracing::error!("format_prompt called with empty batch — returning empty prompt");
-            return String::new();
+            return Vec::new();
         }
     };
     let thread_tags = parse_thread_tags(&last_event.event);
@@ -1077,11 +1085,14 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> String 
     }
 
     // NIP-AE agent core memory (rendered by `engram_fetch::build_core_section`).
-    // agent_core is always in user messages because it is resolved per-channel
-    // after session creation. A future session/update mechanism could move it
-    // to the system role.
-    if let Some(core) = args.agent_core {
-        sections.push(core.to_string());
+    // For modern agents (protocol_version >= 2), core is delivered via the
+    // system role in session/new, so it is omitted here to avoid duplication.
+    // Legacy agents have no system role, so core rides in the user message
+    // alongside `[Base]`/`[System]`.
+    if !args.has_system_prompt_support {
+        if let Some(core) = args.agent_core {
+            sections.push(core.to_string());
+        }
     }
 
     // 2. Context hints (with reply instruction for thread replies).
@@ -1167,7 +1178,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> String 
         );
     }
 
-    sections.join("\n\n")
+    sections
 }
 
 // ─── Unit Tests ──────────────────────────────────────────────────────────────
@@ -1391,7 +1402,7 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
 
         // Should contain [Context] section before the event.
         assert!(prompt.contains("[Context]"));
@@ -1487,7 +1498,7 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
 
         assert!(prompt.contains("[Context]"));
         assert!(prompt.contains("[Buzz events — 3 events]"));
@@ -1516,7 +1527,7 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         // system_prompt and base_prompt are delivered via session/new system role,
         // so they must NOT appear in the user message.
         assert!(!prompt.contains("[System]"));
@@ -1546,11 +1557,44 @@ mod tests {
                 agent_core: Some(core),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
         assert!(
             prompt.starts_with("[Agent Memory — core]\nbe helpful\n\n[Context]"),
             "expected core block first, then [Context]; got: {prompt}"
         );
+    }
+
+    #[test]
+    fn test_format_prompt_modern_agent_omits_core_from_user_message() {
+        // Modern agents (protocol_version >= 2) receive core via the system
+        // role in session/new, so format_prompt must NOT also emit it in the
+        // user message — otherwise core would double-render.
+        let ch = Uuid::new_v4();
+        let event = make_event("hi");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                agent_core: Some("[Agent Memory — core]\nbe helpful"),
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            !prompt.contains("[Agent Memory — core]"),
+            "modern agents must not get core in the user message; got: {prompt}"
+        );
+        assert!(prompt.starts_with("[Context]"));
     }
 
     #[test]
@@ -1573,7 +1617,8 @@ mod tests {
                 agent_core: Some(core),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
         assert!(prompt.starts_with("[Agent Memory — core]\nbe helpful\n\n[Context]"));
     }
 
@@ -1596,7 +1641,7 @@ mod tests {
 
         // format_prompt no longer accepts or emits base_prompt/system_prompt.
         // They are delivered via session/new system role instead.
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(!prompt.contains("[Base]"));
         assert!(!prompt.contains("[System]"));
         assert!(prompt.starts_with("[Context]"));
@@ -1629,7 +1674,8 @@ mod tests {
                 agent_core: Some(core),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
 
         // Both sections must be present
         assert!(
@@ -1683,7 +1729,8 @@ mod tests {
                 system_prompt: Some("test system prompt"),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
 
         // Neither section should appear — they are delivered via session/new
         assert!(
@@ -1729,7 +1776,8 @@ mod tests {
                 conversation_context: Some(&ctx),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
 
         // Verify section ordering: [Agent Memory] < [Context] < [Thread Context]
         let core_pos = prompt
@@ -2236,7 +2284,8 @@ mod tests {
                 channel_info: Some(&ci),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
         assert!(prompt.contains("engineering (#"));
         assert!(prompt.contains("Scope: channel"));
     }
@@ -2265,7 +2314,8 @@ mod tests {
                 channel_info: Some(&ci),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
         assert!(prompt.contains("Scope: dm"));
     }
 
@@ -2291,7 +2341,7 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(prompt.contains("Scope: thread"));
         assert!(prompt.contains("Thread root: root123"));
     }
@@ -2340,7 +2390,8 @@ mod tests {
                 conversation_context: Some(&ctx),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
         assert!(prompt.contains("[Thread Context (2 of 5 messages, truncated)]"));
         assert!(prompt.contains("Let's refactor auth"));
         assert!(prompt.contains("Thread context included below"));
@@ -2380,7 +2431,8 @@ mod tests {
                 conversation_context: Some(&ctx),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
         assert!(prompt.contains("Scope: dm"));
         assert!(prompt.contains("[Conversation Context (1 of 1 messages)]"));
         assert!(prompt.contains("Can you deploy?"));
@@ -2439,7 +2491,8 @@ mod tests {
                 profile_lookup: Some(&profiles),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
 
         assert!(prompt.contains("From: Wes (npub:"));
         assert!(prompt.contains(
@@ -2541,7 +2594,8 @@ mod tests {
                 conversation_context: Some(&ctx),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
         // Scope should be "dm", not "thread".
         assert!(
             prompt.contains("Scope: dm"),
@@ -2586,7 +2640,8 @@ mod tests {
                 channel_info: Some(&ci),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
         assert!(prompt.contains("Scope: dm"));
         assert!(
             prompt.contains("buzz messages get"),
@@ -2613,7 +2668,7 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
             prompt.contains(&format!("Event ID: {event_id}")),
             "prompt should contain the event ID"
@@ -2636,7 +2691,7 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
             prompt.contains(&format!("From: {npub} (hex: {hex})")),
             "prompt should contain both npub and hex"
@@ -2658,7 +2713,7 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
             prompt.contains("Tags:"),
             "tags should always be included, even for stream messages"
@@ -2982,7 +3037,7 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
             prompt.contains(&format!("--reply-to {event_id}")),
             "channel thread reply should include reply instruction with triggering event ID"
@@ -3022,7 +3077,8 @@ mod tests {
                 channel_info: Some(&ci),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
         assert!(
             prompt.contains(&format!("--reply-to {event_id}")),
             "DM thread reply should include reply instruction"
@@ -3043,7 +3099,7 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
             !prompt.contains("--reply-to"),
             "top-level message should NOT include reply instruction"
@@ -3074,7 +3130,8 @@ mod tests {
                 channel_info: Some(&ci),
                 ..Default::default()
             },
-        );
+        )
+        .join("\n\n");
         assert!(
             !prompt.contains("--reply-to"),
             "DM non-reply should NOT include reply instruction"
@@ -3104,7 +3161,7 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         // The instruction should use the triggering event's own ID — not root or parent.
         assert!(
             prompt.contains(&format!("--reply-to {event_id}")),
@@ -3147,7 +3204,7 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
             prompt.contains(&format!("--reply-to {threaded_id}")),
             "batched prompt should use last (threaded) event's ID"
@@ -3180,7 +3237,7 @@ mod tests {
             cancelled_events: vec![],
         };
 
-        let prompt = format_prompt(&batch, &FormatPromptArgs::default());
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
             !prompt.contains("--reply-to"),
             "batched prompt where last event is top-level should NOT include reply instruction"

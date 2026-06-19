@@ -12,8 +12,30 @@ default:
 
 # ─── Dev Environment ─────────────────────────────────────────────────────────
 
+# Install required dev tools via Hermit and create .env (safe to re-run)
+bootstrap:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    # Hermit's bin/ symlinks auto-download pinned tool versions on first use.
+    # Running each tool once triggers the download if not already cached.
+    echo "Ensuring toolchain via Hermit..."
+    cargo --version &
+    node --version &
+    pnpm --version &
+    wait
+    if ! command -v docker &>/dev/null; then
+        echo "Error: Docker is required but not installed."
+        echo "Install it from https://docs.docker.com/get-docker/"
+        exit 1
+    fi
+    if [[ ! -f .env ]]; then
+        cp .env.example .env
+        echo "Created .env from .env.example — review it before running just dev."
+    fi
+
 # Start Docker services, run migrations, install desktop deps
-setup:
+setup: bootstrap
     ./scripts/dev-setup.sh
 
 # Install git hooks via lefthook
@@ -47,13 +69,6 @@ build:
 # Build the Rust workspace in release mode
 build-release:
     cargo build --workspace --release
-
-# Rebuild Typesense docs for all kind:0 (user profile) events.
-# Required once after deploying the indexer change that flattens kind:0 content
-# for searchability; new/updated profiles are indexed correctly automatically.
-# Safe to run repeatedly — Typesense upserts.
-reindex-kind0:
-    cargo run --release -p buzz-relay --bin buzz-reindex-kind0
 
 # Run repo lint and formatting checks
 check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check
@@ -113,6 +128,7 @@ fmt-all: fmt desktop-tauri-fmt mobile-fmt
 fix-all: fmt desktop-tauri-fmt desktop-fix web-fix mobile-fix
 
 # Ensure sidecar placeholder binaries exist (Tauri validates externalBin at compile time)
+# Sidecar binary list must stay in sync with desktop-release-build below.
 _ensure-sidecar-stubs:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -165,6 +181,8 @@ desktop-tauri-test: _ensure-sidecar-stubs
     cd desktop/src-tauri && cargo test
 
 # Build the full desktop Tauri app locally (unsigned, for testing)
+# Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
+# pnpm install is unconditional here: release builds must start from a clean dep tree.
 desktop-release-build target="aarch64-apple-darwin":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -193,31 +211,6 @@ desktop-e2e-smoke:
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
-# Take desktop screenshots using the mock bridge
-desktop-screenshot *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just desktop-build
-    cd {{desktop_dir}}
-    if ! curl -sf http://127.0.0.1:4173/ >/dev/null 2>&1; then
-        python3 -m http.server 4173 -d dist >/dev/null 2>&1 &
-        trap "kill $! 2>/dev/null || true" EXIT
-        for i in $(seq 1 20); do curl -sf http://127.0.0.1:4173/ >/dev/null && break; sleep 0.5; done
-    fi
-    node tests/helpers/screenshot.mjs {{ARGS}}
-
-# Mesh-compute e2e: the CI-safe layers (relay mesh signaling invariants + Playwright UI)
-mesh-e2e:
-    cargo test -p buzz-relay mesh_signaling
-    cd {{desktop_dir}} && pnpm test:e2e:integration -- mesh-compute.spec.ts
-
-# Mesh-compute Layer 1: REAL serve->client->inference on this machine (not CI)
-mesh-e2e-hardware:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
-    cargo run -p buzz-relay --example mesh_serve_client_smoke
-
 # Run all checks suitable for CI / pre-push (no infra needed)
 ci: check test-unit desktop-test desktop-build desktop-tauri-check desktop-tauri-test web-build mobile-test
 
@@ -240,16 +233,45 @@ test-unit:
 test-integration:
     ./scripts/run-tests.sh integration
 
+# Mesh-compute e2e: the CI-safe layers (relay mesh signaling invariants + Playwright UI)
+mesh-e2e:
+    cargo test -p buzz-relay mesh_signaling
+    cd {{desktop_dir}} && pnpm test:e2e:integration -- mesh-compute.spec.ts
+
+# Mesh-compute Layer 1: REAL serve->client->inference on this machine (not CI)
+mesh-e2e-hardware:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
+    cargo run -p buzz-relay --example mesh_serve_client_smoke
+
+# Take desktop screenshots using the mock bridge
+desktop-screenshot *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just desktop-build
+    cd {{desktop_dir}}
+    if ! curl -sf http://127.0.0.1:4173/ >/dev/null 2>&1; then
+        python3 -m http.server 4173 -d dist >/dev/null 2>&1 &
+        trap "kill $! 2>/dev/null || true" EXIT
+        for i in $(seq 1 20); do curl -sf http://127.0.0.1:4173/ >/dev/null && break; sleep 0.5; done
+    fi
+    node tests/helpers/screenshot.mjs {{ARGS}}
+
 # ─── Run ──────────────────────────────────────────────────────────────────────
 
 # Start the relay server (auto-starts Docker services if needed)
-relay: _ensure-migrations
+relay: bootstrap _ensure-migrations
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     cargo run -p buzz-relay
 
 # Start the relay with the built web UI served from it
-relay-web: _ensure-migrations
+relay-web: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     [[ -d node_modules ]] || pnpm install
     pnpm -C web build
     BUZZ_WEB_DIR=./web/dist cargo run -p buzz-relay
@@ -266,26 +288,32 @@ proxy:
 proxy-release:
     cargo run -p buzz-proxy --release
 
-# Run the desktop Tauri app in dev mode (ports and identity derived from worktree)
-dev *ARGS: _ensure-sidecar-stubs
+# Run the desktop Tauri app in dev mode with a local relay (ports and identity derived from worktree)
+dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
+    ./target/debug/buzz-relay &
+    RELAY_PID=$!
+    cleanup() {
+        [[ -n "${INSTANCE_ID:-}" ]] && ../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true
+        kill "$RELAY_PID" 2>/dev/null || true
+    }
+    trap cleanup EXIT
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     source ../scripts/instance-env.sh
-    # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
-    # agent workers. Reap this instance's agents on exit as a backstop.
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
-    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID"' EXIT
     echo "Starting on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
     pnpm exec tauri dev --features mesh-llm --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
-staging *ARGS: _ensure-sidecar-stubs
+staging *ARGS: bootstrap _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
-    pnpm install
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    pnpm install  # unconditional: staging must always start with a clean dep tree
     cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
@@ -293,12 +321,12 @@ staging *ARGS: _ensure-sidecar-stubs
     cp target/release/buzz "desktop/src-tauri/binaries/buzz-${TARGET}"
     chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
     cd {{desktop_dir}}
-    source ../scripts/instance-env.sh
     export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
+    source ../scripts/instance-env.sh
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
-    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID"' EXIT
+    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting staging on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
     pnpm exec tauri dev --features mesh-llm --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
@@ -385,10 +413,16 @@ mobile-dev:
 # ─── Database ─────────────────────────────────────────────────────────────────
 
 # Apply database migrations
-migrate: _ensure-services
-    cargo run -p buzz-admin -- migrate
+migrate: _ensure-migrations
 
 # ─── Utilities ────────────────────────────────────────────────────────────────
+
+# Rebuild Typesense docs for all kind:0 (user profile) events.
+# Required once after deploying the indexer change that flattens kind:0 content
+# for searchability; new/updated profiles are indexed correctly automatically.
+# Safe to run repeatedly — Typesense upserts.
+reindex-kind0:
+    cargo run --release -p buzz-relay --bin buzz-reindex-kind0
 
 # Remove build artifacts
 clean:
@@ -506,7 +540,7 @@ release *ARGS:
         local range="$1"
         git log "$range" --format="%h %H %s" --no-merges | while IFS=' ' read -r short full rest; do
             local pr subject
-            pr=$(printf '%s' "$rest" | grep -oE '\(#[0-9]+\)$' | grep -oE '[0-9]+')
+            pr=$(printf '%s' "$rest" | grep -oE '\(#[0-9]+\)$' | grep -oE '[0-9]+' || true)
             if [[ -n "$pr" ]]; then
                 subject=$(printf '%s' "$rest" | sed -E 's/ \(#[0-9]+\)$//')
                 printf -- '- %s ([#%s](https://github.com/%s/pull/%s)) ([`%s`](https://github.com/%s/commit/%s))\n' \
@@ -584,37 +618,15 @@ release *ARGS:
 goose relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --release -p buzz-acp -p buzz-cli
-    env_args=(
-        BUZZ_RELAY_URL="{{relay}}"
-        BUZZ_PRIVATE_KEY="{{key}}"
-        BUZZ_ACP_AGENT_COMMAND=goose
-        BUZZ_ACP_AGENT_ARGS=acp
-        BUZZ_ACP_AGENTS="{{agents}}"
-        GOOSE_MODE=auto
-    )
-    [[ -n "{{prompt}}" ]] && env_args+=(BUZZ_ACP_SYSTEM_PROMPT="{{prompt}}")
-    if [[ "{{heartbeat}}" != "0" ]]; then
-        env_args+=(BUZZ_ACP_HEARTBEAT_INTERVAL={{heartbeat}})
-    fi
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    source ./scripts/_goose-env.sh "{{relay}}" "{{key}}" "{{agents}}" "{{heartbeat}}" "{{prompt}}"
     exec env "${env_args[@]}" ./target/release/buzz-acp
 
 # Run a goose agent in the background (screen session named 'goose-agent-N')
 goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --release -p buzz-acp -p buzz-cli
-    env_args=(
-        BUZZ_RELAY_URL="{{relay}}"
-        BUZZ_PRIVATE_KEY="{{key}}"
-        BUZZ_ACP_AGENT_COMMAND=goose
-        BUZZ_ACP_AGENT_ARGS=acp
-        BUZZ_ACP_AGENTS="{{agents}}"
-        GOOSE_MODE=auto
-    )
-    [[ -n "{{prompt}}" ]] && env_args+=(BUZZ_ACP_SYSTEM_PROMPT="{{prompt}}")
-    if [[ "{{heartbeat}}" != "0" ]]; then
-        env_args+=(BUZZ_ACP_HEARTBEAT_INTERVAL={{heartbeat}})
-    fi
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    source ./scripts/_goose-env.sh "{{relay}}" "{{key}}" "{{agents}}" "{{heartbeat}}" "{{prompt}}"
     screen -dmS goose-agent-{{agents}} bash -c "$(printf '%q ' env "${env_args[@]}") ./target/release/buzz-acp"
     echo "Agent running in screen session 'goose-agent-{{agents}}'. Attach with: screen -r goose-agent-{{agents}}"

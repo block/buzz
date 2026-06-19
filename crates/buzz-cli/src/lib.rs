@@ -207,6 +207,12 @@ enum Cmd {
     /// Announce and discover git repositories (NIP-34)
     #[command(subcommand)]
     Repos(ReposCmd),
+    /// Send, get, list, and set status on git patches (NIP-34)
+    #[command(subcommand)]
+    Patches(PatchesCmd),
+    /// Create, get, list, and set status on git issues (NIP-34)
+    #[command(subcommand)]
+    Issues(IssuesCmd),
     /// Upload files to the relay's Blossom store
     #[command(subcommand)]
     Upload(UploadCmd),
@@ -405,7 +411,7 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\""
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle"
     )]
     Create {
         /// Channel name
@@ -420,8 +426,12 @@ pub enum ChannelsCmd {
         /// Channel description
         #[arg(long)]
         description: Option<String>,
+        /// Make the channel ephemeral: lifetime in seconds. The relay archives
+        /// it once this many seconds pass without a new message.
+        #[arg(long, value_name = "SECONDS")]
+        ttl: Option<i64>,
     },
-    /// Update channel name or description
+    /// Update channel name, description, or ephemeral TTL
     Update {
         /// Channel UUID
         #[arg(long)]
@@ -432,6 +442,13 @@ pub enum ChannelsCmd {
         /// New channel description
         #[arg(long)]
         description: Option<String>,
+        /// Make the channel ephemeral (or change its lifetime): seconds until
+        /// the relay archives it after the last message. Conflicts with --no-ttl.
+        #[arg(long, value_name = "SECONDS", conflicts_with = "no_ttl")]
+        ttl: Option<i64>,
+        /// Clear an existing TTL, making the channel permanent.
+        #[arg(long)]
+        no_ttl: bool,
     },
     /// Set the channel topic
     Topic {
@@ -1019,6 +1036,195 @@ pub enum ReposCmd {
 }
 
 // ---------------------------------------------------------------------------
+// Patches subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum PatchesCmd {
+    /// Send a git patch (NIP-34 kind:1617)
+    #[command(
+        after_help = "Examples:\n  git format-patch -1 HEAD --stdout | buzz patches send --repo-owner <hex> --repo-id myrepo --patch-file - --root\n  buzz patches send --repo-owner <hex> --repo-id myrepo --patch-file 0001-fix.patch --reply-to <prev-patch-id>"
+    )]
+    Send {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Path to a `git format-patch` file, or '-' to read from stdin
+        #[arg(long)]
+        patch_file: String,
+        /// Earliest-unique-commit of the repo
+        #[arg(long)]
+        euc: Option<String>,
+        /// Additional recipient pubkey(s) — can be specified multiple times
+        #[arg(long = "to")]
+        to: Vec<String>,
+        /// Previous patch event id (series) or original root (revision)
+        #[arg(long)]
+        reply_to: Option<String>,
+        /// Mark as the first patch of a new series
+        #[arg(long, default_value_t = false)]
+        root: bool,
+        /// Mark as the first patch of a new revision of an existing series
+        #[arg(long, default_value_t = false)]
+        root_revision: bool,
+        /// Commit ID this patch produces when applied
+        #[arg(long)]
+        commit: Option<String>,
+        /// Parent commit ID
+        #[arg(long)]
+        parent_commit: Option<String>,
+        /// PGP signature of the commit
+        #[arg(long)]
+        commit_pgp_sig: Option<String>,
+        /// Committer identity: 'name|email|timestamp|tz-offset-minutes'
+        #[arg(long)]
+        committer: Option<String>,
+    },
+    /// Get a patch by event id
+    Get {
+        /// Patch event id (64-char hex)
+        #[arg(long)]
+        event: String,
+    },
+    /// List patches for a repo
+    List {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Filter by patch author pubkey
+        #[arg(long)]
+        author: Option<String>,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Set status on a patch (open/merged/closed/draft — NIP-34 kind:1630-1633)
+    Status {
+        /// Root patch event id (first patch of the series/revision)
+        #[arg(long)]
+        root: String,
+        /// New status
+        #[arg(long, value_parser = ["open", "merged", "closed", "draft"])]
+        status: String,
+        /// Markdown context for the status change ('-' to read from stdin)
+        #[arg(long)]
+        content: Option<String>,
+        /// Repo owner pubkey — requires --repo-id
+        #[arg(long, requires = "repo_id")]
+        repo_owner: Option<String>,
+        /// Repo identifier (d-tag) — requires --repo-owner
+        #[arg(long, requires = "repo_owner")]
+        repo_id: Option<String>,
+        /// Earliest-unique-commit of the repo
+        #[arg(long)]
+        euc: Option<String>,
+        /// Root id of the revision that was accepted (status=merged only)
+        #[arg(long)]
+        revision: Option<String>,
+        /// Additional recipient pubkey(s) for the status event (besides the
+        /// repo owner, which is tagged automatically when --repo-owner is
+        /// given) — e.g. root/revision author. Can be specified multiple times.
+        #[arg(long = "to")]
+        to: Vec<String>,
+        /// Applied patch event id — can be specified multiple times (status=merged only).
+        /// Accepts `<id>`, `<id>:<relay-url>`, or `<id>:<relay-url>:<pubkey>`.
+        #[arg(long = "q")]
+        q: Vec<String>,
+        /// Merge commit id (status=merged only)
+        #[arg(long)]
+        merge_commit: Option<String>,
+        /// Commit id applied to the target branch — can be specified multiple times (status=merged only)
+        #[arg(long = "applied-as-commit")]
+        applied_as_commit: Vec<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
+// Issues subcommands
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+pub enum IssuesCmd {
+    /// Create a git issue (NIP-34 kind:1621)
+    Create {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Issue title
+        #[arg(long, alias = "subject")]
+        title: String,
+        /// Issue body, markdown. Use '-' to read from stdin.
+        #[arg(long)]
+        content: String,
+        /// Label — can be specified multiple times
+        #[arg(long = "label")]
+        label: Vec<String>,
+        /// Additional recipient pubkey(s) — can be specified multiple times
+        #[arg(long = "to")]
+        to: Vec<String>,
+    },
+    /// Get an issue by event id
+    Get {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        event: String,
+    },
+    /// List issues for a repo
+    List {
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Filter by issue author pubkey
+        #[arg(long)]
+        author: Option<String>,
+        /// Filter by label
+        #[arg(long)]
+        label: Option<String>,
+        /// Maximum number of results
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Set status on an issue (open/resolved/closed/draft — NIP-34 kind:1630-1633)
+    Status {
+        /// Issue event id
+        #[arg(long)]
+        issue: String,
+        /// New status
+        #[arg(long, value_parser = ["open", "resolved", "closed", "draft"])]
+        status: String,
+        /// Markdown context for the status change ('-' to read from stdin)
+        #[arg(long)]
+        content: Option<String>,
+        /// Repo owner pubkey — requires --repo-id
+        #[arg(long, requires = "repo_id")]
+        repo_owner: Option<String>,
+        /// Repo identifier (d-tag) — requires --repo-owner
+        #[arg(long, requires = "repo_owner")]
+        repo_id: Option<String>,
+        /// Earliest-unique-commit of the repo
+        #[arg(long)]
+        euc: Option<String>,
+        /// Additional recipient pubkey(s) for the status event (besides the
+        /// repo owner, which is tagged automatically when --repo-owner is
+        /// given) — e.g. the issue author. Can be specified multiple times.
+        #[arg(long = "to")]
+        to: Vec<String>,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // Upload subcommands
 // ---------------------------------------------------------------------------
 
@@ -1192,6 +1398,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
+        Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
+        Cmd::Issues(sub) => commands::issues::dispatch(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Pack(_) => unreachable!("handled above"),
@@ -1221,10 +1429,12 @@ mod tests {
             "dms",
             "emoji",
             "feed",
+            "issues",
             "mem",
             "messages",
             "notes",
             "pack",
+            "patches",
             "reactions",
             "repos",
             "social",
@@ -1338,6 +1548,14 @@ mod tests {
             ]
         );
         assert_eq!(names(&cmd, "repos"), vec!["create", "get", "list"]);
+        assert_eq!(
+            names(&cmd, "patches"),
+            vec!["get", "list", "send", "status"]
+        );
+        assert_eq!(
+            names(&cmd, "issues"),
+            vec!["create", "get", "list", "status"]
+        );
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
     }
@@ -1350,8 +1568,10 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
+            ("issues", 4),
             ("messages", 8),
             ("pack", 2),
+            ("patches", 4),
             ("reactions", 3),
             ("repos", 3),
             ("social", 7),

@@ -16,7 +16,7 @@ export type MessageLinkInput = {
    *
    * Currently emitted into the URL but not consumed by the click handler
    * or deep-link listener — both route via `goChannel(channelId,
-   * { messageId })` and let `useTimelineScrollManager` resolve the target.
+   * { messageId })` and let `useAnchoredScroll` resolve the target.
    * Reserved for future "open in thread view" routing.
    */
   threadRootId?: string | null;

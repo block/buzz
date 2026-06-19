@@ -6,8 +6,10 @@
 use buzz_core::{
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
-        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_REPO_ANNOUNCEMENT,
-        KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
+        KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+        KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF,
+        KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -48,6 +50,21 @@ fn check_hex_len(s: &str, min_len: usize, field: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
+/// Validate a git commit-like hex id (commit, parent-commit, euc,
+/// merge-commit, applied-as-commit). Git object ids are full SHA-1 (40 hex
+/// chars) or SHA-256 (64 hex chars) — anything shorter is an abbreviated
+/// ref that NIP-34 canonical tags shouldn't carry, since consumers resolve
+/// these against the actual repo.
+fn check_commit_hex(s: &str, field: &str) -> Result<(), SdkError> {
+    if (s.len() != 40 && s.len() != 64) || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(SdkError::InvalidInput(format!(
+            "{field} must be a full 40-character (SHA-1) or 64-character (SHA-256) hex commit id (got {:?})",
+            s
+        )));
+    }
+    Ok(())
+}
+
 fn check_pubkey_hex(s: &str, field: &str) -> Result<String, SdkError> {
     if s.len() != 64 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(SdkError::InvalidInput(format!(
@@ -55,6 +72,51 @@ fn check_pubkey_hex(s: &str, field: &str) -> Result<String, SdkError> {
         )));
     }
     Ok(s.to_ascii_lowercase())
+}
+
+/// Validate an exact-length hex string (event ids), returning it lowercased.
+fn check_hex_exact(s: &str, len: usize, field: &str) -> Result<String, SdkError> {
+    if s.len() != len || !s.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(SdkError::InvalidInput(format!(
+            "{field} must be a {len}-character hex string"
+        )));
+    }
+    Ok(s.to_ascii_lowercase())
+}
+
+/// Validate a git repo identifier: `[a-zA-Z0-9._-]{1,64}`, no leading dot,
+/// no `..`. Shared by `build_repo_announcement` and `GitRepoCoord` so a
+/// repo coordinate built directly through the SDK (bypassing CLI-side
+/// `validate_repo_id`) can't slip an invalid `d`-tag into an `a`-tag value.
+fn check_repo_id(repo_id: &str) -> Result<(), SdkError> {
+    if repo_id.is_empty() {
+        return Err(SdkError::InvalidInput("repo_id must not be empty".into()));
+    }
+    if repo_id.len() > 64 {
+        return Err(SdkError::InvalidInput(format!(
+            "repo_id exceeds 64 characters (got {})",
+            repo_id.len()
+        )));
+    }
+    if !repo_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    {
+        return Err(SdkError::InvalidInput(
+            "repo_id may only contain [a-zA-Z0-9._-]".into(),
+        ));
+    }
+    if repo_id.starts_with('.') {
+        return Err(SdkError::InvalidInput(
+            "repo_id must not start with a dot".into(),
+        ));
+    }
+    if repo_id.contains("..") {
+        return Err(SdkError::InvalidInput(
+            "repo_id must not contain '..'".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Validate and normalize a NIP-30 custom emoji shortcode.
@@ -608,12 +670,17 @@ pub fn build_set_purpose(channel_id: Uuid, purpose: &str) -> Result<EventBuilder
 // ── Builder 19: build_create_channel ─────────────────────────────────────────
 
 /// Build a NIP-29 create-group event (kind 9007).
+///
+/// `ttl`: `Some(secs)` makes the channel ephemeral with that lifetime in
+/// seconds (the relay archives it once the deadline passes without activity);
+/// `None` leaves it permanent.
 pub fn build_create_channel(
     channel_id: Uuid,
     name: &str,
     visibility: Option<Visibility>,
     channel_type: Option<ChannelKind>,
     about: Option<&str>,
+    ttl: Option<i32>,
 ) -> Result<EventBuilder, SdkError> {
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["name", name])?];
     if let Some(v) = visibility {
@@ -624,6 +691,9 @@ pub fn build_create_channel(
     }
     if let Some(a) = about {
         tags.push(tag(&["about", a])?);
+    }
+    if let Some(secs) = ttl {
+        tags.push(tag(&["ttl", &secs.to_string()])?);
     }
     Ok(EventBuilder::new(Kind::Custom(9007), "").tags(tags))
 }
@@ -785,33 +855,7 @@ pub fn build_repo_announcement(
     relays: &[&str],
 ) -> Result<EventBuilder, SdkError> {
     // Validate repo_id
-    if repo_id.is_empty() {
-        return Err(SdkError::InvalidInput("repo_id must not be empty".into()));
-    }
-    if repo_id.len() > 64 {
-        return Err(SdkError::InvalidInput(format!(
-            "repo_id exceeds 64 characters (got {})",
-            repo_id.len()
-        )));
-    }
-    if !repo_id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
-    {
-        return Err(SdkError::InvalidInput(
-            "repo_id may only contain [a-zA-Z0-9._-]".into(),
-        ));
-    }
-    if repo_id.starts_with('.') {
-        return Err(SdkError::InvalidInput(
-            "repo_id must not start with a dot".into(),
-        ));
-    }
-    if repo_id.contains("..") {
-        return Err(SdkError::InvalidInput(
-            "repo_id must not contain '..'".into(),
-        ));
-    }
+    check_repo_id(repo_id)?;
 
     // Validate optional name
     if let Some(n) = name {
@@ -913,6 +957,337 @@ pub fn build_repo_announcement(
     }
 
     Ok(EventBuilder::new(Kind::Custom(KIND_GIT_REPO_ANNOUNCEMENT as u16), "").tags(tags))
+}
+
+// ── Git collaboration: patches, issues, status (NIP-34) ─────────────────────
+
+/// Repository coordinate — owner pubkey + `d`-tag identifier.
+///
+/// Renders as the `a`-tag value clients use to address a kind:30617
+/// announcement: `30617:<owner>:<id>`.
+pub struct GitRepoCoord {
+    /// 64-char hex pubkey of the repo's announcing owner.
+    pub owner: String,
+    /// The repo's `d`-tag identifier.
+    pub id: String,
+}
+
+impl GitRepoCoord {
+    fn to_a_tag_value(&self) -> Result<String, SdkError> {
+        let owner = check_pubkey_hex(&self.owner, "repo owner")?;
+        check_repo_id(&self.id)?;
+        Ok(format!("30617:{owner}:{}", self.id))
+    }
+}
+
+/// Metadata for a git patch event (kind:1617, NIP-34).
+#[derive(Default)]
+pub struct GitPatchMeta {
+    /// Earliest-unique-commit of the repo (`r` tag, `euc` marker).
+    pub euc: Option<String>,
+    /// Additional pubkeys to `p`-tag besides the repo owner.
+    pub recipients: Vec<String>,
+    /// Previous patch in a series, or the original root patch when this is
+    /// the first patch of a revision — emits `["e", id, "", "reply"]`.
+    pub reply_to: Option<String>,
+    /// First patch in a new series — emits `["t", "root"]`.
+    pub root: bool,
+    /// First patch in a revision of an existing series — emits `["t", "root-revision"]`.
+    pub root_revision: bool,
+    /// Commit ID this patch produces when applied (`commit` tag + `r` tag).
+    pub commit: Option<String>,
+    /// Parent commit ID (`parent-commit` tag).
+    pub parent_commit: Option<String>,
+    /// PGP signature of the commit, or `Some("")` for an explicitly unsigned commit.
+    pub commit_pgp_sig: Option<String>,
+    /// Committer identity: `(name, email, unix-timestamp, tz-offset-minutes)`.
+    pub committer: Option<(String, String, String, String)>,
+}
+
+/// Build a git patch event (kind:1617, NIP-34).
+///
+/// `content` is the verbatim output of `git format-patch` — not truncated.
+/// NIP-34 says patches SHOULD be used when under 60KB (PRs otherwise); this
+/// builder enforces that bound rather than silently truncating a patch that
+/// must remain applyable.
+pub fn build_git_patch(
+    repo: &GitRepoCoord,
+    content: &str,
+    meta: &GitPatchMeta,
+) -> Result<EventBuilder, SdkError> {
+    if content.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "patch content must not be empty — refusing to publish an unappliable patch".into(),
+        ));
+    }
+    check_content(content, 60 * 1024)?;
+    let a_value = repo.to_a_tag_value()?;
+    let owner = check_pubkey_hex(&repo.owner, "repo owner")?;
+
+    let mut tags = vec![tag(&["a", &a_value])?];
+    if let Some(ref euc) = meta.euc {
+        check_commit_hex(euc, "euc")?;
+        tags.push(tag(&["r", euc, "euc"])?);
+    }
+    tags.push(tag(&["p", &owner])?);
+    for recipient in &meta.recipients {
+        let pk = check_pubkey_hex(recipient, "recipient")?;
+        tags.push(tag(&["p", &pk])?);
+    }
+    if let Some(ref prev) = meta.reply_to {
+        let event_id = check_hex_exact(prev, 64, "reply_to")?;
+        tags.push(tag(&["e", &event_id, "", "reply"])?);
+    }
+    if meta.root && meta.root_revision {
+        return Err(SdkError::InvalidInput(
+            "patch cannot be both --root and --root-revision".into(),
+        ));
+    }
+    if meta.root {
+        tags.push(tag(&["t", "root"])?);
+    }
+    if meta.root_revision {
+        tags.push(tag(&["t", "root-revision"])?);
+    }
+    if let Some(ref commit) = meta.commit {
+        check_commit_hex(commit, "commit")?;
+        tags.push(tag(&["commit", commit])?);
+        tags.push(tag(&["r", commit])?);
+    }
+    if let Some(ref parent) = meta.parent_commit {
+        check_commit_hex(parent, "parent_commit")?;
+        tags.push(tag(&["parent-commit", parent])?);
+    }
+    if let Some(ref sig) = meta.commit_pgp_sig {
+        tags.push(tag(&["commit-pgp-sig", sig])?);
+    }
+    if let Some((ref name, ref email, ref ts, ref tz)) = meta.committer {
+        tags.push(tag(&["committer", name, email, ts, tz])?);
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(KIND_GIT_PATCH as u16), content).tags(tags))
+}
+
+/// Metadata for a git issue event (kind:1621, NIP-34).
+#[derive(Default)]
+pub struct GitIssueMeta {
+    /// Labels (`t` tags).
+    pub labels: Vec<String>,
+    /// Additional pubkeys to `p`-tag besides the repo owner.
+    pub recipients: Vec<String>,
+}
+
+/// Build a git issue event (kind:1621, NIP-34). `content` is the markdown body.
+pub fn build_git_issue(
+    repo: &GitRepoCoord,
+    subject: &str,
+    content: &str,
+    meta: &GitIssueMeta,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    if subject.is_empty() {
+        return Err(SdkError::InvalidInput("subject must not be empty".into()));
+    }
+    if subject.len() > 256 {
+        return Err(SdkError::InvalidInput(format!(
+            "subject exceeds 256 characters (got {})",
+            subject.len()
+        )));
+    }
+    let a_value = repo.to_a_tag_value()?;
+    let owner = check_pubkey_hex(&repo.owner, "repo owner")?;
+
+    let mut tags = vec![tag(&["a", &a_value])?, tag(&["p", &owner])?];
+    for recipient in &meta.recipients {
+        let pk = check_pubkey_hex(recipient, "recipient")?;
+        tags.push(tag(&["p", &pk])?);
+    }
+    tags.push(tag(&["subject", subject])?);
+    for label in &meta.labels {
+        tags.push(tag(&["t", label])?);
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(KIND_GIT_ISSUE as u16), content).tags(tags))
+}
+
+/// Status to apply to a patch or issue root (kind:1630/1631/1632/1633, NIP-34).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitStatus {
+    /// 1630 — Open (the default state).
+    Open,
+    /// 1631 — Applied/Merged for patches; Resolved for issues.
+    AppliedOrResolved,
+    /// 1632 — Closed.
+    Closed,
+    /// 1633 — Draft.
+    Draft,
+}
+
+/// A reference to an applied/merged patch event for a status `q` tag,
+/// optionally carrying a relay-url and/or pubkey hint per NIP-34:
+/// `['q', <id>, <relay-url>, <pubkey>]`.
+///
+/// Parsed from the CLI's `--q <id>[:<relay-url>[:<pubkey>]]` syntax via
+/// [`GitAppliedPatchRef::parse`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitAppliedPatchRef {
+    /// The applied/merged patch event id (64-char hex).
+    pub id: String,
+    /// Optional relay-url hint where the patch event can be found.
+    pub relay: Option<String>,
+    /// Optional pubkey hint of the patch's author. Only meaningful when
+    /// `relay` is also set, per NIP-34's `['q', id, relay, pubkey]` shape.
+    pub pubkey: Option<String>,
+}
+
+impl GitAppliedPatchRef {
+    /// Parse `<id>`, `<id>:<relay-url>`, or `<id>:<relay-url>:<pubkey>`.
+    ///
+    /// The relay-url segment may itself contain `:` (e.g. `wss://host:port`),
+    /// so splitting is bounded to at most 3 parts rather than splitting on
+    /// every colon.
+    pub fn parse(spec: &str) -> Result<Self, SdkError> {
+        let mut parts = spec.splitn(3, ':');
+        let id = parts.next().unwrap_or_default().to_string();
+        let rest = parts.next();
+        match rest {
+            None => Ok(GitAppliedPatchRef {
+                id,
+                relay: None,
+                pubkey: None,
+            }),
+            Some(_) => {
+                // Re-split with the relay url glued back together, since a
+                // relay URL itself contains colons (`wss://host:port`); the
+                // pubkey, if present, is always the last `:`-delimited
+                // segment.
+                let rest_str = &spec[id.len() + 1..];
+                if let Some(idx) = rest_str.rfind(':') {
+                    let candidate_pubkey = &rest_str[idx + 1..];
+                    if candidate_pubkey.len() == 64
+                        && candidate_pubkey.chars().all(|c| c.is_ascii_hexdigit())
+                    {
+                        return Ok(GitAppliedPatchRef {
+                            id,
+                            relay: Some(rest_str[..idx].to_string()),
+                            pubkey: Some(candidate_pubkey.to_ascii_lowercase()),
+                        });
+                    }
+                }
+                Ok(GitAppliedPatchRef {
+                    id,
+                    relay: Some(rest_str.to_string()),
+                    pubkey: None,
+                })
+            }
+        }
+    }
+}
+
+impl GitStatus {
+    fn kind(self) -> u16 {
+        match self {
+            GitStatus::Open => KIND_GIT_STATUS_OPEN as u16,
+            GitStatus::AppliedOrResolved => KIND_GIT_STATUS_MERGED as u16,
+            GitStatus::Closed => KIND_GIT_STATUS_CLOSED as u16,
+            GitStatus::Draft => KIND_GIT_STATUS_DRAFT as u16,
+        }
+    }
+}
+
+/// Metadata for a git status event (kind:1630-1633, NIP-34). Applies to a
+/// patch root, a patch revision root, an issue, or a PR.
+#[derive(Default)]
+pub struct GitStatusMeta {
+    /// The issue/PR/original-root-patch event being given a status — required.
+    pub root_event: String,
+    /// When a revision was the one applied/merged, its root id.
+    pub accepted_revision_root: Option<String>,
+    /// Repo coordinate, included as an `a` tag for subscription efficiency.
+    pub repo: Option<GitRepoCoord>,
+    /// Earliest-unique-commit of the repo (`r` tag, no marker).
+    pub euc: Option<String>,
+    /// Additional `p` tags (root author, revision author, etc.) besides the repo owner.
+    pub recipients: Vec<String>,
+    /// Applied/merged patch event references (`q` tags) — kind:1631 only.
+    pub applied_patches: Vec<GitAppliedPatchRef>,
+    /// Merge commit id — kind:1631 only.
+    pub merge_commit: Option<String>,
+    /// Commit ids applied to the target branch — kind:1631 only.
+    pub applied_as_commits: Vec<String>,
+}
+
+/// Build a git status event (kind:1630/1631/1632/1633, NIP-34).
+/// `content` is optional markdown context for the status change.
+pub fn build_git_status(
+    status: GitStatus,
+    content: &str,
+    meta: &GitStatusMeta,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    let root = check_hex_exact(&meta.root_event, 64, "root_event")?;
+
+    let mut tags = vec![tag(&["e", &root, "", "root"])?];
+    if let Some(ref revision) = meta.accepted_revision_root {
+        let revision = check_hex_exact(revision, 64, "accepted_revision_root")?;
+        tags.push(tag(&["e", &revision, "", "reply"])?);
+    }
+    for recipient in &meta.recipients {
+        let pk = check_pubkey_hex(recipient, "recipient")?;
+        tags.push(tag(&["p", &pk])?);
+    }
+    if let Some(ref repo) = meta.repo {
+        let a_value = repo.to_a_tag_value()?;
+        tags.push(tag(&["a", &a_value])?);
+    }
+    if let Some(ref euc) = meta.euc {
+        check_commit_hex(euc, "euc")?;
+        tags.push(tag(&["r", euc])?);
+    }
+
+    if status != GitStatus::AppliedOrResolved
+        && (!meta.applied_patches.is_empty()
+            || meta.merge_commit.is_some()
+            || !meta.applied_as_commits.is_empty())
+    {
+        return Err(SdkError::InvalidInput(
+            "applied_patches/merge_commit/applied_as_commits only apply to the merged/resolved status".into(),
+        ));
+    }
+    for patch_ref in &meta.applied_patches {
+        let patch_id = check_hex_exact(&patch_ref.id, 64, "applied_patch")?;
+        match (&patch_ref.relay, &patch_ref.pubkey) {
+            (None, None) => tags.push(tag(&["q", &patch_id])?),
+            (Some(relay), None) => tags.push(tag(&["q", &patch_id, relay])?),
+            (Some(relay), Some(pubkey)) => {
+                let pubkey = check_pubkey_hex(pubkey, "applied_patch pubkey")?;
+                tags.push(tag(&["q", &patch_id, relay, &pubkey])?)
+            }
+            (None, Some(_)) => {
+                return Err(SdkError::InvalidInput(
+                    "applied_patch pubkey hint requires a relay-url hint".into(),
+                ))
+            }
+        }
+    }
+    if let Some(ref merge_commit) = meta.merge_commit {
+        check_commit_hex(merge_commit, "merge_commit")?;
+        tags.push(tag(&["merge-commit", merge_commit])?);
+        tags.push(tag(&["r", merge_commit])?);
+    }
+    if !meta.applied_as_commits.is_empty() {
+        let mut commits_tag = vec!["applied-as-commits"];
+        for commit in &meta.applied_as_commits {
+            check_commit_hex(commit, "applied_as_commit")?;
+        }
+        commits_tag.extend(meta.applied_as_commits.iter().map(String::as_str));
+        tags.push(tag(&commits_tag)?);
+        for commit in &meta.applied_as_commits {
+            tags.push(tag(&["r", commit])?);
+        }
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(status.kind()), content).tags(tags))
 }
 
 // ── Builder 31: build_workflow_def ────────────────────────────────────────────
@@ -1711,6 +2086,7 @@ mod tests {
                 Some(Visibility::Open),
                 Some(ChannelKind::Stream),
                 Some("General chat"),
+                None,
             )
             .unwrap(),
         );
@@ -1725,11 +2101,36 @@ mod tests {
     fn create_channel_minimal() {
         let cid = uuid();
         let ev = sign(
-            build_create_channel(cid, "dev", None::<Visibility>, None::<ChannelKind>, None)
-                .unwrap(),
+            build_create_channel(
+                cid,
+                "dev",
+                None::<Visibility>,
+                None::<ChannelKind>,
+                None,
+                None,
+            )
+            .unwrap(),
         );
         assert_eq!(ev.kind.as_u16(), 9007);
         assert!(has_tag(&ev, "name", "dev"));
+    }
+
+    #[test]
+    fn create_channel_ephemeral_emits_ttl() {
+        let cid = uuid();
+        let ev = sign(
+            build_create_channel(
+                cid,
+                "standup",
+                Some(Visibility::Open),
+                Some(ChannelKind::Stream),
+                None,
+                Some(3600),
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 9007);
+        assert!(has_tag(&ev, "ttl", "3600"));
     }
 
     // ── build_join ───────────────────────────────────────────────────────────
@@ -2087,6 +2488,313 @@ mod tests {
         assert_eq!(vals.len(), 2);
         assert_eq!(vals[0], "https://relay.example.com/git/abc/multi-clone");
         assert_eq!(vals[1], "ssh://git@github.com/org/multi-clone.git");
+    }
+
+    // ── build_git_patch / build_git_issue / build_git_status (NIP-34) ───────
+
+    #[test]
+    fn git_patch_happy_path_minimal() {
+        let owner = "a".repeat(64);
+        let repo = GitRepoCoord {
+            owner: owner.clone(),
+            id: "my-repo".to_string(),
+        };
+        let ev =
+            sign(build_git_patch(&repo, "diff --git a/x b/x", &GitPatchMeta::default()).unwrap());
+        assert_eq!(ev.kind.as_u16(), 1617);
+        assert_eq!(ev.content, "diff --git a/x b/x");
+        assert!(has_tag(&ev, "a", &format!("30617:{owner}:my-repo")));
+        assert!(has_tag(&ev, "p", &owner));
+    }
+
+    #[test]
+    fn git_patch_root_and_metadata_tags() {
+        let owner = "a".repeat(64);
+        let commit = "c".repeat(40);
+        let parent = "d".repeat(40);
+        let repo = GitRepoCoord {
+            owner,
+            id: "repo".to_string(),
+        };
+        let meta = GitPatchMeta {
+            root: true,
+            commit: Some(commit.clone()),
+            parent_commit: Some(parent.clone()),
+            ..Default::default()
+        };
+        let ev = sign(build_git_patch(&repo, "patch body", &meta).unwrap());
+        assert!(has_tag(&ev, "t", "root"));
+        assert!(has_tag(&ev, "commit", &commit));
+        assert!(has_tag(&ev, "parent-commit", &parent));
+        assert!(has_tag(&ev, "r", &commit));
+    }
+
+    #[test]
+    fn git_patch_rejects_root_and_root_revision_together() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let meta = GitPatchMeta {
+            root: true,
+            root_revision: true,
+            ..Default::default()
+        };
+        let err = build_git_patch(&repo, "x", &meta).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_patch_rejects_oversized_content() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let big = "x".repeat(60 * 1024 + 1);
+        let err = build_git_patch(&repo, &big, &GitPatchMeta::default()).unwrap_err();
+        assert!(matches!(err, SdkError::ContentTooLarge { .. }));
+    }
+
+    #[test]
+    fn git_patch_rejects_bad_repo_owner() {
+        let repo = GitRepoCoord {
+            owner: "not-hex".to_string(),
+            id: "repo".to_string(),
+        };
+        let err = build_git_patch(&repo, "x", &GitPatchMeta::default()).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_issue_happy_path() {
+        let owner = "a".repeat(64);
+        let repo = GitRepoCoord {
+            owner: owner.clone(),
+            id: "repo".to_string(),
+        };
+        let meta = GitIssueMeta {
+            labels: vec!["bug".to_string(), "p1".to_string()],
+            recipients: vec![],
+        };
+        let ev =
+            sign(build_git_issue(&repo, "Crashes on startup", "steps to repro", &meta).unwrap());
+        assert_eq!(ev.kind.as_u16(), 1621);
+        assert_eq!(ev.content, "steps to repro");
+        assert!(has_tag(&ev, "a", &format!("30617:{owner}:repo")));
+        assert!(has_tag(&ev, "subject", "Crashes on startup"));
+        assert!(has_tag(&ev, "t", "bug"));
+        assert!(has_tag(&ev, "t", "p1"));
+    }
+
+    #[test]
+    fn git_issue_rejects_empty_subject() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let err = build_git_issue(&repo, "", "body", &GitIssueMeta::default()).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_status_open_happy_path() {
+        let root = event_id().to_hex();
+        let meta = GitStatusMeta {
+            root_event: root.clone(),
+            ..Default::default()
+        };
+        let ev = sign(build_git_status(GitStatus::Open, "", &meta).unwrap());
+        assert_eq!(ev.kind.as_u16(), 1630);
+        assert!(has_tag(&ev, "e", &root));
+    }
+
+    #[test]
+    fn git_status_merged_with_applied_patches() {
+        let root = event_id().to_hex();
+        let patch_id = event_id().to_hex();
+        let merge_commit = "f".repeat(40);
+        let meta = GitStatusMeta {
+            root_event: root,
+            applied_patches: vec![GitAppliedPatchRef {
+                id: patch_id.clone(),
+                relay: None,
+                pubkey: None,
+            }],
+            merge_commit: Some(merge_commit.clone()),
+            ..Default::default()
+        };
+        let ev =
+            sign(build_git_status(GitStatus::AppliedOrResolved, "merged, thanks!", &meta).unwrap());
+        assert_eq!(ev.kind.as_u16(), 1631);
+        assert!(has_tag(&ev, "q", &patch_id));
+        assert!(has_tag(&ev, "merge-commit", &merge_commit));
+        assert!(has_tag(&ev, "r", &merge_commit));
+    }
+
+    #[test]
+    fn git_status_rejects_merge_fields_on_non_merged_status() {
+        let root = event_id().to_hex();
+        let meta = GitStatusMeta {
+            root_event: root,
+            merge_commit: Some("f".repeat(40)),
+            ..Default::default()
+        };
+        let err = build_git_status(GitStatus::Closed, "", &meta).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_status_rejects_bad_root_event() {
+        let meta = GitStatusMeta {
+            root_event: "not-an-event-id".to_string(),
+            ..Default::default()
+        };
+        let err = build_git_status(GitStatus::Open, "", &meta).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_patch_rejects_empty_content() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let err = build_git_patch(&repo, "", &GitPatchMeta::default()).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_patch_rejects_whitespace_only_content() {
+        // Regression: a failed `git format-patch | buzz patches send
+        // --patch-file -` must not silently publish a whitespace-only
+        // (i.e. unappliable) patch.
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let err = build_git_patch(&repo, "   \n\t\n", &GitPatchMeta::default()).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_repo_coord_rejects_invalid_repo_id_chars() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "../etc/passwd".to_string(),
+        };
+        let err = build_git_patch(&repo, "diff", &GitPatchMeta::default()).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_patch_rejects_short_commit_hex() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let meta = GitPatchMeta {
+            commit: Some("a".to_string()),
+            ..Default::default()
+        };
+        let err = build_git_patch(&repo, "diff", &meta).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_patch_accepts_full_sha1_and_sha256_commit_hex() {
+        let repo = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "repo".to_string(),
+        };
+        let meta_sha1 = GitPatchMeta {
+            commit: Some("c".repeat(40)),
+            ..Default::default()
+        };
+        assert!(build_git_patch(&repo, "diff", &meta_sha1).is_ok());
+        let meta_sha256 = GitPatchMeta {
+            commit: Some("c".repeat(64)),
+            ..Default::default()
+        };
+        assert!(build_git_patch(&repo, "diff", &meta_sha256).is_ok());
+    }
+
+    #[test]
+    fn git_status_defaults_p_tag_to_repo_owner_when_repo_given() {
+        // SDK-level: GitStatusMeta.recipients is the caller's responsibility
+        // (the CLI defaults it), but verify the repo owner ends up p-tagged
+        // when the CLI-style recipients list includes it.
+        let owner = "a".repeat(64);
+        let root = event_id().to_hex();
+        let meta = GitStatusMeta {
+            root_event: root,
+            repo: Some(GitRepoCoord {
+                owner: owner.clone(),
+                id: "repo".to_string(),
+            }),
+            recipients: vec![owner.clone()],
+            ..Default::default()
+        };
+        let ev = sign(build_git_status(GitStatus::Open, "", &meta).unwrap());
+        assert!(has_tag(&ev, "p", &owner));
+    }
+
+    #[test]
+    fn git_applied_patch_ref_parse_id_only() {
+        let id = "a".repeat(64);
+        let parsed = GitAppliedPatchRef::parse(&id).unwrap();
+        assert_eq!(parsed.id, id);
+        assert_eq!(parsed.relay, None);
+        assert_eq!(parsed.pubkey, None);
+    }
+
+    #[test]
+    fn git_applied_patch_ref_parse_id_and_relay() {
+        let id = "a".repeat(64);
+        let spec = format!("{id}:wss://relay.example.com");
+        let parsed = GitAppliedPatchRef::parse(&spec).unwrap();
+        assert_eq!(parsed.id, id);
+        assert_eq!(parsed.relay, Some("wss://relay.example.com".to_string()));
+        assert_eq!(parsed.pubkey, None);
+    }
+
+    #[test]
+    fn git_applied_patch_ref_parse_id_relay_and_pubkey() {
+        let id = "a".repeat(64);
+        let pubkey = "b".repeat(64);
+        let spec = format!("{id}:wss://relay.example.com:{pubkey}");
+        let parsed = GitAppliedPatchRef::parse(&spec).unwrap();
+        assert_eq!(parsed.id, id);
+        assert_eq!(parsed.relay, Some("wss://relay.example.com".to_string()));
+        assert_eq!(parsed.pubkey, Some(pubkey));
+    }
+
+    #[test]
+    fn git_status_q_tag_includes_relay_and_pubkey_hints() {
+        let root = event_id().to_hex();
+        let patch_id = event_id().to_hex();
+        let pubkey = "b".repeat(64);
+        let meta = GitStatusMeta {
+            root_event: root,
+            applied_patches: vec![GitAppliedPatchRef {
+                id: patch_id.clone(),
+                relay: Some("wss://relay.example.com".to_string()),
+                pubkey: Some(pubkey.clone()),
+            }],
+            ..Default::default()
+        };
+        let ev = sign(build_git_status(GitStatus::AppliedOrResolved, "", &meta).unwrap());
+        let q_tag = ev
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|v| v.as_str()) == Some("q"))
+            .expect("q tag present");
+        let parts = q_tag.as_slice();
+        assert_eq!(parts.get(1).map(|v| v.as_str()), Some(patch_id.as_str()));
+        assert_eq!(
+            parts.get(2).map(|v| v.as_str()),
+            Some("wss://relay.example.com")
+        );
+        assert_eq!(parts.get(3).map(|v| v.as_str()), Some(pubkey.as_str()));
     }
 
     // ── Builder 31: build_workflow_def ───────────────────────────────────────

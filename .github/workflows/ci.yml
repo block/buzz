@@ -5,7 +5,7 @@ on:
   pull_request:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -564,6 +564,12 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: cashapp/activate-hermit@e49f5cb4dd64ff0b0b659d1d8df499595451155a # v1
+      - name: Restore pub cache
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
+          restore-keys: pub-${{ runner.os }}-
       - name: Install dependencies
         run: cd mobile && flutter pub get
       - name: Format check
@@ -572,6 +578,12 @@ jobs:
         run: cd mobile && flutter analyze
       - name: Test
         run: cd mobile && flutter test
+      - name: Save pub cache
+        if: github.event_name == 'push'
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
 
   security:
     name: Security
@@ -688,6 +700,26 @@ jobs:
         run: cargo clippy --workspace --all-targets --target $env:TARGET -- -D warnings
       - name: Check (workspace)
         run: cargo check --workspace --all-targets --target $env:TARGET
+      - name: Test (buzz-dev-mcp)
+        # The Windows-only bash resolver lives in buzz-dev-mcp; its unit tests
+        # only gate if this crate is tested ON Windows.
+        run: cargo test -p buzz-dev-mcp --target $env:TARGET
+      # The bundled-bash staging (PortableGit download, SFX extract, mingw64 drop)
+      # runs only in release.yml on tag — so without this step the agent's only
+      # Windows transport would ship UNEXERCISED until a tagged release hits users.
+      # Stage the tree and spawn the staged bash on a real coreutils pipeline: this
+      # gates the SFX `-o` POSIX-path extraction, that bash.exe still spawns after
+      # mingw64/ is dropped, and that the lazily-loaded MSYS DLL closure (msys-2.0.dll,
+      # coreutils) survives — the exact behaviors unconfirmable off a non-Windows host.
+      - name: Smoke-test bundled bash staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage_dir="$RUNNER_TEMP/git-bash"
+          scripts/stage-windows-bash.sh "$stage_dir"
+          out=$("$stage_dir/usr/bin/bash.exe" -c 'echo hello | tr a-z A-Z')
+          [[ "$out" == "HELLO" ]] || { echo "staged bash pipeline failed: got '$out'" >&2; exit 1; }
+          echo "staged bash spawned and ran a coreutils pipeline"
       - name: Check (Tauri crate)
         run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target $env:TARGET
         env:

@@ -1,8 +1,6 @@
 // biome-ignore format: keep compact to stay within file size limit
 import {
   Activity,
-  ArrowDown,
-  ArrowUp,
   Bot,
   FolderGit2,
   Inbox,
@@ -14,7 +12,6 @@ import { AnimatePresence } from "motion/react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
-import { useManagedAgentsQuery } from "@/features/agents/hooks";
 import type { Workspace } from "@/features/workspaces/types";
 import { AddWorkspaceDialog } from "@/features/workspaces/ui/AddWorkspaceDialog";
 import { useDeferredLoad } from "@/shared/hooks/useDeferredStartup";
@@ -45,7 +42,10 @@ import {
   SidebarLoadingContent,
   useSidebarLoadingShape,
 } from "@/features/sidebar/ui/sidebarLoadingSkeleton";
-import { SECTION_ICON_BUTTON_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
+import {
+  SECTION_ACTION_VISIBILITY_CLASS,
+  SECTION_ICON_BUTTON_CLASS,
+} from "@/features/sidebar/ui/sidebarSectionStyles";
 import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
 import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
 import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCardVisibility";
@@ -56,7 +56,6 @@ import type {
   Profile,
   UserStatus,
 } from "@/shared/api/types";
-import { cn } from "@/shared/lib/cn";
 import {
   Sidebar,
   SidebarContent,
@@ -103,6 +102,7 @@ type AppSidebarProps = {
     | "workflows"
     | "pulse"
     | "projects";
+  unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
   workspaces: Workspace[];
   onAddWorkspace: (workspace: Workspace) => void;
@@ -122,8 +122,6 @@ type AppSidebarProps = {
     templateId?: string;
   }) => Promise<void>;
   onOpenAddWorkspace: () => void;
-  onOpenBrowseChannels: () => void;
-  onOpenBrowseForums: () => void;
   onHideDm: (channelId: string) => void;
   onMarkChannelUnread: (channelId: string) => void;
   onMarkChannelRead: (
@@ -182,6 +180,7 @@ export function AppSidebar({
   errorMessage,
   selectedChannelId,
   selectedView,
+  unreadChannelCounts,
   unreadChannelIds,
   workspaces,
   onAddWorkspace,
@@ -189,8 +188,6 @@ export function AppSidebar({
   onCreateChannel,
   onCreateForum,
   onOpenAddWorkspace,
-  onOpenBrowseChannels,
-  onOpenBrowseForums,
   onHideDm,
   onMarkChannelUnread,
   onMarkChannelRead,
@@ -235,12 +232,6 @@ export function AppSidebar({
   const sidebarFooterCardCount =
     (sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? 1 : 0) +
     (showSidebarUpdateCard ? 1 : 0);
-  const sidebarContentBottomPaddingClass =
-    sidebarFooterCardCount >= 2
-      ? "pb-[18rem]"
-      : sidebarFooterCardCount >= 1
-        ? "pb-52"
-        : "pb-32";
   const unreadBelowBottomClass =
     sidebarFooterCardCount >= 2
       ? "bottom-56"
@@ -252,6 +243,45 @@ export function AppSidebar({
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
+
+  React.useEffect(() => {
+    const scrollElement = scrollRef.current;
+    if (!scrollElement) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.deltaY === 0) return;
+
+      const maxScrollTop =
+        scrollElement.scrollHeight - scrollElement.clientHeight;
+      if (maxScrollTop <= 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+
+      const atTop = scrollElement.scrollTop <= 0;
+      const atBottom = scrollElement.scrollTop >= maxScrollTop - 1;
+      const scrollingPastTop = event.deltaY < 0 && atTop;
+      const scrollingPastBottom = event.deltaY > 0 && atBottom;
+
+      if (scrollingPastTop || scrollingPastBottom) {
+        event.preventDefault();
+        event.stopPropagation();
+        scrollElement.scrollTop = scrollingPastTop ? 0 : maxScrollTop;
+      }
+    };
+
+    scrollElement.addEventListener("wheel", handleWheel, {
+      capture: true,
+      passive: false,
+    });
+    return () => {
+      scrollElement.removeEventListener("wheel", handleWheel, {
+        capture: true,
+      });
+    };
+  }, []);
+
   const [createDialogKind, setCreateDialogKind] =
     React.useState<CreateChannelKind | null>(null);
 
@@ -411,16 +441,6 @@ export function AppSidebar({
     isLoading,
     streamChannels,
   });
-  const shouldLoadAgentCount = useDeferredLoad({
-    immediate: selectedView === "agents",
-    timeoutMs: 250,
-  });
-  const managedAgentsQuery = useManagedAgentsQuery({
-    enabled: shouldLoadAgentCount,
-  });
-  const totalAgentCount = managedAgentsQuery.data?.length ?? 0;
-  const shouldShowAgentCount =
-    totalAgentCount > 0 || managedAgentsQuery.isFetched;
   const resolvedDisplayName =
     profile?.displayName?.trim() ||
     fallbackDisplayName?.trim() ||
@@ -463,109 +483,100 @@ export function AppSidebar({
       data-testid="app-sidebar"
       variant="sidebar"
     >
-      <SidebarHeader
-        className="cursor-default select-none pt-11"
-        data-tauri-drag-region
-      >
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              isActive={selectedView === "home"}
-              onClick={onSelectHome}
-              tooltip="Inbox"
-              type="button"
-            >
-              <Inbox className="h-4 w-4" />
-              <span>Inbox</span>
-            </SidebarMenuButton>
-            {homeBadgeCount > 0 ? (
-              <SidebarMenuBadge
-                className="right-2 rounded-full bg-primary/15 px-1.5 text-2xs text-primary peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
-                data-testid="sidebar-home-count"
-              >
-                {Math.min(homeBadgeCount, 99)}
-              </SidebarMenuBadge>
-            ) : null}
-          </SidebarMenuItem>
-          <FeatureGate feature="pulse">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-pulse-view"
-                isActive={selectedView === "pulse"}
-                onClick={onSelectPulse}
-                tooltip="Pulse"
-                type="button"
-              >
-                <Activity className="h-4 w-4" />
-                <span>Pulse</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </FeatureGate>
-          <FeatureGate feature="projects">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-projects-view"
-                isActive={selectedView === "projects"}
-                onClick={onSelectProjects}
-                tooltip="Projects"
-                type="button"
-              >
-                <FolderGit2 className="h-4 w-4" />
-                <span>Projects</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </FeatureGate>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              data-testid="open-agents-view"
-              isActive={selectedView === "agents"}
-              onClick={onSelectAgents}
-              tooltip="Agents"
-              type="button"
-            >
-              <Bot className="h-4 w-4" />
-              <span>Agents</span>
-            </SidebarMenuButton>
-            {shouldShowAgentCount ? (
-              <SidebarMenuBadge
-                className="right-2 rounded-full bg-sidebar-accent/70 px-1.5 text-2xs leading-none text-sidebar-foreground/75 peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
-                data-testid="sidebar-agents-count"
-              >
-                <span className="leading-none">{totalAgentCount}</span>
-              </SidebarMenuBadge>
-            ) : null}
-          </SidebarMenuItem>
-          <FeatureGate feature="workflows">
-            <SidebarMenuItem>
-              <SidebarMenuButton
-                data-testid="open-workflows-view"
-                isActive={selectedView === "workflows"}
-                onClick={onSelectWorkflows}
-                tooltip="Workflows"
-                type="button"
-              >
-                <Zap className="h-4 w-4" />
-                <span>Workflows</span>
-              </SidebarMenuButton>
-            </SidebarMenuItem>
-          </FeatureGate>
-        </SidebarMenu>
-      </SidebarHeader>
-
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {unreadAboveCount > 0 ? (
           <MoreUnreadButton
             count={unreadAboveCount}
-            icon={<ArrowUp />}
             onClick={scrollToNextAbove}
             position="top"
             testId="sidebar-more-unread-above"
           />
         ) : null}
         <SidebarContent
-          className={cn(sidebarContentBottomPaddingClass)}
+          className="buzz-sidebar-scrollbar mt-(--buzz-top-chrome-height,2.5rem) overscroll-none"
           ref={scrollRef}
         >
+          <SidebarHeader
+            className="cursor-default select-none"
+            data-tauri-drag-region
+          >
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={selectedView === "home"}
+                  onClick={onSelectHome}
+                  tooltip="Inbox"
+                  type="button"
+                >
+                  <Inbox className="h-4 w-4" />
+                  <span>Inbox</span>
+                </SidebarMenuButton>
+                {homeBadgeCount > 0 ? (
+                  <SidebarMenuBadge
+                    className="right-2 rounded-full bg-primary/15 px-1.5 text-2xs text-primary peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
+                    data-testid="sidebar-home-count"
+                  >
+                    {Math.min(homeBadgeCount, 99)}
+                  </SidebarMenuBadge>
+                ) : null}
+              </SidebarMenuItem>
+              <FeatureGate feature="pulse">
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    data-testid="open-pulse-view"
+                    isActive={selectedView === "pulse"}
+                    onClick={onSelectPulse}
+                    tooltip="Pulse"
+                    type="button"
+                  >
+                    <Activity className="h-4 w-4" />
+                    <span>Pulse</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </FeatureGate>
+              <FeatureGate feature="projects">
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    data-testid="open-projects-view"
+                    isActive={selectedView === "projects"}
+                    onClick={onSelectProjects}
+                    tooltip="Projects"
+                    type="button"
+                  >
+                    <FolderGit2 className="h-4 w-4" />
+                    <span>Projects</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </FeatureGate>
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  data-testid="open-agents-view"
+                  isActive={selectedView === "agents"}
+                  onClick={onSelectAgents}
+                  tooltip="Agents"
+                  type="button"
+                >
+                  <Bot className="h-4 w-4" />
+                  <span>Agents</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <FeatureGate feature="workflows">
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    data-testid="open-workflows-view"
+                    isActive={selectedView === "workflows"}
+                    onClick={onSelectWorkflows}
+                    tooltip="Workflows"
+                    type="button"
+                  >
+                    <Zap className="h-4 w-4" />
+                    <span>Workflows</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              </FeatureGate>
+            </SidebarMenu>
+          </SidebarHeader>
+
           {isLoading ? (
             <SidebarLoadingContent shape={sidebarLoadingShape} />
           ) : null}
@@ -574,7 +585,6 @@ export function AppSidebar({
             <>
               {starredChannels.length > 0 ? (
                 <ChannelGroupSection
-                  browseAriaLabel="Starred channels"
                   createAriaLabel="Starred channels"
                   hasUnread={starredChannels.some((c) =>
                     unreadChannelIds.has(c.id),
@@ -594,6 +604,7 @@ export function AppSidebar({
                   onToggleCollapsed={() => toggleCollapsedGroup("starred")}
                   selectedChannelId={selectedChannelId}
                   title="Starred"
+                  unreadChannelCounts={unreadChannelCounts}
                   unreadChannelIds={unreadChannelIds}
                   mutedChannelIds={mutedChannelIds}
                   onMuteChannel={onMuteChannel}
@@ -624,6 +635,7 @@ export function AppSidebar({
                     isCollapsed={collapsedSections[section.id] ?? false}
                     isActiveChannel={selectedView === "channel"}
                     selectedChannelId={selectedChannelId}
+                    unreadChannelCounts={unreadChannelCounts}
                     unreadChannelIds={unreadChannelIds}
                     sections={channelSections}
                     assignments={channelAssignments}
@@ -656,8 +668,6 @@ export function AppSidebar({
                   />
                 ))}
                 <ChannelGroupSection
-                  browseAriaLabel="Browse channels"
-                  browseTestId="browse-channels"
                   createAriaLabel="Create a channel"
                   draggable
                   groupClassName={
@@ -668,7 +678,6 @@ export function AppSidebar({
                   isActiveChannel={selectedView === "channel"}
                   items={sectionBuckets.unassigned}
                   listTestId="stream-list"
-                  onBrowse={onOpenBrowseChannels}
                   onCreateClick={() => setCreateDialogKind("stream")}
                   onMarkAllRead={onMarkAllChannelsRead}
                   onMarkChannelRead={onMarkChannelRead}
@@ -677,6 +686,7 @@ export function AppSidebar({
                   onToggleCollapsed={() => toggleCollapsedGroup("channels")}
                   selectedChannelId={selectedChannelId}
                   title="Channels"
+                  unreadChannelCounts={unreadChannelCounts}
                   unreadChannelIds={unreadChannelIds}
                   sections={channelSections}
                   assignments={channelAssignments}
@@ -693,15 +703,12 @@ export function AppSidebar({
               </SidebarDndContext>
               <FeatureGate feature="forum">
                 <ChannelGroupSection
-                  browseAriaLabel="Browse forums"
-                  browseTestId="browse-forums"
                   createAriaLabel="Create a forum"
                   hasUnread={unreadChannelIds.size > 0}
                   isCollapsed={collapsedGroups.forums}
                   isActiveChannel={selectedView === "channel"}
                   items={forumChannels}
                   listTestId="forum-list"
-                  onBrowse={onOpenBrowseForums}
                   onCreateClick={() => setCreateDialogKind("forum")}
                   onMarkAllRead={onMarkAllChannelsRead}
                   onMarkChannelRead={onMarkChannelRead}
@@ -710,6 +717,7 @@ export function AppSidebar({
                   onToggleCollapsed={() => toggleCollapsedGroup("forums")}
                   selectedChannelId={selectedChannelId}
                   title="Forums"
+                  unreadChannelCounts={unreadChannelCounts}
                   unreadChannelIds={unreadChannelIds}
                   mutedChannelIds={mutedChannelIds}
                   onMuteChannel={onMuteChannel}
@@ -722,7 +730,7 @@ export function AppSidebar({
                     <button
                       aria-expanded={isNewDmOpen}
                       aria-label="Compose new message"
-                      className={SECTION_ICON_BUTTON_CLASS}
+                      className={`${SECTION_ICON_BUTTON_CLASS} ${SECTION_ACTION_VISIBILITY_CLASS}`}
                       data-testid="new-dm-trigger"
                       onClick={() => {
                         setIsNewDmOpen(true);
@@ -748,6 +756,7 @@ export function AppSidebar({
                 selectedChannelId={selectedChannelId}
                 testId="dm-list"
                 title="Direct Messages"
+                unreadChannelCounts={unreadChannelCounts}
                 unreadChannelIds={unreadChannelIds}
                 mutedChannelIds={mutedChannelIds}
                 onMuteChannel={onMuteChannel}
@@ -768,14 +777,13 @@ export function AppSidebar({
           <MoreUnreadButton
             bottomClassName={unreadBelowBottomClass}
             count={unreadBelowCount}
-            icon={<ArrowDown />}
             onClick={scrollToNextBelow}
             position="bottom"
             testId="sidebar-more-unread-below"
           />
         ) : null}
 
-        <SidebarFooter className="absolute inset-x-0 bottom-0 z-30 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
+        <SidebarFooter className="z-30 shrink-0 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
           <AnimatePresence>
             {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
               <SidebarRelayConnectionCard

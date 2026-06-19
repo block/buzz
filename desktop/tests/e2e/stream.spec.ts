@@ -1,6 +1,10 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 
-import { installRelayBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  installRelayBridge,
+  openChannelBrowser,
+  TEST_IDENTITIES,
+} from "../helpers/bridge";
 import { assertRelaySeeded } from "../helpers/seed";
 
 const isCi = Boolean(process.env.CI);
@@ -61,7 +65,7 @@ async function createAndJoinSharedStream(
   await expect(ownerPage.getByTestId("stream-list")).toContainText(channelName);
   await expect(ownerPage.getByTestId("chat-title")).toHaveText(channelName);
 
-  await memberPage.getByTestId("browse-channels").click();
+  await openChannelBrowser(memberPage);
   await expect(memberPage.getByTestId("channel-browser-dialog")).toBeVisible();
   await memberPage
     .getByTestId(`browse-channel-${channelName}`)
