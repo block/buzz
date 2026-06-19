@@ -297,21 +297,37 @@ export function useAnchoredScroll({
       );
       if (!el) return false;
 
+      const rect = el.getBoundingClientRect();
+      const containerRect = container.getBoundingClientRect();
+      const currentTopOffset = rect.top - containerRect.top;
+      const centeredTopOffset = (container.clientHeight - rect.height) / 2;
+      const maxScrollTop = Math.max(
+        0,
+        container.scrollHeight - container.clientHeight,
+      );
+      const targetScrollTop = Math.min(
+        maxScrollTop,
+        Math.max(0, container.scrollTop + currentTopOffset - centeredTopOffset),
+      );
+      const targetTopOffset =
+        currentTopOffset - (targetScrollTop - container.scrollTop);
+
       el.scrollIntoView({
         block: "center",
         behavior: options.behavior ?? "auto",
       });
 
-      // After the scroll, the user's anchor row is this message at its new
-      // top-relative offset. Recompute so layout-effect restoration matches.
-      const rect = el.getBoundingClientRect();
-      const containerTop = container.getBoundingClientRect().top;
+      // `scrollIntoView({ behavior: "smooth" })` starts an async animation, so
+      // measuring after the call can still return the pre-animation position.
+      // Save the clamped destination offset instead; otherwise a concurrent
+      // render/ResizeObserver restore can fight the smooth scroll back toward
+      // where it started.
       anchorRef.current = {
         kind: "message",
         messageId,
-        topOffset: rect.top - containerTop,
+        topOffset: targetTopOffset,
       };
-      setIsAtBottom(isAtBottomNow(container));
+      setIsAtBottom(maxScrollTop - targetScrollTop <= AT_BOTTOM_THRESHOLD_PX);
 
       if (options.highlight) {
         if (highlightTimeoutRef.current !== null) {
