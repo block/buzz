@@ -48,7 +48,7 @@ export function ProjectsView() {
   }
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4 pt-14">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4">
       <div className="mb-3 flex items-center gap-2">
         <h2 className="text-sm font-medium text-muted-foreground">
           {projects.length} {projects.length === 1 ? "project" : "projects"}

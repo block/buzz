@@ -273,7 +273,7 @@ function AgentsLoadingBody() {
 
 function CardListLoadingBody() {
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-14 sm:px-6">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-4 sm:px-6">
       <div className="mb-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Skeleton className="h-6 w-28" />
