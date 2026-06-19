@@ -440,27 +440,28 @@ export function AppShell() {
     },
     [markChannelRead],
   );
-  const threadActivityFeedItems = React.useMemo<FeedItem[]>(
-    () =>
-      threadActivityItems
-        .filter((item) => {
-          const rootId = getThreadReference(item.tags).rootId;
-          return !rootId || !mutedRootIds.has(rootId);
-        })
-        .map((item) => ({
-          id: item.id,
-          kind: item.kind,
-          pubkey: item.pubkey,
-          content: item.content,
-          createdAt: item.createdAt,
-          channelId: item.channelId,
-          channelName: item.channelName,
-          channelType: undefined,
-          tags: item.tags,
-          category: "activity" as const,
-        })),
-    [mutedRootIds, threadActivityItems],
-  );
+  const mutedRootIdsKey = [...mutedRootIds].sort().join("\0");
+  const threadActivityFeedItems = React.useMemo<FeedItem[]>(() => {
+    // mutedRootIds is a mutable Set; this key invalidates when contents change.
+    void mutedRootIdsKey;
+    return threadActivityItems
+      .filter((item) => {
+        const rootId = getThreadReference(item.tags).rootId;
+        return !rootId || !mutedRootIds.has(rootId);
+      })
+      .map((item) => ({
+        id: item.id,
+        kind: item.kind,
+        pubkey: item.pubkey,
+        content: item.content,
+        createdAt: item.createdAt,
+        channelId: item.channelId,
+        channelName: item.channelName,
+        channelType: undefined,
+        tags: item.tags,
+        category: "activity" as const,
+      }));
+  }, [mutedRootIds, mutedRootIdsKey, threadActivityItems]);
 
   // Badge count is computed here (rather than inside useHomeFeedNotifications)
   // so it can consume the NIP-RS read-state lifted from the single
