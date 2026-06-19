@@ -245,6 +245,7 @@ export function HomeView({
         mentionNames:
           resolveMentionNames(message.tags ?? [], feedProfiles) ?? [],
         reactions: message.reactions,
+        tags: message.tags,
       };
     });
   }, [
@@ -544,6 +545,7 @@ export function HomeView({
                   id: result.eventId,
                   parentId: result.parentEventId,
                   rootId: result.rootEventId,
+                  tags: emojiTags,
                 };
                 setLocalRepliesByItemId((current) => ({
                   ...current,

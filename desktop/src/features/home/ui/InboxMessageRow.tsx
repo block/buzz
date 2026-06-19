@@ -5,6 +5,7 @@ import type { TimelineMessage } from "@/features/messages/types";
 import { MessageActionBar } from "@/features/messages/ui/MessageActionBar";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
+import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { cn } from "@/shared/lib/cn";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -22,6 +23,7 @@ function toTimelineMessage(message: InboxDisplayMessage): TimelineMessage {
     createdAt: 0,
     depth: message.depth,
     reactions: message.reactions ?? [],
+    tags: message.tags,
     time: message.fullTimestampLabel,
   };
 }
@@ -51,6 +53,10 @@ export function InboxMessageRow({
   const timelineMessage = React.useMemo(
     () => toTimelineMessage(message),
     [message],
+  );
+  const { customEmoji, emojiOnly } = useMessageEmoji(
+    message.content,
+    message.tags,
   );
   const [badgeBurstEmoji, setBadgeBurstEmoji] = React.useState<string | null>(
     null,
@@ -128,8 +134,13 @@ export function InboxMessageRow({
 
           <div className="mt-0.5">
             <Markdown
-              className="max-w-full text-left text-sm text-foreground"
+              className={cn(
+                "max-w-full text-left text-sm text-foreground",
+                emojiOnly &&
+                  "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
+              )}
               content={message.content}
+              customEmoji={customEmoji}
               mentionNames={message.mentionNames}
             />
             <MessageReactions
