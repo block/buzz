@@ -49,13 +49,8 @@ export function pickPreferredManagedAgent(agents: ManagedAgent[]) {
 export function findReusablePersonaAgent(
   agents: ManagedAgent[],
   personaId: string,
-  channelMemberPubkeys: ReadonlySet<string>,
 ): ManagedAgent | undefined {
-  const candidates = agents.filter(
-    (agent) =>
-      agent.personaId === personaId &&
-      !channelMemberPubkeys.has(normalizePubkey(agent.pubkey)),
-  );
+  const candidates = agents.filter((agent) => agent.personaId === personaId);
   return pickPreferredManagedAgent(candidates);
 }
 
@@ -88,11 +83,7 @@ export function findReusableAgent(
   },
 ): ManagedAgent | undefined {
   if (input.personaId) {
-    return findReusablePersonaAgent(
-      agents,
-      input.personaId,
-      channelMemberPubkeys,
-    );
+    return findReusablePersonaAgent(agents, input.personaId);
   }
   if (!input.systemPrompt?.trim()) {
     return findReusableGenericAgent(

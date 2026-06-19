@@ -9,6 +9,7 @@ import {
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { ParsePersonaFilesResult } from "@/shared/api/tauriPersonas";
 import { createPersona } from "@/shared/api/tauriPersonas";
+import { resolveImportedPersonaAvatarUrl } from "@/shared/avatars/gooseAppAvatarRefs";
 import { Button } from "@/shared/ui/button";
 import { Checkbox } from "@/shared/ui/checkbox";
 import {
@@ -91,9 +92,10 @@ export function BatchImportDialog({
       });
 
       try {
+        const avatarUrl = resolveImportedPersonaAvatarUrl(persona);
         await createPersona({
           displayName: persona.displayName,
-          avatarUrl: persona.avatarDataUrl ?? undefined,
+          avatarUrl: avatarUrl ?? undefined,
           systemPrompt: persona.systemPrompt,
           runtime: persona.runtime ?? undefined,
           model: persona.model ?? undefined,
@@ -178,7 +180,7 @@ export function BatchImportDialog({
                         onClick={(e: React.MouseEvent) => e.stopPropagation()}
                       />
                       <ProfileAvatar
-                        avatarUrl={persona.avatarDataUrl}
+                        avatarUrl={resolveImportedPersonaAvatarUrl(persona)}
                         className="h-8 w-8 rounded-lg text-xs"
                         label={persona.displayName}
                       />

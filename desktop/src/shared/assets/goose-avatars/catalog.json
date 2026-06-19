@@ -1,0 +1,1289 @@
+{
+  "schemaVersion": 1,
+  "catalogVersion": "20260528T204216762Z",
+  "collections": [
+    {
+      "id": "fuzzies",
+      "label": "Fuzzies",
+      "coverAvatarId": "fuzzies-1",
+      "avatarIds": [
+        "fuzzies-1",
+        "fuzzies-2",
+        "fuzzies-3",
+        "fuzzies-4",
+        "fuzzies-5",
+        "fuzzies-6",
+        "fuzzies-7",
+        "fuzzies-8",
+        "fuzzies-9",
+        "fuzzies-10",
+        "fuzzies-11",
+        "fuzzies-12",
+        "fuzzies-13",
+        "fuzzies-14",
+        "fuzzies-15",
+        "fuzzies-16",
+        "fuzzies-17",
+        "fuzzies-18"
+      ]
+    },
+    {
+      "id": "gloopies",
+      "label": "Gloopies",
+      "coverAvatarId": "gloopies-1",
+      "avatarIds": [
+        "gloopies-1",
+        "gloopies-2",
+        "gloopies-3",
+        "gloopies-4",
+        "gloopies-5",
+        "gloopies-6",
+        "gloopies-7",
+        "gloopies-8",
+        "gloopies-9",
+        "gloopies-10",
+        "gloopies-11",
+        "gloopies-12",
+        "gloopies-13",
+        "gloopies-14",
+        "gloopies-15",
+        "gloopies-16",
+        "gloopies-17",
+        "gloopies-18",
+        "gloopies-19",
+        "gloopies-20"
+      ]
+    },
+    {
+      "id": "pollies",
+      "label": "Pollies",
+      "coverAvatarId": "pollies-1",
+      "avatarIds": [
+        "pollies-1",
+        "pollies-2",
+        "pollies-3",
+        "pollies-4",
+        "pollies-5",
+        "pollies-6",
+        "pollies-7",
+        "pollies-8",
+        "pollies-9",
+        "pollies-10",
+        "pollies-11",
+        "pollies-12",
+        "pollies-13",
+        "pollies-14",
+        "pollies-15",
+        "pollies-16",
+        "pollies-17",
+        "pollies-18",
+        "pollies-19",
+        "pollies-20",
+        "pollies-21",
+        "pollies-22",
+        "pollies-23",
+        "pollies-24",
+        "pollies-25"
+      ]
+    }
+  ],
+  "assets": [
+    {
+      "id": "fuzzies-1",
+      "label": "Fuzzies 1",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-1.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3587616,
+          "sha256": "b822c12ce654a893e75e38390d4cee0a0665935156af0b33a8f0b2f5c657551a"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-1.webm",
+          "mimeType": "video/webm",
+          "byteSize": 562357,
+          "sha256": "2380a307f7dfa3d8a643e71a3805b69f14ae7450cc9e3387eabb20f6a6c6f30e"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-2",
+      "label": "Fuzzies 2",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-2.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3748493,
+          "sha256": "fb6f87df5d833b12b1bb31b50db1920244d847fecb087d544da84ad8d98ce680"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-2.webm",
+          "mimeType": "video/webm",
+          "byteSize": 775342,
+          "sha256": "13814e37ab8536191d6524e759e50b72ce0ff5537236ff9483719e2ace470667"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-3",
+      "label": "Fuzzies 3",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-3.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3396604,
+          "sha256": "0e54f12d8cd725025c4ffcb53bfbd54e77fcb67a25840d8a816b1c58cb068d1c"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-3.webm",
+          "mimeType": "video/webm",
+          "byteSize": 446315,
+          "sha256": "301d92bf22c82d7abafef1114a081bfd869174c54c176de6ba81e2dd0a676465"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-4",
+      "label": "Fuzzies 4",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-4.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3577602,
+          "sha256": "2096c81485ca1bca0bb6f331a1ee7e79fa8ce536b6fbc9ac8b64d2e09e34d7f8"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-4.webm",
+          "mimeType": "video/webm",
+          "byteSize": 512709,
+          "sha256": "ee139a93180d64ee60990b59348061d4676f92e4d7630b6951d8311307079507"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-5",
+      "label": "Fuzzies 5",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-5.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3370086,
+          "sha256": "f4ed22538c1cb7377683c5337e0464fb4fe11f42b8b040b71e0fcc8c2ca24b6a"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-5.webm",
+          "mimeType": "video/webm",
+          "byteSize": 398035,
+          "sha256": "c9df25c6e2be8ba58b1ca768f093254665ddbced93d85a93e1f8263ca2132cbd"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-6",
+      "label": "Fuzzies 6",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-6.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3353871,
+          "sha256": "e5d06587c06bd1be9aebc323b284dedf238e2f77a22136d420244dc0d8e1b2ef"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-6.webm",
+          "mimeType": "video/webm",
+          "byteSize": 334667,
+          "sha256": "67cfe087be1b9158e1e531779d790b5b1ffbc81c628a9642f069d829c31eb6bd"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-7",
+      "label": "Fuzzies 7",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-7.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3361424,
+          "sha256": "62dd3b1adcfd0bd2436e87238250ab97902e6f8443b4f1ea4f30113fa515ce33"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-7.webm",
+          "mimeType": "video/webm",
+          "byteSize": 336258,
+          "sha256": "4259ee6f611acca64dd891d186a57d8e828c9916be63ad663b6d007a8c0c3712"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-8",
+      "label": "Fuzzies 8",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-8.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3675297,
+          "sha256": "4018b072770b784f1e761908746adf8628e08a02c106db704f1014a83f0a55a6"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-8.webm",
+          "mimeType": "video/webm",
+          "byteSize": 595441,
+          "sha256": "964281b00abd0252fec95cee853bc932796f6c8ae544ad1bbc9d1621716a9e92"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-9",
+      "label": "Fuzzies 9",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-9.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3449154,
+          "sha256": "b9192330cf2c35de94bf7e9130446bb3be23fc50ed826f6a3976e9525fea45c2"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-9.webm",
+          "mimeType": "video/webm",
+          "byteSize": 408337,
+          "sha256": "41c957f1af633d6204e426f33869dccbea5f89e36900194d0844aa842aaaca1f"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-10",
+      "label": "Fuzzies 10",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-10.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 2353341,
+          "sha256": "ff22603459c7da335f58528b0519456ced5cdd671d0ee3d9953288920d0c81aa"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-10.webm",
+          "mimeType": "video/webm",
+          "byteSize": 284697,
+          "sha256": "91aae276e60788344c3c8e5625250efa8a1d3445f126f17a089036045933c79d"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-11",
+      "label": "Fuzzies 11",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-11.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3746617,
+          "sha256": "4ad1571cbf3c46e69e88149d08d7c49553cd9976bb246042c220e797b4fa1a97"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-11.webm",
+          "mimeType": "video/webm",
+          "byteSize": 814784,
+          "sha256": "5c23407983561c51939c2b67f8cc2ffc21150d7bfc9be5f89265294bb562be66"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-12",
+      "label": "Fuzzies 12",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-12.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4102906,
+          "sha256": "e1216b727c7c8051602a2b2ca8669ee84aa38a34dff8c9c6f824fe61f4f576f2"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-12.webm",
+          "mimeType": "video/webm",
+          "byteSize": 979614,
+          "sha256": "bd25e2bcca0dfc809b76256625504ddad0ef531b41c38125db45474736362e40"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-13",
+      "label": "Fuzzies 13",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-13.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3358935,
+          "sha256": "8e6e40a6ba54dc8b616fd0dfc4dc5b3e470bb0f76a5281974bb2e32e8b4e0dff"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-13.webm",
+          "mimeType": "video/webm",
+          "byteSize": 344707,
+          "sha256": "e53c580fb7da7da0f8a9f3fed400c93f233f3acc2383773fd80eda406cbfd969"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-14",
+      "label": "Fuzzies 14",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-14.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3739689,
+          "sha256": "276de0fc2d6466d4ca170de22e41ca29770320b92b50428c848d3a0a78afeb0b"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-14.webm",
+          "mimeType": "video/webm",
+          "byteSize": 775482,
+          "sha256": "8466ee48433d8584fcdc409393f7a6765a6f95164e52b0ea5824b98268f95c29"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-15",
+      "label": "Fuzzies 15",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-15.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 2689389,
+          "sha256": "bc1fae7689b1b0d7aa0d3bd04e0bce41ea146eacfee6da608ac94a0b6a81657b"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-15.webm",
+          "mimeType": "video/webm",
+          "byteSize": 345318,
+          "sha256": "ce20ee905c6e2300a465297e73574651d89053541042e1131664417b897416f2"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-16",
+      "label": "Fuzzies 16",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-16.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3438276,
+          "sha256": "640284b0115fd3b112be82672c96b56ba3fd26e9a0d6cbd531c00646866cae2a"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-16.webm",
+          "mimeType": "video/webm",
+          "byteSize": 528191,
+          "sha256": "3f0ba84d31b9bf98034d272fbd58e5f712a25e7978554e83880339cbf0a0d124"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-17",
+      "label": "Fuzzies 17",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-17.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 1873124,
+          "sha256": "aa7787e47aaed4fa7ebdb87d521fb44ea9eb71e402a10cf561636ade243bc9ff"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-17.webm",
+          "mimeType": "video/webm",
+          "byteSize": 246182,
+          "sha256": "a0a7239d6ae446d08e51f331c89ae41f425a46ef4ed2d09b8e420d26868156ee"
+        }
+      }
+    },
+    {
+      "id": "fuzzies-18",
+      "label": "Fuzzies 18",
+      "collectionId": "fuzzies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/fuzzies/fuzzies-18.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3064104,
+          "sha256": "bcca5aebbd02ede2e73a19da5f44418a772de7b02f519cb55deb43f782acc876"
+        },
+        "webm": {
+          "path": "webm/fuzzies/fuzzies-18.webm",
+          "mimeType": "video/webm",
+          "byteSize": 265391,
+          "sha256": "53829413ff200d97db80862d71a4df17648fb899ac4731326b00c519577e170c"
+        }
+      }
+    },
+    {
+      "id": "gloopies-1",
+      "label": "Gloopies 1",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-1.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4087416,
+          "sha256": "61475fcd551b1c4f1b1871aadda9868c5ea9333b1238328351a567d16e342f05"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-1.webm",
+          "mimeType": "video/webm",
+          "byteSize": 886174,
+          "sha256": "3c6115ef11a389021dd26563169cfa08d9b977eea5f60c21bf6109d050358a67"
+        }
+      }
+    },
+    {
+      "id": "gloopies-2",
+      "label": "Gloopies 2",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-2.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4415483,
+          "sha256": "8af7406907ee6927940356aecddc2b125fa43509e832e7914a60af4de510cc0b"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-2.webm",
+          "mimeType": "video/webm",
+          "byteSize": 941444,
+          "sha256": "efe6677767ac92e647666e334541b41a15cef23b608c125352a19fca41ec77b2"
+        }
+      }
+    },
+    {
+      "id": "gloopies-3",
+      "label": "Gloopies 3",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-3.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4428777,
+          "sha256": "f455613d6f83ff175e9d11da1f69cb34ba1328753d8b8ff67a232a2b535e5797"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-3.webm",
+          "mimeType": "video/webm",
+          "byteSize": 1136712,
+          "sha256": "dcd12f68b9428c22a108153bb875e7a8bef3507b332de09db5c09ebcd79e4f57"
+        }
+      }
+    },
+    {
+      "id": "gloopies-4",
+      "label": "Gloopies 4",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-4.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4027746,
+          "sha256": "3eab00bdf6ccfc38118c6743a44dc1ec795347b29a8c4214b5d8ef45cb000069"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-4.webm",
+          "mimeType": "video/webm",
+          "byteSize": 848393,
+          "sha256": "ebc27dae67888e200d501b92e6ba193f217afa2bbff3b57facc6e2a802154e1e"
+        }
+      }
+    },
+    {
+      "id": "gloopies-5",
+      "label": "Gloopies 5",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-5.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4051280,
+          "sha256": "fa86b237a38409e2cc9072ab722a4ae552789430a019c784f14a8487637ff262"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-5.webm",
+          "mimeType": "video/webm",
+          "byteSize": 995959,
+          "sha256": "d0bde66014fe401f13314f766e8d03ba01f1082d73c6e33d7cb709378077c11d"
+        }
+      }
+    },
+    {
+      "id": "gloopies-6",
+      "label": "Gloopies 6",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-6.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3759894,
+          "sha256": "42354ea5176e94e0b8b97eeef7b07b2ac9d55bb5f2a98d1ecf0856664cdefffb"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-6.webm",
+          "mimeType": "video/webm",
+          "byteSize": 799269,
+          "sha256": "d564f606c3dfdaa1de3de516bf1c1e6d7930ac1e990d26549129c481dbb44115"
+        }
+      }
+    },
+    {
+      "id": "gloopies-7",
+      "label": "Gloopies 7",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-7.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3980892,
+          "sha256": "3ae7f24b82d8e71f66dcc1b362e82117e9d1edf598731d687cef3b38cd1d7b5a"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-7.webm",
+          "mimeType": "video/webm",
+          "byteSize": 826850,
+          "sha256": "d03b7767d695b340361a6f83e679b9fa72b67c57f3901c54632a7dacfdae30a0"
+        }
+      }
+    },
+    {
+      "id": "gloopies-8",
+      "label": "Gloopies 8",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-8.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4124326,
+          "sha256": "aba48b04887a8be37469d2ee6a80682f2811acf0ffef4c6f0282324456750586"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-8.webm",
+          "mimeType": "video/webm",
+          "byteSize": 936412,
+          "sha256": "869ce7b040ecba42677dd6555dfd5c61e6fd9c604f89dee707f8ebfffe7dfb54"
+        }
+      }
+    },
+    {
+      "id": "gloopies-9",
+      "label": "Gloopies 9",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-9.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4078581,
+          "sha256": "fd1f6b7adc6fe4d6b6e77f4015a033d1324b0f97a9822d0f4d03b859ce3e9f4e"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-9.webm",
+          "mimeType": "video/webm",
+          "byteSize": 943807,
+          "sha256": "c587005dcb9197564ecb378ecd93cf3d954c26c4d7619d95302b7686fa276129"
+        }
+      }
+    },
+    {
+      "id": "gloopies-10",
+      "label": "Gloopies 10",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-10.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4135789,
+          "sha256": "d3f22a3b79963e6ae95e2f8e6f5523015c6f480a159073b1bc063abb4f6ea702"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-10.webm",
+          "mimeType": "video/webm",
+          "byteSize": 881273,
+          "sha256": "165c1cd72626fd8e5ab7a4b52f32bcd401d9d7f341e341a5718d9542596a24be"
+        }
+      }
+    },
+    {
+      "id": "gloopies-11",
+      "label": "Gloopies 11",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-11.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4079372,
+          "sha256": "eab3b59515cd3a7f0353a76f9140633af21f5a4a4accd771677a2d43d109e4b6"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-11.webm",
+          "mimeType": "video/webm",
+          "byteSize": 899295,
+          "sha256": "10e1b873a4732b904a514c00fe5c2772a32a64a282034a9c91c8a346130390ab"
+        }
+      }
+    },
+    {
+      "id": "gloopies-12",
+      "label": "Gloopies 12",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-12.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4018035,
+          "sha256": "fb164080c52ce712b3cece4fd7cf328f512c3777ba6549e0235b760392c1381d"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-12.webm",
+          "mimeType": "video/webm",
+          "byteSize": 867243,
+          "sha256": "b52886a566214778e36bd9b5893f98da2faf3c404bf71b42ccc74c12d44cdfe1"
+        }
+      }
+    },
+    {
+      "id": "gloopies-13",
+      "label": "Gloopies 13",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-13.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4449278,
+          "sha256": "66950a53c034092d4c842e769f667370b3f3be0838053523fa5eef4e08bae25e"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-13.webm",
+          "mimeType": "video/webm",
+          "byteSize": 1157793,
+          "sha256": "e72aa6404d645c350dabf45ba20b9313b4f5af3b6e48c97c03137c7610e18f9b"
+        }
+      }
+    },
+    {
+      "id": "gloopies-14",
+      "label": "Gloopies 14",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-14.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4232273,
+          "sha256": "de5fb07f3545a38c16bfab59455a5815cf41c5fc8ec437fa994a31901b19e1ae"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-14.webm",
+          "mimeType": "video/webm",
+          "byteSize": 1029928,
+          "sha256": "e1682dd1995b5f0a0e143a875a8d451ca6df4e5ba9adec2df3cc315ef689c80f"
+        }
+      }
+    },
+    {
+      "id": "gloopies-15",
+      "label": "Gloopies 15",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-15.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4161795,
+          "sha256": "9de3a6c7c3bcdbfa03dcb228b08a1db0eba6d42f66352264c7d827991b303408"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-15.webm",
+          "mimeType": "video/webm",
+          "byteSize": 891417,
+          "sha256": "13e2f916bbbf5754561041c5e50df4a9b6ff28bf7e978f208fd787decde7d5ae"
+        }
+      }
+    },
+    {
+      "id": "gloopies-16",
+      "label": "Gloopies 16",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-16.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4278864,
+          "sha256": "3e040dc107cabae9a55d69dc971e166945c41c369d2616c1da3e99b172f50495"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-16.webm",
+          "mimeType": "video/webm",
+          "byteSize": 992895,
+          "sha256": "d73fdcedd8e7c7460f9e3c95ae7b77a8792ee372929d1c5a36c3c705239360bf"
+        }
+      }
+    },
+    {
+      "id": "gloopies-17",
+      "label": "Gloopies 17",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-17.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4041698,
+          "sha256": "4b95aedf2d5654aa195498f4ef305061342b32943c72927c77013ce456cda648"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-17.webm",
+          "mimeType": "video/webm",
+          "byteSize": 781077,
+          "sha256": "16c7d83660042d4b65212cc160cf2fef723a36b7b2075bc0db3b378bf57c916d"
+        }
+      }
+    },
+    {
+      "id": "gloopies-18",
+      "label": "Gloopies 18",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-18.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3941245,
+          "sha256": "583e44af88b674a502e0b0dcf06c8ddacb345bb526b1770340f0271d8e10ae3c"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-18.webm",
+          "mimeType": "video/webm",
+          "byteSize": 877967,
+          "sha256": "30187392165ecff2a87d8a20118490817ce35a19de04f37fcbed94e2275a8788"
+        }
+      }
+    },
+    {
+      "id": "gloopies-19",
+      "label": "Gloopies 19",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-19.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4279106,
+          "sha256": "fe51639bc1ae8da73763e63fea520acb4fbea756fe347071b80ef2b5918611d8"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-19.webm",
+          "mimeType": "video/webm",
+          "byteSize": 1200666,
+          "sha256": "ad3cd0c5b81c3b77305b5f0e13201eccef34707deff8ec43958dc3fd858e7524"
+        }
+      }
+    },
+    {
+      "id": "gloopies-20",
+      "label": "Gloopies 20",
+      "collectionId": "gloopies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/gloopies/gloopies-20.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3896315,
+          "sha256": "203ffe247ce1384ae271fb2aa3bb6374640234703f3b072108ce5bbe7c61470f"
+        },
+        "webm": {
+          "path": "webm/gloopies/gloopies-20.webm",
+          "mimeType": "video/webm",
+          "byteSize": 856140,
+          "sha256": "97f4984a5198ae59dce91d36e349cac44e45a2af2a679fab432978983f762c2a"
+        }
+      }
+    },
+    {
+      "id": "pollies-1",
+      "label": "Pollies 1",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-1.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3647773,
+          "sha256": "f99472eede109f15c4530c598ef992157f7bd2b4f705e771eb8a0941733019ef"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-1.webm",
+          "mimeType": "video/webm",
+          "byteSize": 767922,
+          "sha256": "c320826f77c687fb1133389758262326d9dd9a9c125b79961b33b1185a9dcbb7"
+        }
+      }
+    },
+    {
+      "id": "pollies-2",
+      "label": "Pollies 2",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-2.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3488672,
+          "sha256": "7bcc65015eb1f94a84c97549457daddfed4af1c3248c6b76d47f42dc5a618f0e"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-2.webm",
+          "mimeType": "video/webm",
+          "byteSize": 565656,
+          "sha256": "ac930dbe8786256e9b4453c9efe812c5709d609001c3d6f751b4575221cc5e96"
+        }
+      }
+    },
+    {
+      "id": "pollies-3",
+      "label": "Pollies 3",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-3.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4099817,
+          "sha256": "ae48c7b319a742123b3cce64565e063d7d0a69e633ba453f341a434640e1bdd6"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-3.webm",
+          "mimeType": "video/webm",
+          "byteSize": 857507,
+          "sha256": "e978c0f56d0701622b9809cda4128c898d3f1c8148c2f894be3cf1a55569930c"
+        }
+      }
+    },
+    {
+      "id": "pollies-4",
+      "label": "Pollies 4",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-4.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4083863,
+          "sha256": "84c4e1dab6ddb5f5502a82fec1d6dbda5ab87a9c11a80bae6be6f1a15b3ec8c9"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-4.webm",
+          "mimeType": "video/webm",
+          "byteSize": 867066,
+          "sha256": "ce2991ac11157184460b0839866e7e51f967065895b39e023f6ff8bc9aabba98"
+        }
+      }
+    },
+    {
+      "id": "pollies-5",
+      "label": "Pollies 5",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-5.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3948633,
+          "sha256": "5c923b8b8e2a5c0f370e464905f291eb17afb8b07777f047f1a821e3b13d4279"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-5.webm",
+          "mimeType": "video/webm",
+          "byteSize": 762942,
+          "sha256": "578d07da8fcdc2726b192f888f31b053a8c4fff9781156c27dbec2de9a1a77ca"
+        }
+      }
+    },
+    {
+      "id": "pollies-6",
+      "label": "Pollies 6",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-6.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3945772,
+          "sha256": "d777a731377c1609a637135c80329f225b5c68a51d49bbdccb608e33af370371"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-6.webm",
+          "mimeType": "video/webm",
+          "byteSize": 857283,
+          "sha256": "fb48da9423ba59f24f8d22051a5d338f9c3dbe9d5fda410dc8ece09c617a3ddd"
+        }
+      }
+    },
+    {
+      "id": "pollies-7",
+      "label": "Pollies 7",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-7.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4035307,
+          "sha256": "f0ab1788e8cfb06fdcc0d3a3c461152cc383154d762d2d72458df745f3c25e0b"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-7.webm",
+          "mimeType": "video/webm",
+          "byteSize": 877033,
+          "sha256": "3ee83b8ceefe430e9e129472b3da27e795f3114e53eed449e282d1206ad9ef18"
+        }
+      }
+    },
+    {
+      "id": "pollies-8",
+      "label": "Pollies 8",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-8.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4062933,
+          "sha256": "cdc9986e902eb856804cbe880a26f618948888b36d03d2d8d5f2b3d369690b9a"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-8.webm",
+          "mimeType": "video/webm",
+          "byteSize": 854205,
+          "sha256": "43db54d2d5817e93193f883fb0db9a38d33386d10786f89b040bdac20e8d2b44"
+        }
+      }
+    },
+    {
+      "id": "pollies-9",
+      "label": "Pollies 9",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-9.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3915571,
+          "sha256": "71b114e9fa6f7c230c9157609a9e24970f1bdd4148b3a9a137bad1d080dfb9b7"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-9.webm",
+          "mimeType": "video/webm",
+          "byteSize": 852972,
+          "sha256": "99e540acfa14142db3dc5bb13a78e38c83f0a7b5b67f651b1b77dbf49474bd8a"
+        }
+      }
+    },
+    {
+      "id": "pollies-10",
+      "label": "Pollies 10",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-10.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4091774,
+          "sha256": "e551151fe160db4565fb0f8eeda157b3095dedddbc8d28f02f687ebacbdb02b3"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-10.webm",
+          "mimeType": "video/webm",
+          "byteSize": 844811,
+          "sha256": "9eb87df9af3ec0e22f532b117af4e20700b943e08c1567521c108e1d944fe7a2"
+        }
+      }
+    },
+    {
+      "id": "pollies-11",
+      "label": "Pollies 11",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-11.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4197427,
+          "sha256": "9884858899e6f4c2361dd213bd06a7263171178a8221959bb90cfcd50de13239"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-11.webm",
+          "mimeType": "video/webm",
+          "byteSize": 932322,
+          "sha256": "f11558c285460d981e50d73fceffea2173fb01901e7dd885d3db1c5ef308f672"
+        }
+      }
+    },
+    {
+      "id": "pollies-12",
+      "label": "Pollies 12",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-12.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4124105,
+          "sha256": "006ebcd41d97816c3ba325d92c4c23cd96b07944620f4a11bcabd6c82e0ecadf"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-12.webm",
+          "mimeType": "video/webm",
+          "byteSize": 884950,
+          "sha256": "4069fc4f1c4c18c3c210e0e1a280e526efdcf3ddfaf1c15cd1df8eebebfc4fea"
+        }
+      }
+    },
+    {
+      "id": "pollies-13",
+      "label": "Pollies 13",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-13.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4116678,
+          "sha256": "1a3ae32ff7e68d2c216909b7eb4bd582e8dcfa5d7042147c69da6222da0a7da1"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-13.webm",
+          "mimeType": "video/webm",
+          "byteSize": 846083,
+          "sha256": "695e2ad60935a165e8380e8a334a9dd15a63ac7378a86d555cb52b4fb6069eca"
+        }
+      }
+    },
+    {
+      "id": "pollies-14",
+      "label": "Pollies 14",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-14.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3916789,
+          "sha256": "7a4d89e374c64d3c6b7c0e44f6d5f334bb448048c36b44b5428c73c301542356"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-14.webm",
+          "mimeType": "video/webm",
+          "byteSize": 754851,
+          "sha256": "ccf7ef725b4ae05940f872250162b22ccdd89d25cb4861948627a30931235853"
+        }
+      }
+    },
+    {
+      "id": "pollies-15",
+      "label": "Pollies 15",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-15.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3811832,
+          "sha256": "faf7da306074c150e81e9c8ef97e98a080aeae3a405834e6dceb918498f1e23f"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-15.webm",
+          "mimeType": "video/webm",
+          "byteSize": 801579,
+          "sha256": "f9595f95d42dfa5c2be6194f0f34d754414860fcab6ea6b46b8eedffa81da77f"
+        }
+      }
+    },
+    {
+      "id": "pollies-16",
+      "label": "Pollies 16",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-16.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3753280,
+          "sha256": "64be0100fa519b161b68cbc9b06c7aa386b74b935869cb3cfcca9da4710eea88"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-16.webm",
+          "mimeType": "video/webm",
+          "byteSize": 786465,
+          "sha256": "182d1337643bb700e6cf7d01f6a735deb4adede5daeeec53c432c2642c564988"
+        }
+      }
+    },
+    {
+      "id": "pollies-17",
+      "label": "Pollies 17",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-17.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3813926,
+          "sha256": "d6059c68861d0222ca8b3b61ee6ad3dd43ee2aa2ad188f22a24c53acc23ad22f"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-17.webm",
+          "mimeType": "video/webm",
+          "byteSize": 779661,
+          "sha256": "6fffcad6c056342e25c124edf530387f9dd5098f4b933dc1dbb2f7590bdf23b8"
+        }
+      }
+    },
+    {
+      "id": "pollies-18",
+      "label": "Pollies 18",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-18.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4083758,
+          "sha256": "6957a8a52f5a3af43bb984e17d2ad1dc733ef0941592fa03095783c561129055"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-18.webm",
+          "mimeType": "video/webm",
+          "byteSize": 859782,
+          "sha256": "d27a0164454c72e1334f6bafac26444edb55859424a29714607f21925fa6628f"
+        }
+      }
+    },
+    {
+      "id": "pollies-19",
+      "label": "Pollies 19",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-19.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3900279,
+          "sha256": "3b2b4ac0b6f67b8d4517171576af6a440b192f3829e7d55198ea5720e98ed4a8"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-19.webm",
+          "mimeType": "video/webm",
+          "byteSize": 767477,
+          "sha256": "c49e426250c677a022424fee57433cf3963017b5e5c6643eecec006f84878d9f"
+        }
+      }
+    },
+    {
+      "id": "pollies-20",
+      "label": "Pollies 20",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-20.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4301167,
+          "sha256": "4674471eb68c7d90b1b63ea2f055a872ba6d4fff551be0c49eff851bb5792672"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-20.webm",
+          "mimeType": "video/webm",
+          "byteSize": 967346,
+          "sha256": "d75a083f4f334243f37ec4b15383f8a149ca441266b3099fa487882d39182b68"
+        }
+      }
+    },
+    {
+      "id": "pollies-21",
+      "label": "Pollies 21",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-21.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4145152,
+          "sha256": "48122e74bc8d56b08e8883577193f1866d2ed8dcf37a068e73beb73b476c339c"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-21.webm",
+          "mimeType": "video/webm",
+          "byteSize": 882785,
+          "sha256": "afdf5e61ec21e666e12172d62478d8309fd8e1f4b784ee6f1c07578e601662da"
+        }
+      }
+    },
+    {
+      "id": "pollies-22",
+      "label": "Pollies 22",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-22.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3285745,
+          "sha256": "ee2ee564dea6cd64123b2dceb56315082a62ea367047f0504b1ed7433ddf0bd8"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-22.webm",
+          "mimeType": "video/webm",
+          "byteSize": 611716,
+          "sha256": "cac0ced5ba7cd8db7ffcf668e823b52d2d809ef366da29158c9a3599fc2af822"
+        }
+      }
+    },
+    {
+      "id": "pollies-23",
+      "label": "Pollies 23",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-23.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 3509150,
+          "sha256": "9148b6601c61b2fd65f35a80268a7b2d2a7cc6c503c73cf2563e0860a7e56f43"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-23.webm",
+          "mimeType": "video/webm",
+          "byteSize": 701590,
+          "sha256": "864219907f2b8015098b635431fd1de8e8c801b02513a4ce117e05e62f1434c1"
+        }
+      }
+    },
+    {
+      "id": "pollies-24",
+      "label": "Pollies 24",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-24.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4268558,
+          "sha256": "fd9d0d9d9523c1f4040b913ea66ef48eccca190640d704c8544f74e87e8aacf4"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-24.webm",
+          "mimeType": "video/webm",
+          "byteSize": 964063,
+          "sha256": "4ed71c5a2b81d2955dfd9cabd9415887fb3c266711e4037af215738a60fef2fb"
+        }
+      }
+    },
+    {
+      "id": "pollies-25",
+      "label": "Pollies 25",
+      "collectionId": "pollies",
+      "variants": {
+        "hevc": {
+          "path": "hevc/pollies/pollies-25.mp4",
+          "mimeType": "video/mp4",
+          "byteSize": 4286977,
+          "sha256": "7d88a9084c4b076ef60cc898192fd98fda967fc2ca2b2e5b6409f31ab7d19059"
+        },
+        "webm": {
+          "path": "webm/pollies/pollies-25.webm",
+          "mimeType": "video/webm",
+          "byteSize": 1018033,
+          "sha256": "d870b628f40d77c4f891bd82393f5abe4db0df37487ba783bc68502b8daa7593"
+        }
+      }
+    }
+  ]
+}

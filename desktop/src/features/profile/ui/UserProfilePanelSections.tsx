@@ -7,24 +7,26 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
-  Copy,
   Cpu,
-  Fingerprint,
+  FileText,
   Hash,
+  Info,
   MessageSquare,
   Pencil,
-  Server,
-  Terminal,
+  Play,
+  Power,
+  Settings,
+  Square,
   UserMinus,
   UserPlus,
-  UserRound,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { MemorySection } from "@/features/agent-memory/ui/MemorySection";
-import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
+import { getManagedAgentPrimaryActionLabel } from "@/features/agents/lib/managedAgentControlActions";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
+import { ModelPicker } from "@/features/agents/ui/ModelPicker";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { getPresenceLabel } from "@/features/presence/lib/presence";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
@@ -33,61 +35,72 @@ import type {
   useUnfollowMutation,
   useUserProfileQuery,
 } from "@/features/profile/hooks";
-import { truncatePubkey as truncatePubkeyShort } from "@/features/profile/lib/identity";
+import {
+  type ProfileField,
+  ProfileFieldGroup,
+} from "@/features/profile/ui/UserProfilePanelFields";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { BotIdenticon } from "@/features/messages/ui/BotIdenticon";
-import type { ManagedAgent, RelayAgent } from "@/shared/api/types";
+import { UserProfileAgentActions } from "@/features/profile/ui/UserProfileAgentActions";
+import type {
+  AgentPersona,
+  ManagedAgent,
+  RelayAgent,
+} from "@/shared/api/types";
 import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
 import { Badge } from "@/shared/ui/badge";
-
-const RUNTIME_LABELS: Record<string, string> = {
-  goose: "Goose",
-  "claude-code": "Claude Code",
-  "codex-acp": "Codex",
-  aider: "Aider",
-};
-
-function runtimeLabel(command: string): string {
-  return RUNTIME_LABELS[command] ?? command;
-}
-
-async function copyToClipboard(value: string, label?: string) {
-  await navigator.clipboard.writeText(value);
-  toast.success(label ? `Copied ${label}` : "Copied to clipboard");
-}
+import { Button } from "@/shared/ui/button";
 
 // ── Summary view ─────────────────────────────────────────────────────────────
 
 export type ProfileSummaryViewProps = {
   canEditAgent: boolean;
+  canOpenAgentLogs: boolean;
   canViewActivity: boolean;
   channelCount: number;
   channelIdToName: Record<string, string>;
   channelsLoading: boolean;
   displayName: string;
   followMutation: ReturnType<typeof useFollowMutation>;
+  canInstantiateAgent: boolean;
+  agentInstruction: string | null;
+  handleAgentPrimaryAction: () => void;
+  handleDeletePersona?: () => void;
+  handleDuplicatePersona?: () => void;
+  handleDeleteAgent: () => void;
   handleEditAgent: () => void;
+  handleEditPersona?: () => void;
+  handleExportPersona?: () => void;
+  handleInstantiateAgent: () => void;
   handleMessage: () => void;
-  handleOpenActivity: () => void;
   isBot: boolean;
+  isAgentActionPending: boolean;
   isFollowing: boolean;
   isOwner: boolean | undefined;
   isSelf: boolean;
   managedAgent: ManagedAgent | undefined;
   memoriesLoading: boolean;
   memoryCount: number | undefined;
-  ownerDisplayName: string | null;
-  ownerHandle: string | null;
+  agentInfoFields: ProfileField[];
+  agentSettingsFields: ProfileField[];
+  diagnosticsFields: ProfileField[];
+  diagnosticsSummary: string | null;
+  modelLabel: string;
+  onOpenAgentInfo: () => void;
+  onOpenAgentSettings: () => void;
   onOpenChannels: () => void;
+  onOpenDiagnostics: () => void;
+  onOpenInstruction: () => void;
   onOpenMemories: () => void;
+  onOpenModel: () => void;
   onOpenDm?: (pubkeys: string[]) => void;
-  presenceLoaded: boolean;
+  persona?: AgentPersona;
   presenceStatus: "online" | "away" | "offline" | undefined;
   profile: ReturnType<typeof useUserProfileQuery>["data"];
-  pubkey: string;
+  pubkey: string | null;
   relayAgent: RelayAgent | undefined;
   unfollowMutation: ReturnType<typeof useUnfollowMutation>;
   userStatus: { text: string; emoji: string } | null | undefined;
@@ -95,28 +108,46 @@ export type ProfileSummaryViewProps = {
 
 export function ProfileSummaryView({
   canEditAgent,
+  canOpenAgentLogs,
   canViewActivity,
   channelCount,
   channelIdToName,
   channelsLoading,
   displayName,
   followMutation,
+  canInstantiateAgent,
+  agentInstruction,
+  handleAgentPrimaryAction,
+  handleDeletePersona,
+  handleDuplicatePersona,
+  handleDeleteAgent,
   handleEditAgent,
+  handleEditPersona,
+  handleExportPersona,
+  handleInstantiateAgent,
   handleMessage,
-  handleOpenActivity,
   isBot,
+  isAgentActionPending,
   isFollowing,
   isOwner,
   isSelf,
   managedAgent,
   memoriesLoading,
   memoryCount,
-  ownerDisplayName,
-  ownerHandle,
+  agentInfoFields,
+  agentSettingsFields,
+  diagnosticsFields,
+  diagnosticsSummary,
+  modelLabel,
+  onOpenAgentInfo,
+  onOpenAgentSettings,
   onOpenChannels,
+  onOpenDiagnostics,
+  onOpenInstruction,
   onOpenMemories,
+  onOpenModel,
   onOpenDm,
-  presenceLoaded,
+  persona,
   presenceStatus,
   profile,
   pubkey,
@@ -127,28 +158,20 @@ export function ProfileSummaryView({
   const { goChannel } = useAppNavigation();
   const activeTurns = useActiveAgentTurns(isBot ? pubkey : null);
 
-  const metadataFields = [
-    ...buildPublicFields({
-      pubkey,
-      profile,
-      relayAgent,
-      isBot,
-    }),
-    ...(isOwner === true
-      ? buildOwnerFields({
-          managedAgent,
-          ownerDisplayName,
-          ownerHandle,
-          presenceLoaded,
-          presenceStatus,
-          relayAgent,
-        })
-      : []),
-  ];
-
   const showMemoriesIngress = isOwner === true;
+  const showInstructionIngress =
+    isOwner === true &&
+    (agentInstruction !== null || handleEditPersona !== undefined);
   const showChannelsIngress =
     channelsLoading || channelCount > 0 || isBot || relayAgent !== undefined;
+  const showModelIngress = isOwner === true && isBot;
+  const showAgentSettingsIngress =
+    isOwner === true &&
+    (agentSettingsFields.length > 0 || managedAgent?.backend.type === "local");
+  const showDiagnosticsIngress =
+    diagnosticsFields.length > 0 || canOpenAgentLogs || canViewActivity;
+  const showAgentInfoIngress = agentInfoFields.length > 0;
+  const personaActionKey = persona?.id;
 
   return (
     <div className="flex flex-col gap-6 pt-4">
@@ -160,11 +183,33 @@ export function ProfileSummaryView({
         userStatus={userStatus}
       />
 
-      {!isSelf ? (
+      {canInstantiateAgent ? (
+        <ProfilePersonaPrimaryActions
+          canEditAgent={canEditAgent}
+          disabled={isAgentActionPending}
+          onEditAgent={handleEditAgent}
+          onStartAgent={handleInstantiateAgent}
+        />
+      ) : !isSelf && pubkey ? (
         <ProfilePrimaryActions
           canEditAgent={canEditAgent}
           followMutation={followMutation}
           onEditAgent={handleEditAgent}
+          agentActionDisabled={isAgentActionPending}
+          agentActionLabel={
+            isOwner === true && managedAgent
+              ? getManagedAgentPrimaryActionLabel(managedAgent)
+              : undefined
+          }
+          agentActionLive={
+            managedAgent?.status === "running" ||
+            managedAgent?.status === "deployed"
+          }
+          onAgentPrimaryAction={
+            isOwner === true && managedAgent
+              ? handleAgentPrimaryAction
+              : undefined
+          }
           isFollowing={isFollowing}
           onMessage={onOpenDm ? handleMessage : undefined}
           pubkey={pubkey}
@@ -186,8 +231,32 @@ export function ProfileSummaryView({
         </div>
       ) : null}
 
-      {showMemoriesIngress || showChannelsIngress || canViewActivity ? (
+      {showInstructionIngress ||
+      showModelIngress ||
+      showMemoriesIngress ||
+      showChannelsIngress ||
+      showAgentSettingsIngress ||
+      showDiagnosticsIngress ||
+      showAgentInfoIngress ? (
         <section className="space-y-2">
+          {showInstructionIngress ? (
+            <ProfileIngressRow
+              icon={FileText}
+              label="Agent instruction"
+              onClick={onOpenInstruction}
+              testId="user-profile-agent-instruction-ingress"
+              trailing={handleEditPersona ? "Edit" : "View"}
+            />
+          ) : null}
+          {showModelIngress ? (
+            <ProfileIngressRow
+              icon={Cpu}
+              label="Model"
+              onClick={onOpenModel}
+              testId="user-profile-model-ingress"
+              trailing={modelLabel}
+            />
+          ) : null}
           {showMemoriesIngress ? (
             <ProfileIngressRow
               icon={Brain}
@@ -218,19 +287,54 @@ export function ProfileSummaryView({
               }
             />
           ) : null}
-          {canViewActivity ? (
+          {showAgentSettingsIngress ? (
+            <ProfileIngressRow
+              icon={Settings}
+              label="Agent settings"
+              onClick={onOpenAgentSettings}
+              testId="user-profile-agent-settings-ingress"
+              trailing="View"
+            />
+          ) : null}
+          {showDiagnosticsIngress ? (
             <ProfileIngressRow
               icon={Activity}
-              label="Activity log"
-              onClick={handleOpenActivity}
-              testId={`user-profile-view-activity-${pubkey}`}
+              label="Diagnostics"
+              onClick={onOpenDiagnostics}
+              testId="user-profile-diagnostics-ingress"
+              trailing={diagnosticsSummary ?? "View"}
+            />
+          ) : null}
+          {showAgentInfoIngress ? (
+            <ProfileIngressRow
+              icon={Info}
+              label="Agent info"
+              onClick={onOpenAgentInfo}
+              testId="user-profile-agent-info-ingress"
+              trailing="View"
             />
           ) : null}
         </section>
       ) : null}
 
-      {metadataFields.length > 0 ? (
-        <ProfileFieldGroup fields={metadataFields} />
+      {isOwner === true && managedAgent ? (
+        <UserProfileAgentActions
+          isPending={isAgentActionPending}
+          managedAgent={managedAgent}
+          onDelete={handleDeleteAgent}
+          onDuplicatePersona={handleDuplicatePersona}
+          onExportPersona={handleExportPersona}
+          personaActionKey={personaActionKey}
+        />
+      ) : null}
+      {canInstantiateAgent ? (
+        <UserProfileAgentActions
+          isPending={isAgentActionPending}
+          onDelete={handleDeletePersona}
+          onDuplicatePersona={handleDuplicatePersona}
+          onExportPersona={handleExportPersona}
+          personaActionKey={personaActionKey}
+        />
       ) : null}
     </div>
   );
@@ -415,17 +519,25 @@ function ProfileHeroDescription({ about }: { about: string }) {
 // ── Primary actions ──────────────────────────────────────────────────────────
 
 function ProfilePrimaryActions({
+  agentActionDisabled,
+  agentActionLabel,
+  agentActionLive,
   canEditAgent,
   followMutation,
   isFollowing,
+  onAgentPrimaryAction,
   onEditAgent,
   onMessage,
   pubkey,
   unfollowMutation,
 }: {
+  agentActionDisabled?: boolean;
+  agentActionLabel?: string;
+  agentActionLive?: boolean;
   canEditAgent: boolean;
   followMutation: ReturnType<typeof useFollowMutation>;
   isFollowing: boolean;
+  onAgentPrimaryAction?: () => void;
   onEditAgent: () => void;
   onMessage?: () => void;
   pubkey: string;
@@ -464,6 +576,49 @@ function ProfilePrimaryActions({
       ) : null}
       {canEditAgent ? (
         <ProfileQuickAction
+          icon={Pencil}
+          label="Edit"
+          onClick={onEditAgent}
+          testId="user-profile-edit-agent"
+        />
+      ) : null}
+      {onAgentPrimaryAction && agentActionLabel ? (
+        <ProfileQuickAction
+          active={agentActionLive}
+          disabled={agentActionDisabled}
+          icon={agentActionLive ? Square : Play}
+          label={agentActionLabel}
+          onClick={onAgentPrimaryAction}
+          testId="user-profile-agent-primary-action"
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function ProfilePersonaPrimaryActions({
+  canEditAgent,
+  disabled,
+  onEditAgent,
+  onStartAgent,
+}: {
+  canEditAgent: boolean;
+  disabled: boolean;
+  onEditAgent: () => void;
+  onStartAgent: () => void;
+}) {
+  return (
+    <div className="flex items-start justify-center gap-8">
+      <ProfileQuickAction
+        disabled={disabled}
+        icon={Play}
+        label="Start agent"
+        onClick={onStartAgent}
+        testId="user-profile-start-agent"
+      />
+      {canEditAgent ? (
+        <ProfileQuickAction
+          disabled={disabled}
           icon={Pencil}
           label="Edit"
           onClick={onEditAgent}
@@ -519,309 +674,17 @@ function ProfileQuickAction({
   );
 }
 
-// ── Field rows ───────────────────────────────────────────────────────────────
-
-type ProfileField = {
-  copyValue?: string;
-  /**
-   * Plain-text representation. Always required so non-visual surfaces (e.g. tooltips,
-   * copy-to-clipboard) keep working. When `displayNode` is set, the row renders that
-   * instead of the text — but the text still drives the title/tooltip.
-   */
-  displayValue: string;
-  /**
-   * Optional rich rendering for the value cell (e.g. a status badge). When present,
-   * replaces the plain text node in the row.
-   */
-  displayNode?: React.ReactNode;
-  icon: LucideIcon;
-  label: string;
-  testId?: string;
-};
-
-function buildPublicFields({
-  isBot,
-  profile,
-  pubkey,
-  relayAgent,
-}: {
-  isBot: boolean;
-  profile: ProfileSummaryViewProps["profile"];
-  pubkey: string;
-  relayAgent: RelayAgent | undefined;
-}): ProfileField[] {
-  const fields: ProfileField[] = [
-    {
-      copyValue: pubkey,
-      displayValue: truncatePubkeyShort(pubkey),
-      icon: Fingerprint,
-      label: "Public key",
-      testId: "user-profile-copy-pubkey",
-    },
-  ];
-
-  if (profile?.nip05Handle) {
-    fields.push({
-      copyValue: profile.nip05Handle,
-      displayValue: profile.nip05Handle,
-      icon: UserRound,
-      label: "NIP-05",
-      testId: "user-profile-nip05",
-    });
-  }
-
-  if (isBot && relayAgent?.agentType) {
-    fields.push({
-      copyValue: relayAgent.agentType,
-      displayValue: runtimeLabel(relayAgent.agentType),
-      icon: Cpu,
-      label: "Agent type",
-      testId: "user-profile-agent-type",
-    });
-  }
-
-  if (relayAgent?.capabilities.length) {
-    fields.push({
-      copyValue: relayAgent.capabilities.join(", "),
-      displayValue: relayAgent.capabilities.join(", "),
-      icon: Server,
-      label: "Capabilities",
-      testId: "user-profile-capabilities",
-    });
-  }
-
-  return fields;
-}
-
-function buildOwnerFields({
-  managedAgent,
-  ownerDisplayName,
-  ownerHandle,
-  presenceLoaded,
-  presenceStatus,
-  relayAgent,
-}: {
-  managedAgent: ManagedAgent | undefined;
-  ownerDisplayName: string | null;
-  ownerHandle: string | null;
-  presenceLoaded: boolean;
-  presenceStatus: "online" | "away" | "offline" | undefined;
-  relayAgent: RelayAgent | undefined;
-}): ProfileField[] {
-  const fields: ProfileField[] = [];
-
-  if (ownerDisplayName) {
-    fields.push({
-      copyValue: ownerHandle ?? undefined,
-      displayValue: ownerDisplayName,
-      icon: UserRound,
-      label: "Owned by",
-      testId: "user-profile-owned-by",
-    });
-  }
-
-  if (managedAgent?.agentCommand) {
-    fields.push({
-      copyValue: managedAgent.agentCommand,
-      displayValue: runtimeLabel(managedAgent.agentCommand),
-      icon: Terminal,
-      label: "Runtime",
-      testId: "user-profile-runtime",
-    });
-  } else if (relayAgent?.agentType) {
-    fields.push({
-      copyValue: relayAgent.agentType,
-      displayValue: runtimeLabel(relayAgent.agentType),
-      icon: Terminal,
-      label: "Runtime",
-      testId: "user-profile-runtime",
-    });
-  }
-
-  if (managedAgent) {
-    fields.push({
-      displayValue: managedAgent.status
-        .replace(/_/g, " ")
-        .replace(/\b\w/g, (char: string) => char.toUpperCase()),
-      displayNode: (
-        <AgentStatusBadge
-          presenceLoaded={presenceLoaded}
-          presenceStatus={presenceStatus}
-          status={managedAgent.status}
-        />
-      ),
-      icon: Activity,
-      label: "Status",
-      testId: "user-profile-agent-status",
-    });
-  }
-
-  if (managedAgent?.model) {
-    fields.push({
-      copyValue: managedAgent.model,
-      displayValue: managedAgent.model,
-      icon: Cpu,
-      label: "Model",
-      testId: "user-profile-model",
-    });
-  }
-
-  if (managedAgent?.acpCommand) {
-    fields.push({
-      copyValue: managedAgent.acpCommand,
-      displayValue: managedAgent.acpCommand,
-      icon: Terminal,
-      label: "ACP command",
-      testId: "user-profile-acp",
-    });
-  }
-
-  if (managedAgent?.mcpCommand) {
-    fields.push({
-      copyValue: managedAgent.mcpCommand,
-      displayValue: managedAgent.mcpCommand,
-      icon: Terminal,
-      label: "MCP command",
-      testId: "user-profile-mcp",
-    });
-  }
-
-  if (managedAgent?.backend.type === "provider") {
-    const backendLabel = managedAgent.backend.id;
-    fields.push({
-      copyValue: backendLabel,
-      displayValue: backendLabel,
-      icon: Server,
-      label: "Backend",
-      testId: "user-profile-backend",
-    });
-  }
-
-  if (managedAgent) {
-    fields.push({
-      displayValue: managedAgent.startOnAppLaunch ? "Yes" : "No",
-      icon: Server,
-      label: "Start on launch",
-      testId: "user-profile-start-on-launch",
-    });
-    fields.push({
-      displayValue: managedAgent.respondTo.replace(/-/g, " "),
-      icon: MessageSquare,
-      label: "Respond to",
-      testId: "user-profile-respond-to",
-    });
-  }
-
-  if (managedAgent?.lastError) {
-    fields.push({
-      copyValue: managedAgent.lastError,
-      displayValue: managedAgent.lastError,
-      icon: Activity,
-      label: "Last error",
-      testId: "user-profile-last-error",
-    });
-  }
-
-  return fields;
-}
-
-function ProfileFieldGroup({ fields }: { fields: ProfileField[] }) {
-  const publicKeyLabel = "Public key";
-  const ownedByLabel = "Owned by";
-  const statusLabel = "Status";
-  const orderedFields = [
-    ...fields.filter((field) => field.label === publicKeyLabel),
-    ...fields.filter((field) => field.label === ownedByLabel),
-    ...fields.filter(
-      (field) =>
-        field.label !== publicKeyLabel &&
-        field.label !== ownedByLabel &&
-        field.copyValue,
-    ),
-    ...fields.filter((field) => field.label === statusLabel),
-    ...fields.filter((field) => {
-      if (
-        field.label === publicKeyLabel ||
-        field.label === ownedByLabel ||
-        field.label === statusLabel
-      ) {
-        return false;
-      }
-      return !field.copyValue;
-    }),
-  ];
-
-  return (
-    <section>
-      <div className="overflow-hidden rounded-2xl bg-muted/20">
-        {orderedFields.map((field) => (
-          <ProfileFieldRow field={field} key={field.testId ?? field.label} />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function ProfileFieldRow({ field }: { field: ProfileField }) {
-  const Icon = field.icon;
-  const isCopyable = Boolean(field.copyValue);
-
-  const content = (
-    <>
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
-        <Icon className="h-4 w-4 text-muted-foreground" />
-      </span>
-      <span className="min-w-0 flex-1 text-left">
-        <span className="block text-xs font-medium text-foreground">
-          {field.label}
-        </span>
-        <span
-          className="mt-0.5 block truncate text-sm text-muted-foreground"
-          title={field.displayValue}
-        >
-          {field.displayNode ?? field.displayValue}
-        </span>
-      </span>
-      {isCopyable ? (
-        <Copy className="h-4 w-4 shrink-0 text-muted-foreground" />
-      ) : null}
-    </>
-  );
-
-  if (isCopyable && field.copyValue) {
-    return (
-      <button
-        aria-label={`Copy ${field.label}`}
-        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
-        data-testid={field.testId}
-        onClick={() => void copyToClipboard(field.copyValue ?? "", field.label)}
-        title={`Copy ${field.label}`}
-        type="button"
-      >
-        {content}
-      </button>
-    );
-  }
-
-  return (
-    <div
-      className="flex items-center gap-3 px-4 py-3"
-      data-testid={field.testId}
-    >
-      {content}
-    </div>
-  );
-}
-
 // ── Ingress rows ─────────────────────────────────────────────────────────────
 
 function ProfileIngressRow({
+  disabled,
   icon: Icon,
   label,
   onClick,
   testId,
   trailing,
 }: {
+  disabled?: boolean;
   icon: LucideIcon;
   label: string;
   onClick: () => void;
@@ -830,8 +693,9 @@ function ProfileIngressRow({
 }) {
   return (
     <button
-      className="flex w-full items-center gap-3 rounded-2xl bg-muted/20 px-4 py-2 text-left transition-colors hover:bg-muted/40"
+      className="flex w-full items-center gap-3 rounded-2xl bg-muted/20 px-4 py-2 text-left transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-50"
       data-testid={testId}
+      disabled={disabled}
       onClick={onClick}
       type="button"
     >
@@ -875,55 +739,245 @@ type ProfileChannelLink = {
 };
 
 export function ChannelsFocusedView({
+  canAddToChannel,
   channels,
+  isActionPending,
   isLoading,
+  onAddToChannel,
   onOpenChannel,
 }: {
+  canAddToChannel: boolean;
   channels: ProfileChannelLink[];
+  isActionPending: boolean;
   isLoading: boolean;
+  onAddToChannel: () => void;
   onOpenChannel: (channelId: string) => void;
 }) {
-  if (isLoading) {
-    return (
-      <p className="pt-4 text-base leading-7 text-muted-foreground">
-        Loading channels…
-      </p>
-    );
-  }
+  return (
+    <div className="space-y-3 pt-4">
+      {canAddToChannel ? (
+        <ProfileIngressRow
+          disabled={isActionPending}
+          icon={UserPlus}
+          label="Add to channel"
+          onClick={onAddToChannel}
+          testId="user-profile-agent-add-channel"
+          trailing={isActionPending ? "Working…" : undefined}
+        />
+      ) : null}
+      {isLoading ? (
+        <p className="text-base leading-7 text-muted-foreground">
+          Loading channels…
+        </p>
+      ) : channels.length === 0 ? (
+        <p
+          className="text-base leading-7 italic text-muted-foreground"
+          data-testid="user-profile-channels-empty"
+        >
+          No visible channel memberships.
+        </p>
+      ) : (
+        <ul
+          className="overflow-hidden rounded-2xl bg-muted/20"
+          data-testid="user-profile-channels-list"
+        >
+          {channels.map((channel) => (
+            <li key={channel.id}>
+              <button
+                aria-label={`Open #${channel.name}`}
+                className="group flex w-full items-center gap-3 px-4 py-3 text-left text-base leading-7 text-foreground transition-colors hover:bg-muted/40"
+                data-testid={`user-profile-channel-link-${channel.name}`}
+                onClick={() => onOpenChannel(channel.id)}
+                type="button"
+              >
+                <span className="min-w-0 flex-1 truncate">#{channel.name}</span>
+                <ArrowUpRight
+                  aria-hidden="true"
+                  className="h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
+                />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
-  if (channels.length === 0) {
-    return (
-      <p
-        className="pt-4 text-base leading-7 italic text-muted-foreground"
-        data-testid="user-profile-channels-empty"
-      >
-        No visible channel memberships.
-      </p>
-    );
+export function AgentInfoFocusedView({
+  metadataFields,
+}: {
+  metadataFields: ProfileField[];
+}) {
+  if (metadataFields.length === 0) {
+    return null;
   }
 
   return (
-    <ul
-      className="overflow-hidden rounded-2xl bg-muted/20"
-      data-testid="user-profile-channels-list"
-    >
-      {channels.map((channel) => (
-        <li key={channel.id}>
-          <button
-            aria-label={`Open #${channel.name}`}
-            className="group flex w-full items-center gap-3 px-4 py-3 text-left text-base leading-7 text-foreground transition-colors hover:bg-muted/40"
-            data-testid={`user-profile-channel-link-${channel.name}`}
-            onClick={() => onOpenChannel(channel.id)}
-            type="button"
+    <div className="pt-4">
+      <ProfileFieldGroup fields={metadataFields} />
+    </div>
+  );
+}
+
+export function ModelFocusedView({
+  managedAgent,
+  modelLabel,
+  onModelChanged,
+}: {
+  managedAgent: ManagedAgent | undefined;
+  modelLabel: string;
+  onModelChanged: () => void;
+}) {
+  return (
+    <div className="space-y-3 pt-4">
+      <div className="flex items-center gap-3 rounded-2xl bg-muted/20 px-4 py-3">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted/60">
+          <Cpu className="h-4 w-4 text-muted-foreground" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-xs font-medium text-foreground">
+            Model
+          </span>
+          <span className="mt-0.5 block truncate text-sm text-muted-foreground">
+            {modelLabel}
+          </span>
+        </span>
+        {managedAgent ? (
+          <ModelPicker agent={managedAgent} onModelChanged={onModelChanged} />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+export function AgentSettingsFocusedView({
+  fields,
+  isActionPending,
+  managedAgent,
+  onToggleAutoStart,
+}: {
+  fields: ProfileField[];
+  isActionPending: boolean;
+  managedAgent: ManagedAgent | undefined;
+  onToggleAutoStart: () => void;
+}) {
+  const canToggleAutoStart =
+    managedAgent !== undefined && managedAgent.backend.type === "local";
+
+  if (fields.length === 0 && !canToggleAutoStart) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-3 pt-4">
+      {canToggleAutoStart && managedAgent ? (
+        <ProfileIngressRow
+          disabled={isActionPending}
+          icon={Power}
+          label={
+            managedAgent.startOnAppLaunch
+              ? "Disable auto-start"
+              : "Enable auto-start"
+          }
+          onClick={onToggleAutoStart}
+          testId={`user-profile-agent-auto-start-${managedAgent.pubkey}`}
+          trailing={managedAgent.startOnAppLaunch ? "On" : "Off"}
+        />
+      ) : null}
+      {fields.length > 0 ? <ProfileFieldGroup fields={fields} /> : null}
+    </div>
+  );
+}
+
+export function DiagnosticsFocusedView({
+  canOpenAgentLogs,
+  canViewActivity,
+  fields,
+  managedAgent,
+  onOpenActivity,
+  onOpenAgentLogs,
+  pubkey,
+}: {
+  canOpenAgentLogs: boolean;
+  canViewActivity: boolean;
+  fields: ProfileField[];
+  managedAgent: ManagedAgent | undefined;
+  onOpenActivity: () => void;
+  onOpenAgentLogs: () => void;
+  pubkey: string | null;
+}) {
+  const hasActions = canOpenAgentLogs || canViewActivity;
+
+  if (fields.length === 0 && !hasActions) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-3 pt-4">
+      {fields.length > 0 ? <ProfileFieldGroup fields={fields} /> : null}
+      {canOpenAgentLogs && managedAgent ? (
+        <ProfileIngressRow
+          icon={FileText}
+          label="Harness log"
+          onClick={onOpenAgentLogs}
+          testId={`user-profile-agent-logs-${managedAgent.pubkey}`}
+          trailing="View"
+        />
+      ) : null}
+      {canViewActivity ? (
+        <ProfileIngressRow
+          icon={Activity}
+          label="Activity log"
+          onClick={onOpenActivity}
+          testId={`user-profile-view-activity-${pubkey}`}
+          trailing="View"
+        />
+      ) : null}
+    </div>
+  );
+}
+
+export function AgentInstructionFocusedView({
+  instruction,
+  onEdit,
+}: {
+  instruction: string | null;
+  onEdit?: () => void;
+}) {
+  const trimmedInstruction = instruction?.trim() ?? "";
+
+  return (
+    <div className="space-y-3 pt-4">
+      <div className="rounded-2xl bg-muted/20 px-4 py-3">
+        {trimmedInstruction ? (
+          <p
+            className="whitespace-pre-wrap text-sm leading-6 text-foreground"
+            data-testid="user-profile-agent-instruction"
           >
-            <span className="min-w-0 flex-1 truncate">#{channel.name}</span>
-            <ArrowUpRight
-              aria-hidden="true"
-              className="h-4 w-4 shrink-0 text-muted-foreground transition-colors group-hover:text-foreground"
-            />
-          </button>
-        </li>
-      ))}
-    </ul>
+            {trimmedInstruction}
+          </p>
+        ) : (
+          <p
+            className="text-sm leading-6 text-muted-foreground"
+            data-testid="user-profile-agent-instruction-empty"
+          >
+            No instruction set.
+          </p>
+        )}
+      </div>
+      {onEdit ? (
+        <Button
+          className="w-full justify-start gap-2"
+          data-testid="user-profile-agent-instruction-edit"
+          onClick={onEdit}
+          type="button"
+          variant="outline"
+        >
+          <Pencil className="h-4 w-4" />
+          Edit agent
+        </Button>
+      ) : null}
+    </div>
   );
 }

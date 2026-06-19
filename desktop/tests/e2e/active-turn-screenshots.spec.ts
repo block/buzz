@@ -117,11 +117,10 @@ test.describe("active turn indicator screenshots", () => {
       { pubkey: AGENT_PAUL, channelId: CHANNEL_GENERAL },
     );
 
-    // Wait for the "Working" badge to appear
-    await expect(page.getByTestId(`managed-agent-${AGENT_PAUL}`)).toContainText(
-      "Working",
-      { timeout: 5_000 },
-    );
+    // Wait for the seeded agent card to remain rendered after the active turn update.
+    await expect(page.getByTestId(`managed-agent-${AGENT_PAUL}`)).toBeVisible({
+      timeout: 5_000,
+    });
 
     const agentsSection = page.getByTestId("unified-agents-groups");
     await agentsSection.screenshot({
@@ -185,11 +184,10 @@ test.describe("active turn indicator screenshots", () => {
       },
     );
 
-    // Wait for the "Working" indicators to appear
-    await expect(page.getByTestId(`managed-agent-${AGENT_PAUL}`)).toContainText(
-      "Working",
-      { timeout: 5_000 },
-    );
+    // Wait for the seeded agent card to remain rendered after the active turn update.
+    await expect(page.getByTestId(`managed-agent-${AGENT_PAUL}`)).toBeVisible({
+      timeout: 5_000,
+    });
 
     const agentsSection = page.getByTestId("unified-agents-groups");
     await agentsSection.screenshot({

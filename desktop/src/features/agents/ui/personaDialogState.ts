@@ -1,4 +1,5 @@
 import type { ParsePersonaFilesResult } from "@/shared/api/tauriPersonas";
+import { resolveImportedPersonaAvatarUrl } from "@/shared/avatars/gooseAppAvatarRefs";
 import type {
   AgentPersona,
   CreatePersonaInput,
@@ -16,10 +17,10 @@ type ParsedPersonaDraft = ParsePersonaFilesResult["personas"][number];
 
 export function createPersonaDialogState(): PersonaDialogState {
   return {
-    title: "Create persona",
+    title: "Create agent",
     description:
-      "Save a reusable role, prompt, and optional avatar for future agent deployments.",
-    submitLabel: "Create persona",
+      "Create an agent profile and start its managed agent instance.",
+    submitLabel: "Create agent",
     initialValues: {
       displayName: "",
       avatarUrl: "",
@@ -36,8 +37,8 @@ export function duplicatePersonaDialogState(
   return {
     title: `Duplicate ${persona.displayName}`,
     description:
-      "Create a new persona by copying this template and adjusting it as needed.",
-    submitLabel: "Create persona",
+      "Create a new agent by copying this profile and adjusting it as needed.",
+    submitLabel: "Create agent",
     initialValues: {
       displayName: `${persona.displayName} copy`,
       avatarUrl: persona.avatarUrl ?? "",
@@ -60,7 +61,7 @@ export function editPersonaDialogState(
   persona: AgentPersona,
 ): PersonaDialogState {
   return {
-    title: "Edit persona",
+    title: "Edit agent",
     description: "",
     submitLabel: "Save changes",
     initialValues: {
@@ -86,11 +87,11 @@ export function importPersonaDialogState(
 ): PersonaDialogState {
   return {
     title: `Import ${persona.displayName}`,
-    description: "Review and save this imported persona.",
-    submitLabel: "Create persona",
+    description: "Review and create this imported agent.",
+    submitLabel: "Create agent",
     initialValues: {
       displayName: persona.displayName,
-      avatarUrl: persona.avatarDataUrl ?? "",
+      avatarUrl: resolveImportedPersonaAvatarUrl(persona) ?? "",
       systemPrompt: persona.systemPrompt,
       runtime: persona.runtime ?? undefined,
       model: persona.model ?? undefined,

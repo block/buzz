@@ -1,5 +1,5 @@
 import * as React from "react";
-import { RefreshCw, Upload } from "lucide-react";
+import { FolderOpen, RefreshCw, Upload } from "lucide-react";
 
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type {
@@ -15,7 +15,6 @@ import { Checkbox } from "@/shared/ui/checkbox";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/shared/ui/dialog";
@@ -49,6 +48,7 @@ type TeamDialogProps = {
   onOpenChange: (open: boolean) => void;
   onSubmit: (input: CreateTeamInput | UpdateTeamInput) => Promise<void>;
   onDeleteRemovedPersonas?: (personaIds: string[]) => Promise<void>;
+  onInstallFromDirectory?: () => void | Promise<void>;
   onImportUpdateFile?: (
     teamId: string,
     fileBytes: number[],
@@ -56,10 +56,14 @@ type TeamDialogProps = {
   ) => Promise<void>;
 };
 
+const TEAM_FIELD_SHELL_CLASS =
+  "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
+const TEAM_FIELD_CONTROL_CLASS =
+  "border-0 bg-transparent text-muted-foreground shadow-none outline-none ring-0 transition-colors duration-150 ease-out placeholder:text-muted-foreground/55 focus:bg-transparent focus:text-muted-foreground focus:outline-hidden focus-visible:ring-0";
+
 export function TeamDialog({
   open,
   title,
-  description,
   submitLabel,
   initialValues,
   personas,
@@ -69,6 +73,7 @@ export function TeamDialog({
   onOpenChange,
   onSubmit,
   onDeleteRemovedPersonas,
+  onInstallFromDirectory,
   onImportUpdateFile,
 }: TeamDialogProps) {
   const [name, setName] = React.useState("");
@@ -320,53 +325,74 @@ export function TeamDialog({
 
   return (
     <>
-      <Dialog onOpenChange={handleOpenChange} open={open}>
-        <DialogContent className="max-w-2xl overflow-hidden p-0">
+      <Dialog
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen && isPending) return;
+          handleOpenChange(nextOpen);
+        }}
+        open={open}
+      >
+        <DialogContent className="max-w-2xl overflow-hidden border-0 p-0">
           <div className="flex max-h-[85vh] flex-col">
-            <DialogHeader className="shrink-0 border-b border-border/60 px-6 py-5 pr-14">
+            <DialogHeader className="shrink-0 px-6 py-5 pb-2 pr-14">
               <DialogTitle>{title}</DialogTitle>
-              {description.trim().length > 0 ? (
-                <DialogDescription>{description}</DialogDescription>
-              ) : null}
             </DialogHeader>
 
-            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
+            <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 pb-5 pt-3">
               <div className="space-y-1.5">
-                <label className="text-sm font-medium" htmlFor="team-name">
+                <label
+                  className="text-sm font-medium text-foreground"
+                  htmlFor="team-name"
+                >
                   Name
                 </label>
-                <Input
-                  autoCorrect="off"
-                  disabled={isPending}
-                  id="team-name"
-                  onChange={(event) => setName(event.target.value)}
-                  placeholder="Engineering Squad"
-                  value={name}
-                />
+                <div
+                  className={cn(
+                    "flex min-h-11 items-center px-3",
+                    TEAM_FIELD_SHELL_CLASS,
+                  )}
+                >
+                  <Input
+                    autoCorrect="off"
+                    className={cn(
+                      "h-8 px-0 py-0 leading-6",
+                      TEAM_FIELD_CONTROL_CLASS,
+                    )}
+                    disabled={isPending}
+                    id="team-name"
+                    onChange={(event) => setName(event.target.value)}
+                    placeholder="Engineering Squad"
+                    value={name}
+                  />
+                </div>
               </div>
 
               <div className="space-y-1.5">
                 <label
-                  className="text-sm font-medium"
+                  className="text-sm font-medium text-foreground"
                   htmlFor="team-description"
                 >
                   Description
                 </label>
-                <Textarea
-                  className="min-h-20"
-                  disabled={isPending}
-                  id="team-description"
-                  onChange={(event) => setTeamDescription(event.target.value)}
-                  placeholder="Optional description for this team."
-                  value={teamDescription}
-                />
+                <div className={TEAM_FIELD_SHELL_CLASS}>
+                  <Textarea
+                    className={cn(
+                      "min-h-20 resize-none px-3 py-3 leading-5",
+                      TEAM_FIELD_CONTROL_CLASS,
+                    )}
+                    disabled={isPending}
+                    id="team-description"
+                    onChange={(event) => setTeamDescription(event.target.value)}
+                    placeholder="Optional description for this team."
+                    value={teamDescription}
+                  />
+                </div>
               </div>
 
               <div className="space-y-2">
-                <span className="text-sm font-medium">Personas</span>
-                <p className="text-xs text-muted-foreground">
-                  Select the personas to include in this team.
-                </p>
+                <span className="text-sm font-medium text-foreground">
+                  Personas
+                </span>
                 {missingInitialPersonaCount > 0 ? (
                   <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
                     This team references {missingInitialPersonaCount} persona
@@ -382,7 +408,10 @@ export function TeamDialog({
                   </p>
                 ) : (
                   <div
-                    className="max-h-60 space-y-1 overflow-y-auto rounded-lg border border-border/70 p-2"
+                    className={cn(
+                      "max-h-60 space-y-1 overflow-y-auto p-2",
+                      TEAM_FIELD_SHELL_CLASS,
+                    )}
                     role="listbox"
                     aria-label="Personas"
                     aria-multiselectable="true"
@@ -394,7 +423,7 @@ export function TeamDialog({
 
                       return (
                         <div
-                          className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 transition-colors hover:bg-muted/50"
+                          className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
                           key={persona.id}
                           onClick={() => {
                             if (!isPending) {
@@ -443,8 +472,8 @@ export function TeamDialog({
               ) : null}
             </div>
 
-            <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border/60 px-6 py-4">
-              <div className="flex min-h-8 items-center">
+            <div className="flex shrink-0 items-center justify-between gap-3 px-6 pb-4 pt-0">
+              <div className="flex min-h-9 items-center">
                 {canImportTeamUpdate ? (
                   <>
                     <input
@@ -456,7 +485,7 @@ export function TeamDialog({
                     />
                     <button
                       className={cn(
-                        "inline-flex h-8 items-center gap-2 rounded-md border px-3 text-xs font-medium transition-colors",
+                        "inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium transition-colors",
                         importButtonTone === "drag"
                           ? "border-dashed border-primary/70 bg-primary/10 text-primary"
                           : importButtonTone === "error"
@@ -488,9 +517,20 @@ export function TeamDialog({
               </div>
 
               <div className="flex items-center gap-2">
+                {!isEditMode && onInstallFromDirectory ? (
+                  <Button
+                    disabled={isPending}
+                    onClick={() => void onInstallFromDirectory()}
+                    type="button"
+                    variant="outline"
+                  >
+                    <FolderOpen className="h-4 w-4" />
+                    Install from directory
+                  </Button>
+                ) : null}
                 <Button
+                  disabled={isPending}
                   onClick={() => handleOpenChange(false)}
-                  size="sm"
                   type="button"
                   variant="outline"
                 >
@@ -503,7 +543,6 @@ export function TeamDialog({
                     isPending
                   }
                   onClick={() => void handleSubmit()}
-                  size="sm"
                   type="button"
                 >
                   {isPending ? "Saving..." : submitLabel}

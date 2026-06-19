@@ -78,6 +78,19 @@ async function openAgentsView(page: import("@playwright/test").Page) {
 test.describe("team management screenshots", () => {
   test.use({ viewport: { width: 1280, height: 720 } });
 
+  test("00 — agents section with cards", async ({ page }) => {
+    await installMockBridge(page);
+    await openAgentsView(page);
+
+    const agentsSection = page.getByTestId("agents-library-personas");
+    await expect(agentsSection).toContainText("Architect");
+    await expect(agentsSection).toContainText("Sketch");
+
+    await agentsSection.screenshot({
+      path: `${SHOTS}/00-agents-section.png`,
+    });
+  });
+
   test("01 — teams section with cards", async ({ page }) => {
     await installMockBridge(page);
     await openAgentsView(page);
@@ -201,18 +214,27 @@ test.describe("team management screenshots", () => {
     });
   });
 
-  test("06 — install from directory button", async ({ page }) => {
+  test("06 — install from directory in create modal", async ({ page }) => {
     await installMockBridge(page);
     await openAgentsView(page);
 
     const teamsSection = page.getByTestId("agents-library-teams");
-    const installButton = teamsSection.getByRole("button", {
+    await expect(
+      teamsSection.getByRole("button", { name: "Install from directory" }),
+    ).toHaveCount(0);
+    await expect(
+      teamsSection.getByRole("button", { name: "Import" }),
+    ).toHaveCount(0);
+
+    await teamsSection.getByRole("button", { name: "Create team" }).click();
+    const createDialog = page.getByRole("dialog", { name: "Create team" });
+    const installButton = createDialog.getByRole("button", {
       name: "Install from directory",
     });
     await expect(installButton).toBeVisible();
 
-    await installButton.screenshot({
-      path: `${SHOTS}/06-install-from-directory.png`,
+    await createDialog.screenshot({
+      path: `${SHOTS}/06-install-from-directory-modal.png`,
     });
   });
 });

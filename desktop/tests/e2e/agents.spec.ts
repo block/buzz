@@ -182,6 +182,10 @@ test("built-in personas are chosen from the dialog and can be selected", async (
   await expect(page.getByTestId("agents-library-personas")).toContainText(
     "Fizz",
   );
+  const fizzCard = page.getByTestId("persona-agent-row-builtin:fizz");
+  await expect(fizzCard).toContainText("Fizz");
+  await expect(fizzCard).toContainText("Built-in Agent");
+  await expect(fizzCard).toContainText("Auto");
   await expect(
     page.getByTestId("persona-catalog-card-target-builtin:fizz"),
   ).toHaveAttribute("aria-pressed", "true");

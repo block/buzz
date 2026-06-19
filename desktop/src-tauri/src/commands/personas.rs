@@ -298,9 +298,11 @@ pub fn parse_persona_files(
         });
     }
 
-    // .persona.md: YAML frontmatter starts with "---"
+    // Persona markdown: YAML frontmatter starts with "---".
+    // Goose Internal exports plain .md agent files, while Buzz historically
+    // used .persona.md; parse both through the same validated importer.
     let lower_name = file_name.to_ascii_lowercase();
-    if lower_name.ends_with(".persona.md") {
+    if lower_name.ends_with(".md") {
         if file_bytes.len() > MAX_JSON_BYTES {
             return Err("Markdown file is too large (max 5 MB).".to_string());
         }
@@ -312,17 +314,7 @@ pub fn parse_persona_files(
         });
     }
 
-    // If it's a .md file but not .persona.md, give a specific hint.
-    if lower_name.ends_with(".md") {
-        return Err(
-            "Only .persona.md files are supported. Rename to <name>.persona.md".to_string(),
-        );
-    }
-
-    Err(
-        "Unsupported file format. Expected .persona.md, .persona.png, .persona.json, or .zip"
-            .to_string(),
-    )
+    Err("Unsupported file format. Expected .md, .persona.png, .persona.json, or .zip".to_string())
 }
 
 #[tauri::command]
@@ -372,4 +364,32 @@ pub async fn export_persona_to_json(
     let slug = crate::util::slugify(&display_name, "persona", 50);
     let filename = format!("{slug}.persona.json");
     save_json_with_dialog(&app, &filename, &json_bytes).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_persona_files_accepts_plain_md_with_avatar_ref() {
+        let md = br#"---
+name: fizz
+display_name: Fizz
+avatar: app-avatar:pollies-12
+runtime: goose
+---
+You are Fizz.
+"#;
+
+        let result = parse_persona_files(md.to_vec(), "fizz.md".to_string()).unwrap();
+
+        assert_eq!(result.personas.len(), 1);
+        assert!(result.skipped.is_empty());
+        assert_eq!(result.personas[0].display_name, "Fizz");
+        assert_eq!(
+            result.personas[0].avatar_ref.as_deref(),
+            Some("app-avatar:pollies-12")
+        );
+        assert_eq!(result.personas[0].source_file, "fizz.md");
+    }
 }

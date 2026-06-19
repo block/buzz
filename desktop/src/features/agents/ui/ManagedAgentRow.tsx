@@ -55,6 +55,7 @@ export function ManagedAgentRow({
   presenceLookup,
   onAddToChannel,
   onDelete,
+  onOpenProfile,
   onSelectLogAgent,
   onStart,
   onStop,
@@ -73,6 +74,7 @@ export function ManagedAgentRow({
   presenceLookup: PresenceLookup;
   onAddToChannel: (agent: ManagedAgent) => void;
   onDelete: (pubkey: string) => void;
+  onOpenProfile?: (pubkey: string) => void;
   onSelectLogAgent: (pubkey: string | null) => void;
   onStart: (pubkey: string) => void;
   onStop: (pubkey: string) => void;
@@ -128,9 +130,13 @@ export function ManagedAgentRow({
           <button
             aria-expanded={isLogSelected}
             className="-m-1 min-w-0 flex-1 rounded-lg p-1 text-left transition-colors hover:bg-background/40"
-            onClick={() =>
-              onSelectLogAgent(isLogSelected ? null : agent.pubkey)
-            }
+            onClick={() => {
+              if (onOpenProfile) {
+                onOpenProfile(agent.pubkey);
+                return;
+              }
+              onSelectLogAgent(isLogSelected ? null : agent.pubkey);
+            }}
             type="button"
           >
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1.8fr)_minmax(120px,0.8fr)_minmax(0,1.1fr)] lg:gap-4">
@@ -472,7 +478,7 @@ function AgentActionsMenu({
               onClick={() => onStart(agent.pubkey)}
             >
               <Play className="h-4 w-4" />
-              Spawn
+              Start agent
             </DropdownMenuItem>
           )}
 

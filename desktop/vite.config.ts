@@ -27,6 +27,7 @@ export default defineConfig(async () => ({
       "@": "/src",
       "@features-manifest": path.resolve(__dirname, "../preview-features.json"),
     },
+    dedupe: ["react", "react-dom"],
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

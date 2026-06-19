@@ -69,7 +69,7 @@ export type CreateChannelManagedAgentInput = {
   respondTo?: RespondToMode;
   /** Hex pubkeys for allowlist mode. */
   respondToAllowlist?: string[];
-  /** Skip reuse logic and always create a fresh agent instance. */
+  /** Skip generic-agent reuse. Persona-backed agents always reuse by personaId. */
   forceNewInstance?: boolean;
 };
 
@@ -259,18 +259,16 @@ export async function createChannelManagedAgent(
     throw new Error("Agent name is required.");
   }
 
-  // Smart reuse: if a managed agent with the same personaId already exists
-  // and is not already in this channel, attach it instead of creating a new one.
+  // Persona-backed agents are singleton by personaId: adding a persona to any
+  // channel should attach the existing agent key instead of creating another.
   if (
     input.personaId &&
-    !input.forceNewInstance &&
     context?.managedAgents &&
     context.channelMemberPubkeys
   ) {
     const reusable = findReusablePersonaAgent(
       context.managedAgents,
       input.personaId,
-      context.channelMemberPubkeys,
     );
     if (reusable) {
       // Apply the caller's respondTo settings so the user's permission

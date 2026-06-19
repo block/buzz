@@ -1,10 +1,12 @@
 import * as React from "react";
 
+import { resolveGooseAppAvatar } from "@/shared/avatars/gooseAppAvatars";
 import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
+import { GooseAppAvatarMedia } from "@/shared/ui/GooseAppAvatarMedia";
 
 type UserAvatarSize = "xs" | "sm" | "md";
 
@@ -32,6 +34,7 @@ export function UserAvatar({
   testId,
 }: UserAvatarProps) {
   const initials = getInitials(displayName);
+  const gooseAppAvatar = resolveGooseAppAvatar(avatarUrl);
   // Animated avatars show their static poster frame until hovered, then play
   // the animation.
   const animated = parseAnimatedAvatarUrl(avatarUrl);
@@ -41,6 +44,25 @@ export function UserAvatar({
     : avatarUrl
       ? rewriteRelayUrl(avatarUrl)
       : null;
+
+  if (gooseAppAvatar) {
+    return (
+      <Avatar
+        className={cn(
+          sizeClasses[size],
+          "bg-transparent shadow-none",
+          className,
+        )}
+      >
+        <GooseAppAvatarMedia
+          alt={`${displayName} avatar`}
+          asset={gooseAppAvatar}
+          mediaClassName="object-contain"
+          testId={testId ? `${testId}-image` : undefined}
+        />
+      </Avatar>
+    );
+  }
 
   return (
     <Avatar

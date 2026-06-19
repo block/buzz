@@ -7,6 +7,7 @@ import {
   updatePersona as updatePersonaApi,
   type ParsedPersonaPreview,
 } from "@/shared/api/tauriPersonas";
+import { resolveImportedPersonaAvatarUrl } from "@/shared/avatars/gooseAppAvatarRefs";
 import type { AgentPersona, UpdatePersonaInput } from "@/shared/api/types";
 import { buildPersonaImportPlan } from "./personaImportPlan";
 import {
@@ -108,6 +109,7 @@ export function usePersonaImportActions(
     const selectedFieldSet = new Set(selectedFields);
     const preview = personaImportTargetPreview.preview;
     const existing = personaImportTarget;
+    const previewAvatarUrl = resolveImportedPersonaAvatarUrl(preview);
 
     try {
       const updateInput: UpdatePersonaInput = {
@@ -119,7 +121,7 @@ export function usePersonaImportActions(
           ? preview.systemPrompt
           : existing.systemPrompt,
         avatarUrl: selectedFieldSet.has("avatarUrl")
-          ? (preview.avatarDataUrl ?? undefined)
+          ? (previewAvatarUrl ?? undefined)
           : (existing.avatarUrl ?? undefined),
         runtime: selectedFieldSet.has("runtime")
           ? (preview.runtime ?? undefined)

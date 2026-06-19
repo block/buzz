@@ -1,5 +1,6 @@
 import * as React from "react";
 import { ArrowLeft, X } from "lucide-react";
+import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
@@ -8,12 +9,41 @@ import {
 } from "@/features/agent-memory/hooks";
 import { MemoryRefreshButton } from "@/features/agent-memory/ui/MemorySection";
 import {
+  type AttachManagedAgentToChannelResult,
+  useAcpRuntimesQuery,
+  useAvailableAcpRuntimes,
+  useCreateManagedAgentMutation,
+  useCreatePersonaMutation,
+  useDeleteManagedAgentMutation,
+  useDeletePersonaMutation,
+  useExportPersonaJsonMutation,
+  useManagedAgentLogQuery,
   useRelayAgentsQuery,
   useManagedAgentsQuery,
+  usePersonasQuery,
+  useSetManagedAgentStartOnAppLaunchMutation,
+  useSetPersonaActiveMutation,
+  useStartManagedAgentMutation,
+  useStopManagedAgentMutation,
+  useUpdatePersonaMutation,
 } from "@/features/agents/hooks";
+import { AddAgentToChannelDialog } from "@/features/agents/ui/AddAgentToChannelDialog";
 import { useActiveAgentTurnsBridge } from "@/features/agents/activeAgentTurnsStore";
+import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
+import {
+  deleteManagedAgentWithRules,
+  isManagedAgentActive,
+  startManagedAgentWithRules,
+  stopManagedAgentWithRules,
+} from "@/features/agents/lib/managedAgentControlActions";
+import { ManagedAgentLogPanel } from "@/features/agents/ui/ManagedAgentLogPanel";
 import { useManagedAgentObserverBridge } from "@/features/agents/observerRelayStore";
 import { EditAgentDialog } from "@/features/agents/ui/EditAgentDialog";
+import {
+  duplicatePersonaDialogState,
+  editPersonaDialogState,
+  type PersonaDialogState,
+} from "@/features/agents/ui/personaDialogState";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import {
@@ -24,15 +54,35 @@ import {
   useUserProfileQuery,
 } from "@/features/profile/hooks";
 import {
+  AgentInfoFocusedView,
+  AgentInstructionFocusedView,
+  AgentSettingsFocusedView,
   ChannelsFocusedView,
+  DiagnosticsFocusedView,
   MemoryFocusedView,
+  ModelFocusedView,
   ProfileSummaryView,
 } from "@/features/profile/ui/UserProfilePanelSections";
+import { useProfileFieldBuckets } from "@/features/profile/ui/UserProfilePanelFields";
+import { UserProfilePersonaDialogs } from "@/features/profile/ui/UserProfilePersonaDialogs";
+import {
+  buildPersonaDraftProfile,
+  deriveProfileChannels,
+  getRelayAgentChannelIds,
+  PROFILE_PANEL_VIEW_TITLES,
+  type ProfilePanelView,
+  resolveAgentInstruction,
+  resolveOwnerHandle,
+  resolveProfileDisplayName,
+  type UserProfilePanelProps,
+  useRetainedPersona,
+} from "@/features/profile/ui/UserProfilePanelUtils";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
 import { useAgentSession } from "@/shared/context/AgentSessionContext";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { THREAD_PANEL_MIN_WIDTH_PX } from "@/shared/hooks/useThreadPanelWidth";
+import { removeChannelMember } from "@/shared/api/tauri";
 import {
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderGroup,
@@ -40,7 +90,13 @@ import {
   auxiliaryPanelContentPaddingClass,
 } from "@/shared/layout/AuxiliaryPanelHeader";
 import { cn } from "@/shared/lib/cn";
-import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
+import type {
+  AgentPersona,
+  Channel,
+  CreateManagedAgentInput,
+  CreatePersonaInput,
+  UpdatePersonaInput,
+} from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
   OverlayPanelBackdrop,
@@ -49,85 +105,7 @@ import {
   PANEL_SINGLE_COLUMN_HEADER_LAYER_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
 
-type UserProfilePanelProps = {
-  canResetWidth?: boolean;
-  currentPubkey?: string;
-  isSinglePanelView?: boolean;
-  layout?: "standalone" | "split";
-  onClose: () => void;
-  onOpenDm?: (pubkeys: string[]) => void;
-  onResetWidth?: () => void;
-  onResizeStart?: (event: React.PointerEvent<HTMLButtonElement>) => void;
-  onViewChange: (
-    view: ProfilePanelView,
-    options?: { replace?: boolean },
-  ) => void;
-  pubkey: string;
-  /**
-   * When true, the panel sits beside a sibling pane managed by a single-panel
-   * width controller (ChannelScreen). The width is clamped so the sibling keeps
-   * at least THREAD_PANEL_MIN_WIDTH_PX. Standalone/floating mounts (e.g. Pulse)
-   * have no such sibling, so they omit this and use the configured width
-   * directly — otherwise `calc(100% - 300px)` would wrongly shrink the panel.
-   */
-  splitPaneClamp?: boolean;
-  view: ProfilePanelView;
-  widthPx: number;
-};
-
-export type ProfilePanelView = "summary" | "memories" | "channels";
-
-const VIEW_TITLES: Record<ProfilePanelView, string> = {
-  summary: "Profile",
-  memories: "Memories",
-  channels: "Channels",
-};
-
-function truncatePubkey(pubkey: string) {
-  if (pubkey.length <= 16) {
-    return pubkey;
-  }
-
-  return `${pubkey.slice(0, 8)}…${pubkey.slice(-8)}`;
-}
-
-type ProfileChannelLink = {
-  id: string;
-  name: string;
-};
-
-function deriveProfileChannels(
-  pubkeyLower: string,
-  relayAgent: RelayAgent | undefined,
-  managedAgent: ManagedAgent | undefined,
-  channels: Channel[] | undefined,
-): ProfileChannelLink[] {
-  const links = new Map<string, ProfileChannelLink>();
-  const channelsByName = new Map(
-    channels?.map((channel) => [channel.name, channel]) ?? [],
-  );
-
-  relayAgent?.channels.forEach((name, index) => {
-    const channel = channelsByName.get(name);
-    const id = relayAgent.channelIds[index] ?? channel?.id ?? name;
-    links.set(id, { id, name });
-  });
-
-  if (managedAgent && channels) {
-    for (const channel of channels) {
-      const isMember = channel.memberPubkeys.some(
-        (memberPubkey) => memberPubkey.toLowerCase() === pubkeyLower,
-      );
-      if (isMember) {
-        links.set(channel.id, { id: channel.id, name: channel.name });
-      }
-    }
-  }
-
-  return [...links.values()].sort((left, right) =>
-    left.name.localeCompare(right.name),
-  );
-}
+export type { ProfilePanelView };
 
 export function UserProfilePanel({
   canResetWidth,
@@ -139,9 +117,10 @@ export function UserProfilePanel({
   onResetWidth,
   onResizeStart,
   onViewChange,
+  persona,
   pubkey,
   splitPaneClamp = false,
-  view,
+  view: controlledView,
   widthPx,
 }: UserProfilePanelProps) {
   const isOverlay = useIsThreadPanelOverlay();
@@ -149,41 +128,114 @@ export function UserProfilePanel({
   const isSplitLayout = layout === "split";
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
+  const [internalView, setInternalView] =
+    React.useState<ProfilePanelView>("summary");
+  const view = controlledView ?? internalView;
+  const setView = React.useCallback(
+    (nextView: ProfilePanelView, options?: { replace?: boolean }) => {
+      if (onViewChange) {
+        onViewChange(nextView, options);
+        return;
+      }
+      setInternalView(nextView);
+    },
+    [onViewChange],
+  );
   const [editAgentOpen, setEditAgentOpen] = React.useState(false);
+  const [addToChannelOpen, setAddToChannelOpen] = React.useState(false);
+  const [personaDialogState, setPersonaDialogState] =
+    React.useState<PersonaDialogState | null>(null);
+  const [personaToDelete, setPersonaToDelete] =
+    React.useState<AgentPersona | null>(null);
 
-  const profileQuery = useUserProfileQuery(pubkey);
+  const personasQuery = usePersonasQuery();
+  const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
+  const managedAgent = React.useMemo(() => {
+    const agents = managedAgentsQuery.data ?? [];
+    if (pubkey) {
+      const pubkeyLower = pubkey.toLowerCase();
+      return agents.find((agent) => agent.pubkey.toLowerCase() === pubkeyLower);
+    }
+    if (persona) {
+      return agents.find((agent) => agent.personaId === persona.id);
+    }
+    return undefined;
+  }, [managedAgentsQuery.data, persona, pubkey]);
+  const resolvedPersonaFromSource = React.useMemo(() => {
+    if (persona) {
+      return persona;
+    }
+    if (!managedAgent?.personaId) {
+      return undefined;
+    }
+    return personasQuery.data?.find(
+      (candidate) => candidate.id === managedAgent.personaId,
+    );
+  }, [managedAgent?.personaId, persona, personasQuery.data]);
+  const profileIdentityKey =
+    pubkey ?? managedAgent?.pubkey ?? `persona:${persona?.id ?? "unknown"}`;
+  const resolvedPersona = useRetainedPersona(
+    resolvedPersonaFromSource,
+    profileIdentityKey,
+  );
+  const effectivePubkey = pubkey ?? managedAgent?.pubkey ?? null;
+  const pubkeyLower = effectivePubkey?.toLowerCase() ?? "";
+
+  const profileQuery = useUserProfileQuery(effectivePubkey ?? undefined);
   const currentProfileQuery = useProfileQuery(currentPubkey !== undefined);
 
-  // Batch avatar prefetch seeds kind:0 summaries without `about`; refetch on open
-  // so the hero can show the full profile description from relay.
   React.useEffect(() => {
+    if (!effectivePubkey) return;
     void profileQuery.refetch();
-  }, [profileQuery.refetch]);
+  }, [effectivePubkey, profileQuery.refetch]);
 
   const relayAgentsQuery = useRelayAgentsQuery({ enabled: true });
-  const managedAgentsQuery = useManagedAgentsQuery({ enabled: true });
+  const availableRuntimesQuery = useAvailableAcpRuntimes();
+  const acpRuntimesQuery = useAcpRuntimesQuery();
+  const createAgentMutation = useCreateManagedAgentMutation();
+  const startAgentMutation = useStartManagedAgentMutation();
+  const stopAgentMutation = useStopManagedAgentMutation();
+  const deleteAgentMutation = useDeleteManagedAgentMutation();
+  const startOnLaunchMutation = useSetManagedAgentStartOnAppLaunchMutation();
+  const createPersonaMutation = useCreatePersonaMutation();
+  const updatePersonaMutation = useUpdatePersonaMutation();
+  const deletePersonaMutation = useDeletePersonaMutation();
+  const setPersonaActiveMutation = useSetPersonaActiveMutation();
+  const exportPersonaJsonMutation = useExportPersonaJsonMutation();
   const channelsQuery = useChannelsQuery();
-  const presenceQuery = usePresenceQuery([pubkey]);
-  const userStatusQuery = useUserStatusQuery([pubkey]);
+  const presenceQuery = usePresenceQuery(
+    effectivePubkey ? [effectivePubkey] : [],
+  );
+  const userStatusQuery = useUserStatusQuery(
+    effectivePubkey ? [effectivePubkey] : [],
+  );
   const contactListQuery = useContactListQuery(currentPubkey);
   const followMutation = useFollowMutation(currentPubkey);
   const unfollowMutation = useUnfollowMutation(currentPubkey);
   const { onOpenAgentSession } = useAgentSession();
   const { goChannel } = useAppNavigation();
 
-  const profile = profileQuery.data;
-  const pubkeyLower = pubkey.toLowerCase();
-  const presenceStatus = presenceQuery.data?.[pubkeyLower];
-  const userStatus = userStatusQuery.data?.[pubkeyLower];
+  const profile =
+    profileQuery.data ??
+    (resolvedPersona ? buildPersonaDraftProfile(resolvedPersona) : undefined);
+  const presenceStatus = pubkeyLower
+    ? presenceQuery.data?.[pubkeyLower]
+    : undefined;
+  const userStatus = pubkeyLower
+    ? userStatusQuery.data?.[pubkeyLower]
+    : undefined;
 
   const relayAgent = relayAgentsQuery.data?.find(
     (agent) => agent.pubkey.toLowerCase() === pubkeyLower,
   );
-  const managedAgent = managedAgentsQuery.data?.find(
-    (agent) => agent.pubkey.toLowerCase() === pubkeyLower,
+  const managedAgentLogQuery = useManagedAgentLogQuery(
+    view === "logs" && managedAgent?.backend.type === "local"
+      ? managedAgent.pubkey
+      : null,
   );
-  const isBot = Boolean(relayAgent || managedAgent);
-  const isOwner = useIsManagedAgent(isBot ? pubkey : null);
+  const isBot = Boolean(relayAgent || managedAgent || resolvedPersona);
+  const managedAgentOwner = useIsManagedAgent(isBot ? effectivePubkey : null);
+  const isOwner = resolvedPersona ? true : managedAgentOwner;
 
   // Populate the active-turns store for this agent so useActiveAgentTurns works
   // even if the Agents page hasn't been visited yet.
@@ -196,15 +248,39 @@ export function UserProfilePanel({
   );
   useActiveAgentTurnsBridge(bridgeAgents);
   useManagedAgentObserverBridge(bridgeAgents);
-  const canEditAgent = isOwner === true && managedAgent !== undefined;
-  const memoryQuery = useAgentMemoryQuery(pubkey, {
-    enabled: isOwner === true,
+  const canEditAgent =
+    isOwner === true &&
+    (managedAgent !== undefined ||
+      (resolvedPersona !== undefined && !resolvedPersona.isBuiltIn));
+  const memoryQuery = useAgentMemoryQuery(effectivePubkey, {
+    enabled: isOwner === true && Boolean(effectivePubkey),
   });
   const isSelf =
-    currentPubkey !== undefined && pubkeyLower === currentPubkey.toLowerCase();
-  const canViewActivity = isOwner === true && Boolean(onOpenAgentSession);
+    currentPubkey !== undefined &&
+    pubkeyLower.length > 0 &&
+    pubkeyLower === currentPubkey.toLowerCase();
+  const canViewActivity =
+    isOwner === true && Boolean(onOpenAgentSession) && Boolean(effectivePubkey);
+  const canOpenAgentLogs =
+    isOwner === true && managedAgent?.backend.type === "local";
+  const canInstantiateAgent =
+    isOwner === true &&
+    resolvedPersona !== undefined &&
+    managedAgent === undefined;
+  const isAgentActionPending =
+    createAgentMutation.isPending ||
+    startAgentMutation.isPending ||
+    stopAgentMutation.isPending ||
+    deleteAgentMutation.isPending ||
+    startOnLaunchMutation.isPending ||
+    createPersonaMutation.isPending ||
+    updatePersonaMutation.isPending ||
+    deletePersonaMutation.isPending ||
+    setPersonaActiveMutation.isPending ||
+    exportPersonaJsonMutation.isPending;
   const isFollowing =
     !isSelf &&
+    pubkeyLower.length > 0 &&
     (contactListQuery.data?.contacts.some(
       (contact) => contact.pubkey.toLowerCase() === pubkeyLower,
     ) ??
@@ -229,19 +305,331 @@ export function UserProfilePanel({
     return map;
   }, [channelsQuery.data]);
 
+  const targetKey =
+    effectivePubkey ?? `persona:${resolvedPersona?.id ?? "unknown"}`;
+  const prevTargetKeyRef = React.useRef(targetKey);
+  React.useEffect(() => {
+    if (prevTargetKeyRef.current === targetKey) return;
+    prevTargetKeyRef.current = targetKey;
+    setView("summary", { replace: true });
+  }, [setView, targetKey]);
   const handleMessage = React.useCallback(() => {
-    onOpenDm?.([pubkey]);
+    if (!effectivePubkey) return;
+    onOpenDm?.([effectivePubkey]);
     onClose();
-  }, [onClose, onOpenDm, pubkey]);
+  }, [effectivePubkey, onClose, onOpenDm]);
 
   const handleEditAgent = React.useCallback(() => {
+    if (resolvedPersona && !resolvedPersona.isBuiltIn) {
+      setPersonaDialogState(editPersonaDialogState(resolvedPersona));
+      return;
+    }
     setEditAgentOpen(true);
-  }, []);
+  }, [resolvedPersona]);
+
+  const removeAgentFromAllChannels = React.useCallback(
+    async (agentPubkey: string) => {
+      const channelIds = getRelayAgentChannelIds(
+        relayAgentsQuery.data,
+        agentPubkey,
+      );
+      if (channelIds.length === 0) return;
+      await Promise.allSettled(
+        channelIds.map((channelId) =>
+          removeChannelMember(channelId, agentPubkey),
+        ),
+      );
+    },
+    [relayAgentsQuery.data],
+  );
+
+  const handleAgentPrimaryAction = React.useCallback(async () => {
+    if (!managedAgent) return;
+
+    try {
+      if (isManagedAgentActive(managedAgent)) {
+        const result = await stopManagedAgentWithRules({
+          agent: managedAgent,
+          channels: channelsQuery.data ?? [],
+          relayAgents: relayAgentsQuery.data ?? [],
+          stopManagedAgent: stopAgentMutation.mutateAsync,
+        });
+        if (managedAgent.backend.type === "local") {
+          await deleteAgentMutation.mutateAsync({
+            pubkey: managedAgent.pubkey,
+          });
+          await removeAgentFromAllChannels(managedAgent.pubkey);
+          void managedAgentsQuery.refetch();
+          void relayAgentsQuery.refetch();
+          return;
+        }
+        toast.success(result.noticeMessage ?? `Stopped ${managedAgent.name}.`);
+        return;
+      }
+
+      await startManagedAgentWithRules({
+        agent: managedAgent,
+        startManagedAgent: startAgentMutation.mutateAsync,
+      });
+      toast.success(
+        managedAgent.backend.type === "provider"
+          ? `Deploying ${managedAgent.name}.`
+          : `Started ${managedAgent.name}.`,
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Agent action failed.",
+      );
+    }
+  }, [
+    channelsQuery.data,
+    deleteAgentMutation.mutateAsync,
+    managedAgent,
+    managedAgentsQuery.refetch,
+    relayAgentsQuery.data,
+    relayAgentsQuery.refetch,
+    removeAgentFromAllChannels,
+    startAgentMutation.mutateAsync,
+    stopAgentMutation.mutateAsync,
+  ]);
+
+  const handleInstantiateAgent = React.useCallback(async () => {
+    if (!resolvedPersona) return;
+
+    const runtimes = availableRuntimesQuery.data ?? [];
+    const defaultRuntime = runtimes[0] ?? null;
+    const { runtime, warnings } = resolvePersonaRuntime(
+      resolvedPersona.runtime,
+      runtimes,
+      defaultRuntime,
+    );
+
+    for (const warning of warnings) {
+      toast.warning(warning);
+    }
+
+    if (!runtime) {
+      toast.error("No available runtime found for this agent.");
+      return;
+    }
+
+    const input: CreateManagedAgentInput = {
+      name: resolvedPersona.displayName,
+      acpCommand: "buzz-acp",
+      agentCommand: runtime.command,
+      agentArgs: runtime.defaultArgs,
+      mcpCommand: runtime.mcpCommand ?? "",
+      personaId: resolvedPersona.id,
+      systemPrompt: resolvedPersona.systemPrompt,
+      avatarUrl: resolvedPersona.avatarUrl ?? undefined,
+      model: resolvedPersona.model ?? undefined,
+      envVars: resolvedPersona.envVars,
+      spawnAfterCreate: true,
+      startOnAppLaunch: true,
+      backend: { type: "local" },
+    };
+
+    try {
+      const created = await createAgentMutation.mutateAsync(input);
+      if (created.spawnError) {
+        toast.error(created.spawnError);
+      } else {
+        toast.success(`Started ${created.agent.name}.`);
+      }
+      if (created.profileSyncError) {
+        toast.warning(created.profileSyncError);
+      }
+      void managedAgentsQuery.refetch();
+      void relayAgentsQuery.refetch();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to start agent.",
+      );
+    }
+  }, [
+    availableRuntimesQuery.data,
+    createAgentMutation.mutateAsync,
+    managedAgentsQuery.refetch,
+    relayAgentsQuery.refetch,
+    resolvedPersona,
+  ]);
+
+  const handleToggleAgentAutoStart = React.useCallback(async () => {
+    if (managedAgent?.backend.type !== "local") return;
+
+    try {
+      const updated = await startOnLaunchMutation.mutateAsync({
+        pubkey: managedAgent.pubkey,
+        startOnAppLaunch: !managedAgent.startOnAppLaunch,
+      });
+      toast.success(
+        updated.startOnAppLaunch
+          ? `Will start ${updated.name} automatically.`
+          : `${updated.name} will stay manual-start only.`,
+      );
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Failed to update startup preference.",
+      );
+    }
+  }, [managedAgent, startOnLaunchMutation.mutateAsync]);
+
+  const handleDeleteAgent = React.useCallback(async () => {
+    if (!managedAgent) return;
+
+    try {
+      const result = await deleteManagedAgentWithRules({
+        agent: managedAgent,
+        channels: channelsQuery.data ?? [],
+        deleteManagedAgent: deleteAgentMutation.mutateAsync,
+        presenceLookup: presenceQuery.data,
+        relayAgents: relayAgentsQuery.data ?? [],
+      });
+      if (result.cancelled) return;
+
+      await removeAgentFromAllChannels(managedAgent.pubkey);
+      toast.success(`Deleted ${managedAgent.name}.`);
+      onClose();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to delete agent.",
+      );
+    }
+  }, [
+    channelsQuery.data,
+    deleteAgentMutation.mutateAsync,
+    managedAgent,
+    onClose,
+    presenceQuery.data,
+    relayAgentsQuery.data,
+    removeAgentFromAllChannels,
+  ]);
+
+  const handleSubmitPersona = React.useCallback(
+    async (input: CreatePersonaInput | UpdatePersonaInput) => {
+      try {
+        if ("id" in input) {
+          await updatePersonaMutation.mutateAsync(input);
+          toast.success(`Updated ${input.displayName}.`);
+        } else {
+          await createPersonaMutation.mutateAsync(input);
+          toast.success(`Created ${input.displayName}.`);
+        }
+        setPersonaDialogState(null);
+        void personasQuery.refetch();
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to save agent.",
+        );
+      }
+    },
+    [
+      createPersonaMutation.mutateAsync,
+      personasQuery.refetch,
+      updatePersonaMutation.mutateAsync,
+    ],
+  );
+
+  const handleEditPersona = React.useCallback(() => {
+    if (!resolvedPersona || resolvedPersona.isBuiltIn) return;
+    setPersonaDialogState(editPersonaDialogState(resolvedPersona));
+  }, [resolvedPersona]);
+
+  const handleDuplicatePersona = React.useCallback(() => {
+    if (!resolvedPersona) return;
+    setPersonaDialogState(duplicatePersonaDialogState(resolvedPersona));
+  }, [resolvedPersona]);
+
+  const handleExportPersona = React.useCallback(() => {
+    if (!resolvedPersona) return;
+    exportPersonaJsonMutation.mutate(resolvedPersona.id, {
+      onSuccess: (saved) => {
+        if (saved) {
+          toast.success(`Exported ${resolvedPersona.displayName}.`);
+        }
+      },
+      onError: (error) => {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to export agent.",
+        );
+      },
+    });
+  }, [exportPersonaJsonMutation, resolvedPersona]);
+
+  const handleDeletePersona = React.useCallback(async () => {
+    if (!resolvedPersona) return;
+
+    if (resolvedPersona.isBuiltIn) {
+      try {
+        await setPersonaActiveMutation.mutateAsync({
+          id: resolvedPersona.id,
+          active: false,
+        });
+        toast.success(`Removed ${resolvedPersona.displayName} from My Agents.`);
+        onClose();
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to delete agent.",
+        );
+      }
+      return;
+    }
+
+    if (resolvedPersona.sourceTeam) {
+      toast.error("This agent is managed by a team.");
+      return;
+    }
+
+    setPersonaToDelete(resolvedPersona);
+  }, [onClose, resolvedPersona, setPersonaActiveMutation.mutateAsync]);
+
+  const handleConfirmDeletePersona = React.useCallback(
+    async (personaToConfirm: AgentPersona) => {
+      try {
+        await deletePersonaMutation.mutateAsync(personaToConfirm.id);
+        toast.success(`Deleted ${personaToConfirm.displayName}.`);
+        setPersonaToDelete(null);
+        onClose();
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Failed to delete agent.",
+        );
+      }
+    },
+    [deletePersonaMutation.mutateAsync, onClose],
+  );
+
+  const handleAddedToChannel = React.useCallback(
+    (channel: Channel, result: AttachManagedAgentToChannelResult) => {
+      if (result.restarted) {
+        toast.success(
+          `Added ${result.agent.name} to ${channel.name} and restarted it.`,
+        );
+      } else if (result.started) {
+        toast.success(`Added ${result.agent.name} to ${channel.name}.`);
+      } else if (result.membershipAdded) {
+        toast.success(`Added ${result.agent.name} to ${channel.name}.`);
+      } else {
+        toast.success(`${result.agent.name} is already in ${channel.name}.`);
+      }
+      void managedAgentsQuery.refetch();
+      void relayAgentsQuery.refetch();
+      void channelsQuery.refetch();
+    },
+    [
+      channelsQuery.refetch,
+      managedAgentsQuery.refetch,
+      relayAgentsQuery.refetch,
+    ],
+  );
 
   const handleOpenActivity = React.useCallback(() => {
+    if (!effectivePubkey) return;
     onClose();
-    onOpenAgentSession?.(pubkey);
-  }, [onClose, onOpenAgentSession, pubkey]);
+    onOpenAgentSession?.(effectivePubkey);
+  }, [effectivePubkey, onClose, onOpenAgentSession]);
 
   const handleOpenChannel = React.useCallback(
     (channelId: string) => {
@@ -250,24 +638,46 @@ export function UserProfilePanel({
     [goChannel],
   );
 
-  const displayName = profile?.displayName ?? truncatePubkey(pubkey);
-  const ownerHandle = React.useMemo(() => {
-    if (currentPubkey === undefined) {
-      return null;
-    }
-
-    const currentProfile = currentProfileQuery.data;
-    return (
-      currentProfile?.nip05Handle?.trim() ||
-      currentProfile?.displayName?.trim() ||
-      truncatePubkey(currentPubkey)
-    );
-  }, [currentProfileQuery.data, currentPubkey]);
+  const displayName = resolveProfileDisplayName({
+    persona: resolvedPersona,
+    profile,
+    pubkey: effectivePubkey,
+  });
+  const ownerHandle = resolveOwnerHandle(
+    currentProfileQuery.data,
+    currentPubkey,
+  );
   const ownerDisplayName = ownerHandle ? `${ownerHandle} (you)` : null;
-  const panelTitle = VIEW_TITLES[view];
-  const memoryCount = memoryQuery.data
-    ? (memoryQuery.data.core ? 1 : 0) + memoryQuery.data.memories.length
-    : undefined;
+  const memoryCount =
+    memoryQuery.data &&
+    (memoryQuery.data.core ? 1 : 0) + memoryQuery.data.memories.length;
+  const agentInstruction = resolveAgentInstruction(
+    managedAgent,
+    resolvedPersona,
+  );
+  const canManagePersona = isOwner === true && resolvedPersona !== undefined;
+  const canEditPersona =
+    canManagePersona && resolvedPersona?.isBuiltIn !== true;
+  const canDeletePersona = canManagePersona && !resolvedPersona?.sourceTeam;
+  const {
+    agentInfoFields,
+    agentSettingsFields,
+    diagnosticsFields,
+    diagnosticsSummary,
+    modelLabel,
+  } = useProfileFieldBuckets({
+    isBot,
+    isOwner,
+    managedAgent,
+    ownerDisplayName,
+    ownerHandle,
+    persona: resolvedPersona,
+    presenceLoaded: presenceQuery.isSuccess,
+    presenceStatus,
+    profile,
+    pubkey: effectivePubkey,
+    relayAgent,
+  });
 
   const headerLeftContent = (
     <AuxiliaryPanelHeaderGroup>
@@ -276,7 +686,7 @@ export function UserProfilePanel({
           aria-label="Back to profile"
           className="shrink-0"
           data-testid="user-profile-panel-back"
-          onClick={() => onViewChange("summary")}
+          onClick={() => setView("summary")}
           size="icon"
           type="button"
           variant="outline"
@@ -284,14 +694,16 @@ export function UserProfilePanel({
           <ArrowLeft />
         </Button>
       ) : null}
-      <AuxiliaryPanelTitle>{panelTitle}</AuxiliaryPanelTitle>
+      <AuxiliaryPanelTitle>
+        {PROFILE_PANEL_VIEW_TITLES[view]}
+      </AuxiliaryPanelTitle>
     </AuxiliaryPanelHeaderGroup>
   );
 
   const headerActions = (
     <div className="ml-auto flex shrink-0 items-center gap-2">
-      {view === "memories" && isOwner === true ? (
-        <MemoryRefreshButton agentPubkey={pubkey} variant="outline" />
+      {view === "memories" && isOwner === true && effectivePubkey ? (
+        <MemoryRefreshButton agentPubkey={effectivePubkey} variant="outline" />
       ) : null}
       <Button
         aria-label="Close profile"
@@ -317,46 +729,126 @@ export function UserProfilePanel({
       {view === "summary" ? (
         <ProfileSummaryView
           canEditAgent={canEditAgent}
+          canInstantiateAgent={canInstantiateAgent}
+          canOpenAgentLogs={canOpenAgentLogs}
           canViewActivity={canViewActivity}
           channelCount={profileChannels.length}
           channelIdToName={channelIdToName}
           channelsLoading={channelsQuery.isLoading}
           displayName={displayName}
           followMutation={followMutation}
+          agentInstruction={agentInstruction}
+          handleAgentPrimaryAction={handleAgentPrimaryAction}
+          handleDeleteAgent={handleDeleteAgent}
+          handleDeletePersona={
+            canDeletePersona ? handleDeletePersona : undefined
+          }
+          handleDuplicatePersona={
+            canManagePersona ? handleDuplicatePersona : undefined
+          }
           handleEditAgent={handleEditAgent}
+          handleEditPersona={canEditPersona ? handleEditPersona : undefined}
+          handleExportPersona={
+            canManagePersona ? handleExportPersona : undefined
+          }
+          handleInstantiateAgent={handleInstantiateAgent}
           handleMessage={handleMessage}
-          handleOpenActivity={handleOpenActivity}
           isBot={isBot}
+          isAgentActionPending={isAgentActionPending}
           isFollowing={isFollowing}
           isOwner={isOwner}
           isSelf={isSelf}
           managedAgent={managedAgent}
           memoriesLoading={memoryQuery.isLoading}
           memoryCount={memoryCount}
-          ownerDisplayName={ownerDisplayName}
-          ownerHandle={ownerHandle}
-          onOpenChannels={() => onViewChange("channels")}
-          onOpenMemories={() => onViewChange("memories")}
+          agentInfoFields={agentInfoFields}
+          agentSettingsFields={agentSettingsFields}
+          diagnosticsFields={diagnosticsFields}
+          diagnosticsSummary={diagnosticsSummary}
+          modelLabel={modelLabel}
+          onOpenAgentInfo={() => setView("info")}
+          onOpenAgentSettings={() => setView("settings")}
+          onOpenChannels={() => setView("channels")}
+          onOpenDiagnostics={() => setView("diagnostics")}
+          onOpenInstruction={() => setView("instructions")}
+          onOpenMemories={() => setView("memories")}
+          onOpenModel={() => setView("model")}
           onOpenDm={onOpenDm}
-          presenceLoaded={presenceQuery.isSuccess}
+          persona={resolvedPersona}
           presenceStatus={presenceStatus}
           profile={profile}
-          pubkey={pubkey}
+          pubkey={effectivePubkey}
           relayAgent={relayAgent}
           unfollowMutation={unfollowMutation}
           userStatus={userStatus}
         />
       ) : null}
 
-      {view === "memories" ? (
-        <MemoryFocusedView agentPubkey={pubkey} isOwner={isOwner} />
+      {view === "memories" && effectivePubkey ? (
+        <MemoryFocusedView agentPubkey={effectivePubkey} isOwner={isOwner} />
+      ) : null}
+
+      {view === "instructions" ? (
+        <AgentInstructionFocusedView
+          instruction={agentInstruction}
+          onEdit={canEditPersona ? handleEditPersona : undefined}
+        />
+      ) : null}
+
+      {view === "info" ? (
+        <AgentInfoFocusedView metadataFields={agentInfoFields} />
+      ) : null}
+
+      {view === "model" ? (
+        <ModelFocusedView
+          managedAgent={managedAgent}
+          modelLabel={modelLabel}
+          onModelChanged={() => void managedAgentsQuery.refetch()}
+        />
+      ) : null}
+
+      {view === "settings" ? (
+        <AgentSettingsFocusedView
+          fields={agentSettingsFields}
+          isActionPending={isAgentActionPending}
+          managedAgent={managedAgent}
+          onToggleAutoStart={handleToggleAgentAutoStart}
+        />
+      ) : null}
+
+      {view === "diagnostics" ? (
+        <DiagnosticsFocusedView
+          canOpenAgentLogs={canOpenAgentLogs}
+          canViewActivity={canViewActivity}
+          fields={diagnosticsFields}
+          managedAgent={managedAgent}
+          onOpenActivity={handleOpenActivity}
+          onOpenAgentLogs={() => setView("logs")}
+          pubkey={effectivePubkey}
+        />
       ) : null}
 
       {view === "channels" ? (
         <ChannelsFocusedView
+          canAddToChannel={managedAgent !== undefined && isOwner === true}
           channels={profileChannels}
+          isActionPending={isAgentActionPending}
           isLoading={channelsQuery.isLoading}
+          onAddToChannel={() => setAddToChannelOpen(true)}
           onOpenChannel={handleOpenChannel}
+        />
+      ) : null}
+
+      {view === "logs" ? (
+        <ManagedAgentLogPanel
+          error={
+            managedAgentLogQuery.error instanceof Error
+              ? managedAgentLogQuery.error
+              : null
+          }
+          isLoading={managedAgentLogQuery.isLoading}
+          logContent={managedAgentLogQuery.data?.content ?? null}
+          selectedAgent={managedAgent ?? null}
         />
       ) : null}
     </div>
@@ -370,7 +862,41 @@ export function UserProfilePanel({
         open={editAgentOpen}
       />
     ) : null;
-
+  const addAgentToChannelDialog = managedAgent ? (
+    <AddAgentToChannelDialog
+      agent={managedAgent ?? null}
+      onAdded={handleAddedToChannel}
+      onOpenChange={setAddToChannelOpen}
+      open={addToChannelOpen}
+    />
+  ) : null;
+  const personaDialogs = (
+    <UserProfilePersonaDialogs
+      createError={
+        createPersonaMutation.error instanceof Error
+          ? createPersonaMutation.error
+          : null
+      }
+      isPending={
+        createPersonaMutation.isPending || updatePersonaMutation.isPending
+      }
+      personaDialogState={personaDialogState}
+      personaToDelete={personaToDelete}
+      runtimes={acpRuntimesQuery.data ?? []}
+      runtimesLoading={acpRuntimesQuery.isLoading}
+      updateError={
+        updatePersonaMutation.error instanceof Error
+          ? updatePersonaMutation.error
+          : null
+      }
+      onCloseDelete={() => setPersonaToDelete(null)}
+      onCloseDialog={() => setPersonaDialogState(null)}
+      onConfirmDelete={(selectedPersona) => {
+        void handleConfirmDeletePersona(selectedPersona);
+      }}
+      onSubmit={handleSubmitPersona}
+    />
+  );
   if (isSplitLayout) {
     return (
       <>
@@ -382,6 +908,8 @@ export function UserProfilePanel({
           {profileBody}
         </div>
         {editAgentDialog}
+        {addAgentToChannelDialog}
+        {personaDialogs}
       </>
     );
   }
@@ -447,6 +975,8 @@ export function UserProfilePanel({
         {profileBody}
       </aside>
       {editAgentDialog}
+      {addAgentToChannelDialog}
+      {personaDialogs}
     </>
   );
 }

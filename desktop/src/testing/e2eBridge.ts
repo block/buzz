@@ -430,6 +430,10 @@ type RawPersona = {
   display_name: string;
   avatar_url: string | null;
   system_prompt: string;
+  runtime?: string | null;
+  model?: string | null;
+  provider?: string | null;
+  name_pool?: string[];
   is_builtin: boolean;
   is_active: boolean;
   env_vars?: Record<string, string>;
@@ -1056,8 +1060,109 @@ function resetMockPersonas(config?: E2eConfig) {
       display_name: "Fizz",
       avatar_url: null,
       system_prompt: "You are Fizz.",
+      runtime: "goose",
+      model: "Auto",
+      provider: null,
+      name_pool: [],
       is_builtin: true,
       is_active: activePersonaIds.has("builtin:fizz"),
+      env_vars: {},
+      created_at: now,
+      updated_at: now,
+    },
+    {
+      id: "fixture:architect",
+      display_name: "Architect",
+      avatar_url: null,
+      system_prompt:
+        "You are Architect, a planning agent that turns fuzzy requests into crisp next steps.",
+      runtime: "goose",
+      model: "gpt-4.1",
+      provider: "openai",
+      name_pool: ["Architect"],
+      is_builtin: false,
+      is_active: true,
+      env_vars: {},
+      created_at: now,
+      updated_at: now,
+    },
+    {
+      id: "fixture:sketch",
+      display_name: "Sketch",
+      avatar_url: null,
+      system_prompt:
+        "You are Sketch, a product design agent that explores UI directions and critique.",
+      runtime: "claude",
+      model: "sonnet",
+      provider: "anthropic",
+      name_pool: ["Sketch"],
+      is_builtin: false,
+      is_active: true,
+      env_vars: {},
+      created_at: now,
+      updated_at: now,
+    },
+    {
+      id: "fixture:scope",
+      display_name: "Scope",
+      avatar_url: null,
+      system_prompt:
+        "You are Scope, an analysis agent that researches context and checks edge cases.",
+      runtime: "codex",
+      model: "Auto",
+      provider: "openai",
+      name_pool: ["Scope"],
+      is_builtin: false,
+      is_active: true,
+      env_vars: {},
+      created_at: now,
+      updated_at: now,
+    },
+    {
+      id: "fixture:build",
+      display_name: "Build",
+      avatar_url: null,
+      system_prompt:
+        "You are Build, an implementation agent that turns planned product work into working code.",
+      runtime: "goose",
+      model: "gpt-4.1",
+      provider: "openai",
+      name_pool: ["Build"],
+      is_builtin: false,
+      is_active: true,
+      env_vars: {},
+      created_at: now,
+      updated_at: now,
+    },
+    {
+      id: "fixture:read",
+      display_name: "Read",
+      avatar_url: null,
+      system_prompt:
+        "You are Read, a research agent that gathers source context and summarizes what matters.",
+      runtime: "claude",
+      model: "sonnet",
+      provider: "anthropic",
+      name_pool: ["Read"],
+      is_builtin: false,
+      is_active: true,
+      env_vars: {},
+      created_at: now,
+      updated_at: now,
+    },
+    {
+      id: "fixture:ship",
+      display_name: "Ship",
+      avatar_url: null,
+      system_prompt:
+        "You are Ship, a release agent that checks quality gates and gets finished work out the door.",
+      runtime: "codex",
+      model: "Auto",
+      provider: "openai",
+      name_pool: ["Ship"],
+      is_builtin: false,
+      is_active: true,
+      env_vars: {},
       created_at: now,
       updated_at: now,
     },
@@ -1068,10 +1173,23 @@ function resetMockTeams() {
   const now = new Date().toISOString();
   mockTeams = [
     {
+      id: "builtin-team:fizz",
+      name: "Fizz",
+      description: "Fizz works carefully and collaboratively.",
+      persona_ids: ["builtin:fizz"],
+      is_builtin: true,
+      source_dir: null,
+      is_symlink: false,
+      symlink_target: null,
+      version: null,
+      created_at: now,
+      updated_at: now,
+    },
+    {
       id: "team-engineering-001",
       name: "Engineering",
       description: "Core engineering personas",
-      persona_ids: [],
+      persona_ids: ["builtin:fizz", "fixture:architect", "fixture:build"],
       is_builtin: false,
       source_dir: null,
       is_symlink: false,
@@ -1084,7 +1202,7 @@ function resetMockTeams() {
       id: "team-research-002",
       name: "Research Agents",
       description: "Directory-backed research team",
-      persona_ids: [],
+      persona_ids: ["fixture:read", "fixture:scope"],
       is_builtin: false,
       source_dir: "/Users/dev/agents/research",
       is_symlink: false,
@@ -1097,7 +1215,7 @@ function resetMockTeams() {
       id: "team-platform-003",
       name: "Platform Tools",
       description: "Symlinked platform team",
-      persona_ids: [],
+      persona_ids: ["fixture:architect", "fixture:sketch", "fixture:ship"],
       is_builtin: false,
       source_dir: "/Users/dev/agents/platform",
       is_symlink: true,
@@ -4645,6 +4763,10 @@ async function handleCreatePersona(args: {
     displayName: string;
     avatarUrl?: string;
     systemPrompt: string;
+    runtime?: string;
+    model?: string;
+    provider?: string;
+    namePool?: string[];
     envVars?: Record<string, string>;
   };
 }): Promise<RawPersona> {
@@ -4654,6 +4776,10 @@ async function handleCreatePersona(args: {
     display_name: args.input.displayName.trim(),
     avatar_url: args.input.avatarUrl?.trim() || null,
     system_prompt: args.input.systemPrompt.trim(),
+    runtime: args.input.runtime?.trim() || null,
+    model: args.input.model?.trim() || null,
+    provider: args.input.provider?.trim() || null,
+    name_pool: [...(args.input.namePool ?? [])],
     is_builtin: false,
     is_active: true,
     env_vars: { ...(args.input.envVars ?? {}) },
@@ -4670,6 +4796,10 @@ async function handleUpdatePersona(args: {
     displayName: string;
     avatarUrl?: string;
     systemPrompt: string;
+    runtime?: string;
+    model?: string;
+    provider?: string;
+    namePool?: string[];
     envVars?: Record<string, string>;
   };
 }): Promise<RawPersona> {
@@ -4686,6 +4816,10 @@ async function handleUpdatePersona(args: {
   persona.display_name = args.input.displayName.trim();
   persona.avatar_url = args.input.avatarUrl?.trim() || null;
   persona.system_prompt = args.input.systemPrompt.trim();
+  persona.runtime = args.input.runtime?.trim() || null;
+  persona.model = args.input.model?.trim() || null;
+  persona.provider = args.input.provider?.trim() || null;
+  persona.name_pool = [...(args.input.namePool ?? [])];
   if (args.input.envVars !== undefined) {
     // Absent = preserve; present = replace entirely (matches Rust handler).
     persona.env_vars = { ...args.input.envVars };
@@ -4922,10 +5056,38 @@ async function handleParsePersonaFiles(args: {
     display_name: string;
     system_prompt: string;
     avatar_data_url: string | null;
+    avatar_ref: string | null;
+    runtime: string | null;
+    model: string | null;
+    provider: string | null;
+    name_pool?: string[];
     source_file: string;
   }[];
   skipped: { source_file: string; reason: string }[];
 }> {
+  const lowerName = args.fileName.toLowerCase();
+  if (lowerName.endsWith(".md")) {
+    const parsed = parseMockPersonaMarkdown(args.fileBytes);
+    if (parsed) {
+      return {
+        personas: [
+          {
+            display_name: parsed.displayName,
+            system_prompt: parsed.systemPrompt,
+            avatar_data_url: null,
+            avatar_ref: parsed.avatarRef,
+            runtime: parsed.runtime,
+            model: parsed.model,
+            provider: null,
+            name_pool: [],
+            source_file: args.fileName,
+          },
+        ],
+        skipped: [],
+      };
+    }
+  }
+
   // In test mode, return canned data — we can't actually parse PNG chunks in JS
   return {
     personas: [
@@ -4933,11 +5095,63 @@ async function handleParsePersonaFiles(args: {
         display_name: "Imported Persona",
         system_prompt: "You are an imported test persona.",
         avatar_data_url: null,
+        avatar_ref: null,
+        runtime: null,
+        model: null,
+        provider: null,
+        name_pool: [],
         source_file: args.fileName,
       },
     ],
     skipped: [],
   };
+}
+
+function parseMockPersonaMarkdown(fileBytes: number[]) {
+  const content = new TextDecoder().decode(new Uint8Array(fileBytes));
+  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(content);
+  if (!match) {
+    return null;
+  }
+
+  const fields = new Map<string, string>();
+  for (const rawLine of match[1].split(/\r?\n/)) {
+    const lineMatch = /^([A-Za-z_][\w-]*):\s*(.*)$/.exec(rawLine.trim());
+    if (!lineMatch) {
+      continue;
+    }
+    fields.set(lineMatch[1], cleanMockYamlScalar(lineMatch[2]));
+  }
+
+  const displayName = (
+    fields.get("display_name") ??
+    fields.get("displayName") ??
+    fields.get("name") ??
+    "Imported Persona"
+  ).trim();
+  const systemPrompt = match[2].trim() || "You are an imported test persona.";
+  const model = fields.get("model")?.trim() || null;
+  const modelParts = model?.split(":") ?? [];
+  const modelId = modelParts[modelParts.length - 1] || model;
+
+  return {
+    displayName,
+    systemPrompt,
+    avatarRef: fields.get("avatar")?.trim() || null,
+    runtime: fields.get("runtime")?.trim() || null,
+    model: model ? modelId : null,
+  };
+}
+
+function cleanMockYamlScalar(value: string) {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
 }
 
 async function handleExportPersonaToJson(args: {

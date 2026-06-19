@@ -12,7 +12,6 @@ import {
 
 const PUB_A = "a".repeat(64);
 const PUB_B = "b".repeat(64);
-const PUB_C = "c".repeat(64);
 
 function makeAgent(overrides = {}) {
   return {
@@ -173,22 +172,19 @@ test("pickPreferredManagedAgent: undefined updatedAt treated as epoch 0", () => 
 
 test("findReusablePersonaAgent: finds agent with matching personaId", () => {
   const agent = makeAgent({ personaId: "persona-1", pubkey: PUB_A });
-  const channelMembers = new Set([PUB_B]);
-  const result = findReusablePersonaAgent([agent], "persona-1", channelMembers);
+  const result = findReusablePersonaAgent([agent], "persona-1");
   assert.equal(result, agent);
 });
 
-test("findReusablePersonaAgent: excludes agent already in channel", () => {
+test("findReusablePersonaAgent: reuses agent already in channel", () => {
   const agent = makeAgent({ personaId: "persona-1", pubkey: PUB_A });
-  const channelMembers = new Set([PUB_A]);
-  const result = findReusablePersonaAgent([agent], "persona-1", channelMembers);
-  assert.equal(result, undefined);
+  const result = findReusablePersonaAgent([agent], "persona-1");
+  assert.equal(result, agent);
 });
 
 test("findReusablePersonaAgent: excludes agent with different personaId", () => {
   const agent = makeAgent({ personaId: "persona-2", pubkey: PUB_A });
-  const channelMembers = new Set([PUB_B]);
-  const result = findReusablePersonaAgent([agent], "persona-1", channelMembers);
+  const result = findReusablePersonaAgent([agent], "persona-1");
   assert.equal(result, undefined);
 });
 
@@ -207,20 +203,18 @@ test("findReusablePersonaAgent: prefers running agent", () => {
     status: "running",
     updatedAt: "2025-01-01T00:00:00Z",
   });
-  const channelMembers = new Set([PUB_C]);
-  const result = findReusablePersonaAgent(
-    [stopped, running],
-    "p1",
-    channelMembers,
-  );
+  const result = findReusablePersonaAgent([stopped, running], "p1");
   assert.equal(result.id, "r");
 });
 
-test("findReusablePersonaAgent: pubkey comparison is case-insensitive", () => {
+test("findReusablePersonaAgent: channel membership does not affect reuse", () => {
   const agent = makeAgent({ personaId: "p1", pubkey: PUB_A.toUpperCase() });
   const channelMembers = new Set([PUB_A]);
-  const result = findReusablePersonaAgent([agent], "p1", channelMembers);
-  assert.equal(result, undefined);
+  const result = findReusableAgent([agent], channelMembers, {
+    personaId: "p1",
+    command: "goose",
+  });
+  assert.equal(result, agent);
 });
 
 // --- findReusableGenericAgent ---

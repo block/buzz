@@ -16,6 +16,7 @@ export type AgentGroupRowsProps = {
   selectedLogAgentPubkey: string | null;
   onAddToChannel: (agent: ManagedAgent) => void;
   onDelete: (pubkey: string) => void;
+  onOpenProfile?: (pubkey: string) => void;
   onSelectLogAgent: (pubkey: string | null) => void;
   onStart: (pubkey: string) => void;
   onStop: (pubkey: string) => void;
@@ -36,6 +37,7 @@ export function AgentGroupRows({
   selectedLogAgentPubkey,
   onAddToChannel,
   onDelete,
+  onOpenProfile,
   onSelectLogAgent,
   onStart,
   onStop,
@@ -61,6 +63,7 @@ export function AgentGroupRows({
           presenceLookup={presenceLookup}
           onAddToChannel={onAddToChannel}
           onDelete={onDelete}
+          onOpenProfile={onOpenProfile}
           onSelectLogAgent={onSelectLogAgent}
           onStart={onStart}
           onStop={onStop}

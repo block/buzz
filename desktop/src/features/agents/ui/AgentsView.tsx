@@ -19,8 +19,10 @@ import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
+import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 
 export function AgentsView() {
+  const { openPersonaProfilePanel, openProfilePanel } = useProfilePanel();
   const agents = useManagedAgentActions();
   const personas = usePersonaActions();
   const teamActions = useTeamActions(
@@ -33,14 +35,6 @@ export function AgentsView() {
       refetchRelayAgents: agents.refetchRelayAgents,
     },
   );
-
-  const isActionPending =
-    agents.isPending ||
-    personas.isPending ||
-    teamActions.exportTeamJsonMutation.isPending ||
-    teamActions.createTeamMutation.isPending ||
-    teamActions.updateTeamMutation.isPending ||
-    teamActions.deleteTeamMutation.isPending;
 
   return (
     <>
@@ -56,56 +50,21 @@ export function AgentsView() {
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}
-              channelIdToName={agents.channelIdToName}
-              channelsByPubkey={agents.channelsByPubkey}
               agentsError={
                 agents.managedAgentsQuery.error instanceof Error
                   ? agents.managedAgentsQuery.error
                   : null
               }
-              isActionPending={isActionPending}
               isAgentsLoading={agents.managedAgentsQuery.isLoading}
-              logContent={agents.managedAgentLogQuery.data?.content ?? null}
-              logError={
-                agents.managedAgentLogQuery.error instanceof Error
-                  ? agents.managedAgentLogQuery.error
-                  : null
-              }
-              logLoading={agents.managedAgentLogQuery.isLoading}
-              personaLabelsById={personas.personaLabelsById}
-              presenceLoaded={agents.managedPresenceQuery.isSuccess}
-              presenceLookup={agents.managedPresenceQuery.data ?? {}}
-              onAddToChannel={(agent) => {
-                agents.setActionNoticeMessage(null);
-                agents.setActionErrorMessage(null);
-                agents.setAgentToAddToChannel(agent);
-              }}
-              onBulkRemoveStopped={() => {
-                void agents.handleBulkRemoveStopped();
-              }}
-              onBulkStopRunning={() => {
-                void agents.handleBulkStopRunning();
-              }}
               onCreateAgent={() => {
                 agents.setIsCreateOpen(true);
               }}
-              onDeleteAgent={(pubkey) => {
-                void agents.handleDelete(pubkey);
+              onOpenAgentProfile={(pubkey) => {
+                openProfilePanel?.(pubkey);
               }}
-              onSelectLogAgent={agents.setLogAgentPubkey}
-              onStartAgent={(pubkey) => {
-                void agents.handleStart(pubkey);
+              onOpenPersonaProfile={(persona) => {
+                openPersonaProfilePanel?.(persona);
               }}
-              onStopAgent={(pubkey) => {
-                void agents.handleStop(pubkey);
-              }}
-              onToggleStartOnAppLaunch={(pubkey, startOnAppLaunch) => {
-                void agents.handleToggleStartOnAppLaunch(
-                  pubkey,
-                  startOnAppLaunch,
-                );
-              }}
-              selectedLogAgentPubkey={agents.logAgentPubkey}
               // Persona props
               canChooseCatalog={personas.catalogPersonas.length > 0}
               personas={personas.libraryPersonas}
@@ -128,13 +87,6 @@ export function AgentsView() {
               isPersonasPending={personas.isPending}
               onCreatePersona={personas.openCreate}
               onChooseCatalog={personas.openCatalog}
-              onDuplicatePersona={personas.openDuplicate}
-              onEditPersona={personas.openEdit}
-              onExportPersona={personas.handleExport}
-              onDeactivatePersona={(persona) => {
-                void personas.handleSetActive(persona, false, "library");
-              }}
-              onDeletePersona={personas.openDelete}
               onImportPersonaFile={(fileBytes, fileName) => {
                 void personas.handleImportFile(fileBytes, fileName);
               }}
@@ -157,8 +109,6 @@ export function AgentsView() {
               onDuplicate={teamActions.openDuplicateDialog}
               onEdit={teamActions.openEditDialog}
               onExport={teamActions.handleExportTeam}
-              onImportFile={teamActions.handleImportFile}
-              onInstallFromDirectory={teamActions.handleInstallFromDirectory}
               onSync={teamActions.handleSyncTeam}
               onRevealInFinder={teamActions.handleRevealInFinder}
               onAddToChannel={teamActions.setTeamToAddToChannel}
@@ -300,6 +250,7 @@ export function AgentsView() {
           }
         }}
         onDeleteRemovedPersonas={teamActions.handleDeleteRemovedPersonas}
+        onInstallFromDirectory={teamActions.handleInstallFromDirectory}
         onSubmit={teamActions.handleTeamSubmit}
         open={teamActions.teamDialogState !== null}
         personas={personas.libraryPersonas}

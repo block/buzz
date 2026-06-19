@@ -1,6 +1,9 @@
 import * as React from "react";
 import { RefreshCw, Upload } from "lucide-react";
 
+import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import { useAvatarUpload } from "@/features/profile/useAvatarUpload";
+import { resolveGooseAppAvatar } from "@/shared/avatars/gooseAppAvatars";
 import type {
   AcpRuntimeCatalogEntry,
   CreatePersonaInput,
@@ -9,16 +12,19 @@ import type {
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/dialog";
+import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
+import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
+import { Spinner } from "@/shared/ui/spinner";
+import { GooseAppAvatarMedia } from "@/shared/ui/GooseAppAvatarMedia";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/shared/ui/select";
 import { Textarea } from "@/shared/ui/textarea";
-import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import {
   getImportButtonLabel,
   getImportButtonTone,
@@ -46,6 +52,82 @@ type PersonaDialogProps = {
   ) => Promise<void>;
 };
 
+const PERSONA_FIELD_SHELL_CLASS =
+  "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
+const PERSONA_FIELD_CONTROL_CLASS =
+  "border-0 bg-transparent text-muted-foreground shadow-none outline-none ring-0 transition-colors duration-150 ease-out placeholder:text-muted-foreground/55 focus:bg-transparent focus:text-muted-foreground focus:outline-hidden focus-visible:ring-0";
+const PERSONA_LABEL_OPTIONAL_CLASS =
+  "ml-1 text-xs font-normal text-muted-foreground/50";
+const PERSONA_DROPDOWN_TRIGGER_CLASS =
+  "flex min-h-11 w-full items-center justify-between gap-3 rounded-xl border border-input bg-muted/40 px-3 py-2 text-left text-sm text-muted-foreground shadow-none transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus:border-muted-foreground/50 focus:text-muted-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50";
+const AUTO_MODEL_DROPDOWN_VALUE = "__auto_model__";
+
+type PersonaModelOption = {
+  id: string;
+  label: string;
+};
+
+const AUTO_MODEL_OPTION: PersonaModelOption = {
+  id: "",
+  label: "Auto (provider default)",
+};
+
+const PERSONA_MODEL_OPTIONS_BY_RUNTIME: Record<
+  string,
+  readonly PersonaModelOption[]
+> = {
+  goose: [
+    AUTO_MODEL_OPTION,
+    { id: "goose-claude-4-6-opus", label: "Claude Opus 4.6" },
+    { id: "goose-claude-4-6-sonnet", label: "Claude Sonnet 4.6" },
+    { id: "gpt-5", label: "GPT-5" },
+    { id: "gpt-5-mini", label: "GPT-5 mini" },
+    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  ],
+  "buzz-agent": [
+    AUTO_MODEL_OPTION,
+    { id: "goose-claude-4-6-opus", label: "Claude Opus 4.6" },
+    { id: "goose-claude-4-6-sonnet", label: "Claude Sonnet 4.6" },
+    { id: "gpt-5", label: "GPT-5" },
+    { id: "gpt-5-mini", label: "GPT-5 mini" },
+    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  ],
+  claude: [AUTO_MODEL_OPTION],
+  codex: [AUTO_MODEL_OPTION],
+};
+
+function getPersonaModelOptions(
+  runtimeId: string,
+  currentModel: string,
+): readonly PersonaModelOption[] {
+  const options = PERSONA_MODEL_OPTIONS_BY_RUNTIME[runtimeId] ?? [
+    AUTO_MODEL_OPTION,
+  ];
+  const trimmedModel = currentModel.trim();
+  if (
+    trimmedModel.length === 0 ||
+    options.some((option) => option.id === trimmedModel)
+  ) {
+    return options;
+  }
+
+  return [...options, { id: trimmedModel, label: `${trimmedModel} (current)` }];
+}
+
+function formatRuntimeOptionLabel(runtime: AcpRuntimeCatalogEntry) {
+  const suffix =
+    runtime.availability === "adapter_missing"
+      ? " (adapter missing)"
+      : runtime.availability === "cli_missing"
+        ? " (CLI missing)"
+        : runtime.availability === "not_installed"
+          ? " (not installed)"
+          : "";
+  return `${runtime.label}${suffix}`;
+}
+
 export function PersonaDialog({
   open,
   title,
@@ -66,9 +148,6 @@ export function PersonaDialog({
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [runtime, setRuntime] = React.useState("");
   const [model, setModel] = React.useState("");
-  const [provider, setProvider] = React.useState("");
-  const [namePoolText, setNamePoolText] = React.useState("");
-  const [envVars, setEnvVars] = React.useState<EnvVarsValue>({});
   const [isImportingUpdate, setIsImportingUpdate] = React.useState(false);
   const [importErrorMessage, setImportErrorMessage] = React.useState<
     string | null
@@ -91,14 +170,6 @@ export function PersonaDialog({
     setSystemPrompt(initialValues.systemPrompt);
     setRuntime(initialValues.runtime ?? "");
     setModel(initialValues.model ?? "");
-    setProvider(initialValues.provider ?? "");
-    setNamePoolText(
-      ("namePool" in initialValues
-        ? (initialValues as { namePool?: string[] }).namePool
-        : undefined
-      )?.join(", ") ?? "",
-    );
-    setEnvVars(initialValues.envVars ?? {});
     setImportErrorMessage(null);
     setIsImportingUpdate(false);
   }, [initialValues, open]);
@@ -218,8 +289,6 @@ export function PersonaDialog({
       setSystemPrompt("");
       setRuntime("");
       setModel("");
-      setProvider("");
-      setNamePoolText("");
       setImportErrorMessage(null);
       setIsImportingUpdate(false);
       setIsWindowFileDragOver(false);
@@ -229,23 +298,31 @@ export function PersonaDialog({
   }
 
   async function handleSubmit() {
-    if (!initialValues) {
+    if (
+      !initialValues ||
+      displayName.trim().length === 0 ||
+      systemPrompt.trim().length === 0 ||
+      isPending
+    ) {
       return;
     }
 
-    const namePool = namePoolText
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const trimmedRuntime = runtime.trim();
+    const initialRuntime = initialValues.runtime ?? "";
+    const preservedProvider =
+      trimmedRuntime === initialRuntime ? initialValues.provider : undefined;
+    const preservedNamePool =
+      "id" in initialValues && "namePool" in initialValues
+        ? initialValues.namePool
+        : undefined;
     const baseInput = {
-      displayName,
+      displayName: displayName.trim(),
       avatarUrl: avatarUrl.trim() || undefined,
-      systemPrompt,
-      runtime: runtime.trim() || undefined,
-      model: model.trim() || undefined,
-      provider: provider.trim() || undefined,
-      namePool: namePool.length > 0 ? namePool : undefined,
-      envVars,
+      systemPrompt: systemPrompt.trim(),
+      runtime: trimmedRuntime || undefined,
+      model: trimmedRuntime ? model.trim() || undefined : undefined,
+      provider: preservedProvider ?? undefined,
+      namePool: preservedNamePool,
     };
 
     if ("id" in initialValues) {
@@ -257,6 +334,11 @@ export function PersonaDialog({
     }
 
     await onSubmit(baseInput);
+  }
+
+  function handleSubmitForm(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void handleSubmit();
   }
 
   const importButtonTone = getImportButtonTone({
@@ -271,6 +353,26 @@ export function PersonaDialog({
   });
 
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
+  const modelFieldVisible = runtime.trim().length > 0;
+  const isCreateMode = Boolean(initialValues && !("id" in initialValues));
+  const selectedRuntimeIsAvailable =
+    runtime.trim().length === 0 ||
+    selectedRuntime?.availability === "available";
+  const canSubmit =
+    displayName.trim().length > 0 &&
+    systemPrompt.trim().length > 0 &&
+    (!isCreateMode || runtime.trim().length > 0) &&
+    (!isCreateMode || selectedRuntimeIsAvailable) &&
+    !isPending;
+  const modelOptions = getPersonaModelOptions(runtime, model);
+  const selectedRuntimeLabel = runtimesLoading
+    ? "Loading providers..."
+    : (selectedRuntime?.label ?? "Choose a provider");
+  const selectedModelLabel =
+    modelOptions.find((option) => option.id === model)?.label ??
+    AUTO_MODEL_OPTION.label;
+  const previewLabel = displayName.trim() || "Agent name";
+  const previewAvatarUrl = avatarUrl.trim() || null;
   const runtimeWarning =
     selectedRuntime && selectedRuntime.availability !== "available" ? (
       <p className="text-xs text-warning">
@@ -284,191 +386,24 @@ export function PersonaDialog({
     ) : null;
 
   return (
-    <Dialog onOpenChange={handleOpenChange} open={open}>
-      <DialogContent className="max-w-2xl overflow-hidden p-0">
-        <div className="flex max-h-[85vh] flex-col">
-          <DialogHeader className="shrink-0 border-b border-border/60 px-6 py-5 pr-14">
-            <DialogTitle>{title}</DialogTitle>
-            {description.trim().length > 0 ? (
-              <DialogDescription>{description}</DialogDescription>
-            ) : null}
-          </DialogHeader>
-
-          <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium"
-                htmlFor="persona-display-name"
-              >
-                Display name
-              </label>
-              <Input
-                autoCorrect="off"
-                disabled={isPending}
-                id="persona-display-name"
-                onChange={(event) => setDisplayName(event.target.value)}
-                placeholder="Researcher"
-                value={displayName}
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium"
-                htmlFor="persona-avatar-url"
-              >
-                Avatar URL
-              </label>
-              <Input
-                autoCapitalize="none"
-                autoCorrect="off"
-                disabled={isPending}
-                id="persona-avatar-url"
-                onChange={(event) => setAvatarUrl(event.target.value)}
-                placeholder="https://example.com/avatar.png"
-                spellCheck={false}
-                value={avatarUrl}
-              />
-              <p className="text-xs text-muted-foreground">
-                Optional. Deployed agents fall back to the runtime avatar if
-                this is blank.
-              </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium"
-                htmlFor="persona-system-prompt"
-              >
-                System prompt
-              </label>
-              <Textarea
-                className="min-h-40"
-                disabled={isPending}
-                id="persona-system-prompt"
-                onChange={(event) => setSystemPrompt(event.target.value)}
-                placeholder="Describe what this persona should do."
-                value={systemPrompt}
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="persona-runtime">
-                Preferred runtime
-              </label>
-              <select
-                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-                disabled={isPending || runtimesLoading}
-                id="persona-runtime"
-                onChange={(event) => setRuntime(event.target.value)}
-                value={runtime}
-              >
-                <option value="">
-                  {runtimesLoading
-                    ? "Loading runtimes..."
-                    : "No preference (use default)"}
-                </option>
-                {runtimes.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                    {p.availability === "adapter_missing"
-                      ? " (adapter missing)"
-                      : p.availability === "cli_missing"
-                        ? " (CLI missing)"
-                        : p.availability === "not_installed"
-                          ? " (not installed)"
-                          : ""}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-muted-foreground">
-                Optional. When deploying this persona, the selected runtime will
-                be pre-selected. Unavailable runtimes can be installed from
-                Settings &gt; Doctor.
-              </p>
-              {runtimeWarning}
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="persona-model">
-                Preferred model
-              </label>
-              <Input
-                autoCapitalize="none"
-                autoCorrect="off"
-                disabled={isPending}
-                id="persona-model"
-                onChange={(event) => setModel(event.target.value)}
-                placeholder="e.g. gpt-4o, claude-sonnet-4-20250514"
-                spellCheck={false}
-                value={model}
-              />
-              <p className="text-xs text-muted-foreground">
-                Optional. Passed to the agent at creation time. Leave blank to
-                use the runtime default.
-              </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <label className="text-sm font-medium" htmlFor="persona-provider">
-                LLM Provider
-              </label>
-              <Input
-                autoCapitalize="none"
-                autoCorrect="off"
-                disabled={isPending}
-                id="persona-provider"
-                onChange={(event) => setProvider(event.target.value)}
-                placeholder="e.g. databricks, anthropic, openai"
-                spellCheck={false}
-                value={provider}
-              />
-              <p className="text-xs text-muted-foreground">
-                Optional. Injected as the runtime's provider env var at agent
-                creation time. Leave blank for auto-detection or provider-locked
-                runtimes.
-              </p>
-            </div>
-
-            <div className="space-y-1.5">
-              <label
-                className="text-sm font-medium"
-                htmlFor="persona-name-pool"
-              >
-                Instance name pool
-              </label>
-              <Input
-                autoCapitalize="none"
-                autoCorrect="off"
-                disabled={isPending}
-                id="persona-name-pool"
-                onChange={(event) => setNamePoolText(event.target.value)}
-                placeholder="Birch, Compass, Ridge, Thistle, ..."
-                spellCheck={false}
-                value={namePoolText}
-              />
-              <p className="text-xs text-muted-foreground">
-                Comma-separated names for bot copies. Each instance gets a
-                random name from this pool. Leave empty to use generic defaults.
-              </p>
-            </div>
-
-            <EnvVarsEditor
-              disabled={isPending}
-              helperText="Injected when agents created from this persona spawn. Per-agent overrides can replace these."
-              onChange={setEnvVars}
-              value={envVars}
-            />
-
-            {error ? (
-              <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                {error.message}
-              </p>
-            ) : null}
-          </div>
-
-          <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border/60 px-6 py-4">
-            <div className="flex min-h-8 items-center">
+    <Dialog
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen && isPending) return;
+        handleOpenChange(nextOpen);
+      }}
+      open={open}
+    >
+      <ChooserDialogContent
+        className="max-w-3xl border-0"
+        contentClassName="pt-3"
+        data-testid="persona-dialog"
+        description={description}
+        footerClassName="border-t-0 pt-0"
+        headerClassName="pb-2"
+        title={title}
+        footer={
+          <div className="flex w-full items-center justify-between gap-3">
+            <div className="flex min-h-9 items-center">
               {canImportPersonaUpdate ? (
                 <>
                   <input
@@ -480,7 +415,7 @@ export function PersonaDialog({
                   />
                   <button
                     className={cn(
-                      "inline-flex h-8 items-center gap-2 rounded-md border px-3 text-xs font-medium transition-colors",
+                      "inline-flex h-9 items-center gap-2 rounded-md border px-3 text-xs font-medium transition-colors",
                       importButtonTone === "drag"
                         ? "border-dashed border-primary/70 bg-primary/10 text-primary"
                         : importButtonTone === "error"
@@ -511,29 +446,358 @@ export function PersonaDialog({
 
             <div className="flex items-center gap-2">
               <Button
+                disabled={isPending}
                 onClick={() => handleOpenChange(false)}
-                size="sm"
                 type="button"
                 variant="outline"
               >
                 Cancel
               </Button>
               <Button
-                disabled={
-                  displayName.trim().length === 0 ||
-                  systemPrompt.trim().length === 0 ||
-                  isPending
-                }
-                onClick={() => void handleSubmit()}
-                size="sm"
-                type="button"
+                data-testid="persona-dialog-submit"
+                disabled={!canSubmit}
+                form="persona-dialog-form"
+                type="submit"
               >
                 {isPending ? "Saving..." : submitLabel}
               </Button>
             </div>
           </div>
-        </div>
-      </DialogContent>
+        }
+      >
+        <form
+          className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]"
+          id="persona-dialog-form"
+          onSubmit={handleSubmitForm}
+        >
+          <AgentCreationPreview
+            avatarUrl={previewAvatarUrl}
+            disabled={isPending}
+            label={previewLabel}
+            onSelectAvatar={setAvatarUrl}
+          />
+
+          <div className="space-y-5">
+            <div className="space-y-1.5">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor="persona-display-name"
+              >
+                Agent name
+              </label>
+              <div
+                className={cn(
+                  "flex min-h-11 items-center px-3",
+                  PERSONA_FIELD_SHELL_CLASS,
+                )}
+              >
+                <Input
+                  autoCorrect="off"
+                  className={cn(
+                    "h-8 px-0 py-0 leading-6",
+                    PERSONA_FIELD_CONTROL_CLASS,
+                  )}
+                  disabled={isPending}
+                  id="persona-display-name"
+                  onChange={(event) => setDisplayName(event.target.value)}
+                  placeholder="Fizz"
+                  value={displayName}
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor="persona-system-prompt"
+              >
+                Agent instruction
+              </label>
+              <div className={PERSONA_FIELD_SHELL_CLASS}>
+                <Textarea
+                  className={cn(
+                    "min-h-40 resize-y px-3 py-3 leading-5",
+                    PERSONA_FIELD_CONTROL_CLASS,
+                  )}
+                  disabled={isPending}
+                  id="persona-system-prompt"
+                  onChange={(event) => setSystemPrompt(event.target.value)}
+                  placeholder="Describe what this agent should do."
+                  value={systemPrompt}
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor="persona-runtime"
+              >
+                Provider
+              </label>
+              <Select
+                disabled={isPending || runtimesLoading}
+                onValueChange={(nextRuntime) => {
+                  setRuntime(nextRuntime);
+                  setModel("");
+                }}
+                value={runtime}
+              >
+                <SelectTrigger
+                  className={PERSONA_DROPDOWN_TRIGGER_CLASS}
+                  id="persona-runtime"
+                >
+                  <SelectValue placeholder={selectedRuntimeLabel} />
+                </SelectTrigger>
+                <SelectContent
+                  align="start"
+                  onCloseAutoFocus={(event) => event.preventDefault()}
+                >
+                  {runtimes.map((candidate) => (
+                    <SelectItem
+                      disabled={
+                        isCreateMode && candidate.availability !== "available"
+                      }
+                      key={candidate.id}
+                      value={candidate.id}
+                    >
+                      {formatRuntimeOptionLabel(candidate)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {runtimeWarning}
+            </div>
+
+            <div
+              aria-hidden={!modelFieldVisible}
+              className={cn(
+                "grid overflow-hidden transition-[grid-template-rows,opacity] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
+                modelFieldVisible
+                  ? "grid-rows-[1fr] opacity-100"
+                  : "grid-rows-[0fr] opacity-0",
+              )}
+            >
+              <div className="min-h-0 overflow-hidden">
+                <div
+                  className={cn(
+                    "space-y-1.5 transition-[transform,opacity] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
+                    modelFieldVisible
+                      ? "translate-y-0 opacity-100"
+                      : "-translate-y-1 opacity-0",
+                  )}
+                >
+                  <label
+                    className="text-sm font-medium text-foreground"
+                    htmlFor="persona-model"
+                  >
+                    Model
+                    <span className={PERSONA_LABEL_OPTIONAL_CLASS}>
+                      Optional
+                    </span>
+                  </label>
+                  <Select
+                    disabled={isPending || !modelFieldVisible}
+                    onValueChange={(nextModel) => {
+                      setModel(
+                        nextModel === AUTO_MODEL_DROPDOWN_VALUE
+                          ? ""
+                          : nextModel,
+                      );
+                    }}
+                    value={model.trim() || AUTO_MODEL_DROPDOWN_VALUE}
+                  >
+                    <SelectTrigger
+                      className={PERSONA_DROPDOWN_TRIGGER_CLASS}
+                      id="persona-model"
+                    >
+                      <SelectValue placeholder={selectedModelLabel} />
+                    </SelectTrigger>
+                    <SelectContent
+                      align="start"
+                      onCloseAutoFocus={(event) => event.preventDefault()}
+                    >
+                      {modelOptions.map((option) => (
+                        <SelectItem
+                          key={option.id || AUTO_MODEL_DROPDOWN_VALUE}
+                          value={option.id || AUTO_MODEL_DROPDOWN_VALUE}
+                        >
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            </div>
+
+            {error ? (
+              <p className="text-sm text-destructive">{error.message}</p>
+            ) : null}
+          </div>
+        </form>
+      </ChooserDialogContent>
     </Dialog>
+  );
+}
+
+function isAvatarFileDrag(event: React.DragEvent<HTMLElement>) {
+  return Array.from(event.dataTransfer.types).includes("Files");
+}
+
+function AgentCreationPreview({
+  avatarUrl,
+  disabled = false,
+  label,
+  onSelectAvatar,
+}: {
+  avatarUrl: string | null;
+  disabled?: boolean;
+  label: string;
+  onSelectAvatar: (avatarUrl: string) => void;
+}) {
+  const gooseAppAvatar = resolveGooseAppAvatar(avatarUrl);
+  const [isDragOverAvatar, setIsDragOverAvatar] = React.useState(false);
+  const avatarDragDepthRef = React.useRef(0);
+  const {
+    inputRef: avatarUploadInputRef,
+    isUploading,
+    errorMessage: uploadErrorMessage,
+    clearError: clearUploadError,
+    openPicker: openUploadPicker,
+    uploadFile: uploadAvatarFile,
+    handleFileChange: handleAvatarUploadFileChange,
+  } = useAvatarUpload({
+    onUploadSuccess: onSelectAvatar,
+  });
+
+  const handleAvatarDragEnter = React.useCallback(
+    (event: React.DragEvent<HTMLFieldSetElement>) => {
+      if (disabled || !isAvatarFileDrag(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      avatarDragDepthRef.current += 1;
+      event.dataTransfer.dropEffect = "copy";
+      setIsDragOverAvatar(true);
+    },
+    [disabled],
+  );
+
+  const handleAvatarDragOver = React.useCallback(
+    (event: React.DragEvent<HTMLFieldSetElement>) => {
+      if (disabled || !isAvatarFileDrag(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      event.dataTransfer.dropEffect = "copy";
+      setIsDragOverAvatar(true);
+    },
+    [disabled],
+  );
+
+  const handleAvatarDragLeave = React.useCallback(
+    (event: React.DragEvent<HTMLFieldSetElement>) => {
+      if (!isAvatarFileDrag(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      avatarDragDepthRef.current = Math.max(0, avatarDragDepthRef.current - 1);
+      if (avatarDragDepthRef.current === 0) {
+        setIsDragOverAvatar(false);
+      }
+    },
+    [],
+  );
+
+  const handleAvatarDrop = React.useCallback(
+    (event: React.DragEvent<HTMLFieldSetElement>) => {
+      if (!isAvatarFileDrag(event)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      avatarDragDepthRef.current = 0;
+      setIsDragOverAvatar(false);
+
+      const file = event.dataTransfer.files[0];
+      if (!file || disabled || isUploading) {
+        return;
+      }
+
+      clearUploadError();
+      void uploadAvatarFile(file);
+    },
+    [clearUploadError, disabled, isUploading, uploadAvatarFile],
+  );
+
+  return (
+    <div className="mx-auto w-full max-w-[220px] lg:sticky lg:top-0">
+      <fieldset
+        aria-label="Agent avatar preview"
+        className={cn(
+          "group/avatar-preview relative m-0 aspect-[4/5] min-h-[240px] min-w-0 overflow-hidden rounded-xl border border-border/70 bg-muted/50 p-0 shadow-xs transition-[background-color,border-color,box-shadow] duration-150",
+          isDragOverAvatar &&
+            "border-dashed border-primary/70 bg-primary/5 ring-2 ring-primary/15",
+        )}
+        onDragEnter={handleAvatarDragEnter}
+        onDragLeave={handleAvatarDragLeave}
+        onDragOver={handleAvatarDragOver}
+        onDrop={handleAvatarDrop}
+      >
+        <input
+          accept="image/gif,image/jpeg,image/png,image/webp"
+          className="hidden"
+          onChange={handleAvatarUploadFileChange}
+          ref={avatarUploadInputRef}
+          type="file"
+        />
+
+        <div className="absolute inset-0 flex items-center justify-center">
+          {gooseAppAvatar ? (
+            <GooseAppAvatarMedia
+              alt={`${label} avatar`}
+              asset={gooseAppAvatar}
+              className="h-40 w-40"
+              playVideo
+            />
+          ) : (
+            <ProfileAvatar
+              avatarUrl={avatarUrl}
+              className="h-36 w-36 text-4xl"
+              label={label}
+            />
+          )}
+        </div>
+
+        {uploadErrorMessage ? (
+          <p className="absolute inset-x-3 bottom-12 rounded-md bg-background/95 px-2 py-1 text-center text-xs text-destructive shadow-xs">
+            {uploadErrorMessage}
+          </p>
+        ) : null}
+
+        <div className="absolute inset-x-3 bottom-3 flex justify-center">
+          <button
+            className="inline-flex h-8 translate-y-1 items-center justify-center gap-1.5 rounded-full border border-border/70 bg-background/90 px-3 text-xs font-medium text-foreground opacity-0 shadow-xs transition-[background-color,opacity,transform] duration-150 hover:bg-muted focus-visible:translate-y-0 focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring group-hover/avatar-preview:translate-y-0 group-hover/avatar-preview:opacity-100 group-focus-within/avatar-preview:translate-y-0 group-focus-within/avatar-preview:opacity-100"
+            disabled={disabled || isUploading}
+            onClick={() => {
+              clearUploadError();
+              openUploadPicker();
+            }}
+            type="button"
+          >
+            {isUploading ? (
+              <Spinner className="h-3.5 w-3.5 border-2" />
+            ) : (
+              <Upload className="h-3.5 w-3.5" />
+            )}
+            {isUploading ? "Uploading..." : "Edit avatar"}
+          </button>
+        </div>
+      </fieldset>
+    </div>
   );
 }

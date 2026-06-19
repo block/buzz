@@ -28,6 +28,7 @@ function createPreview(overrides = {}) {
     displayName: "Alice",
     systemPrompt: "Be helpful.",
     avatarDataUrl: null,
+    avatarRef: null,
     runtime: null,
     model: null,
     namePool: [],
@@ -82,6 +83,17 @@ test("buildPersonaImportPlan detects avatar change", () => {
 
   assert.equal(plan.fields.length, 1);
   assert.equal(plan.fields[0]?.field, "avatarUrl");
+});
+
+test("buildPersonaImportPlan detects Goose app-avatar ref changes", () => {
+  const plan = buildPersonaImportPlan({
+    persona: createPersona({ avatarUrl: "app-avatar:gloopies-18" }),
+    preview: createPreview({ avatarRef: "app-avatar:gloopies-19" }),
+  });
+
+  assert.equal(plan.fields.length, 1);
+  assert.equal(plan.fields[0]?.field, "avatarUrl");
+  assert.equal(plan.fields[0]?.importedValue, "app-avatar:gloopies-19");
 });
 
 test("buildPersonaImportPlan detects runtime change", () => {

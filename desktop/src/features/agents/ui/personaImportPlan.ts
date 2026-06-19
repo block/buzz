@@ -1,4 +1,5 @@
 import type { ParsedPersonaPreview } from "@/shared/api/tauriPersonas";
+import { resolveImportedPersonaAvatarUrl } from "@/shared/avatars/gooseAppAvatarRefs";
 import type { AgentPersona } from "@/shared/api/types";
 
 type LineChangeCounts = {
@@ -124,7 +125,9 @@ export function buildPersonaImportPlan({
   }
 
   const existingAvatar = normalizeOptionalText(persona.avatarUrl);
-  const importedAvatar = normalizeOptionalText(preview.avatarDataUrl);
+  const importedAvatar = normalizeOptionalText(
+    resolveImportedPersonaAvatarUrl(preview),
+  );
   if (existingAvatar !== importedAvatar) {
     fields.push({
       field: "avatarUrl",

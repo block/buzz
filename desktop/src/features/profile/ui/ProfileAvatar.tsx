@@ -2,10 +2,12 @@ import * as React from "react";
 import { UserRound } from "lucide-react";
 
 import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
+import { resolveGooseAppAvatar } from "@/shared/avatars/gooseAppAvatars";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
+import { GooseAppAvatarMedia } from "@/shared/ui/GooseAppAvatarMedia";
 
 type ProfileAvatarProps = {
   avatarUrl: string | null;
@@ -27,7 +29,7 @@ export function ProfileAvatar({
   testId,
 }: ProfileAvatarProps) {
   const initials = getInitials(label);
-
+  const gooseAppAvatar = resolveGooseAppAvatar(avatarUrl);
   // Animated avatars show their static poster frame until hovered, then play
   // the animation.
   const animated = parseAnimatedAvatarUrl(avatarUrl);
@@ -50,6 +52,25 @@ export function ProfileAvatar({
     ? (avatarDataUrl ?? undefined)
     : (liveSrc ?? avatarDataUrl ?? undefined);
   const shouldShowFallback = src === undefined || (!animated && liveFailed);
+
+  if (gooseAppAvatar) {
+    return (
+      <Avatar
+        className={cn(
+          "shrink-0 bg-transparent text-primary shadow-none",
+          className,
+        )}
+        data-testid={testId}
+      >
+        <GooseAppAvatarMedia
+          alt={`${label} avatar`}
+          asset={gooseAppAvatar}
+          mediaClassName="object-contain"
+          testId={testId ? `${testId}-image` : undefined}
+        />
+      </Avatar>
+    );
+  }
 
   return (
     <Avatar

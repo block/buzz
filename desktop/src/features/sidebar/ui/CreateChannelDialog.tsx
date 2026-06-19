@@ -147,7 +147,7 @@ export function CreateChannelDialog({
       }}
     >
       <ChooserDialogContent
-        className="max-w-lg"
+        className="max-w-lg border-0"
         contentClassName="pt-3"
         data-testid="create-channel-dialog"
         footerClassName="border-t-0 pt-0"

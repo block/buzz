@@ -156,12 +156,10 @@ export function useManagedAgentActions() {
     try {
       const agent = managedAgents.find((a) => a.pubkey === pubkey);
       if (!agent) return;
-      const result = await stopManagedAgentWithRules({
-        agent,
-        channels: channelsQuery.data ?? [],
-        relayAgents: relayAgentsQuery.data ?? [],
-        stopManagedAgent: stopMutation.mutateAsync,
-      });
+      const result = await stopAndRemoveLocalAgent(agent);
+      if (agent.backend.type === "local" && logAgentPubkey === pubkey) {
+        setLogAgentPubkey(null);
+      }
       if (result.noticeMessage) {
         setActionNoticeMessage(result.noticeMessage);
       }
@@ -246,7 +244,7 @@ export function useManagedAgentActions() {
         return `Added ${result.agent.name} to ${channel.name} and restarted it so the new channel subscription is live.`;
       }
       if (result.started) {
-        return `Added ${result.agent.name} to ${channel.name} and spawned it.`;
+        return `Added ${result.agent.name} to ${channel.name} and started it.`;
       }
       if (result.membershipAdded) {
         return `Added ${result.agent.name} to ${channel.name}.`;
@@ -280,18 +278,22 @@ export function useManagedAgentActions() {
   }
 
   async function handleBulkStopRunning() {
-    await runBulkAction(
-      managedAgents.filter((a) => isManagedAgentActive(a)),
+    const targets = managedAgents.filter((a) => isManagedAgentActive(a));
+    const executed = await runBulkAction(
+      targets,
       "Stop",
       "stop",
-      (a) =>
-        stopManagedAgentWithRules({
-          agent: a,
-          channels: channelsQuery.data ?? [],
-          relayAgents: relayAgentsQuery.data ?? [],
-          stopManagedAgent: stopMutation.mutateAsync,
-        }),
+      stopAndRemoveLocalAgent,
     );
+    if (
+      executed &&
+      logAgentPubkey &&
+      targets.some(
+        (a) => a.backend.type === "local" && a.pubkey === logAgentPubkey,
+      )
+    ) {
+      setLogAgentPubkey(null);
+    }
   }
 
   async function handleBulkRemoveStopped() {
@@ -323,6 +325,20 @@ export function useManagedAgentActions() {
       pubkey: agent.pubkey,
       forceRemoteDelete: isDeployedRemote ? true : undefined,
     });
+  }
+
+  async function stopAndRemoveLocalAgent(agent: ManagedAgent) {
+    const result = await stopManagedAgentWithRules({
+      agent,
+      channels: channelsQuery.data ?? [],
+      relayAgents: relayAgentsQuery.data ?? [],
+      stopManagedAgent: stopMutation.mutateAsync,
+    });
+    if (agent.backend.type === "local") {
+      await deleteManagedAgent(agent);
+      await removeAgentFromAllChannels(agent.pubkey);
+    }
+    return result;
   }
 
   const isPending =
