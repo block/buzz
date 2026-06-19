@@ -456,6 +456,7 @@ test("timeline-intro-surface: skeleton suppresses intro while loading", () => {
     selectTimelineIntroSurface({
       hasChannelIntro: true,
       hasDirectMessageIntro: false,
+      hasReachedChannelStart: true,
       isSkeletonVisible: true,
     }),
     null,
@@ -475,9 +476,22 @@ test("timeline-intro-surface: intro may coexist with the message list", () => {
     selectTimelineIntroSurface({
       hasChannelIntro: true,
       hasDirectMessageIntro: false,
+      hasReachedChannelStart: true,
       isSkeletonVisible: false,
     }),
     "channel-intro",
+  );
+});
+
+test("timeline-intro-surface: channel intro waits for oldest-history boundary", () => {
+  assert.equal(
+    selectTimelineIntroSurface({
+      hasChannelIntro: true,
+      hasDirectMessageIntro: false,
+      hasReachedChannelStart: false,
+      isSkeletonVisible: false,
+    }),
+    null,
   );
 });
 
@@ -486,6 +500,7 @@ test("timeline-intro-surface: direct-message intro wins over channel intro", () 
     selectTimelineIntroSurface({
       hasChannelIntro: true,
       hasDirectMessageIntro: true,
+      hasReachedChannelStart: false,
       isSkeletonVisible: false,
     }),
     "direct-message-intro",
@@ -497,6 +512,7 @@ test("timeline-intro-surface: no intro without an intro model", () => {
     selectTimelineIntroSurface({
       hasChannelIntro: false,
       hasDirectMessageIntro: false,
+      hasReachedChannelStart: true,
       isSkeletonVisible: false,
     }),
     null,

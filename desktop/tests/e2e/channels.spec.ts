@@ -793,21 +793,37 @@ test("empty channel shows intro actions", async ({ page }) => {
   );
 });
 
+test("channel with recent messages hides beginning-only intro actions on open", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("message-channel-intro")).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-intro-action-create-agent"),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("channel-intro-action-add-people")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    "Welcome to #general",
+  );
+});
+
 test("channel with messages shows content", async ({ page }) => {
   await page.goto("/");
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await expect(page.getByTestId("message-channel-intro")).toBeVisible();
-  await expect(page.getByTestId("message-channel-intro")).toContainText(
-    "This is the beginning of the regular channel.",
-  );
+  await expect(page.getByTestId("message-channel-intro")).toHaveCount(0);
   await expect(
     page.getByTestId("channel-intro-action-create-channel"),
   ).toHaveCount(0);
   await expect(
     page.getByTestId("channel-intro-action-create-agent"),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
     0,
   );
@@ -815,8 +831,6 @@ test("channel with messages shows content", async ({ page }) => {
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Welcome to #general",
   );
-  await expectSameLeftInset(page, "message-channel-intro", "message-row");
-  await expectIntroBalancedAroundDayDivider(page, "message-channel-intro");
 });
 
 test("shows and clears activity indicators for active channel agents", async ({

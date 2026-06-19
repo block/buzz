@@ -212,25 +212,11 @@ const MessageTimelineBase = React.forwardRef<
     liveCount: messages.length,
   });
   const showTimelineSkeleton = timelineBodySurface === "skeleton";
-  const timelineIntroSurface = selectTimelineIntroSurface({
-    hasChannelIntro: channelIntro !== null && directMessageIntro === null,
-    hasDirectMessageIntro: directMessageIntro !== null,
-    isSkeletonVisible: showTimelineSkeleton,
-  });
-  const showDirectMessageIntro =
-    timelineIntroSurface === "direct-message-intro";
-  const showChannelIntro = timelineIntroSurface === "channel-intro";
-  const activeDirectMessageIntro = showDirectMessageIntro
-    ? directMessageIntro
-    : null;
-  const activeChannelIntro = showChannelIntro ? channelIntro : null;
-  const showIntro = showDirectMessageIntro || showChannelIntro;
-  const showGenericEmpty = timelineBodySurface === "empty" && !showIntro;
-  const showMessageList = timelineBodySurface === "list";
 
   const {
     highlightedMessageId,
     isAtBottom,
+    hasReachedTop,
     newMessageCount,
     onScroll,
     scrollToBottom,
@@ -249,6 +235,24 @@ const MessageTimelineBase = React.forwardRef<
     sentinelRef: topSentinelRef,
     targetMessageId,
   });
+
+  const timelineIntroSurface = selectTimelineIntroSurface({
+    hasChannelIntro: channelIntro !== null && directMessageIntro === null,
+    hasDirectMessageIntro: directMessageIntro !== null,
+    hasReachedChannelStart:
+      (!hasOlderMessages && hasReachedTop) || messages.length === 0,
+    isSkeletonVisible: showTimelineSkeleton,
+  });
+  const showDirectMessageIntro =
+    timelineIntroSurface === "direct-message-intro";
+  const showChannelIntro = timelineIntroSurface === "channel-intro";
+  const activeDirectMessageIntro = showDirectMessageIntro
+    ? directMessageIntro
+    : null;
+  const activeChannelIntro = showChannelIntro ? channelIntro : null;
+  const showIntro = showDirectMessageIntro || showChannelIntro;
+  const showGenericEmpty = timelineBodySurface === "empty" && !showIntro;
+  const showMessageList = timelineBodySurface === "list";
 
   React.useImperativeHandle(
     ref,

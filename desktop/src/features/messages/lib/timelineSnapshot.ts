@@ -225,10 +225,12 @@ export type TimelineIntroSurface =
 export function selectTimelineIntroSurface({
   hasChannelIntro,
   hasDirectMessageIntro,
+  hasReachedChannelStart,
   isSkeletonVisible,
 }: {
   hasChannelIntro: boolean;
   hasDirectMessageIntro: boolean;
+  hasReachedChannelStart: boolean;
   isSkeletonVisible: boolean;
 }): TimelineIntroSurface {
   if (isSkeletonVisible) {
@@ -237,7 +239,7 @@ export function selectTimelineIntroSurface({
   if (hasDirectMessageIntro) {
     return "direct-message-intro";
   }
-  if (hasChannelIntro) {
+  if (hasChannelIntro && hasReachedChannelStart) {
     return "channel-intro";
   }
   return null;
