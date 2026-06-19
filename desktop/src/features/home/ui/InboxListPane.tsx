@@ -320,58 +320,58 @@ export function InboxListPane({
       <TopChromeInsetHeader>
         <div className="px-5 py-1">
           <div className="flex w-full min-w-0 items-center justify-between gap-3">
-            <div className="ml-auto flex shrink-0 items-center justify-end gap-[6px]">
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button
-                    aria-label="Inbox options"
-                    className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
-                    data-testid="inbox-options-trigger"
-                    size="icon"
-                    type="button"
-                    variant="outline"
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  aria-label="Inbox options"
+                  className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+                  data-testid="inbox-options-trigger"
+                  size="icon"
+                  type="button"
+                  variant="outline"
+                >
+                  <Ellipsis className="h-4 w-4" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-60 p-2">
+                <div
+                  className={cn(
+                    "flex min-h-9 items-center justify-between gap-3 rounded-lg px-2 py-1.5",
+                    isReminders && "opacity-50",
+                  )}
+                >
+                  <label
+                    className="text-sm font-medium text-foreground"
+                    htmlFor="inbox-unread-only-switch"
                   >
-                    <Ellipsis className="h-4 w-4" />
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent align="end" className="w-60 p-2">
-                  <div
-                    className={cn(
-                      "flex min-h-9 items-center justify-between gap-3 rounded-lg px-2 py-1.5",
-                      isReminders && "opacity-50",
-                    )}
-                  >
-                    <label
-                      className="text-sm font-medium text-foreground"
-                      htmlFor="inbox-unread-only-switch"
-                    >
-                      Show unread
-                    </label>
-                    <Switch
-                      checked={unreadOnly}
-                      className="shadow-none [&>span]:shadow-none"
-                      data-testid="inbox-unread-only-toggle"
-                      disabled={isReminders}
-                      id="inbox-unread-only-switch"
-                      onCheckedChange={onUnreadOnlyChange}
-                    />
-                  </div>
-                  <Separator className="my-1 bg-muted" />
-                  <button
-                    className="flex min-h-9 w-full items-center rounded-lg px-2 py-2 text-left text-sm transition-colors hover:bg-muted/50 disabled:pointer-events-none disabled:opacity-50"
-                    disabled={unreadVisibleItemCount === 0}
-                    onClick={handleMarkAllRead}
-                    type="button"
-                  >
-                    <span>Mark all as read</span>
-                    {unreadVisibleItemCount > 0 ? (
-                      <span className="ml-auto text-xs text-muted-foreground">
-                        {unreadVisibleItemCount}
-                      </span>
-                    ) : null}
-                  </button>
-                </PopoverContent>
-              </Popover>
+                    Show unread
+                  </label>
+                  <Switch
+                    checked={unreadOnly}
+                    className="shadow-none [&>span]:shadow-none"
+                    data-testid="inbox-unread-only-toggle"
+                    disabled={isReminders}
+                    id="inbox-unread-only-switch"
+                    onCheckedChange={onUnreadOnlyChange}
+                  />
+                </div>
+                <Separator className="my-1 bg-muted" />
+                <button
+                  className="flex min-h-9 w-full items-center rounded-lg px-2 py-2 text-left text-sm transition-colors hover:bg-muted/50 disabled:pointer-events-none disabled:opacity-50"
+                  disabled={unreadVisibleItemCount === 0}
+                  onClick={handleMarkAllRead}
+                  type="button"
+                >
+                  <span>Mark all as read</span>
+                  {unreadVisibleItemCount > 0 ? (
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      {unreadVisibleItemCount}
+                    </span>
+                  ) : null}
+                </button>
+              </PopoverContent>
+            </Popover>
+            <div className="ml-auto flex shrink-0 items-center justify-end">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
