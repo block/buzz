@@ -40,7 +40,7 @@ async function ensureTimelineScrollable(
   expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight + 160);
 }
 
-async function focusTopbarSearchWithShortcut(
+async function focusSidebarSearchWithShortcut(
   page: import("@playwright/test").Page,
 ) {
   const openSearchButton = page.getByTestId("open-search");
@@ -213,12 +213,12 @@ test("home feed renders resolved author labels", async ({ page }) => {
   await expect(page.getByTestId("home-inbox-list")).not.toContainText("You");
 });
 
-test("opens topbar search with the shortcut and loads the exact result", async ({
+test("opens sidebar search with the shortcut and loads the exact result", async ({
   page,
 }) => {
   await page.goto("/");
 
-  await focusTopbarSearchWithShortcut(page);
+  await focusSidebarSearchWithShortcut(page);
 
   await page.getByTestId("open-search").fill("shipped");
   await expect(page.getByTestId("search-results")).toContainText(
@@ -242,7 +242,7 @@ test("opens topbar search with the shortcut and loads the exact result", async (
 test("opens channel matches from search", async ({ page }) => {
   await page.goto("/");
 
-  await focusTopbarSearchWithShortcut(page);
+  await focusSidebarSearchWithShortcut(page);
 
   await page.getByTestId("open-search").fill("engineering");
   const results = page.getByTestId("search-results");
@@ -269,12 +269,35 @@ test("opens channel matches from search", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("engineering");
 });
 
+test("reopens the collapsed sidebar when the search shortcut fires", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await expect(page.getByTestId("open-search")).toBeVisible();
+
+  const sidebarRoot = page.locator('[data-side="left"][data-state]');
+  await expect(sidebarRoot).toHaveAttribute("data-state", "expanded");
+
+  // Collapse the sidebar; its pinned-header search slides off-screen.
+  await page
+    .getByRole("button", { name: "Toggle Sidebar", exact: true })
+    .click();
+  await expect(sidebarRoot).toHaveAttribute("data-state", "collapsed");
+
+  await focusSidebarSearchWithShortcut(page);
+
+  // The shortcut reveals the sidebar and focuses the search input.
+  await expect(sidebarRoot).toHaveAttribute("data-state", "expanded");
+  await expect(page.getByTestId("open-search")).toBeFocused();
+});
+
 test("search results use your resolved profile label instead of You", async ({
   page,
 }) => {
   await page.goto("/");
 
-  await focusTopbarSearchWithShortcut(page);
+  await focusSidebarSearchWithShortcut(page);
 
   await page.getByTestId("open-search").fill("welcome");
   const results = page.getByTestId("search-results");
@@ -289,7 +312,7 @@ test("opens accessible unjoined channels from search in read-only mode", async (
 }) => {
   await page.goto("/");
 
-  await focusTopbarSearchWithShortcut(page);
+  await focusSidebarSearchWithShortcut(page);
 
   await page.getByTestId("open-search").fill("critique");
   const results = page.getByTestId("search-results");

@@ -1,6 +1,3 @@
-import * as React from "react";
-
-import { useAppShell } from "@/app/AppShellContext";
 import { Card } from "@/shared/ui/card";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { cn } from "@/shared/lib/cn";
@@ -23,7 +20,7 @@ type ViewLoadingFallbackProps = {
 
 function LoadingHeaderSkeleton() {
   return (
-    <TopChromeInsetHeader data-tauri-drag-region>
+    <TopChromeInsetHeader data-tauri-drag-region flush>
       <header className="flex min-h-8 min-w-0 cursor-default select-none items-center gap-2.5 px-5 py-1.5">
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1 overflow-hidden">
@@ -396,18 +393,8 @@ export function ViewLoadingFallback({
   includeHeader = false,
   kind,
 }: ViewLoadingFallbackProps) {
-  const { setTopbarSearchLoading } = useAppShell();
   const shouldShowChannelHeader =
     includeHeader && (kind === "channel" || kind === "forum");
-
-  React.useLayoutEffect(() => {
-    if (!includeHeader) return;
-
-    setTopbarSearchLoading(true);
-    return () => {
-      setTopbarSearchLoading(false);
-    };
-  }, [includeHeader, setTopbarSearchLoading]);
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">

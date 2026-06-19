@@ -813,15 +813,12 @@ test("narrow thread view collapses channel header actions into a menu", async ({
   await expect(page.getByTestId("channel-management-trigger")).toBeVisible();
 });
 
-test("single-panel thread view hides topbar search and channel actions", async ({
-  page,
-}) => {
+test("single-panel thread view hides channel actions", async ({ page }) => {
   await page.setViewportSize({ width: 860, height: 720 });
 
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await expect(page.getByTestId("open-search")).toBeVisible();
   await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
 
   const rootMessage = page.locator('[data-message-id="mock-general-alice"]');
@@ -831,13 +828,11 @@ test("single-panel thread view hides topbar search and channel actions", async (
   await page.getByTestId("reply-message-mock-general-alice").click();
   await expect(threadPanel).toBeVisible();
   await expect(threadPanel.getByTestId("message-thread-back")).toBeVisible();
-  await expect(page.getByTestId("open-search")).toHaveCount(0);
   await expect(page.getByTestId("channel-actions-menu-trigger")).toHaveCount(0);
   await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
 
   await threadPanel.getByTestId("message-thread-back").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await expect(page.getByTestId("open-search")).toBeVisible();
   await expect(page.getByTestId("channel-add-bot-trigger")).toHaveCount(0);
 });
 

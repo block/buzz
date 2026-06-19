@@ -96,7 +96,6 @@ export function ChannelScreen({
     isFollowingThread,
     isNotifiedForThread,
     readStateVersion,
-    setTopbarSearchHidden,
   } = useAppShell();
   const {
     clearMessageRouteTarget,
@@ -589,12 +588,6 @@ export function ChannelScreen({
     resetKey: activeChannelId,
     enabled: !isSinglePanelView,
   });
-  React.useEffect(() => {
-    setTopbarSearchHidden(isSinglePanelView);
-    return () => {
-      setTopbarSearchHidden(false);
-    };
-  }, [isSinglePanelView, setTopbarSearchHidden]);
 
   const channelHeader = (
     <ChannelScreenHeader
