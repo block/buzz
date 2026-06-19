@@ -21,7 +21,7 @@ type AppShellContextValue = {
   getChannelReadAt: (channelId: string) => number | null;
   // Thread read frontier as unix-seconds timestamp, or null when never read.
   // Uses `thread:<rootId>` context keys in the same ReadStateManager.
-  getThreadReadAt: (rootId: string) => number | null;
+  getThreadReadAt: (rootId: string, channelId?: string | null) => number | null;
   // Advance the thread read frontier to the given unix-seconds timestamp.
   markThreadRead: (rootId: string, timestamp: number) => void;
   // Bump-counter that invalidates whenever the read marker changes. Include

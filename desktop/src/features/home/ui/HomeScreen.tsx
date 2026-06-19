@@ -13,7 +13,11 @@ import {
 type HomeScreenProps = {
   availableChannelIds: ReadonlySet<string>;
   currentPubkey?: string;
-  onOpenContext: (channelId: string, messageId: string) => void;
+  onOpenContext: (
+    channelId: string,
+    messageId: string,
+    threadRootId?: string | null,
+  ) => void;
 };
 
 export function HomeScreen({

@@ -33,6 +33,7 @@ export type InboxItem = {
   categoryLabel: string;
   channelLabel: string | null;
   fullTimestampLabel: string;
+  groupItems: FeedItem[];
   isActionRequired: boolean;
   latestActivityAt: number;
   mentionNames: string[];
@@ -440,6 +441,7 @@ export function buildInboxItems({
         categoryLabel,
         channelLabel,
         fullTimestampLabel: formatInboxFullTimestamp(item.createdAt),
+        groupItems: group.items,
         isActionRequired: categories.includes("needs_action"),
         latestActivityAt: group.latestActivityAt,
         mentionNames,

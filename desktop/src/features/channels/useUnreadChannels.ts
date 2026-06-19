@@ -281,6 +281,7 @@ export function useUnreadChannels(
 
   const {
     getEffectiveTimestamp,
+    getOwnTimestamp,
     isReady: isReadStateReady,
     markContextRead,
     drainSyncedAdvances,
@@ -379,6 +380,21 @@ export function useUnreadChannels(
   const [membershipVersion, bumpMembershipVersion] = React.useReducer(
     (x: number) => x + 1,
     0,
+  );
+
+  const getThreadActivityReadAt = React.useCallback(
+    (channelId: string, rootId: string): number | null => {
+      const threadReadAt = getOwnTimestamp(`thread:${rootId}`);
+      const channelReadAt = getEffectiveTimestamp(channelId);
+      if (threadReadAt === null) {
+        return channelReadAt;
+      }
+      if (channelReadAt === null) {
+        return threadReadAt;
+      }
+      return Math.max(threadReadAt, channelReadAt);
+    },
+    [getEffectiveTimestamp, getOwnTimestamp],
   );
 
   // Reset all in-session state when the identity or relay changes. Unread
@@ -882,6 +898,7 @@ export function useUnreadChannels(
     threadActivityBackfillKeyRef.current = backfillKey;
 
     let isCancelled = false;
+    let didFinish = false;
     const targetIds = channelIdsKey.split(",");
     const channelById = new Map(
       channels.map((channel) => [channel.id, channel]),
@@ -963,6 +980,10 @@ export function useUnreadChannels(
         ) {
           continue;
         }
+        const readAt = getThreadActivityReadAt(channelId, ref.rootId);
+        if (readAt !== null && event.created_at <= readAt) {
+          continue;
+        }
 
         const replies = candidateRepliesByChannel.get(channelId) ?? [];
         replies.push(event);
@@ -986,6 +1007,10 @@ export function useUnreadChannels(
       for (const [channelId, events] of candidateRepliesByChannel) {
         const channelName = channelById.get(channelId)?.name ?? "";
         for (const event of events) {
+          const ref = getThreadReference(event.tags);
+          if (ref.rootId === null) {
+            continue;
+          }
           if (
             !shouldNotifyForEvent(event, normalizedPubkey, {
               participatedRootIds: participatedRootIdsRef.current,
@@ -996,6 +1021,10 @@ export function useUnreadChannels(
               channelId,
             })
           ) {
+            continue;
+          }
+          const readAt = getThreadActivityReadAt(channelId, ref.rootId);
+          if (readAt !== null && event.created_at <= readAt) {
             continue;
           }
 
@@ -1082,6 +1111,10 @@ export function useUnreadChannels(
           ) {
             continue;
           }
+          const readAt = getThreadActivityReadAt(channelId, ref.rootId);
+          if (readAt !== null && event.created_at <= readAt) {
+            continue;
+          }
 
           const channelName = channelById.get(channelId)?.name ?? "";
           threadReplies.push({
@@ -1113,15 +1146,23 @@ export function useUnreadChannels(
       ) {
         bumpMembershipVersion();
       }
-    })();
+    })().finally(() => {
+      if (!isCancelled) {
+        didFinish = true;
+      }
+    });
 
     return () => {
       isCancelled = true;
+      if (!didFinish && threadActivityBackfillKeyRef.current === backfillKey) {
+        threadActivityBackfillKeyRef.current = null;
+      }
     };
   }, [
     channelIdsKey,
     channels,
     followedRootIdsKey,
+    getThreadActivityReadAt,
     liveUpdateOptions.followedRootIds,
     normalizedPubkey,
     relayClient,
@@ -1322,6 +1363,13 @@ export function useUnreadChannels(
               }
             }
             if (isThreadedReply) {
+              const rootId = evtRef.rootId ?? evtRef.parentId;
+              if (rootId) {
+                const threadReadAt = getThreadActivityReadAt(channelId, rootId);
+                if (threadReadAt !== null && event.created_at <= threadReadAt) {
+                  continue;
+                }
+              }
               threadReplies.push({
                 id: event.id,
                 kind: event.kind,
@@ -1605,6 +1653,7 @@ export function useUnreadChannels(
     // ReadStateManager. readStateVersion is the invalidation signal callers
     // should include in memo deps.
     getEffectiveTimestamp,
+    getOwnTimestamp,
     readStateVersion,
     setContextParentResolver,
     participatedRootIds,

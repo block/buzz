@@ -90,7 +90,11 @@ import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
-import { KIND_APPROVAL_REQUEST, KIND_REMINDER } from "@/shared/constants/kinds";
+import {
+  KIND_APPROVAL_REQUEST,
+  KIND_EVENT_REMINDER,
+  KIND_REMINDER,
+} from "@/shared/constants/kinds";
 import { ConnectionBanner } from "@/shared/ui/ConnectionBanner";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 
@@ -187,34 +191,60 @@ export function AppShell() {
     }
 
     let isCancelled = false;
-    let dispose: (() => Promise<void>) | null = null;
+    let disposers: Array<() => Promise<void>> = [];
+    const since = Math.floor(Date.now() / 1_000);
+    const handleLiveHomeFeedEvent = () => {
+      refetchHomeFeedFromLiveSignal();
+    };
 
-    void relayClient
-      .subscribeLive(
+    void Promise.allSettled([
+      relayClient.subscribeLive(
         {
           kinds: [...HOME_FEED_ACTION_KINDS],
           "#p": [pubkey],
           limit: 50,
-          since: Math.floor(Date.now() / 1_000),
+          since,
         },
-        () => {
-          refetchHomeFeedFromLiveSignal();
+        handleLiveHomeFeedEvent,
+      ),
+      relayClient.subscribeLive(
+        {
+          authors: [pubkey],
+          kinds: [KIND_EVENT_REMINDER],
+          limit: 50,
+          since,
         },
-      )
-      .then((nextDispose) => {
-        if (isCancelled) {
-          void nextDispose().catch(() => {});
-          return;
+        handleLiveHomeFeedEvent,
+      ),
+    ]).then((results) => {
+      const nextDisposers = results.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : [],
+      );
+      for (const result of results) {
+        if (result.status === "rejected") {
+          console.error(
+            "Failed to subscribe to live home feed actions",
+            result.reason,
+          );
         }
-        dispose = nextDispose;
-      })
-      .catch((error) => {
-        console.error("Failed to subscribe to live home feed actions", error);
-      });
+      }
+
+      if (nextDisposers.length === 0) {
+        return;
+      }
+
+      if (isCancelled) {
+        for (const dispose of nextDisposers) {
+          void dispose().catch(() => {});
+        }
+        return;
+      }
+      disposers = nextDisposers;
+    });
 
     return () => {
       isCancelled = true;
-      if (dispose) {
+      for (const dispose of disposers) {
         void dispose().catch(() => {});
       }
     };
@@ -358,6 +388,7 @@ export function AppShell() {
     highPriorityUnreadChannelIds,
     unreadChannelNotificationCount,
     getEffectiveTimestamp: getChannelReadAt,
+    getOwnTimestamp: getOwnReadAt,
     readStateVersion,
     setContextParentResolver,
     participatedRootIds,
@@ -381,8 +412,22 @@ export function AppShell() {
   });
 
   const getThreadReadAt = React.useCallback(
-    (rootId: string) => getChannelReadAt(`thread:${rootId}`),
-    [getChannelReadAt],
+    (rootId: string, channelId?: string | null) => {
+      const threadReadAt = getOwnReadAt(`thread:${rootId}`);
+      if (!channelId) {
+        return threadReadAt;
+      }
+
+      const channelReadAt = getChannelReadAt(channelId);
+      if (threadReadAt === null) {
+        return channelReadAt;
+      }
+      if (channelReadAt === null) {
+        return threadReadAt;
+      }
+      return Math.max(threadReadAt, channelReadAt);
+    },
+    [getChannelReadAt, getOwnReadAt],
   );
 
   const markThreadRead = React.useCallback(
@@ -396,19 +441,24 @@ export function AppShell() {
   );
   const threadActivityFeedItems = React.useMemo<FeedItem[]>(
     () =>
-      threadActivityItems.map((item) => ({
-        id: item.id,
-        kind: item.kind,
-        pubkey: item.pubkey,
-        content: item.content,
-        createdAt: item.createdAt,
-        channelId: item.channelId,
-        channelName: item.channelName,
-        channelType: undefined,
-        tags: item.tags,
-        category: "activity" as const,
-      })),
-    [threadActivityItems],
+      threadActivityItems
+        .filter((item) => {
+          const rootId = getThreadReference(item.tags).rootId;
+          return !rootId || !mutedRootIds.has(rootId);
+        })
+        .map((item) => ({
+          id: item.id,
+          kind: item.kind,
+          pubkey: item.pubkey,
+          content: item.content,
+          createdAt: item.createdAt,
+          channelId: item.channelId,
+          channelName: item.channelName,
+          channelType: undefined,
+          tags: item.tags,
+          category: "activity" as const,
+        })),
+    [mutedRootIds, threadActivityItems],
   );
 
   // Badge count is computed here (rather than inside useHomeFeedNotifications)

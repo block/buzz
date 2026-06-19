@@ -34,6 +34,7 @@ import {
   formatTimelineMessages,
 } from "@/features/messages/lib/formatTimelineMessages";
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import {
@@ -59,7 +60,11 @@ type HomeViewProps = {
   errorMessage?: string;
   currentPubkey?: string;
   availableChannelIds: ReadonlySet<string>;
-  onOpenContext: (channelId: string, messageId: string) => void;
+  onOpenContext: (
+    channelId: string,
+    messageId: string,
+    threadRootId?: string | null,
+  ) => void;
   onRefresh: () => void;
 };
 
@@ -422,7 +427,11 @@ export function HomeView({
               if (!channelId) {
                 return;
               }
-              onOpenContext(channelId, item.id);
+              onOpenContext(
+                channelId,
+                item.id,
+                getThreadReference(item.item.tags).rootId,
+              );
             }}
             onRemindLater={(item) => {
               const channelId = item.item.channelId;

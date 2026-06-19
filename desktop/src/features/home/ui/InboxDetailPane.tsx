@@ -12,6 +12,7 @@ import {
   type InboxDisplayMessage,
   InboxMessageRow,
 } from "@/features/home/ui/InboxMessageRow";
+import { getThreadReference } from "@/features/messages/lib/threading";
 import type { TimelineMessage } from "@/features/messages/types";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
@@ -59,7 +60,11 @@ type InboxDetailPaneProps = {
   currentPubkey?: string;
   onBack?: () => void;
   onDelete: () => void;
-  onOpenContext?: (channelId: string, messageId: string) => void;
+  onOpenContext?: (
+    channelId: string,
+    messageId: string,
+    threadRootId?: string | null,
+  ) => void;
   onSendReply: (input: {
     content: string;
     mediaTags?: string[][];
@@ -224,6 +229,7 @@ export function InboxDetailPane({
   const contextLabel = channelContextName ?? formatInboxTypeLabel(item);
   const hasChannelContext = Boolean(channelContextName);
   const contextChannelId = item.item.channelId;
+  const contextThreadRootId = getThreadReference(item.item.tags).rootId;
 
   const handleSelectReplyTarget = (message: InboxDisplayMessage) => {
     setReplyTargetId((currentReplyTargetId) =>
@@ -264,7 +270,13 @@ export function InboxDetailPane({
                   {canOpenChannel && contextChannelId && onOpenContext ? (
                     <button
                       className="flex min-w-0 items-center gap-[4px] text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                      onClick={() => onOpenContext(contextChannelId, item.id)}
+                      onClick={() =>
+                        onOpenContext(
+                          contextChannelId,
+                          item.id,
+                          contextThreadRootId,
+                        )
+                      }
                       title={item.fullTimestampLabel}
                       type="button"
                     >

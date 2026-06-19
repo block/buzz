@@ -12,7 +12,7 @@ type UseHomeInboxReadStateOptions = {
   /** NIP-RS read marker resolver for channel-backed items (unix seconds, or null when unknown). */
   getChannelReadAt: (channelId: string) => number | null;
   /** NIP-RS read marker resolver for thread-backed items (unix seconds, or null when unknown). */
-  getThreadReadAt: (rootId: string) => number | null;
+  getThreadReadAt: (rootId: string, channelId?: string | null) => number | null;
   /** Invalidation signal for the channel-marker projection. */
   readStateVersion: number;
   /** Local fallback "done" set (used only for items with no channelId). */
@@ -44,6 +44,25 @@ function getInboxThreadRootId(item: InboxItem): string | null {
   }
 
   return getThreadReference(item.item.tags).rootId;
+}
+
+export function getGroupedChannelReadTimestamp(
+  item: InboxItem,
+): { channelId: string; timestamp: number } | null {
+  const channelId = item.item.channelId ?? null;
+  if (!channelId) {
+    return null;
+  }
+
+  let timestamp: number | null = null;
+  for (const groupItem of item.groupItems) {
+    if (groupItem.channelId !== channelId || isThreadReply(groupItem.tags)) {
+      continue;
+    }
+    timestamp = Math.max(timestamp ?? 0, groupItem.createdAt);
+  }
+
+  return timestamp === null ? null : { channelId, timestamp };
 }
 
 /**
@@ -86,7 +105,7 @@ export function useHomeInboxReadState({
       const channelId = item.item.channelId;
       const threadRootId = getInboxThreadRootId(item);
       if (threadRootId) {
-        const readAt = getThreadReadAt(threadRootId);
+        const readAt = getThreadReadAt(threadRootId, channelId);
         if (readAt !== null && item.latestActivityAt <= readAt) {
           result.add(item.id);
         }
@@ -121,6 +140,13 @@ export function useHomeInboxReadState({
       const threadRootId = item ? getInboxThreadRootId(item) : null;
       if (item && threadRootId) {
         markThreadRead(threadRootId, item.latestActivityAt);
+        const groupedChannelRead = getGroupedChannelReadTimestamp(item);
+        if (groupedChannelRead) {
+          markChannelRead(
+            groupedChannelRead.channelId,
+            new Date(groupedChannelRead.timestamp * 1_000).toISOString(),
+          );
+        }
         return;
       }
 

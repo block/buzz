@@ -108,6 +108,10 @@ test("thread groups are represented by the latest reply rather than the root", (
 
   assert.equal(inboxItem.id, "reply-event");
   assert.equal(inboxItem.preview, "New reply in the thread");
+  assert.deepEqual(
+    inboxItem.groupItems.map((groupItem) => groupItem.id),
+    ["root-event", "reply-event"],
+  );
   assert.deepEqual(getInboxTypeLabel(inboxItem), {
     text: "Thread in",
     channelLabel: "buzz-bugs",
@@ -143,6 +147,10 @@ test("thread groups use the latest row label even when the root was a mention", 
   });
 
   assert.equal(inboxItem.id, "reply-event");
+  assert.deepEqual(
+    inboxItem.groupItems.map((groupItem) => groupItem.id),
+    ["root-event", "reply-event"],
+  );
   assert.deepEqual(getInboxTypeLabel(inboxItem), {
     text: "Thread in",
     channelLabel: "buzz-bugs",

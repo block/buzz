@@ -37,6 +37,19 @@ const NOTIFICATION_SETTINGS_STORAGE_KEY = "buzz-notification-settings.v2";
 const HOME_FEED_SEEN_MAX_ITEMS = 500;
 const EMPTY_FEED_ID_SET: ReadonlySet<string> = new Set();
 
+export function dedupeFeedItemsById(items: readonly FeedItem[]): FeedItem[] {
+  const seen = new Set<string>();
+  const result: FeedItem[] = [];
+  for (const item of items) {
+    if (seen.has(item.id)) {
+      continue;
+    }
+    seen.add(item.id);
+    result.push(item);
+  }
+  return result;
+}
+
 export type NotificationSettings = {
   desktopEnabled: boolean;
   homeBadgeEnabled: boolean;
@@ -366,7 +379,10 @@ export function useHomeFeedNotificationState(
   mutedChannelIds?: ReadonlySet<string>,
   localUnreadFeedIds: ReadonlySet<string> = EMPTY_FEED_ID_SET,
   extraInboxItems: readonly FeedItem[] = [],
-  getThreadReadAt: (rootId: string) => number | null = () => null,
+  getThreadReadAt: (
+    rootId: string,
+    channelId?: string | null,
+  ) => number | null = () => null,
 ) {
   useFeedDesktopNotifications(
     feed,
@@ -380,13 +396,12 @@ export function useHomeFeedNotificationState(
   const [seenFeedIds, setSeenFeedIds] = React.useState<string[]>(() =>
     readStoredSeenFeedIds(normalizedPubkey),
   );
-  const currentFeedItems = React.useMemo(
-    () =>
-      feed
-        ? [...feed.feed.mentions, ...feed.feed.needsAction, ...extraInboxItems]
-        : [...extraInboxItems],
-    [extraInboxItems, feed],
-  );
+  const currentFeedItems = React.useMemo(() => {
+    const items = feed
+      ? [...feed.feed.mentions, ...feed.feed.needsAction, ...extraInboxItems]
+      : [...extraInboxItems];
+    return dedupeFeedItemsById(items);
+  }, [extraInboxItems, feed]);
   const currentFeedIds = React.useMemo(
     () => currentFeedItems.map((item) => item.id),
     [currentFeedItems],
@@ -446,7 +461,7 @@ export function useHomeFeedNotificationState(
       if (isLocallyUnread) {
         isUnread = true;
       } else if (threadRootId) {
-        const readAt = getThreadReadAt(threadRootId);
+        const readAt = getThreadReadAt(threadRootId, item.channelId);
         isUnread =
           readAt !== null
             ? item.createdAt > readAt
