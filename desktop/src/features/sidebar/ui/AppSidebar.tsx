@@ -129,6 +129,7 @@ type AppSidebarProps = {
     lastMessageAt: string | null | undefined,
   ) => void;
   onMarkAllChannelsRead: () => void;
+  onBrowseChannels?: () => void;
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
   onUpdateWorkspace: (
     id: string,
@@ -192,6 +193,7 @@ export function AppSidebar({
   onMarkChannelUnread,
   onMarkChannelRead,
   onMarkAllChannelsRead,
+  onBrowseChannels,
   onOpenDm,
   onUpdateWorkspace,
   onRemoveWorkspace,
@@ -662,6 +664,7 @@ export function AppSidebar({
                   />
                 ))}
                 <ChannelGroupSection
+                  browseAriaLabel="Browse channels"
                   createAriaLabel="Create a channel"
                   draggable
                   groupClassName={
@@ -672,6 +675,7 @@ export function AppSidebar({
                   isActiveChannel={selectedView === "channel"}
                   items={sectionBuckets.unassigned}
                   listTestId="stream-list"
+                  onBrowseClick={onBrowseChannels}
                   onCreateClick={() => setCreateDialogKind("stream")}
                   onMarkAllRead={onMarkAllChannelsRead}
                   onMarkChannelRead={onMarkChannelRead}

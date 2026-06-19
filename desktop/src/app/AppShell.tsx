@@ -864,6 +864,7 @@ export function AppShell() {
                           onMarkAllChannelsRead={markAllChannelsRead}
                           onMarkChannelRead={markChannelRead}
                           onMarkChannelUnread={markChannelUnread}
+                          onBrowseChannels={handleOpenBrowseChannels}
                           onOpenDm={async ({ pubkeys }) => {
                             const directMessage =
                               await openDmMutation.mutateAsync({
