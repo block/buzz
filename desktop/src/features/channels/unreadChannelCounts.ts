@@ -21,16 +21,16 @@ export function recordObservedUnreadEvent(
   channelId: string,
   event: ObservedUnreadEvent,
   limit: number,
-): void {
+): boolean {
   let eventsById = eventsByChannel.get(channelId);
   if (!eventsById) {
     eventsById = new Map<string, ObservedUnreadEvent>();
     eventsByChannel.set(channelId, eventsById);
   }
-  if (eventsById.has(event.id)) return;
+  if (eventsById.has(event.id)) return false;
 
   eventsById.set(event.id, event);
-  if (eventsById.size <= limit) return;
+  if (eventsById.size <= limit) return true;
 
   const oldest = [...eventsById.values()].sort(
     (a, b) => a.createdAt - b.createdAt,
@@ -38,6 +38,7 @@ export function recordObservedUnreadEvent(
   if (oldest) {
     eventsById.delete(oldest);
   }
+  return true;
 }
 
 export function countUnreadObservedEvents(

@@ -218,6 +218,40 @@ test("countUnreadObservedEvents_topLevelUsesChannelMarker", () => {
   assert.equal(countUnreadObservedEvents(events, readAtFor(300, new Map())), 1);
 });
 
+test("recordObservedUnreadEvent_reportsOutOfOrderInsertForInvalidation", () => {
+  const channelId = "chan";
+  const observedByChannel = new Map();
+
+  assert.equal(
+    recordObservedUnreadEvent(
+      observedByChannel,
+      channelId,
+      observed("latest", 500, "root-latest"),
+      20,
+    ),
+    true,
+  );
+  assert.equal(
+    recordObservedUnreadEvent(
+      observedByChannel,
+      channelId,
+      observed("older", 400, "root-older"),
+      20,
+    ),
+    true,
+  );
+  assert.equal(
+    recordObservedUnreadEvent(
+      observedByChannel,
+      channelId,
+      observed("older", 400, "root-older"),
+      20,
+    ),
+    false,
+  );
+  assert.equal(observedByChannel.get(channelId).size, 2);
+});
+
 test("highPriorityObservedEvents_countOnlyUnreadHighPriorityItems", () => {
   const events = new Map([
     ["mention-read", observed("mention-read", 500, "root-read", true)],

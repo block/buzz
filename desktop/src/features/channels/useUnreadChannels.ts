@@ -394,14 +394,13 @@ export function useUnreadChannels(
   // external trigger message this client has observed."
   const callerOnChannelMessage = liveUpdateOptions.onChannelMessage;
   const recordUnreadEvent = React.useCallback(
-    (channelId: string, event: ObservedUnreadEvent) => {
+    (channelId: string, event: ObservedUnreadEvent) =>
       recordObservedUnreadEvent(
         observedUnreadEventsByChannelRef.current,
         channelId,
         event,
         CATCH_UP_LIMIT,
-      );
-    },
+      ),
     [],
   );
   const handleChannelMessage = React.useCallback(
@@ -411,7 +410,7 @@ export function useUnreadChannels(
         channel?.channelType === "dm" ||
         (normalizedPubkey !== null &&
           isHighPriorityEventForUser(event, normalizedPubkey));
-      recordUnreadEvent(channelId, {
+      const didRecordUnreadEvent = recordUnreadEvent(channelId, {
         id: event.id,
         createdAt: event.created_at,
         rootId: resolveObservedUnreadRootId(event.tags),
@@ -420,6 +419,8 @@ export function useUnreadChannels(
       const current = latestByChannelRef.current.get(channelId) ?? 0;
       if (event.created_at > current) {
         latestByChannelRef.current.set(channelId, event.created_at);
+        bumpLatestVersion();
+      } else if (didRecordUnreadEvent) {
         bumpLatestVersion();
       }
 
