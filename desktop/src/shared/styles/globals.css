@@ -904,22 +904,28 @@
 .message-markdown.inbox-preview-markdown {
   --inline-chip-padding-block-start: 0.125rem;
   --inline-chip-padding-block-end: 0.0625rem;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
   overflow: hidden;
   padding-bottom: 0.25rem;
 }
 
-.message-markdown.inbox-preview-markdown > p {
-  display: inline;
+.message-markdown.inbox-preview-markdown > :first-child {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.message-markdown.inbox-preview-markdown > :not(:first-child) {
+  display: none;
 }
 
 .message-markdown.inbox-preview-markdown br {
   display: none;
 }
 
-.message-markdown.inbox-preview-markdown .mention-chip {
+.message-markdown.inbox-preview-markdown .mention-chip,
+.message-markdown.inbox-preview-markdown .inline-code-chip,
+.message-markdown.inbox-preview-markdown :not(pre) > code {
   display: inline;
   overflow: visible;
   overflow-wrap: normal;
