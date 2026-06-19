@@ -188,11 +188,9 @@ export function extractToolIdentity(update: Record<string, unknown>): {
   buzzToolName: string | null;
 } {
   const candidates = collectToolNameCandidates(update);
-  const knownName =
-    candidates
-      .map((candidate) => findBuzzToolName(candidate, true))
-      .find((candidate): candidate is string => Boolean(candidate)) ??
-    findBuzzToolName(JSON.stringify(update), false);
+  const knownName = candidates
+    .map((candidate) => findBuzzToolName(candidate, true))
+    .find((candidate): candidate is string => Boolean(candidate));
   const firstSpecific = candidates.find(
     (candidate) => !isGenericToolTitle(candidate),
   );
@@ -201,7 +199,7 @@ export function extractToolIdentity(update: Record<string, unknown>): {
   return {
     title,
     toolName: knownName ?? normalizeToolName(firstSpecific ?? title),
-    buzzToolName: knownName,
+    buzzToolName: knownName ?? null,
   };
 }
 
