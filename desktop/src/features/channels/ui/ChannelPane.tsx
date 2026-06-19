@@ -262,7 +262,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   useComposerHeightPadding(
     timelineScrollRef,
     composerWrapperRef,
-    `${isSinglePanelView}:${hasMainComposerOverlay}`,
+    `${activeChannelId}:${isSinglePanelView}:${hasMainComposerOverlay}`,
   );
 
   const clearWelcomeComposerDismissTimer = React.useCallback(() => {
