@@ -139,6 +139,7 @@ type ChannelPaneProps = {
   personaLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
   openThreadHeadId: string | null;
+  shouldShowThreadSkeleton: boolean;
   openAgentSessionPubkey: string | null;
   onProfilePanelViewChange: (
     view: ProfilePanelView,
@@ -225,6 +226,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   personaLookup,
   profiles,
   openThreadHeadId,
+  shouldShowThreadSkeleton,
   openAgentSessionPubkey,
   onProfilePanelViewChange,
   profilePanelPubkey,
@@ -860,7 +862,7 @@ export const ChannelPane = React.memo(function ChannelPane({
               panel
             );
           })()
-        : openThreadHeadId && activeChannel
+        : shouldShowThreadSkeleton
           ? (() => {
               const panel = (
                 <MessageThreadPanelSkeleton

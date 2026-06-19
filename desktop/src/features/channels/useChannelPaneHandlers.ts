@@ -1,5 +1,7 @@
 import * as React from "react";
 
+import { flushSync } from "react-dom";
+
 import type {
   useDeleteMessageMutation,
   useEditMessageMutation,
@@ -24,6 +26,7 @@ export function useChannelPaneHandlers({
   getReplyDescendantIdsForMessage,
   getSubtreeMaxCreatedAt,
   markThreadRead,
+  onOptimisticOpenThreadHeadIdChange,
   openThreadHeadId,
   sendMessageMutation,
   setExpandedThreadReplyIds,
@@ -42,6 +45,9 @@ export function useChannelPaneHandlers({
   getReplyDescendantIdsForMessage: (messageId: string) => string[];
   getSubtreeMaxCreatedAt: (messageId: string) => number | null;
   markThreadRead: (rootId: string, timestamp: number) => void;
+  onOptimisticOpenThreadHeadIdChange: React.Dispatch<
+    React.SetStateAction<string | null | undefined>
+  >;
   openThreadHeadId: string | null;
   sendMessageMutation: ReturnType<typeof useSendMessageMutation>;
   setExpandedThreadReplyIds: React.Dispatch<React.SetStateAction<Set<string>>>;
@@ -82,11 +88,15 @@ export function useChannelPaneHandlers({
   }, [setThreadReplyTargetId]);
 
   const handleCloseThread = React.useCallback(() => {
+    flushSync(() => {
+      onOptimisticOpenThreadHeadIdChange(null);
+    });
     setOpenThreadHeadId(null);
     setThreadReplyTargetId(null);
     setThreadScrollTargetId(null);
     setExpandedThreadReplyIds(new Set());
   }, [
+    onOptimisticOpenThreadHeadIdChange,
     setExpandedThreadReplyIds,
     setOpenThreadHeadId,
     setThreadReplyTargetId,
@@ -127,6 +137,9 @@ export function useChannelPaneHandlers({
   const handleOpenThread = React.useCallback(
     (message: { id: string }) => {
       if (openThreadHeadIdRef.current === message.id) {
+        flushSync(() => {
+          onOptimisticOpenThreadHeadIdChange(null);
+        });
         setOpenThreadHeadId(null);
         setThreadReplyTargetId(null);
         setThreadScrollTargetId(null);
@@ -135,6 +148,9 @@ export function useChannelPaneHandlers({
         return;
       }
 
+      flushSync(() => {
+        onOptimisticOpenThreadHeadIdChange(message.id);
+      });
       setOpenThreadHeadId(message.id);
       setThreadReplyTargetId(message.id);
       setThreadScrollTargetId(null);
@@ -142,6 +158,7 @@ export function useChannelPaneHandlers({
       setEditTargetId(null);
     },
     [
+      onOptimisticOpenThreadHeadIdChange,
       setEditTargetId,
       setExpandedThreadReplyIds,
       setOpenThreadHeadId,

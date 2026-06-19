@@ -119,8 +119,6 @@ export function ChannelScreen({
   const [isAddBotOpen, setIsAddBotOpen] = React.useState(false);
   const [channelContentRef, channelContentWidthPx] =
     useElementWidth<HTMLDivElement>();
-  const isNotifiedForCurrentThread =
-    openThreadHeadId != null ? isNotifiedForThread(openThreadHeadId) : false;
   const [expandedThreadReplyIds, setExpandedThreadReplyIds] = React.useState(
     () => new Set<string>(),
   );
@@ -131,9 +129,42 @@ export function ChannelScreen({
     string | null
   >(null);
   const [editTargetId, setEditTargetId] = React.useState<string | null>(null);
+  // Thread panel state is URL-backed, but router navigation is intentionally
+  // deferred out of the click handler. Keep a tiny optimistic override so the
+  // auxiliary pane can open/close in the urgent render, then let the URL-backed
+  // state hydrate the real thread contents when it catches up.
+  const [optimisticOpenThreadHeadId, setOptimisticOpenThreadHeadId] =
+    React.useState<string | null | undefined>(undefined);
+  const clearOptimisticThreadOverride = React.useCallback(() => {
+    setOptimisticOpenThreadHeadId(undefined);
+  }, []);
   const mainInsetRef = useMainInsetRef();
   const currentPubkey = currentIdentity?.pubkey;
   const activeChannelId = activeChannel?.id ?? null;
+  const effectiveOpenThreadHeadId =
+    optimisticOpenThreadHeadId === undefined
+      ? openThreadHeadId
+      : optimisticOpenThreadHeadId;
+  const isNotifiedForOpenThread =
+    openThreadHeadId != null ? isNotifiedForThread(openThreadHeadId) : false;
+  const isNotifiedForEffectiveThread =
+    effectiveOpenThreadHeadId != null
+      ? isNotifiedForThread(effectiveOpenThreadHeadId)
+      : false;
+  const previousActiveChannelIdRef = React.useRef(activeChannelId);
+  React.useEffect(() => {
+    const didChangeChannel =
+      previousActiveChannelIdRef.current !== activeChannelId;
+    previousActiveChannelIdRef.current = activeChannelId;
+    setOptimisticOpenThreadHeadId((current) => {
+      if (current === undefined) {
+        return current;
+      }
+      return didChangeChannel || openThreadHeadId === current
+        ? undefined
+        : current;
+    });
+  }, [activeChannelId, openThreadHeadId]);
   const messagesQuery = useChannelMessagesQuery(activeChannel);
   useChannelSubscription(activeChannel);
   const { fetchOlder, hasOlderMessages, isFetchingOlder } =
@@ -288,7 +319,7 @@ export function ChannelScreen({
     activeChannelId,
     channelMembers,
     managedAgents,
-    openThreadHeadId,
+    openThreadHeadId: effectiveOpenThreadHeadId,
     relayAgents,
     typingEntries,
   });
@@ -369,7 +400,7 @@ export function ChannelScreen({
     openThreadHeadId,
     threadReplyTargetId,
     expandedThreadReplyIds,
-    isNotifiedForCurrentThread,
+    isNotifiedForCurrentThread: isNotifiedForOpenThread,
     getChannelReadAt,
     getThreadReadAt,
     markChannelUnread,
@@ -404,7 +435,8 @@ export function ChannelScreen({
     getReplyDescendantIdsForMessage,
     getSubtreeMaxCreatedAt,
     markThreadRead,
-    openThreadHeadId,
+    openThreadHeadId: effectiveOpenThreadHeadId,
+    onOptimisticOpenThreadHeadIdChange: setOptimisticOpenThreadHeadId,
     sendMessageMutation,
     setExpandedThreadReplyIds,
     setEditTargetId,
@@ -540,6 +572,7 @@ export function ChannelScreen({
       if (isTimelineLoading) {
         return;
       }
+      clearOptimisticThreadOverride();
       setOpenThreadHeadId(null, { replace: true });
       setExpandedThreadReplyIds(new Set());
       setThreadScrollTargetId(null);
@@ -558,6 +591,7 @@ export function ChannelScreen({
       setEditTargetId(null);
     }
   }, [
+    clearOptimisticThreadOverride,
     editTargetId,
     editTargetMessage,
     isTimelineLoading,
@@ -570,7 +604,23 @@ export function ChannelScreen({
 
   useLoadMissingAncestors(activeChannel, resolvedMessages);
   const hasAuxiliaryPanel = Boolean(
-    openThreadHeadMessage || openAgentSessionPubkey || profilePanelPubkey,
+    effectiveOpenThreadHeadId || openAgentSessionPubkey || profilePanelPubkey,
+  );
+  const displayedThreadHeadMessage =
+    openThreadHeadMessage?.id === effectiveOpenThreadHeadId
+      ? openThreadHeadMessage
+      : null;
+  const displayedThreadMessages = displayedThreadHeadMessage
+    ? threadMessages
+    : [];
+  const displayedThreadReplyTargetMessage = displayedThreadHeadMessage
+    ? threadReplyTargetMessage
+    : null;
+  const displayedThreadFirstUnreadReplyId = displayedThreadHeadMessage
+    ? threadFirstUnreadReplyId
+    : null;
+  const shouldShowThreadSkeleton = Boolean(
+    effectiveOpenThreadHeadId && activeChannel && !displayedThreadHeadMessage,
   );
   const isNarrowPanelViewport =
     channelContentWidthPx > 0 &&
@@ -673,7 +723,7 @@ export function ChannelScreen({
                   followThreadById={followThread}
                   unfollowThreadById={unfollowThread}
                   isFollowingThreadById={isFollowingThread}
-                  isFollowingThread={isNotifiedForCurrentThread}
+                  isFollowingThread={isNotifiedForEffectiveThread}
                   isSending={sendMessageMutation.isPending}
                   isSinglePanelView={isSinglePanelView}
                   isTimelineLoading={isTimelineLoading}
@@ -681,13 +731,15 @@ export function ChannelScreen({
                   onCancelEdit={handleCancelEdit}
                   onCancelThreadReply={handleCancelThreadReply}
                   onFollowThread={
-                    openThreadHeadId != null && !isNotifiedForCurrentThread
-                      ? () => followThread(openThreadHeadId)
+                    effectiveOpenThreadHeadId != null &&
+                    !isNotifiedForEffectiveThread
+                      ? () => followThread(effectiveOpenThreadHeadId)
                       : undefined
                   }
                   onUnfollowThread={
-                    openThreadHeadId != null && isNotifiedForCurrentThread
-                      ? () => unfollowThread(openThreadHeadId)
+                    effectiveOpenThreadHeadId != null &&
+                    isNotifiedForEffectiveThread
+                      ? () => unfollowThread(effectiveOpenThreadHeadId)
                       : undefined
                   }
                   onCloseAgentSession={handleCloseAgentSession}
@@ -718,7 +770,8 @@ export function ChannelScreen({
                   onTargetReached={handleTargetReached}
                   onToggleReaction={effectiveToggleReaction}
                   openAgentSessionPubkey={openAgentSessionPubkey}
-                  openThreadHeadId={openThreadHeadId}
+                  openThreadHeadId={effectiveOpenThreadHeadId}
+                  shouldShowThreadSkeleton={shouldShowThreadSkeleton}
                   onProfilePanelViewChange={setProfilePanelView}
                   profilePanelPubkey={profilePanelPubkey}
                   profilePanelView={profilePanelView}
@@ -727,15 +780,15 @@ export function ChannelScreen({
                   firstUnreadMessageId={firstUnreadMessageId}
                   unreadCount={unreadCount}
                   targetMessageId={mainTimelineTargetMessageId}
-                  threadHeadMessage={openThreadHeadMessage}
-                  threadMessages={threadMessages}
+                  threadHeadMessage={displayedThreadHeadMessage}
+                  threadMessages={displayedThreadMessages}
                   threadPanelWidthPx={threadPanelWidthPx}
                   threadTypingPubkeys={threadTypingPubkeys}
-                  threadReplyTargetMessage={threadReplyTargetMessage}
+                  threadReplyTargetMessage={displayedThreadReplyTargetMessage}
                   threadScrollTargetId={threadScrollTargetId}
                   threadUnreadCounts={threadUnreadCounts}
                   threadReplyUnreadCounts={threadReplyUnreadCounts}
-                  threadFirstUnreadReplyId={threadFirstUnreadReplyId}
+                  threadFirstUnreadReplyId={displayedThreadFirstUnreadReplyId}
                   isJoining={joinChannelMutation.isPending}
                   onJoinChannel={joinChannelMutation.mutateAsync}
                   typingPubkeys={humanTypingPubkeys}
