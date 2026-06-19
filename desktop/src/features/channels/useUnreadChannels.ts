@@ -1,6 +1,7 @@
 import * as React from "react";
 import {
   EMPTY_SET,
+  shouldRouteChannelUnreadEvent,
   useLiveChannelUpdates,
   type UseLiveChannelUpdatesOptions,
 } from "@/features/channels/useLiveChannelUpdates";
@@ -654,18 +655,19 @@ export function useUnreadChannels(
     [normalizedPubkey, relayClient],
   );
 
-  // Feed the in-session newest-main-channel map from live channel events.
+  // Feed the in-session channel-unread map from live channel events.
   // Composes with any caller-supplied onChannelMessage handler.
   // useLiveChannelUpdates already filters this callback to trigger kinds
-  // and external authors, so the map is always a strict subset of "newest
-  // external main-channel message this client has observed."
+  // and external authors; non-DM thread replies are excluded, while DM
+  // thread replies stay channel-level so the DM unread dot/count advances.
   const callerOnChannelMessage = liveUpdateOptions.onChannelMessage;
   const callerOnThreadReplyDesktopNotification =
     liveUpdateOptions.onThreadReplyDesktopNotification;
   const notifyForActiveChannel = liveUpdateOptions.notifyForActiveChannel;
   const handleChannelMessage = React.useCallback(
     (channelId: string, event: RelayEvent) => {
-      if (isThreadReply(event.tags)) {
+      const channel = channelsRef.current.find((ch) => ch.id === channelId);
+      if (!shouldRouteChannelUnreadEvent(channel, isThreadReply(event.tags))) {
         return;
       }
 
@@ -692,7 +694,6 @@ export function useUnreadChannels(
       }
 
       // Track high-priority events (DMs, mentions, broadcasts) separately.
-      const channel = channelsRef.current.find((ch) => ch.id === channelId);
       if (
         channel?.channelType === "dm" ||
         (normalizedPubkey !== null &&
