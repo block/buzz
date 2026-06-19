@@ -1,3 +1,4 @@
+import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
 
 export function MoreUnreadButton({
@@ -15,7 +16,7 @@ export function MoreUnreadButton({
 }) {
   return (
     <div
-      className={`pointer-events-none absolute inset-x-0 z-10 flex justify-center py-1 ${position === "top" ? "top-0" : bottomClassName}`}
+      className={`pointer-events-none absolute inset-x-0 z-10 flex justify-center py-1 ${position === "top" ? topChromeInset.top : bottomClassName}`}
     >
       <UnreadPill
         direction={position === "top" ? "up" : "down"}
