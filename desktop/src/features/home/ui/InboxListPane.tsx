@@ -201,43 +201,47 @@ export function InboxListPane({
           </div>
         </button>
 
-        <div className="pointer-events-none absolute right-4 top-2 z-10 flex origin-top-right -translate-y-0.5 scale-[0.98] items-center gap-1 rounded-full border border-border/70 bg-background/95 p-0.5 opacity-0 shadow-xs backdrop-blur-sm transition-[opacity,transform] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] will-change-[opacity,transform] motion-reduce:translate-y-0 motion-reduce:scale-100 motion-reduce:transition-opacity group-hover/inbox-item:pointer-events-auto group-hover/inbox-item:translate-y-0 group-hover/inbox-item:scale-100 group-hover/inbox-item:opacity-100 group-focus-within/inbox-item:pointer-events-auto group-focus-within/inbox-item:translate-y-0 group-focus-within/inbox-item:scale-100 group-focus-within/inbox-item:opacity-100 supports-[backdrop-filter]:bg-background/85">
-          {isDone ? (
-            <InboxRowActionButton
-              label="Mark unread"
-              onClick={() => onMarkUnread(item.id)}
-            >
-              <MailOpen className="h-3.5 w-3.5" />
-            </InboxRowActionButton>
-          ) : (
-            <InboxRowActionButton
-              label="Mark as read"
-              onClick={() => onMarkRead(item.id)}
-            >
-              <MailOpen className="h-3.5 w-3.5" />
-            </InboxRowActionButton>
-          )}
-          <InboxRowActionButton
-            disabled={!hasChannelTarget}
-            label={hasChannelTarget ? "Open in channel" : "No channel link"}
-            onClick={() => onOpenDirect(item)}
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-          </InboxRowActionButton>
-          <InboxRowActionButton
-            active={hasActiveReminder}
-            disabled={!hasChannelTarget}
-            label={
-              hasChannelTarget
-                ? hasActiveReminder
-                  ? "Reminder set"
-                  : "Remind me later"
-                : "Cannot remind without a channel"
-            }
-            onClick={() => onRemindLater(item)}
-          >
-            <Clock className="h-3.5 w-3.5" />
-          </InboxRowActionButton>
+        <div className="pointer-events-none absolute right-4 top-2 z-10 origin-top-right -translate-y-0.5 scale-[0.98] opacity-0 transition-[opacity,transform] duration-150 ease-out will-change-[opacity,transform] motion-reduce:translate-y-0 motion-reduce:scale-100 motion-reduce:transition-opacity group-hover/inbox-item:pointer-events-auto group-hover/inbox-item:translate-y-0 group-hover/inbox-item:scale-100 group-hover/inbox-item:opacity-100 group-focus-within/inbox-item:pointer-events-auto group-focus-within/inbox-item:translate-y-0 group-focus-within/inbox-item:scale-100 group-focus-within/inbox-item:opacity-100">
+          <div className="overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm supports-[backdrop-filter]:bg-background/85">
+            <div className="flex items-center gap-0.5 p-1">
+              {isDone ? (
+                <InboxRowActionButton
+                  label="Mark unread"
+                  onClick={() => onMarkUnread(item.id)}
+                >
+                  <MailOpen className="!h-4 !w-4" />
+                </InboxRowActionButton>
+              ) : (
+                <InboxRowActionButton
+                  label="Mark as read"
+                  onClick={() => onMarkRead(item.id)}
+                >
+                  <MailOpen className="!h-4 !w-4" />
+                </InboxRowActionButton>
+              )}
+              <InboxRowActionButton
+                disabled={!hasChannelTarget}
+                label={hasChannelTarget ? "Open in channel" : "No channel link"}
+                onClick={() => onOpenDirect(item)}
+              >
+                <ExternalLink className="!h-4 !w-4" />
+              </InboxRowActionButton>
+              <InboxRowActionButton
+                active={hasActiveReminder}
+                disabled={!hasChannelTarget}
+                label={
+                  hasChannelTarget
+                    ? hasActiveReminder
+                      ? "Reminder set"
+                      : "Remind me later"
+                    : "Cannot remind without a channel"
+                }
+                onClick={() => onRemindLater(item)}
+              >
+                <Clock className="!h-4 !w-4" />
+              </InboxRowActionButton>
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -407,7 +411,7 @@ function InboxRowActionButton({
         <button
           aria-label={label}
           className={cn(
-            "flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40",
+            "flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40",
             active && "bg-blue-500/10 text-blue-500 hover:text-blue-500",
           )}
           disabled={disabled}
