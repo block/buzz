@@ -53,9 +53,10 @@ const releaseConfig = {
 };
 
 // Windows-only: bundle the full PortableGit toolchain (bash runtime + git +
-// jq/curl/coreutils in mingw64/) as a resource so the MCP shell tool always has a
-// genuine, non-WSL bash AND a real dev toolchain to spawn on a bare host (the app
-// must be self-contained — we cannot assume Git for Windows is installed).
+// curl/coreutils in mingw64/, plus a vendored standalone jq.exe) as a resource so
+// the MCP shell tool always has a genuine, non-WSL bash AND a real dev toolchain
+// to spawn on a bare host (the app must be self-contained — we cannot assume Git
+// for Windows is installed).
 //
 // This is emitted ONLY on the Windows runner because the static tauri.conf.json
 // uses `targets: "all"` with a shared bundle block — a bare `resources` entry

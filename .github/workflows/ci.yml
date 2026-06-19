@@ -729,12 +729,14 @@ jobs:
 
           # Faithfulness to the agent: shell.rs spawns the launcher with PATH set
           # wholesale to the shim PATH (shim tempdir + the MCP process's inherited
-          # PATH) — on a bare host that does NOT contain mingw64/bin. The GitHub
-          # runner DOES have git/jq on its ambient PATH, which would mask the
-          # launcher's own mingw64/bin prepend and let this test pass for the wrong
-          # reason. So we strip PATH down to just the Windows system dir before
-          # spawning: now anything that resolves had to come from the launcher
-          # itself, exactly as on a bare host.
+          # PATH). We strip PATH down to just the Windows system dir before
+          # spawning — stricter than a bare host (ambient PATH stripped to force
+          # resolution through the launcher). This stops the runner's ambient
+          # git/jq from masking the launcher's own mingw64/bin prepend, so anything
+          # that resolves had to come from the launcher itself. The fidelity gap is
+          # benign: the real shim tempdir only ever holds rg/tree/buzz and the two
+          # nostr helpers, never git/jq/curl, so a richer real PATH cannot shadow
+          # mingw64/bin for these three tools.
           win_root="${SYSTEMROOT:-${SystemRoot:-C:\\Windows}}"
           bare_path="$win_root\\System32;$win_root"
 
@@ -748,20 +750,27 @@ jobs:
           # under a login shell, `-lc` would pass here while the real agent stays
           # broken — the exact green-but-broken trap this gate guards.
           #
-          # Under the launcher's MSYS environment, bundled tools report POSIX mount
-          # paths — `/mingw64/bin/git`, `/usr/bin/jq` — where `/mingw64` and `/usr`
-          # are the staged tree's own subdirs (the launcher roots MSYS at itself).
-          # Because PATH is stripped bare above, those mounts can ONLY be the
-          # bundle; a host install would instead surface as a `/c/...` drive path.
-          # So: accept the `/mingw64` and `/usr` mounts, reject anything else.
+          # Anchor to the ACTUAL staged tree, not a mount-shape: command -v reports
+          # the MSYS mount path (/mingw64/bin/git), so we cygpath -m it back to the
+          # real Windows location and assert it sits under $stage_dir. A bare
+          # `/mingw64/*` shape check would pass for any /mingw64-rooted mount; the
+          # cygpath round-trip proves the tool is literally inside the bundle we
+          # just staged. cygpath ships in the bundle's usr/bin (MSYS2 core, same
+          # tier as the `tr` proven above), so it resolves under the launcher.
+          #
+          # curl is the one tool of the three with a System32 twin
+          # (C:\Windows\System32\curl.exe, on $bare_path) — if a future PortableGit
+          # ever drops curl from mingw64/bin, the launcher would resolve the
+          # System32 twin and this REDs on a non-bug; git/jq have no such twin.
+          stage_m=$("$launcher" -c "cygpath -m '$stage_dir'")
           for tool in git jq curl; do
-            resolved=$(PATH="$bare_path" "$launcher" -c "command -v $tool" || true)
-            [[ -n "$resolved" ]] || { echo "$tool did not resolve in bundled bash" >&2; exit 1; }
-            case "$resolved" in
-              /mingw64/* | /usr/*) ;;
-              *) echo "$tool resolved outside the bundle: $resolved" >&2; exit 1 ;;
+            located=$(PATH="$bare_path" "$launcher" -c "command -v $tool >/dev/null 2>&1 && cygpath -m \"\$(command -v $tool)\"" || true)
+            [[ -n "$located" ]] || { echo "$tool did not resolve in bundled bash" >&2; exit 1; }
+            case "$located" in
+              "$stage_m"/*) ;;
+              *) echo "$tool resolved outside the staged bundle: $located (stage: $stage_m)" >&2; exit 1 ;;
             esac
-            echo "$tool -> $resolved"
+            echo "$tool -> $located"
           done
 
           # git is not just present but functional: a real commit round-trips,
