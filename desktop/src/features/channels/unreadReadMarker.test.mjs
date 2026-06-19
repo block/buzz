@@ -3,10 +3,15 @@ import test from "node:test";
 
 import { computeChannelUnreadMarker } from "../messages/lib/unreadMarker.ts";
 import {
-  buildChannelThreadRoots,
-  channelUnreadFrontier,
+  countUnreadHighPriorityObservedEvents,
+  countUnreadObservedEvents,
+  observedUnreadEventReadAt,
+  recordObservedUnreadEvent,
 } from "./unreadChannelCounts.ts";
-import { resolveChannelReadMarker } from "./useUnreadChannels.ts";
+import {
+  resolveChannelReadMarker,
+  resolveObservedUnreadRootId,
+} from "./useUnreadChannels.ts";
 
 function topLevel(id, createdAt) {
   return { id, createdAt, author: "a", time: "", body: "", depth: 0 };
@@ -78,104 +83,156 @@ test("resolveChannelReadMarker_noCallerNoObserved_returnsNull", () => {
   assert.equal(result.clearObserved, false);
 });
 
-// --- Fix 2: sidebar dot folds per-thread read markers into the channel frontier ---
+// --- Fix 2: sidebar badge evaluates each observed event against its own read context ---
 
-function replyItem(channelId, rootId) {
-  return {
-    id: `${channelId}:${rootId}:${Math.random()}`,
-    channelId,
-    tags: [["e", rootId, "", "root"]],
-  };
-}
-
-// rootId for these fixtures is the "root"-marked e-tag.
-const getRootId = (tags) =>
-  tags.find((t) => t[0] === "e" && t[3] === "root")?.[1] ?? null;
-
-test("buildChannelThreadRoots_groupsRootsByChannel", () => {
-  const items = [
-    replyItem("chan-a", "root-1"),
-    replyItem("chan-a", "root-1"), // dedup within a channel
-    replyItem("chan-a", "root-2"),
-    replyItem("chan-b", "root-3"),
-  ];
-  const map = buildChannelThreadRoots(items, getRootId);
-
-  assert.deepEqual([...(map.get("chan-a") ?? [])].sort(), ["root-1", "root-2"]);
-  assert.deepEqual([...(map.get("chan-b") ?? [])], ["root-3"]);
-  assert.equal(map.has("chan-c"), false);
-});
-
-test("buildChannelThreadRoots_skipsItemsWithNoRoot", () => {
-  const items = [{ id: "x", channelId: "chan-a", tags: [["p", "someone"]] }];
-  const map = buildChannelThreadRoots(items, getRootId);
-
-  assert.equal(map.size, 0);
-});
-
-test("channelUnreadFrontier_unopenedThreadReply_dotPersists", () => {
-  // Channel's only unread is a thread reply at t=500. The channel marker sits
-  // at the newest TOP-LEVEL message (t=300, Option-1) and the thread has never
-  // been opened (own marker null). Folded frontier stays at 300 < 500 → unread.
-  const channelMarker = 300;
-  const threadRoots = new Set(["root-1"]);
-  const getThreadOwnMarker = () => null; // never opened
-
-  const frontier = channelUnreadFrontier(
-    channelMarker,
-    threadRoots,
-    getThreadOwnMarker,
-  );
-
-  const latest = 500; // the thread reply timestamp
-  assert.equal(frontier, 300);
-  assert.equal(latest > frontier, true); // dot present (Will-accepted)
-});
-
-test("channelUnreadFrontier_openedThreadReply_dotClears", () => {
-  // Same channel, but the user opened the thread: markThreadRead advanced
-  // thread:root-1's OWN marker to 500 (the reply). Folded frontier rises to
-  // 500 ≥ latest → dot clears, even though the channel marker is still 300.
-  const channelMarker = 300;
-  const threadRoots = new Set(["root-1"]);
-  const getThreadOwnMarker = (rootId) => (rootId === "root-1" ? 500 : null);
-
-  const frontier = channelUnreadFrontier(
-    channelMarker,
-    threadRoots,
-    getThreadOwnMarker,
-  );
-
-  const latest = 500;
-  assert.equal(frontier, 500);
-  assert.equal(latest > frontier, false); // dot cleared
-});
-
-test("channelUnreadFrontier_noThreadRoots_usesChannelMarker", () => {
-  // No thread roots observed (or evicted) → channel marker governs unchanged.
+test("resolveObservedUnreadRootId_treatsBroadcastReplyAsTopLevelUnread", () => {
   assert.equal(
-    channelUnreadFrontier(300, undefined, () => null),
-    300,
-  );
-  assert.equal(
-    channelUnreadFrontier(null, undefined, () => null),
+    resolveObservedUnreadRootId([
+      ["e", "root-1", "", "reply"],
+      ["broadcast", "1"],
+    ]),
     null,
   );
 });
 
-test("channelUnreadFrontier_nullChannelMarker_threadMarkerGoverns", () => {
-  // Channel never marked read but a thread was opened: the thread's own marker
-  // becomes the frontier rather than crashing on the null channel marker.
-  const frontier = channelUnreadFrontier(null, new Set(["root-1"]), () => 500);
-  assert.equal(frontier, 500);
+test("observedUnreadEventReadAt_unopenedThreadReplyUsesChannelMarker", () => {
+  const event = observed("reply", 500, "root-1");
+
+  const readAt = observedUnreadEventReadAt(event, 300, () => null);
+
+  assert.equal(readAt, 300);
+  assert.equal(event.createdAt > readAt, true);
 });
 
-test("channelUnreadFrontier_takesMaxAcrossMultipleThreads", () => {
-  // Two opened threads with different markers → the highest wins.
-  const frontier = channelUnreadFrontier(
-    100,
-    new Set(["root-1", "root-2"]),
-    (rootId) => (rootId === "root-1" ? 400 : 700),
+test("observedUnreadEventReadAt_openedThreadReplyUsesThreadMarker", () => {
+  const event = observed("reply", 500, "root-1");
+
+  const readAt = observedUnreadEventReadAt(event, 300, (rootId) =>
+    rootId === "root-1" ? 500 : null,
   );
-  assert.equal(frontier, 700);
+
+  assert.equal(readAt, 500);
+  assert.equal(event.createdAt > readAt, false);
+});
+
+test("observedUnreadEventReadAt_topLevelUsesChannelMarker", () => {
+  assert.equal(
+    observedUnreadEventReadAt(observed("top", 500), 300, () => 900),
+    300,
+  );
+});
+
+test("observedUnreadEventReadAt_nullChannelMarkerThreadMarkerCanClear", () => {
+  assert.equal(
+    observedUnreadEventReadAt(
+      observed("reply", 500, "root-1"),
+      null,
+      () => 500,
+    ),
+    500,
+  );
+});
+
+// --- Fix 2b: sidebar badge evaluates all observed events, not a single aggregate frontier ---
+
+function observed(id, createdAt, rootId = null, highPriority = false) {
+  return { id, createdAt, rootId, highPriority };
+}
+
+function readAtFor(channelMarker, threadMarkers) {
+  return (event) =>
+    observedUnreadEventReadAt(
+      event,
+      channelMarker,
+      (rootId) => threadMarkers.get(rootId) ?? null,
+    );
+}
+
+test("countUnreadObservedEvents_clearsOpenedThreadButKeepsOtherUnreadThread", () => {
+  // Channel marker is the newest top-level message (300). Two thread replies
+  // arrived at 400 and 500. Opening root-newer writes thread:root-newer=500,
+  // but root-older was never opened. The sidebar must stay unread because
+  // root-older still has a reply newer than its own effective frontier.
+  const events = new Map([
+    ["older", observed("older", 400, "root-older")],
+    ["newer", observed("newer", 500, "root-newer")],
+  ]);
+  const getReadAt = readAtFor(300, new Map([["root-newer", 500]]));
+
+  assert.equal(countUnreadObservedEvents(events, getReadAt), 1);
+});
+
+test("sidebarPipeline_openThreadClearsOnlyUnreadThreadContribution", () => {
+  const channelId = "chan";
+  const rootId = "root-1";
+  const reply = observed("reply", 500, rootId);
+  const observedByChannel = new Map();
+  recordObservedUnreadEvent(observedByChannel, channelId, reply, 20);
+
+  // Channel-open advances only to the newest top-level message. Before the
+  // thread is opened, the reply remains newer than the channel frontier, so the
+  // sidebar badge is present.
+  const beforeOpenReadAt = readAtFor(300, new Map());
+  assert.equal(
+    countUnreadObservedEvents(
+      observedByChannel.get(channelId),
+      beforeOpenReadAt,
+    ),
+    1,
+  );
+
+  // Thread-open writes the thread OWN marker. The sidebar recompute must check
+  // the observed reply against that thread marker (not just the channel marker),
+  // which clears the channel count for the reported scenario.
+  const afterOpenReadAt = readAtFor(300, new Map([[rootId, 500]]));
+  assert.equal(
+    countUnreadObservedEvents(
+      observedByChannel.get(channelId),
+      afterOpenReadAt,
+    ),
+    0,
+  );
+});
+
+test("latestObservedEvent_latestThreadReadDoesNotImplyChannelClear", () => {
+  const events = new Map([
+    ["older", observed("older", 400, "root-older")],
+    ["newer", observed("newer", 500, "root-newer")],
+  ]);
+  const getReadAt = readAtFor(300, new Map([["root-newer", 500]]));
+  // This reproduces the bug in the rejected aggregate-frontier model:
+  // checking only the latest event would clear the whole channel after reading
+  // root-newer, even though root-older remains unread.
+  const latestOnly = new Map([["newer", events.get("newer")]]);
+
+  assert.equal(countUnreadObservedEvents(latestOnly, getReadAt), 0);
+  assert.equal(countUnreadObservedEvents(events, getReadAt), 1);
+});
+
+test("countUnreadObservedEvents_topLevelUsesChannelMarker", () => {
+  const events = new Map([
+    ["top-old", observed("top-old", 250)],
+    ["top-new", observed("top-new", 350)],
+  ]);
+
+  assert.equal(countUnreadObservedEvents(events, readAtFor(300, new Map())), 1);
+});
+
+test("highPriorityObservedEvents_countOnlyUnreadHighPriorityItems", () => {
+  const events = new Map([
+    ["mention-read", observed("mention-read", 500, "root-read", true)],
+    ["normal-unread", observed("normal-unread", 600, "root-unread", false)],
+    ["mention-unread", observed("mention-unread", 700, "root-hot", true)],
+  ]);
+  const getReadAt = readAtFor(
+    300,
+    new Map([
+      ["root-read", 500],
+      ["root-unread", 300],
+      ["root-hot", 300],
+    ]),
+  );
+
+  assert.equal(countUnreadObservedEvents(events, getReadAt), 2);
+  assert.equal(countUnreadHighPriorityObservedEvents(events, getReadAt), 1);
 });
