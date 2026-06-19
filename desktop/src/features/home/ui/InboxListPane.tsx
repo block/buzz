@@ -223,7 +223,7 @@ export function InboxListPane({
         </button>
 
         <div className="pointer-events-none absolute right-4 top-2 z-10 origin-top-right -translate-y-0.5 scale-[0.98] opacity-0 transition-[opacity,transform] duration-150 ease-out will-change-[opacity,transform] motion-reduce:translate-y-0 motion-reduce:scale-100 motion-reduce:transition-opacity group-hover/inbox-item:pointer-events-auto group-hover/inbox-item:translate-y-0 group-hover/inbox-item:scale-100 group-hover/inbox-item:opacity-100 group-focus-within/inbox-item:pointer-events-auto group-focus-within/inbox-item:translate-y-0 group-focus-within/inbox-item:scale-100 group-focus-within/inbox-item:opacity-100">
-          <div className="overflow-hidden rounded-lg border border-border/70 bg-background/95 backdrop-blur-sm supports-[backdrop-filter]:bg-background/85">
+          <div className="overflow-hidden rounded-full border border-border/70 bg-background/95 backdrop-blur-sm supports-[backdrop-filter]:bg-background/85">
             <div className="flex items-center gap-0.5 p-1">
               {isDone ? (
                 <InboxRowActionButton
