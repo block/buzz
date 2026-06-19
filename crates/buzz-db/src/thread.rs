@@ -346,6 +346,7 @@ pub async fn get_thread_replies(
             tm.root_event_id,
             tm.channel_id,
             e.pubkey,
+            e.created_at AS created_at,
             e.tags,
             e.content,
             e.kind,
@@ -650,4 +651,93 @@ pub async fn get_thread_metadata_by_event(
         descendant_count,
         broadcast: broadcast_val,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        channel::{create_channel, ChannelType, ChannelVisibility},
+        event::{insert_event_with_thread_metadata, ThreadMetadataParams},
+    };
+    use nostr::{EventBuilder, Keys, Kind};
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+
+    async fn setup_pool() -> PgPool {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+
+        PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB")
+    }
+
+    fn make_stream_event(keys: &Keys, content: &str) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .sign_with_keys(keys)
+            .expect("sign event")
+    }
+
+    fn event_created_at(event: &nostr::Event) -> DateTime<Utc> {
+        DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+            .expect("event timestamp is valid")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_thread_replies_reconstructs_stored_events() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let channel = create_channel(
+            &pool,
+            &format!("thread-replies-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let root = make_stream_event(&author, "root");
+        let root_created_at = event_created_at(&root);
+        insert_event_with_thread_metadata(&pool, &root, Some(channel.id), None)
+            .await
+            .expect("insert root event");
+
+        let reply = make_stream_event(&author, "reply");
+        let reply_created_at = event_created_at(&reply);
+        let reply_id = reply.id.to_hex();
+        insert_event_with_thread_metadata(
+            &pool,
+            &reply,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: reply.id.as_bytes(),
+                event_created_at: reply_created_at,
+                channel_id: channel.id,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(root_created_at),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_created_at),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert reply event and metadata");
+
+        let replies = get_thread_replies(&pool, root.id.as_bytes(), Some(10), 10, None)
+            .await
+            .expect("fetch thread replies");
+
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].stored_event.event.id.to_hex(), reply_id);
+        assert_eq!(replies[0].stored_event.event.content, "reply");
+        assert_eq!(replies[0].stored_event.channel_id, Some(channel.id));
+        assert_eq!(replies[0].depth, 1);
+    }
 }
