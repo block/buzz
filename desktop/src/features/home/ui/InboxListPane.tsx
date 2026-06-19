@@ -321,6 +321,56 @@ export function InboxListPane({
         <div className="px-5 py-1">
           <div className="flex w-full min-w-0 items-center justify-between gap-3">
             <div className="ml-auto flex shrink-0 items-center justify-end gap-[6px]">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    aria-label={`Filter inbox: ${activeFilter?.label ?? "All"}`}
+                    className="relative h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+                    data-testid="inbox-filter-trigger"
+                    size="icon"
+                    type="button"
+                    variant="outline"
+                  >
+                    <ListFilter className="h-4 w-4" />
+                    {dueReminderCount > 0 ? (
+                      <span
+                        className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-background bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
+                        data-testid="inbox-reminder-badge"
+                      >
+                        {dueReminderCount}
+                      </span>
+                    ) : null}
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  <DropdownMenuRadioGroup
+                    onValueChange={(value) =>
+                      onFilterChange(value as InboxFilter)
+                    }
+                    value={filter}
+                  >
+                    {FILTER_OPTIONS.map((option) => (
+                      <DropdownMenuRadioItem
+                        key={option.value}
+                        value={option.value}
+                      >
+                        <span className="flex flex-1 items-center justify-between gap-2">
+                          {option.label}
+                          {option.value === "reminders" &&
+                          dueReminderCount > 0 ? (
+                            <span
+                              className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
+                              data-testid="inbox-reminder-badge-option"
+                            >
+                              {dueReminderCount}
+                            </span>
+                          ) : null}
+                        </span>
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
               <Popover>
                 <PopoverTrigger asChild>
                   <Button
@@ -372,56 +422,6 @@ export function InboxListPane({
                   </button>
                 </PopoverContent>
               </Popover>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    aria-label={`Filter inbox: ${activeFilter?.label ?? "All"}`}
-                    className="relative h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
-                    data-testid="inbox-filter-trigger"
-                    size="icon"
-                    type="button"
-                    variant="outline"
-                  >
-                    <ListFilter className="h-4 w-4" />
-                    {dueReminderCount > 0 ? (
-                      <span
-                        className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-background bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
-                        data-testid="inbox-reminder-badge"
-                      >
-                        {dueReminderCount}
-                      </span>
-                    ) : null}
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-48">
-                  <DropdownMenuRadioGroup
-                    onValueChange={(value) =>
-                      onFilterChange(value as InboxFilter)
-                    }
-                    value={filter}
-                  >
-                    {FILTER_OPTIONS.map((option) => (
-                      <DropdownMenuRadioItem
-                        key={option.value}
-                        value={option.value}
-                      >
-                        <span className="flex flex-1 items-center justify-between gap-2">
-                          {option.label}
-                          {option.value === "reminders" &&
-                          dueReminderCount > 0 ? (
-                            <span
-                              className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
-                              data-testid="inbox-reminder-badge-option"
-                            >
-                              {dueReminderCount}
-                            </span>
-                          ) : null}
-                        </span>
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
             </div>
           </div>
         </div>
