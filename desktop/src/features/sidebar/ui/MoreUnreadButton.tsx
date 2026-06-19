@@ -6,16 +6,20 @@ export function MoreUnreadButton({
   onClick,
   position,
   testId,
+  topClassName = "top-0",
 }: {
   bottomClassName?: string;
   count: number;
   onClick: () => void;
   position: "top" | "bottom";
   testId: string;
+  topClassName?: string;
 }) {
+  const positionClassName = position === "top" ? topClassName : bottomClassName;
+
   return (
     <div
-      className={`pointer-events-none absolute inset-x-0 z-10 flex justify-center py-1 ${position === "top" ? "top-0" : bottomClassName}`}
+      className={`pointer-events-none absolute inset-x-0 z-10 flex justify-center py-1 ${positionClassName}`}
     >
       <UnreadPill
         direction={position === "top" ? "up" : "down"}

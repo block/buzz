@@ -490,6 +490,7 @@ export function AppSidebar({
             onClick={scrollToNextAbove}
             position="top"
             testId="sidebar-more-unread-above"
+            topClassName="top-(--buzz-top-chrome-height,2.5rem)"
           />
         ) : null}
         <SidebarContent
