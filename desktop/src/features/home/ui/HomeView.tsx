@@ -326,7 +326,12 @@ export function HomeView({
 
   if (!feed) {
     return (
-      <div className="flex-1 overflow-hidden px-4 pb-3 pt-4 sm:px-6">
+      <div
+        className={cn(
+          "flex-1 overflow-hidden px-4 pb-3 sm:px-6",
+          topChromeInset.padding,
+        )}
+      >
         <div className="flex w-full max-w-3xl flex-col gap-4">
           <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-5">
             <p className="text-base font-semibold tracking-tight">
