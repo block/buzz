@@ -322,18 +322,6 @@ export function HomeView({
     setIsSendingReply(false);
   }, [selectedItemId]);
 
-  const handleToggleDone = React.useCallback(
-    (itemId: string) => {
-      if (effectiveDoneSet.has(itemId)) {
-        markItemUnread(itemId);
-        return;
-      }
-
-      markItemRead(itemId);
-    },
-    [effectiveDoneSet, markItemRead, markItemUnread],
-  );
-
   if (isLoading && !feed) {
     return <HomeLoadingState />;
   }
@@ -496,9 +484,6 @@ export function HomeView({
             currentPubkey={currentPubkey}
             disabledReplyReason={disabledReplyReason}
             isDeletingMessage={isDeletingMessage}
-            isDone={
-              selectedItem ? effectiveDoneSet.has(selectedItem.id) : false
-            }
             isSendingReply={isSendingReply}
             isSinglePanelView={isSinglePanelDetailView}
             isThreadContextLoading={threadContext.isLoading}
@@ -589,11 +574,6 @@ export function HomeView({
                 onRefresh();
               } finally {
                 setIsSendingReply(false);
-              }
-            }}
-            onToggleDone={() => {
-              if (selectedItem) {
-                handleToggleDone(selectedItem.id);
               }
             }}
             onToggleReaction={

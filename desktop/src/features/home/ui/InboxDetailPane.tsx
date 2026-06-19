@@ -1,12 +1,4 @@
-import {
-  ArrowLeft,
-  CheckCheck,
-  Hash,
-  Mail,
-  MailOpen,
-  MoreHorizontal,
-  Trash2,
-} from "lucide-react";
+import { ArrowLeft, Hash, Mail, MoreHorizontal, Trash2 } from "lucide-react";
 import * as React from "react";
 
 import type {
@@ -31,7 +23,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import {
@@ -56,7 +47,6 @@ type InboxDetailPaneProps = {
   canOpenChannel: boolean;
   canReply: boolean;
   disabledReplyReason?: string | null;
-  isDone: boolean;
   isDeletingMessage?: boolean;
   isSendingReply?: boolean;
   isSinglePanelView?: boolean;
@@ -81,7 +71,6 @@ type InboxDetailPaneProps = {
     emoji: string,
     remove: boolean,
   ) => Promise<void>;
-  onToggleDone: () => void;
 };
 
 export function InboxDetailPane({
@@ -89,7 +78,6 @@ export function InboxDetailPane({
   canOpenChannel,
   canReply,
   disabledReplyReason,
-  isDone,
   isDeletingMessage = false,
   isSendingReply = false,
   isSinglePanelView = false,
@@ -105,7 +93,6 @@ export function InboxDetailPane({
   onOpenContext,
   onSendReply,
   onToggleReaction,
-  onToggleDone,
 }: InboxDetailPaneProps) {
   const detailPaneRef = React.useRef<HTMLElement | null>(null);
   const [replyTargetId, setReplyTargetId] = React.useState<string | null>(null);
@@ -317,13 +304,12 @@ export function InboxDetailPane({
                       }
                     />
                   ) : null}
-                  <HeaderMoreMenu
-                    canDelete={canDelete}
-                    isDeletingMessage={isDeletingMessage}
-                    isDone={isDone}
-                    onDelete={onDelete}
-                    onToggleDone={onToggleDone}
-                  />
+                  {canDelete ? (
+                    <HeaderMoreMenu
+                      isDeletingMessage={isDeletingMessage}
+                      onDelete={onDelete}
+                    />
+                  ) : null}
                 </div>
               </TooltipProvider>
             </div>
@@ -408,17 +394,11 @@ export function InboxDetailPane({
 }
 
 function HeaderMoreMenu({
-  canDelete,
   isDeletingMessage,
-  isDone,
   onDelete,
-  onToggleDone,
 }: {
-  canDelete: boolean;
   isDeletingMessage: boolean;
-  isDone: boolean;
   onDelete: () => void;
-  onToggleDone: () => void;
 }) {
   const trigger = (
     <Button
@@ -441,25 +421,14 @@ function HeaderMoreMenu({
         <TooltipContent>More actions</TooltipContent>
       </Tooltip>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onClick={onToggleDone}>
-          {isDone ? (
-            <MailOpen className="h-4 w-4" />
-          ) : (
-            <CheckCheck className="h-4 w-4" />
-          )}
-          {isDone ? "Unmark as read" : "Mark as read"}
+        <DropdownMenuItem
+          className="text-destructive focus:text-destructive"
+          disabled={isDeletingMessage}
+          onClick={onDelete}
+        >
+          <Trash2 className="h-4 w-4" />
+          Delete message
         </DropdownMenuItem>
-        {canDelete ? <DropdownMenuSeparator /> : null}
-        {canDelete ? (
-          <DropdownMenuItem
-            className="text-destructive focus:text-destructive"
-            disabled={isDeletingMessage}
-            onClick={onDelete}
-          >
-            <Trash2 className="h-4 w-4" />
-            Delete message
-          </DropdownMenuItem>
-        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   );
