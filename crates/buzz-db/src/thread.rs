@@ -4,11 +4,12 @@
 //! nested threads. The `thread_metadata` table is populated when events are
 //! ingested and updated as replies arrive or are deleted.
 
+use buzz_core::StoredEvent;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::error::Result;
+use crate::{error::Result, event::row_to_stored_event};
 
 // -- Structs ------------------------------------------------------------------
 
@@ -29,8 +30,8 @@ pub struct ThreadReply {
     pub tags: serde_json::Value,
     /// Text content of the reply.
     pub content: String,
-    /// Nostr event kind number.
-    pub kind: i32,
+    /// Fully reconstructed event row for this reply.
+    pub stored_event: StoredEvent,
     /// Nesting depth within the thread (root = 0, direct reply = 1, etc.).
     pub depth: i32,
     /// When the reply was created.
@@ -340,6 +341,7 @@ pub async fn get_thread_replies(
         r#"
         SELECT
             tm.event_id,
+            e.id,
             tm.parent_event_id,
             tm.root_event_id,
             tm.channel_id,
@@ -347,6 +349,8 @@ pub async fn get_thread_replies(
             e.tags,
             e.content,
             e.kind,
+            e.sig,
+            e.received_at,
             tm.depth,
             tm.event_created_at,
             tm.broadcast
@@ -392,11 +396,15 @@ pub async fn get_thread_replies(
         let channel_id: Uuid = row.try_get("channel_id")?;
         let pubkey: Vec<u8> = row.try_get("pubkey")?;
         let tags: serde_json::Value = row.try_get("tags")?;
-        let content: String = row.try_get("content")?;
-        let kind: i32 = row.try_get("kind")?;
         let depth: i32 = row.try_get("depth")?;
         let created_at: DateTime<Utc> = row.try_get("event_created_at")?;
         let broadcast_val: bool = row.try_get("broadcast")?;
+
+        let stored_event = row_to_stored_event(row)?.ok_or_else(|| {
+            crate::error::DbError::InvalidData(
+                "thread reply row failed event reconstruction".into(),
+            )
+        })?;
 
         replies.push(ThreadReply {
             event_id,
@@ -405,8 +413,8 @@ pub async fn get_thread_replies(
             channel_id,
             pubkey,
             tags,
-            content,
-            kind,
+            content: stored_event.event.content.clone(),
+            stored_event,
             depth,
             created_at,
             broadcast: broadcast_val,
