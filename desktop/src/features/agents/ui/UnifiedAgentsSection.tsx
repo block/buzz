@@ -40,7 +40,7 @@ type UnifiedAgentsSectionProps = {
 
 type PersonaGroup = { persona: AgentPersona; agents: ManagedAgent[] };
 
-const AGENT_CARD_COLUMN_CLASS = "mx-auto w-full max-w-[744px]";
+const AGENT_CARD_COLUMN_CLASS = "w-full";
 const AGENT_CARD_GRID_CLASS = `${AGENT_CARD_COLUMN_CLASS} grid grid-cols-[repeat(auto-fill,minmax(220px,240px))] justify-start gap-3`;
 
 function buildUnifiedGroups(personas: AgentPersona[], agents: ManagedAgent[]) {

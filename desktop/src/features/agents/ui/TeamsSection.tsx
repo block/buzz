@@ -24,7 +24,7 @@ import { Skeleton } from "@/shared/ui/skeleton";
 import { CreateIdentityCard } from "./CreateIdentityCard";
 import { TeamIdentityCard } from "./TeamIdentityCard";
 
-const TEAM_CARD_COLUMN_CLASS = "mx-auto w-full max-w-[744px]";
+const TEAM_CARD_COLUMN_CLASS = "w-full";
 const TEAM_CARD_GRID_CLASS = `${TEAM_CARD_COLUMN_CLASS} grid grid-cols-[repeat(auto-fill,minmax(220px,240px))] justify-start gap-3`;
 
 type TeamsSectionProps = {
