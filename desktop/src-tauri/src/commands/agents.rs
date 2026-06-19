@@ -384,13 +384,20 @@ pub async fn create_managed_agent(
             .to_bech32()
             .map_err(|error| format!("failed to encode private key: {error}"))?;
 
-        let resolved_relay_url = input
-            .relay_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| relay_ws_url_with_override(&state));
+        // Local agents always live on the workspace relay — ignore any
+        // user-supplied relay_url so the local-relay invariant holds at birth.
+        // Remote (Provider) agents legitimately set their own relay.
+        let resolved_relay_url = if input.backend == BackendKind::Local {
+            relay_ws_url_with_override(&state)
+        } else {
+            input
+                .relay_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| relay_ws_url_with_override(&state))
+        };
 
         (keys, private_key_nsec, pubkey, resolved_relay_url, input)
     };
@@ -732,6 +739,10 @@ pub(crate) struct ProfileReconcileData {
     pub(crate) private_key_nsec: String,
     pub(crate) name: String,
     pub(crate) relay_url: String,
+    /// Whether this agent uses the `Local` backend. Local agents always live on
+    /// the workspace relay, so reconciliation targets the workspace relay for
+    /// them rather than the (possibly stale) per-record `relay_url`.
+    pub(crate) backend_is_local: bool,
     /// Expected avatar URL for the published profile. `None` for legacy records
     /// that predate the `avatar_url` field — these will be backfilled from the
     /// relay's existing kind:0 profile on first reconciliation.
@@ -790,6 +801,7 @@ pub async fn start_managed_agent(
             private_key_nsec: record.private_key_nsec.clone(),
             name: record.name.clone(),
             relay_url: record.relay_url.clone(),
+            backend_is_local: record.backend == BackendKind::Local,
             avatar_url: record.avatar_url.clone(),
             auth_tag: record.auth_tag.clone(),
             pubkey: record.pubkey.clone(),
@@ -908,9 +920,11 @@ fn resolve_legacy_avatar(
 /// profile — and persists the updated record. After backfill, normal
 /// reconciliation proceeds.
 ///
-/// Query and publish both target the agent's stored `relay_url` so that, under
-/// an active workspace relay override, reconciliation reads and writes the same
-/// relay the agent's profile actually lives on.
+/// Query and publish target the workspace relay for `Local` agents (which always
+/// live on the workspace relay) and the agent's stored `relay_url` for remote
+/// agents (whose profile lives on a per-record relay). For local agents this
+/// makes reconciliation follow the session's relay rather than a frozen
+/// per-record value that may have drifted from where the agent actually runs.
 pub(crate) async fn reconcile_agent_profile(
     state: &AppState,
     app: &AppHandle,
@@ -919,8 +933,16 @@ pub(crate) async fn reconcile_agent_profile(
 ) -> Result<(), String> {
     use crate::relay::{query_agent_profile, sync_managed_agent_profile};
 
+    // Local agents always live on the workspace relay; remote agents keep their
+    // per-record relay. Resolved once and used for both the read and write-back.
+    let relay_url = crate::relay::effective_agent_relay_url(
+        data.backend_is_local,
+        &relay_ws_url_with_override(state),
+        &data.relay_url,
+    );
+
     // Query the relay for the agent's existing kind:0 profile.
-    let existing = query_agent_profile(state, &data.relay_url, agent_pubkey).await?;
+    let existing = query_agent_profile(state, &relay_url, agent_pubkey).await?;
 
     // Resolve the expected avatar — backfilling for legacy records that have no
     // stored avatar_url yet.
@@ -974,7 +996,7 @@ pub(crate) async fn reconcile_agent_profile(
 
     sync_managed_agent_profile(
         state,
-        &data.relay_url,
+        &relay_url,
         &agent_keys,
         &data.name,
         Some(&expected_avatar),

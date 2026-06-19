@@ -248,7 +248,14 @@ pub async fn update_managed_agent(
         let sync_params = if name_changed {
             let agent_keys = Keys::parse(&record.private_key_nsec)
                 .map_err(|e| format!("failed to parse agent keys: {e}"))?;
-            let relay_url = record.relay_url.clone();
+            // Local agents always live on the workspace relay; re-publish the
+            // renamed profile there rather than to a possibly-stale per-record
+            // relay. Mirrors reconcile and spawn for the same invariant.
+            let relay_url = crate::relay::effective_agent_relay_url(
+                record.backend == crate::managed_agents::BackendKind::Local,
+                &relay_ws_url_with_override(&state),
+                &record.relay_url,
+            );
             let display_name = record.name.clone();
             let avatar_url = record
                 .avatar_url

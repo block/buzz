@@ -49,6 +49,25 @@ pub fn relay_api_base_url_with_override(state: &AppState) -> String {
     }
 }
 
+/// Selects the relay a managed agent should use for a relay operation.
+///
+/// Local agents always live on the workspace relay, so their frozen per-record
+/// `relay_url` is ignored — this is the invariant that lets a local record
+/// carrying a stale relay still reconcile, spawn, and re-sync on the session's
+/// relay. Remote (Provider) agents keep their per-record relay, where their
+/// profile genuinely lives.
+pub fn effective_agent_relay_url(
+    is_local: bool,
+    workspace_relay: &str,
+    record_relay: &str,
+) -> String {
+    if is_local {
+        workspace_relay.to_string()
+    } else {
+        record_relay.to_string()
+    }
+}
+
 pub fn relay_http_base_url(relay_url: &str) -> String {
     let trimmed = relay_url.trim().trim_end_matches('/');
 
@@ -405,9 +424,10 @@ pub async fn sync_managed_agent_profile(
 
 /// Query the relay for an agent's kind:0 profile event.
 ///
-/// Queries the relay identified by `relay_url` (typically the agent's stored
-/// `relay_url`) so the query targets the same host the profile is published to,
-/// even when a workspace relay override is active.
+/// Queries the relay identified by `relay_url`. Callers pass the workspace relay
+/// for `Local` agents (which always live on the workspace relay) and the agent's
+/// stored per-record `relay_url` for remote agents, so the query targets the
+/// host the profile is actually published to.
 ///
 /// Returns the parsed profile content (display_name, picture) if a kind:0 event
 /// exists for the given pubkey, or `None` if no profile is published.
@@ -554,10 +574,57 @@ pub async fn submit_event_with_keys(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_profile_event, classify_intercepted_response, parse_command_response,
-        relay_http_base_url,
+        build_profile_event, classify_intercepted_response, effective_agent_relay_url,
+        parse_command_response, relay_http_base_url,
     };
     use serde::Deserialize;
+
+    // ── effective_agent_relay_url: the local-agent relay invariant ───────────
+
+    #[test]
+    fn local_agent_uses_workspace_relay_ignoring_stale_record() {
+        // The bug: a local record frozen at a dead relay must reconcile/spawn on
+        // the session's workspace relay, never the stale stored value.
+        assert_eq!(
+            effective_agent_relay_url(true, "wss://staging.example.com", "ws://localhost:3000"),
+            "wss://staging.example.com"
+        );
+    }
+
+    #[test]
+    fn local_agent_uses_workspace_relay_even_when_record_already_matches() {
+        // No special-casing when the stored value happens to already be correct.
+        assert_eq!(
+            effective_agent_relay_url(
+                true,
+                "wss://staging.example.com",
+                "wss://staging.example.com"
+            ),
+            "wss://staging.example.com"
+        );
+    }
+
+    #[test]
+    fn remote_agent_keeps_its_per_record_relay() {
+        // Remote (Provider) profiles genuinely live on a per-record relay that
+        // differs from the workspace — that relay must be preserved.
+        assert_eq!(
+            effective_agent_relay_url(false, "wss://staging.example.com", "wss://relay.other.com"),
+            "wss://relay.other.com"
+        );
+    }
+
+    #[test]
+    fn remote_agent_relay_unchanged_even_when_equal_to_workspace() {
+        assert_eq!(
+            effective_agent_relay_url(
+                false,
+                "wss://staging.example.com",
+                "wss://staging.example.com"
+            ),
+            "wss://staging.example.com"
+        );
+    }
 
     // ── relay_http_base_url loopback normalization ───────────────────────────
 
