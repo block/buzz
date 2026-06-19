@@ -743,15 +743,22 @@ jobs:
           [[ "$out" == "HELLO" ]] || { echo "staged bash pipeline failed: got '$out'" >&2; exit 1; }
 
           # The full-toolchain payoff: git/jq/curl must resolve from the bundle's
-          # mingw64/bin. Use NON-login `-c` to match the agent's actual invocation
-          # (shell.rs spawns `bash -c`): if the launcher only fixes PATH under a
-          # login shell, `-lc` would pass here while the real agent stays broken —
-          # the exact green-but-broken trap this gate guards.
+          # mingw64/bin or usr/bin. Use NON-login `-c` to match the agent's actual
+          # invocation (shell.rs spawns `bash -c`): if the launcher only fixes PATH
+          # under a login shell, `-lc` would pass here while the real agent stays
+          # broken — the exact green-but-broken trap this gate guards.
+          #
+          # Under the launcher's MSYS environment, bundled tools report POSIX mount
+          # paths — `/mingw64/bin/git`, `/usr/bin/jq` — where `/mingw64` and `/usr`
+          # are the staged tree's own subdirs (the launcher roots MSYS at itself).
+          # Because PATH is stripped bare above, those mounts can ONLY be the
+          # bundle; a host install would instead surface as a `/c/...` drive path.
+          # So: accept the `/mingw64` and `/usr` mounts, reject anything else.
           for tool in git jq curl; do
             resolved=$(PATH="$bare_path" "$launcher" -c "command -v $tool" || true)
             [[ -n "$resolved" ]] || { echo "$tool did not resolve in bundled bash" >&2; exit 1; }
             case "$resolved" in
-              */git-bash/*) ;;
+              /mingw64/* | /usr/*) ;;
               *) echo "$tool resolved outside the bundle: $resolved" >&2; exit 1 ;;
             esac
             echo "$tool -> $resolved"
