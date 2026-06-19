@@ -201,7 +201,7 @@ export function InboxListPane({
           </div>
         </button>
 
-        <div className="absolute right-4 top-2 z-10 flex items-center gap-1 rounded-full border border-border/70 bg-background/95 p-0.5 opacity-0 shadow-xs backdrop-blur-sm transition-opacity group-hover/inbox-item:opacity-100 group-focus-within/inbox-item:opacity-100 supports-[backdrop-filter]:bg-background/85">
+        <div className="pointer-events-none absolute right-4 top-2 z-10 flex origin-top-right -translate-y-0.5 scale-[0.98] items-center gap-1 rounded-full border border-border/70 bg-background/95 p-0.5 opacity-0 shadow-xs backdrop-blur-sm transition-[opacity,transform] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] will-change-[opacity,transform] motion-reduce:translate-y-0 motion-reduce:scale-100 motion-reduce:transition-opacity group-hover/inbox-item:pointer-events-auto group-hover/inbox-item:translate-y-0 group-hover/inbox-item:scale-100 group-hover/inbox-item:opacity-100 group-focus-within/inbox-item:pointer-events-auto group-focus-within/inbox-item:translate-y-0 group-focus-within/inbox-item:scale-100 group-focus-within/inbox-item:opacity-100 supports-[backdrop-filter]:bg-background/85">
           {isDone ? (
             <InboxRowActionButton
               label="Mark unread"
