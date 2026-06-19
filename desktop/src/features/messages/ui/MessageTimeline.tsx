@@ -344,7 +344,7 @@ const MessageTimelineBase = React.forwardRef<
               ) : null}
               {activeDirectMessageIntro ? (
                 <div
-                  className="mb-0.5 mt-auto flex w-full flex-col items-start px-3 py-2 text-left"
+                  className="mt-auto flex w-full flex-col items-start px-3 py-2 text-left"
                   data-testid="message-dm-intro"
                 >
                   <DirectMessageIntroAvatarStack
@@ -365,7 +365,7 @@ const MessageTimelineBase = React.forwardRef<
 
               {activeChannelIntro ? (
                 <div
-                  className="mb-0.5 mt-auto flex w-full max-w-2xl flex-col items-start px-3 py-2 text-left"
+                  className="mt-auto flex w-full max-w-2xl flex-col items-start px-3 py-2 text-left"
                   data-testid="message-channel-intro"
                 >
                   <div

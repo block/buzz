@@ -271,11 +271,7 @@ const TimelineRenderRowView = React.memo(function TimelineRenderRowView({
   ]);
 
   if (row.type === "day") {
-    return (
-      <section className="relative flex flex-col gap-2.5 py-1 before:absolute before:inset-x-0 before:top-[19px] before:h-px before:bg-border/35 before:content-['']">
-        <DayDivider label={row.label} />
-      </section>
-    );
+    return <DayDivider label={row.label} />;
   }
 
   if (row.type === "unread") {
