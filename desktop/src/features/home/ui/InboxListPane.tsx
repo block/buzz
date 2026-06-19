@@ -1,4 +1,10 @@
-import { ChevronDown, Clock, ExternalLink, MailOpen } from "lucide-react";
+import {
+  Clock,
+  Ellipsis,
+  ExternalLink,
+  ListFilter,
+  MailOpen,
+} from "lucide-react";
 import * as React from "react";
 
 import {
@@ -16,6 +22,7 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/shared/ui/context-menu";
 import { Markdown } from "@/shared/ui/markdown";
@@ -30,6 +37,8 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
+import { Separator } from "@/shared/ui/separator";
 import { Switch } from "@/shared/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -122,6 +131,18 @@ export function InboxListPane({
   const activeFilter = FILTER_OPTIONS.find((option) => option.value === filter);
   const isReminders = filter === "reminders";
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const unreadVisibleItemCount = React.useMemo(
+    () =>
+      items.reduce((count, item) => count + (doneSet.has(item.id) ? 0 : 1), 0),
+    [doneSet, items],
+  );
+  const handleMarkAllRead = React.useCallback(() => {
+    for (const item of items) {
+      if (!doneSet.has(item.id)) {
+        onMarkRead(item.id);
+      }
+    }
+  }, [doneSet, items, onMarkRead]);
 
   const renderItem = (item: InboxItem, index: number) => {
     const isSelected = item.id === selectedId;
@@ -261,6 +282,29 @@ export function InboxListPane({
               Mark as read
             </ContextMenuItem>
           )}
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            disabled={!hasChannelTarget}
+            onClick={() => {
+              if (hasChannelTarget) {
+                onOpenDirect(item);
+              }
+            }}
+          >
+            <ExternalLink className="h-4 w-4" />
+            {hasChannelTarget ? "Open in channel" : "No channel link"}
+          </ContextMenuItem>
+          <ContextMenuItem
+            disabled={!hasChannelTarget}
+            onClick={() => {
+              if (hasChannelTarget) {
+                onRemindLater(item);
+              }
+            }}
+          >
+            <Clock className="h-4 w-4" />
+            {hasActiveReminder ? "Reminder set" : "Remind me later"}
+          </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
     );
@@ -276,46 +320,80 @@ export function InboxListPane({
       <TopChromeInsetHeader>
         <div className="px-5 py-1">
           <div className="flex w-full min-w-0 items-center justify-between gap-3">
-            <label
-              className={cn(
-                "inline-flex shrink-0 items-center gap-2 text-2xs font-medium leading-none text-muted-foreground",
-                isReminders && "opacity-50",
-              )}
-              htmlFor="inbox-unread-only-switch"
-            >
-              <span>Unread</span>
-              <Switch
-                checked={unreadOnly}
-                className="shadow-none [&>span]:shadow-none"
-                data-testid="inbox-unread-only-toggle"
-                disabled={isReminders}
-                id="inbox-unread-only-switch"
-                onCheckedChange={onUnreadOnlyChange}
-              />
-            </label>
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button
+                  aria-label="Inbox options"
+                  className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+                  data-testid="inbox-options-trigger"
+                  size="icon"
+                  type="button"
+                  variant="outline"
+                >
+                  <Ellipsis className="h-4 w-4" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-60 p-2">
+                <div
+                  className={cn(
+                    "flex min-h-9 items-center justify-between gap-3 rounded-lg px-2 py-1.5",
+                    isReminders && "opacity-50",
+                  )}
+                >
+                  <label
+                    className="text-sm font-medium text-foreground"
+                    htmlFor="inbox-unread-only-switch"
+                  >
+                    Show unread
+                  </label>
+                  <Switch
+                    checked={unreadOnly}
+                    className="shadow-none [&>span]:shadow-none"
+                    data-testid="inbox-unread-only-toggle"
+                    disabled={isReminders}
+                    id="inbox-unread-only-switch"
+                    onCheckedChange={onUnreadOnlyChange}
+                  />
+                </div>
+                <Separator className="my-1 bg-muted" />
+                <button
+                  className="flex min-h-9 w-full items-center rounded-lg px-2 py-2 text-left text-sm transition-colors hover:bg-muted/50 disabled:pointer-events-none disabled:opacity-50"
+                  disabled={unreadVisibleItemCount === 0}
+                  onClick={handleMarkAllRead}
+                  type="button"
+                >
+                  <span>Mark all as read</span>
+                  {unreadVisibleItemCount > 0 ? (
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      {unreadVisibleItemCount}
+                    </span>
+                  ) : null}
+                </button>
+              </PopoverContent>
+            </Popover>
             <div className="ml-auto flex min-w-0 max-w-[var(--home-inbox-list-width)] items-center justify-end">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
-                    className="h-8 shrink-0 px-2.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+                    aria-label={`Filter inbox: ${activeFilter?.label ?? "All"}`}
+                    className="relative h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
                     data-testid="inbox-filter-trigger"
-                    size="sm"
+                    size="icon"
                     type="button"
                     variant="outline"
                   >
-                    <span>{activeFilter?.label ?? "All"}</span>
+                    <ListFilter className="h-4 w-4" />
                     {dueReminderCount > 0 ? (
                       <span
-                        className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
+                        className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-background bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
                         data-testid="inbox-reminder-badge"
                       >
                         {dueReminderCount}
                       </span>
                     ) : null}
-                    <ChevronDown className="h-4 w-4" />
                   </Button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="min-w-40">
+                <DropdownMenuContent align="end" className="w-48">
                   <DropdownMenuRadioGroup
                     onValueChange={(value) =>
                       onFilterChange(value as InboxFilter)
