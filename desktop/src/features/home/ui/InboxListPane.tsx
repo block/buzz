@@ -149,7 +149,7 @@ export function InboxListPane({
         showRightDivider && topChromeInset.verticalDivider,
       )}
     >
-      <TopChromeInsetHeader>
+      <TopChromeInsetHeader flush>
         <div className="px-5 py-1">
           {/* Cap to the list-column width so the right-aligned dropdown stays
               put when the pane goes full-width in reminders mode. */}
