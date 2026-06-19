@@ -401,11 +401,13 @@ pub async fn get_thread_replies(
         let created_at: DateTime<Utc> = row.try_get("event_created_at")?;
         let broadcast_val: bool = row.try_get("broadcast")?;
 
-        let stored_event = row_to_stored_event(row)?.ok_or_else(|| {
-            crate::error::DbError::InvalidData(
-                "thread reply row failed event reconstruction".into(),
-            )
-        })?;
+        // Skip rows that fail event reconstruction (e.g. corrupt signature)
+        // rather than failing the whole thread query, matching the
+        // skip-and-continue semantics of the prior get_events_by_ids path.
+        let stored_event = match row_to_stored_event(row)? {
+            Some(se) => se,
+            None => continue,
+        };
 
         replies.push(ThreadReply {
             event_id,
@@ -739,5 +741,99 @@ mod tests {
         assert_eq!(replies[0].stored_event.event.content, "reply");
         assert_eq!(replies[0].stored_event.channel_id, Some(channel.id));
         assert_eq!(replies[0].depth, 1);
+    }
+
+    /// A reply whose stored row can no longer be reconstructed into a
+    /// `nostr::Event` (e.g. corrupt signature from out-of-band storage damage)
+    /// must be skipped, with the rest of the thread still returned — not
+    /// surfaced as a query error that takes down the whole thread read.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_thread_replies_skips_unreconstructable_row() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let channel = create_channel(
+            &pool,
+            &format!("thread-replies-corrupt-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let root = make_stream_event(&author, "root");
+        let root_created_at = event_created_at(&root);
+        insert_event_with_thread_metadata(&pool, &root, Some(channel.id), None)
+            .await
+            .expect("insert root event");
+
+        // Two replies under the same root: one stays valid, one we corrupt.
+        let good = make_stream_event(&author, "good");
+        let good_id = good.id.to_hex();
+        let good_created_at = event_created_at(&good);
+        insert_event_with_thread_metadata(
+            &pool,
+            &good,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: good.id.as_bytes(),
+                event_created_at: good_created_at,
+                channel_id: channel.id,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(root_created_at),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_created_at),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert good reply");
+
+        let bad = make_stream_event(&author, "bad");
+        let bad_created_at = event_created_at(&bad);
+        insert_event_with_thread_metadata(
+            &pool,
+            &bad,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: bad.id.as_bytes(),
+                event_created_at: bad_created_at,
+                channel_id: channel.id,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(root_created_at),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_created_at),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert bad reply");
+
+        // Corrupt the bad reply's signature in place: truncating the 64-byte
+        // sig makes `row_to_stored_event` fail to deserialize the event and
+        // return `Ok(None)` — the case the skip-and-continue must handle.
+        let rows_changed = sqlx::query("UPDATE events SET sig = $1 WHERE id = $2")
+            .bind(vec![0u8; 32])
+            .bind(bad.id.as_bytes())
+            .execute(&pool)
+            .await
+            .expect("corrupt bad reply sig")
+            .rows_affected();
+        assert_eq!(rows_changed, 1, "expected to corrupt exactly one row");
+
+        let replies = get_thread_replies(&pool, root.id.as_bytes(), Some(10), 10, None)
+            .await
+            .expect("fetch thread replies must succeed despite a corrupt row");
+
+        // The corrupt reply is skipped; the valid one survives. The whole
+        // query does NOT 500 on a single unreconstructable row.
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].stored_event.event.id.to_hex(), good_id);
+        assert_eq!(replies[0].stored_event.event.content, "good");
     }
 }
