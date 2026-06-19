@@ -277,16 +277,15 @@ export function useChannelSubscription(channel: Channel | null) {
         }
 
         cleanup = dispose;
-
-        void syncLatestHistory().catch((error) => {
-          if (!isDisposed) {
-            console.error(
-              "Failed to refresh channel history after subscribing",
-              channelId,
-              error,
-            );
-          }
-        });
+        // No post-subscribe history refetch: useChannelMessagesQuery already
+        // loaded the latest CHANNEL_HISTORY_LIMIT (200) events, and the live
+        // subscription itself backfills up to 50 most-recent events via its
+        // initial REQ (buildChannelFilter(id, 50)). Both write into the same
+        // channelMessagesKey cache, so any window between the two REQs is
+        // covered by the live sub's overlap unless >50 messages land in
+        // <1s — vanishingly rare in practice. The reconnect listener above
+        // still bridges gaps from connection drops, where the gap *is*
+        // unbounded.
       })
       .catch((error) => {
         console.error("Failed to subscribe to channel", channelId, error);
