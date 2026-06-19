@@ -233,29 +233,7 @@ export function AppSidebar({
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
   const scrollRef = React.useRef<HTMLDivElement>(null);
-  const sidebarFooterRef = React.useRef<HTMLDivElement>(null);
-  const [sidebarFooterHeight, setSidebarFooterHeight] = React.useState<
-    number | null
-  >(null);
   useSidebarScrollLock(scrollRef);
-
-  React.useLayoutEffect(() => {
-    const sidebarFooter = sidebarFooterRef.current;
-    if (!sidebarFooter) {
-      return;
-    }
-
-    const updateFooterHeight = () => {
-      setSidebarFooterHeight(sidebarFooter.getBoundingClientRect().height);
-    };
-
-    updateFooterHeight();
-
-    const resizeObserver = new ResizeObserver(updateFooterHeight);
-    resizeObserver.observe(sidebarFooter);
-
-    return () => resizeObserver.disconnect();
-  }, []);
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -496,16 +474,7 @@ export function AppSidebar({
       data-testid="app-sidebar"
       variant="sidebar"
     >
-      <div
-        className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
-        style={
-          sidebarFooterHeight === null
-            ? undefined
-            : ({
-                "--buzz-sidebar-footer-height": `${sidebarFooterHeight}px`,
-              } as React.CSSProperties)
-        }
-      >
+      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {unreadAboveCount > 0 ? (
           <MoreUnreadButton
             count={unreadAboveCount}
@@ -796,67 +765,66 @@ export function AppSidebar({
           ) : null}
         </SidebarContent>
 
-        {unreadBelowCount > 0 ? (
-          <MoreUnreadButton
-            bottomClassName="bottom-(--buzz-sidebar-footer-height,6rem)"
-            count={unreadBelowCount}
-            onClick={scrollToNextBelow}
-            position="bottom"
-            testId="sidebar-more-unread-below"
-          />
-        ) : null}
-
-        <SidebarFooter
-          className="z-30 shrink-0 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35"
-          ref={sidebarFooterRef}
-        >
-          <AnimatePresence>
-            {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
-              <SidebarRelayConnectionCard
-                className="mb-2 group-data-[collapsible=icon]:hidden"
-                isConnected={
-                  sidebarRelayConnectionCard.isRelayConnectionSuccess
-                }
-                isReconnectPending={
-                  sidebarRelayConnectionCard.isRelayReconnectPending
-                }
-                onDismiss={
-                  sidebarRelayConnectionCard.onDismissRelayConnectionCard
-                }
-                onReconnect={sidebarRelayConnectionCard.onReconnectRelay}
-                key="sidebar-relay-connection-card"
-              />
-            ) : null}
-          </AnimatePresence>
-          {showSidebarUpdateCard ? (
-            <div className="mb-2 group-data-[collapsible=icon]:hidden">
-              <SidebarUpdateCard
-                onDismiss={() => setIsSidebarUpdateCardDismissed(true)}
-              />
-            </div>
+        <div className="relative z-30 shrink-0">
+          {unreadBelowCount > 0 ? (
+            <MoreUnreadButton
+              bottomClassName="bottom-full"
+              count={unreadBelowCount}
+              onClick={scrollToNextBelow}
+              position="bottom"
+              testId="sidebar-more-unread-below"
+            />
           ) : null}
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarProfileCard
-                activeWorkspace={activeWorkspace}
-                isPresencePending={isPresencePending}
-                onOpenAddWorkspace={onOpenAddWorkspace}
-                onOpenSettings={onSelectSettings}
-                onRemoveWorkspace={onRemoveWorkspace}
-                onSetPresenceStatus={onSetPresenceStatus}
-                onSetUserStatus={onSetUserStatus}
-                onClearUserStatus={onClearUserStatus}
-                onSwitchWorkspace={onSwitchWorkspace}
-                onUpdateWorkspace={onUpdateWorkspace}
-                profile={profile}
-                resolvedDisplayName={resolvedDisplayName}
-                selfPresenceStatus={selfPresenceStatus}
-                selfUserStatus={selfUserStatus}
-                workspaces={workspaces}
-              />
-            </SidebarMenuItem>
-          </SidebarMenu>
-        </SidebarFooter>
+
+          <SidebarFooter className="bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
+            <AnimatePresence>
+              {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
+                <SidebarRelayConnectionCard
+                  className="mb-2 group-data-[collapsible=icon]:hidden"
+                  isConnected={
+                    sidebarRelayConnectionCard.isRelayConnectionSuccess
+                  }
+                  isReconnectPending={
+                    sidebarRelayConnectionCard.isRelayReconnectPending
+                  }
+                  onDismiss={
+                    sidebarRelayConnectionCard.onDismissRelayConnectionCard
+                  }
+                  onReconnect={sidebarRelayConnectionCard.onReconnectRelay}
+                  key="sidebar-relay-connection-card"
+                />
+              ) : null}
+            </AnimatePresence>
+            {showSidebarUpdateCard ? (
+              <div className="mb-2 group-data-[collapsible=icon]:hidden">
+                <SidebarUpdateCard
+                  onDismiss={() => setIsSidebarUpdateCardDismissed(true)}
+                />
+              </div>
+            ) : null}
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarProfileCard
+                  activeWorkspace={activeWorkspace}
+                  isPresencePending={isPresencePending}
+                  onOpenAddWorkspace={onOpenAddWorkspace}
+                  onOpenSettings={onSelectSettings}
+                  onRemoveWorkspace={onRemoveWorkspace}
+                  onSetPresenceStatus={onSetPresenceStatus}
+                  onSetUserStatus={onSetUserStatus}
+                  onClearUserStatus={onClearUserStatus}
+                  onSwitchWorkspace={onSwitchWorkspace}
+                  onUpdateWorkspace={onUpdateWorkspace}
+                  profile={profile}
+                  resolvedDisplayName={resolvedDisplayName}
+                  selfPresenceStatus={selfPresenceStatus}
+                  selfUserStatus={selfUserStatus}
+                  workspaces={workspaces}
+                />
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarFooter>
+        </div>
       </div>
 
       <CreateChannelDialog
