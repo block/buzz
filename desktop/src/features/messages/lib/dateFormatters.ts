@@ -78,6 +78,18 @@ export function isSameDay(a: number, b: number): boolean {
   return isSameDayDate(new Date(a * 1_000), new Date(b * 1_000));
 }
 
+/**
+ * Unix-seconds timestamp of local midnight for the calendar day containing
+ * `unixSeconds`. Two timestamps on the same calendar day map to the same value,
+ * so it is a stable identifier for a day group that does not shift when an
+ * older message is prepended into that day.
+ */
+export function startOfLocalDaySeconds(unixSeconds: number): number {
+  const date = new Date(unixSeconds * 1_000);
+  date.setHours(0, 0, 0, 0);
+  return Math.floor(date.getTime() / 1_000);
+}
+
 /** Short month + ordinal day, e.g. "May 19th". */
 export function formatShortMonthDayOrdinal(unixSeconds: number): string {
   return formatMonthDayOrdinal(

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { formatTimelineMessages } from "./formatTimelineMessages.ts";
+import {
+  countTopLevelTimelineRows,
+  formatTimelineMessages,
+} from "./formatTimelineMessages.ts";
 
 const HEX64_A =
   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -99,4 +102,95 @@ test("deletion target with non-hex `e` tag value is ignored", () => {
     1,
     "malformed deletion tag should not match anything",
   );
+});
+
+// ---------------------------------------------------------------------------
+// countTopLevelTimelineRows — the unit fetch-older pages by. Must match the
+// rows `buildMainTimelineEntries` would actually render: top-level content
+// events, minus deletions, with thread replies collapsed into their parent.
+// ---------------------------------------------------------------------------
+
+function hex64(char) {
+  return char.repeat(64);
+}
+
+function message(id, overrides = {}) {
+  return {
+    id,
+    pubkey: PUBKEY_A,
+    kind: 9,
+    created_at: 1_700_000_000,
+    content: "hi",
+    tags: [["h", CHANNEL_ID]],
+    sig: "sig",
+    ...overrides,
+  };
+}
+
+function reply(id, parentId, overrides = {}) {
+  return message(id, {
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", parentId, "", "reply"],
+    ],
+    ...overrides,
+  });
+}
+
+test("countTopLevelTimelineRows counts top-level messages", () => {
+  const events = [
+    message(hex64("1")),
+    message(hex64("2")),
+    message(hex64("3")),
+  ];
+  assert.equal(countTopLevelTimelineRows(events), 3);
+});
+
+test("countTopLevelTimelineRows ignores collapsed thread replies", () => {
+  const root = hex64("1");
+  const events = [
+    message(root),
+    reply(hex64("2"), root),
+    reply(hex64("3"), root),
+  ];
+  // Two replies collapse into the root's summary → one visible row.
+  assert.equal(countTopLevelTimelineRows(events), 1);
+});
+
+test("countTopLevelTimelineRows counts broadcast replies as top-level", () => {
+  const root = hex64("1");
+  const broadcast = reply(hex64("2"), root, {
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", root, "", "reply"],
+      ["broadcast", "1"],
+    ],
+  });
+  assert.equal(countTopLevelTimelineRows([message(root), broadcast]), 2);
+});
+
+test("countTopLevelTimelineRows excludes deleted messages", () => {
+  const target = hex64("1");
+  const events = [
+    message(target),
+    message(hex64("2")),
+    deletionEvent(9005, target, { id: hex64("9") }),
+  ];
+  assert.equal(countTopLevelTimelineRows(events), 1);
+});
+
+test("countTopLevelTimelineRows ignores non-content kinds (reactions)", () => {
+  const reaction = {
+    id: hex64("9"),
+    pubkey: PUBKEY_B,
+    kind: 7,
+    created_at: 1_700_000_001,
+    content: "+",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", hex64("1")],
+    ],
+    sig: "sig",
+  };
+  assert.equal(countTopLevelTimelineRows([message(hex64("1")), reaction]), 1);
 });

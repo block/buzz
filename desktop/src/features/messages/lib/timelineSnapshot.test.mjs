@@ -212,6 +212,31 @@ test("buildDayGroupBoundaries: group counts always sum to message count", () => 
   assert.equal(total, messages.length);
 });
 
+test("buildDayGroupBoundaries: same-day group key is stable across a prepend", () => {
+  // The day section is keyed by this value; if it changes when an older
+  // message lands on the same calendar day, React remounts the whole section
+  // on every scroll-up prepend — the timeline flicker. The key must depend on
+  // the calendar day, not the first message's exact timestamp.
+  const before = buildDayGroupBoundaries([
+    message({ id: "b", createdAt: dayAt(2026, 6, 14, 9) }),
+    message({ id: "c", createdAt: dayAt(2026, 6, 14, 10) }),
+  ]);
+  const afterPrepend = buildDayGroupBoundaries([
+    message({ id: "a", createdAt: dayAt(2026, 6, 14, 8) }),
+    message({ id: "b", createdAt: dayAt(2026, 6, 14, 9) }),
+    message({ id: "c", createdAt: dayAt(2026, 6, 14, 10) }),
+  ]);
+  assert.equal(before[0].key, afterPrepend[0].key);
+});
+
+test("buildDayGroupBoundaries: distinct calendar days get distinct keys", () => {
+  const groups = buildDayGroupBoundaries([
+    message({ id: "a", createdAt: dayAt(2026, 6, 13, 12) }),
+    message({ id: "b", createdAt: dayAt(2026, 6, 14, 12) }),
+  ]);
+  assert.notEqual(groups[0].key, groups[1].key);
+});
+
 // --- jump-to-message deep links ----------------------------------------------
 
 test("resolveDeepLinkTarget: unresolved with no target", () => {

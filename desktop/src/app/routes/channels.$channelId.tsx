@@ -38,10 +38,19 @@ export const Route = createFileRoute("/channels/$channelId")({
   component: ChannelRouteComponent,
 });
 
+// Hoisted so the chunk can be warmed eagerly (route preload) as well as loaded
+// lazily on render; the loader dedupes repeat calls.
+const importChannelRouteScreen = () => import("./ChannelRouteScreen");
+
 const ChannelRouteScreen = React.lazy(async () => {
-  const module = await import("./ChannelRouteScreen");
+  const module = await importChannelRouteScreen();
   return { default: module.ChannelRouteScreen };
 });
+
+/** Warms the ChannelRouteScreen chunk so first channel open doesn't stall. */
+export function preloadChannelRouteScreen(): void {
+  void importChannelRouteScreen();
+}
 
 function ChannelRouteComponent() {
   const { channelId } = Route.useParams();

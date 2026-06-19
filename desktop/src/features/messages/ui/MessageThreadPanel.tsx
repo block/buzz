@@ -31,7 +31,7 @@ import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
 import { UnreadDivider } from "./UnreadDivider";
 import { useComposerHeightPadding } from "./useComposerHeightPadding";
-import { useTimelineScrollManager } from "./useTimelineScrollManager";
+import { useAnchoredScroll } from "./useAnchoredScroll";
 import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
 
 type MessageThreadPanelProps = {
@@ -306,6 +306,7 @@ export function MessageThreadPanel({
   widthPx,
 }: MessageThreadPanelProps) {
   const threadBodyRef = React.useRef<HTMLDivElement>(null);
+  const threadContentRef = React.useRef<HTMLDivElement>(null);
   const threadComposerWrapperRef = React.useRef<HTMLDivElement>(null);
   const isOverlay = useIsThreadPanelOverlay();
   const isFloatingOverlay = isOverlay && !isSinglePanelView;
@@ -338,8 +339,7 @@ export function MessageThreadPanel({
   // (`scrollIntoView`), so it must stay consistent with what's actually painted.
   // You can't scroll to a reply that hasn't committed yet. The thread pane gets
   // this no-tearing guarantee for free by routing through the same
-  // `useTimelineScrollManager` (and its `timelineSnapshot` helpers) as the main
-  // timeline.
+  // `useAnchoredScroll` primitive as the main timeline.
   const deferredThreadReplies = React.useDeferredValue(
     threadReplies,
     EMPTY_THREAD_REPLIES,
@@ -359,22 +359,17 @@ export function MessageThreadPanel({
     [deferredThreadReplies],
   );
 
-  const {
-    bottomAnchorRef,
-    contentRef,
-    isAtBottom,
-    newMessageCount,
-    scrollToBottom,
-    syncScrollState,
-  } = useTimelineScrollManager({
-    channelId: threadHeadId,
-    // Wait for deferred replies to commit before scroll-init (else rows mount un-scrolled).
-    isLoading: repliesRenderState === "pending",
-    messages: threadMessages,
-    onTargetReached: onScrollTargetResolved,
-    scrollContainerRef: threadBodyRef,
-    targetMessageId: scrollTargetId,
-  });
+  const { isAtBottom, newMessageCount, onScroll, scrollToBottom } =
+    useAnchoredScroll({
+      channelId: threadHeadId,
+      contentRef: threadContentRef,
+      // Wait for deferred replies to commit before scroll-init (else rows mount un-scrolled).
+      isLoading: repliesRenderState === "pending",
+      messages: threadMessages,
+      onTargetReached: onScrollTargetResolved,
+      scrollContainerRef: threadBodyRef,
+      targetMessageId: scrollTargetId,
+    });
 
   if (!threadHead) {
     return null;
@@ -388,10 +383,10 @@ export function MessageThreadPanel({
         !isSplitLayout && !isFloatingOverlay && "pt-[4.75rem]",
       )}
       data-testid="message-thread-body"
-      onScroll={syncScrollState}
+      onScroll={onScroll}
       ref={threadBodyRef}
     >
-      <div ref={contentRef}>
+      <div ref={threadContentRef}>
         <div className="px-3 pb-1 pt-0" data-testid="message-thread-head">
           <div className="rounded-2xl">
             <MessageRow
@@ -437,7 +432,7 @@ export function MessageThreadPanel({
                 return (
                   <div
                     className={cn(
-                      "flex flex-col gap-1",
+                      "content-visibility-auto flex flex-col gap-1",
                       entry.summary &&
                         "group/message mx-1 rounded-2xl px-0 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
                     )}
@@ -497,7 +492,6 @@ export function MessageThreadPanel({
           // rows are streaming in on the deferred commit. Paint nothing rather
           // than flashing the empty state.
           null}
-          <div aria-hidden className="h-px" ref={bottomAnchorRef} />
         </div>
       </div>
     </div>

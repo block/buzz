@@ -11,7 +11,7 @@
  */
 
 import type { TimelineMessage } from "@/features/messages/types";
-import { isSameDay } from "./dateFormatters";
+import { isSameDay, startOfLocalDaySeconds } from "./dateFormatters";
 
 /** Distance (px) from the bottom within which the timeline counts as "at bottom". */
 export const BOTTOM_THRESHOLD_PX = 72;
@@ -88,7 +88,11 @@ export function selectLatestMessageAutoScrollBehavior({
 
 /** A single day boundary in the timeline: where it starts and how many messages it covers. */
 export type DayGroupBoundary = {
-  /** Stable key for the day section. */
+  /**
+   * Stable key for the day section: the local start-of-day of the messages it
+   * covers, so prepending an older message into an already-rendered day reuses
+   * the same key instead of remounting the whole `<section>`.
+   */
   key: string;
   /** Index into `messages` of the first message in this day. */
   startIndex: number;
@@ -114,7 +118,7 @@ export function buildDayGroupBoundaries(
 
     if (!prev || !isSameDay(prev.createdAt, message.createdAt)) {
       boundaries.push({
-        key: `day-${message.createdAt}`,
+        key: `day-${startOfLocalDaySeconds(message.createdAt)}`,
         startIndex: i,
         count: 1,
         headingTimestamp: message.createdAt,

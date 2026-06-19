@@ -144,6 +144,32 @@ function aspectRatioFromDim(dim?: string): number | undefined {
   return width / height;
 }
 
+/**
+ * Parse a NIP-92 `dim` value ("WxH") into intrinsic pixel dimensions. Used to
+ * stamp explicit `width`/`height` attributes on inline images so the browser
+ * reserves aspect-ratio-correct layout space *before* the image decodes. This
+ * is what keeps the timeline from jumping when a tall image loads late — the
+ * row's height is known at first paint instead of growing from ~0 on load.
+ */
+function dimensionsFromDim(
+  dim?: string,
+): { width: number; height: number } | undefined {
+  if (!dim) return undefined;
+  const match = dim.match(/^(\d+)x(\d+)$/i);
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return undefined;
+  }
+  return { width, height };
+}
+
 function isInsideHiddenSpoiler(element: Element): boolean {
   return (
     element.closest('.buzz-spoiler[data-spoiler][data-revealed="false"]') !==
@@ -1004,10 +1030,12 @@ function ImageZoomOverlay({
  */
 function ImageBlock({
   alt,
+  dim,
   resolvedSrc,
   src,
 }: {
   alt: string | undefined;
+  dim?: string;
   resolvedSrc: string | undefined;
   src: string | undefined;
 }) {
@@ -1093,6 +1121,12 @@ function ImageBlock({
   const closeMenu = React.useCallback(() => setMenu(null), []);
   useDismissImageContextMenu(Boolean(menu), closeMenu);
 
+  // Intrinsic dimensions from the NIP-92 `dim` tag, stamped as width/height
+  // attributes so the browser reserves aspect-ratio space before the image
+  // decodes. Without this the row grows from ~0 on load and shoves the
+  // timeline — the exact reflow the anchored-scroll restore then has to fight.
+  const intrinsicDimensions = dimensionsFromDim(dim);
+
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     if (isInsideHiddenSpoiler(e.currentTarget)) return;
@@ -1153,9 +1187,11 @@ function ImageBlock({
           alt={alt}
           className="block max-h-64 max-w-sm rounded-xl object-contain"
           data-spoiler-media-size={hiddenSpoilerMediaSize ? "" : undefined}
+          height={intrinsicDimensions?.height}
           ref={imageRef}
           src={resolvedSrc}
           style={spoilerMediaStyle}
+          width={intrinsicDimensions?.width}
           onLoad={(event) => updateSpoilerMediaSize(event.currentTarget)}
         />
       </button>
@@ -1860,9 +1896,15 @@ function createMarkdownComponents(
           </span>
         );
       }
+      const entry = src ? imetaByUrl?.get(src) : undefined;
       return (
         <span data-block-media="" className="block">
-          <ImageBlock alt={alt} resolvedSrc={resolvedSrc} src={src} />
+          <ImageBlock
+            alt={alt}
+            dim={entry?.dim}
+            resolvedSrc={resolvedSrc}
+            src={src}
+          />
         </span>
       );
     },
@@ -2094,7 +2136,7 @@ function MarkdownInner({
     (link: ParsedMessageLink) => {
       // Always route through `goChannel` with `messageId` set: the channel
       // route already handles scroll-into-view + highlight via
-      // `useTimelineScrollManager` + `getEventById` backfill, and works for
+      // `useAnchoredScroll` + `getEventById` backfill, and works for
       // both stream-message replies and forum threads. Detecting "the thread
       // root is a forum post" up front would require an event lookup we don't
       // currently have synchronously; the brief explicitly allows skipping

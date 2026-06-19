@@ -96,6 +96,8 @@ type MockBridgeOptions = {
   feedReadError?: string;
   canvasReadError?: string;
   openDmDelayMs?: number;
+  /** Delay (ms) for older-history fetches; see e2eBridge mock config. */
+  historyDelayMs?: number;
   profileReadDelayMs?: number;
   profileReadError?: string;
   profileUpdateError?: string;

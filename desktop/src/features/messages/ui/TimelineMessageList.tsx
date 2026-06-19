@@ -2,19 +2,25 @@ import * as React from "react";
 
 import { formatDayHeading } from "@/features/messages/lib/dateFormatters";
 import {
-  buildMainTimelineEntries,
-  shouldRenderUnreadDivider,
-} from "@/features/messages/lib/threadPanel";
+  buildTimelineItems,
+  getTimelineItemKey,
+  type TimelineItem,
+  type TimelineItemsResult,
+} from "@/features/messages/lib/timelineItems";
+import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
+import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import {
   buildVideoReviewCommentsByRootId,
   buildVideoReviewContextForMessage,
 } from "@/features/messages/lib/videoReviewContext";
-import { buildDayGroupBoundaries } from "@/features/messages/lib/timelineSnapshot";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
-import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { cn } from "@/shared/lib/cn";
+import {
+  type ListVirtualizer,
+  VirtualizedList,
+} from "@/shared/ui/VirtualizedList";
 import { DayDivider } from "./DayDivider";
 import { MessageRow } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
@@ -63,6 +69,13 @@ type TimelineMessageListProps = {
   searchQuery?: string;
   /** Per-thread unread counts keyed by thread root id. */
   threadUnreadCounts?: ReadonlyMap<string, number>;
+  /** Caller-owned scroll container the virtualizer measures and scrolls. */
+  scrollContainerRef: React.RefObject<HTMLElement | null>;
+  /** Receives the flattened item stream + index map so the scroll manager can
+   *  resolve scroll targets by id. Called whenever the stream is rebuilt. */
+  onItems?: (result: TimelineItemsResult) => void;
+  /** Receives the virtualizer instance for index-model scroll paths. */
+  onVirtualizer?: (virtualizer: ListVirtualizer) => void;
 };
 
 export const TimelineMessageList = React.memo(function TimelineMessageList({
@@ -90,6 +103,9 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   searchQuery,
   threadUnreadCounts,
   unfollowThreadById,
+  scrollContainerRef,
+  onItems,
+  onVirtualizer,
 }: TimelineMessageListProps) {
   const entries = React.useMemo(
     () => buildMainTimelineEntries(messages),
@@ -137,161 +153,259 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     profiles,
     reviewCommentsByRootId,
   ]);
-  const dayGroups: Array<{
-    key: string;
-    label: string;
-    elements: React.ReactNode[];
-  }> = [];
-  let currentDayGroup: (typeof dayGroups)[number] | null = null;
 
-  // Day-divider decision delegated to a pure, lib-tested helper: a new group
-  // starts at index 0 and whenever a message falls on a different calendar day
-  // than the one before it. We index the boundary start positions so the render
-  // loop below stays a straight walk while the grouping logic lives in `lib/`.
-  const dayGroupStartIndices = new Set(
-    buildDayGroupBoundaries(entries.map((entry) => entry.message)).map(
-      (boundary) => boundary.startIndex,
-    ),
+  // The flattened item stream and its messageId -> itemIndex map are produced
+  // together from ONE memo, keyed on the entries and the unread boundary (the
+  // unread divider is its own item, so it shifts indices). A separate memo with
+  // diverging deps would let the map go stale and scroll deep-links to the wrong
+  // row — the exact failure virtualization risks.
+  const itemsResult = React.useMemo(
+    () => buildTimelineItems(entries, firstUnreadMessageId),
+    [entries, firstUnreadMessageId],
   );
 
-  for (let i = 0; i < entries.length; i++) {
-    const { message, summary } = entries[i];
-    const messageRenderKey = message.renderKey ?? message.id;
+  React.useEffect(() => {
+    onItems?.(itemsResult);
+  }, [itemsResult, onItems]);
 
-    if (dayGroupStartIndices.has(i)) {
-      currentDayGroup = {
-        key: `day-${message.createdAt}`,
-        label: formatDayHeading(message.createdAt),
-        elements: [],
-      };
-      dayGroups.push(currentDayGroup);
-    }
+  const renderItem = React.useCallback(
+    (item: TimelineItem) => {
+      switch (item.kind) {
+        case "day-divider":
+          // Heading is resolved at render time (not baked into the item) so
+          // "Today"/"Yesterday" track the wall clock, not build time.
+          return <DayDivider label={formatDayHeading(item.headingTimestamp)} />;
+        case "unread-divider":
+          return <UnreadDivider />;
+        case "system":
+          return (
+            <SystemRow
+              currentPubkey={currentPubkey}
+              entry={item.entry}
+              footer={messageFooters?.[item.entry.message.id] ?? null}
+              onToggleReaction={onToggleReaction}
+              profiles={profiles}
+            />
+          );
+        case "message":
+          return (
+            <MessageRowItem
+              agentPubkeys={agentPubkeys}
+              channelId={channelId}
+              currentPubkey={currentPubkey}
+              entry={item.entry}
+              followThreadById={followThreadById}
+              footer={messageFooters?.[item.entry.message.id] ?? null}
+              highlightedMessageId={highlightedMessageId}
+              isFollowingThreadById={isFollowingThreadById}
+              onDelete={onDelete}
+              onEdit={onEdit}
+              onMarkUnread={onMarkUnread}
+              onReply={onReply}
+              onToggleReaction={onToggleReaction}
+              profiles={profiles}
+              searchActiveMessageId={searchActiveMessageId}
+              searchMatchingMessageIds={searchMatchingMessageIds}
+              searchQuery={searchQuery}
+              threadUnreadCounts={threadUnreadCounts}
+              unfollowThreadById={unfollowThreadById}
+              videoReviewContext={videoReviewContextById.get(
+                item.entry.message.id,
+              )}
+            />
+          );
+      }
+    },
+    [
+      agentPubkeys,
+      channelId,
+      currentPubkey,
+      followThreadById,
+      highlightedMessageId,
+      isFollowingThreadById,
+      messageFooters,
+      onDelete,
+      onEdit,
+      onMarkUnread,
+      onReply,
+      onToggleReaction,
+      profiles,
+      searchActiveMessageId,
+      searchMatchingMessageIds,
+      searchQuery,
+      threadUnreadCounts,
+      unfollowThreadById,
+      videoReviewContextById,
+    ],
+  );
 
-    // The unread "New" divider only marks a read/unread boundary when there is
-    // a message above the first unread. When the first unread is the first
-    // rendered top-level entry (fresh/never-read channel), there is nothing
-    // above to separate from, so it is suppressed.
-    if (shouldRenderUnreadDivider(i, message.id, firstUnreadMessageId)) {
-      currentDayGroup?.elements.push(
-        <UnreadDivider key={`unread-${messageRenderKey}`} />,
-      );
-    }
+  return (
+    <VirtualizedList
+      getItemKey={getTimelineItemKey}
+      innerClassName="flex flex-col"
+      items={itemsResult.items}
+      onVirtualizer={onVirtualizer}
+      renderItem={renderItem}
+      scrollRef={scrollContainerRef}
+    />
+  );
+});
 
-    if (message.kind === KIND_SYSTEM_MESSAGE) {
-      const footer = messageFooters?.[message.id] ?? null;
-      currentDayGroup?.elements.push(
-        <div key={messageRenderKey} className="flex flex-col gap-1">
-          <SystemMessageRow
-            message={message}
-            currentPubkey={currentPubkey}
-            onToggleReaction={onToggleReaction}
-            profiles={profiles}
-          />
-          {footer}
-        </div>,
-      );
-    } else if (summary && onReply) {
-      const footer = messageFooters?.[message.id] ?? null;
-      const isHighlighted = message.id === highlightedMessageId;
-      currentDayGroup?.elements.push(
-        <div
-          key={messageRenderKey}
-          className={cn(
-            "group/message relative mx-1 flex flex-col gap-0 rounded-2xl px-0 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
-            isHighlighted &&
-              "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
-          )}
-        >
-          <MessageRow
-            agentPubkeys={agentPubkeys}
-            channelId={channelId}
-            highlighted={false}
-            hoverBackground={false}
-            isFollowingThread={
-              isFollowingThreadById
-                ? isFollowingThreadById(message.id)
-                : undefined
-            }
-            message={message}
-            onDelete={
-              onDelete && currentPubkey && message.pubkey === currentPubkey
-                ? onDelete
-                : undefined
-            }
-            onEdit={
-              onEdit && currentPubkey && message.pubkey === currentPubkey
-                ? onEdit
-                : undefined
-            }
-            onFollowThread={
-              followThreadById ? () => followThreadById(message.id) : undefined
-            }
-            onMarkUnread={onMarkUnread}
-            onToggleReaction={onToggleReaction}
-            onReply={onReply}
-            onUnfollowThread={
-              unfollowThreadById
-                ? () => unfollowThreadById(message.id)
-                : undefined
-            }
-            profiles={profiles}
-            showDepthGuides={false}
-            videoReviewContext={videoReviewContextById.get(message.id)}
-          />
-          <MessageThreadSummaryRow
-            depth={message.depth}
-            message={message}
-            onOpenThread={onReply}
-            showDepthGuides={false}
-            summary={summary}
-            unreadCount={threadUnreadCounts?.get(message.id)}
-          />
-          {footer}
-        </div>,
-      );
-    } else {
-      const isSearchMatch = searchMatchingMessageIds?.has(message.id) ?? false;
-      const isSearchActive = message.id === searchActiveMessageId;
-      const footer = messageFooters?.[message.id] ?? null;
+function SystemRow({
+  currentPubkey,
+  entry,
+  footer,
+  onToggleReaction,
+  profiles,
+}: {
+  currentPubkey?: string;
+  entry: MainTimelineEntry;
+  footer: React.ReactNode;
+  onToggleReaction?: TimelineMessageListProps["onToggleReaction"];
+  profiles?: UserProfileLookup;
+}) {
+  return (
+    <div className="flex flex-col gap-1 pb-2.5">
+      <SystemMessageRow
+        message={entry.message}
+        currentPubkey={currentPubkey}
+        onToggleReaction={onToggleReaction}
+        profiles={profiles}
+      />
+      {footer}
+    </div>
+  );
+}
 
-      currentDayGroup?.elements.push(
-        <div key={messageRenderKey} className="flex flex-col gap-1">
-          <MessageRow
-            agentPubkeys={agentPubkeys}
-            channelId={channelId}
-            highlighted={message.id === highlightedMessageId || isSearchActive}
-            message={message}
-            onDelete={
-              onDelete && currentPubkey && message.pubkey === currentPubkey
-                ? onDelete
-                : undefined
-            }
-            onEdit={
-              onEdit && currentPubkey && message.pubkey === currentPubkey
-                ? onEdit
-                : undefined
-            }
-            onMarkUnread={onMarkUnread}
-            onToggleReaction={onToggleReaction}
-            onReply={onReply}
-            profiles={profiles}
-            searchQuery={isSearchMatch ? searchQuery : undefined}
-            showDepthGuides={false}
-            videoReviewContext={videoReviewContextById.get(message.id)}
-          />
-          {footer}
-        </div>,
-      );
-    }
+type MessageRowItemProps = Pick<
+  TimelineMessageListProps,
+  | "agentPubkeys"
+  | "channelId"
+  | "currentPubkey"
+  | "followThreadById"
+  | "highlightedMessageId"
+  | "isFollowingThreadById"
+  | "onDelete"
+  | "onEdit"
+  | "onMarkUnread"
+  | "onReply"
+  | "onToggleReaction"
+  | "profiles"
+  | "searchActiveMessageId"
+  | "searchMatchingMessageIds"
+  | "searchQuery"
+  | "threadUnreadCounts"
+  | "unfollowThreadById"
+> & {
+  entry: MainTimelineEntry;
+  footer: React.ReactNode;
+  videoReviewContext: ReturnType<typeof buildVideoReviewContextForMessage>;
+};
+
+function MessageRowItem({
+  agentPubkeys,
+  channelId,
+  currentPubkey,
+  entry,
+  followThreadById,
+  footer,
+  highlightedMessageId,
+  isFollowingThreadById,
+  onDelete,
+  onEdit,
+  onMarkUnread,
+  onReply,
+  onToggleReaction,
+  profiles,
+  searchActiveMessageId,
+  searchMatchingMessageIds,
+  searchQuery,
+  threadUnreadCounts,
+  unfollowThreadById,
+  videoReviewContext,
+}: MessageRowItemProps) {
+  const { message, summary } = entry;
+  const canDelete =
+    onDelete && currentPubkey && message.pubkey === currentPubkey
+      ? onDelete
+      : undefined;
+  const canEdit =
+    onEdit && currentPubkey && message.pubkey === currentPubkey
+      ? onEdit
+      : undefined;
+
+  if (summary && onReply) {
+    const isHighlighted = message.id === highlightedMessageId;
+    return (
+      <div
+        className={cn(
+          "group/message relative mx-1 flex flex-col gap-0 rounded-2xl px-0 py-1 pb-2.5 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+          isHighlighted &&
+            "-mx-4 px-4 before:absolute before:-inset-y-1.5 before:inset-x-0 before:animate-[route-target-highlight-fade_2s_ease-out_forwards] before:bg-primary/10 before:content-[''] motion-reduce:before:animate-none sm:-mx-6 sm:px-6",
+        )}
+      >
+        <MessageRow
+          agentPubkeys={agentPubkeys}
+          channelId={channelId}
+          highlighted={false}
+          hoverBackground={false}
+          isFollowingThread={
+            isFollowingThreadById
+              ? isFollowingThreadById(message.id)
+              : undefined
+          }
+          message={message}
+          onDelete={canDelete}
+          onEdit={canEdit}
+          onFollowThread={
+            followThreadById ? () => followThreadById(message.id) : undefined
+          }
+          onMarkUnread={onMarkUnread}
+          onToggleReaction={onToggleReaction}
+          onReply={onReply}
+          onUnfollowThread={
+            unfollowThreadById
+              ? () => unfollowThreadById(message.id)
+              : undefined
+          }
+          profiles={profiles}
+          showDepthGuides={false}
+          videoReviewContext={videoReviewContext}
+        />
+        <MessageThreadSummaryRow
+          depth={message.depth}
+          message={message}
+          onOpenThread={onReply}
+          showDepthGuides={false}
+          summary={summary}
+          unreadCount={threadUnreadCounts?.get(message.id)}
+        />
+        {footer}
+      </div>
+    );
   }
 
-  return dayGroups.map((group) => (
-    <section
-      className="relative flex flex-col gap-2.5 before:absolute before:inset-x-0 before:top-[15px] before:h-px before:bg-border/35 before:content-['']"
-      key={group.key}
-    >
-      <DayDivider label={group.label} />
-      {group.elements}
-    </section>
-  ));
-});
+  const isSearchMatch = searchMatchingMessageIds?.has(message.id) ?? false;
+  const isSearchActive = message.id === searchActiveMessageId;
+
+  return (
+    <div className="flex flex-col gap-1 pb-2.5">
+      <MessageRow
+        agentPubkeys={agentPubkeys}
+        channelId={channelId}
+        highlighted={message.id === highlightedMessageId || isSearchActive}
+        message={message}
+        onDelete={canDelete}
+        onEdit={canEdit}
+        onMarkUnread={onMarkUnread}
+        onToggleReaction={onToggleReaction}
+        onReply={onReply}
+        profiles={profiles}
+        searchQuery={isSearchMatch ? searchQuery : undefined}
+        showDepthGuides={false}
+        videoReviewContext={videoReviewContext}
+      />
+      {footer}
+    </div>
+  );
+}

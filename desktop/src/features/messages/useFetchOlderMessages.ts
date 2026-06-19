@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
+import { countTopLevelTimelineRows } from "@/features/messages/lib/formatTimelineMessages";
 import {
   channelMessagesKey,
   mergeTimelineHistoryMessages,
@@ -9,6 +10,14 @@ import { relayClient } from "@/shared/api/relayClient";
 import type { Channel, RelayEvent } from "@/shared/api/types";
 
 const OLDER_MESSAGES_BATCH_SIZE = 100;
+
+// One scroll-up should advance the timeline by a predictable, *visible* amount.
+// Because thread replies collapse into their parent and non-content events
+// never render, a single 100-message batch can add far fewer rows than that —
+// so we page in additional batches until at least this many top-level rows have
+// been added (or history runs out). Counting rows, not messages, keeps a
+// reply-heavy window from feeling like the fetch did nothing.
+const MIN_TOP_LEVEL_ROWS_PER_FETCH = 10;
 
 export function useFetchOlderMessages(channel: Channel | null) {
   const queryClient = useQueryClient();
@@ -43,38 +52,61 @@ export function useFetchOlderMessages(channel: Channel | null) {
       return;
     }
 
-    // Use the oldest timestamp directly — `until` is inclusive so the relay will
-    // return the boundary message again, but `sortMessages` deduplicates by id.
-    // Subtracting 1 risks skipping messages that share the same second.
-    const oldestTimestamp = currentMessages[0].created_at;
     isFetchingOlderRef.current = true;
     setIsFetchingOlder(true);
 
+    // Page in batches until the timeline has gained at least
+    // MIN_TOP_LEVEL_ROWS_PER_FETCH *visible* rows or history is exhausted.
+    // A single batch is fetched first; only reply-heavy windows that fall short
+    // of the floor loop again. Each batch re-reads the oldest timestamp from the
+    // cache so successive `until` values keep walking backward without gaps.
+    const baselineRowCount = countTopLevelTimelineRows(currentMessages);
     try {
-      const olderMessages = await relayClient.fetchChannelHistoryBefore(
-        channelId,
-        oldestTimestamp,
-        OLDER_MESSAGES_BATCH_SIZE,
-      );
+      while (hasOlderMessagesRef.current) {
+        const messagesBeforeFetch =
+          queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+        if (messagesBeforeFetch.length === 0) {
+          break;
+        }
 
-      if (olderMessages.length < OLDER_MESSAGES_BATCH_SIZE) {
-        hasOlderMessagesRef.current = false;
-        setHasOlderMessages(false);
-      }
-
-      if (olderMessages.length > 0) {
-        queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
-          mergeTimelineHistoryMessages(current, olderMessages),
+        // Use the oldest timestamp directly — `until` is inclusive so the relay
+        // will return the boundary message again, but `sortMessages`
+        // deduplicates by id. Subtracting 1 risks skipping messages that share
+        // the same second.
+        const oldestTimestamp = messagesBeforeFetch[0].created_at;
+        const olderMessages = await relayClient.fetchChannelHistoryBefore(
+          channelId,
+          oldestTimestamp,
+          OLDER_MESSAGES_BATCH_SIZE,
         );
 
-        const updatedMessages =
-          queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
-        if (
-          updatedMessages.length > 0 &&
-          updatedMessages[0].created_at === oldestTimestamp
-        ) {
+        if (olderMessages.length < OLDER_MESSAGES_BATCH_SIZE) {
           hasOlderMessagesRef.current = false;
           setHasOlderMessages(false);
+        }
+
+        if (olderMessages.length > 0) {
+          queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
+            mergeTimelineHistoryMessages(current, olderMessages),
+          );
+
+          const updatedMessages =
+            queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [];
+          if (
+            updatedMessages.length > 0 &&
+            updatedMessages[0].created_at === oldestTimestamp
+          ) {
+            hasOlderMessagesRef.current = false;
+            setHasOlderMessages(false);
+          }
+        }
+
+        const rowsGained =
+          countTopLevelTimelineRows(
+            queryClient.getQueryData<RelayEvent[]>(queryKey) ?? [],
+          ) - baselineRowCount;
+        if (rowsGained >= MIN_TOP_LEVEL_ROWS_PER_FETCH) {
+          break;
         }
       }
     } catch (error) {

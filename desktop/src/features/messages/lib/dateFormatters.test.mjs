@@ -5,6 +5,7 @@ import {
   formatDayHeading,
   formatShortMonthDayOrdinal,
   formatThreadSummaryLastReplyTime,
+  startOfLocalDaySeconds,
 } from "./dateFormatters.ts";
 
 function localUnixSeconds(year, monthIndex, day) {
@@ -124,5 +125,24 @@ test("formatDayHeading includes the year for other years", () => {
   assert.equal(
     formatDayHeading(date.getTime() / 1_000),
     `${weekday(date)}, May 19th, ${year}`,
+  );
+});
+
+test("startOfLocalDaySeconds collapses a day's timestamps to one value", () => {
+  const morning = new Date(2026, 5, 14, 8, 30, 15).getTime() / 1_000;
+  const evening = new Date(2026, 5, 14, 23, 59, 59).getTime() / 1_000;
+  const midnight = new Date(2026, 5, 14, 0, 0, 0).getTime() / 1_000;
+
+  assert.equal(startOfLocalDaySeconds(morning), midnight);
+  assert.equal(startOfLocalDaySeconds(evening), midnight);
+});
+
+test("startOfLocalDaySeconds separates adjacent calendar days", () => {
+  const lateOn14 = new Date(2026, 5, 14, 23, 0, 0).getTime() / 1_000;
+  const earlyOn15 = new Date(2026, 5, 15, 1, 0, 0).getTime() / 1_000;
+
+  assert.notEqual(
+    startOfLocalDaySeconds(lateOn14),
+    startOfLocalDaySeconds(earlyOn15),
   );
 });

@@ -76,6 +76,9 @@ import { relayClient } from "@/shared/api/relayClient";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
+import { preloadAgentsScreen } from "@/app/routes/agents";
+import { preloadChannelRouteScreen } from "@/app/routes/channels.$channelId";
+import { preloadChannelViews } from "@/features/channels/ui/ChannelScreenLazyViews";
 import { joinChannel } from "@/shared/api/tauri";
 import type { Channel, RelayEvent, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
@@ -536,6 +539,19 @@ export function AppShell() {
       globalThis.clearTimeout(timeoutId);
     };
   }, []);
+
+  // Warm the lazy route chunks (channel timeline, forum, agents) once the shell
+  // is idle, so the FIRST main-nav transition doesn't stall on a cold chunk
+  // fetch+parse. `startupReady` is the existing idle-or-timeout gate; the chunk
+  // imports dedupe, so racing an actual navigation is harmless.
+  React.useEffect(() => {
+    if (!startupReady) {
+      return;
+    }
+    preloadChannelRouteScreen();
+    preloadChannelViews();
+    preloadAgentsScreen();
+  }, [startupReady]);
 
   React.useEffect(() => {
     const numericCount =
