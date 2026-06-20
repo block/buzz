@@ -910,6 +910,9 @@ export function useUnreadChannels(
     ? prevUnreadCountsRef.current
     : rawUnread.unreadChannelCounts;
   prevUnreadCountsRef.current = unreadChannelCounts;
+  const unreadChannelNotificationCount = [
+    ...unreadChannelCounts.values(),
+  ].reduce((total, count) => total + count, 0);
 
   const unreadChannelIdsRef = React.useRef(unreadChannelIds);
   unreadChannelIdsRef.current = unreadChannelIds;
@@ -954,6 +957,7 @@ export function useUnreadChannels(
     unreadChannelIds,
     unreadChannelCounts,
     highPriorityUnreadChannelIds,
+    unreadChannelNotificationCount,
     markAllChannelsRead,
     markChannelRead,
     markChannelUnread,
@@ -962,6 +966,7 @@ export function useUnreadChannels(
     // ReadStateManager. readStateVersion is the invalidation signal callers
     // should include in memo deps.
     getEffectiveTimestamp,
+    getOwnTimestamp,
     readStateVersion,
     setContextParentResolver,
     participatedRootIds,
