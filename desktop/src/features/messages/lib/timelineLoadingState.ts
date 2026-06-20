@@ -17,12 +17,19 @@ export type TimelineQueryStatus = {
 
 export function selectTimelineLoadingState(
   status: TimelineQueryStatus,
+  hasSettled = true,
 ): boolean {
   if (status.isPending) {
     return true;
   }
-  // A fetch is in flight; keep loading while what we'd show is a placeholder or
-  // still empty. Once real rows are present we are loaded, even mid-refetch.
+  // Before the first settle, hold the skeleton for the whole cold load — the
+  // row-floor top-up keeps `isFetching` true after the cache already has rows,
+  // and dropping the skeleton there exposes the older-fetch spinner on first
+  // load. After settle, the latch protects against refetch blips, so once real
+  // rows are present we are loaded even mid-refetch.
+  if (!hasSettled) {
+    return status.isFetching;
+  }
   return (
     status.isFetching &&
     (status.isPlaceholderData || (status.dataLength ?? 0) === 0)

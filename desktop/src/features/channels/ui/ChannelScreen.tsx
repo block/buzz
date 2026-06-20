@@ -511,18 +511,23 @@ export function ChannelScreen({
     });
   // `data !== undefined` is not "loaded": the cache is seeded early by stale
   // placeholders and the live subscription. Wait for the history fetch to settle.
-  const timelineLoadingNow =
-    activeChannel !== null &&
-    activeChannel.channelType !== "forum" &&
-    selectTimelineLoadingState({
-      isPending: messagesQuery.isPending,
-      isFetching: messagesQuery.isFetching,
-      isPlaceholderData: messagesQuery.isPlaceholderData,
-      dataLength: messagesQuery.data?.length ?? null,
-    });
   // Latch loaded per channel so a later background refetch can't flip back to
   // the skeleton — that re-flip is the "skeleton bouncing up and down" on entry.
   const settledChannelIdRef = React.useRef<string | null>(null);
+  const hasSettledThisChannel =
+    activeChannelId !== null && settledChannelIdRef.current === activeChannelId;
+  const timelineLoadingNow =
+    activeChannel !== null &&
+    activeChannel.channelType !== "forum" &&
+    selectTimelineLoadingState(
+      {
+        isPending: messagesQuery.isPending,
+        isFetching: messagesQuery.isFetching,
+        isPlaceholderData: messagesQuery.isPlaceholderData,
+        dataLength: messagesQuery.data?.length ?? null,
+      },
+      hasSettledThisChannel,
+    );
   const { settledChannelId, isLoading: isTimelineLoading } =
     resolveTimelineLoadingLatch(
       settledChannelIdRef.current,

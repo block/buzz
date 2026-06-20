@@ -72,6 +72,31 @@ test("background refetch of a populated channel is not loading", () => {
   );
 });
 
+test("initial load holds the skeleton while the cold-load top-up fetches", () => {
+  // Cold load seeds rows before its row-floor top-up finishes, so dataLength>0
+  // while isFetching is still true. Before settle, hold the skeleton — dropping
+  // it here is what exposed the older-fetch spinner on first load.
+  assert.equal(
+    selectTimelineLoadingState(
+      { ...settled, isFetching: true, dataLength: 8 },
+      false,
+    ),
+    true,
+  );
+});
+
+test("settled channel with rows mid-refetch is not loading", () => {
+  // Same query shape, but after first settle: the latch owns refetch blips, so
+  // present rows mean loaded.
+  assert.equal(
+    selectTimelineLoadingState(
+      { ...settled, isFetching: true, dataLength: 8 },
+      true,
+    ),
+    false,
+  );
+});
+
 import { resolveTimelineLoadingLatch } from "./timelineLoadingState.ts";
 
 test("latch: loading on first entry to a channel", () => {
