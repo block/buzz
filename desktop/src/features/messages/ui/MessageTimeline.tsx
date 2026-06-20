@@ -3,6 +3,7 @@ import { Hash } from "lucide-react";
 
 import {
   isDeferredTimelineSnapshotStale,
+  isRenderedTimelineBehindHistoryPrepend,
   selectTimelineBodySurface,
   selectTimelineIntroSurface,
 } from "@/features/messages/lib/timelineSnapshot";
@@ -222,7 +223,6 @@ const MessageTimelineBase = React.forwardRef<
   const {
     highlightedMessageId,
     isAtBottom,
-    hasReachedTop,
     newMessageCount,
     onScroll,
     scrollToBottom,
@@ -246,7 +246,8 @@ const MessageTimelineBase = React.forwardRef<
     hasChannelIntro: channelIntro !== null && directMessageIntro === null,
     hasDirectMessageIntro: directMessageIntro !== null,
     hasReachedChannelStart:
-      (!hasOlderMessages && hasReachedTop) || messages.length === 0,
+      !isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) &&
+      (messages.length === 0 || (!hasOlderMessages && !isFetchingOlder)),
     isSkeletonVisible: showTimelineSkeleton,
   });
   const showDirectMessageIntro =
@@ -342,6 +343,19 @@ const MessageTimelineBase = React.forwardRef<
             />
           </div>
         ) : null}
+        {isFetchingOlder ? (
+          <div
+            className={cn(
+              "pointer-events-none absolute inset-x-0 z-20 flex translate-y-3 justify-center px-4",
+              channelChrome.top,
+            )}
+            data-testid="message-timeline-fetching-older"
+          >
+            <span className="flex items-center rounded-full bg-background/80 p-1.5 shadow-sm ring-1 ring-border/40 backdrop-blur-sm">
+              <Spinner className="h-4 w-4 border-2 text-muted-foreground" />
+            </span>
+          </div>
+        ) : null}
         <div
           className={cn(
             "absolute inset-0 overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-1 [overflow-anchor:none]",
@@ -362,12 +376,6 @@ const MessageTimelineBase = React.forwardRef<
             ref={contentRef}
           >
             <div ref={topSentinelRef} aria-hidden className="h-px" />
-
-            {isFetchingOlder ? (
-              <div className="flex justify-center py-2">
-                <Spinner className="h-4 w-4 border-2 text-muted-foreground" />
-              </div>
-            ) : null}
 
             <div
               className={cn(

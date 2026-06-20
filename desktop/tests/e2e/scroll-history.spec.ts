@@ -81,7 +81,7 @@ test("preserves user scroll while older channel history loads", async ({
     }
     window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__?.({
       channelName: "general",
-      count: 250,
+      count: 600,
       lineCount: 3,
     });
   });
@@ -207,7 +207,7 @@ test("does not teleport upward when user abandons fetch by jumping to bottom", a
     }
     window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__?.({
       channelName: "general",
-      count: 250,
+      count: 600,
       lineCount: 3,
     });
   });
@@ -465,18 +465,16 @@ test("deep-link to a message in older history scrolls and highlights it", async 
     }
     const events = window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__?.({
       channelName: "general",
-      count: 250,
+      count: 600,
       lineCount: 3,
     });
     return (events ?? []).map((event) => event.id);
   });
   expect(prependedIds.length).toBeGreaterThanOrEqual(100);
 
-  // Pick a target from the OLDER half of the prepended block. The initial
-  // history slice on channel open is limited to ~50 events; anything in
-  // the older half is guaranteed to be outside the first render window.
-  // prependedIds are emitted in chronological order (older first), so the
-  // first quarter is reliably old.
+  // Pick a target from the older part of the prepended block, well outside
+  // the 300-event cold history window. prependedIds are chronological (older
+  // first), so an early index remains unloaded on channel open.
   const targetId = prependedIds[Math.floor(prependedIds.length / 8)];
   expect(targetId).toBeTruthy();
 
@@ -1047,4 +1045,346 @@ test("in-viewport reflow above the anchor row does not push it down", async ({
       { timeout: 3_000 },
     )
     .toBeLessThanOrEqual(2);
+});
+
+// Regression: the channel intro ("header") must never flash mid-content while
+// an older-history page is still loading. Reproduces the reported bug where the
+// header appeared in the middle of history during pagination. The companion
+// "scrollable channel ... hides intro actions until top" test in channels.spec
+// already proves the positive (intro shows once at the true, exhausted top);
+// this proves the negative (it stays hidden while a fetch is in flight).
+//
+// Uses real wheel input, not `scrollTop = 0`, because the timeline is
+// virtualized (Virtuoso) and re-asserts its tracked scroll position after a
+// raw scrollTop write -- see the abandon test above for the same rationale.
+test("channel intro stays hidden while older history is loading", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ === "function",
+  );
+
+  await page.evaluate(() => {
+    for (let index = 0; index < 40; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `visible current ${index}\nsecond line ${index}`,
+      });
+    }
+    window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__?.({
+      channelName: "general",
+      count: 600,
+      lineCount: 3,
+    });
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+
+  // Pace the older fetch so it stays in flight long enough to assert against.
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__ = {
+      ...window.__BUZZ_E2E__,
+      mock: {
+        ...window.__BUZZ_E2E__?.mock,
+        historyDelayMs: 5_000,
+      },
+    };
+  });
+
+  await page.waitForFunction(() => {
+    const element = document.querySelector(
+      '[data-testid="message-timeline"]',
+    ) as HTMLDivElement | null;
+    return element ? element.scrollHeight > element.clientHeight + 1000 : false;
+  });
+
+  // At the bottom on initial open: intro hidden.
+  await expect(page.getByTestId("message-channel-intro")).toHaveCount(0);
+
+  // Wheel up to the top to trigger the (5s-delayed) older fetch.
+  await timeline.hover();
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    const metrics = await getTimelineMetrics(page);
+    if (metrics.scrollTop < 500) {
+      break;
+    }
+    await page.mouse.wheel(0, -2000);
+  }
+  await page.waitForTimeout(150);
+
+  // We are near the top of the loaded window AND the prepend has not resolved
+  // (history is still in flight). The intro MUST stay hidden -- this is the
+  // mid-load flash the fix prevents.
+  const duringFetch = await getTimelineMetrics(page);
+  expect(duringFetch.scrollTop).toBeLessThan(500);
+  await expect(page.getByTestId("message-channel-intro")).toHaveCount(0);
+
+  // It must remain hidden while the fetch indicator is visible. Once the
+  // delayed fetch completes, the channel may legitimately be at the true start
+  // and show the intro.
+  await expect
+    .poll(
+      async () => {
+        const introCount = await page
+          .getByTestId("message-channel-intro")
+          .count();
+        const indicatorCount = await page
+          .getByTestId("message-timeline-fetching-older")
+          .count();
+        if (indicatorCount > 0 && introCount > 0) {
+          return "intro-appeared-during-fetch";
+        }
+        return indicatorCount === 0 ? "resolved" : "pending";
+      },
+      { timeout: 7_000 },
+    )
+    .toBe("resolved");
+});
+
+// Regression for the architectural bug Wes reported: in a channel with MORE
+// content events than the timeline window cap (MAX_TIMELINE_MESSAGES = 2000),
+// scrolling back must keep paginating older history WITHOUT ever flashing the
+// channel intro ("header") mid-content. The old code inferred exhaustion from a
+// post-merge oldest-timestamp compare; once the cap evicted a freshly-prepended
+// older root, that compare wrongly fired `hasOlderMessages=false`, popping the
+// header and then flooding in a batch. This test crosses the cap on purpose and
+// asserts the header stays hidden while genuine older history still loads.
+test("channel intro stays hidden while paginating past the timeline cap", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ === "function",
+  );
+
+  // Seed well past the 2000-event cap: a current window plus ~2600 older roots.
+  // Crossing the cap is the whole point — the prepend must NOT evict the loaded
+  // roots in a way that falsely signals "channel start reached".
+  await page.evaluate(() => {
+    for (let index = 0; index < 60; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `recent ${index}`,
+      });
+    }
+    window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__?.({
+      channelName: "general",
+      count: 2600,
+      lineCount: 2,
+    });
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+
+  // At the bottom on open: intro hidden.
+  await expect(page.getByTestId("message-channel-intro")).toHaveCount(0);
+
+  // Scroll back until pagination reaches the true channel start (the oldest
+  // seeded root, "mock older 0") or clearly stalls. Each pass triggers an
+  // older-history fetch; we wait for it to settle (oldest rendered id advances)
+  // before the next wheel. The intro must never appear while older roots remain.
+  //
+  // With the old newest-2000 cap, the freshly-prepended older roots are evicted
+  // once the cache crosses MAX_TIMELINE_MESSAGES, so the oldest rendered row
+  // cannot advance past the window boundary — the loop stalls well above index
+  // 0. The fixed cap retains backward-paged roots, so it reaches the start.
+  const oldestRenderedIndex = async () =>
+    page.getByTestId("message-timeline").evaluate((element) => {
+      const rows = (element as HTMLDivElement).querySelectorAll<HTMLElement>(
+        "[data-message-id]",
+      );
+      let min = Number.POSITIVE_INFINITY;
+      for (const row of rows) {
+        const match = row.textContent?.match(/mock older (\d+)/);
+        if (match) min = Math.min(min, Number(match[1]));
+      }
+      return Number.isFinite(min) ? min : null;
+    });
+
+  const isIntroHeaderInViewport = async () =>
+    page.getByTestId("message-timeline").evaluate((timelineElement) => {
+      const icon = timelineElement.querySelector<HTMLElement>(
+        '[data-testid="message-channel-intro-icon"]',
+      );
+      if (!icon) return false;
+      const timelineRect = timelineElement.getBoundingClientRect();
+      const iconRect = icon.getBoundingClientRect();
+      return (
+        iconRect.bottom > timelineRect.top && iconRect.top < timelineRect.bottom
+      );
+    });
+
+  await timeline.hover();
+  let deepest = Number.POSITIVE_INFINITY;
+  let stallStreak = 0;
+  for (let attempt = 0; attempt < 200 && deepest > 0; attempt += 1) {
+    await page.mouse.wheel(0, -4000);
+    await page.waitForTimeout(80);
+
+    const current = await oldestRenderedIndex();
+    if ((current ?? Number.POSITIVE_INFINITY) > 50) {
+      expect(await isIntroHeaderInViewport()).toBe(false);
+    }
+
+    if (current !== null && current < deepest) {
+      deepest = current;
+      stallStreak = 0;
+    } else {
+      stallStreak += 1;
+      // Already at the top of the rendered window and not advancing: give the
+      // in-flight fetch a beat to prepend, then bail if it never progresses.
+      await page.waitForTimeout(200);
+      if (stallStreak > 25) break;
+    }
+  }
+
+  // Reached deep history (near the true start) without the cap evicting the
+  // backward-paged roots. < 50 leaves slack for virtualization not rendering
+  // the literal index-0 row at the exact top.
+  expect(deepest).toBeLessThan(50);
+});
+
+// Regression for the flood Wes reported: scrolling back while an older-history
+// fetch is already in flight must NOT queue a second concurrent visible page
+// fetch. Aux backfills also use `history-*` subscriptions, so the e2e bridge
+// probe counts only visible older-page requests (`until` and not `#e`).
+test("older-history fetches never overlap (no concurrent in-flight requests)", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ === "function",
+  );
+
+  await page.evaluate(() => {
+    for (let index = 0; index < 60; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `recent ${index}`,
+      });
+    }
+    window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__?.({
+      channelName: "general",
+      count: 1200,
+      lineCount: 2,
+    });
+    (
+      window as unknown as { __HISTORY_INFLIGHT_PEAK__?: number }
+    ).__HISTORY_INFLIGHT_PEAK__ = 0;
+    window.__BUZZ_E2E__ = {
+      ...window.__BUZZ_E2E__,
+      mock: { ...window.__BUZZ_E2E__?.mock, historyDelayMs: 400 },
+    };
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+
+  await timeline.hover();
+  await timeline.evaluate((element) => {
+    const timelineElement = element as HTMLDivElement;
+    timelineElement.scrollTop = 150;
+    timelineElement.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await expect(page.getByTestId("message-timeline-fetching-older")).toBeVisible(
+    { timeout: 2_000 },
+  );
+
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await page.mouse.wheel(0, -3000);
+    await page.waitForTimeout(50);
+  }
+  await page.waitForTimeout(800);
+
+  const peak = await page.evaluate(
+    () =>
+      (window as unknown as { __HISTORY_INFLIGHT_PEAK__?: number })
+        .__HISTORY_INFLIGHT_PEAK__ ?? 0,
+  );
+  expect(peak).toBeLessThanOrEqual(1);
+});
+
+// Regression for Wes's "I only see the loading indicator sometimes": the
+// older-fetch spinner used to be an in-flow element at content-top, so it
+// scrolled out of view the moment the reader was anywhere but the very top.
+// It must be pinned to the viewport so it's visible while a backward fetch is
+// in flight regardless of scroll position.
+test("older-history spinner stays visible in viewport while fetching mid-scroll", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ === "function",
+  );
+
+  await page.evaluate(() => {
+    for (let index = 0; index < 60; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `recent ${index}`,
+      });
+    }
+    window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__?.({
+      channelName: "general",
+      count: 1200,
+      lineCount: 2,
+    });
+    window.__BUZZ_E2E__ = {
+      ...window.__BUZZ_E2E__,
+      mock: { ...window.__BUZZ_E2E__?.mock, historyDelayMs: 2_000 },
+    };
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
+
+  await timeline.hover();
+  await timeline.evaluate((element) => {
+    const timelineElement = element as HTMLDivElement;
+    timelineElement.scrollTop = 150;
+    timelineElement.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+
+  const indicator = page.getByTestId("message-timeline-fetching-older");
+  await expect(indicator).toBeVisible({ timeout: 2_000 });
+
+  const { scrollTop } = await getTimelineMetrics(page);
+  expect(scrollTop).toBeGreaterThan(8);
+
+  const withinViewport = await page.evaluate(() => {
+    const timelineEl = document.querySelector<HTMLElement>(
+      '[data-testid="message-timeline"]',
+    );
+    const spinnerEl = document.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-fetching-older"]',
+    );
+    if (!timelineEl || !spinnerEl) return false;
+    const t = timelineEl.getBoundingClientRect();
+    const s = spinnerEl.getBoundingClientRect();
+    return s.top >= t.top - 1 && s.bottom <= t.bottom + 1;
+  });
+  expect(withinViewport).toBe(true);
 });

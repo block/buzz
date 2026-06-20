@@ -9,7 +9,6 @@ import type { TimelineMessage } from "@/features/messages/types";
  * rounding from the layout engine.
  */
 const AT_BOTTOM_THRESHOLD_PX = 32;
-const AT_TOP_THRESHOLD_PX = 32;
 
 type AnchorState =
   | { kind: "at-bottom" }
@@ -35,12 +34,9 @@ type UseAnchoredScrollOptions = {
    *  debouncing, and post-prepend scroll restoration via the anchor. */
   fetchOlder?: () => Promise<void>;
   hasOlderMessages?: boolean;
-  /** True while an older-history fetch is in flight. The fetch spinner renders
-   *  above the anchor, so toggling it shifts every row below it. The spinner
-   *  toggles on its own commit (no message change), so without this signal the
-   *  restoration effect — keyed on `messages` — wouldn't re-run to correct the
-   *  shift, leaving a visible one-frame jump. Threading it through makes the
-   *  anchor the single owner of every layout change above the reader's eye. */
+  /** True while an older-history fetch is in flight. Threaded in as a
+   *  restoration re-run trigger so the anchor reasserts itself around the
+   *  prepend on the fetch-state toggle, not only on the `messages` change. */
   isFetchingOlder?: boolean;
   /** When set, scroll to and highlight this message on mount and on change. */
   targetMessageId?: string | null;
@@ -52,8 +48,6 @@ type UseAnchoredScrollResult = {
   onScroll: () => void;
   /** True when the user is within `AT_BOTTOM_THRESHOLD_PX` of the bottom. */
   isAtBottom: boolean;
-  /** True once the user has reached the top of the currently loaded timeline. */
-  hasReachedTop: boolean;
   /** Number of new messages that have arrived while the user is not at the
    *  bottom. Cleared when the user returns to the bottom. */
   newMessageCount: number;
@@ -77,18 +71,6 @@ function isAtBottomNow(container: HTMLDivElement) {
     container.scrollHeight - container.clientHeight - container.scrollTop <=
     AT_BOTTOM_THRESHOLD_PX
   );
-}
-
-function isAtTopNow(container: HTMLDivElement) {
-  return container.scrollTop <= AT_TOP_THRESHOLD_PX;
-}
-
-function isAtTimelineStartNow(container: HTMLDivElement) {
-  const scrollableDistance = Math.max(
-    0,
-    container.scrollHeight - container.clientHeight,
-  );
-  return scrollableDistance <= AT_TOP_THRESHOLD_PX || isAtTopNow(container);
 }
 
 /**
@@ -243,7 +225,6 @@ export function useAnchoredScroll({
   // layout effect below so the read is consistent with what's in the DOM.
   const messagesRef = React.useRef<TimelineMessage[]>(messages);
   const [isAtBottom, setIsAtBottom] = React.useState(true);
-  const [hasReachedTop, setHasReachedTop] = React.useState(false);
   const [newMessageCount, setNewMessageCount] = React.useState(0);
   const [highlightedMessageId, setHighlightedMessageId] = React.useState<
     string | null
@@ -268,7 +249,6 @@ export function useAnchoredScroll({
   React.useLayoutEffect(() => {
     anchorRef.current = { kind: "at-bottom" };
     setIsAtBottom(true);
-    setHasReachedTop(false);
     setNewMessageCount(0);
     setHighlightedMessageId(null);
     hasInitializedRef.current = false;
@@ -372,7 +352,6 @@ export function useAnchoredScroll({
     anchorRef.current = computeAnchor(container);
     const atBottom = anchorRef.current.kind === "at-bottom";
     setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
-    setHasReachedTop((current) => current || isAtTimelineStartNow(container));
     if (atBottom) {
       setNewMessageCount(0);
     }
@@ -384,7 +363,7 @@ export function useAnchoredScroll({
   // before the render. This is the single mechanism for keeping scroll
   // stable across prepends, appends, image loads, embed expansions, etc.
   // ---------------------------------------------------------------------------
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `isFetchingOlder` is an intentional re-run trigger, not a read — the fetch spinner renders above the anchor on its own commit (with `messages` unchanged), so we re-run restoration on its toggle to correct the spinner-induced shift via the existing anchor.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `isFetchingOlder` is an intentional re-run trigger, not a read. It re-runs restoration on fetch-state toggles so the anchor reasserts itself around the prepend; the correction is a no-op when nothing above the anchor moved.
   React.useLayoutEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -420,7 +399,6 @@ export function useAnchoredScroll({
         scrollToBottomImperative("auto");
       }
       hasInitializedRef.current = true;
-      setHasReachedTop((current) => current || isAtTimelineStartNow(container));
       prevLastMessageIdRef.current = messages[messages.length - 1]?.id;
       prevMessageCountRef.current = messages.length;
       return;
@@ -471,7 +449,6 @@ export function useAnchoredScroll({
 
     prevLastMessageIdRef.current = lastMessage?.id;
     prevMessageCountRef.current = messages.length;
-    setHasReachedTop((current) => current || isAtTimelineStartNow(container));
   }, [
     isFetchingOlder,
     isLoading,
@@ -504,14 +481,32 @@ export function useAnchoredScroll({
 
     let disposed = false;
     let observer: IntersectionObserver | null = null;
+    let rearmFrame = 0;
+    // Once the timeline is scrollable, a parked sentinel must not keep
+    // re-firing: require it to actually leave and re-enter the preload band
+    // (a real scroll) before the next fetch. Without this, re-observing a
+    // still-intersecting sentinel synthesizes back-to-back fetches — the
+    // "spinner flashes a few times then a burst of rows" on reply-heavy
+    // channels. Auto-fill of a not-yet-scrollable page bypasses the gate.
+    let mustExitBandBeforeFetch = false;
 
     const start = () => {
       if (disposed) return;
       observer = new IntersectionObserver(
         ([entry]) => {
-          if (!entry?.isIntersecting || disposed || fetchingOlderRef.current) {
+          if (!entry?.isIntersecting) {
+            mustExitBandBeforeFetch = false;
             return;
           }
+          if (disposed || fetchingOlderRef.current || mustExitBandBeforeFetch) {
+            return;
+          }
+
+          // One older fetch at a time. While a scroll-up is in flight, drop
+          // further triggers outright rather than queueing retries — fast
+          // scrolling otherwise stacks several sequential page loads. The
+          // post-fetch re-arm fires the next page only when the sentinel is
+          // still (or again) in the preload band.
           fetchingOlderRef.current = true;
           observer?.disconnect();
 
@@ -526,8 +521,18 @@ export function useAnchoredScroll({
             })
             .finally(() => {
               fetchingOlderRef.current = false;
-              // Re-observe in case there's more history to load.
-              start();
+              // If the prepend made the timeline scrollable, require a real
+              // scroll (sentinel leaving the band) before the next fetch.
+              // A still-too-short page keeps auto-filling.
+              mustExitBandBeforeFetch =
+                container.scrollHeight - container.clientHeight >
+                AT_BOTTOM_THRESHOLD_PX;
+              // Re-observe next frame so the fresh observer's callback sees the
+              // post-prepend intersection state.
+              rearmFrame = window.requestAnimationFrame(() => {
+                rearmFrame = 0;
+                start();
+              });
             });
         },
         { root: container, rootMargin: "200px 0px 0px 0px" },
@@ -538,6 +543,9 @@ export function useAnchoredScroll({
     start();
     return () => {
       disposed = true;
+      if (rearmFrame !== 0) {
+        window.cancelAnimationFrame(rearmFrame);
+      }
       observer?.disconnect();
     };
   }, [
@@ -637,7 +645,6 @@ export function useAnchoredScroll({
   return {
     onScroll,
     isAtBottom,
-    hasReachedTop,
     newMessageCount,
     highlightedMessageId,
     scrollToBottom: scrollToBottomImperative,

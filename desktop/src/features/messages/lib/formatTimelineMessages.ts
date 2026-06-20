@@ -42,7 +42,7 @@ import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay
 
 const HEX_RE = /^[0-9a-f]+$/i;
 
-function isTimelineContentEvent(event: RelayEvent) {
+export function isTimelineContentEvent(event: RelayEvent) {
   return (
     event.kind === KIND_STREAM_MESSAGE ||
     event.kind === KIND_STREAM_MESSAGE_V2 ||

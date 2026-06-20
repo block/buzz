@@ -5,7 +5,7 @@ import {
   buildReconnectReplayFilter,
   replayLiveSubscriptions,
 } from "./relayReconnectReplay.ts";
-import { RelayClient } from "./relayClientSession.ts";
+import { buildChannelFilter } from "./relayChannelFilters.ts";
 
 function replayFilter(filter, since, until) {
   return buildReconnectReplayFilter(filter, since, until);
@@ -111,8 +111,7 @@ test("channel reconnect replay pages the missed window until a short page", asyn
     eventRange("middle", 1002, 500),
     eventRange("oldest", 995, 8),
   ];
-  const client = new RelayClient();
-  const filter = client.buildChannelFilter("channel-1", 50);
+  const filter = buildChannelFilter("channel-1", 50);
   const subscriptions = new Map([
     [
       "live-1",

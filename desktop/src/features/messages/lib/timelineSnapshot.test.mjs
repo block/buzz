@@ -6,6 +6,7 @@ import {
   buildDayGroupBoundaries,
   isDeferredTimelineSnapshotStale,
   isNearBottomMetrics,
+  isRenderedTimelineBehindHistoryPrepend,
   resolveDeepLinkTarget,
   selectDeferredListRenderState,
   selectLatestMessageAutoScrollBehavior,
@@ -517,4 +518,42 @@ test("timeline-intro-surface: no intro without an intro model", () => {
     }),
     null,
   );
+});
+
+test("isRenderedTimelineBehindHistoryPrepend: false when both empty", () => {
+  assert.equal(isRenderedTimelineBehindHistoryPrepend([], []), false);
+});
+
+test("isRenderedTimelineBehindHistoryPrepend: false during initial empty-to-loaded settle", () => {
+  // Rendered still empty while the live cache filled on open: not a prepend lag,
+  // so a freshly opened short channel can still show its intro.
+  assert.equal(
+    isRenderedTimelineBehindHistoryPrepend([], [{ id: "a" }]),
+    false,
+  );
+});
+
+test("isRenderedTimelineBehindHistoryPrepend: false when rendered matches live", () => {
+  const a = { id: "a" };
+  const b = { id: "b" };
+  assert.equal(isRenderedTimelineBehindHistoryPrepend([a, b], [a, b]), false);
+});
+
+test("isRenderedTimelineBehindHistoryPrepend: true when rendered trails a live prepend", () => {
+  const older = { id: "older" };
+  const a = { id: "a" };
+  const b = { id: "b" };
+  // Live cache gained an older root; rendered still starts at `a` and is shorter.
+  assert.equal(
+    isRenderedTimelineBehindHistoryPrepend([a, b], [older, a, b]),
+    true,
+  );
+});
+
+test("isRenderedTimelineBehindHistoryPrepend: false when rendered oldest already matches live oldest", () => {
+  const a = { id: "a" };
+  const b = { id: "b" };
+  // Rendered shorter than live but oldest unchanged (e.g. a newer live append):
+  // not behind an older-history prepend.
+  assert.equal(isRenderedTimelineBehindHistoryPrepend([a], [a, b]), false);
 });

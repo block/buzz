@@ -7,8 +7,6 @@ import {
 } from "@/shared/api/tauri";
 import type { PresenceStatus, RelayEvent } from "@/shared/api/types";
 import {
-  CHANNEL_EVENT_KINDS,
-  HOME_MENTION_EVENT_KINDS,
   KIND_STREAM_MESSAGE,
   KIND_TYPING_INDICATOR,
   KIND_USER_STATUS,
@@ -21,6 +19,14 @@ import {
   type RelaySubscription,
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
+import {
+  AUX_BACKFILL_CHUNK_SIZE,
+  buildChannelAuxFilter,
+  buildChannelFilter,
+  buildChannelHistoryFilter,
+  buildChannelMentionFilter,
+  buildGlobalStreamFilter,
+} from "@/shared/api/relayChannelFilters";
 import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
 import {
@@ -148,7 +154,7 @@ export class RelayClient {
   }
 
   async fetchChannelHistory(channelId: string, limit = 50) {
-    return this.fetchHistory(this.buildChannelFilter(channelId, limit));
+    return this.fetchHistory(buildChannelHistoryFilter(channelId, limit));
   }
 
   async fetchChannelHistoryBefore(
@@ -156,7 +162,49 @@ export class RelayClient {
     before: number,
     limit = 50,
   ) {
-    return this.fetchHistory(this.buildChannelFilter(channelId, limit, before));
+    return this.fetchHistory(
+      buildChannelHistoryFilter(channelId, limit, before),
+    );
+  }
+
+  /**
+   * Fetch the auxiliary events (reactions, edits, deletions) that
+   * reference a set of already-loaded message ids, keyed by `#e` rather than a
+   * time window.
+   *
+   * History fetches deliberately request message kinds only, so the `limit`
+   * budget buys visible message depth instead of being diluted by aux events
+   * (on a reaction-heavy channel a 200-event window was only ~136 messages).
+   * The trade-off is that an edit/deletion for a visible message can fall
+   * outside any message time window — so we must pull aux by reference, not by
+   * time, or a visible message would render stale (un-edited / not-deleted).
+   *
+   * Batched: `#e` filters can grow large, so message ids are chunked to keep
+   * each REQ within relay filter limits. Results across chunks are merged.
+   */
+  async fetchAuxEventsForMessages(
+    channelId: string,
+    messageIds: string[],
+  ): Promise<RelayEvent[]> {
+    if (messageIds.length === 0) {
+      return [];
+    }
+
+    await this.ensureConnected();
+
+    const chunks: string[][] = [];
+    for (let i = 0; i < messageIds.length; i += AUX_BACKFILL_CHUNK_SIZE) {
+      chunks.push(messageIds.slice(i, i + AUX_BACKFILL_CHUNK_SIZE));
+    }
+
+    const batches: RelayEvent[][] = [];
+    for (const ids of chunks) {
+      batches.push(
+        await this.requestHistory(buildChannelAuxFilter(channelId, ids)),
+      );
+    }
+
+    return batches.flat();
   }
 
   async fetchEvents(filter: RelaySubscriptionFilter): Promise<RelayEvent[]> {
@@ -269,7 +317,7 @@ export class RelayClient {
     channelId: string,
     onEvent: (event: RelayEvent) => void,
   ) {
-    return this.subscribe(this.buildChannelFilter(channelId, 50), onEvent);
+    return this.subscribe(buildChannelFilter(channelId, 50), onEvent);
   }
 
   /**
@@ -357,7 +405,7 @@ export class RelayClient {
   }
 
   async subscribeToAllStreamMessages(onEvent: (event: RelayEvent) => void) {
-    return this.subscribe(this.buildGlobalStreamFilter(50), onEvent);
+    return this.subscribe(buildGlobalStreamFilter(50), onEvent);
   }
 
   async subscribeLive(
@@ -373,7 +421,7 @@ export class RelayClient {
     onEvent: (event: RelayEvent) => void,
   ) {
     return this.subscribe(
-      this.buildChannelMentionFilter(channelId, pubkey, 50),
+      buildChannelMentionFilter(channelId, pubkey, 50),
       onEvent,
     );
   }
@@ -485,45 +533,6 @@ export class RelayClient {
     this.connectionStateEmitter.set("connected");
     this.stallWatchdog.start();
     this.emitReconnectIfNeeded();
-  }
-
-  private buildChannelFilter(
-    channelId: string,
-    limit: number,
-    until?: number,
-  ): RelaySubscriptionFilter {
-    const filter: RelaySubscriptionFilter = {
-      kinds: [...CHANNEL_EVENT_KINDS],
-      "#h": [channelId],
-      limit,
-    };
-
-    if (until !== undefined) {
-      filter.until = until;
-    }
-
-    return filter;
-  }
-
-  private buildGlobalStreamFilter(limit: number): RelaySubscriptionFilter {
-    return {
-      kinds: [...CHANNEL_EVENT_KINDS],
-      limit,
-    };
-  }
-
-  private buildChannelMentionFilter(
-    channelId: string,
-    pubkey: string,
-    limit: number,
-  ): RelaySubscriptionFilter {
-    return {
-      kinds: [...HOME_MENTION_EVENT_KINDS],
-      "#h": [channelId],
-      "#p": [pubkey],
-      limit,
-      since: Math.floor(Date.now() / 1_000),
-    };
   }
 
   private async subscribe(
