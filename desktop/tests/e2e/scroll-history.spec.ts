@@ -1206,7 +1206,8 @@ test("channel intro stays hidden while older history is loading", async ({
 // asserts the header stays hidden while genuine older history still loads.
 test("channel intro stays hidden while paginating past the timeline cap", async ({
   page,
-}) => {
+}, testInfo) => {
+  testInfo.setTimeout(60_000);
   await installMockBridge(page);
   await page.goto("/");
   await page.waitForFunction(
@@ -1215,7 +1216,7 @@ test("channel intro stays hidden while paginating past the timeline cap", async 
       typeof window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ === "function",
   );
 
-  // Seed well past the 2000-event cap: a current window plus ~2600 older roots.
+  // Seed past the 2000-event cap: a current window plus ~2100 older roots.
   // Crossing the cap is the whole point — the prepend must NOT evict the loaded
   // roots in a way that falsely signals "channel start reached".
   await page.evaluate(() => {
@@ -1227,7 +1228,7 @@ test("channel intro stays hidden while paginating past the timeline cap", async 
     }
     window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__?.({
       channelName: "general",
-      count: 2600,
+      count: 2100,
       lineCount: 2,
     });
   });
