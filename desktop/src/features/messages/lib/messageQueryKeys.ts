@@ -65,15 +65,37 @@ function isTimelineWindowContentEvent(event: RelayEvent) {
 }
 
 /**
+ * Which end of the timeline to keep when the visible-content window overflows
+ * {@link MAX_TIMELINE_MESSAGES}.
+ *
+ * - `"newest"` (default): keep the most recent rows, evict the oldest. Correct
+ *   for cold-load and live-tailing — new messages arrive at the bottom, so the
+ *   far-older head can age off without the reader noticing.
+ * - `"oldest"`: keep the earliest rows, evict the newest. Correct for
+ *   scrollback — the reader is moving *toward* the head, so evicting the head
+ *   would delete the very rows they're scrolling to (e.g. the first messages of
+ *   the channel never render once history exceeds the cap).
+ */
+type TimelineWindowEnd = "newest" | "oldest";
+
+/**
  * Sort, dedupe, and cap the timeline at {@link MAX_TIMELINE_MESSAGES} visible
  * content events so de-virtualized rendering does not grow into an unbounded
  * DOM during long-lived channel sessions.
  *
+ * `keep` selects which end survives when over the cap — see
+ * {@link TimelineWindowEnd}. Defaults to `"newest"` so live-tail and cold-load
+ * behaviour is unchanged; scrollback merges pass `"oldest"` so paging back to
+ * the start of a >cap channel does not evict the head out from under the reader.
+ *
  * Auxiliary events (reactions, edits, tombstones) are kept in cache so they can
  * still apply to retained or later-loaded content, but they must not consume the
- * visible message window and evict older loaded roots.
+ * visible message window and evict loaded roots.
  */
-export function normalizeTimelineMessages(messages: RelayEvent[]) {
+export function normalizeTimelineMessages(
+  messages: RelayEvent[],
+  keep: TimelineWindowEnd = "newest",
+) {
   const normalized = sortMessages(messages);
   const contentEvents = normalized.filter(isTimelineWindowContentEvent);
 
@@ -81,9 +103,11 @@ export function normalizeTimelineMessages(messages: RelayEvent[]) {
     return normalized;
   }
 
-  const retainedContentIds = new Set(
-    contentEvents.slice(-MAX_TIMELINE_MESSAGES).map((event) => event.id),
-  );
+  const retainedWindow =
+    keep === "oldest"
+      ? contentEvents.slice(0, MAX_TIMELINE_MESSAGES)
+      : contentEvents.slice(-MAX_TIMELINE_MESSAGES);
+  const retainedContentIds = new Set(retainedWindow.map((event) => event.id));
 
   return normalized.filter(
     (event) =>
@@ -94,6 +118,7 @@ export function normalizeTimelineMessages(messages: RelayEvent[]) {
 export function mergeTimelineHistoryMessages(
   current: RelayEvent[],
   history: RelayEvent[],
+  keep: TimelineWindowEnd = "newest",
 ) {
-  return normalizeTimelineMessages([...current, ...history]);
+  return normalizeTimelineMessages([...current, ...history], keep);
 }

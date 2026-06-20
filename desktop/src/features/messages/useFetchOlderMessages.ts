@@ -88,7 +88,10 @@ export function useFetchOlderMessages(channel: Channel | null) {
 
         if (olderMessages.length > 0) {
           queryClient.setQueryData<RelayEvent[]>(queryKey, (current = []) =>
-            mergeTimelineHistoryMessages(current, olderMessages),
+            // Scrollback grows the head: keep the *oldest* window so paging
+            // back to the start of a >cap channel doesn't evict the first
+            // messages out from under the reader (see normalizeTimelineMessages).
+            mergeTimelineHistoryMessages(current, olderMessages, "oldest"),
           );
 
           // Backfill the older messages' reactions/edits/deletions by `#e`

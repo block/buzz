@@ -218,3 +218,81 @@ test("sortMessages tiebreaks same-second events on id, order-independent", () =>
   assert.deepEqual(forward, reverse);
   assert.deepEqual(forward, [a.id, b.id, c.id]);
 });
+
+test("scrollback merge keeps the oldest window so the head survives past the cap", () => {
+  // A channel with more than MAX_TIMELINE_MESSAGES (2000) content events: the
+  // reader has paged all the way back to the start. The default "newest"
+  // eviction would clip the head (the first messages never render) — the bug
+  // Tyler hit at the very beginning of #buzz-bugs. Scrollback passes "oldest".
+  const current = [];
+  for (let index = 0; index < 1_900; index += 1) {
+    current.push(event({ id: id("mid", index), createdAt: 5_000 + index }));
+  }
+  // The page that finally reaches the channel start: 200 oldest events,
+  // including the very first (genesis) row.
+  const olderPage = [];
+  for (let index = 0; index < 200; index += 1) {
+    olderPage.push(event({ id: id("head", index), createdAt: 1_000 + index }));
+  }
+  const genesisId = id("head", 0);
+
+  const newestKept = mergeTimelineHistoryMessages(current, olderPage);
+  const oldestKept = mergeTimelineHistoryMessages(current, olderPage, "oldest");
+
+  // Both cap visible content at 2000.
+  assert.equal(newestKept.filter((m) => m.kind === 9).length, 2_000);
+  assert.equal(oldestKept.filter((m) => m.kind === 9).length, 2_000);
+
+  // Default "newest" evicts the head — the channel's first messages vanish.
+  assert.equal(
+    newestKept.some((m) => m.id === genesisId),
+    false,
+  );
+  // Scrollback "oldest" preserves the head the reader scrolled to.
+  assert.equal(
+    oldestKept.some((m) => m.id === genesisId),
+    true,
+  );
+  assert.equal(oldestKept[0].id, genesisId);
+  // The trade-off: the newest tail rows are the ones that age off instead.
+  assert.equal(
+    oldestKept.some((m) => m.id === id("mid", 1_899)),
+    false,
+  );
+});
+
+test("normalizeTimelineMessages keep='oldest' retains non-content events", () => {
+  // Aux events (reactions/deletions) tied to retained roots must survive even
+  // when the visible window keeps the oldest end.
+  const messages = [];
+  for (let index = 0; index < 2_100; index += 1) {
+    messages.push(event({ id: id("msg", index), createdAt: 1_000 + index }));
+  }
+  const oldestRoot = id("msg", 0);
+  const reaction = `${"f".repeat(63)}1`;
+  messages.push(
+    event({
+      id: reaction,
+      kind: 7,
+      createdAt: 9_000,
+      tags: [
+        ["h", CHANNEL_ID],
+        ["e", oldestRoot],
+      ],
+      content: "+",
+    }),
+  );
+
+  const normalized = normalizeTimelineMessages(messages, "oldest");
+
+  assert.equal(normalized.filter((m) => m.kind === 9).length, 2_000);
+  assert.equal(
+    normalized.some((m) => m.id === oldestRoot),
+    true,
+  );
+  // Reaction is retained regardless of which content window survives.
+  assert.equal(
+    normalized.some((m) => m.id === reaction),
+    true,
+  );
+});
