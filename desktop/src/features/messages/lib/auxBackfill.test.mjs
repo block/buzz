@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { collectMessageIdsForAuxBackfill } from "./auxBackfill.ts";
+import {
+  collectAuxEventIdsForDeletionBackfill,
+  collectMessageIdsForAuxBackfill,
+  mergeAuxEventsWithDeletionBackfill,
+} from "./auxBackfill.ts";
 
 const CHANNEL_ID = "36411e44-0e2d-4cfe-bd6e-567eb169db9f";
 
-function event(id, kind) {
+function event(id, kind, overrides = {}) {
   return {
     id,
     pubkey: "a".repeat(64),
@@ -14,6 +18,7 @@ function event(id, kind) {
     content: "",
     tags: [["h", CHANNEL_ID]],
     sig: "sig",
+    ...overrides,
   };
 }
 
@@ -52,4 +57,72 @@ test("excludes auxiliary kinds (reactions, edits, deletions)", () => {
 test("returns empty for a window of only auxiliary events", () => {
   const events = [event(hex("2"), 7), event(hex("3"), 40003)];
   assert.deepEqual(collectMessageIdsForAuxBackfill(events), []);
+});
+
+test("collects reaction and edit ids for deletion-marker backfill", () => {
+  const events = [
+    event(hex("1"), 9),
+    event(hex("2"), 7),
+    event(hex("3"), 40003),
+    event(hex("4"), 5),
+    event(hex("5"), 9005),
+  ];
+
+  assert.deepEqual(collectAuxEventIdsForDeletionBackfill(events), [
+    hex("2"),
+    hex("3"),
+  ]);
+});
+
+test("merges deletion markers that target cached or fetched auxiliary event ids", async () => {
+  const messageId = hex("1");
+  const cachedReactionId = hex("2");
+  const fetchedReactionId = hex("3");
+  const cachedReactionDeletionId = hex("4");
+  const fetchedReactionDeletionId = hex("5");
+  const cachedReaction = event(cachedReactionId, 7, {
+    content: "+",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", messageId],
+    ],
+  });
+  const fetchedReaction = event(fetchedReactionId, 7, {
+    content: "-",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", messageId],
+    ],
+  });
+  const cachedReactionDeletion = event(cachedReactionDeletionId, 5, {
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", cachedReactionId],
+    ],
+  });
+  const fetchedReactionDeletion = event(fetchedReactionDeletionId, 5, {
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", fetchedReactionId],
+    ],
+  });
+  const calls = [];
+
+  const merged = await mergeAuxEventsWithDeletionBackfill({
+    channelId: CHANNEL_ID,
+    cachedEvents: [cachedReaction],
+    fetchedAuxEvents: [fetchedReaction],
+    fetchAuxEventsForMessages: async (channelId, ids) => {
+      calls.push({ channelId, ids });
+      return [cachedReactionDeletion, fetchedReactionDeletion];
+    },
+  });
+
+  assert.deepEqual(calls, [
+    { channelId: CHANNEL_ID, ids: [cachedReactionId, fetchedReactionId] },
+  ]);
+  assert.deepEqual(
+    merged.map((cachedEvent) => cachedEvent.id),
+    [fetchedReactionId, cachedReactionDeletionId, fetchedReactionDeletionId],
+  );
 });

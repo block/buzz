@@ -21,6 +21,7 @@ import {
 } from "@/shared/api/relayClientShared";
 import {
   AUX_BACKFILL_CHUNK_SIZE,
+  buildChannelAuxDeletionFilter,
   buildChannelAuxFilter,
   buildChannelFilter,
   buildChannelHistoryFilter,
@@ -186,29 +187,53 @@ export class RelayClient {
     channelId: string,
     messageIds: string[],
   ): Promise<RelayEvent[]> {
-    if (messageIds.length === 0) {
+    return this.fetchChunkedAuxEvents(
+      channelId,
+      messageIds,
+      buildChannelAuxFilter,
+    );
+  }
+
+  async fetchAuxDeletionEventsForAuxEvents(
+    channelId: string,
+    auxEventIds: string[],
+  ): Promise<RelayEvent[]> {
+    return this.fetchChunkedAuxEvents(
+      channelId,
+      auxEventIds,
+      buildChannelAuxDeletionFilter,
+    );
+  }
+
+  async fetchEvents(filter: RelaySubscriptionFilter): Promise<RelayEvent[]> {
+    return this.fetchHistory(filter);
+  }
+
+  private async fetchChunkedAuxEvents(
+    channelId: string,
+    eventIds: string[],
+    buildFilter: (
+      channelId: string,
+      eventIds: string[],
+    ) => RelaySubscriptionFilter,
+  ): Promise<RelayEvent[]> {
+    if (eventIds.length === 0) {
       return [];
     }
 
     await this.ensureConnected();
 
     const chunks: string[][] = [];
-    for (let i = 0; i < messageIds.length; i += AUX_BACKFILL_CHUNK_SIZE) {
-      chunks.push(messageIds.slice(i, i + AUX_BACKFILL_CHUNK_SIZE));
+    for (let i = 0; i < eventIds.length; i += AUX_BACKFILL_CHUNK_SIZE) {
+      chunks.push(eventIds.slice(i, i + AUX_BACKFILL_CHUNK_SIZE));
     }
 
     const batches: RelayEvent[][] = [];
     for (const ids of chunks) {
-      batches.push(
-        await this.requestHistory(buildChannelAuxFilter(channelId, ids)),
-      );
+      batches.push(await this.requestHistory(buildFilter(channelId, ids)));
     }
 
     return batches.flat();
-  }
-
-  async fetchEvents(filter: RelaySubscriptionFilter): Promise<RelayEvent[]> {
-    return this.fetchHistory(filter);
   }
 
   private async fetchHistory(filter: RelaySubscriptionFilter) {

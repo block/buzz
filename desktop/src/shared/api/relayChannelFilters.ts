@@ -3,6 +3,8 @@ import {
   CHANNEL_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
   HOME_MENTION_EVENT_KINDS,
+  KIND_DELETION,
+  KIND_NIP29_DELETE_EVENT,
 } from "@/shared/constants/kinds";
 import type { RelaySubscriptionFilter } from "@/shared/api/relayClientShared";
 
@@ -72,10 +74,30 @@ export function buildChannelAuxFilter(
   channelId: string,
   messageIds: string[],
 ): RelaySubscriptionFilter {
+  return buildChannelAuxKindFilter(channelId, messageIds, [
+    ...CHANNEL_AUX_EVENT_KINDS,
+  ]);
+}
+
+export function buildChannelAuxDeletionFilter(
+  channelId: string,
+  auxEventIds: string[],
+): RelaySubscriptionFilter {
+  return buildChannelAuxKindFilter(channelId, auxEventIds, [
+    KIND_DELETION,
+    KIND_NIP29_DELETE_EVENT,
+  ]);
+}
+
+function buildChannelAuxKindFilter(
+  channelId: string,
+  referencedEventIds: string[],
+  kinds: number[],
+): RelaySubscriptionFilter {
   return {
-    kinds: [...CHANNEL_AUX_EVENT_KINDS],
+    kinds,
     "#h": [channelId],
-    "#e": messageIds,
+    "#e": referencedEventIds,
     limit: MAX_HISTORICAL_LIMIT,
   };
 }

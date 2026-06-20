@@ -6,7 +6,11 @@ import {
 } from "@/features/messages/lib/messageQueryKeys";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
-import { CHANNEL_TIMELINE_CONTENT_KINDS } from "@/shared/constants/kinds";
+import {
+  CHANNEL_TIMELINE_CONTENT_KINDS,
+  KIND_REACTION,
+  KIND_STREAM_MESSAGE_EDIT,
+} from "@/shared/constants/kinds";
 
 const TIMELINE_CONTENT_KINDS: ReadonlySet<number> = new Set(
   CHANNEL_TIMELINE_CONTENT_KINDS,
@@ -24,6 +28,40 @@ export function collectMessageIdsForAuxBackfill(
   return historyEvents
     .filter((event) => TIMELINE_CONTENT_KINDS.has(event.kind))
     .map((event) => event.id);
+}
+
+export function collectAuxEventIdsForDeletionBackfill(
+  auxEvents: RelayEvent[],
+): string[] {
+  return auxEvents
+    .filter(
+      (event) =>
+        event.kind === KIND_REACTION || event.kind === KIND_STREAM_MESSAGE_EDIT,
+    )
+    .map((event) => event.id);
+}
+
+export async function mergeAuxEventsWithDeletionBackfill(input: {
+  channelId: string;
+  cachedEvents: RelayEvent[];
+  fetchedAuxEvents: RelayEvent[];
+  fetchAuxEventsForMessages: (
+    channelId: string,
+    messageIds: string[],
+  ) => Promise<RelayEvent[]>;
+}): Promise<RelayEvent[]> {
+  const auxEventIds = [
+    ...new Set([
+      ...collectAuxEventIdsForDeletionBackfill(input.cachedEvents),
+      ...collectAuxEventIdsForDeletionBackfill(input.fetchedAuxEvents),
+    ]),
+  ];
+  const auxDeletionEvents =
+    auxEventIds.length > 0
+      ? await input.fetchAuxEventsForMessages(input.channelId, auxEventIds)
+      : [];
+
+  return [...input.fetchedAuxEvents, ...auxDeletionEvents];
 }
 
 /**
@@ -52,17 +90,25 @@ export async function backfillAuxForMessages(
   }
 
   try {
+    const cacheKey = channelMessagesKey(channelId);
+    const cachedEvents = queryClient.getQueryData<RelayEvent[]>(cacheKey) ?? [];
     const auxEvents = await relayClient.fetchAuxEventsForMessages(
       channelId,
       messageIds,
     );
-    if (auxEvents.length === 0) {
+    const mergedAuxEvents = await mergeAuxEventsWithDeletionBackfill({
+      channelId,
+      cachedEvents,
+      fetchedAuxEvents: auxEvents,
+      fetchAuxEventsForMessages: (...args) =>
+        relayClient.fetchAuxDeletionEventsForAuxEvents(...args),
+    });
+    if (mergedAuxEvents.length === 0) {
       return;
     }
 
-    queryClient.setQueryData<RelayEvent[]>(
-      channelMessagesKey(channelId),
-      (current = []) => sortMessages([...current, ...auxEvents]),
+    queryClient.setQueryData<RelayEvent[]>(cacheKey, (current = []) =>
+      sortMessages([...current, ...mergedAuxEvents]),
     );
   } catch (error) {
     console.error(
