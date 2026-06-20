@@ -168,21 +168,6 @@ export class RelayClient {
     );
   }
 
-  /**
-   * Fetch the auxiliary events (reactions, edits, deletions) that
-   * reference a set of already-loaded message ids, keyed by `#e` rather than a
-   * time window.
-   *
-   * History fetches deliberately request message kinds only, so the `limit`
-   * budget buys visible message depth instead of being diluted by aux events
-   * (on a reaction-heavy channel a 200-event window was only ~136 messages).
-   * The trade-off is that an edit/deletion for a visible message can fall
-   * outside any message time window — so we must pull aux by reference, not by
-   * time, or a visible message would render stale (un-edited / not-deleted).
-   *
-   * Batched: `#e` filters can grow large, so message ids are chunked to keep
-   * each REQ within relay filter limits. Results across chunks are merged.
-   */
   async fetchAuxEventsForMessages(
     channelId: string,
     messageIds: string[],
