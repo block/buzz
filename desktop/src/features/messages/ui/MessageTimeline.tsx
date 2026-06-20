@@ -343,7 +343,10 @@ const MessageTimelineBase = React.forwardRef<
             />
           </div>
         ) : null}
-        {isFetchingOlder ? (
+        {/* `isFetchingOlder` clears on fetch resolve, but rows paint a frame
+            later off the deferred snapshot — keep the spinner up until then. */}
+        {isFetchingOlder ||
+        isRenderedTimelineBehindHistoryPrepend(deferredMessages, messages) ? (
           <div
             className={cn(
               "pointer-events-none absolute inset-x-0 z-20 flex translate-y-3 justify-center px-4",
