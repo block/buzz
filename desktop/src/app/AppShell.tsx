@@ -66,6 +66,7 @@ import {
   isSettingsSection,
 } from "@/features/settings/ui/SettingsPanels";
 import { HuddleBar, HuddleProvider } from "@/features/huddle";
+import { remindersQueryKey } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
@@ -194,6 +195,12 @@ export function AppShell() {
     const handleLiveHomeFeedEvent = () => {
       refetchHomeFeedFromLiveSignal();
     };
+    const handleLiveReminderEvent = () => {
+      refetchHomeFeedFromLiveSignal();
+      void queryClient.invalidateQueries({
+        queryKey: remindersQueryKey(pubkey),
+      });
+    };
 
     void Promise.allSettled([
       relayClient.subscribeLive(
@@ -212,7 +219,7 @@ export function AppShell() {
           limit: 50,
           since,
         },
-        handleLiveHomeFeedEvent,
+        handleLiveReminderEvent,
       ),
     ]).then((results) => {
       const nextDisposers = results.flatMap((result) =>
@@ -246,7 +253,7 @@ export function AppShell() {
         void dispose().catch(() => {});
       }
     };
-  }, [identityQuery.data?.pubkey]);
+  }, [identityQuery.data?.pubkey, queryClient]);
   const handleChannelNotification = React.useEffectEvent(
     (_channelId: string, _event: RelayEvent) => {
       if (!notificationSettings.settings.desktopEnabled) return;
