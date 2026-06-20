@@ -61,6 +61,54 @@ async function getMessagePosition(
   }, messageId);
 }
 
+test("first channel load holds skeleton instead of showing older-history spinner", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof window.__BUZZ_E2E_PREPEND_MOCK_HISTORY__ === "function",
+  );
+
+  await page.evaluate(() => {
+    const root = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content: "cold-load root",
+      createdAt: 1_700_000_000,
+    });
+    if (!root) throw new Error("Failed to seed cold-load root");
+
+    for (let index = 0; index < 360; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `cold-load reply ${index}`,
+        parentEventId: root.id,
+        createdAt: 1_700_000_001 + index,
+      });
+    }
+
+    window.__BUZZ_E2E__ = {
+      ...window.__BUZZ_E2E__,
+      mock: { ...window.__BUZZ_E2E__?.mock, historyDelayMs: 1_500 },
+    };
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline.locator(".t-skel-bar").first()).toBeVisible();
+  await expect(page.getByTestId("message-timeline-fetching-older")).toHaveCount(
+    0,
+  );
+
+  await expect(timeline.locator("[data-message-id]").first()).toBeVisible({
+    timeout: 5_000,
+  });
+});
+
 test("preserves user scroll while older channel history loads", async ({
   page,
 }) => {
