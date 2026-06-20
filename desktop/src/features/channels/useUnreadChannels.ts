@@ -516,13 +516,17 @@ export function useUnreadChannels(
       };
       const added = addThreadActivityItems(threadActivityRef.current, [item]);
       if (!added.didAdd) return;
+      const didRecordMentionedRoot = recordMentionedRoot(event);
       threadActivityRef.current = added.items;
       if (normalizedPubkey !== null) {
         writeActivityToStorage(normalizedPubkey, added.items);
       }
+      if (didRecordMentionedRoot) {
+        bumpMembershipVersion();
+      }
       bumpLatestVersion();
     },
-    [channels, normalizedPubkey],
+    [channels, normalizedPubkey, recordMentionedRoot],
   );
 
   const muteThread = React.useCallback(

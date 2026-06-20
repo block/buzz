@@ -828,6 +828,7 @@ export function AppShell() {
             unfollowThread: handleUnfollowThread,
             isFollowingThread,
             isNotifiedForThread,
+            isThreadMuted: (rootId) => mutedRootIds.has(rootId),
             threadActivityItems,
             feedItemState,
           }}

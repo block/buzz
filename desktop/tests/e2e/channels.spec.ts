@@ -880,13 +880,13 @@ test("channel with messages shows content", async ({ page }) => {
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await expect(page.getByTestId("message-channel-intro")).toHaveCount(0);
+  await expect(page.getByTestId("message-channel-intro")).toBeVisible();
   await expect(
     page.getByTestId("channel-intro-action-create-channel"),
   ).toHaveCount(0);
   await expect(
     page.getByTestId("channel-intro-action-create-agent"),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
     0,
   );

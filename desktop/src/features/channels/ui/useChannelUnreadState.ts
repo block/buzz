@@ -35,7 +35,7 @@ type UseChannelUnreadStateOptions = {
   getThreadReadAt: (rootId: string) => number | null;
   markChannelUnread: (channelId: string) => void;
   markThreadRead: (rootId: string, timestamp: number) => void;
-  isNotifiedForThread: (rootId: string) => boolean;
+  isThreadMuted: (rootId: string) => boolean;
   readStateVersion: number;
 };
 
@@ -63,7 +63,7 @@ export function useChannelUnreadState({
   getThreadReadAt,
   markChannelUnread,
   markThreadRead,
-  isNotifiedForThread,
+  isThreadMuted,
   readStateVersion,
 }: UseChannelUnreadStateOptions) {
   // Capture the read frontier as it stood the instant this channel was opened,
@@ -317,7 +317,7 @@ export function useChannelUnreadState({
       channelFrontiers,
       timelineMessages,
       directRepliesByParentId,
-      isNotifiedForThread,
+      (rootId) => !isThreadMuted(rootId),
       getThreadReadAt,
     );
   }
@@ -343,7 +343,7 @@ export function useChannelUnreadState({
         activeChannelId
           ? threadBadgeFrontiersRef.current.get(activeChannelId)
           : undefined,
-        isNotifiedForThread,
+        (rootId) => !isThreadMuted(rootId),
         currentPubkey,
       ),
     [
@@ -351,7 +351,7 @@ export function useChannelUnreadState({
       currentPubkey,
       timelineMessages,
       directRepliesByParentId,
-      isNotifiedForThread,
+      isThreadMuted,
       readStateVersion,
     ],
   );

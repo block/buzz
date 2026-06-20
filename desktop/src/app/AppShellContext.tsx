@@ -34,6 +34,7 @@ type AppShellContextValue = {
   unfollowThread: (rootId: string) => void;
   isFollowingThread: (rootId: string) => boolean;
   isNotifiedForThread: (rootId: string) => boolean;
+  isThreadMuted: (rootId: string) => boolean;
   threadActivityItems: ThreadActivityItem[];
   feedItemState: FeedItemState;
 };
@@ -53,6 +54,7 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   unfollowThread: () => {},
   isFollowingThread: () => false,
   isNotifiedForThread: () => false,
+  isThreadMuted: () => false,
   threadActivityItems: [],
   feedItemState: {
     doneSet: EMPTY_SET,
