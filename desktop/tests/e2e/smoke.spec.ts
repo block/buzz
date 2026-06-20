@@ -59,9 +59,8 @@ async function focusSidebarSearchWithShortcut(
       }),
     );
   });
-  await expect(openSearchButton).toBeFocused();
   await expect(page.getByTestId("search-results")).toBeVisible();
-  await expect(page.getByTestId("search-dialog")).toHaveCount(0);
+  await expect(page.getByTestId("search-dialog-input")).toBeFocused();
 }
 
 async function expectHomeView(page: import("@playwright/test").Page) {
@@ -220,15 +219,12 @@ test("opens sidebar search with the shortcut and loads the exact result", async 
 
   await focusSidebarSearchWithShortcut(page);
 
-  await page.getByTestId("open-search").fill("shipped");
+  await page.getByTestId("search-dialog-input").fill("shipped");
   await expect(page.getByTestId("search-results")).toContainText(
     "Engineering shipped the desktop build.",
   );
 
-  await page
-    .getByTestId("search-results")
-    .getByText("Engineering shipped the desktop build.")
-    .click();
+  await page.keyboard.press("Enter");
 
   await expect(page).toHaveURL(
     /#\/channels\/1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9\?messageId=mock-engineering-shipped$/,
@@ -244,7 +240,7 @@ test("opens channel matches from search", async ({ page }) => {
 
   await focusSidebarSearchWithShortcut(page);
 
-  await page.getByTestId("open-search").fill("engineering");
+  await page.getByTestId("search-dialog-input").fill("engineering");
   const results = page.getByTestId("search-results");
 
   await expect(results).toContainText("engineering");
@@ -259,14 +255,29 @@ test("opens channel matches from search", async ({ page }) => {
     "search-result-channel-1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9",
   );
 
-  await results
-    .getByTestId("search-result-channel-1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9")
-    .click();
+  await expect(
+    results.getByTestId(
+      "search-result-channel-1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9",
+    ),
+  ).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Enter");
 
   await expect(page).toHaveURL(
     /#\/channels\/1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9$/,
   );
   await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+});
+
+test("closes sidebar search with Escape", async ({ page }) => {
+  await page.goto("/");
+
+  await focusSidebarSearchWithShortcut(page);
+  await page.getByTestId("search-dialog-input").fill("shipped");
+
+  await page.keyboard.press("Escape");
+
+  await expect(page.getByTestId("search-results")).toHaveCount(0);
+  await expect(page.getByTestId("open-search")).toBeFocused();
 });
 
 test("reopens the collapsed sidebar when the search shortcut fires", async ({
@@ -287,9 +298,9 @@ test("reopens the collapsed sidebar when the search shortcut fires", async ({
 
   await focusSidebarSearchWithShortcut(page);
 
-  // The shortcut reveals the sidebar and focuses the search input.
+  // The shortcut reveals the sidebar and focuses the dialog search input.
   await expect(sidebarRoot).toHaveAttribute("data-state", "expanded");
-  await expect(page.getByTestId("open-search")).toBeFocused();
+  await expect(page.getByTestId("search-dialog-input")).toBeFocused();
 });
 
 test("search results use your resolved profile label instead of You", async ({
@@ -299,7 +310,7 @@ test("search results use your resolved profile label instead of You", async ({
 
   await focusSidebarSearchWithShortcut(page);
 
-  await page.getByTestId("open-search").fill("welcome");
+  await page.getByTestId("search-dialog-input").fill("welcome");
   const results = page.getByTestId("search-results");
 
   await expect(results).toContainText("Welcome to #general");
@@ -314,7 +325,7 @@ test("opens accessible unjoined channels from search in read-only mode", async (
 
   await focusSidebarSearchWithShortcut(page);
 
-  await page.getByTestId("open-search").fill("critique");
+  await page.getByTestId("search-dialog-input").fill("critique");
   const results = page.getByTestId("search-results");
 
   await expect(results).toContainText(

@@ -530,7 +530,6 @@ export function AppSidebar({
             focusRequest={searchFocusRequest}
             onOpenChannel={onSelectChannel}
             onOpenResult={onOpenSearchResult}
-            placement="sidebar"
           />
           <SidebarHeader
             className="cursor-default select-none px-0 pb-0 pt-2"
