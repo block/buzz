@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getGroupedChannelReadTimestamp } from "./useHomeInboxReadState.ts";
+import {
+  getGroupedChannelReadTimestamp,
+  getGroupedInboxItemIds,
+} from "./useHomeInboxReadState.ts";
 
 const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
@@ -64,4 +67,26 @@ test("grouped channel read timestamp ignores thread-only groups", () => {
   });
 
   assert.equal(getGroupedChannelReadTimestamp(inboxItem([replyItem])), null);
+});
+
+test("grouped inbox item ids include every item represented by the row", () => {
+  const rootItem = feedItem({
+    id: "root-event",
+    category: "mention",
+    createdAt: 100,
+  });
+  const replyItem = feedItem({
+    id: "reply-event",
+    createdAt: 200,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", "root-event", "", "root"],
+      ["e", "parent-event", "", "reply"],
+    ],
+  });
+
+  assert.deepEqual(getGroupedInboxItemIds(inboxItem([rootItem, replyItem])), [
+    "reply-event",
+    "root-event",
+  ]);
 });

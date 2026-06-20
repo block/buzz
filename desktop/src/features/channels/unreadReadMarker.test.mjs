@@ -7,7 +7,10 @@ import {
   buildChannelThreadRoots,
   channelUnreadFrontier,
 } from "./unreadChannelCounts.ts";
-import { resolveChannelReadMarker } from "./useUnreadChannels.ts";
+import {
+  addThreadActivityItems,
+  resolveChannelReadMarker,
+} from "./useUnreadChannels.ts";
 
 function topLevel(id, createdAt) {
   return { id, createdAt, author: "a", time: "", body: "", depth: 0 };
@@ -194,4 +197,27 @@ test("channelUnreadFrontier_takesMaxAcrossMultipleThreads", () => {
     (rootId) => (rootId === "root-1" ? 400 : 700),
   );
   assert.equal(frontier, 700);
+});
+
+test("addThreadActivityItems keeps newest items when input is newest-first", () => {
+  const newestFirst = Array.from({ length: 101 }, (_, index) => {
+    const createdAt = 100 - index;
+    return {
+      id: `reply-${createdAt}`,
+      kind: 9,
+      pubkey: "author",
+      content: "reply",
+      createdAt,
+      channelId: "channel",
+      channelName: "general",
+      tags: [["h", "channel"]],
+    };
+  });
+
+  const result = addThreadActivityItems([], newestFirst);
+
+  assert.equal(result.didAdd, true);
+  assert.equal(result.items.length, 100);
+  assert.equal(result.items[0].id, "reply-1");
+  assert.equal(result.items.at(-1).id, "reply-100");
 });

@@ -290,12 +290,12 @@ test("live mentions refetch the home feed without waiting for polling", async ({
       },
     ]);
 
-    // The home feed should have been refetched live (the original purpose
+    // The inbox feed should have been refetched live (the original purpose
     // of this test). The home badge stays at 0 while the user is actively
     // reading #general — reading in-channel advances the NIP-RS marker past
     // the new mention — so the assertion that the refetch happened is the
     // inbox-list content, not the badge.
-    await targetPage.getByRole("button", { name: "Home" }).click();
+    await targetPage.getByRole("button", { name: "Inbox" }).click();
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toContainText(
       message,
@@ -352,7 +352,7 @@ test("live forum mentions refetch the home feed without waiting for polling", as
       },
     ]);
 
-    await targetPage.getByRole("button", { name: "Home" }).click();
+    await targetPage.getByRole("button", { name: "Inbox" }).click();
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toBeVisible();
     await expect(targetPage.getByTestId("home-inbox-list")).toContainText(

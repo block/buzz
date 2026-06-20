@@ -28,6 +28,7 @@ import {
   useFeedDesktopNotifications,
   writeStoredSeenFeedIds,
 } from "./use-feed-desktop-notifications";
+import { shouldCountTowardHomeBadgeSubtotal } from "./lib/homeBadge";
 
 export type { DesktopNotificationPermissionState } from "./lib/desktop";
 
@@ -477,13 +478,7 @@ export function useHomeFeedNotificationState(
       }
       if (!isUnread) continue;
       total++;
-      if (
-        !(
-          threadRootId === null &&
-          item.channelId &&
-          highPriorityChannelIds.has(item.channelId)
-        )
-      ) {
+      if (shouldCountTowardHomeBadgeSubtotal(item, highPriorityChannelIds)) {
         excludingHighPriority++;
       }
     }

@@ -141,7 +141,7 @@ function writeActivityToStorage(
   }
 }
 
-function addThreadActivityItems(
+export function addThreadActivityItems(
   existing: ThreadActivityItem[],
   items: ThreadActivityItem[],
 ) {
@@ -740,16 +740,11 @@ export function useUnreadChannels(
         channelName,
         tags: [...event.tags],
       };
-      const existing = threadActivityRef.current;
-      if (existing.some((e) => e.id === item.id)) return;
-      const next = [...existing, item];
-      const capped =
-        next.length > MAX_ACTIVITY_ITEMS
-          ? next.slice(next.length - MAX_ACTIVITY_ITEMS)
-          : next;
-      threadActivityRef.current = capped;
+      const added = addThreadActivityItems(threadActivityRef.current, [item]);
+      if (!added.didAdd) return;
+      threadActivityRef.current = added.items;
       if (normalizedPubkey !== null) {
-        writeActivityToStorage(normalizedPubkey, capped);
+        writeActivityToStorage(normalizedPubkey, added.items);
       }
       bumpLatestVersion();
     },
@@ -1418,19 +1413,14 @@ export function useUnreadChannels(
         }
       }
       if (allThreadReplies.length > 0) {
-        const existingIds = new Set(threadActivityRef.current.map((e) => e.id));
-        const newItems = allThreadReplies.filter(
-          (item) => !existingIds.has(item.id),
+        const added = addThreadActivityItems(
+          threadActivityRef.current,
+          allThreadReplies,
         );
-        if (newItems.length > 0) {
-          const merged = [...threadActivityRef.current, ...newItems];
-          const capped =
-            merged.length > MAX_ACTIVITY_ITEMS
-              ? merged.slice(merged.length - MAX_ACTIVITY_ITEMS)
-              : merged;
-          threadActivityRef.current = capped;
+        if (added.didAdd) {
+          threadActivityRef.current = added.items;
           if (normalizedPubkey) {
-            writeActivityToStorage(normalizedPubkey, capped);
+            writeActivityToStorage(normalizedPubkey, added.items);
           }
           didAdvance = true;
         }

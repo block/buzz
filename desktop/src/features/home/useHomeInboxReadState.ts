@@ -65,6 +65,12 @@ export function getGroupedChannelReadTimestamp(
   return timestamp === null ? null : { channelId, timestamp };
 }
 
+export function getGroupedInboxItemIds(item: InboxItem): string[] {
+  return [
+    ...new Set([item.id, item.item.id, ...item.groupItems.map((i) => i.id)]),
+  ];
+}
+
 /**
  * Projects Home inbox read-state from the shared NIP-RS read marker, with
  * the local `useFeedItemState` done-set as a fallback for items that don't
@@ -135,8 +141,11 @@ export function useHomeInboxReadState({
 
   const markItemRead = React.useCallback(
     (itemId: string) => {
-      undoUnreadLocal(itemId);
       const item = itemById.get(itemId);
+      const localUnreadIds = item ? getGroupedInboxItemIds(item) : [itemId];
+      for (const id of localUnreadIds) {
+        undoUnreadLocal(id);
+      }
       const threadRootId = item ? getInboxThreadRootId(item) : null;
       if (item && threadRootId) {
         markThreadRead(threadRootId, item.latestActivityAt);
