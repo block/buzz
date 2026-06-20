@@ -1,6 +1,8 @@
 export type ObservedUnreadEvent = {
   id: string;
   createdAt: number;
+  rootId: string | null;
+  highPriority: boolean;
 };
 
 export function mapsEqual(
@@ -15,72 +17,68 @@ export function mapsEqual(
 }
 
 export function recordObservedUnreadEvent(
-  eventsByChannel: Map<string, Map<string, number>>,
+  eventsByChannel: Map<string, Map<string, ObservedUnreadEvent>>,
   channelId: string,
   event: ObservedUnreadEvent,
   limit: number,
-): void {
+): boolean {
   let eventsById = eventsByChannel.get(channelId);
   if (!eventsById) {
-    eventsById = new Map<string, number>();
+    eventsById = new Map<string, ObservedUnreadEvent>();
     eventsByChannel.set(channelId, eventsById);
   }
-  if (eventsById.has(event.id)) return;
+  if (eventsById.has(event.id)) return false;
 
-  eventsById.set(event.id, event.createdAt);
-  if (eventsById.size <= limit) return;
+  eventsById.set(event.id, event);
+  if (eventsById.size <= limit) return true;
 
-  const oldest = [...eventsById.entries()].sort((a, b) => a[1] - b[1])[0]?.[0];
+  const oldest = [...eventsById.values()].sort(
+    (a, b) => a.createdAt - b.createdAt,
+  )[0]?.id;
   if (oldest) {
     eventsById.delete(oldest);
   }
+  return true;
 }
 
 export function countUnreadObservedEvents(
-  eventsById: ReadonlyMap<string, number> | undefined,
-  readAt: number | null,
+  eventsById: ReadonlyMap<string, ObservedUnreadEvent> | undefined,
+  getReadAt: (event: ObservedUnreadEvent) => number | null,
 ): number {
   if (!eventsById) return 0;
   let count = 0;
-  for (const createdAt of eventsById.values()) {
-    if (readAt === null || createdAt > readAt) count += 1;
+  for (const event of eventsById.values()) {
+    const readAt = getReadAt(event);
+    if (readAt === null || event.createdAt > readAt) count += 1;
   }
   return count;
 }
 
-export function buildChannelThreadRoots<
-  T extends { channelId: string; tags: string[][] },
->(
-  items: readonly T[],
-  getRootId: (tags: string[][]) => string | null,
-): Map<string, Set<string>> {
-  const byChannel = new Map<string, Set<string>>();
-  for (const item of items) {
-    const rootId = getRootId(item.tags);
-    if (rootId === null) continue;
-    let roots = byChannel.get(item.channelId);
-    if (!roots) {
-      roots = new Set<string>();
-      byChannel.set(item.channelId, roots);
-    }
-    roots.add(rootId);
+export function countUnreadHighPriorityObservedEvents(
+  eventsById: ReadonlyMap<string, ObservedUnreadEvent> | undefined,
+  getReadAt: (event: ObservedUnreadEvent) => number | null,
+): number {
+  if (!eventsById) return 0;
+  let count = 0;
+  for (const event of eventsById.values()) {
+    if (!event.highPriority) continue;
+    const readAt = getReadAt(event);
+    if (readAt === null || event.createdAt > readAt) count += 1;
   }
-  return byChannel;
+  return count;
 }
 
-export function channelUnreadFrontier(
-  channelMarker: number | null,
-  threadRoots: ReadonlySet<string> | undefined,
+export function observedUnreadEventReadAt(
+  event: ObservedUnreadEvent,
+  channelReadAt: number | null,
   getThreadOwnMarker: (rootId: string) => number | null,
 ): number | null {
-  let frontier = channelMarker;
-  if (threadRoots) {
-    for (const rootId of threadRoots) {
-      const own = getThreadOwnMarker(rootId);
-      if (own !== null && (frontier === null || own > frontier)) {
-        frontier = own;
-      }
-    }
+  if (event.rootId === null) return channelReadAt;
+
+  const threadReadAt = getThreadOwnMarker(event.rootId);
+  if (threadReadAt === null) return channelReadAt;
+  if (channelReadAt === null || threadReadAt > channelReadAt) {
+    return threadReadAt;
   }
-  return frontier;
+  return channelReadAt;
 }

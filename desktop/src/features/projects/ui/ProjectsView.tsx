@@ -2,6 +2,8 @@ import { ExternalLink, FolderGit2, GitFork, Users } from "lucide-react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useProjectsQuery } from "@/features/projects/hooks";
+import { topChromeInset } from "@/shared/layout/chromeLayout";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 
@@ -48,7 +50,12 @@ export function ProjectsView() {
   }
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto p-4 pt-14">
+    <div
+      className={cn(
+        "flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4",
+        topChromeInset.padding,
+      )}
+    >
       <div className="mb-3 flex items-center gap-2">
         <h2 className="text-sm font-medium text-muted-foreground">
           {projects.length} {projects.length === 1 ? "project" : "projects"}

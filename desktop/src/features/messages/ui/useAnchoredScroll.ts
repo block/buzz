@@ -9,6 +9,7 @@ import type { TimelineMessage } from "@/features/messages/types";
  * rounding from the layout engine.
  */
 const AT_BOTTOM_THRESHOLD_PX = 32;
+const AT_TOP_THRESHOLD_PX = 32;
 
 type AnchorState =
   | { kind: "at-bottom" }
@@ -51,6 +52,8 @@ type UseAnchoredScrollResult = {
   onScroll: () => void;
   /** True when the user is within `AT_BOTTOM_THRESHOLD_PX` of the bottom. */
   isAtBottom: boolean;
+  /** True once the user has reached the top of the currently loaded timeline. */
+  hasReachedTop: boolean;
   /** Number of new messages that have arrived while the user is not at the
    *  bottom. Cleared when the user returns to the bottom. */
   newMessageCount: number;
@@ -74,6 +77,18 @@ function isAtBottomNow(container: HTMLDivElement) {
     container.scrollHeight - container.clientHeight - container.scrollTop <=
     AT_BOTTOM_THRESHOLD_PX
   );
+}
+
+function isAtTopNow(container: HTMLDivElement) {
+  return container.scrollTop <= AT_TOP_THRESHOLD_PX;
+}
+
+function isAtTimelineStartNow(container: HTMLDivElement) {
+  const scrollableDistance = Math.max(
+    0,
+    container.scrollHeight - container.clientHeight,
+  );
+  return scrollableDistance <= AT_TOP_THRESHOLD_PX || isAtTopNow(container);
 }
 
 /**
@@ -228,6 +243,7 @@ export function useAnchoredScroll({
   // layout effect below so the read is consistent with what's in the DOM.
   const messagesRef = React.useRef<TimelineMessage[]>(messages);
   const [isAtBottom, setIsAtBottom] = React.useState(true);
+  const [hasReachedTop, setHasReachedTop] = React.useState(false);
   const [newMessageCount, setNewMessageCount] = React.useState(0);
   const [highlightedMessageId, setHighlightedMessageId] = React.useState<
     string | null
@@ -252,6 +268,7 @@ export function useAnchoredScroll({
   React.useLayoutEffect(() => {
     anchorRef.current = { kind: "at-bottom" };
     setIsAtBottom(true);
+    setHasReachedTop(false);
     setNewMessageCount(0);
     setHighlightedMessageId(null);
     hasInitializedRef.current = false;
@@ -355,6 +372,7 @@ export function useAnchoredScroll({
     anchorRef.current = computeAnchor(container);
     const atBottom = anchorRef.current.kind === "at-bottom";
     setIsAtBottom((prev) => (prev === atBottom ? prev : atBottom));
+    setHasReachedTop((current) => current || isAtTimelineStartNow(container));
     if (atBottom) {
       setNewMessageCount(0);
     }
@@ -402,6 +420,7 @@ export function useAnchoredScroll({
         scrollToBottomImperative("auto");
       }
       hasInitializedRef.current = true;
+      setHasReachedTop((current) => current || isAtTimelineStartNow(container));
       prevLastMessageIdRef.current = messages[messages.length - 1]?.id;
       prevMessageCountRef.current = messages.length;
       return;
@@ -452,6 +471,7 @@ export function useAnchoredScroll({
 
     prevLastMessageIdRef.current = lastMessage?.id;
     prevMessageCountRef.current = messages.length;
+    setHasReachedTop((current) => current || isAtTimelineStartNow(container));
   }, [
     isFetchingOlder,
     isLoading,
@@ -617,6 +637,7 @@ export function useAnchoredScroll({
   return {
     onScroll,
     isAtBottom,
+    hasReachedTop,
     newMessageCount,
     highlightedMessageId,
     scrollToBottom: scrollToBottomImperative,

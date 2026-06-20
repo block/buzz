@@ -18,9 +18,7 @@ function WorkflowDetailRouteComponent() {
   const { workflowId } = Route.useParams();
 
   return (
-    <React.Suspense
-      fallback={<ViewLoadingFallback includeHeader kind="workflows" />}
-    >
+    <React.Suspense fallback={<ViewLoadingFallback kind="workflows" />}>
       <WorkflowsRouteScreen selectedWorkflowId={workflowId} />
     </React.Suspense>
   );

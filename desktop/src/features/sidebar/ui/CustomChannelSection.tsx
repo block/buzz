@@ -11,6 +11,7 @@ import {
   GripVertical,
   Pencil,
   Plus,
+  Search,
   Star,
   StarOff,
   Trash2,
@@ -227,13 +228,17 @@ export function ChannelContextMenuItems({
 // ---------------------------------------------------------------------------
 
 function SectionHeaderActions({
+  browseAriaLabel,
   createAriaLabel,
   hasUnread,
+  onBrowseClick,
   onCreateClick,
   onMarkAllRead,
 }: {
+  browseAriaLabel?: string;
   createAriaLabel: string;
   hasUnread?: boolean;
+  onBrowseClick?: () => void;
   onCreateClick?: () => void;
   onMarkAllRead?: () => void;
 }) {
@@ -253,13 +258,21 @@ function SectionHeaderActions({
           <CheckCheck className="h-4 w-4" />
         </button>
       ) : null}
+      {onBrowseClick ? (
+        <button
+          aria-label={browseAriaLabel}
+          className={SECTION_ICON_BUTTON_CLASS}
+          onClick={onBrowseClick}
+          title={browseAriaLabel}
+          type="button"
+        >
+          <Search className="h-4 w-4" />
+        </button>
+      ) : null}
       {onCreateClick ? (
         <button
           aria-label={createAriaLabel}
-          className={cn(
-            SECTION_ICON_BUTTON_CLASS,
-            SECTION_ACTION_VISIBILITY_CLASS,
-          )}
+          className={SECTION_ICON_BUTTON_CLASS}
           onClick={onCreateClick}
           type="button"
         >
@@ -275,6 +288,7 @@ function SectionHeaderActions({
 // ---------------------------------------------------------------------------
 
 export function ChannelGroupSection({
+  browseAriaLabel,
   createAriaLabel,
   draggable,
   groupClassName,
@@ -283,6 +297,7 @@ export function ChannelGroupSection({
   isActiveChannel,
   items,
   listTestId,
+  onBrowseClick,
   onCreateClick,
   onMarkAllRead,
   onMarkChannelRead,
@@ -305,6 +320,7 @@ export function ChannelGroupSection({
   onStarChannel,
   onUnstarChannel,
 }: {
+  browseAriaLabel?: string;
   createAriaLabel: string;
   draggable?: boolean;
   groupClassName?: string;
@@ -312,6 +328,7 @@ export function ChannelGroupSection({
   isActiveChannel: boolean;
   items: Channel[];
   listTestId: string;
+  onBrowseClick?: () => void;
   onCreateClick?: () => void;
   onMarkChannelRead: (
     channelId: string,
@@ -421,8 +438,10 @@ export function ChannelGroupSection({
           </button>
         </SidebarGroupLabel>
         <SectionHeaderActions
+          browseAriaLabel={browseAriaLabel}
           createAriaLabel={createAriaLabel}
           hasUnread={hasUnread}
+          onBrowseClick={onBrowseClick}
           onCreateClick={onCreateClick}
           onMarkAllRead={onMarkAllRead}
         />

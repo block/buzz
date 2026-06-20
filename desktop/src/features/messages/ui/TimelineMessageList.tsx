@@ -92,6 +92,14 @@ type TimelineRenderRow =
   | TimelineUnreadRow
   | TimelineMessageRowModel;
 
+type TimelineNonDayRow = TimelineUnreadRow | TimelineMessageRowModel;
+
+type TimelineDayGroup = {
+  key: string;
+  label: string;
+  rows: TimelineNonDayRow[];
+};
+
 function buildTimelineRenderRows({
   firstUnreadMessageId,
   messages,
@@ -139,6 +147,36 @@ function buildTimelineRenderRows({
   return rows;
 }
 
+function buildTimelineDayGroups(rows: TimelineRenderRow[]): TimelineDayGroup[] {
+  const groups: TimelineDayGroup[] = [];
+  let currentGroup: TimelineDayGroup | null = null;
+
+  for (const row of rows) {
+    if (row.type === "day") {
+      currentGroup = {
+        key: row.key,
+        label: row.label,
+        rows: [],
+      };
+      groups.push(currentGroup);
+      continue;
+    }
+
+    if (!currentGroup) {
+      currentGroup = {
+        key: "day-undated",
+        label: "",
+        rows: [],
+      };
+      groups.push(currentGroup);
+    }
+
+    currentGroup.rows.push(row);
+  }
+
+  return groups;
+}
+
 export const TimelineMessageList = React.memo(function TimelineMessageList({
   agentPubkeys,
   channelId,
@@ -169,39 +207,55 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
     () => buildTimelineRenderRows({ firstUnreadMessageId, messages }),
     [firstUnreadMessageId, messages],
   );
-  return rows.map((row) => (
-    <TimelineRenderRowView
-      agentPubkeys={agentPubkeys}
-      allMessages={
-        row.type === "message" && hasVideoAttachment(row.message)
-          ? messages
-          : undefined
-      }
-      channelId={channelId}
-      channelName={channelName}
-      channelType={channelType}
-      currentPubkey={currentPubkey}
-      followThreadById={followThreadById}
-      highlightedMessageId={highlightedMessageId}
-      isFollowingThreadById={isFollowingThreadById}
-      isSendingVideoReviewComment={isSendingVideoReviewComment}
-      key={row.key}
-      messageFooters={messageFooters}
-      onDelete={onDelete}
-      onEdit={onEdit}
-      onMarkUnread={onMarkUnread}
-      onReply={onReply}
-      onSendVideoReviewComment={onSendVideoReviewComment}
-      onToggleReaction={onToggleReaction}
-      profiles={profiles}
-      row={row}
-      searchActiveMessageId={searchActiveMessageId}
-      searchMatchingMessageIds={searchMatchingMessageIds}
-      searchQuery={searchQuery}
-      threadUnreadCounts={threadUnreadCounts}
-      unfollowThreadById={unfollowThreadById}
-    />
-  ));
+  const dayGroups = React.useMemo(() => buildTimelineDayGroups(rows), [rows]);
+
+  return (
+    <div className="flex flex-col gap-0">
+      {dayGroups.map((group) => (
+        <section
+          className="relative flex flex-col gap-2 before:absolute before:inset-x-0 before:top-4 before:h-px before:bg-border/35 before:content-['']"
+          data-day-label={group.label}
+          data-testid="message-timeline-day-group"
+          key={group.key}
+        >
+          {group.label ? <DayDivider label={group.label} /> : null}
+          {group.rows.map((row) => (
+            <TimelineRenderRowView
+              agentPubkeys={agentPubkeys}
+              allMessages={
+                row.type === "message" && hasVideoAttachment(row.message)
+                  ? messages
+                  : undefined
+              }
+              channelId={channelId}
+              channelName={channelName}
+              channelType={channelType}
+              currentPubkey={currentPubkey}
+              followThreadById={followThreadById}
+              highlightedMessageId={highlightedMessageId}
+              isFollowingThreadById={isFollowingThreadById}
+              isSendingVideoReviewComment={isSendingVideoReviewComment}
+              key={row.key}
+              messageFooters={messageFooters}
+              onDelete={onDelete}
+              onEdit={onEdit}
+              onMarkUnread={onMarkUnread}
+              onReply={onReply}
+              onSendVideoReviewComment={onSendVideoReviewComment}
+              onToggleReaction={onToggleReaction}
+              profiles={profiles}
+              row={row}
+              searchActiveMessageId={searchActiveMessageId}
+              searchMatchingMessageIds={searchMatchingMessageIds}
+              searchQuery={searchQuery}
+              threadUnreadCounts={threadUnreadCounts}
+              unfollowThreadById={unfollowThreadById}
+            />
+          ))}
+        </section>
+      ))}
+    </div>
+  );
 });
 
 type TimelineRenderRowViewProps = Omit<

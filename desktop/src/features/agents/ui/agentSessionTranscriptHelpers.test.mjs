@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   extractPromptText,
+  extractToolIdentity,
   parsePromptText,
   parseSystemPromptSections,
 } from "./agentSessionTranscriptHelpers.ts";
@@ -122,6 +123,43 @@ test("extractPromptText handles plain string blocks", () => {
 test("extractPromptText returns empty string when prompt is missing or not an array", () => {
   assert.equal(extractPromptText({}), "");
   assert.equal(extractPromptText({ params: { prompt: "nope" } }), "");
+});
+
+test("extractToolIdentity ignores Buzz tool names that only appear in file contents", () => {
+  const identity = extractToolIdentity({
+    sessionUpdate: "tool_call_update",
+    toolCallId: "read-file-1",
+    status: "completed",
+    title: "read_file",
+    kind: "read_file",
+    rawInput: {
+      path: "desktop/src/features/agents/ui/agentSessionToolCatalog.ts",
+    },
+    content: {
+      text: 'const BUZZ_READ_TOOLS = new Set(["get_feed", "get_event"]);',
+    },
+  });
+
+  assert.deepEqual(identity, {
+    title: "read_file",
+    toolName: "read_file",
+    buzzToolName: null,
+  });
+});
+
+test("extractToolIdentity still recognizes explicit Buzz tool fields", () => {
+  const identity = extractToolIdentity({
+    sessionUpdate: "tool_call",
+    title: "Tool call",
+    toolName: "get_feed",
+    rawInput: { limit: 50 },
+  });
+
+  assert.deepEqual(identity, {
+    title: "Tool call",
+    toolName: "get_feed",
+    buzzToolName: "get_feed",
+  });
 });
 
 // --- parseSystemPromptSections: deterministic Base/System split ---

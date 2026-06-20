@@ -16,9 +16,7 @@ export const Route = createFileRoute("/projects")({
 function ProjectsRouteComponent() {
   usePreviewFeatureWarning("projects");
   return (
-    <React.Suspense
-      fallback={<ViewLoadingFallback includeHeader kind="projects" />}
-    >
+    <React.Suspense fallback={<ViewLoadingFallback kind="projects" />}>
       <ProjectsScreen />
     </React.Suspense>
   );

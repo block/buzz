@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   BOTTOM_THRESHOLD_PX,
   buildDayGroupBoundaries,
+  isDeferredTimelineSnapshotStale,
   isNearBottomMetrics,
   resolveDeepLinkTarget,
   selectDeferredListRenderState,
@@ -414,11 +415,48 @@ test("timeline-body-surface: empty only when live and deferred rows are empty", 
   );
 });
 
+test("deferred-snapshot: stale when channel ids diverge during channel switch", () => {
+  assert.equal(
+    isDeferredTimelineSnapshotStale({
+      deferredSnapshot: { channelId: "chan-a" },
+      liveSnapshot: { channelId: "chan-b" },
+    }),
+    true,
+  );
+});
+
+test("deferred-snapshot: fresh when channel ids match", () => {
+  assert.equal(
+    isDeferredTimelineSnapshotStale({
+      deferredSnapshot: { channelId: "chan-a" },
+      liveSnapshot: { channelId: "chan-a" },
+    }),
+    false,
+  );
+});
+
+test("timeline-body-surface: stale deferred channel snapshot paints skeleton instead of old list", () => {
+  const isStale = isDeferredTimelineSnapshotStale({
+    deferredSnapshot: { channelId: "chan-a" },
+    liveSnapshot: { channelId: "chan-b" },
+  });
+
+  assert.equal(
+    selectTimelineBodySurface({
+      deferredCount: 4,
+      isLoading: isStale,
+      liveCount: 0,
+    }),
+    "skeleton",
+  );
+});
+
 test("timeline-intro-surface: skeleton suppresses intro while loading", () => {
   assert.equal(
     selectTimelineIntroSurface({
       hasChannelIntro: true,
       hasDirectMessageIntro: false,
+      hasReachedChannelStart: true,
       isSkeletonVisible: true,
     }),
     null,
@@ -438,9 +476,22 @@ test("timeline-intro-surface: intro may coexist with the message list", () => {
     selectTimelineIntroSurface({
       hasChannelIntro: true,
       hasDirectMessageIntro: false,
+      hasReachedChannelStart: true,
       isSkeletonVisible: false,
     }),
     "channel-intro",
+  );
+});
+
+test("timeline-intro-surface: channel intro waits for oldest-history boundary", () => {
+  assert.equal(
+    selectTimelineIntroSurface({
+      hasChannelIntro: true,
+      hasDirectMessageIntro: false,
+      hasReachedChannelStart: false,
+      isSkeletonVisible: false,
+    }),
+    null,
   );
 });
 
@@ -449,6 +500,7 @@ test("timeline-intro-surface: direct-message intro wins over channel intro", () 
     selectTimelineIntroSurface({
       hasChannelIntro: true,
       hasDirectMessageIntro: true,
+      hasReachedChannelStart: false,
       isSkeletonVisible: false,
     }),
     "direct-message-intro",
@@ -460,6 +512,7 @@ test("timeline-intro-surface: no intro without an intro model", () => {
     selectTimelineIntroSurface({
       hasChannelIntro: false,
       hasDirectMessageIntro: false,
+      hasReachedChannelStart: true,
       isSkeletonVisible: false,
     }),
     null,

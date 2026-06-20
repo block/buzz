@@ -13,10 +13,11 @@ import {
   getChannelWorkflows,
   triggerWorkflow,
 } from "@/shared/api/tauriWorkflows";
+import { topChromeInset } from "@/shared/layout/chromeLayout";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { Skeleton } from "@/shared/ui/skeleton";
-import { TopChromeBackdrop } from "@/shared/ui/TopChromeBackdrop";
 
 type WorkflowsViewProps = {
   channels: Channel[];
@@ -166,9 +167,11 @@ export function WorkflowsView({
       className="relative flex min-h-0 flex-1 overflow-hidden"
       data-testid="workflows-view"
     >
-      <TopChromeBackdrop />
       <div
-        className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-14"
+        className={cn(
+          "flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pb-4",
+          topChromeInset.padding,
+        )}
         data-scroll-restoration-id="workflows-list"
       >
         <div className="mb-4 flex items-center justify-between">

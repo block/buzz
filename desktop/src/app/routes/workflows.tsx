@@ -16,9 +16,7 @@ const WorkflowsRouteScreen = React.lazy(async () => {
 function WorkflowsRouteComponent() {
   usePreviewFeatureWarning("workflows");
   return (
-    <React.Suspense
-      fallback={<ViewLoadingFallback includeHeader kind="workflows" />}
-    >
+    <React.Suspense fallback={<ViewLoadingFallback kind="workflows" />}>
       <WorkflowsRouteScreen selectedWorkflowId={null} />
     </React.Suspense>
   );

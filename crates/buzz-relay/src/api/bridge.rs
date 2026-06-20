@@ -420,22 +420,13 @@ pub async fn query_events(
             .await
             .map_err(|e| internal_error(&format!("thread query error: {e}")))?;
 
-        if !thread_replies.is_empty() {
-            let reply_ids: Vec<Vec<u8>> =
-                thread_replies.iter().map(|r| r.event_id.clone()).collect();
-            let id_refs: Vec<&[u8]> = reply_ids.iter().map(|b| b.as_slice()).collect();
-            let stored = state
-                .db
-                .get_events_by_ids(&id_refs)
-                .await
-                .map_err(|e| internal_error(&format!("thread fetch error: {e}")))?;
-            for se in stored {
-                if !event_in_accessible_channel(&se, &accessible_channels) {
-                    continue;
-                }
-                if let Ok(v) = serde_json::to_value(&se.event) {
-                    events.push(v);
-                }
+        for reply in thread_replies {
+            let se = reply.stored_event;
+            if !event_in_accessible_channel(&se, &accessible_channels) {
+                continue;
+            }
+            if let Ok(v) = serde_json::to_value(&se.event) {
+                events.push(v);
             }
         }
         handled.insert(idx);

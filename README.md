@@ -109,9 +109,9 @@ For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSO
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                             Clients                                     │
 │  Human client         AI agent              CLI / scripts               │
-│  (Buzz desktop)       (Goose, Codex, ...)   (buzz-cli, agents)        │
+│  (Buzz desktop)       (Goose, Codex, ...)   (buzz-cli, agents)          │
 │       │               ┌──────────────┐               │                  │
-│       │               │  buzz-acp  │               │                  │
+│       │               │  buzz-acp  │                 │                  │
 │       │               │  (ACP ↔ MCP) │               │                  │
 │       │               └──────┬───────┘               │                  │
 │       │                      │                       │                  │
@@ -119,7 +119,7 @@ For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSO
         │ WebSocket            │ WS + REST             │ WS + REST
         ▼                      ▼                       ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│                          buzz-relay                                   │
+│                          buzz-relay                                     │
 │  NIP-01 · NIP-42 auth · channel/DM/media/workflow/git REST · audit log  │
 └───┬──────────────────┬──────────────────┬──────────────────┬────────────┘
     │                  │                  │                  │

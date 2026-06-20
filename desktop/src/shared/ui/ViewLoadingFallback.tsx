@@ -1,10 +1,7 @@
-import * as React from "react";
-
-import { useAppShell } from "@/app/AppShellContext";
 import { Card } from "@/shared/ui/card";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { cn } from "@/shared/lib/cn";
-import { channelChrome } from "@/shared/layout/chromeLayout";
+import { channelChrome, topChromeInset } from "@/shared/layout/chromeLayout";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { TopChromeBackdrop } from "@/shared/ui/TopChromeBackdrop";
 
@@ -23,7 +20,7 @@ type ViewLoadingFallbackProps = {
 
 function LoadingHeaderSkeleton() {
   return (
-    <TopChromeInsetHeader data-tauri-drag-region>
+    <TopChromeInsetHeader data-tauri-drag-region flush>
       <header className="flex min-h-8 min-w-0 cursor-default select-none items-center gap-2.5 px-5 py-1.5">
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1 overflow-hidden">
@@ -263,7 +260,12 @@ function AgentTeamsSkeleton() {
 
 function AgentsLoadingBody() {
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-4 pt-14 sm:px-6">
+    <div
+      className={cn(
+        "flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overflow-x-hidden overscroll-contain px-4 pb-4 sm:px-6",
+        topChromeInset.padding,
+      )}
+    >
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
         <div className="flex flex-col gap-6">
           <AgentsLibrarySkeleton />
@@ -276,7 +278,12 @@ function AgentsLoadingBody() {
 
 function CardListLoadingBody() {
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-14 sm:px-6">
+    <div
+      className={cn(
+        "flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4 sm:px-6",
+        topChromeInset.padding,
+      )}
+    >
       <div className="mb-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <Skeleton className="h-6 w-28" />
@@ -396,18 +403,8 @@ export function ViewLoadingFallback({
   includeHeader = false,
   kind,
 }: ViewLoadingFallbackProps) {
-  const { setTopbarSearchLoading } = useAppShell();
   const shouldShowChannelHeader =
     includeHeader && (kind === "channel" || kind === "forum");
-
-  React.useLayoutEffect(() => {
-    if (!includeHeader) return;
-
-    setTopbarSearchLoading(true);
-    return () => {
-      setTopbarSearchLoading(false);
-    };
-  }, [includeHeader, setTopbarSearchLoading]);
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">

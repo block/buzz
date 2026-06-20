@@ -114,8 +114,6 @@ export function AppShell() {
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
   const [searchFocusRequest, setSearchFocusRequest] = React.useState(0);
-  const [topbarSearchHidden, setTopbarSearchHidden] = React.useState(false);
-  const [topbarSearchLoading, setTopbarSearchLoading] = React.useState(false);
   const [browseDialogType, setBrowseDialogType] =
     React.useState<BrowseDialogType>(null);
   const [isNewDmOpen, setIsNewDmOpen] = React.useState(false);
@@ -823,8 +821,6 @@ export function AppShell() {
             unfollowThread: handleUnfollowThread,
             isFollowingThread,
             isNotifiedForThread,
-            setTopbarSearchHidden,
-            setTopbarSearchLoading,
             threadActivityItems,
             feedItemState,
           }}
@@ -846,17 +842,8 @@ export function AppShell() {
                       <AppTopChrome
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
-                        channels={channels}
-                        currentPubkey={identityQuery.data?.pubkey}
                         onGoBack={goBack}
                         onGoForward={goForward}
-                        onOpenChannel={(channelId) => {
-                          void goChannel(channelId);
-                        }}
-                        onOpenResult={handleOpenSearchResult}
-                        searchHidden={topbarSearchHidden}
-                        searchLoading={topbarSearchLoading}
-                        searchFocusRequest={searchFocusRequest}
                       />
                     ) : null}
                     {settingsOpen ? (
@@ -979,6 +966,7 @@ export function AppShell() {
                           onMarkAllChannelsRead={markAllChannelsRead}
                           onMarkChannelRead={markChannelRead}
                           onMarkChannelUnread={markChannelUnread}
+                          onBrowseChannels={handleOpenBrowseChannels}
                           onOpenDm={async ({ pubkeys }) => {
                             const directMessage =
                               await openDmMutation.mutateAsync({
@@ -990,6 +978,9 @@ export function AppShell() {
                           onSelectChannel={(channelId) =>
                             void goChannel(channelId)
                           }
+                          onOpenSearchResult={handleOpenSearchResult}
+                          searchChannels={channels}
+                          searchFocusRequest={searchFocusRequest}
                           onSelectHome={() => void goHome()}
                           onSelectProjects={() => void goProjects()}
                           onSelectPulse={() => void goPulse()}

@@ -12,8 +12,7 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
-import { customEmojiFromTags } from "@/shared/api/customEmoji";
-import { isEmojiOnlyMessage } from "@/shared/lib/emojiOnly";
+import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import {
   resolveMentionNames,
   resolveMentionPubkeysByName,
@@ -131,13 +130,9 @@ export const MessageRow = React.memo(
       [message.tags],
     );
 
-    const customEmoji = React.useMemo(
-      () => (message.tags ? customEmojiFromTags(message.tags) : undefined),
-      [message.tags],
-    );
-    const emojiOnly = React.useMemo(
-      () => isEmojiOnlyMessage(message.body, customEmoji),
-      [message.body, customEmoji],
+    const { customEmoji, emojiOnly } = useMessageEmoji(
+      message.body,
+      message.tags,
     );
     const bodyOffsetClass = emojiOnly ? "mt-1" : "-mt-0.5";
 

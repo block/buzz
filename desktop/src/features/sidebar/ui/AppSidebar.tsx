@@ -11,6 +11,7 @@ import * as React from "react";
 import { AnimatePresence } from "motion/react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
+import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 
 import type { Workspace } from "@/features/workspaces/types";
 import { AddWorkspaceDialog } from "@/features/workspaces/ui/AddWorkspaceDialog";
@@ -54,6 +55,7 @@ import type {
   ChannelVisibility,
   PresenceStatus,
   Profile,
+  SearchHit,
   UserStatus,
 } from "@/shared/api/types";
 import {
@@ -66,6 +68,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
+  useSidebar,
 } from "@/shared/ui/sidebar";
 
 type CollapsibleSidebarGroup =
@@ -129,6 +132,7 @@ type AppSidebarProps = {
     lastMessageAt: string | null | undefined,
   ) => void;
   onMarkAllChannelsRead: () => void;
+  onBrowseChannels?: () => void;
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
   onUpdateWorkspace: (
     id: string,
@@ -141,6 +145,14 @@ type AppSidebarProps = {
   onSelectWorkflows: () => void;
   onSelectHome: () => void;
   onSelectChannel: (channelId: string) => void;
+  onOpenSearchResult: (hit: SearchHit) => void;
+  /**
+   * Full channel set used for global search. Unlike `channels` (which is
+   * scoped to the viewer's joined sidebar list), this includes open channels
+   * the viewer hasn't joined, so search can surface them.
+   */
+  searchChannels: Channel[];
+  searchFocusRequest: number;
   onSelectSettings: (section?: "profile" | "appearance") => void;
   onSetPresenceStatus?: (status: "online" | "away" | "offline") => void;
   onSetUserStatus: (text: string, emoji: string) => void;
@@ -192,6 +204,7 @@ export function AppSidebar({
   onMarkChannelUnread,
   onMarkChannelRead,
   onMarkAllChannelsRead,
+  onBrowseChannels,
   onOpenDm,
   onUpdateWorkspace,
   onRemoveWorkspace,
@@ -201,6 +214,9 @@ export function AppSidebar({
   onSelectWorkflows,
   onSelectHome,
   onSelectChannel,
+  onOpenSearchResult,
+  searchChannels,
+  searchFocusRequest,
   onSelectSettings,
   onSetPresenceStatus,
   onSetUserStatus,
@@ -229,20 +245,29 @@ export function AppSidebar({
     React.useState(false);
   const showSidebarUpdateCard =
     canShowSidebarUpdateCard && !isSidebarUpdateCardDismissed;
-  const sidebarFooterCardCount =
-    (sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? 1 : 0) +
-    (showSidebarUpdateCard ? 1 : 0);
-  const unreadBelowBottomClass =
-    sidebarFooterCardCount >= 2
-      ? "bottom-56"
-      : sidebarFooterCardCount >= 1
-        ? "bottom-44"
-        : "bottom-24";
   const [isNewDmOpenInternal, setIsNewDmOpenInternal] = React.useState(false);
   const isNewDmOpen = isNewDmOpenProp ?? isNewDmOpenInternal;
   const setIsNewDmOpen = onNewDmOpenChange ?? setIsNewDmOpenInternal;
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
+
+  // Search lives in the sidebar's pinned header, so a ⌘K focus request must
+  // first reveal the sidebar. When collapsed (offcanvas) on desktop the input
+  // is mounted but translated off-screen; on mobile it is unmounted entirely.
+  // Open the sidebar on each focus-request bump so the input the shortcut
+  // focuses is actually visible. Skips the initial mount (request === 0).
+  const { isMobile, setOpen, setOpenMobile } = useSidebar();
+  React.useEffect(() => {
+    if (searchFocusRequest === 0) {
+      return;
+    }
+
+    if (isMobile) {
+      setOpenMobile(true);
+    } else {
+      setOpen(true);
+    }
+  }, [searchFocusRequest, isMobile, setOpen, setOpenMobile]);
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -483,7 +508,10 @@ export function AppSidebar({
       data-testid="app-sidebar"
       variant="sidebar"
     >
-      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div
+        className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+        data-testid="app-sidebar-scroll-anchor"
+      >
         {unreadAboveCount > 0 ? (
           <MoreUnreadButton
             count={unreadAboveCount}
@@ -492,12 +520,20 @@ export function AppSidebar({
             testId="sidebar-more-unread-above"
           />
         ) : null}
-        <SidebarContent
-          className="buzz-sidebar-scrollbar mt-(--buzz-top-chrome-height,2.5rem) overscroll-none"
-          ref={scrollRef}
+        <div
+          className="mt-(--buzz-top-chrome-height,2.5rem) shrink-0 px-2 pt-2"
+          data-testid="sidebar-pinned-header"
         >
+          <TopbarSearch
+            channels={searchChannels}
+            currentPubkey={currentPubkey}
+            focusRequest={searchFocusRequest}
+            onOpenChannel={onSelectChannel}
+            onOpenResult={onOpenSearchResult}
+            placement="sidebar"
+          />
           <SidebarHeader
-            className="cursor-default select-none"
+            className="cursor-default select-none px-0 pb-0 pt-2"
             data-tauri-drag-region
           >
             <SidebarMenu>
@@ -576,7 +612,12 @@ export function AppSidebar({
               </FeatureGate>
             </SidebarMenu>
           </SidebarHeader>
+        </div>
 
+        <SidebarContent
+          className="buzz-sidebar-scrollbar overscroll-none"
+          ref={scrollRef}
+        >
           {isLoading ? (
             <SidebarLoadingContent shape={sidebarLoadingShape} />
           ) : null}
@@ -668,6 +709,7 @@ export function AppSidebar({
                   />
                 ))}
                 <ChannelGroupSection
+                  browseAriaLabel="Browse channels"
                   createAriaLabel="Create a channel"
                   draggable
                   groupClassName={
@@ -678,6 +720,7 @@ export function AppSidebar({
                   isActiveChannel={selectedView === "channel"}
                   items={sectionBuckets.unassigned}
                   listTestId="stream-list"
+                  onBrowseClick={onBrowseChannels}
                   onCreateClick={() => setCreateDialogKind("stream")}
                   onMarkAllRead={onMarkAllChannelsRead}
                   onMarkChannelRead={onMarkChannelRead}
@@ -773,64 +816,66 @@ export function AppSidebar({
           ) : null}
         </SidebarContent>
 
-        {unreadBelowCount > 0 ? (
-          <MoreUnreadButton
-            bottomClassName={unreadBelowBottomClass}
-            count={unreadBelowCount}
-            onClick={scrollToNextBelow}
-            position="bottom"
-            testId="sidebar-more-unread-below"
-          />
-        ) : null}
-
-        <SidebarFooter className="z-30 shrink-0 bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
-          <AnimatePresence>
-            {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
-              <SidebarRelayConnectionCard
-                className="mb-2 group-data-[collapsible=icon]:hidden"
-                isConnected={
-                  sidebarRelayConnectionCard.isRelayConnectionSuccess
-                }
-                isReconnectPending={
-                  sidebarRelayConnectionCard.isRelayReconnectPending
-                }
-                onDismiss={
-                  sidebarRelayConnectionCard.onDismissRelayConnectionCard
-                }
-                onReconnect={sidebarRelayConnectionCard.onReconnectRelay}
-                key="sidebar-relay-connection-card"
-              />
-            ) : null}
-          </AnimatePresence>
-          {showSidebarUpdateCard ? (
-            <div className="mb-2 group-data-[collapsible=icon]:hidden">
-              <SidebarUpdateCard
-                onDismiss={() => setIsSidebarUpdateCardDismissed(true)}
-              />
-            </div>
+        <div className="relative z-30 shrink-0">
+          {unreadBelowCount > 0 ? (
+            <MoreUnreadButton
+              bottomClassName="bottom-full"
+              count={unreadBelowCount}
+              onClick={scrollToNextBelow}
+              position="bottom"
+              testId="sidebar-more-unread-below"
+            />
           ) : null}
-          <SidebarMenu>
-            <SidebarMenuItem>
-              <SidebarProfileCard
-                activeWorkspace={activeWorkspace}
-                isPresencePending={isPresencePending}
-                onOpenAddWorkspace={onOpenAddWorkspace}
-                onOpenSettings={onSelectSettings}
-                onRemoveWorkspace={onRemoveWorkspace}
-                onSetPresenceStatus={onSetPresenceStatus}
-                onSetUserStatus={onSetUserStatus}
-                onClearUserStatus={onClearUserStatus}
-                onSwitchWorkspace={onSwitchWorkspace}
-                onUpdateWorkspace={onUpdateWorkspace}
-                profile={profile}
-                resolvedDisplayName={resolvedDisplayName}
-                selfPresenceStatus={selfPresenceStatus}
-                selfUserStatus={selfUserStatus}
-                workspaces={workspaces}
-              />
-            </SidebarMenuItem>
-          </SidebarMenu>
-        </SidebarFooter>
+
+          <SidebarFooter className="bg-sidebar/55 backdrop-blur-xl supports-[backdrop-filter]:bg-sidebar/45 dark:bg-sidebar/45 dark:supports-[backdrop-filter]:bg-sidebar/35">
+            <AnimatePresence>
+              {sidebarRelayConnectionCard.showSidebarRelayConnectionCard ? (
+                <SidebarRelayConnectionCard
+                  className="mb-2 group-data-[collapsible=icon]:hidden"
+                  isConnected={
+                    sidebarRelayConnectionCard.isRelayConnectionSuccess
+                  }
+                  isReconnectPending={
+                    sidebarRelayConnectionCard.isRelayReconnectPending
+                  }
+                  onDismiss={
+                    sidebarRelayConnectionCard.onDismissRelayConnectionCard
+                  }
+                  onReconnect={sidebarRelayConnectionCard.onReconnectRelay}
+                  key="sidebar-relay-connection-card"
+                />
+              ) : null}
+            </AnimatePresence>
+            {showSidebarUpdateCard ? (
+              <div className="mb-2 group-data-[collapsible=icon]:hidden">
+                <SidebarUpdateCard
+                  onDismiss={() => setIsSidebarUpdateCardDismissed(true)}
+                />
+              </div>
+            ) : null}
+            <SidebarMenu>
+              <SidebarMenuItem>
+                <SidebarProfileCard
+                  activeWorkspace={activeWorkspace}
+                  isPresencePending={isPresencePending}
+                  onOpenAddWorkspace={onOpenAddWorkspace}
+                  onOpenSettings={onSelectSettings}
+                  onRemoveWorkspace={onRemoveWorkspace}
+                  onSetPresenceStatus={onSetPresenceStatus}
+                  onSetUserStatus={onSetUserStatus}
+                  onClearUserStatus={onClearUserStatus}
+                  onSwitchWorkspace={onSwitchWorkspace}
+                  onUpdateWorkspace={onUpdateWorkspace}
+                  profile={profile}
+                  resolvedDisplayName={resolvedDisplayName}
+                  selfPresenceStatus={selfPresenceStatus}
+                  selfUserStatus={selfUserStatus}
+                  workspaces={workspaces}
+                />
+              </SidebarMenuItem>
+            </SidebarMenu>
+          </SidebarFooter>
+        </div>
       </div>
 
       <CreateChannelDialog

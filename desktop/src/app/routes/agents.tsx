@@ -14,9 +14,7 @@ export const Route = createFileRoute("/agents")({
 
 function AgentsRouteComponent() {
   return (
-    <React.Suspense
-      fallback={<ViewLoadingFallback includeHeader kind="agents" />}
-    >
+    <React.Suspense fallback={<ViewLoadingFallback kind="agents" />}>
       <AgentsScreen />
     </React.Suspense>
   );

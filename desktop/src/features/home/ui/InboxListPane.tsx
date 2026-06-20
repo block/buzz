@@ -317,7 +317,7 @@ export function InboxListPane({
         showRightDivider && topChromeInset.verticalDivider,
       )}
     >
-      <TopChromeInsetHeader>
+      <TopChromeInsetHeader flush>
         <div className="px-5 py-1">
           <div className="flex w-full min-w-0 items-center justify-between gap-3">
             <Popover>

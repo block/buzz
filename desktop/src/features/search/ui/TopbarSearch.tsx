@@ -22,6 +22,8 @@ import {
 import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 
+type SearchPlacement = "topbar" | "sidebar";
+
 type TopbarSearchProps = {
   channels: Channel[];
   className?: string;
@@ -29,6 +31,18 @@ type TopbarSearchProps = {
   focusRequest?: number;
   onOpenChannel: (channelId: string) => void;
   onOpenResult: (hit: SearchHit) => void;
+  /**
+   * Controls how the results popover is anchored. `topbar` centers a wide
+   * panel under the input; `sidebar` left-anchors a narrower panel that fits
+   * within the persistent sidebar column.
+   */
+  placement?: SearchPlacement;
+};
+
+const RESULTS_POPOVER_CLASS: Record<SearchPlacement, string> = {
+  topbar:
+    "left-1/2 w-[620px] max-w-[min(82vw,620px)] -translate-x-1/2 slide-in-from-top-1",
+  sidebar: "left-0 right-0 w-auto slide-in-from-top-1",
 };
 
 function describeSearchHit(hit: SearchHit) {
@@ -145,6 +159,7 @@ export function TopbarSearch({
   focusRequest = 0,
   onOpenChannel,
   onOpenResult,
+  placement = "topbar",
 }: TopbarSearchProps) {
   const [isOpen, setIsOpen] = React.useState(false);
   const [selectedMenuIndex, setSelectedMenuIndex] = React.useState(0);
@@ -275,7 +290,8 @@ export function TopbarSearch({
         <div
           aria-busy={searchQuery.isLoading && results.length === 0}
           className={cn(
-            "absolute left-1/2 top-full z-50 mt-1 w-[620px] max-w-[min(82vw,620px)] -translate-x-1/2 origin-top overflow-hidden rounded-xl slide-in-from-top-1",
+            "absolute top-full z-50 mt-1 origin-top overflow-hidden rounded-xl",
+            RESULTS_POPOVER_CLASS[placement],
             POPOVER_CUSTOM_ENTER_MOTION_CLASS,
             POPOVER_SURFACE_CLASS,
           )}

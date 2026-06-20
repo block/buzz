@@ -793,21 +793,100 @@ test("empty channel shows intro actions", async ({ page }) => {
   );
 });
 
-test("channel with messages shows content", async ({ page }) => {
+test("short channel with messages shows intro actions on open", async ({
+  page,
+}) => {
+  const channelName = `short-intro-${Date.now()}`;
+  const message = "Only message in a short channel";
+
   await page.goto("/");
+  await page.getByRole("button", { name: "Create a channel" }).click();
+  await page.getByTestId("create-channel-name").fill(channelName);
+  await page.getByTestId("create-channel-submit").click();
+  await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+
+  await page.getByTestId("message-input").fill(message);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.getByTestId(`channel-${channelName}`).click();
+  await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
   await expect(page.getByTestId("message-channel-intro")).toBeVisible();
   await expect(page.getByTestId("message-channel-intro")).toContainText(
     "This is the beginning of the regular channel.",
   );
   await expect(
+    page.getByTestId("channel-intro-action-create-agent"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("channel-intro-action-add-people"),
+  ).toBeVisible();
+});
+
+test("scrollable channel with recent messages hides intro actions until top", async ({
+  page,
+}) => {
+  const channelName = `long-intro-${Date.now()}`;
+  const messages = Array.from(
+    { length: 24 },
+    (_, index) => `Scrollable channel message ${index + 1}`,
+  );
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Create a channel" }).click();
+  await page.getByTestId("create-channel-name").fill(channelName);
+  await page.getByTestId("create-channel-submit").click();
+  await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+
+  for (const message of messages) {
+    await page.getByTestId("message-input").fill(message);
+    await page.getByTestId("send-message").click();
+    await expect(page.getByTestId("message-timeline")).toContainText(message);
+  }
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.getByTestId(`channel-${channelName}`).click();
+  await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+  await expect(page.getByTestId("message-channel-intro")).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-intro-action-create-agent"),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("channel-intro-action-add-people")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("message-timeline")).toContainText(
+    messages[messages.length - 1],
+  );
+
+  await page.getByTestId("message-timeline").evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await expect(page.getByTestId("message-channel-intro")).toBeVisible();
+  await expect(
+    page.getByTestId("channel-intro-action-create-agent"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("channel-intro-action-add-people"),
+  ).toBeVisible();
+});
+
+test("channel with messages shows content", async ({ page }) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page.getByTestId("message-channel-intro")).toHaveCount(0);
+  await expect(
     page.getByTestId("channel-intro-action-create-channel"),
   ).toHaveCount(0);
   await expect(
     page.getByTestId("channel-intro-action-create-agent"),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
     0,
   );
@@ -815,8 +894,6 @@ test("channel with messages shows content", async ({ page }) => {
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Welcome to #general",
   );
-  await expectSameLeftInset(page, "message-channel-intro", "message-row");
-  await expectIntroBalancedAroundDayDivider(page, "message-channel-intro");
 });
 
 test("shows and clears activity indicators for active channel agents", async ({

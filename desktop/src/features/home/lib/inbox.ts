@@ -58,6 +58,7 @@ export type InboxReply = {
   parentId?: string | null;
   reactions?: TimelineReaction[];
   rootId?: string | null;
+  tags?: string[][];
 };
 
 export type InboxContextMessage = InboxReply & {

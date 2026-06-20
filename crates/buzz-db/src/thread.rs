@@ -4,11 +4,12 @@
 //! nested threads. The `thread_metadata` table is populated when events are
 //! ingested and updated as replies arrive or are deleted.
 
+use buzz_core::StoredEvent;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::error::Result;
+use crate::{error::Result, event::row_to_stored_event};
 
 // -- Structs ------------------------------------------------------------------
 
@@ -29,8 +30,8 @@ pub struct ThreadReply {
     pub tags: serde_json::Value,
     /// Text content of the reply.
     pub content: String,
-    /// Nostr event kind number.
-    pub kind: i32,
+    /// Fully reconstructed event row for this reply.
+    pub stored_event: StoredEvent,
     /// Nesting depth within the thread (root = 0, direct reply = 1, etc.).
     pub depth: i32,
     /// When the reply was created.
@@ -340,13 +341,17 @@ pub async fn get_thread_replies(
         r#"
         SELECT
             tm.event_id,
+            e.id,
             tm.parent_event_id,
             tm.root_event_id,
             tm.channel_id,
             e.pubkey,
+            e.created_at AS created_at,
             e.tags,
             e.content,
             e.kind,
+            e.sig,
+            e.received_at,
             tm.depth,
             tm.event_created_at,
             tm.broadcast
@@ -392,11 +397,17 @@ pub async fn get_thread_replies(
         let channel_id: Uuid = row.try_get("channel_id")?;
         let pubkey: Vec<u8> = row.try_get("pubkey")?;
         let tags: serde_json::Value = row.try_get("tags")?;
-        let content: String = row.try_get("content")?;
-        let kind: i32 = row.try_get("kind")?;
         let depth: i32 = row.try_get("depth")?;
         let created_at: DateTime<Utc> = row.try_get("event_created_at")?;
         let broadcast_val: bool = row.try_get("broadcast")?;
+
+        // Skip rows that fail event reconstruction (e.g. corrupt signature)
+        // rather than failing the whole thread query, matching the
+        // skip-and-continue semantics of the prior get_events_by_ids path.
+        let stored_event = match row_to_stored_event(row)? {
+            Some(se) => se,
+            None => continue,
+        };
 
         replies.push(ThreadReply {
             event_id,
@@ -405,8 +416,8 @@ pub async fn get_thread_replies(
             channel_id,
             pubkey,
             tags,
-            content,
-            kind,
+            content: stored_event.event.content.clone(),
+            stored_event,
             depth,
             created_at,
             broadcast: broadcast_val,
@@ -642,4 +653,187 @@ pub async fn get_thread_metadata_by_event(
         descendant_count,
         broadcast: broadcast_val,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        channel::{create_channel, ChannelType, ChannelVisibility},
+        event::{insert_event_with_thread_metadata, ThreadMetadataParams},
+    };
+    use nostr::{EventBuilder, Keys, Kind};
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+
+    async fn setup_pool() -> PgPool {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+
+        PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB")
+    }
+
+    fn make_stream_event(keys: &Keys, content: &str) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .sign_with_keys(keys)
+            .expect("sign event")
+    }
+
+    fn event_created_at(event: &nostr::Event) -> DateTime<Utc> {
+        DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+            .expect("event timestamp is valid")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_thread_replies_reconstructs_stored_events() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let channel = create_channel(
+            &pool,
+            &format!("thread-replies-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let root = make_stream_event(&author, "root");
+        let root_created_at = event_created_at(&root);
+        insert_event_with_thread_metadata(&pool, &root, Some(channel.id), None)
+            .await
+            .expect("insert root event");
+
+        let reply = make_stream_event(&author, "reply");
+        let reply_created_at = event_created_at(&reply);
+        let reply_id = reply.id.to_hex();
+        insert_event_with_thread_metadata(
+            &pool,
+            &reply,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: reply.id.as_bytes(),
+                event_created_at: reply_created_at,
+                channel_id: channel.id,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(root_created_at),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_created_at),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert reply event and metadata");
+
+        let replies = get_thread_replies(&pool, root.id.as_bytes(), Some(10), 10, None)
+            .await
+            .expect("fetch thread replies");
+
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].stored_event.event.id.to_hex(), reply_id);
+        assert_eq!(replies[0].stored_event.event.content, "reply");
+        assert_eq!(replies[0].stored_event.channel_id, Some(channel.id));
+        assert_eq!(replies[0].depth, 1);
+    }
+
+    /// A reply whose stored row can no longer be reconstructed into a
+    /// `nostr::Event` (e.g. corrupt signature from out-of-band storage damage)
+    /// must be skipped, with the rest of the thread still returned — not
+    /// surfaced as a query error that takes down the whole thread read.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn get_thread_replies_skips_unreconstructable_row() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let channel = create_channel(
+            &pool,
+            &format!("thread-replies-corrupt-{}", Uuid::new_v4()),
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        let root = make_stream_event(&author, "root");
+        let root_created_at = event_created_at(&root);
+        insert_event_with_thread_metadata(&pool, &root, Some(channel.id), None)
+            .await
+            .expect("insert root event");
+
+        // Two replies under the same root: one stays valid, one we corrupt.
+        let good = make_stream_event(&author, "good");
+        let good_id = good.id.to_hex();
+        let good_created_at = event_created_at(&good);
+        insert_event_with_thread_metadata(
+            &pool,
+            &good,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: good.id.as_bytes(),
+                event_created_at: good_created_at,
+                channel_id: channel.id,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(root_created_at),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_created_at),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert good reply");
+
+        let bad = make_stream_event(&author, "bad");
+        let bad_created_at = event_created_at(&bad);
+        insert_event_with_thread_metadata(
+            &pool,
+            &bad,
+            Some(channel.id),
+            Some(ThreadMetadataParams {
+                event_id: bad.id.as_bytes(),
+                event_created_at: bad_created_at,
+                channel_id: channel.id,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(root_created_at),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_created_at),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert bad reply");
+
+        // Corrupt the bad reply's signature in place: truncating the 64-byte
+        // sig makes `row_to_stored_event` fail to deserialize the event and
+        // return `Ok(None)` — the case the skip-and-continue must handle.
+        let rows_changed = sqlx::query("UPDATE events SET sig = $1 WHERE id = $2")
+            .bind(vec![0u8; 32])
+            .bind(bad.id.as_bytes())
+            .execute(&pool)
+            .await
+            .expect("corrupt bad reply sig")
+            .rows_affected();
+        assert_eq!(rows_changed, 1, "expected to corrupt exactly one row");
+
+        let replies = get_thread_replies(&pool, root.id.as_bytes(), Some(10), 10, None)
+            .await
+            .expect("fetch thread replies must succeed despite a corrupt row");
+
+        // The corrupt reply is skipped; the valid one survives. The whole
+        // query does NOT 500 on a single unreconstructable row.
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].stored_event.event.id.to_hex(), good_id);
+        assert_eq!(replies[0].stored_event.event.content, "good");
+    }
 }
