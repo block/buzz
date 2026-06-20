@@ -71,32 +71,30 @@ export function buildChannelHistoryFilter(
  * visible message still applies — see {@link buildChannelHistoryFilter}.
  */
 export function buildChannelAuxFilter(
-  channelId: string,
+  _channelId: string,
   messageIds: string[],
 ): RelaySubscriptionFilter {
-  return buildChannelAuxKindFilter(channelId, messageIds, [
-    ...CHANNEL_AUX_EVENT_KINDS,
-  ]);
+  return buildChannelAuxKindFilter(messageIds, [...CHANNEL_AUX_EVENT_KINDS]);
 }
 
 export function buildChannelAuxDeletionFilter(
-  channelId: string,
+  _channelId: string,
   auxEventIds: string[],
 ): RelaySubscriptionFilter {
-  return buildChannelAuxKindFilter(channelId, auxEventIds, [
+  return buildChannelAuxKindFilter(auxEventIds, [
     KIND_DELETION,
     KIND_NIP29_DELETE_EVENT,
   ]);
 }
 
+// No `#h`: reaction/reaction-removal events carry only an `e` tag, so an
+// `#h`-scoped query misses them; `#e` over unique ids is already specific.
 function buildChannelAuxKindFilter(
-  channelId: string,
   referencedEventIds: string[],
   kinds: number[],
 ): RelaySubscriptionFilter {
   return {
     kinds,
-    "#h": [channelId],
     "#e": referencedEventIds,
     limit: MAX_HISTORICAL_LIMIT,
   };
