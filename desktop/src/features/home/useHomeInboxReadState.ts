@@ -71,6 +71,13 @@ export function getGroupedInboxItemIds(item: InboxItem): string[] {
   ];
 }
 
+export function hasGroupedUnreadOverride(
+  item: InboxItem,
+  localUnreadSet: ReadonlySet<string>,
+): boolean {
+  return getGroupedInboxItemIds(item).some((id) => localUnreadSet.has(id));
+}
+
 /**
  * Projects Home inbox read-state from the shared NIP-RS read marker, with
  * the local `useFeedItemState` done-set as a fallback for items that don't
@@ -104,7 +111,7 @@ export function useHomeInboxReadState({
   const effectiveDoneSet = React.useMemo<ReadonlySet<string>>(() => {
     const result = new Set<string>();
     for (const item of items) {
-      if (localUnreadSet.has(item.id)) {
+      if (hasGroupedUnreadOverride(item, localUnreadSet)) {
         continue;
       }
 

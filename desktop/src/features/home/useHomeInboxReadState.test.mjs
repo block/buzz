@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   getGroupedChannelReadTimestamp,
   getGroupedInboxItemIds,
+  hasGroupedUnreadOverride,
 } from "./useHomeInboxReadState.ts";
 
 const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
@@ -89,4 +90,36 @@ test("grouped inbox item ids include every item represented by the row", () => {
     "reply-event",
     "root-event",
   ]);
+});
+
+test("grouped unread override matches any item represented by the row", () => {
+  const rootItem = feedItem({
+    id: "root-event",
+    category: "mention",
+    createdAt: 100,
+  });
+  const replyItem = feedItem({
+    id: "reply-event",
+    createdAt: 200,
+    tags: [
+      ["h", CHANNEL_ID],
+      ["e", "root-event", "", "root"],
+      ["e", "parent-event", "", "reply"],
+    ],
+  });
+
+  assert.equal(
+    hasGroupedUnreadOverride(
+      inboxItem([rootItem, replyItem]),
+      new Set(["root-event"]),
+    ),
+    true,
+  );
+  assert.equal(
+    hasGroupedUnreadOverride(
+      inboxItem([rootItem, replyItem]),
+      new Set(["other-event"]),
+    ),
+    false,
+  );
 });
