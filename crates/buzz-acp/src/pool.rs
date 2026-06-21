@@ -35,8 +35,8 @@ use crate::acp::{
 use crate::config::{DedupMode, PermissionMode};
 use crate::observer;
 use crate::queue::{
-    ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo, PromptProfile,
-    PromptProfileLookup,
+    CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
+    PromptProfile, PromptProfileLookup,
 };
 use crate::relay::{ChannelInfo, RestClient};
 
@@ -185,8 +185,15 @@ fn apply_completed_before_control_signal(
 pub enum ControlSignal {
     /// Stop the current turn and drop its triggering batch.
     Cancel,
-    /// Stop the current turn and requeue its triggering batch for a merged re-prompt.
+    /// Stop the current turn and requeue its triggering batch for a merged
+    /// re-prompt framed as a **supersede**: the new request replaces the old.
     Interrupt,
+    /// Stop the current turn and requeue its triggering batch for a merged
+    /// re-prompt framed as a **steer**: a message arrived while the agent was
+    /// working; it should continue its work and incorporate the message if
+    /// relevant, not treat it as a replacement task. This is the default
+    /// mid-turn delivery path (see [`MultipleEventHandling::Steer`]).
+    Steer,
     /// Stop the current turn and drop its triggering batch. The session is
     /// invalidated just like cancel; the next turn creates a fresh session.
     Rotate,
@@ -1218,10 +1225,8 @@ pub async fn run_prompt_task(
                             Ok(stop_reason) => {
                                 log_stop_reason(&source, &stop_reason);
                                 agent.state.invalidate(&source);
-                                let retry_batch = match control_signal {
-                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
-                                };
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
                                 let _ = result_tx.send(PromptResult {
                                     agent,
                                     source,
@@ -1232,10 +1237,8 @@ pub async fn run_prompt_task(
                             }
                             Err(AcpError::AgentExited) => {
                                 agent.state.invalidate_all();
-                                let retry_batch = match control_signal {
-                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
-                                };
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
                                 let _ = result_tx.send(PromptResult {
                                     agent,
                                     source,
@@ -1247,10 +1250,8 @@ pub async fn run_prompt_task(
                             Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout) => {
                                 // Cancel drain timed out — agent state uncertain.
                                 agent.state.invalidate(&source);
-                                let retry_batch = match control_signal {
-                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
-                                };
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
                                 let _ = result_tx.send(PromptResult {
                                     agent,
                                     source,
@@ -1261,10 +1262,8 @@ pub async fn run_prompt_task(
                             }
                             Err(e) => {
                                 agent.state.invalidate(&source);
-                                let retry_batch = match control_signal {
-                                    ControlSignal::Interrupt => requeue_batch_if_queue(&ctx, batch),
-                                    ControlSignal::Cancel | ControlSignal::Rotate => None,
-                                };
+                                let retry_batch =
+                                    requeue_cancelled_batch(&ctx, control_signal, batch);
                                 let _ = result_tx.send(PromptResult {
                                     agent,
                                     source,
@@ -2035,6 +2034,29 @@ fn requeue_batch_if_queue(ctx: &PromptContext, batch: Option<FlushBatch>) -> Opt
     }
 }
 
+/// Map a cancelling [`ControlSignal`] to the [`CancelReason`] that should frame
+/// the merged re-prompt, then requeue the batch (in `Queue` dedup mode) with
+/// that reason stamped onto [`FlushBatch::cancel_reason`]. `Cancel`/`Rotate`
+/// drop the batch entirely. The reason is consumed by the main loop at requeue
+/// time (`requeue_as_cancelled`) and ultimately by `format_prompt`.
+#[inline]
+fn requeue_cancelled_batch(
+    ctx: &PromptContext,
+    signal: ControlSignal,
+    batch: Option<FlushBatch>,
+) -> Option<FlushBatch> {
+    let reason = match signal {
+        ControlSignal::Steer => CancelReason::Steer,
+        ControlSignal::Interrupt => CancelReason::Interrupt,
+        // Cancel/Rotate discard the batch — no merged re-prompt.
+        ControlSignal::Cancel | ControlSignal::Rotate => return None,
+    };
+    requeue_batch_if_queue(ctx, batch).map(|mut b| {
+        b.cancel_reason = Some(reason);
+        b
+    })
+}
+
 /// Log a stop reason at the appropriate tracing level.
 fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
     let label = match source {
@@ -2761,6 +2783,7 @@ mod tests {
                 received_at: std::time::Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let context = ConversationContext::Thread {
             messages: vec![ContextMessage {

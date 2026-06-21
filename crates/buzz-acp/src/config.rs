@@ -57,8 +57,16 @@ pub enum MultipleEventHandling {
     /// Queue new events while a turn is in-flight. Deliver after current turn
     /// completes. Existing behavior — zero code change in this path.
     Queue,
+    /// Cancel the in-flight turn and re-dispatch a merged prompt that frames
+    /// the new events as a **steering message** — one that arrived while the
+    /// agent was working, to be woven into the in-progress task rather than
+    /// treated as a replacement. Fires for any author the inbound author gate
+    /// admits (owner ∪ allowlist ∪ siblings). This is the default mid-turn
+    /// delivery path. Requires DedupMode::Queue.
+    Steer,
     /// Cancel the in-flight turn and re-dispatch a merged prompt combining
-    /// the original events with the new ones, for ANY new @mention.
+    /// the original events with the new ones, framed as a **supersede** (the
+    /// new request replaces the old), for ANY new @mention.
     /// Requires DedupMode::Queue.
     Interrupt,
     /// Cancel the in-flight turn only when the new @mention is from the agent
@@ -290,12 +298,15 @@ pub struct CliArgs {
     pub dedup: DedupMode,
 
     /// How to handle new @mentions while a turn is already in-flight.
-    /// queue: events wait (default). interrupt: cancel+re-prompt on any mention.
-    /// owner-interrupt: cancel only for agent owner's mentions.
+    /// steer (default): cancel+re-prompt, framing the new mention as a message
+    /// that arrived mid-task — the agent keeps working and weaves it in.
+    /// queue: events wait until the current turn completes.
+    /// interrupt: cancel+re-prompt framed as a supersede (new replaces old).
+    /// owner-interrupt: interrupt only for the agent owner's mentions.
     #[arg(
         long,
         env = "BUZZ_ACP_MULTIPLE_EVENT_HANDLING",
-        default_value = "queue",
+        default_value = "steer",
         value_enum
     )]
     pub multiple_event_handling: MultipleEventHandling,
@@ -501,6 +512,33 @@ fn validate_allowlist(entries: &[String]) -> Result<HashSet<String>, ConfigError
         validated.insert(trimmed);
     }
     Ok(validated)
+}
+
+/// Validate the `--multiple-event-handling` / `--dedup` combination.
+///
+/// Every mid-turn cancel mode (`Steer`, `Interrupt`, `OwnerInterrupt`) requires
+/// `DedupMode::Queue`: `DedupMode::Drop` discards events during the cancel drain
+/// window, which would produce incomplete merged prompts. `Queue` handling
+/// imposes no constraint.
+fn validate_multiple_event_handling(
+    handling: MultipleEventHandling,
+    dedup: DedupMode,
+) -> Result<(), ConfigError> {
+    let is_cancel_mode = matches!(
+        handling,
+        MultipleEventHandling::Steer
+            | MultipleEventHandling::Interrupt
+            | MultipleEventHandling::OwnerInterrupt
+    );
+    if is_cancel_mode && matches!(dedup, DedupMode::Drop) {
+        return Err(ConfigError::ConfigFile(
+            "--multiple-event-handling=steer (or interrupt/owner-interrupt) requires \
+             --dedup=queue. DedupMode::Drop discards events during the cancel drain window, \
+             producing incomplete merged prompts."
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_agent_command_identity(command: &str) -> String {
@@ -898,18 +936,7 @@ impl Config {
         }
         let model = args.model.or(persona_model);
 
-        if matches!(
-            args.multiple_event_handling,
-            MultipleEventHandling::Interrupt | MultipleEventHandling::OwnerInterrupt
-        ) && matches!(args.dedup, DedupMode::Drop)
-        {
-            return Err(ConfigError::ConfigFile(
-                "--multiple-event-handling=interrupt (or owner-interrupt) requires --dedup=queue. \
-                 DedupMode::Drop discards events during the cancel drain window, \
-                 producing incomplete merged prompts."
-                    .into(),
-            ));
-        }
+        validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
         let config = Config {
             keys,
@@ -2335,6 +2362,61 @@ channels = "ALL"
         let result = validate_allowlist(&[]).unwrap();
         assert!(result.is_empty());
     }
+
+    // ── Multiple-event-handling validation + default ──────────────────────────
+
+    #[test]
+    fn test_multiple_event_handling_default_is_steer() {
+        // Parse a minimal arg set; the default for --multiple-event-handling
+        // must be `steer` (steering is the default mid-turn delivery path).
+        let args = CliArgs::parse_from(["buzz-acp", "--private-key", &"0".repeat(64)]);
+        assert_eq!(args.multiple_event_handling, MultipleEventHandling::Steer);
+        // Dedup default must remain `queue` so steering's requirement is met.
+        assert!(matches!(args.dedup, DedupMode::Queue));
+    }
+
+    #[test]
+    fn test_validate_steer_requires_queue_dedup() {
+        // Steer + Drop is rejected (drain window would drop events).
+        let err = validate_multiple_event_handling(MultipleEventHandling::Steer, DedupMode::Drop)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("requires"),
+            "expected a dedup-requirement error, got: {err}"
+        );
+        // Steer + Queue is accepted.
+        assert!(
+            validate_multiple_event_handling(MultipleEventHandling::Steer, DedupMode::Queue)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_queue_handling_allows_any_dedup() {
+        // The non-cancel `Queue` handling imposes no dedup constraint.
+        assert!(
+            validate_multiple_event_handling(MultipleEventHandling::Queue, DedupMode::Drop).is_ok()
+        );
+        assert!(
+            validate_multiple_event_handling(MultipleEventHandling::Queue, DedupMode::Queue)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_interrupt_modes_still_require_queue() {
+        for mode in [
+            MultipleEventHandling::Interrupt,
+            MultipleEventHandling::OwnerInterrupt,
+        ] {
+            assert!(
+                validate_multiple_event_handling(mode, DedupMode::Drop).is_err(),
+                "{mode:?} + Drop should be rejected"
+            );
+        }
+    }
+
+    // ── Idle timeout constant + guard (PR #935) ───────────────────────────────
 
     #[test]
     fn default_idle_timeout_is_900_seconds() {

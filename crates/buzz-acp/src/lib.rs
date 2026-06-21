@@ -32,7 +32,7 @@ use pool::{
     AgentPool, ControlSignal, OwnedAgent, PromptContext, PromptOutcome, PromptResult, PromptSource,
     SessionState,
 };
-use queue::{EventQueue, QueuedEvent, ThreadTags};
+use queue::{CancelReason, EventQueue, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
@@ -1804,21 +1804,20 @@ async fn tokio_main() -> Result<()> {
                             // Event is already queued. If mode requires it AND
                             // the channel has an in-flight task, fire cancel.
                             if accepted && queue.is_channel_in_flight(buzz_event.channel_id) {
-                                let should_cancel = match config.multiple_event_handling {
-                                    MultipleEventHandling::Queue => false,
-                                    MultipleEventHandling::Interrupt => true,
-                                    MultipleEventHandling::OwnerInterrupt => {
-                                        match owner_cache.get() {
-                                            Some(o) => author_hex == *o,
-                                            None => false,
-                                        }
-                                    }
-                                };
-                                if should_cancel {
+                                // Author eligibility (owner ∪ allowlist ∪ siblings)
+                                // is already enforced by the inbound author gate
+                                // above, so the mid-turn signal fires for every
+                                // event that reaches here.
+                                let signal = mode_gate_signal(
+                                    config.multiple_event_handling,
+                                    &author_hex,
+                                    owner_cache.get(),
+                                );
+                                if let Some(signal) = signal {
                                     signal_in_flight_task(
                                         &mut pool,
                                         buzz_event.channel_id,
-                                        ControlSignal::Interrupt,
+                                        signal,
                                     );
                                 }
                             }
@@ -2101,6 +2100,34 @@ fn is_owner_control_command(
         && event_mentions_agent(event, agent_pubkey_hex)
 }
 
+// ── signal_in_flight_task ─────────────────────────────────────────────────────
+
+/// Decide which [`ControlSignal`] (if any) to send to an in-flight turn when a
+/// new, already-author-gated event arrives for that channel.
+///
+/// Returns `None` to leave the in-flight turn untouched (the event waits in the
+/// queue and is delivered when the turn completes). Author eligibility — owner
+/// ∪ allowlist ∪ siblings — is enforced upstream by the inbound author gate, so
+/// `Steer`/`Interrupt` apply to every event that reaches this point; only
+/// `OwnerInterrupt` re-checks authorship (owner-only) here.
+///
+/// `owner` is the resolved owner pubkey hex, if known.
+fn mode_gate_signal(
+    handling: MultipleEventHandling,
+    author_hex: &str,
+    owner: Option<&str>,
+) -> Option<ControlSignal> {
+    match handling {
+        MultipleEventHandling::Queue => None,
+        MultipleEventHandling::Steer => Some(ControlSignal::Steer),
+        MultipleEventHandling::Interrupt => Some(ControlSignal::Interrupt),
+        MultipleEventHandling::OwnerInterrupt => match owner {
+            Some(o) if author_hex == o => Some(ControlSignal::Interrupt),
+            _ => None,
+        },
+    }
+}
+
 /// Send a control signal to the in-flight task for `channel_id`.
 /// Returns `true` if a signal was sent, `false` if no in-flight task was found.
 fn signal_in_flight_task(
@@ -2229,8 +2256,12 @@ fn handle_prompt_result(
             if matches!(result.outcome, PromptOutcome::Cancelled) {
                 // Cancel re-prompt: store as cancelled events so flush_next()
                 // merges them into the next FlushBatch.cancelled_events,
-                // enabling the annotated merged-prompt format.
-                queue.requeue_as_cancelled(batch);
+                // enabling the annotated merged-prompt format. The batch's
+                // cancel_reason (set by the pool task per the control signal)
+                // selects steer vs interrupt framing; default to interrupt if
+                // somehow unset.
+                let reason = batch.cancel_reason.unwrap_or(CancelReason::Interrupt);
+                queue.requeue_as_cancelled(batch, reason);
             } else {
                 queue.requeue(batch);
             }
@@ -2945,6 +2976,46 @@ mod owner_control_command_tests {
             "!rotate",
             &agent
         ));
+    }
+
+    #[test]
+    fn mode_gate_signal_maps_handling_to_control_signal() {
+        let owner = "a".repeat(64);
+        let other = "b".repeat(64);
+
+        // Queue: never signals — events wait for the turn to finish.
+        assert!(mode_gate_signal(MultipleEventHandling::Queue, &owner, Some(&owner)).is_none());
+
+        // Steer: always steers (eligibility already enforced upstream).
+        assert!(matches!(
+            mode_gate_signal(MultipleEventHandling::Steer, &other, Some(&owner)),
+            Some(ControlSignal::Steer)
+        ));
+        // Steer even when owner is unknown — gate doesn't re-check authorship.
+        assert!(matches!(
+            mode_gate_signal(MultipleEventHandling::Steer, &other, None),
+            Some(ControlSignal::Steer)
+        ));
+
+        // Interrupt: always interrupts for any eligible author.
+        assert!(matches!(
+            mode_gate_signal(MultipleEventHandling::Interrupt, &other, Some(&owner)),
+            Some(ControlSignal::Interrupt)
+        ));
+
+        // OwnerInterrupt: interrupts only for the owner.
+        assert!(matches!(
+            mode_gate_signal(MultipleEventHandling::OwnerInterrupt, &owner, Some(&owner)),
+            Some(ControlSignal::Interrupt)
+        ));
+        assert!(
+            mode_gate_signal(MultipleEventHandling::OwnerInterrupt, &other, Some(&owner)).is_none(),
+            "owner-interrupt must not fire for a non-owner author"
+        );
+        assert!(
+            mode_gate_signal(MultipleEventHandling::OwnerInterrupt, &owner, None).is_none(),
+            "owner-interrupt must not fire when the owner is unknown"
+        );
     }
 
     #[tokio::test]

@@ -56,6 +56,19 @@ pub struct BatchEvent {
     pub received_at: Instant,
 }
 
+/// Why a batch's prior turn was cancelled — controls how `format_prompt`
+/// frames the merged re-prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelReason {
+    /// A new request should **supersede** the interrupted work
+    /// (`MultipleEventHandling::Interrupt`).
+    Interrupt,
+    /// A message arrived while the agent was working; it should **continue**
+    /// and incorporate the message if relevant
+    /// (`MultipleEventHandling::Steer`, the default mid-turn path).
+    Steer,
+}
+
 /// A batch of events to prompt the agent with.
 #[derive(Debug, Clone)]
 pub struct FlushBatch {
@@ -63,8 +76,13 @@ pub struct FlushBatch {
     pub events: Vec<BatchEvent>,
     /// Events from a cancelled batch that triggered this re-prompt.
     /// Empty for normal (non-cancel) batches. When non-empty, `format_prompt()`
-    /// produces a merged prompt with annotated sections.
+    /// produces a merged prompt with annotated sections, framed per
+    /// [`cancel_reason`](Self::cancel_reason).
     pub cancelled_events: Vec<BatchEvent>,
+    /// How the prior turn was cancelled, when [`cancelled_events`] is non-empty.
+    /// `None` for normal (non-merge) batches; treated as `Interrupt`-style
+    /// supersede framing if a merge somehow lacks a reason.
+    pub cancel_reason: Option<CancelReason>,
 }
 
 /// Per-channel event queue with per-channel in-flight enforcement.
@@ -127,6 +145,10 @@ pub struct EventQueue {
     /// `FlushBatch` for that channel as `cancelled_events` so `format_prompt()`
     /// can produce annotated "[Previous request — interrupted]" sections.
     cancelled_batches: HashMap<Uuid, Vec<BatchEvent>>,
+    /// Why each channel's cancelled batch was cancelled (steer vs interrupt).
+    /// Set by `requeue_as_cancelled`, consumed by `flush_next` to set
+    /// `FlushBatch::cancel_reason`. Keyed by channel, cleared on flush.
+    cancel_reasons: HashMap<Uuid, CancelReason>,
 }
 
 impl EventQueue {
@@ -141,6 +163,7 @@ impl EventQueue {
             retry_counts: HashMap::new(),
             dedup_mode,
             cancelled_batches: HashMap::new(),
+            cancel_reasons: HashMap::new(),
         }
     }
 
@@ -232,6 +255,7 @@ impl EventQueue {
                         // Move cancelled events into the regular events slot.
                         // No new events to merge — re-dispatch the original batch.
                         let cancelled = self.cancelled_batches.remove(&id).unwrap_or_default();
+                        let cancel_reason = self.cancel_reasons.remove(&id);
                         self.in_flight_channels.insert(id);
                         self.in_flight_deadlines
                             .insert(id, now + Duration::from_secs(IN_FLIGHT_DEADLINE_SECS));
@@ -240,6 +264,7 @@ impl EventQueue {
                             channel_id: id,
                             events: cancelled,
                             cancelled_events: vec![],
+                            cancel_reason,
                         });
                     }
                     None => return None,
@@ -276,11 +301,18 @@ impl EventQueue {
             .cancelled_batches
             .remove(&channel_id)
             .unwrap_or_default();
+        let cancel_reason = if cancelled_events.is_empty() {
+            self.cancel_reasons.remove(&channel_id);
+            None
+        } else {
+            self.cancel_reasons.remove(&channel_id)
+        };
 
         Some(FlushBatch {
             channel_id,
             events,
             cancelled_events,
+            cancel_reason,
         })
     }
 
@@ -435,14 +467,19 @@ impl EventQueue {
     /// in the next `FlushBatch` for this channel (enabling the annotated
     /// merged-prompt format in `format_prompt()`).
     ///
+    /// `reason` records why the turn was cancelled (steer vs interrupt) so the
+    /// merged prompt is framed correctly. On a double-cancel, the most recent
+    /// reason wins.
+    ///
     /// Unlike `requeue_preserve_timestamps`, events are NOT pushed back into
     /// the generic queue — they are stored separately and merged by
     /// `flush_next()`. No retry throttle, no backoff.
-    pub fn requeue_as_cancelled(&mut self, batch: FlushBatch) {
+    pub fn requeue_as_cancelled(&mut self, batch: FlushBatch, reason: CancelReason) {
         let entry = self.cancelled_batches.entry(batch.channel_id).or_default();
         // Preserve any already-cancelled events from a prior cancel (double-cancel).
         entry.extend(batch.cancelled_events);
         entry.extend(batch.events);
+        self.cancel_reasons.insert(batch.channel_id, reason);
     }
 
     /// Returns `true` if any channel has pending events that are not in-flight
@@ -509,6 +546,7 @@ impl EventQueue {
         self.retry_after.remove(&channel_id);
         self.retry_counts.remove(&channel_id);
         self.cancelled_batches.remove(&channel_id);
+        self.cancel_reasons.remove(&channel_id);
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
         // will expire (auto-cleaning the channel). Removing deadlines without
@@ -1201,9 +1239,18 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         sections.push(format_conversation_context(ctx, args.profile_lookup));
     }
 
-    // 4a. Cancelled events section (cancel + re-prompt).
-    if !batch.cancelled_events.is_empty() {
-        let mut s = "[Previous request — interrupted before completion]".to_string();
+    // 4. Cancelled + re-prompt framing. When a turn was cancelled to deliver
+    //    new events mid-flight, the merged prompt is framed two ways depending
+    //    on why it was cancelled (see [`CancelReason`]):
+    //    - `Interrupt`: the new request *supersedes* the interrupted work.
+    //    - `Steer` (default): a message arrived while the agent was working; it
+    //      should *continue* its work and weave the message in if relevant.
+    let has_cancelled = !batch.cancelled_events.is_empty();
+    let framing = MergeFraming::for_reason(batch.cancel_reason);
+
+    // 4a. Cancelled events section.
+    if has_cancelled {
+        let mut s = framing.prior_header.to_string();
         for (i, be) in batch.cancelled_events.iter().enumerate() {
             s.push_str(&format!(
                 "\n\n--- Event {} ({}) ---\n{}",
@@ -1216,12 +1263,12 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     }
 
     // 4b. Event block(s).
-    let has_cancelled = !batch.cancelled_events.is_empty();
     let event_section = if batch.events.len() == 1 {
         let be = &batch.events[0];
         if has_cancelled {
             format!(
-                "[New request — supersedes previous]\n\n--- Event 1 ({}) ---\n{}",
+                "{}\n\n--- Event 1 ({}) ---\n{}",
+                framing.new_header_single,
                 be.prompt_tag,
                 format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
             )
@@ -1235,7 +1282,8 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     } else {
         let header = if has_cancelled {
             format!(
-                "[New request — supersedes previous — {} events]",
+                "{} — {} events]",
+                framing.new_header_multi_prefix,
                 batch.events.len()
             )
         } else {
@@ -1254,17 +1302,55 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     };
     sections.push(event_section);
 
-    // Closing note for cancel + re-prompt.
+    // 4c. Closing note for cancel + re-prompt.
     if has_cancelled {
-        sections.push(
-            "Note: The previous request was interrupted. Please address the new request.\n\
-             If the new request is unrelated to the previous one, you may briefly acknowledge\n\
-             the interruption."
-                .to_string(),
-        );
+        sections.push(framing.closing_note.to_string());
     }
 
     sections
+}
+
+/// Prompt-framing strings for a merged (cancel + re-prompt) turn, selected by
+/// [`CancelReason`]. `Interrupt` frames the new events as superseding the prior
+/// work; `Steer` (the default mid-turn path) frames them as messages that
+/// arrived while the agent was working, to be woven in without abandoning the
+/// in-progress task.
+struct MergeFraming {
+    /// Header for the prior (cancelled) events section.
+    prior_header: &'static str,
+    /// Header for a single newly-arrived event.
+    new_header_single: &'static str,
+    /// Header prefix for multiple newly-arrived events; ` — N events]` is
+    /// appended (note the unclosed `[`).
+    new_header_multi_prefix: &'static str,
+    /// Closing instruction appended after the event block(s).
+    closing_note: &'static str,
+}
+
+impl MergeFraming {
+    fn for_reason(reason: Option<CancelReason>) -> Self {
+        match reason {
+            // Default to steer framing if a merge somehow lacks a reason: the
+            // gentler "continue your work" wording is the safer fallback.
+            None | Some(CancelReason::Steer) => MergeFraming {
+                prior_header:
+                    "[Your in-progress work — you were mid-task when a new message arrived]",
+                new_header_single: "[New message — arrived while you were working]",
+                new_header_multi_prefix: "[New messages — arrived while you were working",
+                closing_note: "Note: A new message arrived while you were working. Continue your \
+                     in-progress work and incorporate the new message if it's relevant; if it's \
+                     unrelated, you may briefly acknowledge it and carry on.",
+            },
+            Some(CancelReason::Interrupt) => MergeFraming {
+                prior_header: "[Previous request — interrupted before completion]",
+                new_header_single: "[New request — supersedes previous]",
+                new_header_multi_prefix: "[New request — supersedes previous",
+                closing_note: "Note: The previous request was interrupted. Please address the new \
+                     request.\nIf the new request is unrelated to the previous one, you may \
+                     briefly acknowledge the interruption.",
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1468,6 +1554,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -1484,6 +1571,115 @@ mod tests {
         // Should NOT contain "--- Event 1 ---" (that's the multi-event format).
         assert!(!prompt.contains("--- Event 1 ---"));
     }
+
+    /// Helper: build a merged (cancel + re-prompt) batch with one cancelled
+    /// event and one new event, framed by `reason`.
+    fn make_merged_batch(reason: Option<CancelReason>) -> FlushBatch {
+        let ch = Uuid::new_v4();
+        FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("the new message"),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![BatchEvent {
+                event: make_event("the original task"),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancel_reason: reason,
+        }
+    }
+
+    #[test]
+    fn test_format_prompt_steer_framing() {
+        let batch = make_merged_batch(Some(CancelReason::Steer));
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+
+        // Steer framing: the new message "arrived while you were working" and
+        // the agent should "continue" — NOT supersede framing.
+        assert!(
+            prompt.contains("arrived while you were working"),
+            "steer prompt should frame the new message as arriving mid-task: {prompt}"
+        );
+        assert!(
+            prompt.contains("Continue your"),
+            "steer prompt should instruct the agent to continue its work: {prompt}"
+        );
+        assert!(
+            !prompt.contains("supersedes"),
+            "steer prompt must NOT use supersede framing: {prompt}"
+        );
+        // Both the original and new content must survive the merge.
+        assert!(prompt.contains("the original task"));
+        assert!(prompt.contains("the new message"));
+    }
+
+    #[test]
+    fn test_format_prompt_interrupt_framing() {
+        let batch = make_merged_batch(Some(CancelReason::Interrupt));
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+
+        // Interrupt framing: the new request supersedes the previous one.
+        assert!(
+            prompt.contains("supersedes previous"),
+            "interrupt prompt should use supersede framing: {prompt}"
+        );
+        assert!(
+            prompt.contains("interrupted before completion"),
+            "interrupt prompt should label the prior work as interrupted: {prompt}"
+        );
+        assert!(
+            !prompt.contains("arrived while you were working"),
+            "interrupt prompt must NOT use steer framing: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_no_reason_defaults_to_steer_framing() {
+        // A merged batch with no recorded reason falls back to the gentler
+        // steer framing (the safer default — see MergeFraming::for_reason).
+        let batch = make_merged_batch(None);
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(
+            prompt.contains("arrived while you were working"),
+            "unset reason should default to steer framing: {prompt}"
+        );
+        assert!(!prompt.contains("supersedes"));
+    }
+
+    #[test]
+    fn test_format_prompt_steer_framing_multi_event() {
+        // Multi-event header path must also branch on reason.
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![
+                BatchEvent {
+                    event: make_event("new one"),
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                },
+                BatchEvent {
+                    event: make_event("new two"),
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                },
+            ],
+            cancelled_events: vec![BatchEvent {
+                event: make_event("original"),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancel_reason: Some(CancelReason::Steer),
+        };
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(prompt.contains("New messages — arrived while you were working — 2 events]"));
+        assert!(!prompt.contains("supersedes"));
+    }
+
+    // ── Test 9b: requeue preserves events ────────────────────────────────────
 
     #[test]
     fn test_requeue_preserves_events() {
@@ -1560,6 +1756,7 @@ mod tests {
                 },
             ],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -1587,6 +1784,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -1609,6 +1807,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let core = "[Agent Memory — core]\nbe helpful";
         let prompt = format_prompt(
@@ -1640,6 +1839,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let prompt = format_prompt(
             &batch,
@@ -1669,6 +1869,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let core = "[Agent Memory — core]\nbe helpful";
         let prompt = format_prompt(
@@ -1695,6 +1896,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         // format_prompt no longer accepts or emits base_prompt/system_prompt.
@@ -1718,6 +1920,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let core = "[Agent Memory — core]\nremember this";
@@ -1773,6 +1976,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(
@@ -1810,6 +2014,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let ctx = ConversationContext::Thread {
@@ -2296,6 +2501,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "engineering".into(),
@@ -2326,6 +2532,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -2363,6 +2570,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2390,6 +2598,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ctx = ConversationContext::Thread {
             messages: vec![
@@ -2433,6 +2642,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -2481,6 +2691,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ctx = ConversationContext::Thread {
             messages: vec![ContextMessage {
@@ -2687,6 +2898,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -2743,6 +2955,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -2782,6 +2995,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2805,6 +3019,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2827,6 +3042,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
@@ -2999,7 +3215,7 @@ mod tests {
         q.push(make_queued(ch, "new-1"));
 
         // Cancel the original batch and release the channel.
-        q.requeue_as_cancelled(batch);
+        q.requeue_as_cancelled(batch, CancelReason::Interrupt);
         q.mark_complete(ch);
 
         // flush_next should merge: events=[new-1], cancelled_events=[old-1, old-2].
@@ -3013,6 +3229,64 @@ mod tests {
     }
 
     #[test]
+    fn test_requeue_as_cancelled_propagates_reason() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Merge path (new event present): reason rides on FlushBatch.
+        q.push(make_queued(ch, "old"));
+        let batch = q.flush_next().unwrap();
+        q.push(make_queued(ch, "new"));
+        q.requeue_as_cancelled(batch, CancelReason::Steer);
+        q.mark_complete(ch);
+        let merged = q.flush_next().unwrap();
+        assert_eq!(
+            merged.cancel_reason,
+            Some(CancelReason::Steer),
+            "steer reason should reach the merged batch"
+        );
+        q.mark_complete(ch);
+
+        // Fallback path (no new event): reason still rides through.
+        q.push(make_queued(ch, "only"));
+        let batch = q.flush_next().unwrap();
+        q.requeue_as_cancelled(batch, CancelReason::Interrupt);
+        q.mark_complete(ch);
+        let fallback = q.flush_next().unwrap();
+        assert_eq!(
+            fallback.cancel_reason,
+            Some(CancelReason::Interrupt),
+            "interrupt reason should reach the re-dispatched batch"
+        );
+        q.mark_complete(ch);
+
+        // A normal (non-cancel) flush carries no reason.
+        q.push(make_queued(ch, "plain"));
+        let plain = q.flush_next().unwrap();
+        assert_eq!(plain.cancel_reason, None);
+    }
+
+    #[test]
+    fn test_double_cancel_latest_reason_wins() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "orig"));
+        let batch1 = q.flush_next().unwrap();
+        q.push(make_queued(ch, "new-1"));
+        q.requeue_as_cancelled(batch1, CancelReason::Interrupt);
+        q.mark_complete(ch);
+        let batch2 = q.flush_next().unwrap();
+        // Second cancel with a different reason — the latest reason wins.
+        q.requeue_as_cancelled(batch2, CancelReason::Steer);
+        q.push(make_queued(ch, "new-2"));
+        q.mark_complete(ch);
+        let batch3 = q.flush_next().unwrap();
+        assert_eq!(batch3.cancel_reason, Some(CancelReason::Steer));
+    }
+
+    // ── Test: requeue_as_cancelled fallback (no new events) ──────────────────
+
+    #[test]
     fn test_requeue_as_cancelled_no_new_events_fallback() {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
@@ -3022,7 +3296,7 @@ mod tests {
         let batch = q.flush_next().unwrap();
 
         // Cancel the batch (no new events pushed) and release the channel.
-        q.requeue_as_cancelled(batch);
+        q.requeue_as_cancelled(batch, CancelReason::Interrupt);
         q.mark_complete(ch);
 
         // Fallback path: cancelled events become regular events, cancelled_events is empty.
@@ -3046,7 +3320,7 @@ mod tests {
         // Push, flush, cancel — no new events queued.
         q.push(make_queued(ch, "msg"));
         let batch = q.flush_next().unwrap();
-        q.requeue_as_cancelled(batch);
+        q.requeue_as_cancelled(batch, CancelReason::Interrupt);
         q.mark_complete(ch);
 
         // Channel has only cancelled events — should still be considered flushable.
@@ -3064,7 +3338,7 @@ mod tests {
         // Push, flush, cancel.
         q.push(make_queued(ch, "msg"));
         let batch = q.flush_next().unwrap();
-        q.requeue_as_cancelled(batch);
+        q.requeue_as_cancelled(batch, CancelReason::Interrupt);
         q.mark_complete(ch);
 
         // drain_channel should clear cancelled_batches for the channel.
@@ -3092,7 +3366,7 @@ mod tests {
         q.push(make_queued(ch, "new-1"));
 
         // First cancel: store 2 cancelled events.
-        q.requeue_as_cancelled(batch1);
+        q.requeue_as_cancelled(batch1, CancelReason::Interrupt);
         q.mark_complete(ch);
 
         // Second flush: events=[new-1], cancelled_events=[orig-1, orig-2].
@@ -3102,7 +3376,7 @@ mod tests {
 
         // Second cancel: requeue_as_cancelled should accumulate all 3 events
         // (2 from cancelled_events + 1 from events).
-        q.requeue_as_cancelled(batch2);
+        q.requeue_as_cancelled(batch2, CancelReason::Interrupt);
 
         // Push 1 more new event and release channel.
         q.push(make_queued(ch, "new-2"));
@@ -3134,6 +3408,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         // No profile lookup → sender treated as human → human-facing thread
@@ -3175,6 +3450,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3208,6 +3484,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         // Top-level human message (no lookup → human): the reply opens a new
@@ -3236,6 +3513,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
         let ci = PromptChannelInfo {
             name: "DM".into(),
@@ -3277,6 +3555,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         // Human-facing (no lookup) deep reply: anchor to the thread ROOT to
@@ -3353,6 +3632,7 @@ mod tests {
                 },
             ],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         // Scope derives from the last (threaded) event; human-facing → anchor
@@ -3389,6 +3669,7 @@ mod tests {
                 },
             ],
             cancelled_events: vec![],
+            cancel_reason: None,
         };
 
         // Last event is top-level and human-facing → opens a new thread
@@ -3414,6 +3695,7 @@ mod tests {
                 received_at: Instant::now(),
             }],
             cancelled_events: vec![],
+            cancel_reason: None,
         }
     }
 
